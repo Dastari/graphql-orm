@@ -694,7 +694,7 @@ dependencies = [
 [[package]]
 name = "graphql-orm-macros"
 version = "0.3.0"
-source = "git+https://github.com/Dastari/graphql-orm-macros.git?rev=74c90e4706f9667ff20a1bdba8137805e3ec784a#74c90e4706f9667ff20a1bdba8137805e3ec784a"
+source = "git+https://github.com/Dastari/graphql-orm-macros.git?rev=65a3e668cb8c4fb8080818d32fea33e9ae4ad06c#65a3e668cb8c4fb8080818d32fea33e9ae4ad06c"
 dependencies = [
  "convert_case",
  "proc-macro2",
