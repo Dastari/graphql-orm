@@ -1,0 +1,26 @@
+[package]
+name = "graphql-orm"
+version = "0.1.0"
+edition = "2024"
+description = "Runtime support crate for graphql-orm-macros"
+license = "MIT"
+repository = "https://github.com/Dastari/graphql-orm"
+
+[features]
+default = ["sqlite"]
+sqlite = ["graphql-orm-macros/sqlite"]
+postgres = ["graphql-orm-macros/postgres"]
+
+[dependencies]
+async-graphql = { version = "7", features = ["dataloader"] }
+futures = "0.3"
+graphql-orm-macros = { path = "../graphql-orm-macros", version = "0.3.0", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres"] }
+tokio = { version = "1", features = ["sync"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
