@@ -134,7 +134,8 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
             title TEXT NOT NULL,
             published BOOLEAN NOT NULL,
             created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint),
-            updated_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint)
+            updated_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint),
+            FOREIGN KEY (author_id) REFERENCES users(id)
         )",
     )
     .execute(&pool)
@@ -210,6 +211,46 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
         nested_json["Users"]["Edges"][0]["Node"]["Posts"]["Edges"][0]["Node"]["title"].as_str(),
         Some("Hello")
     );
+
+    let metadata = <User as graphql_orm::graphql::orm::Entity>::metadata();
+    assert_eq!(metadata.entity_name, "User");
+    assert_eq!(metadata.table_name, "users");
+    assert_eq!(metadata.primary_key, "id");
+    assert_eq!(metadata.fields.len(), 5);
+    assert_eq!(metadata.relations.len(), 1);
+    assert_eq!(metadata.relations[0].field_name, "Posts");
+    assert_eq!(metadata.relations[0].source_column, "id");
+    assert_eq!(metadata.relations[0].target_column, "author_id");
+    let schema_model =
+        graphql_orm::graphql::orm::SchemaModel::from_entities(&[metadata]);
+    assert_eq!(schema_model.tables.len(), 1);
+    assert_eq!(schema_model.tables[0].table_name, "users");
+    assert_eq!(schema_model.tables[0].foreign_keys.len(), 1);
+    assert_eq!(schema_model.tables[0].foreign_keys[0].target_column, "author_id");
+
+    let introspected = graphql_orm::graphql::orm::introspect_schema(&pool).await?;
+    assert_eq!(introspected.tables.len(), 2);
+    let users_table = introspected
+        .tables
+        .iter()
+        .find(|table| table.table_name == "users")
+        .expect("users table should be introspected");
+    assert_eq!(users_table.primary_key, "id");
+    assert!(users_table.columns.iter().any(|column| column.name == "name"));
+    let posts_table = introspected
+        .tables
+        .iter()
+        .find(|table| table.table_name == "posts")
+        .expect("posts table should be introspected");
+    assert!(posts_table
+        .columns
+        .iter()
+        .any(|column| column.name == "author_id"));
+
+    assert!(matches!(
+        graphql_orm::graphql::orm::current_backend(),
+        graphql_orm::graphql::orm::DatabaseBackend::Postgres
+    ));
 
     Ok(())
 }

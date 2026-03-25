@@ -7,21 +7,32 @@ Runtime support crate for `graphql-orm-macros`.
 This crate owns the runtime contract that generated code targets:
 
 - database pool and row aliases
+- backend and dialect abstractions
+- entity metadata types
 - GraphQL auth, filter, pagination, and relation-loader support
 - query helpers and bind execution
-- shared ORM traits such as `DatabaseEntity`, `DatabaseFilter`, `DatabaseOrderBy`, `FromSqlRow`, and `RelationLoader`
+- shared ORM traits such as `Entity`, `DatabaseEntity`, `DatabaseSchema`, `DatabaseFilter`, `DatabaseOrderBy`, `FromSqlRow`, and `RelationLoader`
+- migration traits and migration records
 
 ## Current Scope
-
-The current implementation is focused on making the proc-macro output target a real runtime crate instead of application-local shim modules.
 
 Working today:
 
 - SQLite runtime support
 - PostgreSQL runtime support
-- generated CRUD operations
-- generated subscriptions
-- generated relation loading and batched nested traversal
+- generated entity metadata through the runtime contract
+- generated CRUD operations, subscriptions, relation loading, and batched nested traversal
+- backend-aware query rendering through a small typed query IR
+- schema models built from runtime metadata
+- schema diffing and migration planning
+- migration file rendering and migration application helpers
+- live schema introspection for SQLite and PostgreSQL
+
+Still remaining:
+
+- MySQL and SQL Server runtime support
+- richer query IR coverage beyond the current CRUD/filter/sort/pagination subset
+- more complete migration execution for backend-specific edge cases and review workflows
 
 ## Usage
 
