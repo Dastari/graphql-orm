@@ -14,7 +14,7 @@ postgres = ["graphql-orm-macros/postgres"]
 [dependencies]
 async-graphql = { version = "7", features = ["dataloader"] }
 futures = "0.3"
-graphql-orm-macros = { path = "../graphql-orm-macros", version = "0.3.0", default-features = false }
+graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm-macros.git", rev = "74c90e4706f9667ff20a1bdba8137805e3ec784a", version = "0.3.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres"] }
