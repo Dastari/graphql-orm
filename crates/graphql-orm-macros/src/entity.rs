@@ -209,7 +209,6 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                     let _ = attr.parse_nested_meta(|nested| {
                         if nested.path.is_ident("private") {
                             meta.read = false;
-                            meta.write = false;
                             meta.filter = false;
                             meta.order = false;
                             meta.subscribe = false;

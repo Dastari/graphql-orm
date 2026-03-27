@@ -65,7 +65,7 @@ Runtime types:
 pub trait MutationHook: Send + Sync {
     fn on_mutation<'a>(
         &'a self,
-        ctx: &'a async_graphql::Context<'_>,
+        ctx: Option<&'a async_graphql::Context<'_>>,
         db: &'a crate::db::Database,
         event: &'a MutationEvent,
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>>;
@@ -86,6 +86,8 @@ This is the intended integration point for:
 - audit trails
 - version snapshots
 - generic mutation observers
+
+When the mutation comes from app-side repository helpers rather than GraphQL resolvers, `ctx` is `None`.
 
 It is deliberately runtime-driven and not Digitise-specific.
 
@@ -117,13 +119,14 @@ pub valuation: Option<String>,
 - database persistence
 - ORM/runtime metadata
 
-while excluding it from:
+while excluding it from GraphQL schema exposure:
 
 - generated object field exposure
-- generated create/update inputs
 - generated filters
 - generated order inputs
 - generated subscription field access
+
+The generated Rust `Create<Entity>Input` / `Update<Entity>Input` structs still retain writable private fields as `#[graphql(skip)]` members, so app-side repository code can use the same typed inputs without exposing those fields in GraphQL SDL.
 
 The runtime policy boundary is:
 
@@ -142,6 +145,40 @@ Generated code consults:
 - `write_policy` on generated create/update mutation paths
 
 The macro crate only generates the wiring. Policy decisions remain application-owned.
+
+App-side typed repository helpers do not invoke field policy automatically. Host apps are expected to apply policy before calling those helpers.
+
+## App-Side Typed Persistence Helpers
+
+Each generated entity now exposes a typed non-GraphQL persistence surface for host repositories and services:
+
+- `Entity::update_by_id(&database, &id, UpdateEntityInput { .. })`
+- `Entity::update_where(&database, EntityWhereInput { .. }, UpdateEntityInput { .. })`
+- `Entity::delete_by_id(&database, &id)`
+- `Entity::delete_where(&database, EntityWhereInput { .. })`
+
+These helpers:
+
+- reuse the generated Rust input/filter types
+- do not require `async_graphql::Context`
+- preserve runtime mutation hooks
+- emit the same typed entity change events used by subscriptions when a sender is registered on `Database`
+
+Typical setup:
+
+```rust
+let database = graphql_orm::db::Database::new(pool);
+database.register_event_sender::<UserChangedEvent>(user_events_tx.clone());
+
+let updated = User::update_by_id(
+    &database,
+    &user_id,
+    UpdateUserInput {
+        password_hash: Some(new_hash),
+        ..Default::default()
+    },
+).await?;
+```
 
 ## Naming Rules
 

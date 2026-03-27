@@ -19,6 +19,7 @@ The shared app-facing contract now includes:
 - `graphql_orm::db::Database` as the runtime handle passed into GraphQL
 - `graphql_orm::graphql::orm::MutationHook` and `Database::with_mutation_hook(...)` for audit/versioning integrations
 - `graphql_orm::graphql::orm::FieldPolicy` and `Database::with_field_policy(...)` / `set_field_policy(...)` for app-owned field visibility/editability decisions
+- generated app-side `update_by_id` / `update_where` / `delete_by_id` / `delete_where` helpers on each entity for non-GraphQL repository code
 - UUID-first entity support across generated CRUD, filters, metadata, and migrations
 
 Typical setup:
@@ -38,6 +39,41 @@ let schema = schema_builder(database)
 ```
 
 Apps can still attach extra app-specific data after `schema_builder(...)`. Auth, policy, and domain rules remain app concerns.
+
+## App-Side Repository Usage
+
+Generated entities now expose a typed non-GraphQL persistence surface for host apps.
+
+Typical repository usage:
+
+```rust
+let database = graphql_orm::db::Database::new(pool);
+database.register_event_sender::<UserChangedEvent>(user_events_tx.clone());
+
+let user = User::update_by_id(
+    &database,
+    &user_id,
+    UpdateUserInput {
+        password_hash: Some(new_password_hash),
+        disabled: Some(false),
+        ..Default::default()
+    },
+).await?;
+
+let revoked = RefreshToken::delete_where(
+    &database,
+    RefreshTokenWhereInput {
+        family_id: Some(UuidFilter {
+            eq: Some(family_id),
+            ..Default::default()
+        }),
+        ..Default::default()
+    },
+).await?;
+```
+
+This is the intended non-GraphQL persistence surface for host applications.
+It reuses the generated typed input/filter types and preserves runtime mutation hooks plus entity subscription fanout when a sender is registered on `Database`.
 
 ## Field Safety
 
@@ -68,6 +104,7 @@ pub valuation: Option<String>,
 ```
 
 `private` excludes the field from generated GraphQL object fields, create/update inputs, filters, ordering, and subscription access while keeping it in the Rust struct and ORM persistence model.
+Private/write-only fields remain present on the generated Rust input structs, so app-side repository code can still write them without exposing them in the GraphQL schema.
 
 Generated names now align with serde naming:
 
@@ -78,7 +115,7 @@ Root query/mutation/subscription names remain PascalCase.
 
 ## Lifecycle Hooks
 
-Generated create/update/delete mutations call the runtime mutation hook before and after the database write when a hook is configured.
+Generated create/update/delete mutations and app-side typed update/delete helpers call the runtime mutation hook before and after the database write when a hook is configured.
 
 Use this for cross-cutting behavior such as:
 
@@ -99,6 +136,8 @@ Hook implementations receive a `MutationEvent` with:
 - entity/table name
 - entity id as a string
 - changed field/value pairs as `SqlValue`
+
+If the mutation originated outside GraphQL, the hook receives `None` for the GraphQL context.
 
 ## Field Policy Hook
 

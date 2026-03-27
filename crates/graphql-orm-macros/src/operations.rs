@@ -180,11 +180,14 @@ pub(crate) fn generate_graphql_operations(
         // Skip auto-generated primary key, timestamps, and skip_input fields (e.g. password_hash)
         // But #[input_only] overrides skip_input (allows write-only fields like encrypted credentials)
         let is_timestamp = rust_name == "created_at" || rust_name == "updated_at";
-        let include_in_create = (!meta.is_primary_key || !auto_generated_pk)
-            && !is_timestamp
-            && meta.write
-            && (!meta.skip_input || meta.input_only);
+        let include_in_create =
+            (!meta.is_primary_key || !auto_generated_pk) && !is_timestamp && meta.write;
         if include_in_create {
+            let create_input_attr = if meta.skip_input && !meta.input_only {
+                quote! { #[graphql(skip)] }
+            } else {
+                quote! { #[graphql(name = #graphql_name)] }
+            };
             let create_policy_check = if let Some(policy_key) = &meta.write_policy {
                 quote! {
                     db.ensure_writable_field(
@@ -202,7 +205,7 @@ pub(crate) fn generate_graphql_operations(
             create_policy_checks.push(create_policy_check);
             // For create: use the field type directly (required fields stay required)
             create_input_fields.push(quote! {
-                #[graphql(name = #graphql_name)]
+                #create_input_attr
                 pub #field_name: #field_type,
             });
 
@@ -290,17 +293,18 @@ pub(crate) fn generate_graphql_operations(
         // For update: wrap in Option to make all fields optional (skip PK, timestamps, skip_input)
         // But #[input_only] overrides skip_input (allows write-only fields like encrypted credentials)
         let is_timestamp = rust_name == "created_at" || rust_name == "updated_at";
-        if !meta.is_primary_key
-            && !is_timestamp
-            && meta.write
-            && (!meta.skip_input || meta.input_only)
-        {
+        if !meta.is_primary_key && !is_timestamp && meta.write {
             // All update fields are wrapped in Option (even if already optional)
             // This allows distinguishing between "not provided" and "set to null"
             let update_type = quote! { Option<#field_type> };
+            let update_input_attr = if meta.skip_input && !meta.input_only {
+                quote! { #[graphql(skip)] }
+            } else {
+                quote! { #[graphql(name = #graphql_name)] }
+            };
 
             update_input_fields.push(quote! {
-                #[graphql(name = #graphql_name)]
+                #update_input_attr
                 pub #field_name: #update_type,
             });
 
@@ -894,14 +898,11 @@ pub(crate) fn generate_graphql_operations(
                             .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?
                             .ok_or_else(|| ::graphql_orm::async_graphql::Error::new("Entity not found after creation"))?;
 
-                        // Broadcast entity change event if subscription channel is configured
-                        if let Ok(tx) = ctx.data::<::graphql_orm::tokio::sync::broadcast::Sender<#changed_event>>() {
-                            let _ = tx.send(#changed_event {
-                                action: ::graphql_orm::graphql::orm::ChangeAction::Created,
-                                id: entity.#pk_field.clone(),
-                                entity: Some(entity.clone()),
-                            });
-                        }
+                        #struct_name::__gom_emit_changed_event(
+                            db,
+                            ::graphql_orm::graphql::orm::ChangeAction::Created,
+                            Some(&entity),
+                        );
 
                         db.run_mutation_hook(
                             ctx,
@@ -1006,14 +1007,11 @@ pub(crate) fn generate_graphql_operations(
 
                         match entity {
                             Some(entity) => {
-                                // Broadcast entity change event if subscription channel is configured
-                                if let Ok(tx) = ctx.data::<::graphql_orm::tokio::sync::broadcast::Sender<#changed_event>>() {
-                                    let _ = tx.send(#changed_event {
-                                        action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
-                                        id: entity.#pk_field.clone(),
-                                        entity: Some(entity.clone()),
-                                    });
-                                }
+                                #struct_name::__gom_emit_changed_event(
+                                    db,
+                                    ::graphql_orm::graphql::orm::ChangeAction::Updated,
+                                    Some(&entity),
+                                );
 
                                 db.run_mutation_hook(
                                     ctx,
@@ -1089,14 +1087,11 @@ pub(crate) fn generate_graphql_operations(
 
                 match result {
                     Ok(r) if r.rows_affected() > 0 => {
-                        // Broadcast entity change event if subscription channel is configured
-                        if let Ok(tx) = ctx.data::<::graphql_orm::tokio::sync::broadcast::Sender<#changed_event>>() {
-                            let _ = tx.send(#changed_event {
-                                action: ::graphql_orm::graphql::orm::ChangeAction::Deleted,
-                                id: entity.#pk_field.clone(),
-                                entity: Some(entity.clone()),
-                            });
-                        }
+                        #struct_name::__gom_emit_changed_event(
+                            db,
+                            ::graphql_orm::graphql::orm::ChangeAction::Deleted,
+                            Some(&entity),
+                        );
 
                         db.run_mutation_hook(
                             ctx,
@@ -1144,42 +1139,8 @@ pub(crate) fn generate_graphql_operations(
                     _ => return Ok(#update_many_result_type::err("Where filter is required for bulk update and must not be empty")),
                 };
 
-                // Build dynamic UPDATE SQL based on provided fields
-                let mut set_clauses: Vec<String> = Vec::new();
-                let mut changed_fields: Vec<&str> = Vec::new();
-                let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
-
-                #(#update_field_checks)*
-
-                // Update timestamp column when this entity defines one
-                if #has_updated_at_column {
-                    set_clauses.push(format!("updated_at = {}", #struct_name::__gom_current_epoch_expr()));
-                }
-
-                if set_clauses.is_empty() {
-                    return Ok(#update_many_result_type::err("No fields to update"));
-                }
-
-                // Reuse EntityQuery WHERE SQL construction and bind values.
-                let query = EntityQuery::<#struct_name>::new().filter(filter);
-                let (delete_sql, filter_values) = query.build_delete_sql();
-                let where_clause = match delete_sql.split_once(" WHERE ") {
-                    Some((_, clause)) => #struct_name::__gom_rebind_sql(clause, values.len() + 1),
-                    None => return Ok(#update_many_result_type::err("Where filter produced empty SQL")),
-                };
-
-                let sql = format!(
-                    "UPDATE {} SET {} WHERE {}",
-                    #table_name,
-                    set_clauses.join(", "),
-                    where_clause
-                );
-
-                values.extend(filter_values);
-                let result = ::graphql_orm::graphql::orm::execute_with_binds(&sql, &values, pool).await;
-
-                match result {
-                    Ok(r) => Ok(#update_many_result_type::ok(r.rows_affected() as i64)),
+                match #struct_name::update_where(db, filter.clone(), input).await {
+                    Ok(affected_count) => Ok(#update_many_result_type::ok(affected_count)),
                     Err(e) => Ok(#update_many_result_type::err(e.to_string())),
                 }
             }
@@ -1203,14 +1164,8 @@ pub(crate) fn generate_graphql_operations(
                     _ => return Ok(#delete_many_result_type::err("Where filter is required for bulk delete and must not be empty")),
                 };
 
-                let mut query = EntityQuery::<#struct_name>::new().filter(filter);
-                let (sql, values) = query.build_delete_sql();
-                let sql = #struct_name::__gom_rebind_sql(&sql, 1);
-
-                let result = ::graphql_orm::graphql::orm::execute_with_binds(&sql, &values, pool).await;
-
-                match result {
-                    Ok(r) => Ok(#delete_many_result_type::ok(r.rows_affected() as i64)),
+                match #struct_name::delete_where(db, filter.clone()).await {
+                    Ok(deleted_count) => Ok(#delete_many_result_type::ok(deleted_count)),
                     Err(e) => Ok(#delete_many_result_type::err(e.to_string())),
                 }
             }
@@ -1240,7 +1195,13 @@ pub(crate) fn generate_graphql_operations(
 
                 // Try to get the broadcast channel for this entity type
                 // If not available, return an empty stream (subscription not enabled)
-                let maybe_events = ctx.data_opt::<::graphql_orm::tokio::sync::broadcast::Sender<#changed_event>>();
+                let maybe_events = ctx
+                    .data_opt::<::graphql_orm::db::Database>()
+                    .and_then(|db| db.event_sender::<#changed_event>())
+                    .or_else(|| {
+                        ctx.data_opt::<::graphql_orm::tokio::sync::broadcast::Sender<#changed_event>>()
+                            .cloned()
+                    });
 
                 Ok(match maybe_events {
                     None => {
@@ -1273,6 +1234,26 @@ pub(crate) fn generate_graphql_operations(
         ///
         /// Provides static async methods for common database operations.
         impl #struct_name {
+            #[doc(hidden)]
+            fn __gom_runtime_error(message: impl Into<String>) -> ::graphql_orm::sqlx::Error {
+                ::graphql_orm::sqlx::Error::Protocol(message.into())
+            }
+
+            #[doc(hidden)]
+            fn __gom_emit_changed_event(
+                db: &::graphql_orm::db::Database,
+                action: ::graphql_orm::graphql::orm::ChangeAction,
+                entity: Option<&Self>,
+            ) {
+                if let Some(entity) = entity {
+                    db.emit_event(#changed_event {
+                        action,
+                        id: entity.#pk_field.clone(),
+                        entity: Some(entity.clone()),
+                    });
+                }
+            }
+
             /// Insert a new entity record using the generated create input.
             pub async fn insert(
                 pool: &#pool_type,
@@ -1315,6 +1296,325 @@ pub(crate) fn generate_graphql_operations(
                     )
                     .fetch_one(pool)
                     .await
+            }
+
+            /// Update a single entity by primary key using the generated update input.
+            pub async fn update_by_id(
+                db: &::graphql_orm::db::Database,
+                id: &#pk_type_ty,
+                input: #update_input,
+            ) -> Result<Option<Self>, ::graphql_orm::sqlx::Error> {
+                use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
+
+                let pool = db.pool();
+                let current_entity = EntityQuery::<Self>::new()
+                    .where_clause(
+                        &format!("{} = {}", Self::PRIMARY_KEY, Self::__gom_placeholder(1)),
+                        #pk_bind_value_ref
+                    )
+                    .fetch_one(pool)
+                    .await?;
+
+                let Some(current_entity) = current_entity else {
+                    return Ok(None);
+                };
+
+                let mut set_clauses: Vec<String> = Vec::new();
+                let mut changed_fields: Vec<&str> = Vec::new();
+                let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+
+                #(#update_field_checks)*
+
+                if #has_updated_at_column {
+                    set_clauses.push(format!("updated_at = {}", Self::__gom_current_epoch_expr()));
+                }
+
+                if set_clauses.is_empty() {
+                    return Err(Self::__gom_runtime_error("No fields to update"));
+                }
+
+                let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
+                db.run_mutation_hook_without_context(
+                    &::graphql_orm::graphql::orm::MutationEvent {
+                        phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
+                        action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
+                        entity_name: #entity_name_lit,
+                        table_name: #table_name,
+                        id: current_entity.#pk_field.to_string(),
+                        changes: mutation_changes.clone(),
+                    },
+                )
+                .await
+                .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+
+                let sql = Self::__gom_rebind_sql(
+                    &format!("UPDATE {} SET {} WHERE {} = ?", #table_name, set_clauses.join(", "), Self::PRIMARY_KEY),
+                    1,
+                );
+                values.push(#pk_bind_value_ref);
+
+                let result = ::graphql_orm::graphql::orm::execute_with_binds(&sql, &values, pool).await?;
+                if result.rows_affected() == 0 {
+                    return Ok(None);
+                }
+
+                let entity = EntityQuery::<Self>::new()
+                    .where_clause(
+                        &format!("{} = {}", Self::PRIMARY_KEY, Self::__gom_placeholder(1)),
+                        #pk_bind_value_ref
+                    )
+                    .fetch_one(pool)
+                    .await?;
+
+                let Some(entity) = entity else {
+                    return Ok(None);
+                };
+
+                Self::__gom_emit_changed_event(
+                    db,
+                    ::graphql_orm::graphql::orm::ChangeAction::Updated,
+                    Some(&entity),
+                );
+
+                db.run_mutation_hook_without_context(
+                    &::graphql_orm::graphql::orm::MutationEvent {
+                        phase: ::graphql_orm::graphql::orm::MutationPhase::After,
+                        action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
+                        entity_name: #entity_name_lit,
+                        table_name: #table_name,
+                        id: entity.#pk_field.to_string(),
+                        changes: mutation_changes,
+                    },
+                )
+                .await
+                .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+
+                Ok(Some(entity))
+            }
+
+            /// Update multiple entities matching a typed where filter.
+            pub async fn update_where(
+                db: &::graphql_orm::db::Database,
+                where_input: #where_input,
+                input: #update_input,
+            ) -> Result<i64, ::graphql_orm::sqlx::Error> {
+                use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow, SqlValue};
+
+                if where_input.is_empty() {
+                    return Err(Self::__gom_runtime_error("Where filter is required for bulk update and must not be empty"));
+                }
+
+                let pool = db.pool();
+                let matched_entities = EntityQuery::<Self>::new()
+                    .filter(&where_input)
+                    .fetch_all(pool)
+                    .await?;
+
+                if matched_entities.is_empty() {
+                    return Ok(0);
+                }
+
+                let mut set_clauses: Vec<String> = Vec::new();
+                let mut changed_fields: Vec<&str> = Vec::new();
+                let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+
+                #(#update_field_checks)*
+
+                if #has_updated_at_column {
+                    set_clauses.push(format!("updated_at = {}", Self::__gom_current_epoch_expr()));
+                }
+
+                if set_clauses.is_empty() {
+                    return Err(Self::__gom_runtime_error("No fields to update"));
+                }
+
+                let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
+                for entity in &matched_entities {
+                    db.run_mutation_hook_without_context(
+                        &::graphql_orm::graphql::orm::MutationEvent {
+                            phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
+                            action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
+                            entity_name: #entity_name_lit,
+                            table_name: #table_name,
+                            id: entity.#pk_field.to_string(),
+                            changes: mutation_changes.clone(),
+                        },
+                    )
+                    .await
+                    .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                }
+
+                let query = EntityQuery::<Self>::new().filter(&where_input);
+                let (delete_sql, filter_values) = query.build_delete_sql();
+                let where_clause = match delete_sql.split_once(" WHERE ") {
+                    Some((_, clause)) => Self::__gom_rebind_sql(clause, values.len() + 1),
+                    None => return Err(Self::__gom_runtime_error("Where filter produced empty SQL")),
+                };
+
+                let sql = format!(
+                    "UPDATE {} SET {} WHERE {}",
+                    #table_name,
+                    set_clauses.join(", "),
+                    where_clause
+                );
+
+                values.extend(filter_values);
+                let result = ::graphql_orm::graphql::orm::execute_with_binds(&sql, &values, pool).await?;
+                let affected = result.rows_affected() as i64;
+
+                for previous in matched_entities {
+                    if let Some(entity) = Self::get(pool, &previous.#pk_field).await? {
+                        Self::__gom_emit_changed_event(
+                            db,
+                            ::graphql_orm::graphql::orm::ChangeAction::Updated,
+                            Some(&entity),
+                        );
+                        db.run_mutation_hook_without_context(
+                            &::graphql_orm::graphql::orm::MutationEvent {
+                                phase: ::graphql_orm::graphql::orm::MutationPhase::After,
+                                action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
+                                entity_name: #entity_name_lit,
+                                table_name: #table_name,
+                                id: entity.#pk_field.to_string(),
+                                changes: mutation_changes.clone(),
+                            },
+                        )
+                        .await
+                        .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                    }
+                }
+
+                Ok(affected)
+            }
+
+            /// Delete a single entity by primary key.
+            pub async fn delete_by_id(
+                db: &::graphql_orm::db::Database,
+                id: &#pk_type_ty,
+            ) -> Result<bool, ::graphql_orm::sqlx::Error> {
+                use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, SqlValue};
+
+                let pool = db.pool();
+                let entity = EntityQuery::<Self>::new()
+                    .where_clause(
+                        &format!("{} = {}", Self::PRIMARY_KEY, Self::__gom_placeholder(1)),
+                        #pk_bind_value_ref
+                    )
+                    .fetch_one(pool)
+                    .await?;
+
+                let Some(entity) = entity else {
+                    return Ok(false);
+                };
+
+                db.run_mutation_hook_without_context(
+                    &::graphql_orm::graphql::orm::MutationEvent {
+                        phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
+                        action: ::graphql_orm::graphql::orm::ChangeAction::Deleted,
+                        entity_name: #entity_name_lit,
+                        table_name: #table_name,
+                        id: entity.#pk_field.to_string(),
+                        changes: Vec::new(),
+                    },
+                )
+                .await
+                .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+
+                let sql = Self::__gom_rebind_sql(
+                    &format!("DELETE FROM {} WHERE {} = ?", #table_name, Self::PRIMARY_KEY),
+                    1,
+                );
+                let values = vec![#pk_bind_value_ref];
+                let result = ::graphql_orm::graphql::orm::execute_with_binds(&sql, &values, pool).await?;
+                if result.rows_affected() == 0 {
+                    return Ok(false);
+                }
+
+                Self::__gom_emit_changed_event(
+                    db,
+                    ::graphql_orm::graphql::orm::ChangeAction::Deleted,
+                    Some(&entity),
+                );
+
+                db.run_mutation_hook_without_context(
+                    &::graphql_orm::graphql::orm::MutationEvent {
+                        phase: ::graphql_orm::graphql::orm::MutationPhase::After,
+                        action: ::graphql_orm::graphql::orm::ChangeAction::Deleted,
+                        entity_name: #entity_name_lit,
+                        table_name: #table_name,
+                        id: entity.#pk_field.to_string(),
+                        changes: Vec::new(),
+                    },
+                )
+                .await
+                .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+
+                Ok(true)
+            }
+
+            /// Delete multiple entities matching a typed where filter.
+            pub async fn delete_where(
+                db: &::graphql_orm::db::Database,
+                where_input: #where_input,
+            ) -> Result<i64, ::graphql_orm::sqlx::Error> {
+                use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow};
+
+                if where_input.is_empty() {
+                    return Err(Self::__gom_runtime_error("Where filter is required for bulk delete and must not be empty"));
+                }
+
+                let pool = db.pool();
+                let matched_entities = EntityQuery::<Self>::new()
+                    .filter(&where_input)
+                    .fetch_all(pool)
+                    .await?;
+
+                if matched_entities.is_empty() {
+                    return Ok(0);
+                }
+
+                for entity in &matched_entities {
+                    db.run_mutation_hook_without_context(
+                        &::graphql_orm::graphql::orm::MutationEvent {
+                            phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
+                            action: ::graphql_orm::graphql::orm::ChangeAction::Deleted,
+                            entity_name: #entity_name_lit,
+                            table_name: #table_name,
+                            id: entity.#pk_field.to_string(),
+                            changes: Vec::new(),
+                        },
+                    )
+                    .await
+                    .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                }
+
+                let mut query = EntityQuery::<Self>::new().filter(&where_input);
+                let (sql, values) = query.build_delete_sql();
+                let sql = Self::__gom_rebind_sql(&sql, 1);
+                let result = ::graphql_orm::graphql::orm::execute_with_binds(&sql, &values, pool).await?;
+                let deleted = result.rows_affected() as i64;
+
+                for entity in matched_entities {
+                    Self::__gom_emit_changed_event(
+                        db,
+                        ::graphql_orm::graphql::orm::ChangeAction::Deleted,
+                        Some(&entity),
+                    );
+                    db.run_mutation_hook_without_context(
+                        &::graphql_orm::graphql::orm::MutationEvent {
+                            phase: ::graphql_orm::graphql::orm::MutationPhase::After,
+                            action: ::graphql_orm::graphql::orm::ChangeAction::Deleted,
+                            entity_name: #entity_name_lit,
+                            table_name: #table_name,
+                            id: entity.#pk_field.to_string(),
+                            changes: Vec::new(),
+                        },
+                    )
+                    .await
+                    .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                }
+
+                Ok(deleted)
             }
 
             /// Count entities matching the given filter

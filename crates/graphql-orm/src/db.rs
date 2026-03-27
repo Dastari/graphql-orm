@@ -1,12 +1,19 @@
 use crate::DbPool;
-use std::any::Any;
-use std::sync::Arc;
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+
+#[derive(Default)]
+struct EventSenders {
+    senders: RwLock<HashMap<TypeId, Box<dyn Any + Send + Sync>>>,
+}
 
 #[derive(Clone)]
 pub struct Database {
     pool: DbPool,
     mutation_hook: Option<Arc<dyn crate::graphql::orm::MutationHook>>,
     field_policy: Option<Arc<dyn crate::graphql::orm::FieldPolicy>>,
+    event_senders: Arc<EventSenders>,
 }
 
 impl Database {
@@ -15,6 +22,7 @@ impl Database {
             pool,
             mutation_hook: None,
             field_policy: None,
+            event_senders: Arc::new(EventSenders::default()),
         }
     }
 
@@ -26,6 +34,7 @@ impl Database {
             pool,
             mutation_hook: Some(Arc::new(hook)),
             field_policy: None,
+            event_senders: Arc::new(EventSenders::default()),
         }
     }
 
@@ -37,6 +46,7 @@ impl Database {
             pool,
             mutation_hook: None,
             field_policy: Some(Arc::new(policy)),
+            event_senders: Arc::new(EventSenders::default()),
         }
     }
 
@@ -49,6 +59,7 @@ impl Database {
             pool,
             mutation_hook: Some(Arc::new(mutation_hook)),
             field_policy: Some(Arc::new(field_policy)),
+            event_senders: Arc::new(EventSenders::default()),
         }
     }
 
@@ -84,10 +95,54 @@ impl Database {
         event: &crate::graphql::orm::MutationEvent,
     ) -> async_graphql::Result<()> {
         if let Some(hook) = &self.mutation_hook {
-            hook.on_mutation(ctx, self, event).await?;
+            hook.on_mutation(Some(ctx), self, event).await?;
         }
 
         Ok(())
+    }
+
+    pub async fn run_mutation_hook_without_context(
+        &self,
+        event: &crate::graphql::orm::MutationEvent,
+    ) -> async_graphql::Result<()> {
+        if let Some(hook) = &self.mutation_hook {
+            hook.on_mutation(None, self, event).await?;
+        }
+
+        Ok(())
+    }
+
+    pub fn register_event_sender<T>(&self, sender: tokio::sync::broadcast::Sender<T>)
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        self.event_senders
+            .senders
+            .write()
+            .expect("event sender lock poisoned")
+            .insert(TypeId::of::<T>(), Box::new(sender));
+    }
+
+    pub fn event_sender<T>(&self) -> Option<tokio::sync::broadcast::Sender<T>>
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        self.event_senders
+            .senders
+            .read()
+            .expect("event sender lock poisoned")
+            .get(&TypeId::of::<T>())
+            .and_then(|sender| sender.downcast_ref::<tokio::sync::broadcast::Sender<T>>())
+            .cloned()
+    }
+
+    pub fn emit_event<T>(&self, event: T)
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        if let Some(sender) = self.event_sender::<T>() {
+            let _ = sender.send(event);
+        }
     }
 
     pub async fn can_read_field(

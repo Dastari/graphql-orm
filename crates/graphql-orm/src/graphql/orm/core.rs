@@ -39,7 +39,7 @@ pub struct MutationEvent {
 pub trait MutationHook: Send + Sync {
     fn on_mutation<'a>(
         &'a self,
-        ctx: &'a async_graphql::Context<'_>,
+        ctx: Option<&'a async_graphql::Context<'_>>,
         db: &'a crate::db::Database,
         event: &'a MutationEvent,
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>>;
