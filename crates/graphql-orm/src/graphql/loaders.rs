@@ -1,6 +1,8 @@
-use super::{DbRow, HashMap, PhantomData};
+use crate::DbRow;
 use async_graphql::dataloader::Loader;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
 
 pub trait BatchLoadEntity:
     crate::graphql::orm::DatabaseEntity
