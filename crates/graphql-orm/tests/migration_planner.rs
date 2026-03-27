@@ -165,18 +165,18 @@ fn postgres_plan_renders_backend_specific_statements() {
     };
 
     let plan: MigrationPlan = build_migration_plan(DatabaseBackend::Postgres, &current, &target);
-    assert!(plan
-        .statements
-        .iter()
-        .any(|statement| statement == "ALTER TABLE users ADD COLUMN active BOOLEAN NOT NULL DEFAULT false"));
-    assert!(plan
-        .statements
-        .iter()
-        .any(|statement| statement == "ALTER TABLE users ALTER COLUMN name TYPE VARCHAR(255)"));
-    assert!(plan
-        .statements
-        .iter()
-        .any(|statement| statement == "CREATE INDEX idx_users_name ON users (name)"));
+    assert!(plan.statements.iter().any(|statement| statement
+        == "ALTER TABLE users ADD COLUMN active BOOLEAN NOT NULL DEFAULT false"));
+    assert!(
+        plan.statements
+            .iter()
+            .any(|statement| statement == "ALTER TABLE users ALTER COLUMN name TYPE VARCHAR(255)")
+    );
+    assert!(
+        plan.statements
+            .iter()
+            .any(|statement| statement == "CREATE INDEX idx_users_name ON users (name)")
+    );
 }
 
 #[test]
@@ -189,41 +189,50 @@ fn sqlite_plan_rebuilds_tables_for_column_alterations() {
     };
 
     let plan = build_migration_plan(DatabaseBackend::Sqlite, &current, &target);
-    assert!(plan
-        .statements
-        .iter()
-        .any(|statement| statement == "PRAGMA foreign_keys = OFF"));
-    assert!(plan
-        .statements
-        .iter()
-        .any(|statement| statement.starts_with("CREATE TABLE __graphql_orm_users_new")));
-    assert!(plan
-        .statements
-        .iter()
-        .any(|statement| statement
-            == "INSERT INTO __graphql_orm_users_new (id, name) SELECT id, name FROM users"));
-    assert!(plan
-        .statements
-        .iter()
-        .any(|statement| statement == "DROP TABLE users"));
-    assert!(plan
-        .statements
-        .iter()
-        .any(|statement| statement == "ALTER TABLE __graphql_orm_users_new RENAME TO users"));
-    assert!(plan
-        .statements
-        .iter()
-        .any(|statement| statement == "CREATE INDEX idx_users_name ON users (name)"));
-    assert!(plan
-        .statements
-        .iter()
-        .any(|statement| statement == "PRAGMA foreign_keys = ON"));
+    assert!(
+        plan.statements
+            .iter()
+            .any(|statement| statement == "PRAGMA foreign_keys = OFF")
+    );
+    assert!(
+        plan.statements
+            .iter()
+            .any(|statement| statement.starts_with("CREATE TABLE __graphql_orm_users_new"))
+    );
+    assert!(plan.statements.iter().any(|statement| statement
+        == "INSERT INTO __graphql_orm_users_new (id, name) SELECT id, name FROM users"));
+    assert!(
+        plan.statements
+            .iter()
+            .any(|statement| statement == "DROP TABLE users")
+    );
+    assert!(
+        plan.statements
+            .iter()
+            .any(|statement| statement == "ALTER TABLE __graphql_orm_users_new RENAME TO users")
+    );
+    assert!(
+        plan.statements
+            .iter()
+            .any(|statement| statement == "CREATE INDEX idx_users_name ON users (name)")
+    );
+    assert!(
+        plan.statements
+            .iter()
+            .any(|statement| statement == "PRAGMA foreign_keys = ON")
+    );
 }
 
 #[test]
 fn diff_detects_foreign_key_addition() {
     let current = SchemaModel {
-        tables: vec![users_v1(), TableModel { foreign_keys: vec![], ..posts_with_fk() }],
+        tables: vec![
+            users_v1(),
+            TableModel {
+                foreign_keys: vec![],
+                ..posts_with_fk()
+            },
+        ],
     };
     let target = SchemaModel {
         tables: vec![users_v1(), posts_with_fk()],
@@ -243,7 +252,13 @@ fn diff_detects_foreign_key_addition() {
 #[test]
 fn postgres_plan_renders_foreign_key_statement() {
     let current = SchemaModel {
-        tables: vec![users_v1(), TableModel { foreign_keys: vec![], ..posts_with_fk() }],
+        tables: vec![
+            users_v1(),
+            TableModel {
+                foreign_keys: vec![],
+                ..posts_with_fk()
+            },
+        ],
     };
     let target = SchemaModel {
         tables: vec![users_v1(), posts_with_fk()],
@@ -259,25 +274,31 @@ fn postgres_plan_renders_foreign_key_statement() {
 #[test]
 fn sqlite_plan_rebuilds_tables_for_foreign_key_changes() {
     let current = SchemaModel {
-        tables: vec![users_v1(), TableModel { foreign_keys: vec![], ..posts_with_fk() }],
+        tables: vec![
+            users_v1(),
+            TableModel {
+                foreign_keys: vec![],
+                ..posts_with_fk()
+            },
+        ],
     };
     let target = SchemaModel {
         tables: vec![users_v1(), posts_with_fk()],
     };
 
     let plan = build_migration_plan(DatabaseBackend::Sqlite, &current, &target);
-    assert!(plan
-        .statements
-        .iter()
-        .any(|statement| statement.starts_with("CREATE TABLE __graphql_orm_posts_new")));
-    assert!(plan.statements.iter().any(|statement| {
-        statement.contains("FOREIGN KEY (author_id) REFERENCES users(id)")
-    }));
-    assert!(plan
-        .statements
-        .iter()
-        .any(|statement| statement
-            == "INSERT INTO __graphql_orm_posts_new (id, author_id) SELECT id, author_id FROM posts"));
+    assert!(
+        plan.statements
+            .iter()
+            .any(|statement| statement.starts_with("CREATE TABLE __graphql_orm_posts_new"))
+    );
+    assert!(
+        plan.statements.iter().any(|statement| {
+            statement.contains("FOREIGN KEY (author_id) REFERENCES users(id)")
+        })
+    );
+    assert!(plan.statements.iter().any(|statement| statement
+        == "INSERT INTO __graphql_orm_posts_new (id, author_id) SELECT id, author_id FROM posts"));
 }
 
 #[test]
@@ -296,5 +317,8 @@ fn migration_file_renderer_includes_headers_and_semicolons() {
     assert!(file.contains("-- description: Create Users"));
     assert!(file.contains("CREATE TABLE users (id TEXT PRIMARY KEY);"));
     assert!(file.contains("-- comment only;"));
-    assert_eq!(migration_filename("2026032501", "Create Users"), "2026032501_create_users.sql");
+    assert_eq!(
+        migration_filename("2026032501", "Create Users"),
+        "2026032501_create_users.sql"
+    );
 }

@@ -35,7 +35,9 @@ fn leak_migration(plan: &graphql_orm::graphql::orm::MigrationPlan) -> Migration 
 async fn sqlite_migration_runner_applies_rebuild_plan() -> Result<(), Box<dyn std::error::Error>> {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
 
-    sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await?;
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&pool)
+        .await?;
     sqlx::query("CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT NOT NULL)")
         .execute(&pool)
         .await?;
@@ -117,13 +119,17 @@ async fn sqlite_migration_runner_applies_rebuild_plan() -> Result<(), Box<dyn st
         .iter()
         .find(|table| table.table_name == "users")
         .expect("users table should exist after migration");
-    assert!(users_table.columns.iter().any(|column| {
-        column.name == "active" && column.default.as_deref() == Some("false")
-    }));
-    assert!(users_table
-        .indexes
-        .iter()
-        .any(|index| index.name == "idx_users_name"));
+    assert!(
+        users_table.columns.iter().any(|column| {
+            column.name == "active" && column.default.as_deref() == Some("false")
+        })
+    );
+    assert!(
+        users_table
+            .indexes
+            .iter()
+            .any(|index| index.name == "idx_users_name")
+    );
 
     Ok(())
 }
@@ -170,7 +176,11 @@ async fn postgres_migration_runner_applies_plan() -> Result<(), Box<dyn std::err
         }],
     };
 
-    let plan = build_migration_plan(DatabaseBackend::Postgres, &SchemaModel { tables: vec![] }, &target);
+    let plan = build_migration_plan(
+        DatabaseBackend::Postgres,
+        &SchemaModel { tables: vec![] },
+        &target,
+    );
     let database = graphql_orm::db::Database::new(pool.clone());
     database.apply_migrations(&[leak_migration(&plan)]).await?;
 

@@ -72,7 +72,9 @@ type TestPool = sqlx::PgPool;
 #[cfg(feature = "sqlite")]
 async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
-    sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await?;
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&pool)
+        .await?;
     sqlx::query(
         "CREATE TABLE accounts (
             id TEXT PRIMARY KEY,
@@ -120,12 +122,14 @@ fn expected_uuid_sql_type() -> &'static str {
 }
 
 #[tokio::test]
-async fn uuid_ids_are_first_class_across_crud_migrations_and_hooks(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn uuid_ids_are_first_class_across_crud_migrations_and_hooks()
+-> Result<(), Box<dyn std::error::Error>> {
     let pool = setup_pool().await?;
     let hook = RecordingHook::default();
     let database = graphql_orm::db::Database::with_mutation_hook(pool.clone(), hook.clone());
-    let schema = schema_builder(database).data("test-user".to_string()).finish();
+    let schema = schema_builder(database)
+        .data("test-user".to_string())
+        .finish();
 
     let created = schema
         .execute(
@@ -158,7 +162,10 @@ async fn uuid_ids_are_first_class_across_crud_migrations_and_hooks(
         .await;
     assert!(by_id.errors.is_empty(), "{:?}", by_id.errors);
     let by_id_json = by_id.data.into_json()?;
-    assert_eq!(by_id_json["Account"]["id"].as_str(), Some(account_id.as_str()));
+    assert_eq!(
+        by_id_json["Account"]["id"].as_str(),
+        Some(account_id.as_str())
+    );
     assert_eq!(by_id_json["Account"]["name"].as_str(), Some("Primary"));
 
     let filtered = schema
@@ -174,7 +181,10 @@ async fn uuid_ids_are_first_class_across_crud_migrations_and_hooks(
         .await;
     assert!(filtered.errors.is_empty(), "{:?}", filtered.errors);
     let filtered_json = filtered.data.into_json()?;
-    assert_eq!(filtered_json["Accounts"]["Edges"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        filtered_json["Accounts"]["Edges"].as_array().map(Vec::len),
+        Some(1)
+    );
     assert_eq!(
         filtered_json["Accounts"]["Edges"][0]["Node"]["id"].as_str(),
         Some(account_id.as_str())
@@ -208,7 +218,10 @@ async fn uuid_ids_are_first_class_across_crud_migrations_and_hooks(
         .await;
     assert!(deleted.errors.is_empty(), "{:?}", deleted.errors);
     let deleted_json = deleted.data.into_json()?;
-    assert_eq!(deleted_json["DeleteAccount"]["Success"].as_bool(), Some(true));
+    assert_eq!(
+        deleted_json["DeleteAccount"]["Success"].as_bool(),
+        Some(true)
+    );
 
     let metadata = <Account as graphql_orm::graphql::orm::Entity>::metadata();
     let id_field = metadata

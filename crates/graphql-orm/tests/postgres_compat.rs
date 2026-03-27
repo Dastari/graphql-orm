@@ -106,13 +106,18 @@ schema_roots! {
 type TestSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 
 #[tokio::test]
-async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn std::error::Error>> {
+async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn std::error::Error>>
+{
     let database_url = std::env::var("TEST_DATABASE_URL")
         .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1:55432/postgres".to_string());
     let pool = sqlx::PgPool::connect(&database_url).await?;
 
-    sqlx::query("DROP TABLE IF EXISTS posts").execute(&pool).await?;
-    sqlx::query("DROP TABLE IF EXISTS users").execute(&pool).await?;
+    sqlx::query("DROP TABLE IF EXISTS posts")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DROP TABLE IF EXISTS users")
+        .execute(&pool)
+        .await?;
 
     sqlx::query(
         "CREATE TABLE users (
@@ -141,7 +146,9 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
     .await?;
 
     let database = graphql_orm::db::Database::new(pool.clone());
-    let schema: TestSchema = schema_builder(database).data("test-user".to_string()).finish();
+    let schema: TestSchema = schema_builder(database)
+        .data("test-user".to_string())
+        .finish();
 
     let create_user = schema
         .execute(
@@ -208,12 +215,14 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
     assert_eq!(metadata.relations[0].field_name, "posts");
     assert_eq!(metadata.relations[0].source_column, "id");
     assert_eq!(metadata.relations[0].target_column, "author_id");
-    let schema_model =
-        graphql_orm::graphql::orm::SchemaModel::from_entities(&[metadata]);
+    let schema_model = graphql_orm::graphql::orm::SchemaModel::from_entities(&[metadata]);
     assert_eq!(schema_model.tables.len(), 1);
     assert_eq!(schema_model.tables[0].table_name, "users");
     assert_eq!(schema_model.tables[0].foreign_keys.len(), 1);
-    assert_eq!(schema_model.tables[0].foreign_keys[0].target_column, "author_id");
+    assert_eq!(
+        schema_model.tables[0].foreign_keys[0].target_column,
+        "author_id"
+    );
 
     let introspected = graphql_orm::graphql::orm::introspect_schema(&pool).await?;
     assert!(introspected.tables.len() >= 2);
@@ -223,16 +232,23 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
         .find(|table| table.table_name == "users")
         .expect("users table should be introspected");
     assert_eq!(users_table.primary_key, "id");
-    assert!(users_table.columns.iter().any(|column| column.name == "name"));
+    assert!(
+        users_table
+            .columns
+            .iter()
+            .any(|column| column.name == "name")
+    );
     let posts_table = introspected
         .tables
         .iter()
         .find(|table| table.table_name == "posts")
         .expect("posts table should be introspected");
-    assert!(posts_table
-        .columns
-        .iter()
-        .any(|column| column.name == "author_id"));
+    assert!(
+        posts_table
+            .columns
+            .iter()
+            .any(|column| column.name == "author_id")
+    );
 
     assert!(matches!(
         graphql_orm::graphql::orm::current_backend(),

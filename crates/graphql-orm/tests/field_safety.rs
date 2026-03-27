@@ -4,7 +4,9 @@ use graphql_orm::prelude::*;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-#[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+)]
 #[serde(rename_all = "camelCase")]
 #[graphql_entity(table = "users", plural = "Users", default_sort = "display_name ASC")]
 pub struct User {
@@ -82,14 +84,11 @@ impl graphql_orm::graphql::orm::FieldPolicy for RecordingPolicy {
         _record: Option<&'a (dyn std::any::Any + Send + Sync)>,
     ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
         Box::pin(async move {
-            self.reads
-                .lock()
-                .expect("read log lock")
-                .push((
-                    entity_name.to_string(),
-                    field_name.to_string(),
-                    policy_key.map(str::to_string),
-                ));
+            self.reads.lock().expect("read log lock").push((
+                entity_name.to_string(),
+                field_name.to_string(),
+                policy_key.map(str::to_string),
+            ));
             Ok(policy_key.is_none_or(|key| {
                 self.allowed_reads
                     .lock()
@@ -110,14 +109,11 @@ impl graphql_orm::graphql::orm::FieldPolicy for RecordingPolicy {
         _value: Option<&'a (dyn std::any::Any + Send + Sync)>,
     ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
         Box::pin(async move {
-            self.writes
-                .lock()
-                .expect("write log lock")
-                .push((
-                    entity_name.to_string(),
-                    field_name.to_string(),
-                    policy_key.map(str::to_string),
-                ));
+            self.writes.lock().expect("write log lock").push((
+                entity_name.to_string(),
+                field_name.to_string(),
+                policy_key.map(str::to_string),
+            ));
             Ok(policy_key.is_none_or(|key| {
                 self.allowed_writes
                     .lock()
@@ -130,8 +126,10 @@ impl graphql_orm::graphql::orm::FieldPolicy for RecordingPolicy {
 
 async fn setup_schema(
     policy: RecordingPolicy,
-) -> Result<async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot>, Box<dyn std::error::Error>>
-{
+) -> Result<
+    async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot>,
+    Box<dyn std::error::Error>,
+> {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
     sqlx::query(
         "CREATE TABLE users (
@@ -150,7 +148,9 @@ async fn setup_schema(
 
     let mut database = graphql_orm::db::Database::new(pool);
     database.set_field_policy(policy);
-    Ok(schema_builder(database).data("test-user".to_string()).finish())
+    Ok(schema_builder(database)
+        .data("test-user".to_string())
+        .finish())
 }
 
 #[tokio::test]
@@ -193,8 +193,8 @@ async fn private_fields_are_hidden_and_names_follow_serde() -> Result<(), Box<dy
 }
 
 #[tokio::test]
-async fn field_policy_callbacks_gate_generated_read_and_write_paths(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn field_policy_callbacks_gate_generated_read_and_write_paths()
+-> Result<(), Box<dyn std::error::Error>> {
     let policy = RecordingPolicy::default();
     let schema = setup_schema(policy.clone()).await?;
 
