@@ -1,0 +1,20 @@
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    container_name: graphql-orm-postgres-test
+    ports:
+      - "55432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    volumes:
+      - graphql-orm-postgres-test-data:/var/lib/postgresql/data
+
+volumes:
+  graphql-orm-postgres-test-data:

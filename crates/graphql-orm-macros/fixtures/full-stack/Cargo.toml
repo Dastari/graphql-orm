@@ -1,0 +1,26 @@
+[package]
+name = "full-stack-fixture"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+default = ["sqlite"]
+sqlite = ["graphql-orm-macros/sqlite"]
+postgres = ["graphql-orm-macros/postgres"]
+
+[dependencies]
+async-graphql = { version = "7", features = ["dataloader"] }
+async-trait = "0.1"
+futures = "0.3"
+futures-util = "0.3"
+graphql-orm-macros = { path = "../..", default-features = false }
+once_cell = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "postgres"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+uuid = { version = "1", features = ["v4"] }

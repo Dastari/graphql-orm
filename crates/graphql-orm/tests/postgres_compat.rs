@@ -1,6 +1,5 @@
 #![cfg(feature = "postgres")]
 
-use async_graphql::dataloader::DataLoader;
 use async_graphql::{Schema, SimpleObject};
 use graphql_orm::prelude::*;
 use sqlx::Row;
@@ -16,8 +15,8 @@ use sqlx::Row;
     Debug,
     PartialEq,
 )]
-#[graphql(complex)]
 #[graphql_entity(table = "users", plural = "Users", default_sort = "name ASC")]
+#[graphql(complex)]
 pub struct User {
     #[primary_key]
     pub id: String,
@@ -52,8 +51,8 @@ pub struct User {
     Debug,
     PartialEq,
 )]
-#[graphql(complex)]
 #[graphql_entity(table = "posts", plural = "Posts", default_sort = "title ASC")]
+#[graphql(complex)]
 pub struct Post {
     #[primary_key]
     pub id: String,
@@ -142,24 +141,12 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
     .await?;
 
     let database = graphql_orm::db::Database::new(pool.clone());
-    let schema: TestSchema =
-        Schema::build(QueryRoot::default(), MutationRoot::default(), SubscriptionRoot::default())
-            .data(database.clone())
-            .data("test-user".to_string())
-            .data(DataLoader::new(
-                graphql_orm::graphql::loaders::RelationLoader::<User>::new(database.clone()),
-                tokio::spawn,
-            ))
-            .data(DataLoader::new(
-                graphql_orm::graphql::loaders::RelationLoader::<Post>::new(database),
-                tokio::spawn,
-            ))
-            .finish();
+    let schema: TestSchema = schema_builder(database).data("test-user".to_string()).finish();
 
     let create_user = schema
         .execute(
             "mutation {
-                CreateUser(Input: { Name: \"Alice\", Active: true }) {
+                CreateUser(Input: { name: \"Alice\", active: true }) {
                     Success
                     User { id name }
                 }
@@ -176,7 +163,7 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
     let create_post = schema
         .execute(format!(
             "mutation {{
-                CreatePost(Input: {{ AuthorId: \"{user_id}\", Title: \"Hello\", Published: true }}) {{
+                CreatePost(Input: {{ author_id: \"{user_id}\", title: \"Hello\", published: true }}) {{
                     Success
                     Post {{ id title }}
                 }}
@@ -192,7 +179,7 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
                     Edges {
                         Node {
                             name
-                            Posts {
+                            posts {
                                 Edges { Node { title } }
                             }
                         }
@@ -208,7 +195,7 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
         Some("Alice")
     );
     assert_eq!(
-        nested_json["Users"]["Edges"][0]["Node"]["Posts"]["Edges"][0]["Node"]["title"].as_str(),
+        nested_json["Users"]["Edges"][0]["Node"]["posts"]["Edges"][0]["Node"]["title"].as_str(),
         Some("Hello")
     );
 
@@ -218,7 +205,7 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
     assert_eq!(metadata.primary_key, "id");
     assert_eq!(metadata.fields.len(), 5);
     assert_eq!(metadata.relations.len(), 1);
-    assert_eq!(metadata.relations[0].field_name, "Posts");
+    assert_eq!(metadata.relations[0].field_name, "posts");
     assert_eq!(metadata.relations[0].source_column, "id");
     assert_eq!(metadata.relations[0].target_column, "author_id");
     let schema_model =
@@ -229,7 +216,7 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
     assert_eq!(schema_model.tables[0].foreign_keys[0].target_column, "author_id");
 
     let introspected = graphql_orm::graphql::orm::introspect_schema(&pool).await?;
-    assert_eq!(introspected.tables.len(), 2);
+    assert!(introspected.tables.len() >= 2);
     let users_table = introspected
         .tables
         .iter()

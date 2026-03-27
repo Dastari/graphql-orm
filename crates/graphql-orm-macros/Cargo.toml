@@ -1,0 +1,28 @@
+[package]
+name = "graphql-orm-macros"
+version = "0.3.1"
+edition.workspace = true
+authors = ["Toby Martin <toby@dastari.net>"]
+description = "Procedural macros for async-graphql and ORM-backed entities, relations, and CRUD operations."
+readme = "README.md"
+repository.workspace = true
+homepage = "https://github.com/Dastari/graphql-orm/tree/main/crates/graphql-orm-macros"
+documentation = "https://docs.rs/graphql-orm-macros"
+keywords = ["graphql", "proc-macro", "async-graphql", "sqlx", "orm"]
+categories = ["development-tools::procedural-macro-helpers", "database", "web-programming"]
+
+[lib]
+proc-macro = true
+
+[features]
+default = ["sqlite"]
+sqlite = []
+postgres = []
+mysql = []
+mssql = []
+
+[dependencies]
+convert_case.workspace = true
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true
