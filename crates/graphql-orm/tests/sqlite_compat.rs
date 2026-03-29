@@ -147,16 +147,16 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
     let create_user = schema
         .execute(
             "mutation {
-                CreateUser(Input: { name: \"Alice\", active: true }) {
-                    Success
-                    User { id name }
+                createUser(input: { name: \"Alice\", active: true }) {
+                    success
+                    user { id name }
                 }
             }",
         )
         .await;
     assert!(create_user.errors.is_empty(), "{:?}", create_user.errors);
     let user_json = create_user.data.into_json()?;
-    let user_id = user_json["CreateUser"]["User"]["id"]
+    let user_id = user_json["createUser"]["user"]["id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -164,9 +164,9 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
     let create_post = schema
         .execute(format!(
             "mutation {{
-                CreatePost(Input: {{ author_id: \"{user_id}\", title: \"Hello\", published: true }}) {{
-                    Success
-                    Post {{ id title }}
+                createPost(input: {{ authorId: \"{user_id}\", title: \"Hello\", published: true }}) {{
+                    success
+                    post {{ id title }}
                 }}
             }}"
         ))
@@ -176,12 +176,12 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
     let nested = schema
         .execute(
             "query {
-                Users {
-                    Edges {
-                        Node {
+                users {
+                    edges {
+                        node {
                             name
                             posts {
-                                Edges { Node { title } }
+                                edges { node { title } }
                             }
                         }
                     }
@@ -192,11 +192,11 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
     assert!(nested.errors.is_empty(), "{:?}", nested.errors);
     let nested_json = nested.data.into_json()?;
     assert_eq!(
-        nested_json["Users"]["Edges"][0]["Node"]["name"].as_str(),
+        nested_json["users"]["edges"][0]["node"]["name"].as_str(),
         Some("Alice")
     );
     assert_eq!(
-        nested_json["Users"]["Edges"][0]["Node"]["posts"]["Edges"][0]["Node"]["title"].as_str(),
+        nested_json["users"]["edges"][0]["node"]["posts"]["edges"][0]["node"]["title"].as_str(),
         Some("Hello")
     );
 
@@ -298,8 +298,8 @@ async fn nested_relations_batch_with_and_without_args() -> Result<(), Box<dyn st
         let response = schema
             .execute(format!(
                 "mutation {{
-                    CreateUser(Input: {{ name: \"{name}\", active: true }}) {{
-                        User {{ id }}
+                    createUser(input: {{ name: \"{name}\", active: true }}) {{
+                        user {{ id }}
                     }}
                 }}"
             ))
@@ -307,7 +307,7 @@ async fn nested_relations_batch_with_and_without_args() -> Result<(), Box<dyn st
         assert!(response.errors.is_empty(), "{:?}", response.errors);
         let data = response.data.into_json()?;
         user_ids.push(
-            data["CreateUser"]["User"]["id"]
+            data["createUser"]["user"]["id"]
                 .as_str()
                 .unwrap()
                 .to_string(),
@@ -326,8 +326,8 @@ async fn nested_relations_batch_with_and_without_args() -> Result<(), Box<dyn st
         let response = schema
             .execute(format!(
                 "mutation {{
-                    CreatePost(Input: {{ author_id: \"{author_id}\", title: \"{title}\", published: {} }}) {{
-                        Success
+                    createPost(input: {{ authorId: \"{author_id}\", title: \"{title}\", published: {} }}) {{
+                        success
                     }}
                 }}",
                 if published { "true" } else { "false" }
@@ -341,12 +341,12 @@ async fn nested_relations_batch_with_and_without_args() -> Result<(), Box<dyn st
     let no_args = schema
         .execute(
             "query {
-                Users(OrderBy: [{ name: ASC }]) {
-                    Edges {
-                        Node {
+                users(orderBy: [{ name: ASC }]) {
+                    edges {
+                        node {
                             name
                             posts {
-                                Edges { Node { title } }
+                                edges { node { title } }
                             }
                         }
                     }
@@ -356,7 +356,7 @@ async fn nested_relations_batch_with_and_without_args() -> Result<(), Box<dyn st
         .await;
     assert!(no_args.errors.is_empty(), "{:?}", no_args.errors);
     let no_args_json = no_args.data.into_json()?;
-    let edges = no_args_json["Users"]["Edges"].as_array().unwrap();
+    let edges = no_args_json["users"]["edges"].as_array().unwrap();
     assert_eq!(edges.len(), 4);
     assert!(
         graphql_orm::graphql::orm::query_count() < edges.len() + 2,
@@ -370,17 +370,17 @@ async fn nested_relations_batch_with_and_without_args() -> Result<(), Box<dyn st
     let arg_query = schema
         .execute(
             "query {
-                Users(OrderBy: [{ name: ASC }]) {
-                    Edges {
-                        Node {
+                users(orderBy: [{ name: ASC }]) {
+                    edges {
+                        node {
                             name
                             posts(
-                                Where: { published: { Eq: true } }
-                                OrderBy: { title: DESC }
-                                Page: { Limit: 1, Offset: 0 }
+                                where: { published: { eq: true } }
+                                orderBy: { title: DESC }
+                                page: { limit: 1, offset: 0 }
                             ) {
-                                Edges { Node { title } }
-                                PageInfo { totalCount hasNextPage }
+                                edges { node { title } }
+                                pageInfo { totalCount hasNextPage }
                             }
                         }
                     }
@@ -390,26 +390,26 @@ async fn nested_relations_batch_with_and_without_args() -> Result<(), Box<dyn st
         .await;
     assert!(arg_query.errors.is_empty(), "{:?}", arg_query.errors);
     let arg_json = arg_query.data.into_json()?;
-    let arg_edges = arg_json["Users"]["Edges"].as_array().unwrap();
+    let arg_edges = arg_json["users"]["edges"].as_array().unwrap();
     assert_eq!(arg_edges.len(), 4);
     assert_eq!(
-        arg_edges[0]["Node"]["posts"]["Edges"][0]["Node"]["title"].as_str(),
+        arg_edges[0]["node"]["posts"]["edges"][0]["node"]["title"].as_str(),
         Some("A3")
     );
     assert_eq!(
-        arg_edges[0]["Node"]["posts"]["PageInfo"]["totalCount"].as_i64(),
+        arg_edges[0]["node"]["posts"]["pageInfo"]["totalCount"].as_i64(),
         Some(3)
     );
     assert_eq!(
-        arg_edges[1]["Node"]["posts"]["PageInfo"]["totalCount"].as_i64(),
+        arg_edges[1]["node"]["posts"]["pageInfo"]["totalCount"].as_i64(),
         Some(1)
     );
     assert_eq!(
-        arg_edges[2]["Node"]["posts"]["PageInfo"]["totalCount"].as_i64(),
+        arg_edges[2]["node"]["posts"]["pageInfo"]["totalCount"].as_i64(),
         Some(1)
     );
     assert_eq!(
-        arg_edges[3]["Node"]["posts"]["PageInfo"]["totalCount"].as_i64(),
+        arg_edges[3]["node"]["posts"]["pageInfo"]["totalCount"].as_i64(),
         Some(1)
     );
     assert!(

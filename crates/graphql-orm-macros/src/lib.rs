@@ -5,6 +5,7 @@
 //!
 //! - `mutation_result!` - Generate GraphQL mutation result types
 //! - `#[derive(GraphQLEntity)]` - Generate GraphQL types, filters, and SQL helpers from a struct
+//! - `#[derive(GraphQLSchemaEntity)]` - Generate schema metadata only for migration planning
 //! - `#[derive(GraphQLRelations)]` - Generate relation loading with look_ahead support
 //! - `#[derive(GraphQLOperations)]` - Generate Query/Mutation/Subscription structs
 
@@ -74,6 +75,37 @@ pub fn mutation_result(input: TokenStream) -> TokenStream {
 pub fn derive_graphql_entity(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match entity::generate_graphql_entity(&input) {
+        Ok(tokens) => TokenStream::from(tokens),
+        Err(err) => TokenStream::from(err.to_compile_error()),
+    }
+}
+
+#[proc_macro_derive(
+    GraphQLSchemaEntity,
+    attributes(
+        graphql_entity,
+        graphql,
+        graphql_orm,
+        serde,
+        primary_key,
+        filterable,
+        sortable,
+        unique,
+        db_column,
+        relation,
+        skip_db,
+        date_field,
+        boolean_field,
+        json_field,
+        transform,
+        input_only,
+        index,
+        unique_index
+    )
+)]
+pub fn derive_graphql_schema_entity(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match entity::generate_graphql_schema_entity(&input) {
         Ok(tokens) => TokenStream::from(tokens),
         Err(err) => TokenStream::from(err.to_compile_error()),
     }

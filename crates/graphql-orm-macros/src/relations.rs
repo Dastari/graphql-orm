@@ -2,7 +2,9 @@ use super::*;
 use crate::backend::backend_pool_type_tokens;
 use crate::entity::{
     collect_parsed_fields, graphql_field_name, has_graphql_complex, parse_entity_metadata,
+    relation_delete_policy_tokens,
 };
+use syn::spanned::Spanned;
 
 struct RelationDef {
     field_name: syn::Ident,
@@ -13,6 +15,7 @@ struct RelationDef {
     is_multiple: bool,
     source_field_ty: syn::Type,
     source_supports_dataloader: bool,
+    on_delete: proc_macro2::TokenStream,
 }
 
 #[derive(Copy, Clone)]
@@ -152,6 +155,8 @@ pub(crate) fn generate_graphql_relations(
             Some((RelationValueKind::String, _))
         );
         let is_multiple = meta.relation_multiple;
+        let on_delete =
+            relation_delete_policy_tokens(meta.relation_on_delete.as_deref(), field.span())?;
 
         relations.push(RelationDef {
             field_name,
@@ -162,6 +167,7 @@ pub(crate) fn generate_graphql_relations(
             is_multiple,
             source_field_ty,
             source_supports_dataloader,
+            on_delete,
         });
     }
 
@@ -174,6 +180,7 @@ pub(crate) fn generate_graphql_relations(
             let source_column = &r.source_column;
             let target_column = &r.fk_column;
             let is_multiple = r.is_multiple;
+            let on_delete = &r.on_delete;
             quote! {
                 ::graphql_orm::graphql::orm::RelationMetadata {
                     field_name: #graphql_name,
@@ -181,6 +188,7 @@ pub(crate) fn generate_graphql_relations(
                     source_column: #source_column,
                     target_column: #target_column,
                     is_multiple: #is_multiple,
+                    on_delete: #on_delete,
                 }
             }
         })
@@ -336,13 +344,20 @@ pub(crate) fn generate_graphql_relations(
                 async fn #field_name(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
-                    #[graphql(name = "Where")] where_input: Option<#where_input>,
-                    #[graphql(name = "OrderBy")] order_by: Option<#order_by_input>,
-                    #[graphql(name = "Page")] page: Option<::graphql_orm::graphql::orm::PageInput>,
+                    #[graphql(name = "where")] where_input: Option<#where_input>,
+                    #[graphql(name = "orderBy")] order_by: Option<#order_by_input>,
+                    #[graphql(name = "page")] page: Option<::graphql_orm::graphql::orm::PageInput>,
                 ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, DatabaseOrderBy, EntityQuery, SqlValue};
 
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database>();
+                    db.ensure_entity_access(
+                        Some(ctx),
+                        <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name(),
+                        <#target_type as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                        ::graphql_orm::graphql::orm::EntityAccessKind::Read,
+                        ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlRelation,
+                    ).await?;
 
                     if where_input.is_none() && order_by.is_none() && page.is_none() && !self.#field_name.is_empty() {
                         let entities = self.#field_name.clone();
@@ -467,6 +482,13 @@ pub(crate) fn generate_graphql_relations(
                     }
 
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database>();
+                    db.ensure_entity_access(
+                        Some(ctx),
+                        <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name(),
+                        <#target_type as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                        ::graphql_orm::graphql::orm::EntityAccessKind::Read,
+                        ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlRelation,
+                    ).await?;
                     #source_binding_single
 
                     let result = if #source_supports_dataloader {

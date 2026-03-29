@@ -153,16 +153,16 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
     let create_user = schema
         .execute(
             "mutation {
-                CreateUser(Input: { name: \"Alice\", active: true }) {
-                    Success
-                    User { id name }
+                createUser(input: { name: \"Alice\", active: true }) {
+                    success
+                    user { id name }
                 }
             }",
         )
         .await;
     assert!(create_user.errors.is_empty(), "{:?}", create_user.errors);
     let user_json = create_user.data.into_json()?;
-    let user_id = user_json["CreateUser"]["User"]["id"]
+    let user_id = user_json["createUser"]["user"]["id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -170,9 +170,9 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
     let create_post = schema
         .execute(format!(
             "mutation {{
-                CreatePost(Input: {{ author_id: \"{user_id}\", title: \"Hello\", published: true }}) {{
-                    Success
-                    Post {{ id title }}
+                createPost(input: {{ authorId: \"{user_id}\", title: \"Hello\", published: true }}) {{
+                    success
+                    post {{ id title }}
                 }}
             }}"
         ))
@@ -182,12 +182,12 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
     let nested = schema
         .execute(
             "query {
-                Users {
-                    Edges {
-                        Node {
+                users {
+                    edges {
+                        node {
                             name
                             posts {
-                                Edges { Node { title } }
+                                edges { node { title } }
                             }
                         }
                     }
@@ -198,11 +198,11 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
     assert!(nested.errors.is_empty(), "{:?}", nested.errors);
     let nested_json = nested.data.into_json()?;
     assert_eq!(
-        nested_json["Users"]["Edges"][0]["Node"]["name"].as_str(),
+        nested_json["users"]["edges"][0]["node"]["name"].as_str(),
         Some("Alice")
     );
     assert_eq!(
-        nested_json["Users"]["Edges"][0]["Node"]["posts"]["Edges"][0]["Node"]["title"].as_str(),
+        nested_json["users"]["edges"][0]["node"]["posts"]["edges"][0]["node"]["title"].as_str(),
         Some("Hello")
     );
 

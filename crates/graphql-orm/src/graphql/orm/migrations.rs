@@ -1,10 +1,14 @@
 use super::core::{
-    ColumnModel, ForeignKeyModel, IndexDef, MigrationPlan, MigrationStep, SchemaDiff, SchemaModel,
-    TableModel,
+    ColumnModel, DeletePolicy, ForeignKeyModel, IndexDef, MigrationPlan, MigrationStep, SchemaDiff,
+    SchemaModel, TableModel,
 };
 use super::dialect::DatabaseBackend;
 use super::query::PoolProvider;
 use sqlx::Row;
+
+fn is_internal_graphql_orm_table(table_name: &str) -> bool {
+    table_name.starts_with("__graphql_orm_")
+}
 
 fn render_column_definition(column: &ColumnModel) -> String {
     let mut parts = vec![format!("{} {}", column.name, column.sql_type)];
@@ -34,9 +38,14 @@ fn render_create_table_statement_for_name(table: &TableModel, table_name: &str) 
         .map(render_column_definition)
         .collect::<Vec<_>>();
     parts.extend(table.foreign_keys.iter().map(|foreign_key| {
+        let constraint_name = foreign_key_constraint_name(table_name, foreign_key);
         format!(
-            "FOREIGN KEY ({}) REFERENCES {}({})",
-            foreign_key.source_column, foreign_key.target_table, foreign_key.target_column
+            "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({}) ON DELETE {}",
+            constraint_name,
+            foreign_key.source_column,
+            foreign_key.target_table,
+            foreign_key.target_column,
+            foreign_key.on_delete.as_sql(),
         )
     }));
     format!("CREATE TABLE {} ({})", table_name, parts.join(", "))
@@ -44,6 +53,55 @@ fn render_create_table_statement_for_name(table: &TableModel, table_name: &str) 
 
 fn column_changed(before: &ColumnModel, after: &ColumnModel) -> bool {
     before != after
+}
+
+fn order_tables_by_foreign_keys<'a>(
+    tables: &std::collections::BTreeMap<String, &'a TableModel>,
+) -> Vec<&'a TableModel> {
+    fn visit<'a>(
+        table_name: &str,
+        tables: &std::collections::BTreeMap<String, &'a TableModel>,
+        visiting: &mut std::collections::BTreeSet<String>,
+        visited: &mut std::collections::BTreeSet<String>,
+        ordered: &mut Vec<&'a TableModel>,
+    ) {
+        if visited.contains(table_name) || visiting.contains(table_name) {
+            return;
+        }
+        let Some(table) = tables.get(table_name) else {
+            return;
+        };
+
+        visiting.insert(table_name.to_string());
+        for foreign_key in &table.foreign_keys {
+            if tables.contains_key(&foreign_key.target_table) {
+                visit(
+                    &foreign_key.target_table,
+                    tables,
+                    visiting,
+                    visited,
+                    ordered,
+                );
+            }
+        }
+        visiting.remove(table_name);
+        visited.insert(table_name.to_string());
+        ordered.push(*table);
+    }
+
+    let mut ordered = Vec::new();
+    let mut visiting = std::collections::BTreeSet::new();
+    let mut visited = std::collections::BTreeSet::new();
+    for table_name in tables.keys() {
+        visit(
+            table_name,
+            tables,
+            &mut visiting,
+            &mut visited,
+            &mut ordered,
+        );
+    }
+    ordered
 }
 
 pub fn diff_schema_models(current: &SchemaModel, target: &SchemaModel) -> SchemaDiff {
@@ -60,13 +118,18 @@ pub fn diff_schema_models(current: &SchemaModel, target: &SchemaModel) -> Schema
 
     let mut steps = Vec::new();
 
-    for (table_name, table) in &target_tables {
+    for table in order_tables_by_foreign_keys(&target_tables) {
+        let table_name = &table.table_name;
         if !current_tables.contains_key(table_name) {
-            steps.push(MigrationStep::CreateTable((*table).clone()));
+            steps.push(MigrationStep::CreateTable(table.clone()));
         }
     }
 
-    for (table_name, table) in &current_tables {
+    for table in order_tables_by_foreign_keys(&current_tables)
+        .into_iter()
+        .rev()
+    {
+        let table_name = &table.table_name;
         if !target_tables.contains_key(table_name) {
             steps.push(MigrationStep::DropTable {
                 table_name: table_name.clone(),
@@ -152,6 +215,7 @@ pub fn diff_schema_models(current: &SchemaModel, target: &SchemaModel) -> Schema
                         foreign_key.source_column.clone(),
                         foreign_key.target_table.clone(),
                         foreign_key.target_column.clone(),
+                        foreign_key.on_delete.clone(),
                     ),
                     foreign_key,
                 )
@@ -166,24 +230,25 @@ pub fn diff_schema_models(current: &SchemaModel, target: &SchemaModel) -> Schema
                         foreign_key.source_column.clone(),
                         foreign_key.target_table.clone(),
                         foreign_key.target_column.clone(),
+                        foreign_key.on_delete.clone(),
                     ),
                     foreign_key,
                 )
             })
             .collect::<std::collections::BTreeMap<_, _>>();
 
-        for (key, foreign_key) in &target_foreign_keys {
-            if !current_foreign_keys.contains_key(key) {
-                steps.push(MigrationStep::AddForeignKey {
+        for (key, foreign_key) in &current_foreign_keys {
+            if !target_foreign_keys.contains_key(key) {
+                steps.push(MigrationStep::DropForeignKey {
                     table_name: table_name.clone(),
                     foreign_key: (*foreign_key).clone(),
                 });
             }
         }
 
-        for (key, foreign_key) in &current_foreign_keys {
-            if !target_foreign_keys.contains_key(key) {
-                steps.push(MigrationStep::DropForeignKey {
+        for (key, foreign_key) in &target_foreign_keys {
+            if !current_foreign_keys.contains_key(key) {
+                steps.push(MigrationStep::AddForeignKey {
                     table_name: table_name.clone(),
                     foreign_key: (*foreign_key).clone(),
                 });
@@ -376,24 +441,26 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
             let constraint_name = foreign_key_constraint_name(table_name, foreign_key);
             match backend {
                 DatabaseBackend::Postgres => vec![format!(
-                    "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({})",
+                    "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({}) ON DELETE {}",
                     table_name,
                     constraint_name,
                     foreign_key.source_column,
                     foreign_key.target_table,
-                    foreign_key.target_column
+                    foreign_key.target_column,
+                    foreign_key.on_delete.as_sql()
                 )],
                 DatabaseBackend::Sqlite => vec![format!(
                     "-- sqlite requires table rebuild to add foreign key {} on {}",
                     constraint_name, table_name
                 )],
                 DatabaseBackend::Mysql | DatabaseBackend::Mssql => vec![format!(
-                    "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({})",
+                    "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({}) ON DELETE {}",
                     table_name,
                     constraint_name,
                     foreign_key.source_column,
                     foreign_key.target_table,
-                    foreign_key.target_column
+                    foreign_key.target_column,
+                    foreign_key.on_delete.as_sql()
                 )],
             }
         }
@@ -545,6 +612,9 @@ pub async fn introspect_schema(provider: &impl PoolProvider) -> Result<SchemaMod
     let mut tables = Vec::new();
     for row in table_rows {
         let table_name: String = row.try_get("name")?;
+        if is_internal_graphql_orm_table(&table_name) {
+            continue;
+        }
 
         let pragma_table_info = format!("PRAGMA table_info({})", table_name);
         let column_rows = sqlx::query(&pragma_table_info).fetch_all(pool).await?;
@@ -577,6 +647,9 @@ pub async fn introspect_schema(provider: &impl PoolProvider) -> Result<SchemaMod
         let mut indexes = Vec::new();
         for row in index_rows {
             let index_name: String = row.try_get("name")?;
+            if index_name.starts_with("sqlite_autoindex_") {
+                continue;
+            }
             let unique = row.try_get::<i64, _>("unique")? != 0;
             let pragma_index_info = format!("PRAGMA index_info({})", index_name);
             let index_info_rows = sqlx::query(&pragma_index_info).fetch_all(pool).await?;
@@ -609,6 +682,11 @@ pub async fn introspect_schema(provider: &impl PoolProvider) -> Result<SchemaMod
                     target_table: row.try_get("table")?,
                     target_column: row.try_get("to")?,
                     is_multiple: false,
+                    on_delete: match row.try_get::<String, _>("on_delete")?.as_str() {
+                        "CASCADE" => DeletePolicy::Cascade,
+                        "SET NULL" => DeletePolicy::SetNull,
+                        _ => DeletePolicy::Restrict,
+                    },
                 })
             })
             .collect::<Result<Vec<_>, sqlx::Error>>()?;
@@ -643,6 +721,9 @@ pub async fn introspect_schema(provider: &impl PoolProvider) -> Result<SchemaMod
     let mut tables = Vec::new();
     for row in table_rows {
         let table_name: String = row.try_get("table_name")?;
+        if is_internal_graphql_orm_table(&table_name) {
+            continue;
+        }
         let column_rows = sqlx::query(
             "SELECT column_name, data_type, is_nullable, column_default
              FROM information_schema.columns
@@ -720,6 +801,9 @@ pub async fn introspect_schema(provider: &impl PoolProvider) -> Result<SchemaMod
         let mut indexes = Vec::new();
         for row in index_rows {
             let index_name: String = row.try_get("indexname")?;
+            if index_name.ends_with("_pkey") {
+                continue;
+            }
             let indexdef: String = row.try_get("indexdef")?;
             let unique = indexdef.contains("CREATE UNIQUE INDEX");
             let columns_segment = indexdef
@@ -752,7 +836,8 @@ pub async fn introspect_schema(provider: &impl PoolProvider) -> Result<SchemaMod
             "SELECT
                 kcu.column_name AS source_column,
                 ccu.table_name AS target_table,
-                ccu.column_name AS target_column
+                ccu.column_name AS target_column,
+                rc.delete_rule AS delete_rule
              FROM information_schema.table_constraints tc
              JOIN information_schema.key_column_usage kcu
                ON tc.constraint_name = kcu.constraint_name
@@ -760,6 +845,9 @@ pub async fn introspect_schema(provider: &impl PoolProvider) -> Result<SchemaMod
              JOIN information_schema.constraint_column_usage ccu
                ON ccu.constraint_name = tc.constraint_name
               AND ccu.table_schema = tc.table_schema
+             JOIN information_schema.referential_constraints rc
+               ON rc.constraint_name = tc.constraint_name
+              AND rc.constraint_schema = tc.table_schema
              WHERE tc.table_schema = 'public'
                AND tc.table_name = $1
                AND tc.constraint_type = 'FOREIGN KEY'",
@@ -775,6 +863,11 @@ pub async fn introspect_schema(provider: &impl PoolProvider) -> Result<SchemaMod
                     target_table: row.try_get("target_table")?,
                     target_column: row.try_get("target_column")?,
                     is_multiple: false,
+                    on_delete: match row.try_get::<String, _>("delete_rule")?.as_str() {
+                        "CASCADE" => DeletePolicy::Cascade,
+                        "SET NULL" => DeletePolicy::SetNull,
+                        _ => DeletePolicy::Restrict,
+                    },
                 })
             })
             .collect::<Result<Vec<_>, sqlx::Error>>()?;

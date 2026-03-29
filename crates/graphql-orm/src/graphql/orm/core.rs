@@ -1,5 +1,7 @@
 use super::dialect::DatabaseBackend;
 use super::query::{ChangeAction, DatabaseEntity, DatabaseSchema, EntityRelations};
+use std::any::Any;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static QUERY_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -7,6 +9,8 @@ static QUERY_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[derive(Clone, Debug, PartialEq)]
 pub enum SqlValue {
     String(String),
+    Json(serde_json::Value),
+    JsonNull,
     Uuid(uuid::Uuid),
     Int(i64),
     Float(f64),
@@ -26,23 +30,383 @@ pub struct MutationFieldValue {
     pub value: SqlValue,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
+pub struct EntityState {
+    value: Arc<dyn Any + Send + Sync>,
+    json: serde_json::Value,
+}
+
+impl EntityState {
+    pub fn downcast_ref<T: 'static>(&self) -> Option<&T> {
+        self.value.downcast_ref::<T>()
+    }
+
+    pub fn as_json(&self) -> &serde_json::Value {
+        &self.json
+    }
+}
+
+#[derive(Clone)]
 pub struct MutationEvent {
     pub phase: MutationPhase,
     pub action: ChangeAction,
     pub entity_name: &'static str,
     pub table_name: &'static str,
+    pub metadata: &'static EntityMetadata,
     pub id: String,
     pub changes: Vec<MutationFieldValue>,
+    pub before_state: Option<EntityState>,
+    pub after_state: Option<EntityState>,
+}
+
+impl MutationEvent {
+    pub fn before<T: 'static>(&self) -> async_graphql::Result<Option<&T>> {
+        self.before_state
+            .as_ref()
+            .map(|state| {
+                state.downcast_ref::<T>().ok_or_else(|| {
+                    async_graphql::Error::new(format!(
+                        "Mutation before_state for {} is not {}",
+                        self.entity_name,
+                        std::any::type_name::<T>()
+                    ))
+                })
+            })
+            .transpose()
+    }
+
+    pub fn after<T: 'static>(&self) -> async_graphql::Result<Option<&T>> {
+        self.after_state
+            .as_ref()
+            .map(|state| {
+                state.downcast_ref::<T>().ok_or_else(|| {
+                    async_graphql::Error::new(format!(
+                        "Mutation after_state for {} is not {}",
+                        self.entity_name,
+                        std::any::type_name::<T>()
+                    ))
+                })
+            })
+            .transpose()
+    }
+}
+
+trait DeferredEventEmitter: Send {
+    fn emit(self: Box<Self>, db: &crate::db::Database);
+}
+
+trait PostCommitActionRunner: Send {
+    fn run(
+        self: Box<Self>,
+        db: crate::db::Database,
+    ) -> futures::future::BoxFuture<'static, Result<(), String>>;
+}
+
+struct DeferredEvent<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    event: T,
+}
+
+impl<T> DeferredEventEmitter for DeferredEvent<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    fn emit(self: Box<Self>, db: &crate::db::Database) {
+        db.emit_event(self.event);
+    }
+}
+
+struct DeferredAction<F> {
+    action: Option<F>,
+}
+
+impl<F, Fut, E> PostCommitActionRunner for DeferredAction<F>
+where
+    F: FnOnce(crate::db::Database) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), E>> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    fn run(
+        mut self: Box<Self>,
+        db: crate::db::Database,
+    ) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        let action = self
+            .action
+            .take()
+            .expect("deferred post-commit action was already taken");
+        Box::pin(async move { action(db).await.map_err(|error| error.to_string()) })
+    }
+}
+
+#[cfg(feature = "sqlite")]
+pub struct MutationContext<'tx> {
+    db: &'tx crate::db::Database,
+    tx: sqlx::Transaction<'tx, sqlx::Sqlite>,
+    deferred_events: Vec<Box<dyn DeferredEventEmitter>>,
+    deferred_actions: Vec<Box<dyn PostCommitActionRunner>>,
+}
+
+#[cfg(feature = "postgres")]
+pub struct MutationContext<'tx> {
+    db: &'tx crate::db::Database,
+    tx: sqlx::Transaction<'tx, sqlx::Postgres>,
+    deferred_events: Vec<Box<dyn DeferredEventEmitter>>,
+    deferred_actions: Vec<Box<dyn PostCommitActionRunner>>,
+}
+
+impl<'tx> MutationContext<'tx> {
+    #[cfg(feature = "sqlite")]
+    pub fn new(db: &'tx crate::db::Database, tx: sqlx::Transaction<'tx, sqlx::Sqlite>) -> Self {
+        Self {
+            db,
+            tx,
+            deferred_events: Vec::new(),
+            deferred_actions: Vec::new(),
+        }
+    }
+
+    #[cfg(feature = "postgres")]
+    pub fn new(db: &'tx crate::db::Database, tx: sqlx::Transaction<'tx, sqlx::Postgres>) -> Self {
+        Self {
+            db,
+            tx,
+            deferred_events: Vec::new(),
+            deferred_actions: Vec::new(),
+        }
+    }
+
+    pub fn database(&self) -> &crate::db::Database {
+        self.db
+    }
+
+    pub fn actor<T>(&self, ctx: Option<&async_graphql::Context<'_>>) -> Option<T>
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        ctx.and_then(|ctx| ctx.data_opt::<T>()).cloned()
+    }
+
+    pub fn auth_user(
+        &self,
+        ctx: Option<&async_graphql::Context<'_>>,
+    ) -> async_graphql::Result<String> {
+        use crate::graphql::auth::AuthExt;
+
+        ctx.ok_or_else(|| async_graphql::Error::new("missing GraphQL context for auth user"))?
+            .auth_user()
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub fn executor(&mut self) -> &mut sqlx::SqliteConnection {
+        self.tx.as_mut()
+    }
+
+    #[cfg(feature = "postgres")]
+    pub fn executor(&mut self) -> &mut sqlx::PgConnection {
+        self.tx.as_mut()
+    }
+
+    pub fn queue_event<T>(&mut self, event: T)
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        self.deferred_events.push(Box::new(DeferredEvent { event }));
+    }
+
+    pub fn defer<F, Fut, E>(&mut self, action: F)
+    where
+        F: FnOnce(crate::db::Database) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), E>> + Send + 'static,
+        E: std::fmt::Display + Send + 'static,
+    {
+        self.deferred_actions.push(Box::new(DeferredAction {
+            action: Some(action),
+        }));
+    }
+
+    pub fn emit_queued_events(&mut self) {
+        for event in self.deferred_events.drain(..) {
+            event.emit(self.db);
+        }
+    }
+
+    pub async fn commit_and_emit(self) -> Result<(), sqlx::Error> {
+        let Self {
+            db,
+            tx,
+            deferred_events,
+            deferred_actions,
+        } = self;
+        tx.commit().await?;
+        for event in deferred_events {
+            event.emit(db);
+        }
+        for action in deferred_actions {
+            if let Err(error) = action.run(db.clone()).await {
+                db.report_post_commit_error(error).await;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn run_mutation_hook<'a>(
+        &'a mut self,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        event: &'a MutationEvent,
+    ) -> async_graphql::Result<()> {
+        if let Some(hook) = self.db.mutation_hook() {
+            hook.on_mutation(ctx, self, event).await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn insert<'a, T>(
+        &'a mut self,
+        input: <T as MutationContextInsert>::CreateInput,
+    ) -> Result<T, sqlx::Error>
+    where
+        T: MutationContextInsert,
+    {
+        T::insert_in_mutation_context(self, input).await
+    }
+
+    pub async fn update_by_id<'a, T>(
+        &'a mut self,
+        id: &'a <T as MutationContextUpdateById>::Id,
+        input: <T as MutationContextUpdateById>::UpdateInput,
+    ) -> Result<Option<T>, sqlx::Error>
+    where
+        T: MutationContextUpdateById,
+    {
+        T::update_by_id_in_mutation_context(self, id, input).await
+    }
+
+    pub async fn update_where<'a, T>(
+        &'a mut self,
+        where_input: <T as MutationContextUpdateWhere>::WhereInput,
+        input: <T as MutationContextUpdateWhere>::UpdateInput,
+    ) -> Result<i64, sqlx::Error>
+    where
+        T: MutationContextUpdateWhere,
+    {
+        T::update_where_in_mutation_context(self, where_input, input).await
+    }
+
+    pub async fn delete_by_id<'a, T>(
+        &'a mut self,
+        id: &'a <T as MutationContextDeleteById>::Id,
+    ) -> Result<bool, sqlx::Error>
+    where
+        T: MutationContextDeleteById,
+    {
+        T::delete_by_id_in_mutation_context(self, id).await
+    }
+
+    pub async fn delete_where<'a, T>(
+        &'a mut self,
+        where_input: <T as MutationContextDeleteWhere>::WhereInput,
+    ) -> Result<i64, sqlx::Error>
+    where
+        T: MutationContextDeleteWhere,
+    {
+        T::delete_where_in_mutation_context(self, where_input).await
+    }
 }
 
 pub trait MutationHook: Send + Sync {
     fn on_mutation<'a>(
         &'a self,
         ctx: Option<&'a async_graphql::Context<'_>>,
-        db: &'a crate::db::Database,
+        hook_ctx: &'a mut MutationContext<'_>,
         event: &'a MutationEvent,
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>>;
+}
+
+pub trait MutationContextInsert: Sized {
+    type CreateInput;
+
+    fn insert_in_mutation_context<'a>(
+        hook_ctx: &'a mut MutationContext<'_>,
+        input: Self::CreateInput,
+    ) -> futures::future::BoxFuture<'a, Result<Self, sqlx::Error>>;
+}
+
+pub trait MutationContextUpdateById: Sized {
+    type Id;
+    type UpdateInput;
+
+    fn update_by_id_in_mutation_context<'a>(
+        hook_ctx: &'a mut MutationContext<'_>,
+        id: &'a Self::Id,
+        input: Self::UpdateInput,
+    ) -> futures::future::BoxFuture<'a, Result<Option<Self>, sqlx::Error>>;
+}
+
+pub trait MutationContextUpdateWhere: Sized {
+    type WhereInput;
+    type UpdateInput;
+
+    fn update_where_in_mutation_context<'a>(
+        hook_ctx: &'a mut MutationContext<'_>,
+        where_input: Self::WhereInput,
+        input: Self::UpdateInput,
+    ) -> futures::future::BoxFuture<'a, Result<i64, sqlx::Error>>;
+}
+
+pub trait MutationContextDeleteById: Sized {
+    type Id;
+
+    fn delete_by_id_in_mutation_context<'a>(
+        hook_ctx: &'a mut MutationContext<'_>,
+        id: &'a Self::Id,
+    ) -> futures::future::BoxFuture<'a, Result<bool, sqlx::Error>>;
+}
+
+pub trait MutationContextDeleteWhere: Sized {
+    type WhereInput;
+
+    fn delete_where_in_mutation_context<'a>(
+        hook_ctx: &'a mut MutationContext<'_>,
+        where_input: Self::WhereInput,
+    ) -> futures::future::BoxFuture<'a, Result<i64, sqlx::Error>>;
+}
+
+pub trait PostCommitErrorHandler: Send + Sync {
+    fn on_post_commit_error<'a>(
+        &'a self,
+        db: &'a crate::db::Database,
+        error: &'a str,
+    ) -> futures::future::BoxFuture<'a, ()>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntityAccessKind {
+    Read,
+    Write,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntityAccessSurface {
+    GraphqlQuery,
+    GraphqlMutation,
+    GraphqlSubscription,
+    GraphqlRelation,
+    Repository,
+}
+
+pub trait EntityPolicy: Send + Sync {
+    fn can_access_entity<'a>(
+        &'a self,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        db: &'a crate::db::Database,
+        entity_name: &'static str,
+        policy_key: Option<&'static str>,
+        kind: EntityAccessKind,
+        surface: EntityAccessSurface,
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>>;
 }
 
 pub trait FieldPolicy: Send + Sync {
@@ -68,6 +432,47 @@ pub trait FieldPolicy: Send + Sync {
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>>;
 }
 
+pub trait RowPolicy: Send + Sync {
+    fn can_read_row<'a>(
+        &'a self,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        db: &'a crate::db::Database,
+        entity_name: &'static str,
+        policy_key: Option<&'static str>,
+        surface: EntityAccessSurface,
+        row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>>;
+
+    fn can_write_row<'a>(
+        &'a self,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        db: &'a crate::db::Database,
+        entity_name: &'static str,
+        policy_key: Option<&'static str>,
+        surface: EntityAccessSurface,
+        row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>>;
+}
+
+pub trait WriteInputTransform: Send + Sync {
+    fn before_create<'a>(
+        &'a self,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        db: &'a crate::db::Database,
+        entity_name: &'static str,
+        input: &'a mut (dyn std::any::Any + Send + Sync),
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>>;
+
+    fn before_update<'a>(
+        &'a self,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        db: &'a crate::db::Database,
+        entity_name: &'static str,
+        existing_row: Option<&'a (dyn std::any::Any + Send + Sync)>,
+        input: &'a mut (dyn std::any::Any + Send + Sync),
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>>;
+}
+
 pub fn mutation_changes(fields: &[&str], values: &[SqlValue]) -> Vec<MutationFieldValue> {
     fields
         .iter()
@@ -77,6 +482,43 @@ pub fn mutation_changes(fields: &[&str], values: &[SqlValue]) -> Vec<MutationFie
             value: value.clone(),
         })
         .collect()
+}
+
+pub trait OrmResultError {
+    fn from_sqlx_error(error: sqlx::Error) -> Self;
+}
+
+impl OrmResultError for sqlx::Error {
+    fn from_sqlx_error(error: sqlx::Error) -> Self {
+        error
+    }
+}
+
+impl OrmResultError for async_graphql::Error {
+    fn from_sqlx_error(error: sqlx::Error) -> Self {
+        async_graphql::Error::new(error.to_string())
+    }
+}
+
+pub fn json_sql_value<T, E>(value: &T) -> Result<SqlValue, E>
+where
+    T: serde::Serialize,
+    E: OrmResultError,
+{
+    let json = serde_json::to_value(value)
+        .map_err(|error| E::from_sqlx_error(sqlx::Error::Encode(Box::new(error))))?;
+    Ok(SqlValue::Json(json))
+}
+
+pub fn entity_state<T>(value: &T) -> Result<EntityState, sqlx::Error>
+where
+    T: serde::Serialize + Clone + Send + Sync + 'static,
+{
+    let json = serde_json::to_value(value).map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+    Ok(EntityState {
+        value: Arc::new(value.clone()),
+        json,
+    })
 }
 
 pub fn reset_query_count() {
@@ -155,6 +597,23 @@ impl IndexDef {
 
 pub type IndexMetadata = IndexDef;
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DeletePolicy {
+    Restrict,
+    Cascade,
+    SetNull,
+}
+
+impl DeletePolicy {
+    pub fn as_sql(&self) -> &'static str {
+        match self {
+            DeletePolicy::Restrict => "RESTRICT",
+            DeletePolicy::Cascade => "CASCADE",
+            DeletePolicy::SetNull => "SET NULL",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RelationMetadata {
     pub field_name: &'static str,
@@ -162,6 +621,7 @@ pub struct RelationMetadata {
     pub source_column: &'static str,
     pub target_column: &'static str,
     pub is_multiple: bool,
+    pub on_delete: DeletePolicy,
 }
 
 #[derive(Clone, Debug)]
@@ -171,6 +631,8 @@ pub struct EntityMetadata {
     pub plural_name: &'static str,
     pub primary_key: &'static str,
     pub default_sort: &'static str,
+    pub read_policy: Option<&'static str>,
+    pub write_policy: Option<&'static str>,
     pub fields: Box<[FieldMetadata]>,
     pub indexes: Box<[IndexMetadata]>,
     pub composite_unique_indexes: Box<[Box<[&'static str]>]>,
@@ -178,7 +640,11 @@ pub struct EntityMetadata {
 }
 
 impl EntityMetadata {
-    pub fn from_schema<T>(entity_name: &'static str) -> Self
+    pub fn from_schema<T>(
+        entity_name: &'static str,
+        read_policy: Option<&'static str>,
+        write_policy: Option<&'static str>,
+    ) -> Self
     where
         T: DatabaseEntity + DatabaseSchema + EntityRelations,
     {
@@ -188,6 +654,8 @@ impl EntityMetadata {
             plural_name: T::PLURAL_NAME,
             primary_key: T::PRIMARY_KEY,
             default_sort: T::DEFAULT_SORT,
+            read_policy,
+            write_policy,
             fields: T::columns()
                 .iter()
                 .map(FieldMetadata::from)
@@ -220,6 +688,7 @@ pub struct ForeignKeyModel {
     pub target_table: String,
     pub target_column: String,
     pub is_multiple: bool,
+    pub on_delete: DeletePolicy,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -237,6 +706,50 @@ pub struct TableModel {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SchemaModel {
     pub tables: Vec<TableModel>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SchemaStage {
+    pub version: String,
+    pub description: String,
+    pub target_schema: SchemaModel,
+}
+
+impl SchemaStage {
+    pub fn new(
+        version: impl Into<String>,
+        description: impl Into<String>,
+        target_schema: SchemaModel,
+    ) -> Self {
+        Self {
+            version: version.into(),
+            description: description.into(),
+            target_schema,
+        }
+    }
+
+    pub fn from_schema_model(
+        version: impl Into<String>,
+        description: impl Into<String>,
+        target_schema: SchemaModel,
+    ) -> Self {
+        Self::new(version, description, target_schema)
+    }
+
+    pub fn from_entities(
+        version: impl Into<String>,
+        description: impl Into<String>,
+        entities: &[&EntityMetadata],
+    ) -> Self {
+        Self::new(version, description, SchemaModel::from_entities(entities))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlannedSchemaStage {
+    pub version: String,
+    pub description: String,
+    pub plan: MigrationPlan,
 }
 
 impl From<&EntityMetadata> for TableModel {
@@ -272,6 +785,7 @@ impl From<&EntityMetadata> for TableModel {
                     target_table: relation.target_type.to_string(),
                     target_column: relation.target_column.to_string(),
                     is_multiple: relation.is_multiple,
+                    on_delete: relation.on_delete.clone(),
                 })
                 .collect(),
         }
@@ -280,10 +794,25 @@ impl From<&EntityMetadata> for TableModel {
 
 impl SchemaModel {
     pub fn from_entities(entities: &[&EntityMetadata]) -> Self {
+        let entity_table_names = entities
+            .iter()
+            .map(|entity| (entity.entity_name, entity.table_name))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
         Self {
             tables: entities
                 .iter()
-                .map(|entity| TableModel::from(*entity))
+                .map(|entity| {
+                    let mut table = TableModel::from(*entity);
+                    for foreign_key in &mut table.foreign_keys {
+                        if let Some(table_name) =
+                            entity_table_names.get(foreign_key.target_table.as_str())
+                        {
+                            foreign_key.target_table = (*table_name).to_string();
+                        }
+                    }
+                    table
+                })
                 .collect(),
         }
     }

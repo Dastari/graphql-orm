@@ -2,12 +2,16 @@ use super::*;
 use crate::backend::{
     backend_current_epoch_expr, backend_helper_import_tokens, backend_row_type_tokens,
 };
+use syn::spanned::Spanned;
 
 #[derive(Default)]
 pub(crate) struct EntityMetadata {
     pub(crate) table_name: Option<String>,
     pub(crate) plural_name: Option<String>,
     pub(crate) default_sort: Option<String>,
+    pub(crate) schema_only: bool,
+    pub(crate) read_policy: Option<String>,
+    pub(crate) write_policy: Option<String>,
     /// Optional async hook path invoked after create/update/delete mutations.
     pub(crate) notify_handler: Option<String>,
     pub(crate) unique_composite: Vec<Vec<String>>,
@@ -33,6 +37,18 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
                     metadata.default_sort = Some(lit.value());
+                } else if meta.path.is_ident("schema_only") {
+                    let value = meta.value()?;
+                    let lit: syn::LitBool = value.parse()?;
+                    metadata.schema_only = lit.value;
+                } else if meta.path.is_ident("read_policy") {
+                    let value = meta.value()?;
+                    let lit: syn::LitStr = value.parse()?;
+                    metadata.read_policy = Some(lit.value());
+                } else if meta.path.is_ident("write_policy") {
+                    let value = meta.value()?;
+                    let lit: syn::LitStr = value.parse()?;
+                    metadata.write_policy = Some(lit.value());
                 } else if meta.path.is_ident("notify") || meta.path.is_ident("notify_with") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
@@ -123,6 +139,7 @@ pub(crate) struct FieldMetadata {
     pub(crate) relation_from: Option<String>,
     pub(crate) relation_to: Option<String>,
     pub(crate) relation_multiple: bool,
+    pub(crate) relation_on_delete: Option<String>,
     pub(crate) skip_db: bool,
     /// Skip from Create/Update inputs only (e.g. password_hash); field remains in DB and struct
     pub(crate) skip_input: bool,
@@ -162,6 +179,7 @@ impl Default for FieldMetadata {
             relation_from: None,
             relation_to: None,
             relation_multiple: false,
+            relation_on_delete: None,
             skip_db: false,
             skip_input: false,
             is_date_field: false,
@@ -213,6 +231,10 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             meta.order = false;
                             meta.subscribe = false;
                             meta.skip_input = true;
+                        } else if nested.path.is_ident("json") {
+                            meta.is_json_field = true;
+                            meta.filter = false;
+                            meta.order = false;
                         } else if nested.path.is_ident("read") {
                             let value = nested.value()?;
                             let lit: syn::LitBool = value.parse()?;
@@ -244,6 +266,10 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             meta.write_policy = Some(lit.value());
+                        } else if nested.path.is_ident("db_column") {
+                            let value = nested.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            meta.db_column = Some(lit.value());
                         }
                         Ok(())
                     });
@@ -307,6 +333,10 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             meta.relation_to = Some(lit.value());
+                        } else if nested.path.is_ident("on_delete") {
+                            let value = nested.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            meta.relation_on_delete = Some(lit.value());
                         } else if nested.path.is_ident("multiple") {
                             meta.relation_multiple = true;
                         }
@@ -324,6 +354,8 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                 }
                 "json_field" => {
                     meta.is_json_field = true;
+                    meta.filter = false;
+                    meta.order = false;
                 }
                 "transform" => {
                     let _ = attr.parse_nested_meta(|nested| {
@@ -368,6 +400,76 @@ fn to_snake_case(s: &str) -> String {
     s.to_case(Case::Snake)
 }
 
+pub(crate) fn relation_delete_policy_tokens(
+    policy: Option<&str>,
+    span: proc_macro2::Span,
+) -> syn::Result<proc_macro2::TokenStream> {
+    match policy.unwrap_or("restrict") {
+        "restrict" => Ok(quote! { ::graphql_orm::graphql::orm::DeletePolicy::Restrict }),
+        "cascade" => Ok(quote! { ::graphql_orm::graphql::orm::DeletePolicy::Cascade }),
+        "set_null" => Ok(quote! { ::graphql_orm::graphql::orm::DeletePolicy::SetNull }),
+        other => Err(syn::Error::new(
+            span,
+            format!(
+                "unsupported relation on_delete policy '{other}'; expected 'restrict', 'cascade', or 'set_null'"
+            ),
+        )),
+    }
+}
+
+fn validate_relation_delete_policy(
+    struct_name: &syn::Ident,
+    field: &Field,
+    field_meta: &FieldMetadata,
+    parsed_fields: &[ParsedField],
+) -> syn::Result<()> {
+    if field_meta.relation_on_delete.as_deref() != Some("set_null") {
+        return Ok(());
+    }
+
+    let source_column = field_meta
+        .relation_from
+        .clone()
+        .unwrap_or_else(|| "id".to_string());
+    let source_field = parsed_fields
+        .iter()
+        .find(|parsed| {
+            parsed
+                .field
+                .ident
+                .as_ref()
+                .map(|ident| ident == &syn::Ident::new(&source_column, ident.span()))
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| {
+            syn::Error::new_spanned(
+                field,
+                format!(
+                    "Relation '{}' references unknown source field '{}' on '{}'",
+                    field
+                        .ident
+                        .as_ref()
+                        .map(|ident| ident.to_string())
+                        .unwrap_or_default(),
+                    source_column,
+                    struct_name
+                ),
+            )
+        })?;
+
+    if !is_option_type(&source_field.field.ty) {
+        return Err(syn::Error::new_spanned(
+            field,
+            format!(
+                "relation on_delete = \"set_null\" requires nullable source field '{}.{}'",
+                struct_name, source_column
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
 fn apply_rename_rule(name: &str, rule: &str) -> String {
     match rule {
         "lowercase" => name.to_case(Case::Lower),
@@ -394,7 +496,7 @@ pub(crate) fn graphql_field_name(
     } else if let Some(rule) = rename_all {
         apply_rename_rule(rust_name, rule)
     } else {
-        rust_name.to_string()
+        rust_name.to_case(Case::Camel)
     }
 }
 
@@ -453,6 +555,19 @@ pub(crate) fn maybe_wrap_read_transform(
 
 pub(crate) fn generate_graphql_entity(
     input: &DeriveInput,
+) -> syn::Result<proc_macro2::TokenStream> {
+    generate_entity_impl(input, false)
+}
+
+pub(crate) fn generate_graphql_schema_entity(
+    input: &DeriveInput,
+) -> syn::Result<proc_macro2::TokenStream> {
+    generate_entity_impl(input, true)
+}
+
+fn generate_entity_impl(
+    input: &DeriveInput,
+    schema_only_override: bool,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let struct_name = &input.ident;
     let row_type = backend_row_type_tokens();
@@ -550,8 +665,25 @@ pub(crate) fn generate_graphql_entity(
     };
 
     let entity_meta = parse_entity_metadata(&input.attrs)?;
+    let schema_only = schema_only_override || entity_meta.schema_only;
     let entity_name_lit = struct_name.to_string();
     let rename_all_rule = entity_meta.serde_rename_all.as_deref();
+    let read_policy = entity_meta
+        .read_policy
+        .as_ref()
+        .map(|policy| {
+            let lit = syn::LitStr::new(policy, struct_name.span());
+            quote! { Some(#lit) }
+        })
+        .unwrap_or_else(|| quote! { None });
+    let write_policy = entity_meta
+        .write_policy
+        .as_ref()
+        .map(|policy| {
+            let lit = syn::LitStr::new(policy, struct_name.span());
+            quote! { Some(#lit) }
+        })
+        .unwrap_or_else(|| quote! { None });
     let legacy_graphql_complex = has_graphql_complex(&input.attrs);
     let table_name = entity_meta.table_name.as_deref().unwrap_or("unknown");
     let plural_name = entity_meta
@@ -604,15 +736,18 @@ pub(crate) fn generate_graphql_entity(
     let mut relation_metadata_defs = Vec::new();
     let mut sortable_columns: Vec<String> = Vec::new();
     let mut object_field_methods = Vec::new();
+    let parsed_fields = collect_parsed_fields(fields.iter())?;
 
-    for field in fields {
+    for parsed_field in &parsed_fields {
+        let field = &parsed_field.field;
         let field_name = field.ident.as_ref().unwrap();
         let field_type = &field.ty;
-        let field_meta = parse_field_metadata(field)?;
+        let field_meta = parsed_field.meta.clone();
 
         // Skip relation fields for column list
         if field_meta.is_relation || field_meta.skip_db {
             if field_meta.is_relation {
+                validate_relation_delete_policy(struct_name, field, &field_meta, &parsed_fields)?;
                 let rust_name = field_name.to_string();
                 let graphql_name = graphql_field_name(&field_meta, &rust_name, rename_all_rule);
                 let target_type = field_meta
@@ -628,6 +763,10 @@ pub(crate) fn generate_graphql_entity(
                     .clone()
                     .unwrap_or_else(|| "unknown_id".to_string());
                 let is_multiple = field_meta.relation_multiple;
+                let on_delete = relation_delete_policy_tokens(
+                    field_meta.relation_on_delete.as_deref(),
+                    field.span(),
+                )?;
 
                 relation_metadata_defs.push(quote! {
                     ::graphql_orm::graphql::orm::RelationMetadata {
@@ -636,6 +775,7 @@ pub(crate) fn generate_graphql_entity(
                         source_column: #source_column,
                         target_column: #target_column,
                         is_multiple: #is_multiple,
+                        on_delete: #on_delete,
                     }
                 });
             }
@@ -797,7 +937,7 @@ pub(crate) fn generate_graphql_entity(
         })
         .collect();
 
-    let object_impl = if legacy_graphql_complex {
+    let object_impl = if schema_only || legacy_graphql_complex {
         quote! {}
     } else {
         quote! {
@@ -808,6 +948,71 @@ pub(crate) fn generate_graphql_entity(
         }
     };
 
+    if schema_only {
+        return Ok(quote! {
+            impl ::graphql_orm::graphql::orm::DatabaseEntity for #struct_name {
+                const TABLE_NAME: &'static str = #table_name;
+                const PLURAL_NAME: &'static str = #plural_name;
+                const PRIMARY_KEY: &'static str = #primary_key;
+                const DEFAULT_SORT: &'static str = #default_sort;
+
+                fn column_names() -> &'static [&'static str] {
+                    &[#(#columns_array),*]
+                }
+            }
+
+            impl ::graphql_orm::graphql::orm::DatabaseSchema for #struct_name {
+                fn columns() -> &'static [::graphql_orm::graphql::orm::ColumnDef] {
+                    static COLUMNS: &[::graphql_orm::graphql::orm::ColumnDef] = &[
+                        #(#column_defs),*
+                    ];
+                    COLUMNS
+                }
+
+                fn indexes() -> &'static [::graphql_orm::graphql::orm::IndexDef] {
+                    static INDEXES: &[::graphql_orm::graphql::orm::IndexDef] = &[
+                        #(#index_defs),*
+                    ];
+                    INDEXES
+                }
+
+                fn composite_unique_indexes() -> &'static [&'static [&'static str]] {
+                    static UNIQUE_INDEXES: &[&[&str]] = &[
+                        #(#composite_unique_indexes),*
+                    ];
+                    UNIQUE_INDEXES
+                }
+            }
+
+            impl ::graphql_orm::graphql::orm::EntityRelations for #struct_name {
+                fn relation_metadata() -> &'static [::graphql_orm::graphql::orm::RelationMetadata] {
+                    static RELATIONS: &[::graphql_orm::graphql::orm::RelationMetadata] = &[
+                        #(#relation_metadata_defs),*
+                    ];
+                    RELATIONS
+                }
+            }
+
+            impl ::graphql_orm::graphql::orm::Entity for #struct_name {
+                fn entity_name() -> &'static str {
+                    #struct_name_str
+                }
+
+                fn metadata() -> &'static ::graphql_orm::graphql::orm::EntityMetadata {
+                    static METADATA: ::std::sync::OnceLock<::graphql_orm::graphql::orm::EntityMetadata> =
+                        ::std::sync::OnceLock::new();
+                    METADATA.get_or_init(|| {
+                        ::graphql_orm::graphql::orm::EntityMetadata::from_schema::<Self>(
+                            #struct_name_str,
+                            #read_policy,
+                            #write_policy,
+                        )
+                    })
+                }
+            }
+        });
+    }
+
     Ok(quote! {
         // WhereInput for filtering
         #[derive(::graphql_orm::async_graphql::InputObject, Default, Clone, Debug)]
@@ -816,15 +1021,12 @@ pub(crate) fn generate_graphql_entity(
             #(#where_input_fields)*
 
             /// Logical AND of conditions
-            #[graphql(name = "And")]
             pub and: Option<Vec<#where_input_name>>,
 
             /// Logical OR of conditions
-            #[graphql(name = "Or")]
             pub or: Option<Vec<#where_input_name>>,
 
             /// Logical NOT of condition
-            #[graphql(name = "Not")]
             pub not: Option<Box<#where_input_name>>,
         }
 
@@ -994,7 +1196,11 @@ pub(crate) fn generate_graphql_entity(
                 static METADATA: ::std::sync::OnceLock<::graphql_orm::graphql::orm::EntityMetadata> =
                     ::std::sync::OnceLock::new();
                 METADATA.get_or_init(|| {
-                    ::graphql_orm::graphql::orm::EntityMetadata::from_schema::<Self>(#struct_name_str)
+                    ::graphql_orm::graphql::orm::EntityMetadata::from_schema::<Self>(
+                        #struct_name_str,
+                        #read_policy,
+                        #write_policy,
+                    )
                 })
             }
         }
@@ -1411,12 +1617,21 @@ fn generate_row_field_assignment(
         });
     }
 
-    if meta.is_json_field {
-        return Ok(quote! {
-            #field_name: {
+    if meta.is_json_field && !is_option_type(field_type) {
+        let json_expr = if cfg!(feature = "postgres") {
+            quote! {{
+                let value: ::graphql_orm::sqlx::types::Json<::graphql_orm::serde_json::Value> =
+                    row.try_get(#db_col)?;
+                json_from_value(value.0)?
+            }}
+        } else {
+            quote! {{
                 let s: String = row.try_get(#db_col)?;
-                json_to_vec(&s)
-            },
+                json_from_str(&s)?
+            }}
+        };
+        return Ok(quote! {
+            #field_name: #json_expr,
         });
     }
 
@@ -1529,6 +1744,27 @@ fn generate_option_row_field_assignment(
     if let syn::Type::Path(inner_path) = inner_type {
         if let Some(segment) = inner_path.path.segments.last() {
             let inner_name = segment.ident.to_string();
+
+            if meta.is_json_field {
+                let json_expr = if cfg!(feature = "postgres") {
+                    quote! {{
+                        let value: Option<::graphql_orm::sqlx::types::Json<::graphql_orm::serde_json::Value>> =
+                            row.try_get(#db_col)?;
+                        value.map(|json| json_from_value(json.0)).transpose()?
+                    }}
+                } else {
+                    quote! {{
+                        let s: Option<String> = row.try_get(#db_col)?;
+                        match s.as_deref() {
+                            Some("") | None => None,
+                            Some(value) => Some(json_from_str(value)?),
+                        }
+                    }}
+                };
+                return Ok(quote! {
+                    #field_name: #json_expr,
+                });
+            }
 
             match inner_name.as_str() {
                 "String" => {

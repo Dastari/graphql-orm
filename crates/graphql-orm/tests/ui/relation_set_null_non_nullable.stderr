@@ -1,0 +1,6 @@
+error: relation on_delete = "set_null" requires nullable source field 'InvalidChild.parent_id'
+  --> tests/ui/relation_set_null_non_nullable.rs:26:5
+   |
+26 | /     #[relation(target = "InvalidParent", from = "parent_id", to = "id", on_delete = "set_null")]
+27 | |     pub parent: Option<InvalidParent>,
+   | |_____________________________________^

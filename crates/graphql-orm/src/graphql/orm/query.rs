@@ -1,6 +1,6 @@
 use super::core::{ColumnDef, EntityMetadata, IndexDef, RelationMetadata, SqlValue};
 use super::dialect::{DatabaseBackend, SqlDialect, current_backend};
-use super::execution::fetch_rows;
+use super::execution::{fetch_rows, fetch_rows_on};
 use crate::graphql::pagination::{Connection, Edge, PageInfo, encode_cursor};
 use crate::{DbPool, DbRow};
 use sqlx::Row;
@@ -148,15 +148,12 @@ pub enum ChangeAction {
 
 #[derive(async_graphql::InputObject, Clone, Debug, Default)]
 pub struct SubscriptionFilterInput {
-    #[graphql(name = "Dummy")]
     pub dummy: Option<bool>,
 }
 
 #[derive(async_graphql::InputObject, Clone, Debug, Default)]
 pub struct PageInput {
-    #[graphql(name = "Limit")]
     pub limit: Option<i64>,
-    #[graphql(name = "Offset")]
     pub offset: Option<i64>,
 }
 
@@ -524,11 +521,47 @@ where
         rows.iter().map(T::from_row).collect()
     }
 
+    #[cfg(feature = "sqlite")]
+    pub async fn fetch_all_on<'e, E>(&self, executor: E) -> Result<Vec<T>, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    {
+        let rendered = render_select_query(current_backend(), &self.build_select_query());
+        let rows = fetch_rows_on(executor, &rendered.sql, &rendered.values).await?;
+        rows.iter().map(T::from_row).collect()
+    }
+
+    #[cfg(feature = "postgres")]
+    pub async fn fetch_all_on<'e, E>(&self, executor: E) -> Result<Vec<T>, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let rendered = render_select_query(current_backend(), &self.build_select_query());
+        let rows = fetch_rows_on(executor, &rendered.sql, &rendered.values).await?;
+        rows.iter().map(T::from_row).collect()
+    }
+
     pub async fn fetch_one<P>(&self, provider: &P) -> Result<Option<T>, sqlx::Error>
     where
         P: PoolProvider + ?Sized,
     {
         Ok(self.fetch_all(provider).await?.into_iter().next())
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub async fn fetch_one_on<'e, E>(&self, executor: E) -> Result<Option<T>, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    {
+        Ok(self.fetch_all_on(executor).await?.into_iter().next())
+    }
+
+    #[cfg(feature = "postgres")]
+    pub async fn fetch_one_on<'e, E>(&self, executor: E) -> Result<Option<T>, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        Ok(self.fetch_all_on(executor).await?.into_iter().next())
     }
 
     pub async fn count<P>(&self, provider: &P) -> Result<i64, sqlx::Error>
@@ -541,6 +574,36 @@ where
         query.sorts.clear();
         let rendered = render_select_query(current_backend(), &query);
         let rows = fetch_rows(provider.pool(), &rendered.sql, &rendered.values).await?;
+        let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+        row.try_get::<i64, _>("count")
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub async fn count_on<'e, E>(&self, executor: E) -> Result<i64, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    {
+        let mut query = self.build_select_query();
+        query.count_only = true;
+        query.pagination = None;
+        query.sorts.clear();
+        let rendered = render_select_query(current_backend(), &query);
+        let rows = fetch_rows_on(executor, &rendered.sql, &rendered.values).await?;
+        let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+        row.try_get::<i64, _>("count")
+    }
+
+    #[cfg(feature = "postgres")]
+    pub async fn count_on<'e, E>(&self, executor: E) -> Result<i64, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let mut query = self.build_select_query();
+        query.count_only = true;
+        query.pagination = None;
+        query.sorts.clear();
+        let rendered = render_select_query(current_backend(), &query);
+        let rows = fetch_rows_on(executor, &rendered.sql, &rendered.values).await?;
         let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
         row.try_get::<i64, _>("count")
     }

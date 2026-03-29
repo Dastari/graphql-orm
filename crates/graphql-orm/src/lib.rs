@@ -1,6 +1,7 @@
 pub use async_graphql;
 pub use futures;
 pub use graphql_orm_macros::*;
+pub use serde_json;
 pub use sqlx;
 pub use tokio;
 pub use tokio_stream;

@@ -1,7 +1,7 @@
 use graphql_orm::graphql::orm::{
-    ColumnModel, DatabaseBackend, ForeignKeyModel, IndexDef, MigrationPlan, MigrationStep,
-    SchemaModel, TableModel, build_migration_plan, diff_schema_models, migration_filename,
-    render_migration_file,
+    ColumnModel, DatabaseBackend, DeletePolicy, ForeignKeyModel, IndexDef, MigrationPlan,
+    MigrationStep, SchemaModel, TableModel, build_migration_plan, diff_schema_models,
+    migration_filename, render_migration_file,
 };
 
 fn users_v1() -> TableModel {
@@ -98,6 +98,7 @@ fn posts_with_fk() -> TableModel {
             target_table: "users".to_string(),
             target_column: "id".to_string(),
             is_multiple: false,
+            on_delete: DeletePolicy::Restrict,
         }],
     }
 }
@@ -246,6 +247,7 @@ fn diff_detects_foreign_key_addition() {
                 && foreign_key.source_column == "author_id"
                 && foreign_key.target_table == "users"
                 && foreign_key.target_column == "id"
+                && foreign_key.on_delete == DeletePolicy::Restrict
     )));
 }
 
@@ -267,7 +269,7 @@ fn postgres_plan_renders_foreign_key_statement() {
     let plan = build_migration_plan(DatabaseBackend::Postgres, &current, &target);
     assert!(plan.statements.iter().any(|statement| {
         statement.contains("ALTER TABLE posts ADD CONSTRAINT fk_posts_author_id_users_id")
-            && statement.contains("FOREIGN KEY (author_id) REFERENCES users(id)")
+            && statement.contains("FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE RESTRICT")
     }));
 }
 
@@ -292,11 +294,9 @@ fn sqlite_plan_rebuilds_tables_for_foreign_key_changes() {
             .iter()
             .any(|statement| statement.starts_with("CREATE TABLE __graphql_orm_posts_new"))
     );
-    assert!(
-        plan.statements.iter().any(|statement| {
-            statement.contains("FOREIGN KEY (author_id) REFERENCES users(id)")
-        })
-    );
+    assert!(plan.statements.iter().any(|statement| {
+        statement.contains("FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE RESTRICT")
+    }));
     assert!(plan.statements.iter().any(|statement| statement
         == "INSERT INTO __graphql_orm_posts_new (id, author_id) SELECT id, author_id FROM posts"));
 }

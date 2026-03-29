@@ -28,6 +28,20 @@ pub(crate) fn backend_pool_type_tokens() -> proc_macro2::TokenStream {
     }
 }
 
+pub(crate) fn backend_database_type_tokens() -> proc_macro2::TokenStream {
+    if cfg!(feature = "sqlite") {
+        quote! { ::graphql_orm::sqlx::Sqlite }
+    } else if cfg!(feature = "postgres") {
+        quote! { ::graphql_orm::sqlx::Postgres }
+    } else if cfg!(feature = "mysql") {
+        quote! { ::graphql_orm::sqlx::MySql }
+    } else if cfg!(feature = "mssql") {
+        quote! { ::graphql_orm::sqlx::Mssql }
+    } else {
+        proc_macro2::TokenStream::new()
+    }
+}
+
 pub(crate) fn backend_helper_import_tokens() -> proc_macro2::TokenStream {
     if cfg!(feature = "sqlite") {
         quote! { use ::graphql_orm::db::sqlite_helpers::*; }

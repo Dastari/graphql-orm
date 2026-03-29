@@ -201,13 +201,13 @@ async fn field_policy_callbacks_gate_generated_read_and_write_paths()
     let denied_write = schema
         .execute(
             "mutation {
-                CreateUser(Input: {
+                createUser(input: {
                     principal: \"principal-1\"
                     displayName: \"Visible Name\"
                     emailAddress: \"user@example.com\"
                 }) {
-                    Success
-                    Error
+                    success
+                    error
                 }
             }",
         )
@@ -221,13 +221,13 @@ async fn field_policy_callbacks_gate_generated_read_and_write_paths()
     let created = schema
         .execute(
             "mutation {
-                CreateUser(Input: {
+                createUser(input: {
                     principal: \"principal-1\"
                     displayName: \"Visible Name\"
                     emailAddress: \"user@example.com\"
                 }) {
-                    Success
-                    User {
+                    success
+                    user {
                         id
                         principal
                         displayName
@@ -238,14 +238,14 @@ async fn field_policy_callbacks_gate_generated_read_and_write_paths()
         .await;
     assert!(created.errors.is_empty(), "{:?}", created.errors);
     let created_json = created.data.into_json()?;
-    let user_id = created_json["CreateUser"]["User"]["id"]
+    let user_id = created_json["createUser"]["user"]["id"]
         .as_str()
         .expect("created user id should be present");
 
     let denied_read = schema
         .execute(format!(
             "query {{
-                User(Id: \"{user_id}\") {{
+                user(id: \"{user_id}\") {{
                     principal
                     emailAddress
                 }}
@@ -261,9 +261,9 @@ async fn field_policy_callbacks_gate_generated_read_and_write_paths()
     let allowed_read = schema
         .execute(format!(
             "query {{
-                Users(Where: {{ displayName: {{ Eq: \"Visible Name\" }} }}, OrderBy: [{{ displayName: ASC }}]) {{
-                    Edges {{
-                        Node {{
+                users(where: {{ displayName: {{ eq: \"Visible Name\" }} }}, orderBy: [{{ displayName: ASC }}]) {{
+                    edges {{
+                        node {{
                             principal
                             displayName
                             emailAddress
@@ -276,11 +276,11 @@ async fn field_policy_callbacks_gate_generated_read_and_write_paths()
     assert!(allowed_read.errors.is_empty(), "{:?}", allowed_read.errors);
     let allowed_json = allowed_read.data.into_json()?;
     assert_eq!(
-        allowed_json["Users"]["Edges"][0]["Node"]["displayName"].as_str(),
+        allowed_json["users"]["edges"][0]["node"]["displayName"].as_str(),
         Some("Visible Name")
     );
     assert_eq!(
-        allowed_json["Users"]["Edges"][0]["Node"]["emailAddress"].as_str(),
+        allowed_json["users"]["edges"][0]["node"]["emailAddress"].as_str(),
         Some("user@example.com")
     );
 

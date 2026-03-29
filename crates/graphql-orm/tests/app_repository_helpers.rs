@@ -58,7 +58,7 @@ impl graphql_orm::graphql::orm::MutationHook for RecordingHook {
     fn on_mutation<'a>(
         &'a self,
         _ctx: Option<&'a async_graphql::Context<'_>>,
-        _db: &'a graphql_orm::db::Database,
+        _hook_ctx: &'a mut graphql_orm::graphql::orm::MutationContext<'_>,
         event: &'a graphql_orm::graphql::orm::MutationEvent,
     ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<()>> {
         Box::pin(async move {

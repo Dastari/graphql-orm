@@ -1,0 +1,11 @@
+error[E0412]: cannot find type `SchemaOnlyExampleWhereInput` in this scope
+  --> tests/ui/schema_only_entity_no_graphql.rs:15:25
+   |
+15 |     let _missing_where: SchemaOnlyExampleWhereInput = Default::default();
+   |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0412]: cannot find type `CreateSchemaOnlyExampleInput` in this scope
+  --> tests/ui/schema_only_entity_no_graphql.rs:16:26
+   |
+16 |     let _missing_create: CreateSchemaOnlyExampleInput;
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope

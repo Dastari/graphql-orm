@@ -51,7 +51,7 @@ impl graphql_orm::graphql::orm::MutationHook for RecordingHook {
     fn on_mutation<'a>(
         &'a self,
         _ctx: Option<&'a async_graphql::Context<'_>>,
-        _db: &'a graphql_orm::db::Database,
+        _hook_ctx: &'a mut graphql_orm::graphql::orm::MutationContext<'_>,
         event: &'a graphql_orm::graphql::orm::MutationEvent,
     ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<()>> {
         Box::pin(async move {
@@ -134,16 +134,16 @@ async fn uuid_ids_are_first_class_across_crud_migrations_and_hooks()
     let created = schema
         .execute(
             "mutation {
-                CreateAccount(Input: { name: \"Primary\", active: true }) {
-                    Success
-                    Account { id name active }
+                createAccount(input: { name: \"Primary\", active: true }) {
+                    success
+                    account { id name active }
                 }
             }",
         )
         .await;
     assert!(created.errors.is_empty(), "{:?}", created.errors);
     let created_json = created.data.into_json()?;
-    let account_id = created_json["CreateAccount"]["Account"]["id"]
+    let account_id = created_json["createAccount"]["account"]["id"]
         .as_str()
         .expect("account id should be present")
         .to_string();
@@ -152,7 +152,7 @@ async fn uuid_ids_are_first_class_across_crud_migrations_and_hooks()
     let by_id = schema
         .execute(format!(
             "query {{
-                Account(Id: \"{account_id}\") {{
+                account(id: \"{account_id}\") {{
                     id
                     name
                     active
@@ -163,17 +163,17 @@ async fn uuid_ids_are_first_class_across_crud_migrations_and_hooks()
     assert!(by_id.errors.is_empty(), "{:?}", by_id.errors);
     let by_id_json = by_id.data.into_json()?;
     assert_eq!(
-        by_id_json["Account"]["id"].as_str(),
+        by_id_json["account"]["id"].as_str(),
         Some(account_id.as_str())
     );
-    assert_eq!(by_id_json["Account"]["name"].as_str(), Some("Primary"));
+    assert_eq!(by_id_json["account"]["name"].as_str(), Some("Primary"));
 
     let filtered = schema
         .execute(format!(
             "query {{
-                Accounts(Where: {{ id: {{ Eq: \"{account_id}\" }} }}) {{
-                    Edges {{
-                        Node {{ id name }}
+                accounts(where: {{ id: {{ eq: \"{account_id}\" }} }}) {{
+                    edges {{
+                        node {{ id name }}
                     }}
                 }}
             }}"
@@ -182,20 +182,20 @@ async fn uuid_ids_are_first_class_across_crud_migrations_and_hooks()
     assert!(filtered.errors.is_empty(), "{:?}", filtered.errors);
     let filtered_json = filtered.data.into_json()?;
     assert_eq!(
-        filtered_json["Accounts"]["Edges"].as_array().map(Vec::len),
+        filtered_json["accounts"]["edges"].as_array().map(Vec::len),
         Some(1)
     );
     assert_eq!(
-        filtered_json["Accounts"]["Edges"][0]["Node"]["id"].as_str(),
+        filtered_json["accounts"]["edges"][0]["node"]["id"].as_str(),
         Some(account_id.as_str())
     );
 
     let updated = schema
         .execute(format!(
             "mutation {{
-                UpdateAccount(Id: \"{account_id}\", Input: {{ name: \"Renamed\" }}) {{
-                    Success
-                    Account {{ id name }}
+                updateAccount(id: \"{account_id}\", input: {{ name: \"Renamed\" }}) {{
+                    success
+                    account {{ id name }}
                 }}
             }}"
         ))
@@ -203,15 +203,15 @@ async fn uuid_ids_are_first_class_across_crud_migrations_and_hooks()
     assert!(updated.errors.is_empty(), "{:?}", updated.errors);
     let updated_json = updated.data.into_json()?;
     assert_eq!(
-        updated_json["UpdateAccount"]["Account"]["name"].as_str(),
+        updated_json["updateAccount"]["account"]["name"].as_str(),
         Some("Renamed")
     );
 
     let deleted = schema
         .execute(format!(
             "mutation {{
-                DeleteAccount(Id: \"{account_id}\") {{
-                    Success
+                deleteAccount(id: \"{account_id}\") {{
+                    success
                 }}
             }}"
         ))
@@ -219,7 +219,7 @@ async fn uuid_ids_are_first_class_across_crud_migrations_and_hooks()
     assert!(deleted.errors.is_empty(), "{:?}", deleted.errors);
     let deleted_json = deleted.data.into_json()?;
     assert_eq!(
-        deleted_json["DeleteAccount"]["Success"].as_bool(),
+        deleted_json["deleteAccount"]["success"].as_bool(),
         Some(true)
     );
 
