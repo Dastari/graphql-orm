@@ -417,7 +417,9 @@ Current transaction semantics:
 - the generated entity write is held until the hook path succeeds
 - `After` hooks run before the generated write commits, so returning an error aborts the main persistence change
 - hooks receive a transaction-bound `MutationContext`, so related writes can use the same SQLite/Postgres transaction safely
+- hooks should also perform related reads through `MutationContext`, not `db.pool()`, so reads stay on the active transaction and do not contend with the held mutation connection
 - `hook_ctx.insert::<Entity>(...)`, `hook_ctx.update_by_id::<Entity>(...)`, `hook_ctx.update_where::<Entity>(...)`, `hook_ctx.delete_by_id::<Entity>(...)`, and `hook_ctx.delete_where::<Entity>(...)` are the intended shared paths for transactional side effects
+- `hook_ctx.query::<Entity>()` and `hook_ctx.find_by_id::<Entity>(&id)` are the intended shared paths for transactional reads
 - generated subscription event fanout runs after commit
 - hook-authored side-effect writes commit or roll back with the main write
 
@@ -492,6 +494,30 @@ impl graphql_orm::graphql::orm::MutationHook for SessionCleanupHook {
     }
 }
 ```
+
+Example hook-side reads on the active transaction:
+
+```rust
+let active_sessions = hook_ctx
+    .query::<RefreshSession>()
+    .filter(RefreshSessionWhereInput {
+        user_id: Some(UuidFilter {
+            eq: Some(before.id),
+            ..Default::default()
+        }),
+        revoked: Some(BoolFilter {
+            eq: Some(false),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .count()
+    .await?;
+
+let existing_user = hook_ctx.find_by_id::<User>(&before.id).await?;
+```
+
+Prefer these `hook_ctx` reads over `db.pool()` inside hooks. With SQLite and a constrained pool, using `db.pool()` for reads while the mutation already holds a transaction connection can block the hook path.
 
 Example generated create + hook-created dependent row:
 

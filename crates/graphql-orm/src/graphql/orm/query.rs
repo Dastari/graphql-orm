@@ -698,8 +698,91 @@ where
         self
     }
 
+    pub fn offset(mut self, offset: i64) -> Self {
+        let mut page = self.query.page.unwrap_or_default();
+        page.offset = Some(offset);
+        self.query.page = Some(page);
+        self
+    }
+
     pub async fn fetch_all(self) -> Result<Vec<T>, sqlx::Error> {
         self.query.fetch_all(self.pool).await
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub async fn fetch_all_on<'e, E>(self, executor: E) -> Result<Vec<T>, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    {
+        self.query.fetch_all_on(executor).await
+    }
+
+    #[cfg(feature = "postgres")]
+    pub async fn fetch_all_on<'e, E>(self, executor: E) -> Result<Vec<T>, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        self.query.fetch_all_on(executor).await
+    }
+
+    pub async fn fetch_one(self) -> Result<Option<T>, sqlx::Error> {
+        self.query.fetch_one(self.pool).await
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub async fn fetch_one_on<'e, E>(self, executor: E) -> Result<Option<T>, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    {
+        self.query.fetch_one_on(executor).await
+    }
+
+    #[cfg(feature = "postgres")]
+    pub async fn fetch_one_on<'e, E>(self, executor: E) -> Result<Option<T>, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        self.query.fetch_one_on(executor).await
+    }
+
+    pub async fn count(self) -> Result<i64, sqlx::Error> {
+        self.query.count(self.pool).await
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub async fn count_on<'e, E>(self, executor: E) -> Result<i64, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    {
+        self.query.count_on(executor).await
+    }
+
+    #[cfg(feature = "postgres")]
+    pub async fn count_on<'e, E>(self, executor: E) -> Result<i64, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        self.query.count_on(executor).await
+    }
+
+    pub async fn exists(self) -> Result<bool, sqlx::Error> {
+        Ok(self.query.count(self.pool).await? > 0)
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub async fn exists_on<'e, E>(self, executor: E) -> Result<bool, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    {
+        Ok(self.query.count_on(executor).await? > 0)
+    }
+
+    #[cfg(feature = "postgres")]
+    pub async fn exists_on<'e, E>(self, executor: E) -> Result<bool, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        Ok(self.query.count_on(executor).await? > 0)
     }
 }
 
@@ -739,6 +822,36 @@ where
             sql.push_str(&self.filters.join(" AND "));
         }
         let rows = fetch_rows(self.pool, &sql, &self.values).await?;
+        let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+        row.try_get::<i64, _>("count")
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub async fn count_on<'e, E>(self, executor: E) -> Result<i64, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    {
+        let mut sql = format!("SELECT COUNT(*) AS count FROM {}", self.table);
+        if !self.filters.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&self.filters.join(" AND "));
+        }
+        let rows = fetch_rows_on(executor, &sql, &self.values).await?;
+        let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+        row.try_get::<i64, _>("count")
+    }
+
+    #[cfg(feature = "postgres")]
+    pub async fn count_on<'e, E>(self, executor: E) -> Result<i64, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let mut sql = format!("SELECT COUNT(*) AS count FROM {}", self.table);
+        if !self.filters.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&self.filters.join(" AND "));
+        }
+        let rows = fetch_rows_on(executor, &sql, &self.values).await?;
         let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
         row.try_get::<i64, _>("count")
     }

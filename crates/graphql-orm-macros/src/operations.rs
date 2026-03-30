@@ -2791,5 +2791,16 @@ pub(crate) fn generate_graphql_operations(
                 Box::pin(async move { Self::__gom_delete_where_with_mutation_context(hook_ctx, where_input).await })
             }
         }
+
+        impl ::graphql_orm::graphql::orm::MutationContextFindById for #struct_name {
+            type Id = #pk_type_ty;
+
+            fn find_by_id_in_mutation_context<'a>(
+                hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_>,
+                id: &'a Self::Id,
+            ) -> ::graphql_orm::futures::future::BoxFuture<'a, Result<Option<Self>, ::graphql_orm::sqlx::Error>> {
+                Box::pin(async move { Self::__gom_fetch_by_id_on(hook_ctx.executor(), id).await })
+            }
+        }
     })
 }

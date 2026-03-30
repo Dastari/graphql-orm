@@ -1,5 +1,8 @@
 use super::dialect::DatabaseBackend;
-use super::query::{ChangeAction, DatabaseEntity, DatabaseSchema, EntityRelations};
+use super::query::{
+    ChangeAction, DatabaseEntity, DatabaseFilter, DatabaseOrderBy, DatabaseSchema, EntityQuery,
+    EntityRelations, FromSqlRow,
+};
 use std::any::Any;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -154,6 +157,85 @@ pub struct MutationContext<'tx> {
     tx: sqlx::Transaction<'tx, sqlx::Postgres>,
     deferred_events: Vec<Box<dyn DeferredEventEmitter>>,
     deferred_actions: Vec<Box<dyn PostCommitActionRunner>>,
+}
+
+pub struct MutationQuery<'ctx, 'tx, T>
+where
+    T: DatabaseEntity + FromSqlRow + Clone + Send + Sync,
+{
+    hook_ctx: &'ctx mut MutationContext<'tx>,
+    query: EntityQuery<T>,
+}
+
+impl<'ctx, 'tx, T> MutationQuery<'ctx, 'tx, T>
+where
+    T: DatabaseEntity + FromSqlRow + Clone + Send + Sync,
+{
+    fn new(hook_ctx: &'ctx mut MutationContext<'tx>) -> Self {
+        Self {
+            hook_ctx,
+            query: EntityQuery::new(),
+        }
+    }
+
+    pub fn filter<F>(mut self, filter: F) -> Self
+    where
+        F: DatabaseFilter,
+    {
+        self.query = self.query.filter(&filter);
+        self
+    }
+
+    pub fn order_by<O>(mut self, order: O) -> Self
+    where
+        O: DatabaseOrderBy,
+    {
+        self.query = self.query.order_by(&order);
+        self
+    }
+
+    pub fn default_order(mut self) -> Self {
+        self.query = self.query.default_order();
+        self
+    }
+
+    pub fn limit(mut self, limit: i64) -> Self {
+        let mut page = self.query.page.unwrap_or_default();
+        page.limit = Some(limit);
+        self.query.page = Some(page);
+        self
+    }
+
+    pub fn offset(mut self, offset: i64) -> Self {
+        let mut page = self.query.page.unwrap_or_default();
+        page.offset = Some(offset);
+        self.query.page = Some(page);
+        self
+    }
+
+    pub fn paginate(mut self, page: super::query::PageInput) -> Self {
+        self.query = self.query.paginate(&page);
+        self
+    }
+
+    pub async fn fetch_all(self) -> Result<Vec<T>, sqlx::Error> {
+        let query = self.query;
+        query.fetch_all_on(self.hook_ctx.executor()).await
+    }
+
+    pub async fn fetch_one(self) -> Result<Option<T>, sqlx::Error> {
+        let query = self.query;
+        query.fetch_one_on(self.hook_ctx.executor()).await
+    }
+
+    pub async fn count(self) -> Result<i64, sqlx::Error> {
+        let query = self.query;
+        query.count_on(self.hook_ctx.executor()).await
+    }
+
+    pub async fn exists(self) -> Result<bool, sqlx::Error> {
+        Ok(self.count().await? > 0)
+    }
 }
 
 impl<'tx> MutationContext<'tx> {
@@ -314,6 +396,23 @@ impl<'tx> MutationContext<'tx> {
     {
         T::delete_where_in_mutation_context(self, where_input).await
     }
+
+    pub fn query<'a, T>(&'a mut self) -> MutationQuery<'a, 'tx, T>
+    where
+        T: DatabaseEntity + FromSqlRow + Clone + Send + Sync,
+    {
+        MutationQuery::new(self)
+    }
+
+    pub async fn find_by_id<'a, T>(
+        &'a mut self,
+        id: &'a <T as MutationContextFindById>::Id,
+    ) -> Result<Option<T>, sqlx::Error>
+    where
+        T: MutationContextFindById,
+    {
+        T::find_by_id_in_mutation_context(self, id).await
+    }
 }
 
 pub trait MutationHook: Send + Sync {
@@ -372,6 +471,15 @@ pub trait MutationContextDeleteWhere: Sized {
         hook_ctx: &'a mut MutationContext<'_>,
         where_input: Self::WhereInput,
     ) -> futures::future::BoxFuture<'a, Result<i64, sqlx::Error>>;
+}
+
+pub trait MutationContextFindById: Sized {
+    type Id;
+
+    fn find_by_id_in_mutation_context<'a>(
+        hook_ctx: &'a mut MutationContext<'_>,
+        id: &'a Self::Id,
+    ) -> futures::future::BoxFuture<'a, Result<Option<Self>, sqlx::Error>>;
 }
 
 pub trait PostCommitErrorHandler: Send + Sync {
