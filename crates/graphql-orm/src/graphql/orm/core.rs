@@ -548,6 +548,58 @@ pub struct ColumnDef {
     pub references: Option<&'static str>,
 }
 
+impl ColumnDef {
+    pub const fn text(name: &'static str) -> Self {
+        Self::new(name, "TEXT")
+    }
+
+    pub const fn integer(name: &'static str) -> Self {
+        Self::new(name, "INTEGER")
+    }
+
+    pub const fn blob(name: &'static str) -> Self {
+        Self::new(name, "BLOB")
+    }
+
+    pub const fn new(name: &'static str, sql_type: &'static str) -> Self {
+        Self {
+            name,
+            sql_type,
+            nullable: true,
+            is_primary_key: false,
+            is_unique: false,
+            default: None,
+            references: None,
+        }
+    }
+
+    pub const fn not_null(mut self) -> Self {
+        self.nullable = false;
+        self
+    }
+
+    pub const fn primary_key(mut self) -> Self {
+        self.is_primary_key = true;
+        self.nullable = false;
+        self
+    }
+
+    pub const fn unique(mut self) -> Self {
+        self.is_unique = true;
+        self
+    }
+
+    pub const fn default(mut self, default: &'static str) -> Self {
+        self.default = Some(default);
+        self
+    }
+
+    pub const fn references(mut self, references: &'static str) -> Self {
+        self.references = Some(references);
+        self
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct FieldMetadata {
     pub name: &'static str,
@@ -581,7 +633,7 @@ pub struct IndexDef {
 }
 
 impl IndexDef {
-    pub fn new(name: &'static str, columns: &'static [&'static str]) -> Self {
+    pub const fn new(name: &'static str, columns: &'static [&'static str]) -> Self {
         Self {
             name,
             columns,
@@ -589,7 +641,7 @@ impl IndexDef {
         }
     }
 
-    pub fn unique(mut self) -> Self {
+    pub const fn unique(mut self) -> Self {
         self.is_unique = true;
         self
     }

@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if, clippy::if_same_then_else)]
+
 //! Procedural macros for GraphQL/ORM backends.
 //!
 //! This crate provides macros to reduce boilerplate for an `async-graphql` +

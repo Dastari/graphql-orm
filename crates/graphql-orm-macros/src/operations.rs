@@ -36,7 +36,10 @@ pub(crate) fn generate_graphql_operations(
     };
 
     let entity_meta = parse_entity_metadata(&input.attrs)?;
-    let rename_all_rule = entity_meta.serde_rename_all.as_deref();
+    let rename_all_rule = entity_meta
+        .graphql_rename_fields
+        .as_deref()
+        .or(entity_meta.serde_rename_all.as_deref());
     let table_name = entity_meta.table_name.as_deref().unwrap_or("unknown");
     let plural_name = entity_meta
         .plural_name
@@ -166,6 +169,8 @@ pub(crate) fn generate_graphql_operations(
 
     // For SQL generation
     let mut insert_columns: Vec<String> = Vec::new();
+    let mut insert_default_columns: Vec<String> = Vec::new();
+    let mut insert_default_exprs: Vec<String> = Vec::new();
     let mut insert_binds_graphql: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut insert_binds_repo: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut update_field_checks_graphql: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -200,6 +205,11 @@ pub(crate) fn generate_graphql_operations(
         let is_timestamp = rust_name == "created_at" || rust_name == "updated_at";
         let include_in_create =
             (!meta.is_primary_key || !auto_generated_pk) && !is_timestamp && meta.write;
+        let include_generated_default_in_create =
+            (!meta.is_primary_key || !auto_generated_pk)
+                && !is_timestamp
+                && !meta.write
+                && meta.default.is_some();
         if include_in_create {
             let graphql_include_in_create =
                 (!meta.skip_input && !meta.is_json_field) || meta.input_only;
@@ -403,6 +413,13 @@ pub(crate) fn generate_graphql_operations(
                     insert_binds_repo.push(bind_tokens);
                 }
             }
+        } else if include_generated_default_in_create {
+            insert_default_columns.push(db_col.clone());
+            insert_default_exprs.push(
+                meta.default
+                    .clone()
+                    .expect("generated create default must exist"),
+            );
         }
 
         // For update: wrap in Option to make all fields optional (skip PK, timestamps, skip_input)
@@ -708,8 +725,10 @@ pub(crate) fn generate_graphql_operations(
     let insert_placeholders: Vec<&str> = insert_columns.iter().map(|_| "?").collect();
     let insert_sql = if auto_generated_pk {
         let mut columns = vec!["id".to_string()];
+        columns.extend(insert_default_columns.iter().cloned());
         columns.extend(insert_columns.iter().cloned());
         let mut placeholders = vec!["?".to_string()];
+        placeholders.extend(insert_default_exprs.iter().cloned());
         placeholders.extend(insert_placeholders.iter().map(|value| value.to_string()));
         format!(
             "INSERT INTO {} ({}) VALUES ({})",
@@ -718,11 +737,15 @@ pub(crate) fn generate_graphql_operations(
             placeholders.join(", ")
         )
     } else {
+        let mut columns = insert_default_columns.clone();
+        columns.extend(insert_columns.iter().cloned());
+        let mut placeholders = insert_default_exprs.clone();
+        placeholders.extend(insert_placeholders.iter().map(|value| value.to_string()));
         format!(
             "INSERT INTO {} ({}) VALUES ({})",
             table_name,
-            insert_columns.join(", "),
-            insert_placeholders.join(", ")
+            columns.join(", "),
+            placeholders.join(", ")
         )
     };
     let create_mutation_fields = if auto_generated_pk {
@@ -1233,7 +1256,7 @@ pub(crate) fn generate_graphql_operations(
                 #(#create_policy_checks)*
                 #prepend_pk_bind
                 #(#insert_binds_graphql)*
-                let mutation_fields = vec![#(#create_mutation_field_literals),*];
+                let mutation_fields = [#(#create_mutation_field_literals),*];
                 let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&mutation_fields, &bind_values);
                 let tx = pool.begin().await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::new(db, tx);
@@ -1499,7 +1522,7 @@ pub(crate) fn generate_graphql_operations(
                     &format!("DELETE FROM {} WHERE {} = ?", #table_name, #struct_name::PRIMARY_KEY),
                     1
                 );
-                let values = vec![#pk_bind_value];
+                let values = [#pk_bind_value];
                 let result = ::graphql_orm::graphql::orm::execute_with_binds_on(hook_ctx.executor(), &sql, &values).await;
 
                 match result {
@@ -1715,7 +1738,7 @@ pub(crate) fn generate_graphql_operations(
                     &format!("SELECT * FROM {} WHERE {} = ?", #table_name, Self::PRIMARY_KEY),
                     1,
                 );
-                let values = vec![#pk_bind_value_ref];
+                let values = [#pk_bind_value_ref];
                 let rows = ::graphql_orm::graphql::orm::fetch_rows_on(executor, &sql, &values).await?;
                 rows.first()
                     .map(<Self as ::graphql_orm::graphql::orm::FromSqlRow>::from_row)
@@ -1751,7 +1774,7 @@ pub(crate) fn generate_graphql_operations(
                             table_name: #table_name,
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                             id: #created_pk_id_string,
-                            changes: ::graphql_orm::graphql::orm::mutation_changes(&vec![#(#create_mutation_field_literals),*], &bind_values),
+                            changes: ::graphql_orm::graphql::orm::mutation_changes(&[#(#create_mutation_field_literals),*], &bind_values),
                             before_state,
                             after_state: None,
                         },
@@ -1774,7 +1797,7 @@ pub(crate) fn generate_graphql_operations(
                             table_name: #table_name,
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
                             id: entity.#pk_field.to_string(),
-                            changes: ::graphql_orm::graphql::orm::mutation_changes(&vec![#(#create_mutation_field_literals),*], &bind_values),
+                            changes: ::graphql_orm::graphql::orm::mutation_changes(&[#(#create_mutation_field_literals),*], &bind_values),
                             before_state: None,
                             after_state,
                         },
@@ -2030,7 +2053,7 @@ pub(crate) fn generate_graphql_operations(
                     &format!("DELETE FROM {} WHERE {} = ?", #table_name, Self::PRIMARY_KEY),
                     1,
                 );
-                let values = vec![#pk_bind_value_ref];
+                let values = [#pk_bind_value_ref];
                 let result = ::graphql_orm::graphql::orm::execute_with_binds_on(hook_ctx.executor(), &sql, &values).await?;
                 if result.rows_affected() == 0 {
                     return Ok(false);
@@ -2507,7 +2530,7 @@ pub(crate) fn generate_graphql_operations(
                     &format!("DELETE FROM {} WHERE {} = ?", #table_name, Self::PRIMARY_KEY),
                     1,
                 );
-                let values = vec![#pk_bind_value_ref];
+                let values = [#pk_bind_value_ref];
                 let result = ::graphql_orm::graphql::orm::execute_with_binds_on(hook_ctx.executor(), &sql, &values).await?;
                 if result.rows_affected() == 0 {
                     return Ok(false);

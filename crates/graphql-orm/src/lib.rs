@@ -1,3 +1,11 @@
+#![allow(
+    clippy::collapsible_if,
+    clippy::iter_cloned_collect,
+    clippy::needless_lifetimes,
+    clippy::new_without_default,
+    clippy::too_many_arguments
+)]
+
 pub use async_graphql;
 pub use futures;
 pub use graphql_orm_macros::*;

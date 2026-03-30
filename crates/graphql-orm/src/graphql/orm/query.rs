@@ -107,6 +107,7 @@ impl From<&PageInput> for PaginationRequest {
 }
 
 #[derive(async_graphql::Enum, Copy, Clone, Debug, Eq, PartialEq)]
+#[graphql(rename_items = "PascalCase")]
 pub enum OrderDirection {
     Asc,
     Desc,
@@ -140,6 +141,7 @@ impl DatabaseOrderBy for () {
 #[derive(
     async_graphql::Enum, serde::Serialize, serde::Deserialize, Copy, Clone, Debug, Eq, PartialEq,
 )]
+#[graphql(rename_items = "PascalCase")]
 pub enum ChangeAction {
     Created,
     Updated,
@@ -148,6 +150,9 @@ pub enum ChangeAction {
 
 #[derive(async_graphql::InputObject, Clone, Debug, Default)]
 pub struct SubscriptionFilterInput {
+    #[graphql(name = "Actions")]
+    pub actions: Option<Vec<ChangeAction>>,
+    #[graphql(name = "Dummy")]
     pub dummy: Option<bool>,
 }
 

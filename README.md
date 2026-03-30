@@ -131,6 +131,7 @@ Generated names now align with serde naming and standard GraphQL casing:
 
 - `serde(rename = "...")`
 - `serde(rename_all = "...")`
+- `#[graphql(rename_fields = "...")]` on the entity when GraphQL naming should diverge from serde naming
 - default field/input/filter/order names are camelCase even when the Rust field is snake_case
 
 GraphQL naming contract:
@@ -145,6 +146,45 @@ Breaking change:
 
 - generated operation names and payload field names changed from PascalCase to camelCase
 - frontend codegen and handwritten GraphQL documents should be regenerated or updated after upgrade
+
+If GraphQL needs a different field convention than serde, set it explicitly on the entity:
+
+```rust
+#[derive(GraphQLEntity, GraphQLOperations)]
+#[graphql_entity(table = "gate_events", plural = "GateEvents")]
+#[graphql(rename_fields = "PascalCase")]
+pub struct GateEvent {
+    pub gate_name: String,
+    pub event_time: i64,
+}
+```
+
+This applies the chosen GraphQL casing to generated object fields, create/update inputs, filters, and ordering while leaving serde behavior unchanged.
+
+## Generated Create Defaults
+
+Generated create mutations can now populate database-side default expressions for non-writable fields.
+
+Use this when a column should not be client-writable but still needs an explicit insert-time SQL default:
+
+```rust
+#[derive(GraphQLEntity, GraphQLOperations)]
+#[graphql_entity(table = "system_logs", plural = "SystemLogs")]
+pub struct SystemLog {
+    #[primary_key]
+    pub id: String,
+
+    pub message: String,
+
+    #[graphql_orm(write = false, default = "CURRENT_TIMESTAMP")]
+    pub created_at: i64,
+}
+```
+
+That default is used in both:
+
+- generated schema metadata for migrations
+- generated create inserts when the field is excluded from the GraphQL/app write surface
 
 ## Row Policy
 

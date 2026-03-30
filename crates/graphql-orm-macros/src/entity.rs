@@ -17,6 +17,7 @@ pub(crate) struct EntityMetadata {
     pub(crate) unique_composite: Vec<Vec<String>>,
     pub(crate) indexes: Vec<(bool, Vec<String>)>,
     pub(crate) serde_rename_all: Option<String>,
+    pub(crate) graphql_rename_fields: Option<String>,
 }
 
 pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<EntityMetadata> {
@@ -89,6 +90,15 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                 }
                 Ok(())
             })?;
+        } else if attr.path().is_ident("graphql") {
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("rename_fields") {
+                    let value = meta.value()?;
+                    let lit: syn::LitStr = value.parse()?;
+                    metadata.graphql_rename_fields = Some(lit.value());
+                }
+                Ok(())
+            })?;
         } else if attr.path().is_ident("serde") {
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("rename_all") {
@@ -152,6 +162,7 @@ pub(crate) struct FieldMetadata {
     /// Sync read transform: fn(T) -> T
     /// Applied after reading from the database row (e.g., decryption)
     pub(crate) transform_read: Option<String>,
+    pub(crate) default: Option<String>,
     /// If true, include in Create/Update inputs even if #[graphql(skip)] is set.
     /// Useful for fields that should be writable but never exposed in queries.
     pub(crate) input_only: bool,
@@ -187,6 +198,7 @@ impl Default for FieldMetadata {
             is_json_field: false,
             transform_write: None,
             transform_read: None,
+            default: None,
             input_only: false,
             read: true,
             write: true,
@@ -262,14 +274,14 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             meta.read_policy = Some(lit.value());
-                        } else if nested.path.is_ident("write_policy") {
-                            let value = nested.value()?;
-                            let lit: syn::LitStr = value.parse()?;
-                            meta.write_policy = Some(lit.value());
                         } else if nested.path.is_ident("db_column") {
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             meta.db_column = Some(lit.value());
+                        } else if nested.path.is_ident("default") {
+                            let value = nested.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            meta.default = Some(lit.value());
                         }
                         Ok(())
                     });
@@ -667,7 +679,10 @@ fn generate_entity_impl(
     let entity_meta = parse_entity_metadata(&input.attrs)?;
     let schema_only = schema_only_override || entity_meta.schema_only;
     let entity_name_lit = struct_name.to_string();
-    let rename_all_rule = entity_meta.serde_rename_all.as_deref();
+    let rename_all_rule = entity_meta
+        .graphql_rename_fields
+        .as_deref()
+        .or(entity_meta.serde_rename_all.as_deref());
     let read_policy = entity_meta
         .read_policy
         .as_ref()
@@ -805,15 +820,20 @@ fn generate_entity_impl(
         let is_pk = field_meta.is_primary_key;
         let is_unique = field_meta.unique;
         let sql_type = rust_type_to_sql_type(field_type, &field_meta);
-        let default_val = if rust_name == "created_at" || rust_name == "updated_at" {
-            Some(backend_current_epoch_expr())
-        } else {
-            None
-        };
+        let default_val = field_meta.default.clone().or_else(|| {
+            if rust_name == "created_at" || rust_name == "updated_at" {
+                Some(backend_current_epoch_expr().to_string())
+            } else {
+                None
+            }
+        });
 
         // Build column definition
         let default_expr = match default_val {
-            Some(d) => quote! { Some(#d) },
+            Some(d) => {
+                let lit = syn::LitStr::new(&d, proc_macro2::Span::call_site());
+                quote! { Some(#lit) }
+            }
             None => quote! { None },
         };
 

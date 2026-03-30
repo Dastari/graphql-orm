@@ -783,6 +783,7 @@ Supported naming inputs:
 - Rust field name as the default GraphQL field name, converted to camelCase
 - `serde(rename = "...")`
 - `serde(rename_all = "...")`
+- `#[graphql(rename_fields = "...")]` on the entity for a GraphQL-only casing override
 - explicit `#[graphql(name = "...")]` override when needed
 
 GraphQL naming contract:
@@ -797,6 +798,44 @@ Breaking change:
 
 - generated operation names and payload field names changed from PascalCase to camelCase
 - host apps should regenerate frontend codegen output and update handwritten GraphQL documents after upgrading
+
+Example GraphQL-only override:
+
+```rust
+#[derive(GraphQLEntity, GraphQLOperations)]
+#[graphql_entity(table = "gate_events", plural = "GateEvents")]
+#[graphql(rename_fields = "PascalCase")]
+pub struct GateEvent {
+    pub gate_name: String,
+    pub event_time: i64,
+}
+```
+
+The explicit GraphQL override is consulted first, then serde naming, then the default camelCase contract.
+
+## Generated Create Defaults
+
+Field metadata can now carry an explicit SQL default expression for generated create paths:
+
+```rust
+#[derive(GraphQLEntity, GraphQLOperations)]
+#[graphql_entity(table = "system_logs", plural = "SystemLogs")]
+pub struct SystemLog {
+    #[primary_key]
+    pub id: String,
+
+    pub message: String,
+
+    #[graphql_orm(write = false, default = "CURRENT_TIMESTAMP")]
+    pub created_at: i64,
+}
+```
+
+Current contract:
+
+- `default = "..."` records the SQL default expression in generated schema metadata
+- if the field is excluded from generated create inputs because `write = false`, the generated insert still emits that default expression
+- this is intended for server-managed or integration-managed columns that should exist on the row immediately without exposing a client write surface
 
 ## UUID-First Entities
 

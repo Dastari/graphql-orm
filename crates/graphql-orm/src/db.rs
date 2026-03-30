@@ -22,6 +22,16 @@ pub struct Database {
     event_senders: Arc<EventSenders>,
 }
 
+impl std::fmt::Debug for Database {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Database")
+            .field("pool", &"DbPool")
+            .field("has_mutation_hook", &self.mutation_hook.is_some())
+            .field("has_field_policy", &self.field_policy.is_some())
+            .finish()
+    }
+}
+
 impl Database {
     pub fn new(pool: DbPool) -> Self {
         Self {

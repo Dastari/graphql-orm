@@ -1,4 +1,5 @@
 #[derive(async_graphql::SimpleObject, Clone, Debug, Default)]
+#[graphql(rename_fields = "PascalCase")]
 pub struct PageInfo {
     pub has_next_page: bool,
     pub has_previous_page: bool,

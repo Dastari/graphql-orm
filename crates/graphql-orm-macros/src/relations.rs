@@ -90,7 +90,10 @@ pub(crate) fn generate_graphql_relations(
     };
 
     let entity_meta = parse_entity_metadata(&input.attrs)?;
-    let rename_all_rule = entity_meta.serde_rename_all.as_deref();
+    let rename_all_rule = entity_meta
+        .graphql_rename_fields
+        .as_deref()
+        .or(entity_meta.serde_rename_all.as_deref());
     let legacy_graphql_complex = has_graphql_complex(&input.attrs);
     let parsed_fields = collect_parsed_fields(fields.iter())?;
 
