@@ -246,7 +246,11 @@ async fn row_policy_filters_reads_and_write_transform_injects_server_fields()
             }",
         )
         .await;
-    assert!(second_created.errors.is_empty(), "{:?}", second_created.errors);
+    assert!(
+        second_created.errors.is_empty(),
+        "{:?}",
+        second_created.errors
+    );
 
     let actor_a_list = actor_a_schema
         .execute(

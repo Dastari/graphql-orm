@@ -44,6 +44,10 @@ That keeps the app-facing dependency as one crate even though the proc-macros li
 - `::graphql_orm::db::Database`
 - one `DataLoader<RelationLoader<T>>` per entity
 
+Generated entity subscriptions also use that same `Database` runtime automatically.
+Host apps do not need to register one `broadcast::Sender<SomeEntityChangedEvent>` per entity.
+If the runtime `Database` is missing from schema data, generated subscriptions now fail explicitly instead of returning an empty stream.
+
 Apps can then attach their own data:
 
 ```rust
@@ -678,13 +682,12 @@ These helpers:
 - reuse the generated Rust input/filter types
 - do not require `async_graphql::Context`
 - preserve runtime mutation hooks
-- emit the same typed entity change events used by subscriptions when a sender is registered on `Database`
+- emit the same typed entity change events used by subscriptions through the runtime-owned event transport on `Database`
 
 Typical setup:
 
 ```rust
 let database = graphql_orm::db::Database::new(pool);
-database.register_event_sender::<UserChangedEvent>(user_events_tx.clone());
 
 let updated = User::update_by_id(
     &database,
@@ -695,6 +698,8 @@ let updated = User::update_by_id(
     },
 ).await?;
 ```
+
+Manual `register_event_sender::<T>(...)` is optional now. Generated subscriptions and generated writes auto-wire against the runtime-owned transport lazily on first use.
 
 ## Migration Application Contract
 

@@ -126,8 +126,7 @@ async fn app_side_helpers_update_delete_and_emit_side_effects()
     let pool = setup_pool().await?;
     let hook = RecordingHook::default();
     let db = graphql_orm::db::Database::with_mutation_hook(pool.clone(), hook.clone());
-    let (tx, mut rx) = graphql_orm::tokio::sync::broadcast::channel::<UserChangedEvent>(32);
-    db.register_event_sender(tx);
+    let mut rx = db.ensure_event_sender::<UserChangedEvent>().subscribe();
 
     let alpha = User::insert(
         db.pool(),

@@ -8,6 +8,8 @@ struct EventSenders {
     senders: RwLock<HashMap<TypeId, Box<dyn Any + Send + Sync>>>,
 }
 
+const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 256;
+
 #[derive(Clone)]
 pub struct Database {
     pool: DbPool,
@@ -222,6 +224,32 @@ impl Database {
             .insert(TypeId::of::<T>(), Box::new(sender));
     }
 
+    pub fn ensure_event_sender<T>(&self) -> tokio::sync::broadcast::Sender<T>
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        if let Some(sender) = self.event_sender::<T>() {
+            return sender;
+        }
+
+        let mut senders = self
+            .event_senders
+            .senders
+            .write()
+            .expect("event sender lock poisoned");
+
+        if let Some(sender) = senders
+            .get(&TypeId::of::<T>())
+            .and_then(|sender| sender.downcast_ref::<tokio::sync::broadcast::Sender<T>>())
+        {
+            return sender.clone();
+        }
+
+        let (sender, _) = tokio::sync::broadcast::channel(DEFAULT_EVENT_CHANNEL_CAPACITY);
+        senders.insert(TypeId::of::<T>(), Box::new(sender.clone()));
+        sender
+    }
+
     pub fn event_sender<T>(&self) -> Option<tokio::sync::broadcast::Sender<T>>
     where
         T: Clone + Send + Sync + 'static,
@@ -239,9 +267,8 @@ impl Database {
     where
         T: Clone + Send + Sync + 'static,
     {
-        if let Some(sender) = self.event_sender::<T>() {
-            let _ = sender.send(event);
-        }
+        let sender = self.ensure_event_sender::<T>();
+        let _ = sender.send(event);
     }
 
     pub async fn report_post_commit_error(&self, error: String) {

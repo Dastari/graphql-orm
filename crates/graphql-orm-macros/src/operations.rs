@@ -1621,11 +1621,15 @@ pub(crate) fn generate_graphql_operations(
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #[graphql(name = "filter")] _filter: Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>,
             ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = #changed_event>> {
-                use ::graphql_orm::futures::stream::{self, StreamExt};
+                use ::graphql_orm::futures::StreamExt;
                 use ::graphql_orm::graphql::auth::AuthExt;
 
                 let _user = ctx.auth_user()?;
-                let db = ctx.data_unchecked::<::graphql_orm::db::Database>();
+                let db = ctx.data::<::graphql_orm::db::Database>().map_err(|_| {
+                    ::graphql_orm::async_graphql::Error::new(
+                        "graphql-orm Database runtime not registered; build the schema with schema_builder(database) or add Database to schema data",
+                    )
+                })?;
                 db.ensure_entity_access(
                     Some(ctx),
                     #entity_name_lit,
@@ -1634,36 +1638,16 @@ pub(crate) fn generate_graphql_operations(
                     ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlSubscription,
                 ).await?;
 
-                // Try to get the broadcast channel for this entity type
-                // If not available, return an empty stream (subscription not enabled)
-                let maybe_events = ctx
-                    .data_opt::<::graphql_orm::db::Database>()
-                    .and_then(|db| db.event_sender::<#changed_event>())
-                    .or_else(|| {
-                        ctx.data_opt::<::graphql_orm::tokio::sync::broadcast::Sender<#changed_event>>()
-                            .cloned()
-                    });
+                let rx = db.ensure_event_sender::<#changed_event>().subscribe();
 
-                Ok(match maybe_events {
-                    None => {
-                        // Return empty stream if no broadcast channel is configured
-                        stream::empty().left_stream()
+                use ::graphql_orm::tokio_stream::wrappers::BroadcastStream;
+
+                Ok(BroadcastStream::new(rx).filter_map(move |result| async move {
+                    match result {
+                        Ok(event) => Some(event),
+                        Err(_) => None,
                     }
-                    Some(events) => {
-                        let rx = events.subscribe();
-
-                        use ::graphql_orm::tokio_stream::wrappers::BroadcastStream;
-
-                        BroadcastStream::new(rx)
-                            .filter_map(move |result| async move {
-                                match result {
-                                    Ok(event) => Some(event),
-                                    Err(_) => None,
-                                }
-                            })
-                            .right_stream()
-                    }
-                })
+                }))
             }
         }
 

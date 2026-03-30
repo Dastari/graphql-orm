@@ -47,6 +47,10 @@ let schema = schema_builder(database)
 
 Apps can still attach extra app-specific data after `schema_builder(...)`. Auth, policy, and domain rules remain app concerns.
 
+Generated subscriptions are operational by default through the `Database` runtime injected by `schema_builder(database)`.
+Host apps do not need to register one broadcast sender per entity changed-event type.
+If the schema is built without `Database` in schema data, generated subscriptions now fail explicitly instead of returning a silent empty stream.
+
 Generated entity `create` / `update` / `delete` is the canonical write path for host apps.
 The intended model is:
 
@@ -65,7 +69,6 @@ Typical repository usage:
 
 ```rust
 let database = graphql_orm::db::Database::new(pool);
-database.register_event_sender::<UserChangedEvent>(user_events_tx.clone());
 
 let user = User::update_by_id(
     &database,
@@ -90,7 +93,8 @@ let revoked = RefreshToken::delete_where(
 ```
 
 This is the intended non-GraphQL persistence surface for host applications.
-It reuses the generated typed input/filter types and preserves runtime mutation hooks plus entity subscription fanout when a sender is registered on `Database`.
+It reuses the generated typed input/filter types and preserves runtime mutation hooks plus entity subscription fanout through the runtime-owned event transport on `Database`.
+Manual `register_event_sender::<T>(...)` is now optional and only needed if a host wants to override the default transport in tests or custom runtime wiring.
 
 ## Field Safety
 
