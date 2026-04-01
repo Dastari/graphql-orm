@@ -205,11 +205,10 @@ pub(crate) fn generate_graphql_operations(
         let is_timestamp = rust_name == "created_at" || rust_name == "updated_at";
         let include_in_create =
             (!meta.is_primary_key || !auto_generated_pk) && !is_timestamp && meta.write;
-        let include_generated_default_in_create =
-            (!meta.is_primary_key || !auto_generated_pk)
-                && !is_timestamp
-                && !meta.write
-                && meta.default.is_some();
+        let include_generated_default_in_create = (!meta.is_primary_key || !auto_generated_pk)
+            && !is_timestamp
+            && !meta.write
+            && meta.default.is_some();
         if include_in_create {
             let graphql_include_in_create =
                 (!meta.skip_input && !meta.is_json_field) || meta.input_only;

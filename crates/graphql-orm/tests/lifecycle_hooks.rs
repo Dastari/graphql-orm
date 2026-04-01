@@ -70,7 +70,7 @@ impl graphql_orm::graphql::orm::MutationHook for RecordingLifecycleHook {
                 .expect("hook lock poisoned")
                 .push(ObservedLifecycle {
                     phase: event.phase.clone(),
-                    action: event.action.clone(),
+                    action: event.action,
                     entity_name: event.entity_name,
                     actor: hook_ctx.actor::<String>(ctx),
                     before_title: before.map(|record| record.title.clone()),

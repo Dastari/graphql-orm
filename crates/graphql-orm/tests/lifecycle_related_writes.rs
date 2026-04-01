@@ -188,7 +188,6 @@ async fn hook_related_writes_are_transactional_for_app_and_graphql_paths()
         &created.id,
         UpdateRecordInput {
             title: Some("beta".to_string()),
-            ..Default::default()
         },
     )
     .await?
@@ -251,7 +250,6 @@ async fn hook_related_writes_are_transactional_for_app_and_graphql_paths()
         &rollback_record.id,
         UpdateRecordInput {
             title: Some("rollback-failed".to_string()),
-            ..Default::default()
         },
     )
     .await;

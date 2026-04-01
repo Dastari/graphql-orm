@@ -350,11 +350,10 @@ async fn row_policy_filters_reads_and_write_transform_injects_server_fields()
         ))
         .await;
     let actor_b_update_json = actor_b_update.data.into_json()?;
-    assert_eq!(
-        actor_b_update_json["updateScopedCollection"]["success"]
+    assert!(
+        !actor_b_update_json["updateScopedCollection"]["success"]
             .as_bool()
-            .unwrap_or(false),
-        false
+            .unwrap_or(false)
     );
 
     let repo_denied = ScopedCollection::update_by_id(
@@ -380,11 +379,10 @@ async fn row_policy_filters_reads_and_write_transform_injects_server_fields()
         .await;
     assert!(admin_delete.errors.is_empty(), "{:?}", admin_delete.errors);
     let admin_delete_json = admin_delete.data.into_json()?;
-    assert_eq!(
+    assert!(
         admin_delete_json["deleteScopedCollection"]["success"]
             .as_bool()
-            .unwrap_or(false),
-        true
+            .unwrap_or(false)
     );
     assert!(
         ScopedCollection::get(&pool, &graphql_orm::uuid::Uuid::parse_str(&created_id)?)

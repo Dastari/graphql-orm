@@ -93,7 +93,7 @@ impl graphql_orm::graphql::orm::MutationHook for CleanupHook {
         Box::pin(async move {
             use graphql_orm::graphql::orm::{ChangeAction, MutationPhase};
 
-            match (event.phase.clone(), event.action.clone(), event.entity_name) {
+            match (event.phase.clone(), event.action, event.entity_name) {
                 (MutationPhase::After, ChangeAction::Updated, "HookUser") => {
                     let before = event
                         .before::<HookUser>()?
