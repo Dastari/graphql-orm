@@ -27,6 +27,13 @@ pub enum MutationPhase {
     After,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteOrigin {
+    GraphqlMutation,
+    Repository,
+    InternalMutationHook,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MutationFieldValue {
     pub field: String,
@@ -231,6 +238,187 @@ where
     pub async fn count(self) -> Result<i64, sqlx::Error> {
         let query = self.query;
         query.count_on(self.hook_ctx.executor()).await
+    }
+
+    pub async fn exists(self) -> Result<bool, sqlx::Error> {
+        Ok(self.count().await? > 0)
+    }
+}
+
+pub struct WriteInputContext<'ctx, 'tx> {
+    graphql_ctx: Option<&'ctx async_graphql::Context<'ctx>>,
+    entity_name: &'static str,
+    origin: WriteOrigin,
+    database: Option<&'ctx crate::db::Database>,
+    mutation_ctx: Option<&'ctx mut MutationContext<'tx>>,
+}
+
+pub struct WriteQuery<'ctx, 'write, 'tx, T>
+where
+    T: DatabaseEntity + FromSqlRow + Clone + Send + Sync,
+{
+    write_ctx: &'ctx mut WriteInputContext<'write, 'tx>,
+    query: EntityQuery<T>,
+}
+
+impl<'ctx, 'write> WriteInputContext<'ctx, 'write> {
+    pub fn graphql(
+        db: &'ctx crate::db::Database,
+        ctx: &'ctx async_graphql::Context<'ctx>,
+        entity_name: &'static str,
+    ) -> Self {
+        Self {
+            graphql_ctx: Some(ctx),
+            entity_name,
+            origin: WriteOrigin::GraphqlMutation,
+            database: Some(db),
+            mutation_ctx: None,
+        }
+    }
+
+    pub fn repository(db: &'ctx crate::db::Database, entity_name: &'static str) -> Self {
+        Self {
+            graphql_ctx: None,
+            entity_name,
+            origin: WriteOrigin::Repository,
+            database: Some(db),
+            mutation_ctx: None,
+        }
+    }
+
+    pub fn internal(
+        entity_name: &'static str,
+        hook_ctx: &'ctx mut MutationContext<'write>,
+    ) -> Self {
+        Self {
+            graphql_ctx: None,
+            entity_name,
+            origin: WriteOrigin::InternalMutationHook,
+            database: None,
+            mutation_ctx: Some(hook_ctx),
+        }
+    }
+
+    pub fn graphql_ctx(&self) -> Option<&async_graphql::Context<'ctx>> {
+        self.graphql_ctx
+    }
+
+    pub fn entity_name(&self) -> &'static str {
+        self.entity_name
+    }
+
+    pub fn origin(&self) -> WriteOrigin {
+        self.origin
+    }
+
+    pub fn database(&self) -> &crate::db::Database {
+        if let Some(db) = self.database {
+            db
+        } else {
+            self.mutation_ctx
+                .as_deref()
+                .expect("write input context missing database and mutation context")
+                .database()
+        }
+    }
+
+    pub fn actor<T>(&self) -> Option<T>
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        self.graphql_ctx
+            .and_then(|ctx| ctx.data_opt::<T>())
+            .cloned()
+    }
+
+    pub fn auth_user(&self) -> async_graphql::Result<String> {
+        use crate::graphql::auth::AuthExt;
+
+        self.graphql_ctx
+            .ok_or_else(|| async_graphql::Error::new("missing GraphQL context for auth user"))?
+            .auth_user()
+    }
+
+    pub fn query<'a, T>(&'a mut self) -> WriteQuery<'a, 'ctx, 'write, T>
+    where
+        T: DatabaseEntity + FromSqlRow + Clone + Send + Sync,
+    {
+        WriteQuery {
+            write_ctx: self,
+            query: EntityQuery::new(),
+        }
+    }
+}
+
+impl<'ctx, 'write, 'tx, T> WriteQuery<'ctx, 'write, 'tx, T>
+where
+    T: DatabaseEntity + FromSqlRow + Clone + Send + Sync,
+{
+    pub fn filter<F>(mut self, filter: F) -> Self
+    where
+        F: DatabaseFilter,
+    {
+        self.query = self.query.filter(&filter);
+        self
+    }
+
+    pub fn order_by<O>(mut self, order: O) -> Self
+    where
+        O: DatabaseOrderBy,
+    {
+        self.query = self.query.order_by(&order);
+        self
+    }
+
+    pub fn default_order(mut self) -> Self {
+        self.query = self.query.default_order();
+        self
+    }
+
+    pub fn limit(mut self, limit: i64) -> Self {
+        let mut page = self.query.page.unwrap_or_default();
+        page.limit = Some(limit);
+        self.query.page = Some(page);
+        self
+    }
+
+    pub fn offset(mut self, offset: i64) -> Self {
+        let mut page = self.query.page.unwrap_or_default();
+        page.offset = Some(offset);
+        self.query.page = Some(page);
+        self
+    }
+
+    pub fn paginate(mut self, page: super::query::PageInput) -> Self {
+        self.query = self.query.paginate(&page);
+        self
+    }
+
+    pub async fn fetch_all(self) -> Result<Vec<T>, sqlx::Error> {
+        let query = self.query;
+        if let Some(hook_ctx) = self.write_ctx.mutation_ctx.as_deref_mut() {
+            query.fetch_all_on(hook_ctx.executor()).await
+        } else {
+            query.fetch_all(self.write_ctx.database()).await
+        }
+    }
+
+    pub async fn fetch_one(self) -> Result<Option<T>, sqlx::Error> {
+        let query = self.query;
+        if let Some(hook_ctx) = self.write_ctx.mutation_ctx.as_deref_mut() {
+            query.fetch_one_on(hook_ctx.executor()).await
+        } else {
+            query.fetch_one(self.write_ctx.database()).await
+        }
+    }
+
+    pub async fn count(self) -> Result<i64, sqlx::Error> {
+        let query = self.query;
+        if let Some(hook_ctx) = self.write_ctx.mutation_ctx.as_deref_mut() {
+            query.count_on(hook_ctx.executor()).await
+        } else {
+            query.count(self.write_ctx.database()).await
+        }
     }
 
     pub async fn exists(self) -> Result<bool, sqlx::Error> {
@@ -563,13 +751,44 @@ pub trait RowPolicy: Send + Sync {
 }
 
 pub trait WriteInputTransform: Send + Sync {
+    fn before_create_with_context<'a>(
+        &'a self,
+        write_ctx: &'a mut WriteInputContext<'_, '_>,
+        input: &'a mut (dyn std::any::Any + Send + Sync),
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>> {
+        self.before_create(
+            write_ctx.graphql_ctx(),
+            write_ctx.database(),
+            write_ctx.entity_name(),
+            input,
+        )
+    }
+
+    fn before_update_with_context<'a>(
+        &'a self,
+        write_ctx: &'a mut WriteInputContext<'_, '_>,
+        existing_row: Option<&'a (dyn std::any::Any + Send + Sync)>,
+        input: &'a mut (dyn std::any::Any + Send + Sync),
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>> {
+        self.before_update(
+            write_ctx.graphql_ctx(),
+            write_ctx.database(),
+            write_ctx.entity_name(),
+            existing_row,
+            input,
+        )
+    }
+
     fn before_create<'a>(
         &'a self,
         ctx: Option<&'a async_graphql::Context<'_>>,
         db: &'a crate::db::Database,
         entity_name: &'static str,
         input: &'a mut (dyn std::any::Any + Send + Sync),
-    ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>>;
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>> {
+        let _ = (ctx, db, entity_name, input);
+        Box::pin(async { Ok(()) })
+    }
 
     fn before_update<'a>(
         &'a self,
@@ -578,7 +797,10 @@ pub trait WriteInputTransform: Send + Sync {
         entity_name: &'static str,
         existing_row: Option<&'a (dyn std::any::Any + Send + Sync)>,
         input: &'a mut (dyn std::any::Any + Send + Sync),
-    ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>>;
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>> {
+        let _ = (ctx, db, entity_name, existing_row, input);
+        Box::pin(async { Ok(()) })
+    }
 }
 
 pub fn mutation_changes(fields: &[&str], values: &[SqlValue]) -> Vec<MutationFieldValue> {

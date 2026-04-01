@@ -210,8 +210,16 @@ pub(crate) fn generate_graphql_operations(
             && !meta.write
             && meta.default.is_some();
         if include_in_create {
-            let graphql_include_in_create =
-                (!meta.skip_input && !meta.is_json_field) || meta.input_only;
+            let graphql_include_in_create = !meta.skip_input || meta.input_only;
+            let graphql_create_field_type = if meta.is_json_field {
+                if let Some(inner_type) = option_inner_type(field_type) {
+                    quote! { Option<::graphql_orm::async_graphql::Json<#inner_type>> }
+                } else {
+                    quote! { ::graphql_orm::async_graphql::Json<#field_type> }
+                }
+            } else {
+                quote! { #field_type }
+            };
             let create_policy_check = if let Some(policy_key) = &meta.write_policy {
                 quote! {
                     db.ensure_writable_field(
@@ -234,11 +242,23 @@ pub(crate) fn generate_graphql_operations(
             if graphql_include_in_create {
                 graphql_create_input_fields.push(quote! {
                     #[graphql(name = #graphql_name)]
-                    pub #field_name: #field_type,
+                    pub #field_name: #graphql_create_field_type,
                 });
-                create_input_from_graphql_fields.push(quote! {
-                    #field_name: input.#field_name,
-                });
+                if meta.is_json_field {
+                    if option_inner_type(field_type).is_some() {
+                        create_input_from_graphql_fields.push(quote! {
+                            #field_name: input.#field_name.map(|value| value.0),
+                        });
+                    } else {
+                        create_input_from_graphql_fields.push(quote! {
+                            #field_name: input.#field_name.0,
+                        });
+                    }
+                } else {
+                    create_input_from_graphql_fields.push(quote! {
+                        #field_name: input.#field_name,
+                    });
+                }
             } else {
                 create_input_from_graphql_fields.push(quote! {
                     #field_name: ::std::default::Default::default(),
@@ -430,12 +450,17 @@ pub(crate) fn generate_graphql_operations(
             let is_already_optional = is_option_type(field_type);
             let update_type = quote! { Option<#field_type> };
             let graphql_update_type = if let Some(inner_type) = option_inner_type(field_type) {
-                quote! { ::graphql_orm::async_graphql::MaybeUndefined<#inner_type> }
+                if meta.is_json_field {
+                    quote! { ::graphql_orm::async_graphql::MaybeUndefined<::graphql_orm::async_graphql::Json<#inner_type>> }
+                } else {
+                    quote! { ::graphql_orm::async_graphql::MaybeUndefined<#inner_type> }
+                }
+            } else if meta.is_json_field {
+                quote! { Option<::graphql_orm::async_graphql::Json<#field_type>> }
             } else {
                 quote! { #update_type }
             };
-            let graphql_include_in_update =
-                (!meta.skip_input && !meta.is_json_field) || meta.input_only;
+            let graphql_include_in_update = !meta.skip_input || meta.input_only;
             update_input_fields.push(quote! {
                 pub #field_name: #update_type,
             });
@@ -444,7 +469,19 @@ pub(crate) fn generate_graphql_operations(
                     #[graphql(name = #graphql_name)]
                     pub #field_name: #graphql_update_type,
                 });
-                if is_already_optional {
+                if meta.is_json_field && is_already_optional {
+                    update_input_from_graphql_fields.push(quote! {
+                        #field_name: match input.#field_name {
+                            ::graphql_orm::async_graphql::MaybeUndefined::Value(value) => Some(Some(value.0)),
+                            ::graphql_orm::async_graphql::MaybeUndefined::Null => Some(None),
+                            ::graphql_orm::async_graphql::MaybeUndefined::Undefined => None,
+                        },
+                    });
+                } else if meta.is_json_field {
+                    update_input_from_graphql_fields.push(quote! {
+                        #field_name: input.#field_name.map(|value| value.0),
+                    });
+                } else if is_already_optional {
                     update_input_from_graphql_fields.push(quote! {
                         #field_name: input.#field_name.into(),
                     });
@@ -1751,9 +1788,13 @@ pub(crate) fn generate_graphql_operations(
             ) -> Result<Self, ::graphql_orm::sqlx::Error> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, SqlValue};
 
-                hook_ctx.database().run_before_create(
-                    None,
+                let db = hook_ctx.database().clone();
+                let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(
                     #entity_name_lit,
+                    hook_ctx,
+                );
+                db.run_before_create_with_context(
+                    &mut write_ctx,
                     &mut input as &mut (dyn ::std::any::Any + Send + Sync),
                 ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
                 #created_pk_init
@@ -1825,9 +1866,13 @@ pub(crate) fn generate_graphql_operations(
                 let Some(current_entity) = current_entity else {
                     return Ok(None);
                 };
-                hook_ctx.database().run_before_update(
-                    None,
+                let db = hook_ctx.database().clone();
+                let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(
                     #entity_name_lit,
+                    hook_ctx,
+                );
+                db.run_before_update_with_context(
+                    &mut write_ctx,
                     Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
                     &mut input as &mut (dyn ::std::any::Any + Send + Sync),
                 ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
@@ -1929,9 +1974,13 @@ pub(crate) fn generate_graphql_operations(
                     return Ok(0);
                 }
                 if let Some(first_entity) = matched_entities.first() {
-                    hook_ctx.database().run_before_update(
-                        None,
+                    let db = hook_ctx.database().clone();
+                    let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(
                         #entity_name_lit,
+                        hook_ctx,
+                    );
+                    db.run_before_update_with_context(
+                        &mut write_ctx,
                         Some(first_entity as &(dyn ::std::any::Any + Send + Sync)),
                         &mut input as &mut (dyn ::std::any::Any + Send + Sync),
                     ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;

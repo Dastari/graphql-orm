@@ -474,8 +474,22 @@ impl Database {
         entity_name: &'static str,
         input: &mut (dyn Any + Send + Sync),
     ) -> async_graphql::Result<()> {
+        let mut write_ctx = if let Some(ctx) = ctx {
+            crate::graphql::orm::WriteInputContext::graphql(self, ctx, entity_name)
+        } else {
+            crate::graphql::orm::WriteInputContext::repository(self, entity_name)
+        };
+        self.run_before_create_with_context(&mut write_ctx, input)
+            .await
+    }
+
+    pub async fn run_before_create_with_context(
+        &self,
+        write_ctx: &mut crate::graphql::orm::WriteInputContext<'_, '_>,
+        input: &mut (dyn Any + Send + Sync),
+    ) -> async_graphql::Result<()> {
         if let Some(transform) = &self.write_input_transform {
-            transform.before_create(ctx, self, entity_name, input).await
+            transform.before_create_with_context(write_ctx, input).await
         } else {
             Ok(())
         }
@@ -488,9 +502,24 @@ impl Database {
         existing_row: Option<&(dyn Any + Send + Sync)>,
         input: &mut (dyn Any + Send + Sync),
     ) -> async_graphql::Result<()> {
+        let mut write_ctx = if let Some(ctx) = ctx {
+            crate::graphql::orm::WriteInputContext::graphql(self, ctx, entity_name)
+        } else {
+            crate::graphql::orm::WriteInputContext::repository(self, entity_name)
+        };
+        self.run_before_update_with_context(&mut write_ctx, existing_row, input)
+            .await
+    }
+
+    pub async fn run_before_update_with_context(
+        &self,
+        write_ctx: &mut crate::graphql::orm::WriteInputContext<'_, '_>,
+        existing_row: Option<&(dyn Any + Send + Sync)>,
+        input: &mut (dyn Any + Send + Sync),
+    ) -> async_graphql::Result<()> {
         if let Some(transform) = &self.write_input_transform {
             transform
-                .before_update(ctx, self, entity_name, existing_row, input)
+                .before_update_with_context(write_ctx, existing_row, input)
                 .await
         } else {
             Ok(())

@@ -221,6 +221,8 @@ database.set_write_input_transform(my_transform);
 Runtime API:
 
 - `graphql_orm::graphql::orm::WriteInputTransform`
+- `graphql_orm::graphql::orm::WriteInputContext`
+- `graphql_orm::graphql::orm::WriteOrigin`
 - `Database::with_write_input_transform(...)`
 - `Database::set_write_input_transform(...)`
 
@@ -241,8 +243,73 @@ Use it to:
 - default status/visibility
 - normalize values
 - override forbidden client-supplied values
+- validate related rows through transaction-aware reads
+
+Generated write origins are explicit:
+
+- `WriteOrigin::GraphqlMutation`
+- `WriteOrigin::Repository`
+- `WriteOrigin::InternalMutationHook`
+
+That means nested `MutationContext::insert/update/delete` writes no longer show up as a generic `ctx.is_none()` case. Host transforms can branch on `write_ctx.origin()` directly.
+
+`WriteInputContext` also provides transaction-aware validation reads:
+
+- `write_ctx.query::<Entity>()...fetch_one().await?`
+- `write_ctx.query::<Entity>()...exists().await?`
+- `write_ctx.query::<Entity>()...count().await?`
+
+When a write is running inside `MutationContext`, those reads stay on the active SQLite/Postgres transaction and can see rows created earlier in the same transaction.
 
 Because the transform runs on the generated Rust input structs, clients do not need to send server-owned fields in GraphQL mutation documents.
+
+Trusted internal example:
+
+```rust
+impl graphql_orm::graphql::orm::WriteInputTransform for MyTransform {
+    fn before_create_with_context<'a>(
+        &'a self,
+        write_ctx: &'a mut graphql_orm::graphql::orm::WriteInputContext<'_, '_>,
+        input: &'a mut (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<()>> {
+        Box::pin(async move {
+            match (write_ctx.entity_name(), write_ctx.origin()) {
+                ("Collection", graphql_orm::graphql::orm::WriteOrigin::GraphqlMutation) => {
+                    let actor_id = write_ctx
+                        .actor::<String>()
+                        .ok_or_else(|| async_graphql::Error::new("missing actor"))?;
+                    let input = input
+                        .downcast_mut::<CreateCollectionInput>()
+                        .ok_or_else(|| async_graphql::Error::new("unexpected input type"))?;
+                    input.owner_user_id = actor_id;
+                }
+                ("CollectionMembership", graphql_orm::graphql::orm::WriteOrigin::InternalMutationHook) => {
+                    let input = input
+                        .downcast_mut::<CreateCollectionMembershipInput>()
+                        .ok_or_else(|| async_graphql::Error::new("unexpected input type"))?;
+                    let exists = write_ctx
+                        .query::<Collection>()
+                        .filter(CollectionWhereInput {
+                            id: Some(UuidFilter {
+                                eq: Some(input.collection_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .exists()
+                        .await
+                        .map_err(|error| async_graphql::Error::new(error.to_string()))?;
+                    if !exists {
+                        return Err(async_graphql::Error::new("collection not visible in transaction"));
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        })
+    }
+}
+```
 
 Example clear mutation:
 
@@ -669,6 +736,7 @@ Behavior:
 - entity fields keep their real Rust types such as structs, `Vec<T>`, maps, and `Option<T>`
 - generated insert/get/query/update helpers serialize and deserialize automatically through serde
 - host apps do not need to manually stringify or parse JSON for routine persistence
+- generated GraphQL create/update inputs can write JSON-backed fields through the standard `JSON` scalar
 - SQLite stores JSON-backed fields as `TEXT`
 - Postgres stores JSON-backed fields as `JSONB`
 
@@ -676,7 +744,64 @@ First-pass limits:
 
 - JSON fields are not filterable or orderable by default
 - rich JSON-path query/filter/order support is not implemented yet
-- if a JSON field should stay out of generated GraphQL, keep using field controls like `read = false`, `private`, `filter = false`, `order = false`, and `subscribe = false`
+- if a JSON field should stay out of generated GraphQL output while remaining writable, use field controls like `read = false`, `filter = false`, `order = false`, and `subscribe = false`
+- if a JSON field should stay out of generated GraphQL entirely, keep using `private`
+
+Generated GraphQL writes now work for JSON-backed fields through the normal mutations:
+
+```graphql
+mutation UpdateRecord($id: UUID!, $input: UpdateRecordInput!) {
+  updateRecord(id: $id, input: $input) {
+    success
+    record {
+      id
+      slug
+    }
+  }
+}
+```
+
+with variables like:
+
+```json
+{
+  "id": "8b87d564-15b5-4a0f-8bca-3fdbe0b1de41",
+  "input": {
+    "content": { "title": "Updated", "body": "Body" },
+    "tags": [{ "label": "published" }],
+    "metadata": null
+  }
+}
+```
+
+## Recursive Relations
+
+For self-referential live entities, the supported pattern is:
+
+- use `Option<Box<Self>>` for singular parent/self links
+- use `Vec<Self>` or `Vec<Box<Self>>` for child collections when needed
+- keep the relation field `#[graphql(skip)]` and let `GraphQLRelations` expose the resolver
+
+Example:
+
+```rust
+#[derive(GraphQLEntity, GraphQLRelations, GraphQLOperations, SimpleObject, Clone, Debug)]
+#[graphql_entity(table = "places", plural = "Places", default_sort = "name ASC")]
+#[graphql(complex)]
+pub struct Place {
+    #[primary_key]
+    pub id: String,
+
+    pub name: String,
+    pub parent_id: Option<String>,
+
+    #[graphql(skip)]
+    #[relation(target = "Place", from = "parent_id", to = "id")]
+    pub parent_place: Option<Box<Place>>,
+}
+```
+
+This keeps the Rust layout safe for recursive entities while preserving generated relation loading and GraphQL traversal such as `parentPlace { ... }`.
 
 ## Persisted Column Names
 

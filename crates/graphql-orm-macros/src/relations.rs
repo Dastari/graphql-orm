@@ -16,6 +16,7 @@ struct RelationDef {
     source_field_ty: syn::Type,
     source_supports_dataloader: bool,
     on_delete: proc_macro2::TokenStream,
+    storage_kind: RelationStorageKind,
 }
 
 #[derive(Copy, Clone)]
@@ -25,6 +26,49 @@ enum RelationValueKind {
     Int,
     Float,
     Bool,
+}
+
+#[derive(Copy, Clone)]
+enum RelationStorageKind {
+    Direct,
+    BoxedSingle,
+    BoxedMany,
+}
+
+fn relation_storage_kind(ty: &syn::Type, is_multiple: bool) -> RelationStorageKind {
+    match ty {
+        syn::Type::Path(type_path) => {
+            let Some(segment) = type_path.path.segments.last() else {
+                return RelationStorageKind::Direct;
+            };
+            match segment.ident.to_string().as_str() {
+                "Option" if !is_multiple => {
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                        && let Some(syn::GenericArgument::Type(syn::Type::Path(inner_path))) =
+                            args.args.first()
+                        && let Some(inner_segment) = inner_path.path.segments.last()
+                        && inner_segment.ident == "Box"
+                    {
+                        return RelationStorageKind::BoxedSingle;
+                    }
+                    RelationStorageKind::Direct
+                }
+                "Vec" if is_multiple => {
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                        && let Some(syn::GenericArgument::Type(syn::Type::Path(inner_path))) =
+                            args.args.first()
+                        && let Some(inner_segment) = inner_path.path.segments.last()
+                        && inner_segment.ident == "Box"
+                    {
+                        return RelationStorageKind::BoxedMany;
+                    }
+                    RelationStorageKind::Direct
+                }
+                _ => RelationStorageKind::Direct,
+            }
+        }
+        _ => RelationStorageKind::Direct,
+    }
 }
 
 fn classify_relation_value_type(ty: &syn::Type) -> Option<(RelationValueKind, bool)> {
@@ -160,6 +204,7 @@ pub(crate) fn generate_graphql_relations(
         let is_multiple = meta.relation_multiple;
         let on_delete =
             relation_delete_policy_tokens(meta.relation_on_delete.as_deref(), field.span())?;
+        let storage_kind = relation_storage_kind(&field.ty, is_multiple);
 
         relations.push(RelationDef {
             field_name,
@@ -171,6 +216,7 @@ pub(crate) fn generate_graphql_relations(
             source_field_ty,
             source_supports_dataloader,
             on_delete,
+            storage_kind,
         });
     }
 
@@ -215,6 +261,7 @@ pub(crate) fn generate_graphql_relations(
         let source_field = syn::Ident::new(source_column, struct_name.span());
         let source_supports_dataloader = r.source_supports_dataloader;
         let source_ty = &r.source_field_ty;
+        let storage_kind = r.storage_kind;
 
         let (source_kind, source_is_option) =
             classify_relation_value_type(source_ty).ok_or_else(|| {
@@ -335,6 +382,22 @@ pub(crate) fn generate_graphql_relations(
         };
 
         if r.is_multiple {
+            let preloaded_entities = match storage_kind {
+                RelationStorageKind::BoxedMany => {
+                    quote! {
+                        let entities: Vec<#target_type> = self.#field_name
+                            .iter()
+                            .cloned()
+                            .map(|entity| *entity)
+                            .collect();
+                    }
+                }
+                _ => {
+                    quote! {
+                        let entities = self.#field_name.clone();
+                    }
+                }
+            };
             // One-to-many relation with smart batching
             Ok(quote! {
                 /// Get related #graphql_name with optional filtering, sorting, and pagination.
@@ -363,7 +426,7 @@ pub(crate) fn generate_graphql_relations(
                     ).await?;
 
                     if where_input.is_none() && order_by.is_none() && page.is_none() && !self.#field_name.is_empty() {
-                        let entities = self.#field_name.clone();
+                        #preloaded_entities
                         let edges: Vec<#edge_type> = entities
                             .into_iter()
                             .enumerate()
@@ -470,6 +533,18 @@ pub(crate) fn generate_graphql_relations(
                 }
             })
         } else {
+            let preloaded_single = match storage_kind {
+                RelationStorageKind::BoxedSingle => {
+                    quote! {
+                        return Ok(self.#field_name.clone().map(|entity| *entity));
+                    }
+                }
+                _ => {
+                    quote! {
+                        return Ok(self.#field_name.clone());
+                    }
+                }
+            };
             // Single relation (many-to-one) - uses DataLoader when the source key supports it
             Ok(quote! {
                 /// Get related #graphql_name
@@ -481,7 +556,7 @@ pub(crate) fn generate_graphql_relations(
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, SqlValue};
 
                     if self.#field_name.is_some() {
-                        return Ok(self.#field_name.clone());
+                        #preloaded_single
                     }
 
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database>();
@@ -532,6 +607,7 @@ pub(crate) fn generate_graphql_relations(
             let source_field = syn::Ident::new(source_column, struct_name.span());
             let target_type = syn::Ident::new(&r.target_type_str, struct_name.span());
             let source_ty = &r.source_field_ty;
+            let storage_kind = r.storage_kind;
 
             let (source_kind, source_is_option) =
                 classify_relation_value_type(source_ty).ok_or_else(|| {
@@ -584,37 +660,61 @@ pub(crate) fn generate_graphql_relations(
 
             let assign_expr = if source_is_option {
                 if r.is_multiple {
+                    let assign_value = match storage_kind {
+                        RelationStorageKind::BoxedMany => {
+                            quote! { grouped.remove(&relation_key).unwrap_or_default().into_iter().map(Box::new).collect() }
+                        }
+                        _ => quote! { grouped.remove(&relation_key).unwrap_or_default() },
+                    };
                     quote! {
                         if let Some(value) = entity.#source_field.as_ref() {
                             let value = value;
                             let relation_key = #key_string_expr;
-                            entity.#field_name = grouped.remove(&relation_key).unwrap_or_default();
+                            entity.#field_name = #assign_value;
                         } else {
                             entity.#field_name = Vec::new();
                         }
                     }
                 } else {
+                    let assign_value = match storage_kind {
+                        RelationStorageKind::BoxedSingle => {
+                            quote! { grouped.remove(&relation_key).map(Box::new) }
+                        }
+                        _ => quote! { grouped.remove(&relation_key) },
+                    };
                     quote! {
                         if let Some(value) = entity.#source_field.as_ref() {
                             let value = value;
                             let relation_key = #key_string_expr;
-                            entity.#field_name = grouped.remove(&relation_key);
+                            entity.#field_name = #assign_value;
                         } else {
                             entity.#field_name = None;
                         }
                     }
                 }
             } else if r.is_multiple {
+                let assign_value = match storage_kind {
+                    RelationStorageKind::BoxedMany => {
+                        quote! { grouped.remove(&relation_key).unwrap_or_default().into_iter().map(Box::new).collect() }
+                    }
+                    _ => quote! { grouped.remove(&relation_key).unwrap_or_default() },
+                };
                 quote! {
                     let value = &entity.#source_field;
                     let relation_key = #key_string_expr;
-                    entity.#field_name = grouped.remove(&relation_key).unwrap_or_default();
+                    entity.#field_name = #assign_value;
                 }
             } else {
+                let assign_value = match storage_kind {
+                    RelationStorageKind::BoxedSingle => {
+                        quote! { grouped.remove(&relation_key).map(Box::new) }
+                    }
+                    _ => quote! { grouped.remove(&relation_key) },
+                };
                 quote! {
                     let value = &entity.#source_field;
                     let relation_key = #key_string_expr;
-                    entity.#field_name = grouped.remove(&relation_key);
+                    entity.#field_name = #assign_value;
                 }
             };
 

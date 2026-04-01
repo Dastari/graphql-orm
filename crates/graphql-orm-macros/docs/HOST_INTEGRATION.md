@@ -180,6 +180,19 @@ Runtime surface:
 
 ```rust
 pub trait WriteInputTransform: Send + Sync {
+    fn before_create_with_context<'a>(
+        &'a self,
+        write_ctx: &'a mut WriteInputContext<'_, '_>,
+        input: &'a mut (dyn std::any::Any + Send + Sync),
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>>;
+
+    fn before_update_with_context<'a>(
+        &'a self,
+        write_ctx: &'a mut WriteInputContext<'_, '_>,
+        existing_row: Option<&'a (dyn std::any::Any + Send + Sync)>,
+        input: &'a mut (dyn std::any::Any + Send + Sync),
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>>;
+
     fn before_create<'a>(
         &'a self,
         ctx: Option<&'a async_graphql::Context<'_>>,
@@ -198,6 +211,22 @@ pub trait WriteInputTransform: Send + Sync {
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>>;
 }
 ```
+
+Additional runtime types:
+
+- `graphql_orm::graphql::orm::WriteInputContext`
+- `graphql_orm::graphql::orm::WriteOrigin`
+
+`WriteInputContext` is the preferred extension surface for new host transforms because it carries:
+
+- the explicit write origin:
+  - `GraphqlMutation`
+  - `Repository`
+  - `InternalMutationHook`
+- optional actor access through `write_ctx.actor::<T>()`
+- transaction-aware validation reads through `write_ctx.query::<Entity>()`
+
+That means nested `MutationContext::insert/update/delete` writes no longer need host apps to infer trust from `ctx.is_none()`. They arrive as `WriteOrigin::InternalMutationHook`.
 
 Use this to:
 
@@ -231,33 +260,53 @@ mutation ClearCollectionCover($id: ID!) {
 }
 ```
 
-Example CreateCollection-style actor injection:
+Example CreateCollection-style actor injection and internal validation:
 
 ```rust
 impl graphql_orm::graphql::orm::WriteInputTransform for MyTransform {
-    fn before_create<'a>(
+    fn before_create_with_context<'a>(
         &'a self,
-        ctx: Option<&'a async_graphql::Context<'_>>,
-        _db: &'a graphql_orm::db::Database,
-        entity_name: &'static str,
+        write_ctx: &'a mut graphql_orm::graphql::orm::WriteInputContext<'_, '_>,
         input: &'a mut (dyn std::any::Any + Send + Sync),
     ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<()>> {
         Box::pin(async move {
-            if entity_name == "Collection" {
-                let actor_id = ctx
-                    .and_then(|ctx| ctx.data_opt::<String>())
-                    .cloned()
-                    .ok_or_else(|| async_graphql::Error::new("missing actor"))?;
-                let input = input
-                    .downcast_mut::<CreateCollectionInput>()
-                    .ok_or_else(|| async_graphql::Error::new("unexpected input type"))?;
-                input.owner_user_id = actor_id;
+            match (write_ctx.entity_name(), write_ctx.origin()) {
+                ("Collection", graphql_orm::graphql::orm::WriteOrigin::GraphqlMutation) => {
+                    let actor_id = write_ctx
+                        .actor::<String>()
+                        .ok_or_else(|| async_graphql::Error::new("missing actor"))?;
+                    let input = input
+                        .downcast_mut::<CreateCollectionInput>()
+                        .ok_or_else(|| async_graphql::Error::new("unexpected input type"))?;
+                    input.owner_user_id = actor_id;
+                }
+                ("CollectionMembership", graphql_orm::graphql::orm::WriteOrigin::InternalMutationHook) => {
+                    let input = input
+                        .downcast_mut::<CreateCollectionMembershipInput>()
+                        .ok_or_else(|| async_graphql::Error::new("unexpected input type"))?;
+                    let exists = write_ctx
+                        .query::<Collection>()
+                        .filter(CollectionWhereInput {
+                            id: Some(UuidFilter {
+                                eq: Some(input.collection_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .exists()
+                        .await
+                        .map_err(|error| async_graphql::Error::new(error.to_string()))?;
+                    if !exists {
+                        return Err(async_graphql::Error::new("collection not visible in transaction"));
+                    }
+                }
+                _ => {}
             }
             Ok(())
         })
     }
 
-    fn before_update<'a>(...) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<()>> {
+    fn before_update_with_context<'a>(...) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<()>> {
         todo!()
     }
 }
@@ -906,6 +955,7 @@ Behavior:
 
 - generated insert/get/query/update helpers serialize and deserialize through serde automatically
 - app-side repository code uses the real Rust field type instead of `String`
+- generated GraphQL create/update inputs accept JSON-backed fields through the standard `JSON` scalar
 - SQLite stores JSON-backed fields as `TEXT`
 - Postgres stores JSON-backed fields as `JSONB`
 
@@ -913,7 +963,50 @@ First-pass limits:
 
 - JSON fields are not filterable or orderable by default
 - nested JSON-path query support is not implemented yet
-- for generated GraphQL surfaces, the recommended first pass is to keep JSON fields non-readable or private unless the field type already has the GraphQL representation you want
+- for generated GraphQL output, the recommended first pass is to keep JSON fields non-readable or private unless the field type already has the GraphQL representation you want
+
+Generated GraphQL writes now work without handwritten wrapper resolvers. Example mutation variables:
+
+```json
+{
+  "input": {
+    "slug": "record-graphql",
+    "identity": { "subject": "rec-1", "namespace": "tenant-a" },
+    "content": { "title": "GraphQL Title", "body": "GraphQL Body" },
+    "tags": [{ "label": "graphql" }],
+    "metadata": null
+  }
+}
+```
+
+## Recursive Live Relations
+
+For self-referential live entities, the supported pattern is:
+
+- singular parent/self link: `Option<Box<Self>>`
+- child collections: `Vec<Self>` or `Vec<Box<Self>>`
+- keep the relation field `#[graphql(skip)]` and expose it through `GraphQLRelations`
+
+Example:
+
+```rust
+#[derive(GraphQLEntity, GraphQLRelations, GraphQLOperations, SimpleObject, Clone, Debug)]
+#[graphql_entity(table = "places", plural = "Places", default_sort = "name ASC")]
+#[graphql(complex)]
+pub struct Place {
+    #[primary_key]
+    pub id: String,
+
+    pub name: String,
+    pub parent_id: Option<String>,
+
+    #[graphql(skip)]
+    #[relation(target = "Place", from = "parent_id", to = "id")]
+    pub parent_place: Option<Box<Place>>,
+}
+```
+
+This keeps the Rust layout safe for recursive entities while preserving generated relation loading and nested GraphQL traversal like `parentPlace { id name }`.
 
 The runtime and macros treat app-side typed inputs as the source of truth. Generated GraphQL mutation inputs are a separate layer, so hidden JSON fields remain usable through app-side `Create<Entity>Input` / `Update<Entity>Input` without forcing GraphQL to expose raw JSON strings.
 

@@ -1,4 +1,5 @@
 use graphql_orm::prelude::*;
+use std::sync::OnceLock;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Default)]
 struct Identity {
@@ -45,7 +46,7 @@ struct Record {
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
     pub tags: Vec<Tag>,
 
-    #[graphql_orm(json, private)]
+    #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
     pub metadata: Option<RecordMetadata>,
 
     #[filterable(type = "number")]
@@ -95,9 +96,15 @@ fn expected_json_sql_type() -> &'static str {
     "JSONB"
 }
 
+fn test_mutex() -> &'static tokio::sync::Mutex<()> {
+    static TEST_MUTEX: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    TEST_MUTEX.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 #[tokio::test]
 async fn typed_json_fields_round_trip_through_runtime_and_migrations()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = test_mutex().lock().await;
     use graphql_orm::graphql::orm::{
         DatabaseBackend, Entity, MigrationRunner, build_migration_plan, introspect_schema,
     };
@@ -149,10 +156,11 @@ async fn typed_json_fields_round_trip_through_runtime_and_migrations()
 
     let schema = schema_builder(database.clone()).finish();
     let sdl = schema.sdl();
-    assert!(!sdl.contains("identity:"));
-    assert!(!sdl.contains("content:"));
-    assert!(!sdl.contains("tags:"));
-    assert!(!sdl.contains("metadata:"));
+    assert!(sdl.contains("input CreateRecordInput"));
+    assert!(sdl.contains("identity: JSON!"));
+    assert!(sdl.contains("content: JSON!"));
+    assert!(sdl.contains("tags: JSON!"));
+    assert!(sdl.contains("metadata: JSON"));
 
     let created = Record::insert(
         &pool,
@@ -273,6 +281,133 @@ async fn typed_json_fields_round_trip_through_runtime_and_migrations()
             .expect("json column should exist");
         assert_eq!(column.sql_type.to_uppercase(), expected_json_sql_type());
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn typed_json_fields_are_writable_through_generated_graphql_mutations()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = test_mutex().lock().await;
+    use async_graphql::{Request, Variables};
+    use graphql_orm::graphql::orm::{DatabaseBackend, Entity, Migration, build_migration_plan};
+
+    let pool = setup_pool().await?;
+    let database = graphql_orm::db::Database::new(pool.clone());
+    let target_schema =
+        graphql_orm::graphql::orm::SchemaModel::from_entities(&[<Record as Entity>::metadata()]);
+    let version = format!(
+        "2026040102_json_graphql_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+    let plan = build_migration_plan(
+        if cfg!(feature = "postgres") {
+            DatabaseBackend::Postgres
+        } else {
+            DatabaseBackend::Sqlite
+        },
+        &graphql_orm::graphql::orm::SchemaModel { tables: Vec::new() },
+        &target_schema,
+    );
+    let statements: &'static [&'static str] = Box::leak(
+        plan.statements
+            .iter()
+            .map(|statement| Box::leak(statement.clone().into_boxed_str()) as &'static str)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    );
+    database
+        .apply_migrations(&[Migration {
+            version: Box::leak(version.into_boxed_str()),
+            description: "json_fields_graphql_write_contract",
+            statements,
+        }])
+        .await?;
+
+    let schema = schema_builder(database.clone())
+        .data("editor-1".to_string())
+        .finish();
+    let sdl = schema.sdl();
+    assert!(sdl.contains("input CreateRecordInput"));
+    assert!(sdl.contains("identity: JSON!"));
+    assert!(sdl.contains("content: JSON!"));
+    assert!(sdl.contains("tags: JSON!"));
+    assert!(sdl.contains("metadata: JSON"));
+
+    let created = schema
+        .execute(
+            Request::new(
+                "mutation CreateRecord($input: CreateRecordInput!) {
+                    createRecord(input: $input) {
+                        success
+                        record { id slug }
+                    }
+                }",
+            )
+            .variables(Variables::from_json(serde_json::json!({
+                "input": {
+                    "slug": "record-graphql",
+                    "identity": { "subject": "rec-1", "namespace": "tenant-a" },
+                    "content": { "title": "GraphQL Title", "body": "GraphQL Body" },
+                    "tags": [{ "label": "graphql" }, { "label": "json" }],
+                    "metadata": { "revision": 1, "published": false }
+                }
+            }))),
+        )
+        .await;
+    assert!(created.errors.is_empty(), "{:?}", created.errors);
+    let created_json = created.data.into_json()?;
+    let record_id = graphql_orm::uuid::Uuid::parse_str(
+        created_json["createRecord"]["record"]["id"]
+            .as_str()
+            .expect("record id missing"),
+    )?;
+
+    let created_record = Record::get(&pool, &record_id)
+        .await?
+        .expect("record should exist after GraphQL create");
+    assert_eq!(created_record.identity.subject, "rec-1");
+    assert_eq!(created_record.content.title, "GraphQL Title");
+    assert_eq!(created_record.tags.len(), 2);
+    assert_eq!(
+        created_record.metadata,
+        Some(RecordMetadata {
+            revision: 1,
+            published: false,
+        })
+    );
+
+    let updated = schema
+        .execute(
+            Request::new(
+                "mutation UpdateRecord($id: UUID!, $input: UpdateRecordInput!) {
+                    updateRecord(id: $id, input: $input) {
+                        success
+                        record { id slug }
+                    }
+                }",
+            )
+            .variables(Variables::from_json(serde_json::json!({
+                "id": record_id,
+                "input": {
+                    "content": { "title": "Updated Title", "body": "Updated Body" },
+                    "tags": [{ "label": "updated" }],
+                    "metadata": null
+                }
+            }))),
+        )
+        .await;
+    assert!(updated.errors.is_empty(), "{:?}", updated.errors);
+
+    let updated_record = Record::get(&pool, &record_id)
+        .await?
+        .expect("record should exist after GraphQL update");
+    assert_eq!(updated_record.content.title, "Updated Title");
+    assert_eq!(updated_record.tags.len(), 1);
+    assert_eq!(updated_record.tags[0].label, "updated");
+    assert_eq!(updated_record.metadata, None);
 
     Ok(())
 }
