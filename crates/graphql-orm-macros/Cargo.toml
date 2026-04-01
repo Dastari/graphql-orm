@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-macros"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 authors = ["Toby Martin <toby@dastari.net>"]
 description = "Procedural macros for async-graphql and ORM-backed entities, relations, and CRUD operations."
