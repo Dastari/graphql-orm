@@ -2,6 +2,7 @@ use super::core::{PlannedSchemaStage, SchemaStage, SqlValue, record_executed_que
 use super::dialect::current_backend;
 use super::migrations::{build_migration_plan, introspect_schema};
 use crate::{DbPool, DbRow};
+use sqlx::Acquire;
 use sqlx::Row;
 use std::collections::HashSet;
 
@@ -230,29 +231,72 @@ async fn apply_migration_statements_transactionally<S>(
 where
     S: AsRef<str>,
 {
-    let mut tx = pool.begin().await?;
-    for statement in statements {
-        let statement = statement.as_ref().trim();
-        if statement.is_empty()
-            || statement == "PRAGMA foreign_keys = OFF"
-            || statement == "PRAGMA foreign_keys = ON"
-        {
-            continue;
-        }
-        sqlx::query(statement).execute(&mut *tx).await?;
+    let mut conn = pool.acquire().await?;
+    let suspend_foreign_keys = statements.iter().any(|statement| {
+        statement
+            .as_ref()
+            .trim()
+            .eq_ignore_ascii_case("PRAGMA foreign_keys = OFF")
+    });
+
+    if suspend_foreign_keys {
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&mut *conn)
+            .await?;
     }
 
-    sqlx::query(&format!(
-        "INSERT INTO {} (version, description) VALUES (?, ?)",
-        MIGRATION_HISTORY_TABLE
-    ))
-    .bind(version)
-    .bind(description)
-    .execute(&mut *tx)
-    .await?;
+    let mut tx = conn.begin().await?;
+    let migration_result = async {
+        for statement in statements {
+            let statement = statement.as_ref().trim();
+            if statement.is_empty()
+                || statement == "PRAGMA foreign_keys = OFF"
+                || statement == "PRAGMA foreign_keys = ON"
+            {
+                continue;
+            }
+            sqlx::query(statement).execute(&mut *tx).await?;
+        }
 
-    tx.commit().await?;
-    Ok(())
+        if suspend_foreign_keys {
+            let violations: Vec<sqlx::sqlite::SqliteRow> = sqlx::query("PRAGMA foreign_key_check")
+                .fetch_all(&mut *tx)
+                .await?;
+            if !violations.is_empty() {
+                return Err(sqlx::Error::Protocol(format!(
+                    "SQLite foreign_key_check failed after controlled rebuild during migration {version}"
+                )));
+            }
+        }
+
+        sqlx::query(&format!(
+            "INSERT INTO {} (version, description) VALUES (?, ?)",
+            MIGRATION_HISTORY_TABLE
+        ))
+        .bind(version)
+        .bind(description)
+        .execute(&mut *tx)
+        .await?;
+
+        Ok::<(), sqlx::Error>(())
+    }
+    .await;
+
+    let final_result = match migration_result {
+        Ok(()) => tx.commit().await,
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
+    };
+
+    if suspend_foreign_keys {
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&mut *conn)
+            .await?;
+    }
+
+    final_result
 }
 
 #[cfg(feature = "postgres")]

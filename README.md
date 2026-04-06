@@ -51,6 +51,52 @@ Generated subscriptions are operational by default through the `Database` runtim
 Host apps do not need to register one broadcast sender per entity changed-event type.
 If the schema is built without `Database` in schema data, generated subscriptions now fail explicitly instead of returning a silent empty stream.
 
+Generated subscriptions can also propagate explicit dependent invalidation upward along annotated relations:
+
+```rust
+#[graphql(skip)]
+#[relation(
+    target = "Collection",
+    from = "collection_id",
+    to = "id",
+    propagate_change = "up"
+)]
+pub collection: Option<Collection>,
+```
+
+That makes child entity writes emit an additional propagated parent event without pretending the parent row was directly mutated.
+Generated changed-event payloads now include:
+
+- `action`
+- `changeKind` with `DIRECT` or `PROPAGATED`
+- `sourceEntity`
+- `sourceId`
+- `path`
+
+Example:
+
+```graphql
+subscription {
+  collectionChanged {
+    action
+    changeKind
+    sourceEntity
+    sourceId
+    path
+    collection {
+      id
+      name
+    }
+  }
+}
+```
+
+Notes:
+
+- propagation only follows explicitly annotated relations
+- same-entity list pages should still subscribe directly to that entity’s own `...Changed` event
+- propagated events are for parent invalidation and dependent refresh behavior
+
 Generated entity `create` / `update` / `delete` is the canonical write path for host apps.
 The intended model is:
 
@@ -95,6 +141,22 @@ let revoked = RefreshToken::delete_where(
 This is the intended non-GraphQL persistence surface for host applications.
 It reuses the generated typed input/filter types and preserves runtime mutation hooks plus entity subscription fanout through the runtime-owned event transport on `Database`.
 Manual `register_event_sender::<T>(...)` is now optional and only needed if a host wants to override the default transport in tests or custom runtime wiring.
+
+## SQLite Migration Rebuilds
+
+SQLite column and foreign-key changes still use table rebuilds, but rebuild execution is now coordinated across the whole migration rather than table-by-table.
+
+Current SQLite strategy:
+
+- detect when a migration plan needs one or more rebuilds
+- open one controlled rebuild window for that migration
+- temporarily suspend SQLite foreign-key enforcement on the migration connection
+- run the full create/copy/drop/rename sequence for all rebuilt tables
+- run `PRAGMA foreign_key_check` before commit
+- re-enable foreign-key enforcement after the transaction finishes
+
+This means host apps do not need to manually split schema stages just to avoid parent/child rebuild ordering failures.
+FK-linked tables such as `vocabularies` and `vocabulary_terms` can now be rebuilt in the same stage safely, with data preserved and FK definitions restored in the final schema.
 
 ## Field Safety
 

@@ -2,7 +2,7 @@ use super::*;
 use crate::backend::backend_pool_type_tokens;
 use crate::entity::{
     collect_parsed_fields, graphql_field_name, has_graphql_complex, parse_entity_metadata,
-    relation_delete_policy_tokens,
+    relation_change_propagation_tokens, relation_delete_policy_tokens,
 };
 use syn::spanned::Spanned;
 
@@ -16,6 +16,7 @@ struct RelationDef {
     source_field_ty: syn::Type,
     source_supports_dataloader: bool,
     on_delete: proc_macro2::TokenStream,
+    propagate_change: proc_macro2::TokenStream,
     storage_kind: RelationStorageKind,
 }
 
@@ -204,6 +205,10 @@ pub(crate) fn generate_graphql_relations(
         let is_multiple = meta.relation_multiple;
         let on_delete =
             relation_delete_policy_tokens(meta.relation_on_delete.as_deref(), field.span())?;
+        let propagate_change = relation_change_propagation_tokens(
+            meta.relation_propagate_change.as_deref(),
+            field.span(),
+        )?;
         let storage_kind = relation_storage_kind(&field.ty, is_multiple);
 
         relations.push(RelationDef {
@@ -216,6 +221,7 @@ pub(crate) fn generate_graphql_relations(
             source_field_ty,
             source_supports_dataloader,
             on_delete,
+            propagate_change,
             storage_kind,
         });
     }
@@ -230,6 +236,7 @@ pub(crate) fn generate_graphql_relations(
             let target_column = &r.fk_column;
             let is_multiple = r.is_multiple;
             let on_delete = &r.on_delete;
+            let propagate_change = &r.propagate_change;
             quote! {
                 ::graphql_orm::graphql::orm::RelationMetadata {
                     field_name: #graphql_name,
@@ -238,6 +245,7 @@ pub(crate) fn generate_graphql_relations(
                     target_column: #target_column,
                     is_multiple: #is_multiple,
                     on_delete: #on_delete,
+                    propagate_change: #propagate_change,
                 }
             }
         })

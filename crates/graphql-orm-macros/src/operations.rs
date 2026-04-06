@@ -6,6 +6,59 @@ use crate::entity::{
     maybe_wrap_write_transform, option_inner_type, parse_entity_metadata, parse_field_metadata,
     type_path_last_ident,
 };
+use syn::spanned::Spanned;
+
+#[derive(Copy, Clone)]
+enum PropagationValueKind {
+    String,
+    Uuid,
+    Int,
+    Float,
+    Bool,
+}
+
+fn classify_propagation_value_type(ty: &syn::Type) -> Option<(PropagationValueKind, bool)> {
+    let mut current = ty;
+    let mut is_option = false;
+
+    loop {
+        match current {
+            syn::Type::Path(type_path) => {
+                let segment = type_path.path.segments.last()?;
+                let name = segment.ident.to_string();
+                if name == "Option" {
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                            current = inner;
+                            is_option = true;
+                            continue;
+                        }
+                    }
+                    return None;
+                }
+
+                let kind = match name.as_str() {
+                    "String" => PropagationValueKind::String,
+                    "Uuid" => PropagationValueKind::Uuid,
+                    "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64"
+                    | "usize" => PropagationValueKind::Int,
+                    "f32" | "f64" => PropagationValueKind::Float,
+                    "bool" => PropagationValueKind::Bool,
+                    _ => return None,
+                };
+                return Some((kind, is_option));
+            }
+            _ => return None,
+        }
+    }
+}
+
+struct PropagatedRelation {
+    graphql_name: String,
+    source_field: syn::Ident,
+    source_ty: syn::Type,
+    target_type: syn::Ident,
+}
 
 pub(crate) fn generate_graphql_operations(
     input: &DeriveInput,
@@ -119,6 +172,55 @@ pub(crate) fn generate_graphql_operations(
     };
     let created_pk_id_string = quote! { created_pk.to_string() };
 
+    let mut propagated_relations: Vec<PropagatedRelation> = Vec::new();
+    for field in fields {
+        let meta = parse_field_metadata(field)?;
+        if !meta.is_relation || meta.relation_propagate_change.as_deref() != Some("up") {
+            continue;
+        }
+
+        let field_name = field.ident.clone().unwrap();
+        let rust_name = field_name.to_string();
+        let graphql_name = graphql_field_name(&meta, &rust_name, rename_all_rule);
+        let source_column = meta
+            .relation_from
+            .clone()
+            .unwrap_or_else(|| pk_field.to_string());
+        let source_field = fields
+            .iter()
+            .find(|candidate| {
+                candidate
+                    .ident
+                    .as_ref()
+                    .is_some_and(|ident| ident == source_column.as_str())
+            })
+            .and_then(|candidate| {
+                candidate
+                    .ident
+                    .clone()
+                    .map(|ident| (ident, candidate.ty.clone()))
+            })
+            .ok_or_else(|| {
+                syn::Error::new_spanned(
+                    field,
+                    format!(
+                        "Relation '{}' references unknown propagation source field '{}'",
+                        rust_name, source_column
+                    ),
+                )
+            })?;
+        let target_type = syn::Ident::new(
+            meta.relation_target.as_deref().unwrap_or("Unknown"),
+            field.span(),
+        );
+        propagated_relations.push(PropagatedRelation {
+            graphql_name,
+            source_field: source_field.0,
+            source_ty: source_field.1,
+            target_type,
+        });
+    }
+
     // Generate type names
     let queries_struct = syn::Ident::new(&format!("{}Queries", struct_name), struct_name.span());
     let mutations_struct =
@@ -158,6 +260,87 @@ pub(crate) fn generate_graphql_operations(
     let delete_many_result_type =
         syn::Ident::new(&format!("Delete{}Result", plural_name), struct_name.span());
     let delete_many_result_type_str = format!("Delete{}Result", plural_name);
+    let propagation_blocks: Vec<proc_macro2::TokenStream> = propagated_relations
+        .iter()
+        .map(|relation| -> syn::Result<proc_macro2::TokenStream> {
+            let relation_name = &relation.graphql_name;
+            let source_field = &relation.source_field;
+            let target_type = &relation.target_type;
+            let target_changed_event =
+                syn::Ident::new(&format!("{}ChangedEvent", target_type), struct_name.span());
+            let (kind, is_option) = classify_propagation_value_type(&relation.source_ty).ok_or_else(
+                || {
+                    syn::Error::new_spanned(
+                        &relation.source_ty,
+                        format!(
+                            "Unsupported propagate_change source field type for relation '{}': expected String/uuid/int/float/bool (optionals allowed)",
+                            relation_name
+                        ),
+                    )
+                },
+            )?;
+
+            let source_binding = if is_option {
+                quote! {
+                    let Some(parent_id) = entity.#source_field.as_ref() else {
+                        return Ok(());
+                    };
+                }
+            } else {
+                quote! {
+                    let parent_id = &entity.#source_field;
+                }
+            };
+
+            let parent_key_string = match kind {
+                PropagationValueKind::String => quote! { parent_id.clone() },
+                _ => quote! { parent_id.to_string() },
+            };
+
+            let fetch_parent = quote! {
+                let parent_entity = <#target_type>::__gom_fetch_by_id_on(hook_ctx.executor(), parent_id).await?;
+            };
+
+            Ok(quote! {
+                {
+                    #source_binding
+                    let parent_id_string = #parent_key_string;
+                    let mut next_path = path.clone();
+                    next_path.push(#relation_name.to_string());
+                    let dedupe_key = format!(
+                        "{}:{}:{}:{}",
+                        <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name(),
+                        parent_id_string,
+                        source_entity,
+                        source_id
+                    );
+                    if visited.insert(dedupe_key) {
+                        #fetch_parent
+                        hook_ctx.queue_event(#target_changed_event {
+                            action,
+                            change_kind: ::graphql_orm::graphql::orm::ChangeKind::Propagated,
+                            id: parent_id.clone(),
+                            source_entity: Some(source_entity.to_string()),
+                            source_id: Some(source_id.to_string()),
+                            path: next_path.clone(),
+                            entity: parent_entity.clone(),
+                        });
+                        if let Some(parent_entity) = parent_entity.as_ref() {
+                            <#target_type>::__gom_propagate_changed_event(
+                                hook_ctx,
+                                action,
+                                parent_entity,
+                                source_entity,
+                                source_id,
+                                next_path,
+                                visited,
+                            ).await?;
+                        }
+                    }
+                }
+            })
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
 
     // Generate input fields (excluding primary key for create, all optional for update)
     let mut create_input_fields: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -1037,7 +1220,11 @@ pub(crate) fn generate_graphql_operations(
         #[graphql(name = #changed_event_str)]
         pub struct #changed_event {
             pub action: ::graphql_orm::graphql::orm::ChangeAction,
+            pub change_kind: ::graphql_orm::graphql::orm::ChangeKind,
             pub id: #pk_type,
+            pub source_entity: Option<String>,
+            pub source_id: Option<String>,
+            pub path: Vec<String>,
             #[graphql(name = #entity_result_field_name)]
             pub entity: Option<#struct_name>,
         }
@@ -1343,7 +1530,7 @@ pub(crate) fn generate_graphql_operations(
                     &mut hook_ctx,
                     ::graphql_orm::graphql::orm::ChangeAction::Created,
                     Some(&entity),
-                );
+                ).await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
                 hook_ctx.commit_and_emit().await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
                 #notify_on_created
                 Ok(#result_type::ok(entity))
@@ -1477,7 +1664,7 @@ pub(crate) fn generate_graphql_operations(
                                     &mut hook_ctx,
                                     ::graphql_orm::graphql::orm::ChangeAction::Updated,
                                     Some(&entity),
-                                );
+                                ).await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
                                 hook_ctx.commit_and_emit().await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
 
                                 // Invoke optional post-mutation hook.
@@ -1581,7 +1768,7 @@ pub(crate) fn generate_graphql_operations(
                             &mut hook_ctx,
                             ::graphql_orm::graphql::orm::ChangeAction::Deleted,
                             Some(&entity),
-                        );
+                        ).await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
                         hook_ctx.commit_and_emit().await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
 
                         // Invoke optional post-mutation hook.
@@ -1732,25 +1919,67 @@ pub(crate) fn generate_graphql_operations(
                 if let Some(entity) = entity {
                     db.emit_event(#changed_event {
                         action,
+                        change_kind: ::graphql_orm::graphql::orm::ChangeKind::Direct,
                         id: entity.#pk_field.clone(),
+                        source_entity: None,
+                        source_id: None,
+                        path: Vec::new(),
                         entity: Some(entity.clone()),
                     });
                 }
             }
 
             #[doc(hidden)]
-            fn __gom_queue_changed_event(
+            pub(crate) fn __gom_propagate_changed_event<'a>(
+                hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_>,
+                action: ::graphql_orm::graphql::orm::ChangeAction,
+                entity: &'a Self,
+                source_entity: &'a str,
+                source_id: &'a str,
+                path: Vec<String>,
+                visited: &'a mut ::std::collections::HashSet<String>,
+            ) -> ::graphql_orm::futures::future::BoxFuture<'a, Result<(), ::graphql_orm::sqlx::Error>> {
+                Box::pin(async move {
+                    #(#propagation_blocks)*
+                    Ok(())
+                })
+            }
+
+            #[doc(hidden)]
+            async fn __gom_queue_changed_event(
                 hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_>,
                 action: ::graphql_orm::graphql::orm::ChangeAction,
                 entity: Option<&Self>,
-            ) {
+            ) -> Result<(), ::graphql_orm::sqlx::Error> {
                 if let Some(entity) = entity {
+                    let source_id = entity.#pk_field.to_string();
                     hook_ctx.queue_event(#changed_event {
                         action,
+                        change_kind: ::graphql_orm::graphql::orm::ChangeKind::Direct,
                         id: entity.#pk_field.clone(),
+                        source_entity: None,
+                        source_id: None,
+                        path: Vec::new(),
                         entity: Some(entity.clone()),
                     });
+                    let mut visited = ::std::collections::HashSet::from([format!(
+                        "{}:{}:{}:{}",
+                        #entity_name_lit,
+                        source_id,
+                        #entity_name_lit,
+                        source_id
+                    )]);
+                    Self::__gom_propagate_changed_event(
+                        hook_ctx,
+                        action,
+                        entity,
+                        #entity_name_lit,
+                        &source_id,
+                        Vec::new(),
+                        &mut visited,
+                    ).await?;
                 }
+                Ok(())
             }
 
             #[doc(hidden)]
@@ -1761,7 +1990,7 @@ pub(crate) fn generate_graphql_operations(
             }
 
             #[doc(hidden)]
-            async fn __gom_fetch_by_id_on<'e, E>(
+            pub(crate) async fn __gom_fetch_by_id_on<'e, E>(
                 executor: E,
                 id: &#pk_type_ty,
             ) -> Result<Option<Self>, ::graphql_orm::sqlx::Error>
@@ -1849,7 +2078,7 @@ pub(crate) fn generate_graphql_operations(
                     hook_ctx,
                     ::graphql_orm::graphql::orm::ChangeAction::Created,
                     Some(&entity),
-                );
+                ).await?;
 
                 Ok(entity)
             }
@@ -1948,7 +2177,7 @@ pub(crate) fn generate_graphql_operations(
                     hook_ctx,
                     ::graphql_orm::graphql::orm::ChangeAction::Updated,
                     Some(&entity),
-                );
+                ).await?;
 
                 Ok(Some(entity))
             }
@@ -2060,7 +2289,7 @@ pub(crate) fn generate_graphql_operations(
                             hook_ctx,
                             ::graphql_orm::graphql::orm::ChangeAction::Updated,
                             Some(&entity),
-                        );
+                        ).await?;
                     }
                 }
 
@@ -2128,7 +2357,7 @@ pub(crate) fn generate_graphql_operations(
                     hook_ctx,
                     ::graphql_orm::graphql::orm::ChangeAction::Deleted,
                     Some(&entity),
-                );
+                ).await?;
 
                 Ok(true)
             }
@@ -2199,7 +2428,7 @@ pub(crate) fn generate_graphql_operations(
                         hook_ctx,
                         ::graphql_orm::graphql::orm::ChangeAction::Deleted,
                         Some(&entity),
-                    );
+                    ).await?;
                 }
 
                 Ok(deleted)
@@ -2384,7 +2613,7 @@ pub(crate) fn generate_graphql_operations(
                     &mut hook_ctx,
                     ::graphql_orm::graphql::orm::ChangeAction::Updated,
                     Some(&entity),
-                );
+                ).await?;
                 hook_ctx.commit_and_emit().await?;
 
                 Ok(Some(entity))
@@ -2512,7 +2741,7 @@ pub(crate) fn generate_graphql_operations(
                             &mut hook_ctx,
                             ::graphql_orm::graphql::orm::ChangeAction::Updated,
                             Some(&entity),
-                        );
+                        ).await?;
                     }
                 }
                 hook_ctx.commit_and_emit().await?;
@@ -2604,7 +2833,7 @@ pub(crate) fn generate_graphql_operations(
                     &mut hook_ctx,
                     ::graphql_orm::graphql::orm::ChangeAction::Deleted,
                     Some(&entity),
-                );
+                ).await?;
                 hook_ctx.commit_and_emit().await?;
 
                 Ok(true)
@@ -2695,7 +2924,7 @@ pub(crate) fn generate_graphql_operations(
                         &mut hook_ctx,
                         ::graphql_orm::graphql::orm::ChangeAction::Deleted,
                         Some(entity),
-                    );
+                    ).await?;
                 }
                 hook_ctx.commit_and_emit().await?;
 

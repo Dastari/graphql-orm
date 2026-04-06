@@ -146,6 +146,14 @@ pub enum ChangeAction {
     Deleted,
 }
 
+#[derive(
+    async_graphql::Enum, serde::Serialize, serde::Deserialize, Copy, Clone, Debug, Eq, PartialEq,
+)]
+pub enum ChangeKind {
+    Direct,
+    Propagated,
+}
+
 #[derive(async_graphql::InputObject, Clone, Debug, Default)]
 pub struct SubscriptionFilterInput {
     pub actions: Option<Vec<ChangeAction>>,

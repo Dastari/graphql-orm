@@ -150,6 +150,7 @@ pub(crate) struct FieldMetadata {
     pub(crate) relation_to: Option<String>,
     pub(crate) relation_multiple: bool,
     pub(crate) relation_on_delete: Option<String>,
+    pub(crate) relation_propagate_change: Option<String>,
     pub(crate) skip_db: bool,
     /// Skip from Create/Update inputs only (e.g. password_hash); field remains in DB and struct
     pub(crate) skip_input: bool,
@@ -191,6 +192,7 @@ impl Default for FieldMetadata {
             relation_to: None,
             relation_multiple: false,
             relation_on_delete: None,
+            relation_propagate_change: None,
             skip_db: false,
             skip_input: false,
             is_date_field: false,
@@ -349,6 +351,10 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             meta.relation_on_delete = Some(lit.value());
+                        } else if nested.path.is_ident("propagate_change") {
+                            let value = nested.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            meta.relation_propagate_change = Some(lit.value());
                         } else if nested.path.is_ident("multiple") {
                             meta.relation_multiple = true;
                         }
@@ -424,6 +430,22 @@ pub(crate) fn relation_delete_policy_tokens(
             span,
             format!(
                 "unsupported relation on_delete policy '{other}'; expected 'restrict', 'cascade', or 'set_null'"
+            ),
+        )),
+    }
+}
+
+pub(crate) fn relation_change_propagation_tokens(
+    propagation: Option<&str>,
+    span: proc_macro2::Span,
+) -> syn::Result<proc_macro2::TokenStream> {
+    match propagation.unwrap_or("none") {
+        "none" => Ok(quote! { ::graphql_orm::graphql::orm::RelationChangePropagation::None }),
+        "up" => Ok(quote! { ::graphql_orm::graphql::orm::RelationChangePropagation::Up }),
+        other => Err(syn::Error::new(
+            span,
+            format!(
+                "unsupported relation propagate_change value '{other}'; expected 'none' or 'up'"
             ),
         )),
     }
@@ -782,6 +804,10 @@ fn generate_entity_impl(
                     field_meta.relation_on_delete.as_deref(),
                     field.span(),
                 )?;
+                let propagate_change = relation_change_propagation_tokens(
+                    field_meta.relation_propagate_change.as_deref(),
+                    field.span(),
+                )?;
 
                 relation_metadata_defs.push(quote! {
                     ::graphql_orm::graphql::orm::RelationMetadata {
@@ -791,6 +817,7 @@ fn generate_entity_impl(
                         target_column: #target_column,
                         is_multiple: #is_multiple,
                         on_delete: #on_delete,
+                        propagate_change: #propagate_change,
                     }
                 });
             }

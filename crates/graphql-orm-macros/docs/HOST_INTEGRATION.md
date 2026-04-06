@@ -48,6 +48,55 @@ Generated entity subscriptions also use that same `Database` runtime automatical
 Host apps do not need to register one `broadcast::Sender<SomeEntityChangedEvent>` per entity.
 If the runtime `Database` is missing from schema data, generated subscriptions now fail explicitly instead of returning an empty stream.
 
+Generated subscriptions also support explicit relation-based propagated invalidation.
+Annotate the relation edge that should notify its parent:
+
+```rust
+#[graphql(skip)]
+#[relation(
+    target = "Collection",
+    from = "collection_id",
+    to = "id",
+    propagate_change = "up"
+)]
+pub collection: Option<Collection>,
+```
+
+When a child row changes, the generated parent subscription receives a propagated event rather than a fake direct parent update.
+Generated changed-event payloads now expose:
+
+- `action`
+- `changeKind` with `DIRECT` or `PROPAGATED`
+- `sourceEntity`
+- `sourceId`
+- `path`
+
+Example:
+
+```graphql
+subscription {
+  collectionChanged {
+    action
+    changeKind
+    sourceEntity
+    sourceId
+    path
+    collection {
+      id
+      name
+    }
+  }
+}
+```
+
+Contract notes:
+
+- propagation follows only explicitly annotated relations
+- multi-parent propagation is supported
+- delete propagation resolves the parent from the child row’s before-state
+- repeated notifications are deduplicated per target/source pair to avoid loops
+- same-entity list pages should still subscribe directly to that entity’s own `...Changed` stream
+
 Apps can then attach their own data:
 
 ```rust
@@ -58,6 +107,24 @@ let schema = schema_builder(database)
 ```
 
 This keeps auth context, policy inputs, and other domain data in the app while hiding the repeated loader wiring.
+
+## SQLite Migration Rebuild Strategy
+
+SQLite still requires table rebuilds for some schema changes such as column alterations and foreign-key changes.
+The runtime now treats those rebuilds as one controlled migration window instead of toggling foreign-key handling around each individual table.
+
+Behavior:
+
+- if a SQLite migration plan includes rebuild tables, the migration executor suspends `PRAGMA foreign_keys` on the migration connection before the transaction
+- all rebuild create/copy/drop/rename statements for that migration run in the same transaction
+- the executor runs `PRAGMA foreign_key_check` before commit
+- foreign-key enforcement is restored after the transaction completes
+
+Implications for host apps:
+
+- you do not need to manually split schema stages just to avoid parent/child rebuild ordering failures
+- FK-linked tables can be rebuilt in one stage safely
+- stale temp rebuild tables are still cleaned up automatically on startup before migration replay
 
 ## Entity Policy Hook
 

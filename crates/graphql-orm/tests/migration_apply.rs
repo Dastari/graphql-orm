@@ -1,3 +1,7 @@
+#[cfg(feature = "sqlite")]
+use graphql_orm::graphql::orm::DeletePolicy;
+#[cfg(feature = "sqlite")]
+use graphql_orm::graphql::orm::ForeignKeyModel;
 use graphql_orm::graphql::orm::{
     ColumnModel, DatabaseBackend, IndexDef, Migration, MigrationRunner, SchemaModel, TableModel,
     build_migration_plan, introspect_schema,
@@ -436,4 +440,311 @@ fn users_v2_like() -> TableModel {
         indexes: vec![leaked_index("idx_users_name", &["name"])],
         ..users_v1_like()
     }
+}
+
+#[cfg(feature = "sqlite")]
+fn sqlite_text_column(name: &str, primary_key: bool, nullable: bool) -> ColumnModel {
+    ColumnModel {
+        name: name.to_string(),
+        sql_type: "TEXT".to_string(),
+        nullable,
+        is_primary_key: primary_key,
+        is_unique: false,
+        default: None,
+    }
+}
+
+#[cfg(feature = "sqlite")]
+fn sqlite_varchar_column(name: &str, primary_key: bool, nullable: bool) -> ColumnModel {
+    ColumnModel {
+        name: name.to_string(),
+        sql_type: if primary_key {
+            "TEXT".to_string()
+        } else {
+            "VARCHAR(255)".to_string()
+        },
+        nullable,
+        is_primary_key: primary_key,
+        is_unique: false,
+        default: None,
+    }
+}
+
+#[cfg(feature = "sqlite")]
+fn sqlite_fk(source_column: &str, target_table: &str) -> ForeignKeyModel {
+    ForeignKeyModel {
+        source_column: source_column.to_string(),
+        target_table: target_table.to_string(),
+        target_column: "id".to_string(),
+        is_multiple: false,
+        on_delete: DeletePolicy::Cascade,
+    }
+}
+
+#[cfg(feature = "sqlite")]
+fn sqlite_table(
+    entity_name: &str,
+    table_name: &str,
+    default_sort: &str,
+    columns: Vec<ColumnModel>,
+    foreign_keys: Vec<ForeignKeyModel>,
+) -> TableModel {
+    TableModel {
+        entity_name: entity_name.to_string(),
+        table_name: table_name.to_string(),
+        primary_key: "id".to_string(),
+        default_sort: default_sort.to_string(),
+        columns,
+        indexes: vec![],
+        composite_unique_indexes: vec![],
+        foreign_keys,
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_migration_runner_rebuilds_parent_child_chain_in_one_migration()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await?;
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&pool)
+        .await?;
+
+    let current = SchemaModel {
+        tables: vec![
+            sqlite_table(
+                "Grandparent",
+                "stage_grandparents",
+                "name ASC",
+                vec![
+                    sqlite_text_column("id", true, false),
+                    sqlite_text_column("name", false, false),
+                ],
+                vec![],
+            ),
+            sqlite_table(
+                "Parent",
+                "stage_parents",
+                "name ASC",
+                vec![
+                    sqlite_text_column("id", true, false),
+                    sqlite_text_column("grandparent_id", false, false),
+                    sqlite_text_column("name", false, false),
+                ],
+                vec![sqlite_fk("grandparent_id", "stage_grandparents")],
+            ),
+            sqlite_table(
+                "Child",
+                "stage_children",
+                "name ASC",
+                vec![
+                    sqlite_text_column("id", true, false),
+                    sqlite_text_column("parent_id", false, false),
+                    sqlite_text_column("name", false, false),
+                ],
+                vec![sqlite_fk("parent_id", "stage_parents")],
+            ),
+        ],
+    };
+    let target = SchemaModel {
+        tables: vec![
+            sqlite_table(
+                "Grandparent",
+                "stage_grandparents",
+                "name ASC",
+                vec![
+                    sqlite_varchar_column("id", true, false),
+                    sqlite_varchar_column("name", false, false),
+                ],
+                vec![],
+            ),
+            sqlite_table(
+                "Parent",
+                "stage_parents",
+                "name ASC",
+                vec![
+                    sqlite_varchar_column("id", true, false),
+                    sqlite_varchar_column("grandparent_id", false, false),
+                    sqlite_varchar_column("name", false, false),
+                ],
+                vec![sqlite_fk("grandparent_id", "stage_grandparents")],
+            ),
+            sqlite_table(
+                "Child",
+                "stage_children",
+                "name ASC",
+                vec![
+                    sqlite_varchar_column("id", true, false),
+                    sqlite_varchar_column("parent_id", false, false),
+                    sqlite_varchar_column("name", false, false),
+                ],
+                vec![sqlite_fk("parent_id", "stage_parents")],
+            ),
+        ],
+    };
+
+    let database = graphql_orm::db::Database::new(pool.clone());
+    database
+        .apply_migrations(&[leak_migration(
+            &build_migration_plan(
+                DatabaseBackend::Sqlite,
+                &SchemaModel { tables: vec![] },
+                &current,
+            ),
+            "2026040201",
+            "sqlite_fk_chain_initial",
+        )])
+        .await?;
+
+    sqlx::query("INSERT INTO stage_grandparents (id, name) VALUES ('g1', 'grand')")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO stage_parents (id, grandparent_id, name) VALUES ('p1', 'g1', 'parent')",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("INSERT INTO stage_children (id, parent_id, name) VALUES ('c1', 'p1', 'child')")
+        .execute(&pool)
+        .await?;
+
+    let plan = build_migration_plan(DatabaseBackend::Sqlite, &current, &target);
+    database
+        .apply_migrations(&[leak_migration(
+            &plan,
+            "2026040202",
+            "sqlite_fk_chain_rebuild",
+        )])
+        .await?;
+
+    let row = sqlx::query(
+        "SELECT c.name AS child_name, p.name AS parent_name, g.name AS grand_name
+         FROM stage_children c
+         JOIN stage_parents p ON p.id = c.parent_id
+         JOIN stage_grandparents g ON g.id = p.grandparent_id
+         WHERE c.id = 'c1'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        sqlx::Row::try_get::<String, _>(&row, "child_name")?,
+        "child"
+    );
+    assert_eq!(
+        sqlx::Row::try_get::<String, _>(&row, "parent_name")?,
+        "parent"
+    );
+    assert_eq!(
+        sqlx::Row::try_get::<String, _>(&row, "grand_name")?,
+        "grand"
+    );
+
+    let schema = introspect_schema(&pool).await?;
+    let parent_table = schema
+        .tables
+        .iter()
+        .find(|table| table.table_name == "stage_parents")
+        .expect("stage_parents exists");
+    let child_table = schema
+        .tables
+        .iter()
+        .find(|table| table.table_name == "stage_children")
+        .expect("stage_children exists");
+    assert!(parent_table.foreign_keys.iter().any(|foreign_key| {
+        foreign_key.source_column == "grandparent_id"
+            && foreign_key.target_table == "stage_grandparents"
+    }));
+    assert!(child_table.foreign_keys.iter().any(|foreign_key| {
+        foreign_key.source_column == "parent_id" && foreign_key.target_table == "stage_parents"
+    }));
+
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_migration_runner_rebuilds_self_referential_table()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await?;
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&pool)
+        .await?;
+
+    let current = SchemaModel {
+        tables: vec![sqlite_table(
+            "Node",
+            "stage_nodes",
+            "name ASC",
+            vec![
+                sqlite_text_column("id", true, false),
+                sqlite_text_column("name", false, false),
+                sqlite_text_column("parent_id", false, true),
+            ],
+            vec![sqlite_fk("parent_id", "stage_nodes")],
+        )],
+    };
+    let target = SchemaModel {
+        tables: vec![sqlite_table(
+            "Node",
+            "stage_nodes",
+            "name ASC",
+            vec![
+                sqlite_varchar_column("id", true, false),
+                sqlite_varchar_column("name", false, false),
+                sqlite_varchar_column("parent_id", false, true),
+            ],
+            vec![sqlite_fk("parent_id", "stage_nodes")],
+        )],
+    };
+
+    let database = graphql_orm::db::Database::new(pool.clone());
+    database
+        .apply_migrations(&[leak_migration(
+            &build_migration_plan(
+                DatabaseBackend::Sqlite,
+                &SchemaModel { tables: vec![] },
+                &current,
+            ),
+            "2026040203",
+            "sqlite_self_ref_initial",
+        )])
+        .await?;
+
+    sqlx::query("INSERT INTO stage_nodes (id, name, parent_id) VALUES ('root', 'Root', NULL)")
+        .execute(&pool)
+        .await?;
+    sqlx::query("INSERT INTO stage_nodes (id, name, parent_id) VALUES ('child', 'Child', 'root')")
+        .execute(&pool)
+        .await?;
+
+    database
+        .apply_migrations(&[leak_migration(
+            &build_migration_plan(DatabaseBackend::Sqlite, &current, &target),
+            "2026040204",
+            "sqlite_self_ref_rebuild",
+        )])
+        .await?;
+
+    let row = sqlx::query("SELECT parent_id FROM stage_nodes WHERE id = 'child'")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(sqlx::Row::try_get::<String, _>(&row, "parent_id")?, "root");
+
+    let schema = introspect_schema(&pool).await?;
+    let nodes_table = schema
+        .tables
+        .iter()
+        .find(|table| table.table_name == "stage_nodes")
+        .expect("stage_nodes exists");
+    assert!(nodes_table.foreign_keys.iter().any(|foreign_key| {
+        foreign_key.source_column == "parent_id" && foreign_key.target_table == "stage_nodes"
+    }));
+
+    Ok(())
 }

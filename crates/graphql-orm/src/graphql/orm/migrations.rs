@@ -308,7 +308,7 @@ fn render_sqlite_table_rebuild_statements(
         .map(|column| column.name.clone())
         .collect::<Vec<_>>();
 
-    let mut statements = vec!["PRAGMA foreign_keys = OFF".to_string(), target_table_sql];
+    let mut statements = vec![target_table_sql];
     if !common_columns.is_empty() {
         let columns = common_columns.join(", ");
         statements.push(format!(
@@ -331,7 +331,6 @@ fn render_sqlite_table_rebuild_statements(
             index.columns.join(", ")
         )
     }));
-    statements.push("PRAGMA foreign_keys = ON".to_string());
     statements
 }
 
@@ -518,6 +517,10 @@ pub fn build_migration_plan(
             let mut statements = Vec::new();
             let mut rebuilt_tables = std::collections::BTreeSet::new();
 
+            if !rebuild_tables.is_empty() {
+                statements.push("PRAGMA foreign_keys = OFF".to_string());
+            }
+
             for step in &diff.steps {
                 let table_name = migration_step_table_name(step);
                 if let Some(table_name) = table_name {
@@ -537,6 +540,10 @@ pub fn build_migration_plan(
                     }
                 }
                 statements.extend(render_migration_step(backend, step));
+            }
+
+            if !rebuild_tables.is_empty() {
+                statements.push("PRAGMA foreign_keys = ON".to_string());
             }
 
             statements

@@ -996,6 +996,12 @@ impl DeletePolicy {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RelationChangePropagation {
+    None,
+    Up,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RelationMetadata {
     pub field_name: &'static str,
@@ -1004,6 +1010,7 @@ pub struct RelationMetadata {
     pub target_column: &'static str,
     pub is_multiple: bool,
     pub on_delete: DeletePolicy,
+    pub propagate_change: RelationChangePropagation,
 }
 
 #[derive(Clone, Debug)]
