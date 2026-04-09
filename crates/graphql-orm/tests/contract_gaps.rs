@@ -2,6 +2,7 @@
 
 use graphql_orm::prelude::*;
 use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 
 #[derive(
     GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
@@ -87,6 +88,29 @@ struct ServerManagedLog {
     pub created_at: String,
 }
 
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+)]
+#[graphql_entity(
+    table = "sync_profiles",
+    plural = "SyncProfiles",
+    default_sort = "name ASC"
+)]
+struct SyncProfile {
+    #[primary_key]
+    #[filterable(type = "uuid")]
+    pub id: graphql_orm::uuid::Uuid,
+
+    #[filterable(type = "string")]
+    #[sortable]
+    pub name: String,
+
+    #[graphql_orm(skip_input)]
+    #[filterable(type = "string")]
+    #[sortable]
+    pub sync_status: String,
+}
+
 #[derive(GraphQLSchemaEntity, Clone, Debug)]
 #[graphql_entity(table = "relation_parents", plural = "RelationParents")]
 struct RelationParent {
@@ -140,7 +164,7 @@ struct SqlDefaultExample {
 
 schema_roots! {
     query_custom_ops: [],
-    entities: [ExternalRecord, Credential, BlobAsset, ServerManagedLog],
+    entities: [ExternalRecord, Credential, BlobAsset, ServerManagedLog, SyncProfile],
 }
 
 #[cfg(feature = "sqlite")]
@@ -166,6 +190,7 @@ async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
         "credentials",
         "blob_assets",
         "server_managed_logs",
+        "sync_profiles",
         "relation_children_no_fk",
         "relation_children_with_fk",
         "relation_parents",
@@ -213,6 +238,68 @@ async fn apply_schema(
     Ok(())
 }
 
+#[derive(Clone, Default)]
+struct SyncProfileTransform {
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl SyncProfileTransform {
+    fn snapshot(&self) -> Vec<String> {
+        self.calls.lock().expect("transform calls lock").clone()
+    }
+}
+
+impl graphql_orm::graphql::orm::WriteInputTransform for SyncProfileTransform {
+    fn before_create<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a graphql_orm::db::Database,
+        entity_name: &'static str,
+        input: &'a mut (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<()>> {
+        Box::pin(async move {
+            if entity_name == "SyncProfile" {
+                let input = input
+                    .downcast_mut::<CreateSyncProfileInput>()
+                    .ok_or_else(|| async_graphql::Error::new("unexpected create input type"))?;
+                if input.sync_status.is_empty() {
+                    input.sync_status = "created-by-transform".to_string();
+                }
+                self.calls
+                    .lock()
+                    .expect("transform calls lock")
+                    .push(format!("create:{}", input.sync_status));
+            }
+            Ok(())
+        })
+    }
+
+    fn before_update<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a graphql_orm::db::Database,
+        entity_name: &'static str,
+        _existing_row: Option<&'a (dyn std::any::Any + Send + Sync)>,
+        input: &'a mut (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<()>> {
+        Box::pin(async move {
+            if entity_name == "SyncProfile" {
+                let input = input
+                    .downcast_mut::<UpdateSyncProfileInput>()
+                    .ok_or_else(|| async_graphql::Error::new("unexpected update input type"))?;
+                if input.sync_status.is_none() {
+                    input.sync_status = Some("updated-by-transform".to_string());
+                }
+                self.calls
+                    .lock()
+                    .expect("transform calls lock")
+                    .push(format!("update:{:?}", input.sync_status));
+            }
+            Ok(())
+        })
+    }
+}
+
 #[tokio::test]
 async fn hidden_primary_key_is_excluded_from_graphql_input_but_settable_via_repo_insert()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -221,7 +308,9 @@ async fn hidden_primary_key_is_excluded_from_graphql_input_but_settable_via_repo
     let database = graphql_orm::db::Database::new(pool.clone());
     apply_schema(&database, &[<ExternalRecord as Entity>::metadata()]).await?;
 
-    let schema = schema_builder(database.clone()).finish();
+    let schema = schema_builder(database.clone())
+        .data("system".to_string())
+        .finish();
     let sdl = schema.sdl();
     assert!(sdl.contains("type ExternalRecord"));
     assert!(sdl.contains("id: String!"));
@@ -245,6 +334,142 @@ async fn hidden_primary_key_is_excluded_from_graphql_input_but_settable_via_repo
             .expect("external record exists")
             .name,
         "Remote mirror"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn skip_input_fields_remain_publicly_readable_but_stay_out_of_graphql_write_inputs()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = test_mutex().lock().await;
+    let pool = setup_pool().await?;
+    let transform = SyncProfileTransform::default();
+    let mut database = graphql_orm::db::Database::new(pool.clone());
+    database.set_write_input_transform(transform.clone());
+    apply_schema(&database, &[<SyncProfile as Entity>::metadata()]).await?;
+
+    let schema = schema_builder(database.clone())
+        .data("system".to_string())
+        .finish();
+    let sdl = schema.sdl();
+    assert!(sdl.contains("type SyncProfile"));
+    assert!(sdl.contains("syncStatus: String!"));
+
+    let create_input =
+        sdl_input_block(&sdl, "CreateSyncProfileInput").expect("CreateSyncProfileInput block");
+    assert!(create_input.contains("name: String!"));
+    assert!(!create_input.contains("syncStatus:"));
+
+    let update_input =
+        sdl_input_block(&sdl, "UpdateSyncProfileInput").expect("UpdateSyncProfileInput block");
+    assert!(update_input.contains("name: String"));
+    assert!(!update_input.contains("syncStatus:"));
+
+    let direct_create = CreateSyncProfileInput {
+        name: "Repo created".to_string(),
+        sync_status: "repo-managed".to_string(),
+    };
+    let repo_created = SyncProfile::insert(&database, direct_create).await?;
+    assert_eq!(repo_created.sync_status, "repo-managed");
+
+    let repo_updated = SyncProfile::update_by_id(
+        &database,
+        &repo_created.id,
+        UpdateSyncProfileInput {
+            sync_status: Some("repo-updated".to_string()),
+            ..Default::default()
+        },
+    )
+    .await?
+    .expect("updated sync profile");
+    assert_eq!(repo_updated.sync_status, "repo-updated");
+
+    let graphql_created = schema
+        .execute(
+            "mutation {
+                createSyncProfile(input: { name: \"GraphQL created\" }) {
+                    success
+                    syncProfile {
+                        id
+                        name
+                        syncStatus
+                    }
+                }
+            }",
+        )
+        .await;
+    assert!(
+        graphql_created.errors.is_empty(),
+        "{:?}",
+        graphql_created.errors
+    );
+    let created_json = graphql_created.data.into_json()?;
+    assert_eq!(
+        created_json["createSyncProfile"]["syncProfile"]["syncStatus"].as_str(),
+        Some("created-by-transform")
+    );
+    let graphql_created_id = graphql_orm::uuid::Uuid::parse_str(
+        created_json["createSyncProfile"]["syncProfile"]["id"]
+            .as_str()
+            .expect("created sync profile id"),
+    )?;
+
+    let graphql_updated = schema
+        .execute(format!(
+            "mutation {{
+                updateSyncProfile(id: \"{}\", input: {{ name: \"Renamed from GraphQL\" }}) {{
+                    success
+                    syncProfile {{
+                        id
+                        name
+                        syncStatus
+                    }}
+                }}
+            }}",
+            graphql_created_id
+        ))
+        .await;
+    assert!(
+        graphql_updated.errors.is_empty(),
+        "{:?}",
+        graphql_updated.errors
+    );
+    let updated_json = graphql_updated.data.into_json()?;
+    assert_eq!(
+        updated_json["updateSyncProfile"]["syncProfile"]["syncStatus"].as_str(),
+        Some("updated-by-transform")
+    );
+    assert_eq!(
+        updated_json["updateSyncProfile"]["syncProfile"]["name"].as_str(),
+        Some("Renamed from GraphQL")
+    );
+
+    let stored_graphql_profile = SyncProfile::get(&pool, &graphql_created_id)
+        .await?
+        .expect("stored graphql-created sync profile");
+    assert_eq!(stored_graphql_profile.sync_status, "updated-by-transform");
+
+    let transform_calls = transform.snapshot();
+    assert!(
+        transform_calls
+            .iter()
+            .any(|entry| entry == "create:repo-managed")
+    );
+    assert!(
+        transform_calls
+            .iter()
+            .any(|entry| entry == "update:Some(\"repo-updated\")")
+    );
+    assert!(
+        transform_calls
+            .iter()
+            .any(|entry| entry == "create:created-by-transform")
+    );
+    assert!(
+        transform_calls
+            .iter()
+            .any(|entry| entry == "update:Some(\"updated-by-transform\")")
     );
 
     Ok(())

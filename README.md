@@ -197,7 +197,28 @@ SQLite schema stages also preserve SQL-expression defaults correctly for support
 ## Field Safety
 
 Field-safety and field-policy metadata live on the field itself.
-Repo-only fields can stay in the Rust entity and database model while being omitted from generated public GraphQL mutation inputs by marking the field with `#[graphql(skip)]`.
+Server-managed but publicly readable fields can stay in the Rust entity and database model while being omitted only from generated public GraphQL mutation inputs:
+
+```rust
+#[graphql_orm(skip_input)]
+pub sync_status: String,
+```
+
+`skip_input` keeps the field in:
+
+- the Rust entity
+- generated Rust `Create<Entity>Input` / `Update<Entity>Input`
+- database persistence
+- generated GraphQL object output, filters, ordering, and subscriptions unless other field controls disable those surfaces
+
+while excluding it from:
+
+- generated public GraphQL create inputs
+- generated public GraphQL update inputs
+
+Generated public GraphQL create/update resolvers map omitted `skip_input` fields to `Default::default()` before `WriteInputTransform` and lifecycle hooks run, so server-managed values can still be injected there without exposing the field in frontend mutation documents.
+
+`#[graphql(skip)]` is still useful for fields that should disappear from GraphQL output entirely, but it is not required for `skip_input`.
 
 Baseline private field:
 

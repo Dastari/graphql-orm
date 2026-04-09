@@ -153,7 +153,8 @@ pub(crate) struct FieldMetadata {
     pub(crate) relation_on_delete: Option<String>,
     pub(crate) relation_propagate_change: Option<String>,
     pub(crate) skip_db: bool,
-    /// Skip from Create/Update inputs only (e.g. password_hash); field remains in DB and struct
+    /// Skip from generated public GraphQL Create/Update inputs only; field remains in DB,
+    /// the Rust entity, and generated trusted Rust Create/Update input structs.
     pub(crate) skip_input: bool,
     pub(crate) is_date_field: bool,
     pub(crate) is_boolean_field: bool,
@@ -248,6 +249,8 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             meta.filter = false;
                             meta.order = false;
                             meta.subscribe = false;
+                            meta.skip_input = true;
+                        } else if nested.path.is_ident("skip_input") {
                             meta.skip_input = true;
                         } else if nested.path.is_ident("json") {
                             meta.is_json_field = true;

@@ -783,7 +783,29 @@ pub email: Option<String>,
 pub valuation: Option<String>,
 ```
 
-Repo-only fields can stay in the Rust entity and database model while being omitted from generated public GraphQL mutation inputs by marking the field with `#[graphql(skip)]`.
+Server-managed but publicly readable fields can stay in the Rust entity and database model while being omitted only from generated public GraphQL mutation inputs:
+
+```rust
+#[graphql_orm(skip_input)]
+pub sync_status: String,
+```
+
+`skip_input` keeps the field in:
+
+- the Rust entity
+- generated Rust `Create<Entity>Input` / `Update<Entity>Input`
+- database persistence
+- generated GraphQL object output unless other field controls disable it
+- filters / ordering / subscriptions unless other field controls disable them
+
+while excluding it from:
+
+- generated public GraphQL create inputs
+- generated public GraphQL update inputs
+
+Generated public GraphQL create/update resolvers map omitted `skip_input` fields to `Default::default()` before `WriteInputTransform` and lifecycle hooks run, so host apps can fill server-managed values there without requiring frontend clients to send them.
+
+`#[graphql(skip)]` remains the tool for removing a field from GraphQL object output entirely, but it is not required for `skip_input`.
 
 `private` keeps the field in:
 
