@@ -97,6 +97,21 @@ Notes:
 - same-entity list pages should still subscribe directly to that entity’s own `...Changed` event
 - propagated events are for parent invalidation and dependent refresh behavior
 
+Relation metadata and physical foreign-key emission are separate controls.
+The default is unchanged: declared relations still emit physical database foreign keys.
+If you only want ORM relation metadata without a physical FK, disable it explicitly:
+
+```rust
+#[graphql(skip)]
+#[relation(
+    target = "Collection",
+    from = "collection_id",
+    to = "id",
+    emit_fk = false
+)]
+pub collection: Option<Collection>,
+```
+
 Generated entity `create` / `update` / `delete` is the canonical write path for host apps.
 The intended model is:
 
@@ -142,6 +157,26 @@ This is the intended non-GraphQL persistence surface for host applications.
 It reuses the generated typed input/filter types and preserves runtime mutation hooks plus entity subscription fanout through the runtime-owned event transport on `Database`.
 Manual `register_event_sender::<T>(...)` is now optional and only needed if a host wants to override the default transport in tests or custom runtime wiring.
 
+Trusted repository helpers can also write explicit primary keys while keeping them out of generated public GraphQL inputs:
+
+```rust
+#[primary_key]
+#[graphql(skip)]
+#[graphql_orm(auto_generated = false)]
+pub id: String,
+```
+
+That keeps the field on the Rust entity and generated Rust `Create<Entity>Input`, but omits it from the GraphQL create input.
+
+Blob fields are also supported end to end through generated repository helpers:
+
+```rust
+pub payload: Vec<u8>,
+pub thumbnail: Option<Vec<u8>>,
+```
+
+`insert`, `update_by_id`, and `update_where` now bind byte values directly without requiring raw SQL.
+
 ## SQLite Migration Rebuilds
 
 SQLite column and foreign-key changes still use table rebuilds, but rebuild execution is now coordinated across the whole migration rather than table-by-table.
@@ -157,10 +192,12 @@ Current SQLite strategy:
 
 This means host apps do not need to manually split schema stages just to avoid parent/child rebuild ordering failures.
 FK-linked tables such as `vocabularies` and `vocabulary_terms` can now be rebuilt in the same stage safely, with data preserved and FK definitions restored in the final schema.
+SQLite schema stages also preserve SQL-expression defaults correctly for supported expressions such as `CURRENT_TIMESTAMP` and `lower(hex(randomblob(16)))`.
 
 ## Field Safety
 
 Field-safety and field-policy metadata live on the field itself.
+Repo-only fields can stay in the Rust entity and database model while being omitted from generated public GraphQL mutation inputs by marking the field with `#[graphql(skip)]`.
 
 Baseline private field:
 
@@ -188,6 +225,15 @@ pub valuation: Option<String>,
 
 `private` excludes the field from generated GraphQL object fields, create/update inputs, filters, ordering, and subscription access while keeping it in the Rust struct and ORM persistence model.
 Private/write-only fields remain present on the generated Rust input structs, so app-side repository code can still write them without exposing them in the GraphQL schema.
+
+For trusted primary keys that should not use the conventional auto-generated `id` behavior, opt out explicitly:
+
+```rust
+#[primary_key]
+#[graphql(skip)]
+#[graphql_orm(auto_generated = false)]
+pub id: String,
+```
 
 Generated names now align with serde naming and standard GraphQL casing:
 

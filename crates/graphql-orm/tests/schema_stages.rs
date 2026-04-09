@@ -1,3 +1,4 @@
+#[cfg(feature = "sqlite")]
 use graphql_orm::graphql::orm::{
     ColumnModel, DeletePolicy, ForeignKeyModel, IndexDef, SchemaModel, SchemaStage, TableModel,
 };

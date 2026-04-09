@@ -97,6 +97,21 @@ Contract notes:
 - repeated notifications are deduplicated per target/source pair to avoid loops
 - same-entity list pages should still subscribe directly to that entity’s own `...Changed` stream
 
+Relation metadata and physical foreign-key emission are separate controls.
+The default remains physical FK emission.
+If a host app only wants ORM relation metadata, disable FK emission explicitly:
+
+```rust
+#[graphql(skip)]
+#[relation(
+    target = "Collection",
+    from = "collection_id",
+    to = "id",
+    emit_fk = false
+)]
+pub collection: Option<Collection>,
+```
+
 Apps can then attach their own data:
 
 ```rust
@@ -125,6 +140,11 @@ Implications for host apps:
 - you do not need to manually split schema stages just to avoid parent/child rebuild ordering failures
 - FK-linked tables can be rebuilt in one stage safely
 - stale temp rebuild tables are still cleaned up automatically on startup before migration replay
+
+SQLite schema stages also render SQL-expression defaults correctly for supported expressions such as:
+
+- `CURRENT_TIMESTAMP`
+- `lower(hex(randomblob(16)))`
 
 ## Entity Policy Hook
 
@@ -190,6 +210,17 @@ Attach behavior through:
 
 The shared contract explicitly favors generated writes plus hooks over bespoke CRUD resolvers.
 Frontend semantic naming should prefer GraphQL aliases over backend-specific wrapper mutations.
+
+Trusted repository inserts can also set primary keys explicitly while keeping them out of generated public GraphQL create inputs:
+
+```rust
+#[primary_key]
+#[graphql(skip)]
+#[graphql_orm(auto_generated = false)]
+pub id: String,
+```
+
+That keeps the field on the Rust entity and generated Rust `Create<Entity>Input`, but omits it from the GraphQL create input.
 
 ## Row Policy
 
@@ -752,6 +783,8 @@ pub email: Option<String>,
 pub valuation: Option<String>,
 ```
 
+Repo-only fields can stay in the Rust entity and database model while being omitted from generated public GraphQL mutation inputs by marking the field with `#[graphql(skip)]`.
+
 `private` keeps the field in:
 
 - the Rust entity
@@ -766,6 +799,15 @@ while excluding it from GraphQL schema exposure:
 - generated subscription field access
 
 The generated Rust `Create<Entity>Input` / `Update<Entity>Input` structs still retain writable private fields as `#[graphql(skip)]` members, so app-side repository code can use the same typed inputs without exposing those fields in GraphQL SDL.
+
+For trusted primary keys that should not use the conventional auto-generated `id` behavior, opt out explicitly:
+
+```rust
+#[primary_key]
+#[graphql(skip)]
+#[graphql_orm(auto_generated = false)]
+pub id: String,
+```
 
 The runtime policy boundary is:
 
@@ -818,6 +860,15 @@ Each generated entity now exposes a typed non-GraphQL persistence surface for ho
 - `Entity::update_where(&database, EntityWhereInput { .. }, UpdateEntityInput { .. })`
 - `Entity::delete_by_id(&database, &id)`
 - `Entity::delete_where(&database, EntityWhereInput { .. })`
+
+Blob fields are supported through the same generated repository helpers:
+
+```rust
+pub payload: Vec<u8>,
+pub thumbnail: Option<Vec<u8>>,
+```
+
+`insert`, `update_by_id`, and `update_where` bind byte values directly through the runtime.
 
 These helpers:
 

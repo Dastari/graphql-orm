@@ -140,11 +140,13 @@ pub(crate) fn generate_graphql_operations(
     // Find primary key field
     let mut pk_field_name: Option<syn::Ident> = None;
     let mut pk_type_ty: Option<syn::Type> = None;
+    let mut pk_auto_generated_override: Option<bool> = None;
     for field in fields {
         let meta = parse_field_metadata(field)?;
         if meta.is_primary_key {
             pk_field_name = Some(field.ident.clone().unwrap());
             pk_type_ty = Some(field.ty.clone());
+            pk_auto_generated_override = meta.auto_generated;
             break;
         }
     }
@@ -153,7 +155,8 @@ pub(crate) fn generate_graphql_operations(
         .unwrap_or_else(|| syn::Ident::new("id", struct_name.span()));
     let pk_type_ty: syn::Type = pk_type_ty.unwrap_or_else(|| syn::parse_quote!(String));
     let pk_type = quote! { #pk_type_ty };
-    let auto_generated_pk = pk_field == syn::Ident::new("id", pk_field.span());
+    let auto_generated_pk = pk_auto_generated_override
+        .unwrap_or_else(|| pk_field == syn::Ident::new("id", pk_field.span()));
     let pk_is_uuid = is_uuid_type(&pk_type_ty);
     let pk_bind_value = if pk_is_uuid {
         quote! { ::graphql_orm::graphql::orm::SqlValue::Uuid(id) }
@@ -567,6 +570,23 @@ pub(crate) fn generate_graphql_operations(
                 };
                 insert_binds_graphql.push(bind_tokens.clone());
                 insert_binds_repo.push(bind_tokens);
+            } else if is_byte_vec_type(field_type) {
+                let bind_tokens = quote! {
+                    bind_values.push(::graphql_orm::graphql::orm::SqlValue::Bytes(input.#field_name.clone()));
+                };
+                insert_binds_graphql.push(bind_tokens.clone());
+                insert_binds_repo.push(bind_tokens);
+            } else if is_option_type(field_type)
+                && option_inner_type(field_type).is_some_and(is_byte_vec_type)
+            {
+                let bind_tokens = quote! {
+                    match &input.#field_name {
+                        Some(v) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Bytes(v.clone())),
+                        None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::BytesNull),
+                    }
+                };
+                insert_binds_graphql.push(bind_tokens.clone());
+                insert_binds_repo.push(bind_tokens);
             } else if is_option_type(field_type) {
                 let value_expr =
                     maybe_wrap_write_transform(quote! { v.to_string() }, &meta.transform_write);
@@ -837,6 +857,21 @@ pub(crate) fn generate_graphql_operations(
                 };
                 update_field_checks_graphql.push(update_tokens.clone());
                 update_field_checks_repo.push(update_tokens);
+            } else if is_already_optional
+                && option_inner_type(field_type).is_some_and(is_byte_vec_type)
+            {
+                let update_tokens = quote! {
+                    if let Some(ref val) = input.#field_name {
+                        changed_fields.push(#db_col);
+                        set_clauses.push(format!("{} = ?", #db_col));
+                        match val {
+                            Some(v) => values.push(::graphql_orm::graphql::orm::SqlValue::Bytes(v.clone())),
+                            None => values.push(::graphql_orm::graphql::orm::SqlValue::BytesNull),
+                        }
+                    }
+                };
+                update_field_checks_graphql.push(update_tokens.clone());
+                update_field_checks_repo.push(update_tokens);
             } else if is_already_optional {
                 // Field type is already Option<T>, update type is Option<Option<T>>
                 let value_expr =
@@ -894,6 +929,16 @@ pub(crate) fn generate_graphql_operations(
                         changed_fields.push(#db_col);
                         set_clauses.push(format!("{} = ?", #db_col));
                         values.push(::graphql_orm::graphql::orm::SqlValue::Float((*val).into()));
+                    }
+                };
+                update_field_checks_graphql.push(update_tokens.clone());
+                update_field_checks_repo.push(update_tokens);
+            } else if is_byte_vec_type(field_type) {
+                let update_tokens = quote! {
+                    if let Some(ref val) = input.#field_name {
+                        changed_fields.push(#db_col);
+                        set_clauses.push(format!("{} = ?", #db_col));
+                        values.push(::graphql_orm::graphql::orm::SqlValue::Bytes(val.clone()));
                     }
                 };
                 update_field_checks_graphql.push(update_tokens.clone());

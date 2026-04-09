@@ -15,6 +15,7 @@ struct RelationDef {
     is_multiple: bool,
     source_field_ty: syn::Type,
     source_supports_dataloader: bool,
+    emit_foreign_key: bool,
     on_delete: proc_macro2::TokenStream,
     propagate_change: proc_macro2::TokenStream,
     storage_kind: RelationStorageKind,
@@ -220,6 +221,7 @@ pub(crate) fn generate_graphql_relations(
             is_multiple,
             source_field_ty,
             source_supports_dataloader,
+            emit_foreign_key: meta.relation_emit_foreign_key,
             on_delete,
             propagate_change,
             storage_kind,
@@ -235,6 +237,7 @@ pub(crate) fn generate_graphql_relations(
             let source_column = &r.source_column;
             let target_column = &r.fk_column;
             let is_multiple = r.is_multiple;
+            let emit_foreign_key = r.emit_foreign_key;
             let on_delete = &r.on_delete;
             let propagate_change = &r.propagate_change;
             quote! {
@@ -244,6 +247,7 @@ pub(crate) fn generate_graphql_relations(
                     source_column: #source_column,
                     target_column: #target_column,
                     is_multiple: #is_multiple,
+                    emit_foreign_key: #emit_foreign_key,
                     on_delete: #on_delete,
                     propagate_change: #propagate_change,
                 }

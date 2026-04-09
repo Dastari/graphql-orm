@@ -10,7 +10,35 @@ fn is_internal_graphql_orm_table(table_name: &str) -> bool {
     table_name.starts_with("__graphql_orm_")
 }
 
-fn render_column_definition(column: &ColumnModel) -> String {
+fn render_default_clause(backend: DatabaseBackend, default: &str) -> String {
+    if backend != DatabaseBackend::Sqlite {
+        return default.to_string();
+    }
+
+    let trimmed = default.trim();
+    if trimmed.starts_with('(') && trimmed.ends_with(')') {
+        return trimmed.to_string();
+    }
+
+    let uppercase = trimmed.to_ascii_uppercase();
+    let is_keyword_default = matches!(
+        uppercase.as_str(),
+        "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "CURRENT_TIME" | "NULL" | "TRUE" | "FALSE"
+    );
+    let is_numeric_literal = trimmed
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_digit() || c == '-' || c == '+');
+    let is_string_literal = trimmed.starts_with('\'') || uppercase.starts_with("X'");
+
+    if is_keyword_default || is_numeric_literal || is_string_literal {
+        trimmed.to_string()
+    } else {
+        format!("({trimmed})")
+    }
+}
+
+fn render_column_definition(backend: DatabaseBackend, column: &ColumnModel) -> String {
     let mut parts = vec![format!("{} {}", column.name, column.sql_type)];
     if !column.nullable {
         parts.push("NOT NULL".to_string());
@@ -22,20 +50,27 @@ fn render_column_definition(column: &ColumnModel) -> String {
         parts.push("UNIQUE".to_string());
     }
     if let Some(default) = &column.default {
-        parts.push(format!("DEFAULT {}", default));
+        parts.push(format!(
+            "DEFAULT {}",
+            render_default_clause(backend, default)
+        ));
     }
     parts.join(" ")
 }
 
-fn render_create_table_statement(table: &TableModel) -> String {
-    render_create_table_statement_for_name(table, &table.table_name)
+fn render_create_table_statement(backend: DatabaseBackend, table: &TableModel) -> String {
+    render_create_table_statement_for_name(backend, table, &table.table_name)
 }
 
-fn render_create_table_statement_for_name(table: &TableModel, table_name: &str) -> String {
+fn render_create_table_statement_for_name(
+    backend: DatabaseBackend,
+    table: &TableModel,
+    table_name: &str,
+) -> String {
     let mut parts = table
         .columns
         .iter()
-        .map(render_column_definition)
+        .map(|column| render_column_definition(backend, column))
         .collect::<Vec<_>>();
     parts.extend(table.foreign_keys.iter().map(|foreign_key| {
         let constraint_name = foreign_key_constraint_name(table_name, foreign_key);
@@ -295,7 +330,11 @@ fn render_sqlite_table_rebuild_statements(
     target_table: &TableModel,
 ) -> Vec<String> {
     let temp_table_name = format!("__graphql_orm_{}_new", target_table.table_name);
-    let target_table_sql = render_create_table_statement_for_name(target_table, &temp_table_name);
+    let target_table_sql = render_create_table_statement_for_name(
+        DatabaseBackend::Sqlite,
+        target_table,
+        &temp_table_name,
+    );
     let common_columns = target_table
         .columns
         .iter()
@@ -337,7 +376,7 @@ fn render_sqlite_table_rebuild_statements(
 pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> Vec<String> {
     match step {
         MigrationStep::CreateTable(table) => {
-            let mut statements = vec![render_create_table_statement(table)];
+            let mut statements = vec![render_create_table_statement(backend, table)];
             statements.extend(table.indexes.iter().map(|index| {
                 let unique = if index.is_unique { "UNIQUE " } else { "" };
                 format!(
@@ -356,7 +395,7 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
         MigrationStep::AddColumn { table_name, column } => vec![format!(
             "ALTER TABLE {} ADD COLUMN {}",
             table_name,
-            render_column_definition(column)
+            render_column_definition(backend, column)
         )],
         MigrationStep::DropColumn {
             table_name,

@@ -12,6 +12,8 @@ static QUERY_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[derive(Clone, Debug, PartialEq)]
 pub enum SqlValue {
     String(String),
+    Bytes(Vec<u8>),
+    BytesNull,
     Json(serde_json::Value),
     JsonNull,
     Uuid(uuid::Uuid),
@@ -1009,6 +1011,7 @@ pub struct RelationMetadata {
     pub source_column: &'static str,
     pub target_column: &'static str,
     pub is_multiple: bool,
+    pub emit_foreign_key: bool,
     pub on_delete: DeletePolicy,
     pub propagate_change: RelationChangePropagation,
 }
@@ -1169,6 +1172,7 @@ impl From<&EntityMetadata> for TableModel {
             foreign_keys: value
                 .relations
                 .iter()
+                .filter(|relation| relation.emit_foreign_key)
                 .map(|relation| ForeignKeyModel {
                     source_column: relation.source_column.to_string(),
                     target_table: relation.target_type.to_string(),

@@ -550,6 +550,8 @@ pub mod graphql {
             for value in values {
                 query = match value {
                     SqlValue::String(value) => query.bind(value),
+                    SqlValue::Bytes(value) => query.bind(value),
+                    SqlValue::BytesNull => query.bind(Option::<Vec<u8>>::None),
                     SqlValue::Int(value) => query.bind(*value),
                     SqlValue::Float(value) => query.bind(*value),
                     SqlValue::Bool(value) => query.bind(*value),
@@ -571,6 +573,8 @@ pub mod graphql {
             for value in values {
                 query = match value {
                     SqlValue::String(value) => query.bind(value),
+                    SqlValue::Bytes(value) => query.bind(value),
+                    SqlValue::BytesNull => query.bind(Option::<Vec<u8>>::None),
                     SqlValue::Int(value) => query.bind(*value),
                     SqlValue::Float(value) => query.bind(*value),
                     SqlValue::Bool(value) => query.bind(*value),
@@ -592,6 +596,8 @@ pub mod graphql {
                 for value in values {
                     query = match value {
                         SqlValue::String(value) => query.bind(value),
+                        SqlValue::Bytes(value) => query.bind(value),
+                        SqlValue::BytesNull => query.bind(Option::<Vec<u8>>::None),
                         SqlValue::Int(value) => query.bind(*value),
                         SqlValue::Float(value) => query.bind(*value),
                         SqlValue::Bool(value) => query.bind(*value),
@@ -608,6 +614,8 @@ pub mod graphql {
                 for value in values {
                     query = match value {
                         SqlValue::String(value) => query.bind(value),
+                        SqlValue::Bytes(value) => query.bind(value),
+                        SqlValue::BytesNull => query.bind(Option::<Vec<u8>>::None),
                         SqlValue::Int(value) => query.bind(*value),
                         SqlValue::Float(value) => query.bind(*value),
                         SqlValue::Bool(value) => query.bind(*value),

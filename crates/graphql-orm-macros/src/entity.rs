@@ -149,6 +149,7 @@ pub(crate) struct FieldMetadata {
     pub(crate) relation_from: Option<String>,
     pub(crate) relation_to: Option<String>,
     pub(crate) relation_multiple: bool,
+    pub(crate) relation_emit_foreign_key: bool,
     pub(crate) relation_on_delete: Option<String>,
     pub(crate) relation_propagate_change: Option<String>,
     pub(crate) skip_db: bool,
@@ -164,6 +165,7 @@ pub(crate) struct FieldMetadata {
     /// Applied after reading from the database row (e.g., decryption)
     pub(crate) transform_read: Option<String>,
     pub(crate) default: Option<String>,
+    pub(crate) auto_generated: Option<bool>,
     /// If true, include in Create/Update inputs even if #[graphql(skip)] is set.
     /// Useful for fields that should be writable but never exposed in queries.
     pub(crate) input_only: bool,
@@ -191,6 +193,7 @@ impl Default for FieldMetadata {
             relation_from: None,
             relation_to: None,
             relation_multiple: false,
+            relation_emit_foreign_key: true,
             relation_on_delete: None,
             relation_propagate_change: None,
             skip_db: false,
@@ -201,6 +204,7 @@ impl Default for FieldMetadata {
             transform_write: None,
             transform_read: None,
             default: None,
+            auto_generated: None,
             input_only: false,
             read: true,
             write: true,
@@ -284,6 +288,10 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             meta.default = Some(lit.value());
+                        } else if nested.path.is_ident("auto_generated") {
+                            let value = nested.value()?;
+                            let lit: syn::LitBool = value.parse()?;
+                            meta.auto_generated = Some(lit.value);
                         }
                         Ok(())
                     });
@@ -351,6 +359,10 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             meta.relation_on_delete = Some(lit.value());
+                        } else if nested.path.is_ident("emit_fk") {
+                            let value = nested.value()?;
+                            let lit: syn::LitBool = value.parse()?;
+                            meta.relation_emit_foreign_key = lit.value;
                         } else if nested.path.is_ident("propagate_change") {
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
@@ -800,6 +812,7 @@ fn generate_entity_impl(
                     .clone()
                     .unwrap_or_else(|| "unknown_id".to_string());
                 let is_multiple = field_meta.relation_multiple;
+                let emit_foreign_key = field_meta.relation_emit_foreign_key;
                 let on_delete = relation_delete_policy_tokens(
                     field_meta.relation_on_delete.as_deref(),
                     field.span(),
@@ -816,6 +829,7 @@ fn generate_entity_impl(
                         source_column: #source_column,
                         target_column: #target_column,
                         is_multiple: #is_multiple,
+                        emit_foreign_key: #emit_foreign_key,
                         on_delete: #on_delete,
                         propagate_change: #propagate_change,
                     }

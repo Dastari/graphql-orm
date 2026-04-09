@@ -67,6 +67,9 @@ async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
     sqlx::query("DROP TABLE IF EXISTS places")
         .execute(&pool)
         .await?;
+    sqlx::query("DROP TABLE IF EXISTS __graphql_orm_migrations")
+        .execute(&pool)
+        .await?;
     Ok(pool)
 }
 

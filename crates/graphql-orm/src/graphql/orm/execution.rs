@@ -2,6 +2,7 @@ use super::core::{PlannedSchemaStage, SchemaStage, SqlValue, record_executed_que
 use super::dialect::current_backend;
 use super::migrations::{build_migration_plan, introspect_schema};
 use crate::{DbPool, DbRow};
+#[cfg(feature = "sqlite")]
 use sqlx::Acquire;
 use sqlx::Row;
 use std::collections::HashSet;
@@ -373,6 +374,8 @@ where
     for value in values {
         query = match value {
             SqlValue::String(value) => query.bind(value),
+            SqlValue::Bytes(value) => query.bind(value),
+            SqlValue::BytesNull => query.bind(Option::<Vec<u8>>::None),
             SqlValue::Json(value) => query.bind(value.to_string()),
             SqlValue::JsonNull => query.bind(Option::<String>::None),
             SqlValue::Uuid(value) => query.bind(crate::db::sqlite_helpers::uuid_to_string(value)),
@@ -399,6 +402,8 @@ where
     for value in values {
         query = match value {
             SqlValue::String(value) => query.bind(value),
+            SqlValue::Bytes(value) => query.bind(value),
+            SqlValue::BytesNull => query.bind(Option::<Vec<u8>>::None),
             SqlValue::Json(value) => query.bind(sqlx::types::Json(value.clone())),
             SqlValue::JsonNull => query.bind(Option::<sqlx::types::Json<serde_json::Value>>::None),
             SqlValue::Uuid(value) => query.bind(*value),
@@ -426,6 +431,8 @@ where
         for value in values {
             query = match value {
                 SqlValue::String(value) => query.bind(value),
+                SqlValue::Bytes(value) => query.bind(value),
+                SqlValue::BytesNull => query.bind(Option::<Vec<u8>>::None),
                 SqlValue::Json(value) => query.bind(value.to_string()),
                 SqlValue::JsonNull => query.bind(Option::<String>::None),
                 SqlValue::Uuid(value) => {
@@ -455,6 +462,8 @@ where
     for value in values {
         query = match value {
             SqlValue::String(value) => query.bind(value),
+            SqlValue::Bytes(value) => query.bind(value),
+            SqlValue::BytesNull => query.bind(Option::<Vec<u8>>::None),
             SqlValue::Json(value) => query.bind(sqlx::types::Json(value.clone())),
             SqlValue::JsonNull => query.bind(Option::<sqlx::types::Json<serde_json::Value>>::None),
             SqlValue::Uuid(value) => query.bind(*value),
