@@ -221,7 +221,7 @@ pub(crate) fn generate_graphql_relations(
             is_multiple,
             source_field_ty,
             source_supports_dataloader,
-            emit_foreign_key: meta.relation_emit_foreign_key,
+            emit_foreign_key: meta.relation_emit_foreign_key.unwrap_or(!is_multiple),
             on_delete,
             propagate_change,
             storage_kind,

@@ -425,12 +425,58 @@ pub fn render_delete_query(dialect: DatabaseBackend, query: &DeleteQuery) -> Ren
     RenderedQuery { sql, values }
 }
 
+pub fn render_upsert_sql(
+    dialect: DatabaseBackend,
+    table: &str,
+    insert_columns: &[&str],
+    insert_values: &[&str],
+    conflict_columns: &[&str],
+    update_columns: &[&str],
+    update_updated_at: bool,
+) -> String {
+    let mut set_clauses = update_columns
+        .iter()
+        .map(|column| format!("{column} = EXCLUDED.{column}"))
+        .collect::<Vec<_>>();
+    if update_updated_at {
+        set_clauses.push(format!("updated_at = {}", dialect.current_epoch_expr()));
+    }
+
+    format!(
+        "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}",
+        table,
+        insert_columns.join(", "),
+        insert_values.join(", "),
+        conflict_columns.join(", "),
+        set_clauses.join(", ")
+    )
+}
+
 pub fn backend_placeholder(index: usize) -> String {
     current_backend().placeholder(index)
 }
 
 pub fn normalize_sql(sql: &str, start_index: usize) -> String {
     current_backend().normalize_sql(sql, start_index)
+}
+
+pub fn build_upsert_sql(
+    table: &str,
+    insert_columns: &[&str],
+    insert_values: &[&str],
+    conflict_columns: &[&str],
+    update_columns: &[&str],
+    update_updated_at: bool,
+) -> String {
+    render_upsert_sql(
+        current_backend(),
+        table,
+        insert_columns,
+        insert_values,
+        conflict_columns,
+        update_columns,
+        update_updated_at,
+    )
 }
 pub struct EntityQuery<T> {
     pub where_clauses: Vec<String>,

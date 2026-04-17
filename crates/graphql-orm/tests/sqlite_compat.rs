@@ -212,11 +212,7 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
     let schema_model = graphql_orm::graphql::orm::SchemaModel::from_entities(&[metadata]);
     assert_eq!(schema_model.tables.len(), 1);
     assert_eq!(schema_model.tables[0].table_name, "users");
-    assert_eq!(schema_model.tables[0].foreign_keys.len(), 1);
-    assert_eq!(
-        schema_model.tables[0].foreign_keys[0].target_column,
-        "author_id"
-    );
+    assert_eq!(schema_model.tables[0].foreign_keys.len(), 0);
     let introspected = graphql_orm::graphql::orm::introspect_schema(&pool).await?;
     assert_eq!(introspected.tables.len(), 2);
     let users_table = introspected

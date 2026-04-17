@@ -14,6 +14,7 @@ pub(crate) struct EntityMetadata {
     pub(crate) write_policy: Option<String>,
     /// Optional async hook path invoked after create/update/delete mutations.
     pub(crate) notify_handler: Option<String>,
+    pub(crate) upsert: Option<Vec<String>>,
     pub(crate) unique_composite: Vec<Vec<String>>,
     pub(crate) indexes: Vec<(bool, Vec<String>)>,
     pub(crate) serde_rename_all: Option<String>,
@@ -54,6 +55,28 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
                     metadata.notify_handler = Some(lit.value());
+                } else if meta.path.is_ident("upsert") {
+                    if metadata.upsert.is_some() {
+                        return Err(syn::Error::new(
+                            meta.path.span(),
+                            "graphql_entity upsert may only be declared once per entity",
+                        ));
+                    }
+                    let value = meta.value()?;
+                    let lit: syn::LitStr = value.parse()?;
+                    let cols = lit
+                        .value()
+                        .split(',')
+                        .map(|c| c.trim().to_string())
+                        .filter(|c| !c.is_empty())
+                        .collect::<Vec<_>>();
+                    if cols.is_empty() {
+                        return Err(syn::Error::new(
+                            lit.span(),
+                            "upsert must include at least one column",
+                        ));
+                    }
+                    metadata.upsert = Some(cols);
                 } else if meta.path.is_ident("unique_composite") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
@@ -149,7 +172,7 @@ pub(crate) struct FieldMetadata {
     pub(crate) relation_from: Option<String>,
     pub(crate) relation_to: Option<String>,
     pub(crate) relation_multiple: bool,
-    pub(crate) relation_emit_foreign_key: bool,
+    pub(crate) relation_emit_foreign_key: Option<bool>,
     pub(crate) relation_on_delete: Option<String>,
     pub(crate) relation_propagate_change: Option<String>,
     pub(crate) skip_db: bool,
@@ -194,7 +217,7 @@ impl Default for FieldMetadata {
             relation_from: None,
             relation_to: None,
             relation_multiple: false,
-            relation_emit_foreign_key: true,
+            relation_emit_foreign_key: None,
             relation_on_delete: None,
             relation_propagate_change: None,
             skip_db: false,
@@ -365,7 +388,7 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                         } else if nested.path.is_ident("emit_fk") {
                             let value = nested.value()?;
                             let lit: syn::LitBool = value.parse()?;
-                            meta.relation_emit_foreign_key = lit.value;
+                            meta.relation_emit_foreign_key = Some(lit.value);
                         } else if nested.path.is_ident("propagate_change") {
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
@@ -815,7 +838,7 @@ fn generate_entity_impl(
                     .clone()
                     .unwrap_or_else(|| "unknown_id".to_string());
                 let is_multiple = field_meta.relation_multiple;
-                let emit_foreign_key = field_meta.relation_emit_foreign_key;
+                let emit_foreign_key = field_meta.relation_emit_foreign_key.unwrap_or(!is_multiple);
                 let on_delete = relation_delete_policy_tokens(
                     field_meta.relation_on_delete.as_deref(),
                     field.span(),

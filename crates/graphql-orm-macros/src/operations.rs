@@ -2,10 +2,11 @@ use super::*;
 use crate::backend::backend_database_type_tokens;
 use crate::backend::backend_pool_type_tokens;
 use crate::entity::{
-    graphql_field_name, is_bool_type, is_byte_vec_type, is_option_type, is_uuid_type, is_vec_type,
-    maybe_wrap_write_transform, option_inner_type, parse_entity_metadata, parse_field_metadata,
-    type_path_last_ident,
+    FieldMetadata, graphql_field_name, is_bool_type, is_byte_vec_type, is_option_type,
+    is_uuid_type, is_vec_type, maybe_wrap_write_transform, option_inner_type,
+    parse_entity_metadata, parse_field_metadata, type_path_last_ident,
 };
+use std::collections::HashMap;
 use syn::spanned::Spanned;
 
 #[derive(Copy, Clone)]
@@ -58,6 +59,311 @@ struct PropagatedRelation {
     source_field: syn::Ident,
     source_ty: syn::Type,
     target_type: syn::Ident,
+}
+
+#[derive(Clone)]
+struct ResolvedUpsertField {
+    field_name: syn::Ident,
+    field_type: syn::Type,
+    meta: FieldMetadata,
+    rust_name: String,
+    graphql_name: String,
+    db_column: String,
+    graphql_create_visible: bool,
+}
+
+struct ResolvedUpsertConfig {
+    fields: Vec<ResolvedUpsertField>,
+}
+
+fn create_input_visibility(meta: &FieldMetadata, rust_name: &str, auto_generated_pk: bool) -> bool {
+    let is_timestamp = rust_name == "created_at" || rust_name == "updated_at";
+    let include_in_create =
+        (!meta.is_primary_key || !auto_generated_pk) && !is_timestamp && meta.write;
+    include_in_create && (!meta.skip_input || meta.input_only)
+}
+
+fn resolve_schema_column_name(name: &str, field_columns: &HashMap<String, String>) -> String {
+    field_columns
+        .get(name)
+        .cloned()
+        .unwrap_or_else(|| name.to_string())
+}
+
+fn resolve_upsert_config(
+    struct_name: &syn::Ident,
+    fields: &syn::punctuated::Punctuated<Field, syn::token::Comma>,
+    entity_meta: &crate::entity::EntityMetadata,
+    rename_all_rule: Option<&str>,
+    auto_generated_pk: bool,
+) -> syn::Result<Option<ResolvedUpsertConfig>> {
+    let Some(requested_targets) = entity_meta.upsert.as_ref() else {
+        return Ok(None);
+    };
+
+    #[cfg(any(feature = "mysql", feature = "mssql"))]
+    {
+        return Err(syn::Error::new(
+            struct_name.span(),
+            "graphql-orm upsert is only supported for sqlite and postgres in v1",
+        ));
+    }
+
+    #[allow(unreachable_code)]
+    {
+        let mut field_columns = HashMap::new();
+        let mut resolved_fields = Vec::new();
+
+        for field in fields {
+            let field_name = field.ident.clone().expect("named field");
+            let meta = parse_field_metadata(field)?;
+            let rust_name = field_name.to_string();
+            let graphql_name = graphql_field_name(&meta, &rust_name, rename_all_rule);
+            let db_column = meta.db_column.clone().unwrap_or_else(|| rust_name.clone());
+            field_columns.insert(rust_name.clone(), db_column.clone());
+            field_columns.insert(db_column.clone(), db_column.clone());
+            resolved_fields.push(ResolvedUpsertField {
+                field_name,
+                field_type: field.ty.clone(),
+                meta,
+                rust_name,
+                graphql_name,
+                db_column,
+                graphql_create_visible: false,
+            });
+        }
+
+        for field in &mut resolved_fields {
+            field.graphql_create_visible =
+                create_input_visibility(&field.meta, &field.rust_name, auto_generated_pk);
+        }
+
+        let mut target_fields = Vec::new();
+        for requested in requested_targets {
+            let resolved = resolved_fields
+                .iter()
+                .find(|field| field.rust_name == *requested)
+                .or_else(|| {
+                    resolved_fields
+                        .iter()
+                        .find(|field| field.db_column == *requested)
+                })
+                .ok_or_else(|| {
+                    syn::Error::new(
+                        struct_name.span(),
+                        format!(
+                            "graphql_entity upsert target '{}' does not match any persisted field",
+                            requested
+                        ),
+                    )
+                })?;
+
+            if resolved.meta.is_relation || resolved.meta.skip_db {
+                return Err(syn::Error::new(
+                    struct_name.span(),
+                    format!(
+                        "graphql_entity upsert target '{}' must reference a persisted scalar field",
+                        requested
+                    ),
+                ));
+            }
+
+            target_fields.push(resolved.clone());
+        }
+
+        let primary_key = resolved_fields
+            .iter()
+            .find(|field| field.meta.is_primary_key)
+            .map(|field| field.db_column.clone())
+            .unwrap_or_else(|| "id".to_string());
+        let target_columns = target_fields
+            .iter()
+            .map(|field| field.db_column.clone())
+            .collect::<Vec<_>>();
+
+        let mut unique_targets = vec![vec![primary_key]];
+        unique_targets.extend(
+            resolved_fields
+                .iter()
+                .filter(|field| field.meta.unique)
+                .map(|field| vec![field.db_column.clone()]),
+        );
+        unique_targets.extend(entity_meta.unique_composite.iter().map(|columns| {
+            columns
+                .iter()
+                .map(|column| resolve_schema_column_name(column, &field_columns))
+                .collect::<Vec<_>>()
+        }));
+        unique_targets.extend(
+            entity_meta
+                .indexes
+                .iter()
+                .filter(|(unique, _)| *unique)
+                .map(|(_, columns)| {
+                    columns
+                        .iter()
+                        .map(|column| resolve_schema_column_name(column, &field_columns))
+                        .collect::<Vec<_>>()
+                }),
+        );
+
+        if !unique_targets
+            .iter()
+            .any(|candidate| *candidate == target_columns)
+        {
+            return Err(syn::Error::new(
+                struct_name.span(),
+                format!(
+                    "graphql_entity upsert target '{}' must match a unique field, primary key, unique_index, or unique_composite declaration",
+                    requested_targets.join(", ")
+                ),
+            ));
+        }
+
+        Ok(Some(ResolvedUpsertConfig {
+            fields: target_fields,
+        }))
+    }
+}
+
+fn push_create_input_sql_value_tokens(
+    struct_name: &syn::Ident,
+    field_access: proc_macro2::TokenStream,
+    field_type: &syn::Type,
+    meta: &FieldMetadata,
+    error_ty: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    if meta.is_boolean_field || is_bool_type(field_type) {
+        if is_option_type(field_type) {
+            quote! {
+                match #field_access {
+                    Some(value) => bind_values.push(#struct_name::__gom_bool_sql_value(value)),
+                    None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                }
+            }
+        } else {
+            quote! {
+                bind_values.push(#struct_name::__gom_bool_sql_value(#field_access));
+            }
+        }
+    } else if meta.is_json_field || (is_vec_type(field_type) && !is_byte_vec_type(field_type)) {
+        if is_option_type(field_type) {
+            quote! {
+                match &#field_access {
+                    Some(value) => bind_values.push(::graphql_orm::graphql::orm::json_sql_value::<_, #error_ty>(value)?),
+                    None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::JsonNull),
+                }
+            }
+        } else {
+            quote! {
+                bind_values.push(::graphql_orm::graphql::orm::json_sql_value::<_, #error_ty>(&#field_access)?);
+            }
+        }
+    } else if is_uuid_type(field_type) {
+        if is_option_type(field_type) {
+            quote! {
+                match #field_access {
+                    Some(value) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Uuid(value)),
+                    None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                }
+            }
+        } else {
+            quote! {
+                bind_values.push(::graphql_orm::graphql::orm::SqlValue::Uuid(#field_access));
+            }
+        }
+    } else if option_inner_type(field_type)
+        .and_then(type_path_last_ident)
+        .is_some_and(|ident| {
+            matches!(
+                ident.to_string().as_str(),
+                "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
+            )
+        })
+    {
+        quote! {
+            match #field_access {
+                Some(value) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Int(value as i64)),
+                None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+            }
+        }
+    } else if option_inner_type(field_type)
+        .and_then(type_path_last_ident)
+        .is_some_and(|ident| matches!(ident.to_string().as_str(), "f32" | "f64"))
+    {
+        quote! {
+            match #field_access {
+                Some(value) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Float(value.into())),
+                None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+            }
+        }
+    } else if type_path_last_ident(field_type).is_some_and(|ident| {
+        matches!(
+            ident.to_string().as_str(),
+            "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
+        )
+    }) {
+        quote! {
+            bind_values.push(::graphql_orm::graphql::orm::SqlValue::Int((#field_access) as i64));
+        }
+    } else if type_path_last_ident(field_type)
+        .is_some_and(|ident| matches!(ident.to_string().as_str(), "f32" | "f64"))
+    {
+        quote! {
+            bind_values.push(::graphql_orm::graphql::orm::SqlValue::Float((#field_access).into()));
+        }
+    } else if is_byte_vec_type(field_type) {
+        quote! {
+            bind_values.push(::graphql_orm::graphql::orm::SqlValue::Bytes((#field_access).clone()));
+        }
+    } else if is_option_type(field_type)
+        && option_inner_type(field_type).is_some_and(is_byte_vec_type)
+    {
+        quote! {
+            match &#field_access {
+                Some(value) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Bytes(value.clone())),
+                None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::BytesNull),
+            }
+        }
+    } else if is_option_type(field_type) {
+        let value_expr =
+            maybe_wrap_write_transform(quote! { value.to_string() }, &meta.transform_write);
+        if meta.transform_write.is_some() {
+            quote! {
+                match &#field_access {
+                    Some(value) => {
+                        let __transformed = #value_expr;
+                        bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(__transformed));
+                    }
+                    None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                }
+            }
+        } else {
+            quote! {
+                match &#field_access {
+                    Some(value) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr)),
+                    None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                }
+            }
+        }
+    } else {
+        let value_expr = maybe_wrap_write_transform(
+            quote! { (#field_access).to_string() },
+            &meta.transform_write,
+        );
+        if meta.transform_write.is_some() {
+            quote! {
+                {
+                    let __transformed = #value_expr;
+                    bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(__transformed));
+                }
+            }
+        } else {
+            quote! {
+                bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr));
+            }
+        }
+    }
 }
 
 pub(crate) fn generate_graphql_operations(
@@ -157,6 +463,13 @@ pub(crate) fn generate_graphql_operations(
     let pk_type = quote! { #pk_type_ty };
     let auto_generated_pk = pk_auto_generated_override
         .unwrap_or_else(|| pk_field == syn::Ident::new("id", pk_field.span()));
+    let upsert_config = resolve_upsert_config(
+        struct_name,
+        fields,
+        &entity_meta,
+        rename_all_rule,
+        auto_generated_pk,
+    )?;
     let pk_is_uuid = is_uuid_type(&pk_type_ty);
     let pk_bind_value = if pk_is_uuid {
         quote! { ::graphql_orm::graphql::orm::SqlValue::Uuid(id) }
@@ -251,17 +564,21 @@ pub(crate) fn generate_graphql_operations(
     let list_query_name = plural_name.to_case(Case::Camel);
     let single_query_name = struct_name_str.to_case(Case::Camel);
     let create_mutation_name = format!("create{}", struct_name).to_case(Case::Camel);
+    let upsert_mutation_name = format!("upsert{}", struct_name).to_case(Case::Camel);
     let update_mutation_name = format!("update{}", struct_name).to_case(Case::Camel);
     let update_many_mutation_name = format!("update{}", plural_name).to_case(Case::Camel);
     let delete_mutation_name = format!("delete{}", struct_name).to_case(Case::Camel);
     let delete_many_mutation_name = format!("delete{}", plural_name).to_case(Case::Camel);
     let subscription_name = format!("{}Changed", struct_name).to_case(Case::Camel);
     let entity_result_field_name = struct_name_str.to_case(Case::Camel);
+    let upsert_result_type =
+        syn::Ident::new(&format!("Upsert{}Result", struct_name), struct_name.span());
     let update_many_result_type =
         syn::Ident::new(&format!("Update{}Result", plural_name), struct_name.span());
     let update_many_result_type_str = format!("Update{}Result", plural_name);
     let delete_many_result_type =
         syn::Ident::new(&format!("Delete{}Result", plural_name), struct_name.span());
+    let upsert_result_type_str = format!("Upsert{}Result", struct_name);
     let delete_many_result_type_str = format!("Delete{}Result", plural_name);
     let propagation_blocks: Vec<proc_macro2::TokenStream> = propagated_relations
         .iter()
@@ -363,6 +680,22 @@ pub(crate) fn generate_graphql_operations(
     let mut update_field_checks_repo: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut create_policy_checks: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut update_policy_checks: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut upsert_policy_checks_graphql: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut upsert_policy_checks_repo: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut upsert_update_columns: Vec<String> = Vec::new();
+    let mut upsert_change_fields: Vec<String> = Vec::new();
+    let mut upsert_change_binds_graphql: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut upsert_change_binds_repo: Vec<proc_macro2::TokenStream> = Vec::new();
+    let upsert_target_db_columns = upsert_config
+        .as_ref()
+        .map(|config| {
+            config
+                .fields
+                .iter()
+                .map(|field| field.db_column.clone())
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .unwrap_or_default();
 
     // Track string-filterable fields for search_similar
     let mut string_filterable_fields: Vec<(syn::Ident, bool)> = Vec::new(); // (field_name, is_option)
@@ -449,6 +782,107 @@ pub(crate) fn generate_graphql_operations(
                 create_input_from_graphql_fields.push(quote! {
                     #field_name: ::std::default::Default::default(),
                 });
+            }
+
+            if upsert_config.is_some() {
+                let upsert_update_candidate =
+                    !meta.is_primary_key && !upsert_target_db_columns.contains(&db_col);
+
+                if let Some(policy_key) = &meta.write_policy {
+                    let graphql_check = if upsert_update_candidate {
+                        quote! {
+                            if let Some(current_entity) = current_entity.as_ref() {
+                                db.ensure_writable_field(
+                                    Some(ctx),
+                                    #entity_name_lit,
+                                    #graphql_name,
+                                    Some(#policy_key),
+                                    Some(current_entity as &(dyn ::std::any::Any + Send + Sync)),
+                                    Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
+                                ).await?;
+                            } else {
+                                db.ensure_writable_field(
+                                    Some(ctx),
+                                    #entity_name_lit,
+                                    #graphql_name,
+                                    Some(#policy_key),
+                                    None,
+                                    Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
+                                ).await?;
+                            }
+                        }
+                    } else {
+                        quote! {
+                            if current_entity.is_none() {
+                                db.ensure_writable_field(
+                                    Some(ctx),
+                                    #entity_name_lit,
+                                    #graphql_name,
+                                    Some(#policy_key),
+                                    None,
+                                    Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
+                                ).await?;
+                            }
+                        }
+                    };
+                    let repo_check = if upsert_update_candidate {
+                        quote! {
+                            if let Some(current_entity) = current_entity.as_ref() {
+                                db.ensure_writable_field(
+                                    None,
+                                    #entity_name_lit,
+                                    #graphql_name,
+                                    Some(#policy_key),
+                                    Some(current_entity as &(dyn ::std::any::Any + Send + Sync)),
+                                    Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
+                                ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                            } else {
+                                db.ensure_writable_field(
+                                    None,
+                                    #entity_name_lit,
+                                    #graphql_name,
+                                    Some(#policy_key),
+                                    None,
+                                    Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
+                                ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                            }
+                        }
+                    } else {
+                        quote! {
+                            if current_entity.is_none() {
+                                db.ensure_writable_field(
+                                    None,
+                                    #entity_name_lit,
+                                    #graphql_name,
+                                    Some(#policy_key),
+                                    None,
+                                    Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
+                                ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                            }
+                        }
+                    };
+                    upsert_policy_checks_graphql.push(graphql_check);
+                    upsert_policy_checks_repo.push(repo_check);
+                }
+
+                if upsert_update_candidate {
+                    upsert_update_columns.push(db_col.clone());
+                    upsert_change_fields.push(db_col.clone());
+                    upsert_change_binds_graphql.push(push_create_input_sql_value_tokens(
+                        struct_name,
+                        quote! { input.#field_name.clone() },
+                        field_type,
+                        &meta,
+                        quote! { ::graphql_orm::async_graphql::Error },
+                    ));
+                    upsert_change_binds_repo.push(push_create_input_sql_value_tokens(
+                        struct_name,
+                        quote! { input.#field_name.clone() },
+                        field_type,
+                        &meta,
+                        quote! { ::graphql_orm::sqlx::Error },
+                    ));
+                }
             }
 
             // Track columns for INSERT
@@ -985,6 +1419,27 @@ pub(crate) fn generate_graphql_operations(
             .is_some_and(|col| col == "updated_at")
     });
 
+    if let Some(config) = &upsert_config {
+        for field in &config.fields {
+            if !field.graphql_create_visible {
+                return Err(syn::Error::new(
+                    struct_name.span(),
+                    format!(
+                        "graphql_entity upsert target '{}' must be present in the public GraphQL create input",
+                        field.graphql_name
+                    ),
+                ));
+            }
+        }
+
+        if upsert_update_columns.is_empty() && !has_updated_at_column {
+            return Err(syn::Error::new(
+                struct_name.span(),
+                "graphql_entity upsert requires at least one updatable field or an updated_at column",
+            ));
+        }
+    }
+
     // Build INSERT SQL template
     let insert_placeholders: Vec<&str> = insert_columns.iter().map(|_| "?").collect();
     let insert_sql = if auto_generated_pk {
@@ -1045,6 +1500,48 @@ pub(crate) fn generate_graphql_operations(
     } else {
         quote! {}
     };
+    let upsert_change_field_literals: Vec<syn::LitStr> = upsert_change_fields
+        .iter()
+        .map(|field| syn::LitStr::new(field, struct_name.span()))
+        .collect();
+    let upsert_update_column_literals: Vec<syn::LitStr> = upsert_update_columns
+        .iter()
+        .map(|field| syn::LitStr::new(field, struct_name.span()))
+        .collect();
+    let (upsert_insert_columns, upsert_insert_values): (Vec<String>, Vec<String>) =
+        if auto_generated_pk {
+            let mut columns = vec!["id".to_string()];
+            columns.extend(insert_default_columns.iter().cloned());
+            columns.extend(insert_columns.iter().cloned());
+            let mut values = vec!["?".to_string()];
+            values.extend(insert_default_exprs.iter().cloned());
+            values.extend(insert_placeholders.iter().map(|value| value.to_string()));
+            (columns, values)
+        } else {
+            let mut columns = insert_default_columns.clone();
+            columns.extend(insert_columns.iter().cloned());
+            let mut values = insert_default_exprs.clone();
+            values.extend(insert_placeholders.iter().map(|value| value.to_string()));
+            (columns, values)
+        };
+    let upsert_insert_column_literals: Vec<syn::LitStr> = upsert_insert_columns
+        .iter()
+        .map(|field| syn::LitStr::new(field, struct_name.span()))
+        .collect();
+    let upsert_insert_value_literals: Vec<syn::LitStr> = upsert_insert_values
+        .iter()
+        .map(|field| syn::LitStr::new(field, struct_name.span()))
+        .collect();
+    let upsert_conflict_column_literals: Vec<syn::LitStr> = upsert_config
+        .as_ref()
+        .map(|config| {
+            config
+                .fields
+                .iter()
+                .map(|field| syn::LitStr::new(&field.db_column, struct_name.span()))
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Column list for SQL (unused now but kept for reference)
     let column_names: Vec<String> = fields
@@ -1147,6 +1644,392 @@ pub(crate) fn generate_graphql_operations(
                 _ => None,
             }
         }
+    };
+
+    let upsert_result_definition = if upsert_config.is_some() {
+        quote! {
+            #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject)]
+            #[graphql(name = #upsert_result_type_str)]
+            pub struct #upsert_result_type {
+                pub success: bool,
+                pub error: Option<String>,
+                pub action: Option<::graphql_orm::graphql::orm::ChangeAction>,
+                #[graphql(name = #entity_result_field_name)]
+                pub entity: Option<#struct_name>,
+            }
+
+            impl #upsert_result_type {
+                pub fn ok(action: ::graphql_orm::graphql::orm::ChangeAction, entity: #struct_name) -> Self {
+                    Self { success: true, error: None, action: Some(action), entity: Some(entity) }
+                }
+
+                pub fn err(msg: impl Into<String>) -> Self {
+                    Self { success: false, error: Some(msg.into()), action: None, entity: None }
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let upsert_fetch_conditions = upsert_config
+        .as_ref()
+        .map(|config| {
+            config
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(index, field)| {
+                    let db_column = &field.db_column;
+                    let bind_index = index + 1;
+                    quote! { format!("{} = {}", #db_column, Self::__gom_placeholder(#bind_index)) }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let upsert_fetch_bind_tokens = upsert_config
+        .as_ref()
+        .map(|config| {
+            config
+                .fields
+                .iter()
+                .map(|field| {
+                    let field_name = &field.field_name;
+                    push_create_input_sql_value_tokens(
+                        struct_name,
+                        quote! { input.#field_name.clone() },
+                        &field.field_type,
+                        &field.meta,
+                        quote! { ::graphql_orm::sqlx::Error },
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let upsert_sql_expression = if upsert_config.is_some() {
+        quote! {
+            ::graphql_orm::graphql::orm::build_upsert_sql(
+                #table_name,
+                &[#(#upsert_insert_column_literals),*],
+                &[#(#upsert_insert_value_literals),*],
+                &[#(#upsert_conflict_column_literals),*],
+                &[#(#upsert_update_column_literals),*],
+                #has_updated_at_column,
+            )
+        }
+    } else {
+        quote! { String::new() }
+    };
+    let upsert_helper_methods = if upsert_config.is_some() {
+        quote! {
+            #[doc(hidden)]
+            pub(crate) async fn __gom_fetch_by_upsert_on<'e, E>(
+                executor: E,
+                input: &#create_input,
+            ) -> Result<Option<Self>, ::graphql_orm::sqlx::Error>
+            where
+                E: ::graphql_orm::sqlx::Executor<'e, Database = #database_type>,
+            {
+                use ::graphql_orm::graphql::orm::FromSqlRow;
+
+                let where_clause = vec![#(#upsert_fetch_conditions),*].join(" AND ");
+                let sql = Self::__gom_rebind_sql(
+                    &format!("SELECT * FROM {} WHERE {}", #table_name, where_clause),
+                    1,
+                );
+                let mut bind_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                #(#upsert_fetch_bind_tokens)*
+                let rows = ::graphql_orm::graphql::orm::fetch_rows_on(executor, &sql, &bind_values).await?;
+                rows.first()
+                    .map(<Self as ::graphql_orm::graphql::orm::FromSqlRow>::from_row)
+                    .transpose()
+            }
+
+            #[doc(hidden)]
+            async fn __gom_upsert_with_mutation_context<'a>(
+                hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_>,
+                input: #create_input,
+            ) -> Result<::graphql_orm::graphql::orm::UpsertOutcome<Self>, ::graphql_orm::sqlx::Error> {
+                let db = hook_ctx.database().clone();
+                let current_entity = Self::__gom_fetch_by_upsert_on(hook_ctx.executor(), &input).await?;
+                if let Some(current_entity) = current_entity.as_ref() {
+                    db.ensure_writable_row(
+                        None,
+                        #entity_name_lit,
+                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                        ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                        current_entity as &(dyn ::std::any::Any + Send + Sync),
+                    ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                }
+                #(#upsert_policy_checks_repo)*
+
+                #created_pk_init
+                let action = if current_entity.is_some() {
+                    ::graphql_orm::graphql::orm::ChangeAction::Updated
+                } else {
+                    ::graphql_orm::graphql::orm::ChangeAction::Created
+                };
+                let before_state = current_entity
+                    .as_ref()
+                    .map(Self::__gom_capture_entity_state)
+                    .transpose()?;
+                let event_id = current_entity
+                    .as_ref()
+                    .map(|entity| entity.#pk_field.to_string())
+                    .unwrap_or_else(|| #created_pk_id_string);
+                let lookup_input = input.clone();
+                let change_input = input.clone();
+                let sql = Self::__gom_rebind_sql(&#upsert_sql_expression, 1);
+                let mut bind_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                #prepend_pk_bind
+                #(#insert_binds_repo)*
+                let mutation_changes = if action == ::graphql_orm::graphql::orm::ChangeAction::Updated {
+                    let input = change_input;
+                    let mut bind_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                    #(#upsert_change_binds_repo)*
+                    ::graphql_orm::graphql::orm::mutation_changes(&[#(#upsert_change_field_literals),*], &bind_values)
+                } else {
+                    ::graphql_orm::graphql::orm::mutation_changes(&[#(#create_mutation_field_literals),*], &bind_values)
+                };
+
+                hook_ctx.run_mutation_hook(
+                    None,
+                    &::graphql_orm::graphql::orm::MutationEvent {
+                        phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
+                        action,
+                        entity_name: #entity_name_lit,
+                        table_name: #table_name,
+                        metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
+                        id: event_id,
+                        changes: mutation_changes.clone(),
+                        before_state: before_state.clone(),
+                        after_state: None,
+                    },
+                ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+
+                ::graphql_orm::graphql::orm::execute_with_binds_on(hook_ctx.executor(), &sql, &bind_values).await?;
+                let entity = Self::__gom_fetch_by_upsert_on(hook_ctx.executor(), &lookup_input).await?
+                    .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
+                let after_state = Some(Self::__gom_capture_entity_state(&entity)?);
+
+                hook_ctx.run_mutation_hook(
+                    None,
+                    &::graphql_orm::graphql::orm::MutationEvent {
+                        phase: ::graphql_orm::graphql::orm::MutationPhase::After,
+                        action,
+                        entity_name: #entity_name_lit,
+                        table_name: #table_name,
+                        metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
+                        id: entity.#pk_field.to_string(),
+                        changes: mutation_changes.clone(),
+                        before_state,
+                        after_state,
+                    },
+                ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+
+                Self::__gom_queue_changed_event(hook_ctx, action, Some(&entity)).await?;
+
+                Ok(::graphql_orm::graphql::orm::UpsertOutcome { action, entity })
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let upsert_graphql_method = if upsert_config.is_some() {
+        quote! {
+            #[graphql(name = #upsert_mutation_name)]
+            async fn upsert(
+                &self,
+                ctx: &::graphql_orm::async_graphql::Context<'_>,
+                #[graphql(name = "input")] input: #graphql_create_input,
+            ) -> ::graphql_orm::async_graphql::Result<#upsert_result_type> {
+                use ::graphql_orm::graphql::auth::AuthExt;
+
+                let _user = ctx.auth_user()?;
+                let db = ctx.data_unchecked::<::graphql_orm::db::Database>();
+                let pool = db.pool();
+                db.ensure_entity_access(
+                    Some(ctx),
+                    #entity_name_lit,
+                    <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                    ::graphql_orm::graphql::orm::EntityAccessKind::Write,
+                    ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
+                ).await?;
+                let mut input: #create_input = input.into();
+                db.run_before_upsert(
+                    Some(ctx),
+                    #entity_name_lit,
+                    &mut input as &mut (dyn ::std::any::Any + Send + Sync),
+                ).await?;
+
+                let current_entity = #struct_name::__gom_fetch_by_upsert_on(pool, &input)
+                    .await
+                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                if let Some(current_entity) = current_entity.as_ref() {
+                    db.ensure_writable_row(
+                        Some(ctx),
+                        #entity_name_lit,
+                        <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                        ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
+                        current_entity as &(dyn ::std::any::Any + Send + Sync),
+                    ).await?;
+                }
+                #(#upsert_policy_checks_graphql)*
+
+                #created_pk_init
+                let action = if current_entity.is_some() {
+                    ::graphql_orm::graphql::orm::ChangeAction::Updated
+                } else {
+                    ::graphql_orm::graphql::orm::ChangeAction::Created
+                };
+                let before_state = current_entity
+                    .as_ref()
+                    .map(#struct_name::__gom_capture_entity_state)
+                    .transpose()
+                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                let event_id = current_entity
+                    .as_ref()
+                    .map(|entity| entity.#pk_field.to_string())
+                    .unwrap_or_else(|| #created_pk_id_string);
+                let lookup_input = input.clone();
+                let change_input = input.clone();
+                let sql = #struct_name::__gom_rebind_sql(&#upsert_sql_expression, 1);
+                let mut bind_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                #prepend_pk_bind
+                #(#insert_binds_graphql)*
+                let mutation_changes = if action == ::graphql_orm::graphql::orm::ChangeAction::Updated {
+                    let input = change_input;
+                    let mut bind_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                    #(#upsert_change_binds_graphql)*
+                    ::graphql_orm::graphql::orm::mutation_changes(&[#(#upsert_change_field_literals),*], &bind_values)
+                } else {
+                    ::graphql_orm::graphql::orm::mutation_changes(&[#(#create_mutation_field_literals),*], &bind_values)
+                };
+
+                let tx = pool.begin().await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::new(db, tx);
+                hook_ctx.run_mutation_hook(
+                    Some(ctx),
+                    &::graphql_orm::graphql::orm::MutationEvent {
+                        phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
+                        action,
+                        entity_name: #entity_name_lit,
+                        table_name: #table_name,
+                        metadata: <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata(),
+                        id: event_id,
+                        changes: mutation_changes.clone(),
+                        before_state: before_state.clone(),
+                        after_state: None,
+                    },
+                ).await?;
+
+                ::graphql_orm::graphql::orm::execute_with_binds_on(hook_ctx.executor(), &sql, &bind_values)
+                    .await
+                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                let entity = #struct_name::__gom_fetch_by_upsert_on(hook_ctx.executor(), &lookup_input)
+                    .await
+                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?
+                    .ok_or_else(|| ::graphql_orm::async_graphql::Error::new("Entity not found after upsert"))?;
+                let after_state = Some(
+                    #struct_name::__gom_capture_entity_state(&entity)
+                        .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?
+                );
+
+                hook_ctx.run_mutation_hook(
+                    Some(ctx),
+                    &::graphql_orm::graphql::orm::MutationEvent {
+                        phase: ::graphql_orm::graphql::orm::MutationPhase::After,
+                        action,
+                        entity_name: #entity_name_lit,
+                        table_name: #table_name,
+                        metadata: <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata(),
+                        id: entity.#pk_field.to_string(),
+                        changes: mutation_changes.clone(),
+                        before_state,
+                        after_state,
+                    },
+                ).await?;
+
+                #struct_name::__gom_queue_changed_event(&mut hook_ctx, action, Some(&entity))
+                    .await
+                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                hook_ctx
+                    .commit_and_emit()
+                    .await
+                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+
+                match action {
+                    ::graphql_orm::graphql::orm::ChangeAction::Created => {
+                        #notify_on_created
+                    }
+                    ::graphql_orm::graphql::orm::ChangeAction::Updated => {
+                        #notify_on_updated
+                    }
+                    ::graphql_orm::graphql::orm::ChangeAction::Deleted => {}
+                }
+
+                Ok(#upsert_result_type::ok(action, entity))
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let upsert_repository_method = if upsert_config.is_some() {
+        quote! {
+            pub async fn upsert(
+                db: &::graphql_orm::db::Database,
+                mut input: #create_input,
+            ) -> Result<::graphql_orm::graphql::orm::UpsertOutcome<Self>, ::graphql_orm::sqlx::Error> {
+                let pool = db.pool();
+                db.ensure_entity_access(
+                    None,
+                    #entity_name_lit,
+                    <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                    ::graphql_orm::graphql::orm::EntityAccessKind::Write,
+                    ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                db.run_before_upsert(
+                    None,
+                    #entity_name_lit,
+                    &mut input as &mut (dyn ::std::any::Any + Send + Sync),
+                ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                let tx = pool.begin().await?;
+                let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::new(db, tx);
+                let outcome = Self::__gom_upsert_with_mutation_context(&mut hook_ctx, input).await?;
+                hook_ctx.commit_and_emit().await?;
+                Ok(outcome)
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let upsert_trait_impl = if upsert_config.is_some() {
+        quote! {
+            impl ::graphql_orm::graphql::orm::MutationContextUpsert for #struct_name {
+                type UpsertInput = #create_input;
+
+                fn upsert_in_mutation_context<'a>(
+                    hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_>,
+                    input: Self::UpsertInput,
+                ) -> ::graphql_orm::futures::future::BoxFuture<'a, Result<::graphql_orm::graphql::orm::UpsertOutcome<Self>, ::graphql_orm::sqlx::Error>> {
+                    Box::pin(async move {
+                        let db = hook_ctx.database().clone();
+                        let mut input = input;
+                        let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(
+                            #entity_name_lit,
+                            hook_ctx,
+                        );
+                        db.run_before_upsert_with_context(
+                            &mut write_ctx,
+                            &mut input as &mut (dyn ::std::any::Any + Send + Sync),
+                        ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                        Self::__gom_upsert_with_mutation_context(hook_ctx, input).await
+                    })
+                }
+            }
+        }
+    } else {
+        quote! {}
     };
 
     Ok(quote! {
@@ -1259,6 +2142,8 @@ pub(crate) fn generate_graphql_operations(
                 Self { success: false, error: Some(msg.into()), entity: None }
             }
         }
+
+        #upsert_result_definition
 
         /// Event for #struct_name changes (subscriptions)
         #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject, serde::Serialize, serde::Deserialize)]
@@ -1580,6 +2465,8 @@ pub(crate) fn generate_graphql_operations(
                 #notify_on_created
                 Ok(#result_type::ok(entity))
             }
+
+            #upsert_graphql_method
 
             /// Update an existing #struct_name_str
             #[graphql(name = #update_mutation_name)]
@@ -2128,6 +3015,8 @@ pub(crate) fn generate_graphql_operations(
                 Ok(entity)
             }
 
+            #upsert_helper_methods
+
             #[doc(hidden)]
             async fn __gom_update_by_id_with_mutation_context<'a>(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_>,
@@ -2525,6 +3414,8 @@ pub(crate) fn generate_graphql_operations(
                     .ok_or(::graphql_orm::sqlx::Error::RowNotFound)
                 }
             }
+
+            #upsert_repository_method
 
             /// Find all entities matching the given filter
             pub fn query<'a>(pool: &'a #pool_type) -> ::graphql_orm::graphql::orm::FindQuery<'a, Self, #where_input, #order_by_input> {
@@ -3065,6 +3956,8 @@ pub(crate) fn generate_graphql_operations(
                 Box::pin(async move { Self::__gom_insert_with_mutation_context(hook_ctx, input).await })
             }
         }
+
+        #upsert_trait_impl
 
         impl ::graphql_orm::graphql::orm::MutationContextUpdateById for #struct_name {
             type Id = #pk_type_ty;

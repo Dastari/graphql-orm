@@ -1,0 +1,35 @@
+error: A GraphQL Input Object type must define one or more input fields.
+ --> tests/ui/upsert_non_unique_target.rs:9:8
+  |
+9 | struct UpsertNonUniqueExample {
+  |        ^^^^^^^^^^^^^^^^^^^^^^
+
+error: graphql_entity upsert target 'slug' must match a unique field, primary key, unique_index, or unique_composite declaration
+ --> tests/ui/upsert_non_unique_target.rs:9:8
+  |
+9 | struct UpsertNonUniqueExample {
+  |        ^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0282]: type annotations needed
+ --> tests/ui/upsert_non_unique_target.rs:3:10
+  |
+3 | #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
+  |          ^^^^^^^^^^^^^ cannot infer type
+  |
+  = note: this error originates in the derive macro `GraphQLEntity` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0283]: type annotations needed
+ --> tests/ui/upsert_non_unique_target.rs:3:10
+  |
+3 | #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
+  |          ^^^^^^^^^^^^^ cannot infer type
+  |
+  = note: multiple `impl`s satisfying `_: Borrow<str>` found in the following crates: `alloc`, `async_graphql_parser`, `async_graphql_value`, `http`, `rustix`, `sqlx_core`:
+          - impl Borrow<str> for Positioned<std::string::String>;
+          - impl Borrow<str> for async_graphql::Name;
+          - impl Borrow<str> for http::header::name::HeaderName;
+          - impl Borrow<str> for rustix::net::netdevice::InlinedName;
+          - impl Borrow<str> for sqlx_core::ext::ustr::UStr;
+          - impl Borrow<str> for std::string::String;
+  = note: required for `[_]` to implement `std::slice::Join<&str>`
+  = note: this error originates in the derive macro `GraphQLEntity` (in Nightly builds, run with -Z macro-backtrace for more info)

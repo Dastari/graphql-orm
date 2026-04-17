@@ -150,6 +150,38 @@ struct RelationChildWithPhysicalFk {
 }
 
 #[derive(GraphQLSchemaEntity, Clone, Debug)]
+#[graphql_entity(table = "inverse_relation_parents", plural = "InverseRelationParents")]
+struct InverseRelationParent {
+    #[primary_key]
+    pub id: String,
+
+    #[graphql(skip)]
+    #[relation(
+        target = "InverseRelationChild",
+        from = "id",
+        to = "parent_id",
+        multiple
+    )]
+    pub children: Vec<String>,
+}
+
+#[derive(GraphQLSchemaEntity, Clone, Debug)]
+#[graphql_entity(
+    table = "inverse_relation_children",
+    plural = "InverseRelationChildren"
+)]
+struct InverseRelationChild {
+    #[primary_key]
+    pub id: String,
+
+    pub parent_id: String,
+
+    #[graphql(skip)]
+    #[relation(target = "InverseRelationParent", from = "parent_id", to = "id")]
+    pub parent: Option<String>,
+}
+
+#[derive(GraphQLSchemaEntity, Clone, Debug)]
 #[graphql_entity(table = "sql_default_examples", plural = "SqlDefaultExamples")]
 struct SqlDefaultExample {
     #[primary_key]
@@ -193,6 +225,8 @@ async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
         "sync_profiles",
         "relation_children_no_fk",
         "relation_children_with_fk",
+        "inverse_relation_children",
+        "inverse_relation_parents",
         "relation_parents",
         "sql_default_examples",
     ] {
@@ -659,6 +693,63 @@ async fn relation_metadata_emits_physical_foreign_key_by_default()
         .tables
         .iter()
         .find(|table| table.table_name == "relation_children_with_fk")
+        .expect("introspected child table");
+    assert_eq!(introspected_child.foreign_keys.len(), 1);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn inverse_multiple_relations_do_not_emit_physical_foreign_keys_by_default()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = test_mutex().lock().await;
+    use graphql_orm::graphql::orm::{Entity, SchemaModel, introspect_schema};
+
+    let pool = setup_pool().await?;
+    let database = graphql_orm::db::Database::new(pool.clone());
+    let target = SchemaModel::from_entities(&[
+        <InverseRelationParent as Entity>::metadata(),
+        <InverseRelationChild as Entity>::metadata(),
+    ]);
+
+    let parent_metadata = <InverseRelationParent as Entity>::metadata();
+    assert_eq!(parent_metadata.relations.len(), 1);
+    assert!(!parent_metadata.relations[0].emit_foreign_key);
+
+    let parent_table = target
+        .tables
+        .iter()
+        .find(|table| table.table_name == "inverse_relation_parents")
+        .expect("parent table metadata");
+    assert!(parent_table.foreign_keys.is_empty());
+
+    let child_table = target
+        .tables
+        .iter()
+        .find(|table| table.table_name == "inverse_relation_children")
+        .expect("child table metadata");
+    assert_eq!(child_table.foreign_keys.len(), 1);
+
+    apply_schema(
+        &database,
+        &[
+            <InverseRelationParent as Entity>::metadata(),
+            <InverseRelationChild as Entity>::metadata(),
+        ],
+    )
+    .await?;
+    let introspected = introspect_schema(database.pool()).await?;
+    let introspected_parent = introspected
+        .tables
+        .iter()
+        .find(|table| table.table_name == "inverse_relation_parents")
+        .expect("introspected parent table");
+    assert!(introspected_parent.foreign_keys.is_empty());
+
+    let introspected_child = introspected
+        .tables
+        .iter()
+        .find(|table| table.table_name == "inverse_relation_children")
         .expect("introspected child table");
     assert_eq!(introspected_child.foreign_keys.len(), 1);
 

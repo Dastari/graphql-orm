@@ -21,7 +21,7 @@ Working today:
 - SQLite runtime support
 - PostgreSQL runtime support
 - generated entity metadata through the runtime contract
-- generated CRUD operations, subscriptions, relation loading, and batched nested traversal
+- generated CRUD and opt-in upsert operations, subscriptions, relation loading, and batched nested traversal
 - backend-aware query rendering through a small typed query IR
 - schema models built from runtime metadata
 - schema diffing and migration planning

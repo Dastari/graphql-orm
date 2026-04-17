@@ -22,6 +22,7 @@ The shared app-facing contract now includes:
 - `graphql_orm::graphql::orm::FieldPolicy` and `Database::with_field_policy(...)` / `set_field_policy(...)` for app-owned field visibility/editability decisions
 - `graphql_orm::graphql::orm::RowPolicy` and `Database::with_row_policy(...)` / `set_row_policy(...)` for row-level read/write access checks
 - `graphql_orm::graphql::orm::WriteInputTransform` and `Database::with_write_input_transform(...)` / `set_write_input_transform(...)` for pre-write server-side field injection and normalization
+- generated app-side `upsert(...)` helpers plus `graphql_orm::graphql::orm::UpsertOutcome<T>` for explicit conflict-target writes
 - generated app-side `update_by_id` / `update_where` / `delete_by_id` / `delete_where` helpers on each entity for non-GraphQL repository code
 - UUID-first entity support across generated CRUD, filters, metadata, and migrations
 - first-class `#[graphql_orm(json)]` persistence for typed structured fields
@@ -112,7 +113,7 @@ If you only want ORM relation metadata without a physical FK, disable it explici
 pub collection: Option<Collection>,
 ```
 
-Generated entity `create` / `update` / `delete` is the canonical write path for host apps.
+Generated entity `create` / `upsert` / `update` / `delete` is the canonical write path for host apps.
 The intended model is:
 
 - row policy for row visibility/access
@@ -151,6 +152,15 @@ let revoked = RefreshToken::delete_where(
         ..Default::default()
     },
 ).await?;
+
+let controller = UnifiController::upsert(
+    &database,
+    CreateUnifiControllerInput {
+        mac: "aa:bb:cc:dd:ee:ff".to_string(),
+        name: "Main Controller".to_string(),
+        last_seen_at: 1_735_000_000,
+    },
+).await?;
 ```
 
 This is the intended non-GraphQL persistence surface for host applications.
@@ -175,7 +185,66 @@ pub payload: Vec<u8>,
 pub thumbnail: Option<Vec<u8>>,
 ```
 
-`insert`, `update_by_id`, and `update_where` now bind byte values directly without requiring raw SQL.
+`insert`, `upsert`, `update_by_id`, and `update_where` now bind byte values directly without requiring raw SQL.
+
+## Generated Upserts
+
+Generated upsert support is explicit and opt-in per entity:
+
+```rust
+#[derive(GraphQLEntity, GraphQLOperations)]
+#[graphql_entity(
+    table = "unifi_controllers",
+    plural = "UnifiControllers",
+    upsert = "mac"
+)]
+pub struct UnifiController {
+    #[primary_key]
+    pub id: graphql_orm::uuid::Uuid,
+
+    #[unique]
+    pub mac: String,
+
+    pub name: String,
+}
+```
+
+That generates:
+
+- repository helper: `UnifiController::upsert(&db, CreateUnifiControllerInput { ... }).await?`
+- mutation field: `upsertUnifiController(input: CreateUnifiControllerInput!): UpsertUnifiControllerResult!`
+
+Conflict targets can be:
+
+- one unique field
+- a composite unique key declared through `unique_composite`
+- a `unique_index`
+- the primary key
+
+Current limits:
+
+- SQLite and PostgreSQL only
+- exactly one `upsert = "..."` declaration per entity
+- GraphQL upsert reuses the generated `Create<Entity>Input`
+- on conflict, graphql-orm updates every writable non-key field except the conflict-target columns
+
+The generated GraphQL result reports which path ran:
+
+```graphql
+mutation {
+  upsertUnifiController(input: { mac: "aa:bb", name: "Lobby" }) {
+    success
+    action
+    unifiController {
+      id
+      mac
+      name
+    }
+  }
+}
+```
+
+`action` is `CREATED` for a fresh insert and `UPDATED` for the conflict-update path.
 
 ## SQLite Migration Rebuilds
 
@@ -358,6 +427,7 @@ Runtime API:
 The transform runs:
 
 - before generated create writes
+- before generated upsert writes
 - before generated update writes
 
 Generated nullable update semantics are now tri-state:

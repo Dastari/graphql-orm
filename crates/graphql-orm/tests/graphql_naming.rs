@@ -6,7 +6,8 @@ use graphql_orm::prelude::*;
 #[graphql_entity(
     table = "collections",
     plural = "Collections",
-    default_sort = "name ASC"
+    default_sort = "name ASC",
+    upsert = "slug"
 )]
 struct Collection {
     #[primary_key]
@@ -17,6 +18,7 @@ struct Collection {
     pub name: String,
 
     #[filterable(type = "string")]
+    #[unique]
     pub slug: String,
 
     #[filterable(type = "uuid")]
@@ -61,6 +63,9 @@ async fn generated_graphql_schema_uses_pascal_case_types_and_camel_case_fields()
     assert!(sdl.contains("collections(where: CollectionWhereInput, orderBy: [CollectionOrderByInput!], page: PageInput): CollectionConnection!"));
     assert!(sdl.contains("collection(id: String!): Collection"));
     assert!(sdl.contains("createCollection(input: CreateCollectionInput!): CollectionResult!"));
+    assert!(
+        sdl.contains("upsertCollection(input: CreateCollectionInput!): UpsertCollectionResult!")
+    );
     assert!(sdl.contains(
         "updateCollection(id: String!, input: UpdateCollectionInput!): CollectionResult!"
     ));
@@ -73,6 +78,8 @@ async fn generated_graphql_schema_uses_pascal_case_types_and_camel_case_fields()
     assert!(sdl.contains("\tsuccess: Boolean!"));
     assert!(sdl.contains("\terror: String"));
     assert!(sdl.contains("\tcollection: Collection"));
+    assert!(sdl.contains("type UpsertCollectionResult {"));
+    assert!(sdl.contains("\taction: ChangeAction"));
     assert!(sdl.contains("type CollectionConnection {"));
     assert!(sdl.contains("\tedges: [CollectionEdge!]!"));
     assert!(sdl.contains("\tpageInfo: PageInfo!"));

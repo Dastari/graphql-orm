@@ -42,6 +42,12 @@ pub struct MutationFieldValue {
     pub value: SqlValue,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct UpsertOutcome<T> {
+    pub action: ChangeAction,
+    pub entity: T,
+}
+
 #[derive(Clone)]
 pub struct EntityState {
     value: Arc<dyn Any + Send + Sync>,
@@ -545,6 +551,16 @@ impl<'tx> MutationContext<'tx> {
         T::insert_in_mutation_context(self, input).await
     }
 
+    pub async fn upsert<'a, T>(
+        &'a mut self,
+        input: <T as MutationContextUpsert>::UpsertInput,
+    ) -> Result<UpsertOutcome<T>, sqlx::Error>
+    where
+        T: MutationContextUpsert,
+    {
+        T::upsert_in_mutation_context(self, input).await
+    }
+
     pub async fn update_by_id<'a, T>(
         &'a mut self,
         id: &'a <T as MutationContextUpdateById>::Id,
@@ -621,6 +637,15 @@ pub trait MutationContextInsert: Sized {
         hook_ctx: &'a mut MutationContext<'_>,
         input: Self::CreateInput,
     ) -> futures::future::BoxFuture<'a, Result<Self, sqlx::Error>>;
+}
+
+pub trait MutationContextUpsert: Sized {
+    type UpsertInput;
+
+    fn upsert_in_mutation_context<'a>(
+        hook_ctx: &'a mut MutationContext<'_>,
+        input: Self::UpsertInput,
+    ) -> futures::future::BoxFuture<'a, Result<UpsertOutcome<Self>, sqlx::Error>>;
 }
 
 pub trait MutationContextUpdateById: Sized {
@@ -781,6 +806,19 @@ pub trait WriteInputTransform: Send + Sync {
         )
     }
 
+    fn before_upsert_with_context<'a>(
+        &'a self,
+        write_ctx: &'a mut WriteInputContext<'_, '_>,
+        input: &'a mut (dyn std::any::Any + Send + Sync),
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>> {
+        self.before_upsert(
+            write_ctx.graphql_ctx(),
+            write_ctx.database(),
+            write_ctx.entity_name(),
+            input,
+        )
+    }
+
     fn before_create<'a>(
         &'a self,
         ctx: Option<&'a async_graphql::Context<'_>>,
@@ -802,6 +840,16 @@ pub trait WriteInputTransform: Send + Sync {
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>> {
         let _ = (ctx, db, entity_name, existing_row, input);
         Box::pin(async { Ok(()) })
+    }
+
+    fn before_upsert<'a>(
+        &'a self,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        db: &'a crate::db::Database,
+        entity_name: &'static str,
+        input: &'a mut (dyn std::any::Any + Send + Sync),
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>> {
+        self.before_create(ctx, db, entity_name, input)
     }
 }
 

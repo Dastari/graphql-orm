@@ -525,6 +525,33 @@ impl Database {
             Ok(())
         }
     }
+
+    pub async fn run_before_upsert(
+        &self,
+        ctx: Option<&async_graphql::Context<'_>>,
+        entity_name: &'static str,
+        input: &mut (dyn Any + Send + Sync),
+    ) -> async_graphql::Result<()> {
+        let mut write_ctx = if let Some(ctx) = ctx {
+            crate::graphql::orm::WriteInputContext::graphql(self, ctx, entity_name)
+        } else {
+            crate::graphql::orm::WriteInputContext::repository(self, entity_name)
+        };
+        self.run_before_upsert_with_context(&mut write_ctx, input)
+            .await
+    }
+
+    pub async fn run_before_upsert_with_context(
+        &self,
+        write_ctx: &mut crate::graphql::orm::WriteInputContext<'_, '_>,
+        input: &mut (dyn Any + Send + Sync),
+    ) -> async_graphql::Result<()> {
+        if let Some(transform) = &self.write_input_transform {
+            transform.before_upsert_with_context(write_ctx, input).await
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(feature = "sqlite")]
