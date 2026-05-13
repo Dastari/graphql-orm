@@ -207,10 +207,7 @@ fn resolve_upsert_config(
                 }),
         );
 
-        if !unique_targets
-            .iter()
-            .any(|candidate| *candidate == target_columns)
-        {
+        if !unique_targets.contains(&target_columns) {
             return Err(syn::Error::new(
                 struct_name.span(),
                 format!(
