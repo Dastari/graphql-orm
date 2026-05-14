@@ -31,8 +31,7 @@ pub fn snapshot_manifest_key(snapshot_id: Uuid) -> String {
 
 /// Returns the reserved table export key.
 ///
-/// Full backup currently writes uncompressed JSON Lines. The `.zst` suffix is
-/// retained for the stable repository layout reserved by the snapshot format.
+/// Returns the zstd-compressed table export key used by the snapshot format.
 #[must_use]
 pub fn database_table_key(snapshot_id: Uuid, table_name: &str) -> String {
     format!("snapshots/{snapshot_id}/database/tables/{table_name}.jsonl.zst")
@@ -62,6 +61,7 @@ pub async fn create_full_backup(
     let mut row_count = 0_u64;
     for table in &plan.tables {
         let bytes = serialize_table_export(table)?;
+        let bytes = crate::compress_payload(&bytes)?;
         let content_key = database_table_key(request.snapshot_id, &table.table_name);
         let sha256_hex = sha256_hex(&bytes);
         repository
@@ -128,6 +128,7 @@ pub async fn create_full_backup(
         backup_kind: BackupKind::Full,
         database: DatabaseBackupManifest {
             export_format: DATABASE_EXPORT_FORMAT.to_string(),
+            compression: crate::BackupCompression::Zstd,
             row_count,
             table_count: table_entries.len() as u64,
             tables: table_entries,

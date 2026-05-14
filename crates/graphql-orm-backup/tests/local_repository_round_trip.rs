@@ -1,8 +1,9 @@
 use bytes::Bytes;
 use graphql_orm_backup::{
-    BACKUP_FORMAT_VERSION, BackupError, BackupKind, BackupRepository, BackupSnapshotManifest,
-    DatabaseBackupManifest, LocalBackupRepository, ObjectBackupEntry, TableBackupEntry,
-    bytes_sha256_hex, object_content_key, set_manifest_checksum, verify_object_checksums,
+    BACKUP_FORMAT_VERSION, BackupCompression, BackupError, BackupKind, BackupRepository,
+    BackupSnapshotManifest, DatabaseBackupManifest, LocalBackupRepository, ObjectBackupEntry,
+    TableBackupEntry, bytes_sha256_hex, object_content_key, set_manifest_checksum,
+    verify_object_checksums,
 };
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -67,6 +68,144 @@ async fn local_repository_rejects_path_traversal_keys() {
 }
 
 #[tokio::test]
+async fn local_repository_rejects_absolute_keys() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = LocalBackupRepository::new(temp.path());
+
+    let err = repository
+        .put_blob("/tmp/escape", Bytes::from_static(b"bad"))
+        .await
+        .expect_err("absolute key rejected");
+
+    assert!(matches!(err, BackupError::InvalidRepositoryKey { .. }));
+}
+
+#[tokio::test]
+async fn local_repository_rejects_dot_components() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = LocalBackupRepository::new(temp.path());
+
+    let err = repository
+        .put_blob("snapshots/./manifest.json", Bytes::from_static(b"bad"))
+        .await
+        .expect_err("dot component rejected");
+
+    assert!(matches!(err, BackupError::InvalidRepositoryKey { .. }));
+}
+
+#[tokio::test]
+async fn local_repository_rejects_parent_components() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = LocalBackupRepository::new(temp.path());
+
+    let err = repository
+        .put_blob("snapshots/../manifest.json", Bytes::from_static(b"bad"))
+        .await
+        .expect_err("parent component rejected");
+
+    assert!(matches!(err, BackupError::InvalidRepositoryKey { .. }));
+}
+
+#[tokio::test]
+async fn local_repository_rejects_empty_segments() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = LocalBackupRepository::new(temp.path());
+
+    let err = repository
+        .put_blob("snapshots//manifest.json", Bytes::from_static(b"bad"))
+        .await
+        .expect_err("empty segment rejected");
+
+    assert!(matches!(err, BackupError::InvalidRepositoryKey { .. }));
+}
+
+#[tokio::test]
+async fn local_repository_rejects_backslashes() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = LocalBackupRepository::new(temp.path());
+
+    let err = repository
+        .put_blob("snapshots\\manifest.json", Bytes::from_static(b"bad"))
+        .await
+        .expect_err("backslash rejected");
+
+    assert!(matches!(err, BackupError::InvalidRepositoryKey { .. }));
+}
+
+#[tokio::test]
+async fn local_repository_rejects_nul_bytes() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = LocalBackupRepository::new(temp.path());
+
+    let err = repository
+        .put_blob("snapshots/manifest\0.json", Bytes::from_static(b"bad"))
+        .await
+        .expect_err("nul rejected");
+
+    assert!(matches!(err, BackupError::InvalidRepositoryKey { .. }));
+}
+
+#[tokio::test]
+async fn local_repository_empty_prefix_lists_all_blobs() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = LocalBackupRepository::new(temp.path());
+
+    repository
+        .put_blob("snapshots/a/manifest.json", Bytes::from_static(b"manifest"))
+        .await
+        .expect("put manifest");
+    repository
+        .put_blob("objects/sha256/aa/bb/aabb", Bytes::from_static(b"object"))
+        .await
+        .expect("put object");
+
+    let listed = repository.list_blobs("").await.expect("list all blobs");
+    assert_eq!(
+        listed,
+        vec![
+            "objects/sha256/aa/bb/aabb".to_string(),
+            "snapshots/a/manifest.json".to_string()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn local_repository_open_existing_accepts_existing_directory() {
+    let temp = TempDir::new().expect("temp dir");
+
+    LocalBackupRepository::open_existing(temp.path())
+        .await
+        .expect("open existing directory");
+}
+
+#[tokio::test]
+async fn local_repository_open_existing_rejects_missing_path() {
+    let temp = TempDir::new().expect("temp dir");
+    let missing = temp.path().join("missing");
+
+    let err = LocalBackupRepository::open_existing(missing)
+        .await
+        .expect_err("missing path rejected");
+
+    assert!(matches!(err, BackupError::Io { .. }));
+}
+
+#[tokio::test]
+async fn local_repository_open_existing_rejects_file_path() {
+    let temp = TempDir::new().expect("temp dir");
+    let file = temp.path().join("file");
+    tokio::fs::write(&file, b"not a directory")
+        .await
+        .expect("write file");
+
+    let err = LocalBackupRepository::open_existing(file)
+        .await
+        .expect_err("file path rejected");
+
+    assert!(matches!(err, BackupError::InvalidRepositoryRoot { .. }));
+}
+
+#[tokio::test]
 async fn verification_fails_when_object_blob_is_missing() {
     let temp = TempDir::new().expect("temp dir");
     let repository = LocalBackupRepository::new(temp.path());
@@ -116,7 +255,8 @@ fn sample_manifest_with_object_hash(object_hash: String) -> BackupSnapshotManife
         database_backend: "sqlite".to_string(),
         backup_kind: BackupKind::Full,
         database: DatabaseBackupManifest {
-            export_format: "jsonl.zst".to_string(),
+            export_format: "jsonl".to_string(),
+            compression: BackupCompression::Zstd,
             row_count: 0,
             table_count: 1,
             tables: vec![TableBackupEntry {

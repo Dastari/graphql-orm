@@ -23,7 +23,13 @@ sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["fs"] }
 uuid = { version = "1", features = ["serde", "v4"] }
+zstd = "0.13"
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread"] }
+
+[[test]]
+name = "local_repository_round_trip"
+path = "tests/local_repository_round_trip.rs"
+required-features = ["local"]

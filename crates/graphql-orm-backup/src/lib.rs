@@ -28,9 +28,10 @@ pub use error::BackupError;
 #[cfg(feature = "local")]
 pub use local_repository::LocalBackupRepository;
 pub use manifest::{
-    BACKUP_FORMAT_VERSION, BackupKind, BackupSnapshotManifest, BackupTombstone,
-    DatabaseBackupManifest, ObjectBackupEntry, TableBackupEntry, manifest_checksum,
-    set_manifest_checksum, verify_manifest_checksum,
+    BACKUP_FORMAT_VERSION, BackupCompression, BackupKind, BackupSnapshotManifest, BackupTombstone,
+    DatabaseBackupManifest, ObjectBackupEntry, TableBackupEntry, compress_payload,
+    decompress_payload, load_manifest, load_manifest_chain, manifest_checksum,
+    set_manifest_checksum, validate_manifest_chain, verify_manifest_checksum,
 };
 pub use object_index::{BackupObjectIndex, BackupObjectRef};
 pub use planner::{FullBackupPlan, plan_full_backup};

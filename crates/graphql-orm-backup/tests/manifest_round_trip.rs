@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use graphql_orm_backup::{
-    BACKUP_FORMAT_VERSION, BackupChangeExport, BackupError, BackupKind, BackupObjectIndex,
-    BackupObjectRef, BackupSnapshotManifest, BackupTableExport, BackupTombstone,
+    BACKUP_FORMAT_VERSION, BackupChangeExport, BackupCompression, BackupError, BackupKind,
+    BackupObjectIndex, BackupObjectRef, BackupSnapshotManifest, BackupTableExport, BackupTombstone,
     DatabaseBackupManifest, FullBackupPlan, GraphqlOrmBackupAdapter, GraphqlOrmBackupSchema,
     ObjectBackupEntry, RestoreContext, TableBackupEntry, bytes_sha256_hex,
     ensure_empty_restore_target, manifest_checksum, object_content_key, plan_full_backup,
@@ -31,6 +31,21 @@ fn manifest_checksum_is_stable_and_excludes_checksum_field() {
     let second = manifest_checksum(&manifest).expect("checksum");
 
     assert_eq!(first, second);
+}
+
+#[test]
+fn manifest_deserialization_defaults_missing_compression_to_none() {
+    let json = r#"{
+        "export_format": "jsonl",
+        "row_count": 0,
+        "table_count": 0,
+        "tables": []
+    }"#;
+
+    let database: DatabaseBackupManifest =
+        serde_json::from_str(json).expect("deserialize database manifest");
+
+    assert_eq!(database.compression, BackupCompression::None);
 }
 
 #[test]
@@ -101,7 +116,8 @@ fn sample_manifest() -> BackupSnapshotManifest {
         database_backend: "sqlite".to_string(),
         backup_kind: BackupKind::Full,
         database: DatabaseBackupManifest {
-            export_format: "jsonl.zst".to_string(),
+            export_format: "jsonl".to_string(),
+            compression: BackupCompression::Zstd,
             row_count: 1,
             table_count: 1,
             tables: vec![TableBackupEntry {

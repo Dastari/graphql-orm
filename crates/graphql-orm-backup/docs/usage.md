@@ -57,11 +57,12 @@ The function performs these steps:
 1. Reads schema metadata from `GraphqlOrmBackupAdapter`.
 2. Exports all full-backup table rows through `GraphqlOrmBackupAdapter`.
 3. Lists referenced objects through `BackupObjectIndex`.
-4. Writes table export payloads to the repository.
-5. Loads and verifies object bytes.
-6. Writes missing object blobs by content-addressed key.
-7. Builds and checksums the manifest.
-8. Writes the manifest last.
+4. Serializes table exports as JSON Lines.
+5. Compresses table payloads with zstd and writes them to the repository.
+6. Loads and verifies object bytes.
+7. Writes missing object blobs by content-addressed key.
+8. Builds and checksums the manifest.
+9. Writes the manifest last.
 
 ## Database Adapter Responsibilities
 
@@ -103,8 +104,8 @@ snapshots/{snapshot_id}/database/tables/{table_name}.jsonl.zst
 objects/sha256/{first_two}/{next_two}/{sha256}
 ```
 
-The current table payload is uncompressed JSON Lines even though the table key
-keeps the reserved `.jsonl.zst` suffix. Compression is future work.
+Table payloads are zstd-compressed JSON Lines. Manifest table checksums cover
+the stored compressed bytes.
 
 ## Verification
 

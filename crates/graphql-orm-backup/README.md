@@ -14,6 +14,9 @@ This crate coordinates database export/import adapters, stored-object indexes, b
 - Full backup planner skeleton implemented.
 - Full snapshot creation implemented through `create_full_backup`.
 - Verification helpers implemented.
+- Manifest chain loading and validation implemented.
+- Table payloads are zstd-compressed JSON Lines.
+- Mounted SMB paths are supported through `LocalBackupRepository` filesystem semantics and `open_existing` root validation.
 - Restore safety context implemented for empty-target restores.
 
 `graphql-orm` still needs to provide stable logical export/import and change-journal APIs before complete database backup/restore can be implemented.
@@ -25,6 +28,8 @@ This crate coordinates database export/import adapters, stored-object indexes, b
 - [Snapshot format](docs/snapshot-format.md)
 - [Restore semantics](docs/restore-semantics.md)
 - [Provider roadmap](docs/provider-roadmap.md)
+- [Cloud provider direction](docs/cloud-provider-direction.md)
+- [SMB mounted repository guidance](docs/smb.md)
 - [graphql-orm integration brief](docs/graphql-orm-agent-brief.md)
 
 ## Design Rule
@@ -39,8 +44,8 @@ objects/sha256/{first_two}/{next_two}/{sha256}
 ```
 
 The manifest is written last. Its checksum excludes its own `checksum` field.
-Table payloads are currently written as uncompressed JSON Lines. The `.zst`
-filename suffix is reserved for the stable future compressed layout.
+Table payloads are written as zstd-compressed JSON Lines and table checksums
+cover the stored compressed bytes.
 
 ## Backup Repository Example
 

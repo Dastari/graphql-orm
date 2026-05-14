@@ -18,12 +18,13 @@
 1. Read schema snapshot from `GraphqlOrmBackupAdapter`.
 2. Export all backup-enabled tables through `GraphqlOrmBackupAdapter`.
 3. List all referenced stored objects through `BackupObjectIndex`.
-4. Write table exports to the backup repository as uncompressed JSON Lines.
-5. Load and checksum each object from `BackupObjectIndex`.
-6. Write object blobs by content-addressed key if missing.
-7. Build manifest.
-8. Set manifest checksum.
-9. Write manifest last.
+4. Serialize table exports as JSON Lines.
+5. Compress table exports with zstd, checksum the stored compressed bytes, and write them to the backup repository.
+6. Load and checksum each object from `BackupObjectIndex`.
+7. Write object blobs by content-addressed key if missing.
+8. Build manifest.
+9. Set manifest checksum.
+10. Write manifest last.
 
 ## Incremental Backup Flow
 

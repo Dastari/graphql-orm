@@ -7,6 +7,7 @@ Create a reusable backup and restore crate for applications using `graphql-orm`.
 ## What This Crate Provides
 
 - Snapshot manifest format.
+- Manifest chain loading and validation.
 - Backup repository trait.
 - Local backup repository.
 - Database backup adapter contract.
@@ -14,6 +15,7 @@ Create a reusable backup and restore crate for applications using `graphql-orm`.
 - Full backup planner.
 - Full snapshot writer.
 - Verification helpers.
+- Zstd-compressed table payloads.
 - Restore context and initial empty-target safety checks.
 
 ## What This Crate Must Not Provide
@@ -50,10 +52,10 @@ Create a reusable backup and restore crate for applications using `graphql-orm`.
 ## Future Work
 
 - Stream database exports instead of holding rows in memory.
-- Add zstd compression for table and change files.
-- Add S3 backup repository.
-- Add Azure Blob backup repository.
+- Add zstd compression for future change files.
+- Add a `graphql-orm-storage::BlobStore` backup repository adapter after the shared storage crate exposes that lower-level abstraction.
+- Add S3 backup repository through the shared `BlobStore` adapter path.
+- Add Azure Blob backup repository through the shared `BlobStore` adapter path.
 - Add Dropbox backup repository.
-- Add SMB mounted-path documentation and validation.
 - Implement full restore after graphql-orm import lands.
 - Implement incremental backup after graphql-orm change journal lands.

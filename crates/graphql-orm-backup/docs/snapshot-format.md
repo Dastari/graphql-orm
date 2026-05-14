@@ -21,6 +21,7 @@ The manifest records:
 - database backend
 - backup kind
 - database table export entries
+- database payload compression
 - object entries
 - tombstones
 - manifest checksum
@@ -39,13 +40,24 @@ This allows dedupe across snapshots and providers.
 
 ## Database Blobs
 
-The current table export payload is uncompressed JSON Lines. Each line is one
-serialized backup row and ends with `\n`.
+The table export payload is JSON Lines compressed with zstd. Each decompressed
+line is one serialized backup row and ends with `\n`.
 
-The repository key keeps the planned compressed filename:
+The repository key uses the compressed filename:
 
 ```text
 snapshots/{snapshot_id}/database/tables/{table_name}.jsonl.zst
 ```
 
-Compression is not implemented yet. The filename reserves the intended format so future implementation has a stable layout.
+The manifest records:
+
+```json
+{
+  "export_format": "jsonl",
+  "compression": "Zstd"
+}
+```
+
+Table entry checksums are computed over the stored compressed bytes, not the
+decompressed JSON Lines payload. This lets repository verification validate the
+exact bytes stored in the backup repository.

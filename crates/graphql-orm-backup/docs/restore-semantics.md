@@ -26,8 +26,11 @@ The default empty restore context disables application policies and change journ
 
 ## Safety Rules
 
+- Load and validate the selected manifest chain before writing.
 - Verify manifests before writing.
 - Verify object checksums before final success.
+- Verify table payload checksums against the stored compressed bytes.
+- Decompress table payloads only after checksum verification.
 - Preserve primary keys.
 - Preserve created and updated timestamps where entities define them.
 - Restore rows in dependency order.

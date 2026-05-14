@@ -16,6 +16,18 @@ impl LocalBackupRepository {
         Self { root: root.into() }
     }
 
+    pub async fn open_existing(root: impl Into<PathBuf>) -> Result<Self, BackupError> {
+        let root = root.into();
+        let metadata = tokio::fs::metadata(&root)
+            .await
+            .map_err(|source| BackupError::io(&root, source))?;
+        if !metadata.is_dir() {
+            return Err(BackupError::InvalidRepositoryRoot { path: root });
+        }
+
+        Ok(Self { root })
+    }
+
     fn path_for(&self, key: &str) -> Result<PathBuf, BackupError> {
         validate_repository_key(key)?;
         Ok(self.root.join(Path::new(key)))
@@ -68,9 +80,7 @@ impl BackupRepository for LocalBackupRepository {
     }
 
     async fn list_blobs(&self, prefix: &str) -> Result<Vec<String>, BackupError> {
-        if !prefix.is_empty() {
-            validate_repository_key(prefix)?;
-        }
+        validate_repository_prefix(prefix)?;
 
         let start = if prefix.is_empty() {
             self.root.clone()
@@ -122,7 +132,13 @@ impl BackupRepository for LocalBackupRepository {
 }
 
 fn validate_repository_key(key: &str) -> Result<(), BackupError> {
-    if key.is_empty() {
+    if key.is_empty()
+        || key.contains('\\')
+        || key.contains('\0')
+        || key
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
+    {
         return Err(BackupError::InvalidRepositoryKey {
             key: key.to_string(),
         });
@@ -144,4 +160,12 @@ fn validate_repository_key(key: &str) -> Result<(), BackupError> {
     }
 
     Ok(())
+}
+
+fn validate_repository_prefix(prefix: &str) -> Result<(), BackupError> {
+    if prefix.is_empty() {
+        return Ok(());
+    }
+
+    validate_repository_key(prefix)
 }

@@ -6,11 +6,11 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use graphql_orm_backup::{
-    BackupChangeExport, BackupError, BackupObjectIndex, BackupObjectRef, BackupRepository,
-    BackupRow, BackupTableExport, DATABASE_EXPORT_FORMAT, FullBackupRequest,
+    BackupChangeExport, BackupCompression, BackupError, BackupObjectIndex, BackupObjectRef,
+    BackupRepository, BackupRow, BackupTableExport, DATABASE_EXPORT_FORMAT, FullBackupRequest,
     GraphqlOrmBackupAdapter, GraphqlOrmBackupSchema, RestoreContext, bytes_sha256_hex,
-    create_full_backup, database_table_key, object_content_key, snapshot_manifest_key,
-    verify_manifest_and_objects, verify_manifest_checksum,
+    create_full_backup, database_table_key, decompress_payload, object_content_key,
+    snapshot_manifest_key, verify_manifest_and_objects, verify_manifest_checksum,
 };
 use serde_json::{Map, Value};
 use uuid::Uuid;
@@ -52,6 +52,7 @@ async fn create_full_backup_writes_tables_objects_and_manifest_last() {
     );
 
     let table_bytes = repository.get_blob(&table_key).await.expect("table blob");
+    let table_bytes = decompress_payload(&table_bytes).expect("decompress table blob");
     assert!(table_bytes.ends_with(b"\n"));
     let first_line = table_bytes
         .split(|byte| *byte == b'\n')
@@ -144,6 +145,10 @@ async fn create_full_backup_sets_database_counts() {
     assert_eq!(
         result.manifest.database.export_format,
         DATABASE_EXPORT_FORMAT
+    );
+    assert_eq!(
+        result.manifest.database.compression,
+        BackupCompression::Zstd
     );
     assert_eq!(result.manifest.database.table_count, 2);
     assert_eq!(result.manifest.database.row_count, 3);

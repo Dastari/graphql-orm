@@ -13,7 +13,12 @@ Acceptance criteria:
 
 ## Phase 2: S3
 
-Add behind the `s3` feature.
+Do not implement direct AWS SDK integration in this crate yet.
+
+`graphql-orm-storage` should first expose a shared lower-level streaming
+`BlobStore` abstraction. `graphql-orm-backup` should then adapt that abstraction
+to `BackupRepository` so primary object storage and backup repositories can
+share S3-compatible provider code without sharing higher-level semantics.
 
 Expected configuration:
 
@@ -26,7 +31,9 @@ Expected configuration:
 
 ## Phase 3: Azure Blob
 
-Add behind the `azure` feature.
+Do not implement direct Azure SDK integration in this crate yet. Azure Blob
+should follow the same future `graphql-orm-storage::BlobStore` adapter path as
+S3 once the shared abstraction exists.
 
 Expected configuration:
 
@@ -39,7 +46,10 @@ Expected configuration:
 
 Initial SMB support should be mounted filesystem support using `LocalBackupRepository`.
 
-Native SMB protocol support is future work.
+Native SMB protocol support is future work. Mounts, credentials, reconnect
+behavior, and OS-level permissions are managed outside this crate. Use
+`LocalBackupRepository::open_existing` to validate that the mounted path exists
+and is a directory before using it as a repository root.
 
 ## Phase 5: Dropbox
 

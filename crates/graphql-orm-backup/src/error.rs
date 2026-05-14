@@ -8,6 +8,9 @@ pub enum BackupError {
     #[error("invalid backup repository key: {key}")]
     InvalidRepositoryKey { key: String },
 
+    #[error("invalid backup repository root: {path:?}")]
+    InvalidRepositoryRoot { path: PathBuf },
+
     #[error("backup blob is missing: {key}")]
     MissingBlob { key: String },
 
@@ -24,6 +27,12 @@ pub enum BackupError {
     #[error("invalid manifest chain: {reason}")]
     InvalidManifestChain { reason: String },
 
+    #[error("backup payload compression error")]
+    Compression {
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("unsupported operation: {operation}")]
     UnsupportedOperation { operation: String },
 
@@ -39,6 +48,11 @@ pub enum BackupError {
 }
 
 impl BackupError {
+    pub(crate) fn compression(source: std::io::Error) -> Self {
+        Self::Compression { source }
+    }
+
+    #[cfg(feature = "local")]
     pub(crate) fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
         Self::Io {
             path: path.into(),

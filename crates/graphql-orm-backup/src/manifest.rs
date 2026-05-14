@@ -1,7 +1,9 @@
+use std::collections::HashSet;
+
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::BackupError;
+use crate::{BackupError, BackupRepository};
 
 pub const BACKUP_FORMAT_VERSION: u32 = 1;
 
@@ -10,6 +12,13 @@ pub enum BackupKind {
     Full,
     Incremental,
     SyntheticFull,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum BackupCompression {
+    #[default]
+    None,
+    Zstd,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -33,6 +42,8 @@ pub struct BackupSnapshotManifest {
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DatabaseBackupManifest {
     pub export_format: String,
+    #[serde(default)]
+    pub compression: BackupCompression,
     pub row_count: u64,
     pub table_count: u64,
     pub tables: Vec<TableBackupEntry>,
@@ -89,8 +100,132 @@ pub fn verify_manifest_checksum(manifest: &BackupSnapshotManifest) -> Result<(),
     }
 }
 
+pub async fn load_manifest(
+    repository: &dyn BackupRepository,
+    snapshot_id: Uuid,
+) -> Result<BackupSnapshotManifest, BackupError> {
+    let key = manifest_key(snapshot_id);
+    let bytes = repository.get_blob(&key).await?;
+    let manifest: BackupSnapshotManifest = serde_json::from_slice(&bytes)?;
+    verify_manifest_checksum(&manifest)?;
+    Ok(manifest)
+}
+
+pub async fn load_manifest_chain(
+    repository: &dyn BackupRepository,
+    snapshot_id: Uuid,
+) -> Result<Vec<BackupSnapshotManifest>, BackupError> {
+    let mut chain = Vec::new();
+    let mut seen = HashSet::new();
+    let mut next = Some(snapshot_id);
+
+    while let Some(current_snapshot_id) = next {
+        if !seen.insert(current_snapshot_id) {
+            return Err(BackupError::InvalidManifestChain {
+                reason: format!("duplicate snapshot id {current_snapshot_id}"),
+            });
+        }
+
+        let manifest = load_manifest(repository, current_snapshot_id).await?;
+        next = manifest.parent_snapshot_id;
+        chain.push(manifest);
+    }
+
+    chain.reverse();
+    validate_manifest_chain(&chain)?;
+    Ok(chain)
+}
+
+pub fn validate_manifest_chain(chain: &[BackupSnapshotManifest]) -> Result<(), BackupError> {
+    let Some(first) = chain.first() else {
+        return Err(BackupError::InvalidManifestChain {
+            reason: "manifest chain is empty".to_string(),
+        });
+    };
+
+    if !matches!(
+        first.backup_kind,
+        BackupKind::Full | BackupKind::SyntheticFull
+    ) {
+        return Err(BackupError::InvalidManifestChain {
+            reason: "manifest chain does not start with a full or synthetic-full snapshot"
+                .to_string(),
+        });
+    }
+
+    if first.parent_snapshot_id.is_some() {
+        return Err(BackupError::InvalidManifestChain {
+            reason: "root full snapshot must not have a parent".to_string(),
+        });
+    }
+
+    let mut seen = HashSet::new();
+    seen.insert(first.snapshot_id);
+
+    for pair in chain.windows(2) {
+        let parent = &pair[0];
+        let child = &pair[1];
+
+        if !seen.insert(child.snapshot_id) {
+            return Err(BackupError::InvalidManifestChain {
+                reason: format!("duplicate snapshot id {}", child.snapshot_id),
+            });
+        }
+
+        if child.parent_snapshot_id != Some(parent.snapshot_id) {
+            return Err(BackupError::InvalidManifestChain {
+                reason: format!(
+                    "snapshot {} does not reference expected parent {}",
+                    child.snapshot_id, parent.snapshot_id
+                ),
+            });
+        }
+
+        if child.app_id != parent.app_id {
+            return Err(BackupError::InvalidManifestChain {
+                reason: format!(
+                    "snapshot {} app_id does not match parent {}",
+                    child.snapshot_id, parent.snapshot_id
+                ),
+            });
+        }
+
+        if child.database_backend != parent.database_backend {
+            return Err(BackupError::InvalidManifestChain {
+                reason: format!(
+                    "snapshot {} database backend does not match parent {}",
+                    child.snapshot_id, parent.snapshot_id
+                ),
+            });
+        }
+
+        if child.graphql_orm_schema_hash != parent.graphql_orm_schema_hash {
+            return Err(BackupError::InvalidManifestChain {
+                reason: format!(
+                    "snapshot {} schema hash does not match parent {}",
+                    child.snapshot_id, parent.snapshot_id
+                ),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+pub fn compress_payload(bytes: &[u8]) -> Result<Vec<u8>, BackupError> {
+    zstd::stream::encode_all(bytes, 0).map_err(BackupError::compression)
+}
+
+pub fn decompress_payload(bytes: &[u8]) -> Result<Vec<u8>, BackupError> {
+    zstd::stream::decode_all(bytes).map_err(BackupError::compression)
+}
+
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
+}
+
+fn manifest_key(snapshot_id: Uuid) -> String {
+    format!("snapshots/{snapshot_id}/manifest.json")
 }
