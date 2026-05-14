@@ -4,6 +4,19 @@
 
 `graphql-orm-storage` owns object bytes and object locators. It does not own database rows. This keeps the crate usable by any application that wants to persist storage metadata differently.
 
+## BlobStore Boundary
+
+`BlobStore` is the low-level key-addressed storage abstraction. It stores and
+loads safe relative blob keys, supports streaming bodies, and exposes existence,
+metadata, listing, and delete operations.
+
+`StorageService` is the high-level primary object workflow. It generates object
+IDs, namespaces, storage keys, byte counts, checksums, and timestamps before
+applications persist metadata in their own database rows.
+
+`graphql-orm-backup` should reuse future cloud provider implementations through
+a `BlobStore` adapter, not through `StorageService`.
+
 ## GraphQL Resolver Boundary
 
 The core crate should not provide default GraphQL upload, download, delete, or metadata mutation resolvers.
@@ -58,10 +71,10 @@ The host app should still own:
 
 1. Caller provides `StoragePutRequest`.
 2. `StorageService` generates a UUID object ID.
-3. `StorageService` computes the SHA-256 checksum.
-4. `StorageService` creates a sharded storage key.
-5. `StorageService` delegates byte persistence to `ObjectStorage`.
-6. Backend writes bytes and returns the `StoredObject`.
+3. `StorageService` creates a sharded storage key.
+4. `StorageService` delegates byte persistence to `BlobStore`.
+5. Backend writes bytes and returns size plus SHA-256.
+6. `StorageService` returns the `StoredObject`.
 7. Caller persists returned metadata in its own database transaction.
 
 ## Object Key Safety
@@ -87,3 +100,5 @@ Provider-specific code should live behind cargo features:
 - `azure`: reserved
 
 Provider implementations must satisfy the same `ObjectStorage` trait.
+Provider implementations should implement `BlobStore` first, then expose
+`ObjectStorage` behavior on top of it.

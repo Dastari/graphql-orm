@@ -1,7 +1,7 @@
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::{StorageBackend, StorageNamespace};
+use crate::{StorageBackend, StorageByteStream, StorageNamespace};
 
 /// Request body for storing a new object.
 #[derive(Clone, Debug)]
@@ -14,6 +14,19 @@ pub struct StoragePutRequest {
     pub mime_type: Option<String>,
     /// Full object bytes to store.
     pub bytes: Vec<u8>,
+}
+
+/// Streaming request body for storing a new object.
+#[derive(Debug)]
+pub struct StoragePutStreamRequest {
+    /// Logical namespace for the generated storage key.
+    pub namespace: StorageNamespace,
+    /// Original filename retained as metadata only.
+    pub file_name: Option<String>,
+    /// Caller-provided MIME type metadata.
+    pub mime_type: Option<String>,
+    /// Streaming object bytes to store.
+    pub body: StorageByteStream,
 }
 
 /// Provider-neutral metadata describing a stored object.
@@ -46,4 +59,13 @@ pub struct StorageObjectBody {
     pub object: StoredObject,
     /// Loaded object bytes.
     pub bytes: Vec<u8>,
+}
+
+/// Object metadata plus streaming bytes.
+#[derive(Debug)]
+pub struct StorageObjectStream {
+    /// Stored object metadata.
+    pub object: StoredObject,
+    /// Streaming object bytes.
+    pub body: StorageByteStream,
 }

@@ -5,16 +5,14 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    StorageBackend, StorageError, StorageObjectBody, StoragePutRequest, StoredObject,
-    build_storage_key, file_extension, sha256_hex,
+    BlobMetadata, BlobStore, StorageBackend, StorageByteStream, StorageError, StorageObjectBody,
+    StorageObjectStream, StoragePutRequest, StoragePutStreamRequest, StoredObject,
+    build_storage_key, collect_storage_stream, file_extension,
 };
 
 /// Provider implementation contract for object storage backends.
 #[async_trait]
-pub trait ObjectStorage: Send + Sync {
-    /// Returns the provider identifier for this backend.
-    fn backend(&self) -> StorageBackend;
-
+pub trait ObjectStorage: BlobStore {
     /// Persists object bytes and returns stored metadata.
     ///
     /// # Errors
@@ -69,8 +67,32 @@ impl StorageService {
         &self,
         request: StoragePutRequest,
     ) -> Result<StoredObject, StorageError> {
-        let object = build_stored_object(self.backend.backend(), &request);
-        self.backend.put_object(object, request.bytes).await
+        self.put_object_stream(StoragePutStreamRequest {
+            namespace: request.namespace,
+            file_name: request.file_name,
+            mime_type: request.mime_type,
+            body: StorageByteStream::from_bytes(request.bytes),
+        })
+        .await
+    }
+
+    /// Stores streaming bytes and returns provider-neutral object metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the backend cannot persist the object.
+    pub async fn put_object_stream(
+        &self,
+        request: StoragePutStreamRequest,
+    ) -> Result<StoredObject, StorageError> {
+        let mut object = build_stream_stored_object(self.backend.backend(), &request);
+        let outcome = self
+            .backend
+            .put_blob(&object.storage_key, request.body)
+            .await?;
+        object.size_bytes = outcome.size_bytes;
+        object.sha256_hex = outcome.sha256_hex;
+        Ok(object)
     }
 
     /// Loads object bytes for existing metadata.
@@ -82,7 +104,28 @@ impl StorageService {
         &self,
         object: &StoredObject,
     ) -> Result<StorageObjectBody, StorageError> {
-        self.backend.get_object(object).await
+        let object_stream = self.get_object_stream(object).await?;
+        let bytes = collect_storage_stream(object_stream.body).await?;
+        Ok(StorageObjectBody {
+            object: object_stream.object,
+            bytes: bytes.to_vec(),
+        })
+    }
+
+    /// Loads a streaming object body for existing metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the backend cannot load the object.
+    pub async fn get_object_stream(
+        &self,
+        object: &StoredObject,
+    ) -> Result<StorageObjectStream, StorageError> {
+        let body = self.backend.get_blob(&object.storage_key).await?;
+        Ok(StorageObjectStream {
+            object: object.clone(),
+            body: body.body,
+        })
     }
 
     /// Deletes an object from the configured backend.
@@ -93,9 +136,33 @@ impl StorageService {
     pub async fn delete_object(&self, object: &StoredObject) -> Result<(), StorageError> {
         self.backend.delete_object(object).await
     }
+
+    /// Checks whether an object's backend blob exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the backend cannot check the object.
+    pub async fn object_exists(&self, object: &StoredObject) -> Result<bool, StorageError> {
+        self.backend.blob_exists(&object.storage_key).await
+    }
+
+    /// Loads backend metadata for an object's blob.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the backend cannot load metadata.
+    pub async fn object_backend_metadata(
+        &self,
+        object: &StoredObject,
+    ) -> Result<Option<BlobMetadata>, StorageError> {
+        self.backend.head_blob(&object.storage_key).await
+    }
 }
 
-fn build_stored_object(backend: StorageBackend, request: &StoragePutRequest) -> StoredObject {
+fn build_stream_stored_object(
+    backend: StorageBackend,
+    request: &StoragePutStreamRequest,
+) -> StoredObject {
     let object_id = Uuid::new_v4();
     let extension = request.file_name.as_deref().and_then(file_extension);
     let storage_key = build_storage_key(request.namespace, &object_id, extension);
@@ -107,8 +174,8 @@ fn build_stored_object(backend: StorageBackend, request: &StoragePutRequest) -> 
         storage_key,
         original_file_name: request.file_name.clone(),
         mime_type: request.mime_type.clone(),
-        size_bytes: u64::try_from(request.bytes.len()).unwrap_or(u64::MAX),
-        sha256_hex: sha256_hex(&request.bytes),
+        size_bytes: 0,
+        sha256_hex: String::new(),
         created_at: OffsetDateTime::now_utc(),
     }
 }

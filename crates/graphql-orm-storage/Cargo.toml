@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-storage"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm-storage"
@@ -8,17 +8,21 @@ description = "Provider-neutral object storage primitives for graphql-orm applic
 
 [features]
 default = ["local"]
-local = ["dep:tokio"]
+local = ["dep:tokio", "dep:tokio-util"]
 s3 = []
 azure = []
 
 [dependencies]
 async-trait = "0.1"
+bytes = "1"
+futures-core = "0.3"
+futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 thiserror = "2"
 time = { version = "0.3", features = ["serde"] }
-tokio = { version = "1", features = ["fs"], optional = true }
+tokio = { version = "1", features = ["fs", "io-util"], optional = true }
+tokio-util = { version = "0.7", features = ["io"], optional = true }
 uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]
@@ -28,4 +32,9 @@ tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread"] }
 [[test]]
 name = "local_round_trip"
 path = "tests/local_round_trip.rs"
+required-features = ["local"]
+
+[[test]]
+name = "local_blob"
+path = "tests/local_blob.rs"
 required-features = ["local"]

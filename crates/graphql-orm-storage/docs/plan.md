@@ -7,6 +7,7 @@ Create a reusable object storage crate for applications that use `graphql-orm`. 
 ## What This Crate Provides
 
 - Provider-neutral object metadata.
+- Provider-neutral streaming blob storage trait.
 - Provider-neutral object storage trait.
 - Storage service that generates object IDs, keys, sizes, hashes, and timestamps.
 - Local filesystem backend.
@@ -32,6 +33,8 @@ Create a reusable object storage crate for applications that use `graphql-orm`. 
 6. Implement safe sharded object key generation.
 7. Implement `LocalStorageBackend`.
 8. Add tests for the local backend and key safety.
+9. Add `BlobStore` as the shared low-level provider abstraction.
+10. Add streaming object APIs while preserving buffered object APIs.
 
 ## Integration Pattern For Applications
 
@@ -51,8 +54,7 @@ Applications should also own GraphQL resolvers and route handlers. A future opti
 
 ## Future Work
 
-- Add streaming upload/download APIs so large files do not need to fit in memory.
-- Add S3-compatible provider behind the `s3` feature.
-- Add Azure Blob provider behind the `azure` feature.
-- Add optional object existence and metadata APIs if backup verification needs them.
+- Add S3-compatible provider behind the `s3` feature, implemented as `BlobStore` first.
+- Add Azure Blob provider behind the `azure` feature, implemented as `BlobStore` first.
+- Add a `graphql-orm-backup` adapter that wraps `BlobStore` as a backup repository.
 - Add optional server-side encryption hooks if applications need provider-managed keys.

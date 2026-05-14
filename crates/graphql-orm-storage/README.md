@@ -4,9 +4,12 @@ Provider-neutral object storage primitives for applications that use `graphql-or
 
 This crate stores bytes in an object backend and returns metadata that an application can persist in its own `graphql-orm` entity. It deliberately does not define application concepts such as collections, records, accessions, tenants, users, or media workflows.
 
+Current crate version: `0.2.0`.
+
 ## Current Status
 
 - Local filesystem backend implemented.
+- Streaming `BlobStore` abstraction implemented.
 - Stable object metadata and key generation implemented.
 - S3 and Azure Blob expose explicit unsupported placeholder backends behind feature flags for later provider work.
 
@@ -23,6 +26,9 @@ The core crate does not provide default GraphQL resolvers. Upload, download, del
 - `azure`: provides `AzureBlobStorageBackend` and `AzureBlobStorageConfig` placeholders that return an unsupported-backend error until real Azure Blob Storage is implemented.
 
 For detailed integration guidance, see [docs/usage.md](docs/usage.md).
+For the lower-level blob abstraction, see [docs/blob-store.md](docs/blob-store.md).
+For streaming object APIs, see [docs/streaming.md](docs/streaming.md).
+For backup integration guidance, see [docs/backup-integration.md](docs/backup-integration.md).
 
 ```rust
 use std::sync::Arc;
@@ -102,8 +108,8 @@ Only the file extension is copied from the original filename. The original filen
 ## Provider Roadmap
 
 1. Local filesystem
-2. S3-compatible object storage
-3. Azure Blob Storage
+2. S3-compatible object storage implemented as `BlobStore` first, then `ObjectStorage`
+3. Azure Blob Storage implemented as `BlobStore` first, then `ObjectStorage`
 
 Backup repositories such as Dropbox and SMB belong in `graphql-orm-backup`, not this crate.
 

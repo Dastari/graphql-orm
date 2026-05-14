@@ -2,7 +2,8 @@
 use graphql_orm_storage::{AzureBlobStorageBackend, AzureBlobStorageConfig};
 #[cfg(any(feature = "azure", feature = "s3"))]
 use graphql_orm_storage::{
-    ObjectStorage, StorageBackend, StorageError, StorageNamespace, StoredObject, sha256_hex,
+    BlobStore, ObjectStorage, StorageBackend, StorageByteStream, StorageError, StorageNamespace,
+    StoredObject, sha256_hex,
 };
 #[cfg(feature = "s3")]
 use graphql_orm_storage::{S3StorageBackend, S3StorageConfig};
@@ -28,6 +29,20 @@ async fn s3_placeholder_backend_returns_unsupported_errors() {
 
     assert_eq!(backend.backend(), StorageBackend::S3);
     assert_unsupported(
+        backend
+            .put_blob(
+                "objects/test",
+                StorageByteStream::from_bytes(b"bytes".to_vec()),
+            )
+            .await,
+        "s3",
+    );
+    assert_unsupported(backend.get_blob("objects/test").await, "s3");
+    assert_unsupported(backend.blob_exists("objects/test").await, "s3");
+    assert_unsupported(backend.head_blob("objects/test").await, "s3");
+    assert_unsupported(backend.list_blobs("objects").await, "s3");
+    assert_unsupported(backend.delete_blob("objects/test").await, "s3");
+    assert_unsupported(
         backend.put_object(object.clone(), b"bytes".to_vec()).await,
         "s3",
     );
@@ -52,6 +67,20 @@ async fn azure_placeholder_backend_returns_unsupported_errors() {
     let object = test_object(StorageBackend::AzureBlob);
 
     assert_eq!(backend.backend(), StorageBackend::AzureBlob);
+    assert_unsupported(
+        backend
+            .put_blob(
+                "objects/test",
+                StorageByteStream::from_bytes(b"bytes".to_vec()),
+            )
+            .await,
+        "azure_blob",
+    );
+    assert_unsupported(backend.get_blob("objects/test").await, "azure_blob");
+    assert_unsupported(backend.blob_exists("objects/test").await, "azure_blob");
+    assert_unsupported(backend.head_blob("objects/test").await, "azure_blob");
+    assert_unsupported(backend.list_blobs("objects").await, "azure_blob");
+    assert_unsupported(backend.delete_blob("objects/test").await, "azure_blob");
     assert_unsupported(
         backend.put_object(object.clone(), b"bytes".to_vec()).await,
         "azure_blob",

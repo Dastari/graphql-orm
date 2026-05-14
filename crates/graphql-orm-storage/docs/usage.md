@@ -9,6 +9,10 @@ upload, read, delete, or list objects. It also does not define database tables,
 GraphQL resolvers, upload routes, download routes, tenant behavior, collection
 behavior, media workflows, or audit events.
 
+Use `StorageService` for primary object metadata workflows. Use `BlobStore` for
+low-level key-addressed blob operations that do not need generated object
+metadata.
+
 ## Dependency
 
 Default local filesystem support:
@@ -58,6 +62,33 @@ let storage_key = stored.storage_key;
 let size_bytes = stored.size_bytes;
 let sha256_hex = stored.sha256_hex;
 let created_at = stored.created_at;
+# Ok(())
+# }
+```
+
+## Store A Streaming Object
+
+```rust
+use std::sync::Arc;
+
+use graphql_orm_storage::{
+    LocalStorageBackend, StorageByteStream, StorageNamespace,
+    StoragePutStreamRequest, StorageService,
+};
+
+# async fn example() -> Result<(), graphql_orm_storage::StorageError> {
+let service = StorageService::new(Arc::new(LocalStorageBackend::new("./data/storage")));
+
+let stored = service
+    .put_object_stream(StoragePutStreamRequest {
+        namespace: StorageNamespace::Originals,
+        file_name: Some("artifact.bin".to_string()),
+        mime_type: Some("application/octet-stream".to_string()),
+        body: StorageByteStream::from_bytes(b"streamed bytes".to_vec()),
+    })
+    .await?;
+
+assert_eq!(stored.size_bytes, 14);
 # Ok(())
 # }
 ```

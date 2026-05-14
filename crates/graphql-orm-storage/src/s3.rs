@@ -3,8 +3,8 @@ use std::fmt;
 use async_trait::async_trait;
 
 use crate::{
-    ObjectStorage, StorageBackend, StorageError, StorageObjectBody, StoredObject,
-    unsupported_backend,
+    BlobBody, BlobMetadata, BlobStore, BlobWriteOutcome, ObjectStorage, StorageBackend,
+    StorageByteStream, StorageError, StorageObjectBody, StoredObject, unsupported_backend,
 };
 
 /// Configuration for a future S3-compatible storage backend.
@@ -66,11 +66,42 @@ impl S3StorageBackend {
 }
 
 #[async_trait]
-impl ObjectStorage for S3StorageBackend {
+impl BlobStore for S3StorageBackend {
     fn backend(&self) -> StorageBackend {
         StorageBackend::S3
     }
 
+    async fn put_blob(
+        &self,
+        _key: &str,
+        _body: StorageByteStream,
+    ) -> Result<BlobWriteOutcome, StorageError> {
+        Err(unsupported_backend(StorageBackend::S3))
+    }
+
+    async fn get_blob(&self, _key: &str) -> Result<BlobBody, StorageError> {
+        Err(unsupported_backend(StorageBackend::S3))
+    }
+
+    async fn blob_exists(&self, _key: &str) -> Result<bool, StorageError> {
+        Err(unsupported_backend(StorageBackend::S3))
+    }
+
+    async fn head_blob(&self, _key: &str) -> Result<Option<BlobMetadata>, StorageError> {
+        Err(unsupported_backend(StorageBackend::S3))
+    }
+
+    async fn list_blobs(&self, _prefix: &str) -> Result<Vec<String>, StorageError> {
+        Err(unsupported_backend(StorageBackend::S3))
+    }
+
+    async fn delete_blob(&self, _key: &str) -> Result<(), StorageError> {
+        Err(unsupported_backend(StorageBackend::S3))
+    }
+}
+
+#[async_trait]
+impl ObjectStorage for S3StorageBackend {
     async fn put_object(
         &self,
         _object: StoredObject,

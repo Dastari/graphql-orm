@@ -11,6 +11,10 @@ pub enum StorageError {
     #[error("invalid storage key: {key}")]
     InvalidStorageKey { key: String },
 
+    /// A requested blob is missing from the storage backend.
+    #[error("storage blob is missing: {key}")]
+    MissingBlob { key: String },
+
     /// A local filesystem object path did not have a writable parent directory.
     #[error("local storage path has no parent: {path:?}")]
     MissingParent { path: PathBuf },

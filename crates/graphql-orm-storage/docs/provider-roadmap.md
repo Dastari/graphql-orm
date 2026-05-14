@@ -16,6 +16,10 @@ Acceptance criteria:
 
 Add behind the `s3` feature.
 
+Implement S3 as a `BlobStore` first. The high-level `ObjectStorage` behavior
+should delegate to the same S3 blob operations so backup integrations can reuse
+the provider through a future adapter.
+
 Expected configuration:
 
 - endpoint URL
@@ -31,6 +35,10 @@ The implementation must use the same `storage_key` values as local storage.
 ## Phase 3: Azure Blob Storage
 
 Add behind the `azure` feature.
+
+Implement Azure Blob as a `BlobStore` first. Azure should follow the same
+provider layering as S3 after the S3 implementation proves the shared blob
+interface.
 
 Expected configuration:
 

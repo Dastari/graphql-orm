@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use graphql_orm_storage::{
-    LocalStorageBackend, StorageBackend, StorageError, StorageNamespace, StoragePutRequest,
-    StorageService, StoredObject, sha256_hex,
+    LocalStorageBackend, StorageBackend, StorageByteStream, StorageError, StorageNamespace,
+    StoragePutRequest, StoragePutStreamRequest, StorageService, StoredObject,
+    collect_storage_stream, sha256_hex,
 };
 use tempfile::TempDir;
 use time::OffsetDateTime;
@@ -42,6 +43,59 @@ async fn local_put_get_delete_round_trip_preserves_bytes_and_metadata() {
 
     service.delete_object(&stored).await.expect("delete object");
     assert!(service.get_object(&stored).await.is_err());
+}
+
+#[tokio::test]
+async fn local_put_get_stream_round_trip_preserves_bytes_and_metadata() {
+    let temp = TempDir::new().expect("temp dir");
+    let service = StorageService::new(Arc::new(LocalStorageBackend::new(temp.path())));
+
+    let stored = service
+        .put_object_stream(StoragePutStreamRequest {
+            namespace: StorageNamespace::Originals,
+            file_name: Some("artifact.TXT".to_string()),
+            mime_type: Some("text/plain".to_string()),
+            body: StorageByteStream::from_bytes(b"streamed object".to_vec()),
+        })
+        .await
+        .expect("put stream");
+
+    assert_eq!(stored.backend, StorageBackend::Local);
+    assert_eq!(stored.namespace, StorageNamespace::Originals);
+    assert_eq!(stored.original_file_name.as_deref(), Some("artifact.TXT"));
+    assert_eq!(stored.mime_type.as_deref(), Some("text/plain"));
+    assert_eq!(stored.size_bytes, 15);
+    assert_eq!(stored.sha256_hex, sha256_hex(b"streamed object"));
+    assert!(stored.storage_key.ends_with(".txt"));
+    assert!(service.object_exists(&stored).await.expect("object exists"));
+
+    let metadata = service
+        .object_backend_metadata(&stored)
+        .await
+        .expect("metadata")
+        .expect("metadata exists");
+    assert_eq!(metadata.key, stored.storage_key);
+    assert_eq!(metadata.size_bytes, Some(15));
+
+    let loaded = service
+        .get_object_stream(&stored)
+        .await
+        .expect("get stream");
+    assert_eq!(loaded.object, stored);
+    assert_eq!(
+        collect_storage_stream(loaded.body)
+            .await
+            .expect("collect stream"),
+        b"streamed object".as_slice()
+    );
+
+    service.delete_object(&stored).await.expect("delete object");
+    assert!(!service.object_exists(&stored).await.expect("object exists"));
+    let err = service
+        .get_object_stream(&stored)
+        .await
+        .expect_err("deleted object should be missing");
+    assert!(matches!(err, StorageError::MissingBlob { .. }));
 }
 
 #[tokio::test]

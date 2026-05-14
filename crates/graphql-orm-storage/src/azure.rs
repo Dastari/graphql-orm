@@ -3,8 +3,8 @@ use std::fmt;
 use async_trait::async_trait;
 
 use crate::{
-    ObjectStorage, StorageBackend, StorageError, StorageObjectBody, StoredObject,
-    unsupported_backend,
+    BlobBody, BlobMetadata, BlobStore, BlobWriteOutcome, ObjectStorage, StorageBackend,
+    StorageByteStream, StorageError, StorageObjectBody, StoredObject, unsupported_backend,
 };
 
 /// Configuration for a future Azure Blob Storage backend.
@@ -66,11 +66,42 @@ impl AzureBlobStorageBackend {
 }
 
 #[async_trait]
-impl ObjectStorage for AzureBlobStorageBackend {
+impl BlobStore for AzureBlobStorageBackend {
     fn backend(&self) -> StorageBackend {
         StorageBackend::AzureBlob
     }
 
+    async fn put_blob(
+        &self,
+        _key: &str,
+        _body: StorageByteStream,
+    ) -> Result<BlobWriteOutcome, StorageError> {
+        Err(unsupported_backend(StorageBackend::AzureBlob))
+    }
+
+    async fn get_blob(&self, _key: &str) -> Result<BlobBody, StorageError> {
+        Err(unsupported_backend(StorageBackend::AzureBlob))
+    }
+
+    async fn blob_exists(&self, _key: &str) -> Result<bool, StorageError> {
+        Err(unsupported_backend(StorageBackend::AzureBlob))
+    }
+
+    async fn head_blob(&self, _key: &str) -> Result<Option<BlobMetadata>, StorageError> {
+        Err(unsupported_backend(StorageBackend::AzureBlob))
+    }
+
+    async fn list_blobs(&self, _prefix: &str) -> Result<Vec<String>, StorageError> {
+        Err(unsupported_backend(StorageBackend::AzureBlob))
+    }
+
+    async fn delete_blob(&self, _key: &str) -> Result<(), StorageError> {
+        Err(unsupported_backend(StorageBackend::AzureBlob))
+    }
+}
+
+#[async_trait]
+impl ObjectStorage for AzureBlobStorageBackend {
     async fn put_object(
         &self,
         _object: StoredObject,
