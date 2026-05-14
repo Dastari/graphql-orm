@@ -1,0 +1,89 @@
+# graphql-orm-storage Architecture
+
+## Boundary
+
+`graphql-orm-storage` owns object bytes and object locators. It does not own database rows. This keeps the crate usable by any application that wants to persist storage metadata differently.
+
+## GraphQL Resolver Boundary
+
+The core crate should not provide default GraphQL upload, download, delete, or metadata mutation resolvers.
+
+Reason: storage authorization is application-specific. Digitise currently combines:
+
+- `graphql-orm` read/write policy names on metadata entities
+- application row-policy checks
+- collection membership checks
+- platform-admin bypass rules
+- route-level bearer-token validation for file download
+- route-level upload checks before bytes are accepted
+
+A generic crate cannot safely know these rules. Shipping generic resolvers that only check "is authenticated" would be too weak for multi-tenant or collection-scoped applications.
+
+Future GraphQL support should be optional and should expose resolver building blocks, not ready-to-use unaudited endpoints. Any resolver helper must require the host application to provide an authorization adapter.
+
+Suggested future shape:
+
+```rust
+#[async_trait::async_trait]
+pub trait StorageAccessPolicy<Context, Metadata>: Send + Sync {
+    async fn can_upload(
+        &self,
+        context: &Context,
+        scope: &StorageUploadScope,
+    ) -> Result<bool, StorageError>;
+
+    async fn can_read(
+        &self,
+        context: &Context,
+        metadata: &Metadata,
+    ) -> Result<bool, StorageError>;
+
+    async fn can_delete(
+        &self,
+        context: &Context,
+        metadata: &Metadata,
+    ) -> Result<bool, StorageError>;
+}
+```
+
+The host app should still own:
+
+- the `graphql-orm` storage metadata entity
+- policy names such as `storage.read` and `storage.manage`
+- row ownership checks
+- upload/download HTTP routes or GraphQL mutation wrappers
+- audit logging
+
+## Data Flow
+
+1. Caller provides `StoragePutRequest`.
+2. `StorageService` generates a UUID object ID.
+3. `StorageService` computes the SHA-256 checksum.
+4. `StorageService` creates a sharded storage key.
+5. `StorageService` delegates byte persistence to `ObjectStorage`.
+6. Backend writes bytes and returns the `StoredObject`.
+7. Caller persists returned metadata in its own database transaction.
+
+## Object Key Safety
+
+The original filename is metadata only. The key generator copies only a sanitized extension. The local backend validates every `storage_key` before joining it with the root path:
+
+- no absolute paths
+- no `..`
+- no `.`
+- no platform prefix components
+- only normal path components
+
+## Error Model
+
+The crate uses `StorageError` through `thiserror`. Application code can convert this into its own API or GraphQL error types.
+
+## Provider Features
+
+Provider-specific code should live behind cargo features:
+
+- `local`: default, implemented now
+- `s3`: reserved
+- `azure`: reserved
+
+Provider implementations must satisfy the same `ObjectStorage` trait.
