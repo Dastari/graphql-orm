@@ -1160,7 +1160,10 @@ pub struct EntityMetadata {
     pub entity_name: &'static str,
     pub table_name: &'static str,
     pub plural_name: &'static str,
+    /// Compatibility accessor for the first primary-key column.
     pub primary_key: &'static str,
+    /// All primary-key columns in declaration order.
+    pub primary_keys: Box<[&'static str]>,
     pub default_sort: &'static str,
     pub backup_enabled: bool,
     pub backup_export_order: Option<i32>,
@@ -1190,6 +1193,7 @@ impl EntityMetadata {
             table_name: T::TABLE_NAME,
             plural_name: T::PLURAL_NAME,
             primary_key: T::PRIMARY_KEY,
+            primary_keys: T::PRIMARY_KEYS.to_vec().into_boxed_slice(),
             default_sort: T::DEFAULT_SORT,
             backup_enabled,
             backup_export_order,

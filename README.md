@@ -54,7 +54,7 @@ Single-backend applications can continue selecting one backend feature and using
 implicit backend behavior:
 
 ```toml
-graphql-orm = { version = "0.2.7", default-features = false, features = ["sqlite"] }
+graphql-orm = { version = "0.2.8", default-features = false, features = ["sqlite"] }
 ```
 
 When exactly one of `sqlite`, `postgres`, or `mssql` is enabled, `graphql_orm::DbPool`,
@@ -226,6 +226,62 @@ pub thumbnail: Option<Vec<u8>>,
 
 `insert`, `upsert`, `update_by_id`, and `update_where` now bind byte values directly without requiring raw SQL.
 
+## Composite Primary Keys
+
+Entities may mark more than one persisted field with `#[primary_key]`. Existing single-key entities
+keep the same generated GraphQL and repository surface, including `Entity(id: ...)`,
+`Entity::get(pool, &id)`, and `Entity::find_by_id(&database, &id)`.
+
+Composite-key entities generate read/query operations with one GraphQL argument per key field:
+
+```rust
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
+#[graphql_entity(table = "JimLabour", plural = "JimLabourEntries")]
+pub struct JimLabourEntry {
+    #[primary_key]
+    #[graphql(name = "JimObjectType")]
+    #[graphql_orm(db_column = "JimObjectType", write = false)]
+    pub jim_object_type: i32,
+
+    #[primary_key]
+    #[graphql(name = "RefNo")]
+    #[graphql_orm(db_column = "RefNo", write = false)]
+    pub ref_no: i32,
+
+    #[primary_key]
+    #[graphql(name = "LineNum")]
+    #[graphql_orm(db_column = "LineNum", write = false)]
+    pub line_num: i16,
+
+    #[graphql(name = "LabourDate")]
+    #[graphql_orm(db_column = "LabourDate", write = false)]
+    pub labour_date: Option<String>,
+}
+```
+
+With Pascal-case resolver and argument features, the single lookup shape is:
+
+```graphql
+query {
+  JimLabourEntry(JimObjectType: 1, RefNo: 12345, LineNum: 2) {
+    JimObjectType
+    RefNo
+    LineNum
+    LabourDate
+  }
+}
+```
+
+Runtime metadata exposes both the compatibility scalar `PRIMARY_KEY` / `metadata.primary_key` and
+the full key list through `PRIMARY_KEYS` / `metadata.primary_keys`. Generated read helpers include
+`find_by_key` and `get_by_key` with a generated key type such as `JimLabourEntryKey`. Single-key
+entities alias that key type to the existing ID type and keep `find_by_id` / `get`.
+
+Composite-key writes are not generated in this phase for SQLite/Postgres, and MSSQL remains
+read-only. Pagination cursors are offset-based today, so they do not encode or assume a single ID.
+Relation metadata still models single-column relation edges; composite foreign-key relations are a
+future extension.
+
 ## Generated Upserts
 
 Generated upsert support is explicit and opt-in per entity:
@@ -384,7 +440,7 @@ The default schema remains camelCase. For compatibility with schemas that requir
 
 ```toml
 graphql-orm = {
-  version = "0.2.7",
+  version = "0.2.8",
   default-features = false,
   features = [
     "sqlite",

@@ -20,7 +20,9 @@ Working today:
 
 - SQLite runtime support
 - PostgreSQL runtime support
+- read/query-only SQL Server runtime support through Tiberius
 - generated entity metadata through the runtime contract
+- composite primary-key metadata and generated read lookups
 - generated CRUD and opt-in upsert operations, subscriptions, relation loading, and batched nested traversal
 - backend-aware query rendering through a small typed query IR
 - schema models built from runtime metadata
@@ -30,7 +32,8 @@ Working today:
 
 Still remaining:
 
-- MySQL and SQL Server runtime support
+- MySQL runtime support
+- SQL Server writes, migrations, and schema management
 - richer query IR coverage beyond the current CRUD/filter/sort/pagination subset
 - more complete migration execution for backend-specific edge cases and review workflows
 

@@ -13,7 +13,10 @@ use std::marker::PhantomData;
 pub trait DatabaseEntity {
     const TABLE_NAME: &'static str;
     const PLURAL_NAME: &'static str;
+    /// Compatibility accessor for the first primary-key column.
     const PRIMARY_KEY: &'static str;
+    /// All primary-key columns in declaration order.
+    const PRIMARY_KEYS: &'static [&'static str] = &[Self::PRIMARY_KEY];
     const DEFAULT_SORT: &'static str;
 
     fn column_names() -> &'static [&'static str];
@@ -570,6 +573,12 @@ where
     pub fn where_clause(mut self, clause: &str, value: SqlValue) -> Self {
         self.where_clauses.push(clause.to_string());
         self.values.push(value);
+        self
+    }
+
+    pub fn where_values(mut self, clause: &str, values: Vec<SqlValue>) -> Self {
+        self.where_clauses.push(clause.to_string());
+        self.values.extend(values);
         self
     }
 

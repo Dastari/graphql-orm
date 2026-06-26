@@ -25,6 +25,7 @@ The paired `graphql-orm` runtime now provides:
 
 - runtime metadata types generated from derives
 - backend-aware query rendering for SQLite, PostgreSQL, and read-only SQL Server
+- single and composite primary-key metadata plus generated read lookups
 - schema models, diffing, migration planning, migration-file rendering, and live schema introspection
 - live integration coverage for generated CRUD, nested relations, subscriptions, and N+1-preload behavior
 

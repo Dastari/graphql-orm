@@ -82,11 +82,73 @@ struct ResolvedUpsertConfig {
     fields: Vec<ResolvedUpsertField>,
 }
 
+#[derive(Clone)]
+struct PrimaryKeyField {
+    field_name: syn::Ident,
+    field_type: syn::Type,
+    meta: FieldMetadata,
+    rust_name: String,
+    graphql_name: String,
+}
+
 fn create_input_visibility(meta: &FieldMetadata, rust_name: &str, auto_generated_pk: bool) -> bool {
     let is_timestamp = rust_name == "created_at" || rust_name == "updated_at";
     let include_in_create =
         (!meta.is_primary_key || !auto_generated_pk) && !is_timestamp && meta.write;
     include_in_create && (!meta.skip_input || meta.input_only)
+}
+
+fn collect_primary_key_fields(
+    struct_name: &syn::Ident,
+    fields: &syn::punctuated::Punctuated<Field, syn::token::Comma>,
+    graphql_rename_fields: Option<&str>,
+    serde_rename_all: Option<&str>,
+) -> syn::Result<Vec<PrimaryKeyField>> {
+    let mut primary_keys = Vec::new();
+    let mut fallback_id: Option<PrimaryKeyField> = None;
+
+    for field in fields {
+        let Some(field_name) = field.ident.clone() else {
+            continue;
+        };
+        let meta = parse_field_metadata(field)?;
+        if meta.is_relation || meta.skip_db {
+            continue;
+        }
+
+        let rust_name = field_name.to_string();
+        let graphql_name =
+            graphql_field_name(&meta, &rust_name, graphql_rename_fields, serde_rename_all);
+        let key = PrimaryKeyField {
+            field_name,
+            field_type: field.ty.clone(),
+            meta: meta.clone(),
+            rust_name,
+            graphql_name,
+        };
+
+        if meta.is_primary_key {
+            primary_keys.push(key);
+        } else if key.rust_name == "id" {
+            fallback_id = Some(key);
+        }
+    }
+
+    if primary_keys.is_empty() {
+        if let Some(fallback_id) = fallback_id {
+            primary_keys.push(fallback_id);
+        } else {
+            primary_keys.push(PrimaryKeyField {
+                field_name: syn::Ident::new("id", struct_name.span()),
+                field_type: syn::parse_quote!(String),
+                meta: FieldMetadata::default(),
+                rust_name: "id".to_string(),
+                graphql_name: "id".to_string(),
+            });
+        }
+    }
+
+    Ok(primary_keys)
 }
 
 fn resolve_schema_column_name(name: &str, field_columns: &HashMap<String, String>) -> String {
@@ -452,25 +514,18 @@ pub(crate) fn generate_graphql_operations(
     };
     let entity_name_lit = struct_name_str.clone();
 
-    // Find primary key field
-    let mut pk_field_name: Option<syn::Ident> = None;
-    let mut pk_type_ty: Option<syn::Type> = None;
-    let mut pk_auto_generated_override: Option<bool> = None;
-    for field in fields {
-        let meta = parse_field_metadata(field)?;
-        if meta.is_primary_key {
-            pk_field_name = Some(field.ident.clone().unwrap());
-            pk_type_ty = Some(field.ty.clone());
-            pk_auto_generated_override = meta.auto_generated;
-            break;
-        }
-    }
-    let pk_field = pk_field_name
-        .clone()
-        .unwrap_or_else(|| syn::Ident::new("id", struct_name.span()));
-    let pk_type_ty: syn::Type = pk_type_ty.unwrap_or_else(|| syn::parse_quote!(String));
+    let primary_key_fields =
+        collect_primary_key_fields(struct_name, fields, graphql_rename_fields, serde_rename_all)?;
+    let has_composite_primary_key = primary_key_fields.len() > 1;
+    let first_primary_key = primary_key_fields
+        .first()
+        .expect("primary key collection includes fallback id");
+    let pk_field = first_primary_key.field_name.clone();
+    let pk_type_ty: syn::Type = first_primary_key.field_type.clone();
     let pk_type = quote! { #pk_type_ty };
-    let auto_generated_pk = pk_auto_generated_override
+    let auto_generated_pk = first_primary_key
+        .meta
+        .auto_generated
         .unwrap_or_else(|| pk_field == syn::Ident::new("id", pk_field.span()));
     let upsert_config = resolve_upsert_config(
         struct_name,
@@ -610,6 +665,101 @@ pub(crate) fn generate_graphql_operations(
         syn::Ident::new(&format!("Delete{}Result", plural_name), struct_name.span());
     let upsert_result_type_str = format!("Upsert{}Result", struct_name);
     let delete_many_result_type_str = format!("Delete{}Result", plural_name);
+    let key_type = syn::Ident::new(&format!("{}Key", struct_name), struct_name.span());
+    let key_type_definition = if has_composite_primary_key {
+        let fields = primary_key_fields
+            .iter()
+            .map(|field| {
+                let field_name = &field.field_name;
+                let field_type = &field.field_type;
+                quote! { pub #field_name: #field_type, }
+            })
+            .collect::<Vec<_>>();
+        quote! {
+            #[derive(Clone, Debug, PartialEq)]
+            pub struct #key_type {
+                #(#fields)*
+            }
+        }
+    } else {
+        quote! {
+            pub type #key_type = #pk_type_ty;
+        }
+    };
+    let single_query_args = if has_composite_primary_key {
+        primary_key_fields
+            .iter()
+            .map(|field| {
+                let field_name = &field.field_name;
+                let field_type = &field.field_type;
+                let arg_name = apply_graphql_case(&field.graphql_name, argument_case);
+                quote! { #[graphql(name = #arg_name)] #field_name: #field_type, }
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![quote! { #[graphql(name = #id_arg_name)] id: #pk_type, }]
+    };
+    let single_query_key_init = if has_composite_primary_key {
+        let fields = primary_key_fields
+            .iter()
+            .map(|field| {
+                let field_name = &field.field_name;
+                quote! { #field_name, }
+            })
+            .collect::<Vec<_>>();
+        quote! {
+            let key = #key_type {
+                #(#fields)*
+            };
+        }
+    } else {
+        quote! {
+            let key = id;
+        }
+    };
+    let key_bind_from_key_tokens = if has_composite_primary_key {
+        primary_key_fields
+            .iter()
+            .map(|field| {
+                let field_name = &field.field_name;
+                push_create_input_sql_value_tokens(
+                    struct_name,
+                    quote! { key.#field_name.clone() },
+                    &field.field_type,
+                    &field.meta,
+                    quote! { ::graphql_orm::sqlx::Error },
+                )
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![push_create_input_sql_value_tokens(
+            struct_name,
+            quote! { key.clone() },
+            &pk_type_ty,
+            &first_primary_key.meta,
+            quote! { ::graphql_orm::sqlx::Error },
+        )]
+    };
+    let key_condition_method = quote! {
+        #[doc(hidden)]
+        pub fn __gom_key_where_clause() -> String {
+            <Self as ::graphql_orm::graphql::orm::DatabaseEntity>::PRIMARY_KEYS
+                .iter()
+                .enumerate()
+                .map(|(index, column)| {
+                    format!("{} = {}", column, Self::__gom_placeholder(index + 1))
+                })
+                .collect::<Vec<_>>()
+                .join(" AND ")
+        }
+
+        #[doc(hidden)]
+        pub fn __gom_key_values(key: &#key_type) -> Vec<::graphql_orm::graphql::orm::SqlValue> {
+            let mut bind_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+            #(#key_bind_from_key_tokens)*
+            bind_values
+        }
+    };
     let propagation_blocks: Vec<proc_macro2::TokenStream> = propagated_relations
         .iter()
         .map(|relation| -> syn::Result<proc_macro2::TokenStream> {
@@ -1649,6 +1799,102 @@ pub(crate) fn generate_graphql_operations(
         quote! {}
     };
 
+    let find_by_id_method = if has_composite_primary_key {
+        quote! {}
+    } else {
+        quote! {
+            pub async fn find_by_id(
+                db: &::graphql_orm::db::Database<#backend_marker>,
+                id: &#pk_type_ty,
+            ) -> Result<Option<Self>, ::graphql_orm::sqlx::Error> {
+                Self::find_by_key(db, id).await
+            }
+        }
+    };
+    let get_by_id_method = if has_composite_primary_key {
+        quote! {}
+    } else {
+        quote! {
+            pub async fn get(pool: &#pool_type, id: &#pk_type_ty) -> Result<Option<Self>, ::graphql_orm::sqlx::Error> {
+                Self::get_by_key(pool, id).await
+            }
+        }
+    };
+    let read_repository_key_methods = quote! {
+        #find_by_id_method
+
+        pub async fn find_by_key(
+            db: &::graphql_orm::db::Database<#backend_marker>,
+            key: &#key_type,
+        ) -> Result<Option<Self>, ::graphql_orm::sqlx::Error> {
+            db.ensure_entity_access(
+                None,
+                #entity_name_lit,
+                <Self as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                ::graphql_orm::graphql::orm::EntityAccessKind::Read,
+                ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+            ).await.map_err(|e| ::graphql_orm::sqlx::Error::Protocol(format!("{e:?}")))?;
+
+            let entity = ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
+                .where_values(&Self::__gom_key_where_clause(), Self::__gom_key_values(key))
+                .fetch_one(db)
+                .await?;
+
+            if let Some(ref loaded) = entity {
+                if !db.can_read_row(
+                    None,
+                    #entity_name_lit,
+                    <Self as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                    ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                    loaded as &(dyn ::std::any::Any + Send + Sync),
+                ).await.map_err(|e| ::graphql_orm::sqlx::Error::Protocol(format!("{e:?}")))? {
+                    return Ok(None);
+                }
+            }
+
+            Ok(entity)
+        }
+
+        #get_by_id_method
+
+        pub async fn get_by_key(pool: &#pool_type, key: &#key_type) -> Result<Option<Self>, ::graphql_orm::sqlx::Error> {
+            ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
+                .where_values(&Self::__gom_key_where_clause(), Self::__gom_key_values(key))
+                .fetch_one(pool)
+                .await
+        }
+    };
+
+    let composite_write_stubs = if has_composite_primary_key && backend != BackendKind::Mssql {
+        quote! {
+            #[derive(Default)]
+            pub struct #mutations_struct;
+
+            #[::graphql_orm::async_graphql::Object]
+            impl #mutations_struct {
+                #[graphql(visible = false)]
+                async fn __gom_composite_key_writes_unavailable(&self) -> bool {
+                    false
+                }
+            }
+
+            #[derive(Default)]
+            pub struct #subscriptions_struct;
+
+            #[::graphql_orm::async_graphql::Subscription]
+            impl #subscriptions_struct {
+                #[graphql(visible = false)]
+                async fn __gom_composite_key_subscriptions_unavailable(
+                    &self,
+                ) -> ::graphql_orm::futures::stream::Empty<bool> {
+                    ::graphql_orm::futures::stream::empty()
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     // Generate match arms for searchable fields (used in search_similar)
     let searchable_field_arms: Vec<proc_macro2::TokenStream> = string_filterable_fields
         .iter()
@@ -2063,11 +2309,13 @@ pub(crate) fn generate_graphql_operations(
         quote! {}
     };
 
-    if backend == BackendKind::Mssql {
+    if backend == BackendKind::Mssql || has_composite_primary_key {
         return Ok(quote! {
             // ============================================================================
             // Connection/Edge Types (for pagination)
             // ============================================================================
+
+            #key_type_definition
 
             #[derive(::graphql_orm::async_graphql::SimpleObject, Debug, Clone)]
             #[graphql(name = #edge_type_str, rename_fields = #field_case_rule)]
@@ -2225,11 +2473,12 @@ pub(crate) fn generate_graphql_operations(
                 async fn get_by_id(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
-                    #[graphql(name = #id_arg_name)] id: #pk_type,
+                    #(#single_query_args)*
                 ) -> ::graphql_orm::async_graphql::Result<Option<#struct_name>> {
                     use ::graphql_orm::graphql::auth::AuthExt;
                     use ::graphql_orm::graphql::orm::EntityQuery;
 
+                    #single_query_key_init
                     let _user = ctx.auth_user()?;
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                     let pool = db.pool();
@@ -2241,12 +2490,8 @@ pub(crate) fn generate_graphql_operations(
                         ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
                     ).await?;
 
-                    let pk_col = #struct_name::PRIMARY_KEY;
                     let mut entity = EntityQuery::<#struct_name, #backend_marker>::new()
-                        .where_clause(
-                            &format!("{} = {}", pk_col, #struct_name::__gom_placeholder(1)),
-                            #pk_bind_value
-                        )
+                        .where_values(&#struct_name::__gom_key_where_clause(), #struct_name::__gom_key_values(&key))
                         .fetch_one(pool)
                         .await
                         .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
@@ -2270,50 +2515,21 @@ pub(crate) fn generate_graphql_operations(
             }
 
             impl #struct_name {
+                #key_condition_method
+
                 pub fn query<'a>(pool: &'a #pool_type) -> ::graphql_orm::graphql::orm::FindQuery<'a, Self, #where_input, #order_by_input, #backend_marker> {
                     ::graphql_orm::graphql::orm::FindQuery::new(pool)
                 }
 
-                pub async fn find_by_id(
-                    db: &::graphql_orm::db::Database<#backend_marker>,
-                    id: &#pk_type_ty,
-                ) -> Result<Option<Self>, ::graphql_orm::sqlx::Error> {
-                    db.ensure_entity_access(
-                        None,
-                        #entity_name_lit,
-                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-                        ::graphql_orm::graphql::orm::EntityAccessKind::Read,
-                        ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                    ).await.map_err(|e| ::graphql_orm::sqlx::Error::Protocol(format!("{e:?}")))?;
-
-                    let entity = ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
-                        .where_clause(
-                            &format!("{} = {}", Self::PRIMARY_KEY, Self::__gom_placeholder(1)),
-                            #pk_bind_value_ref
-                        )
-                        .fetch_one(db)
-                        .await?;
-
-                    if let Some(ref loaded) = entity {
-                        if !db.can_read_row(
-                            None,
-                            #entity_name_lit,
-                            <Self as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-                            ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                            loaded as &(dyn ::std::any::Any + Send + Sync),
-                        ).await.map_err(|e| ::graphql_orm::sqlx::Error::Protocol(format!("{e:?}")))? {
-                            return Ok(None);
-                        }
-                    }
-
-                    Ok(entity)
-                }
+                #read_repository_key_methods
 
                 pub fn count_query<'a>(pool: &'a #pool_type) -> ::graphql_orm::graphql::orm::CountQuery<'a, #where_input, #backend_marker> {
                     use ::graphql_orm::graphql::orm::DatabaseEntity;
                     ::graphql_orm::graphql::orm::CountQuery::new(pool, <Self as DatabaseEntity>::TABLE_NAME)
                 }
             }
+
+            #composite_write_stubs
         });
     }
 
@@ -2321,6 +2537,8 @@ pub(crate) fn generate_graphql_operations(
         // ============================================================================
         // Connection/Edge Types (for pagination)
         // ============================================================================
+
+        #key_type_definition
 
         /// Edge containing a node and cursor
         #[derive(::graphql_orm::async_graphql::SimpleObject, Debug, Clone)]
@@ -2611,11 +2829,12 @@ pub(crate) fn generate_graphql_operations(
             async fn get_by_id(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = #id_arg_name)] id: #pk_type,
+                #(#single_query_args)*
             ) -> ::graphql_orm::async_graphql::Result<Option<#struct_name>> {
-                use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
+                use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow};
                 use ::graphql_orm::graphql::auth::AuthExt;
 
+                #single_query_key_init
                 let _user = ctx.auth_user()?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let pool = db.pool();
@@ -2627,12 +2846,8 @@ pub(crate) fn generate_graphql_operations(
                     ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
                 ).await?;
 
-                let pk_col = #struct_name::PRIMARY_KEY;
                 let mut entity = EntityQuery::<#struct_name, #backend_marker>::new()
-                    .where_clause(
-                        &format!("{} = {}", pk_col, #struct_name::__gom_placeholder(1)),
-                        #pk_bind_value
-                    )
+                    .where_values(&#struct_name::__gom_key_where_clause(), #struct_name::__gom_key_values(&key))
                     .fetch_one(pool)
                     .await
                     .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
@@ -3132,6 +3347,8 @@ pub(crate) fn generate_graphql_operations(
             fn __gom_runtime_error(message: impl Into<String>) -> ::graphql_orm::sqlx::Error {
                 ::graphql_orm::sqlx::Error::Protocol(message.into())
             }
+
+            #key_condition_method
 
             #[doc(hidden)]
             fn __gom_emit_changed_event(
@@ -3713,18 +3930,7 @@ pub(crate) fn generate_graphql_operations(
                 ::graphql_orm::graphql::orm::FindQuery::new(pool)
             }
 
-            /// Find entity by ID
-            pub async fn get(pool: &#pool_type, id: &#pk_type_ty) -> Result<Option<Self>, ::graphql_orm::sqlx::Error> {
-                use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
-
-                EntityQuery::<Self, #backend_marker>::new()
-                    .where_clause(
-                        &format!("{} = {}", <Self as DatabaseEntity>::PRIMARY_KEY, Self::__gom_placeholder(1)),
-                        #pk_bind_value_ref
-                    )
-                    .fetch_one(pool)
-                    .await
-            }
+            #read_repository_key_methods
 
             /// Update a single entity by primary key using the generated update input.
             pub async fn update_by_id(

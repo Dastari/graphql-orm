@@ -13,7 +13,7 @@ not provide an MSSQL driver.
 For a service that only uses SQL Server, select the `mssql` backend feature:
 
 ```toml
-graphql-orm = { version = "0.2.7", default-features = false, features = ["mssql"] }
+graphql-orm = { version = "0.2.8", default-features = false, features = ["mssql"] }
 ```
 
 When exactly one of `sqlite`, `postgres`, or `mssql` is enabled, the legacy implicit backend remains
@@ -59,7 +59,8 @@ Under `mssql`, generated GraphQL schemas contain:
 - filters, order-by inputs, pagination, count/page info
 - relation loading for declared relations
 - read row/entity/field policies
-- read repository helpers: `query`, `find_by_id`, and `count_query`
+- read repository helpers: `query`, `find_by_id` for single-key entities, `find_by_key` /
+  `get_by_key`, and `count_query`
 
 Under `mssql`, generated schemas do not contain:
 
@@ -135,6 +136,59 @@ For single-backend MSSQL builds, the `backend = "mssql"` attribute is optional. 
 SQL Server entities is recommended because it keeps the code valid in larger workspaces where SQLite
 or Postgres may be enabled by another service.
 
+Composite primary keys are supported for read paths by marking each key field with `#[primary_key]`:
+
+```rust
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
+#[graphql_entity(
+    backend = "mssql",
+    table = "dbo.JimLabour",
+    plural = "JimLabourEntries",
+    default_sort = "[JimObjectType] ASC, [RefNo] ASC, [LineNum] ASC"
+)]
+pub struct JimLabourEntry {
+    #[primary_key]
+    #[graphql(name = "JimObjectType")]
+    #[graphql_orm(db_column = "JimObjectType", write = false)]
+    pub jim_object_type: i32,
+
+    #[primary_key]
+    #[graphql(name = "RefNo")]
+    #[graphql_orm(db_column = "RefNo", write = false)]
+    pub ref_no: i32,
+
+    #[primary_key]
+    #[graphql(name = "LineNum")]
+    #[graphql_orm(db_column = "LineNum", write = false)]
+    pub line_num: i16,
+
+    #[graphql(name = "LabourDate")]
+    #[graphql_orm(db_column = "LabourDate", write = false)]
+    pub labour_date: Option<String>,
+}
+```
+
+The generated single lookup uses one argument per key field and binds them in declaration order:
+
+```graphql
+query {
+  jimLabourEntry(jimObjectType: 1, refNo: 12345, lineNum: 2) {
+    jimObjectType
+    refNo
+    lineNum
+    labourDate
+  }
+}
+```
+
+With Pascal-case resolver, argument, and field features, the same lookup is exposed as
+`JimLabourEntry(JimObjectType: ..., RefNo: ..., LineNum: ...)`.
+
+The generated repository key type is `JimLabourEntryKey`, and read helpers include `find_by_key` and
+`get_by_key`. `PRIMARY_KEY` remains the first key for compatibility; use `PRIMARY_KEYS` or
+`Entity::metadata().primary_keys` when code needs the full key.
+Pagination cursors are offset-based today, so composite keys do not change cursor encoding.
+
 The SQL Server dialect quotes generated identifiers as `[Name]`, renders schema-qualified tables as
 `[dbo].[Jobs]`, binds parameters as `@P1`, `@P2`, and uses:
 
@@ -149,6 +203,10 @@ arguments or the entity default order.
 
 Relations are ORM metadata only. They do not require physical SQL Server foreign keys and do not
 create or migrate constraints.
+
+Relation declarations currently describe single-column edges. Composite primary keys do not block
+future composite relation support, but composite foreign-key relation loading is not first-class in
+this phase.
 
 For renamed SQL Server columns, use the Rust source field in `from` and the target database column in
 `to`:
@@ -185,8 +243,6 @@ precision needs of the application. SQL Server-specific types such as `xml`, `hi
 `geography`, `geometry`, `sql_variant`, `rowversion`, and table-valued columns are not first-class
 ORM scalar types in this phase.
 
-Composite primary keys are not supported unless the existing ORM primary-key model is extended.
-
 ## Tests
 
 Pure SQL rendering tests run with the default test suite:
@@ -199,6 +255,12 @@ MSSQL compile-time read-only checks run with the MSSQL feature:
 
 ```bash
 cargo test -p graphql-orm --no-default-features --features mssql --test mssql_write_unavailable_ui
+```
+
+Composite-key read rendering and MSSQL read-only schema checks are covered by:
+
+```bash
+cargo test -p graphql-orm --no-default-features --features mssql --test composite_primary_keys
 ```
 
 The live MSSQL integration test is opt-in. Set `MSSQL_TEST_DATABASE_URL` to an ADO.NET-style

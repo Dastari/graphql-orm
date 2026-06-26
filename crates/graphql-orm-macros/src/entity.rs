@@ -887,7 +887,7 @@ fn generate_entity_impl(
     // Collect field info
     let mut column_names: Vec<String> = Vec::new();
     let mut column_defs: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut primary_key_col: Option<String> = None;
+    let mut primary_key_cols: Vec<String> = Vec::new();
     let mut where_input_fields = Vec::new();
     let mut order_by_fields = Vec::new();
     let mut filter_to_sql = Vec::new();
@@ -1022,7 +1022,7 @@ fn generate_entity_impl(
         });
 
         if field_meta.is_primary_key {
-            primary_key_col = Some(db_col_sql.clone());
+            primary_key_cols.push(db_col_sql.clone());
         }
 
         // Generate WhereInput field for filterable fields
@@ -1111,7 +1111,14 @@ fn generate_entity_impl(
     } else {
         "id".to_string()
     };
-    let primary_key = primary_key_col.as_deref().unwrap_or(&default_primary_key);
+    if primary_key_cols.is_empty() {
+        primary_key_cols.push(default_primary_key);
+    }
+    let primary_key = primary_key_cols.first().map(String::as_str).unwrap_or("id");
+    let primary_key_literals: Vec<syn::LitStr> = primary_key_cols
+        .iter()
+        .map(|column| syn::LitStr::new(column, struct_name.span()))
+        .collect();
     let columns_array: Vec<&str> = column_names.iter().map(|s| s.as_str()).collect();
 
     // Generate type names (as strings for #[graphql(name = "...")] and as idents for struct names)
@@ -1151,6 +1158,7 @@ fn generate_entity_impl(
                 const TABLE_NAME: &'static str = #table_name;
                 const PLURAL_NAME: &'static str = #plural_name;
                 const PRIMARY_KEY: &'static str = #primary_key;
+                const PRIMARY_KEYS: &'static [&'static str] = &[#(#primary_key_literals),*];
                 const DEFAULT_SORT: &'static str = #default_sort;
 
                 fn column_names() -> &'static [&'static str] {
@@ -1305,6 +1313,7 @@ fn generate_entity_impl(
             const TABLE_NAME: &'static str = #table_name;
             const PLURAL_NAME: &'static str = #plural_name;
             const PRIMARY_KEY: &'static str = #primary_key;
+            const PRIMARY_KEYS: &'static [&'static str] = &[#(#primary_key_literals),*];
             const DEFAULT_SORT: &'static str = #default_sort;
 
             fn column_names() -> &'static [&'static str] {

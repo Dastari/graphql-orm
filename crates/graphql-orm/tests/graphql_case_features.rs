@@ -47,9 +47,31 @@ struct OverrideItem {
     pub override_value: String,
 }
 
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+)]
+#[graphql_entity(
+    table = "case_composite_records",
+    plural = "CaseCompositeRecords",
+    default_sort = "case_part ASC, part_ref ASC"
+)]
+struct CaseCompositeRecord {
+    #[primary_key]
+    #[graphql(name = "CasePart")]
+    #[sortable]
+    pub case_part: i32,
+
+    #[primary_key]
+    #[graphql(name = "PartRef")]
+    #[sortable]
+    pub part_ref: i32,
+
+    pub label: String,
+}
+
 schema_roots! {
     query_custom_ops: [],
-    entities: [CaseCollection, OverrideItem],
+    entities: [CaseCollection, OverrideItem, CaseCompositeRecord],
 }
 
 #[cfg(feature = "sqlite")]
@@ -99,6 +121,10 @@ async fn generated_schema_respects_crate_wide_case_features() {
         assert_has(&sdl, "caseCollection(id: String!): CaseCollection");
         assert_has(
             &sdl,
+            "caseCompositeRecord(casePart: Int!, partRef: Int!): CaseCompositeRecord",
+        );
+        assert_has(
+            &sdl,
             "createCaseCollection(input: CreateCaseCollectionInput!): CaseCollectionResult!",
         );
         assert_has(
@@ -125,6 +151,10 @@ async fn generated_schema_respects_crate_wide_case_features() {
             "CaseCollections(Where: CaseCollectionWhereInput, OrderBy: [CaseCollectionOrderByInput!], Page: PageInput): CaseCollectionConnection!",
         );
         assert_has(&sdl, "CaseCollection(Id: String!): CaseCollection");
+        assert_has(
+            &sdl,
+            "CaseCompositeRecord(CasePart: Int!, PartRef: Int!): CaseCompositeRecord",
+        );
         assert_has(
             &sdl,
             "CreateCaseCollection(Input: CreateCaseCollectionInput!): CaseCollectionResult!",
