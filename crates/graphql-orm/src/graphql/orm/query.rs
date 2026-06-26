@@ -158,12 +158,28 @@ pub enum ChangeKind {
 }
 
 #[derive(async_graphql::InputObject, Clone, Debug, Default)]
+#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
+#[cfg_attr(
+    feature = "field-case-screaming-snake",
+    graphql(rename_fields = "SCREAMING_SNAKE_CASE")
+)]
+#[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
+#[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
 pub struct SubscriptionFilterInput {
     pub actions: Option<Vec<ChangeAction>>,
     pub dummy: Option<bool>,
 }
 
 #[derive(async_graphql::InputObject, Clone, Debug, Default)]
+#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
+#[cfg_attr(
+    feature = "field-case-screaming-snake",
+    graphql(rename_fields = "SCREAMING_SNAKE_CASE")
+)]
+#[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
+#[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
 pub struct PageInput {
     pub limit: Option<i64>,
     pub offset: Option<i64>,

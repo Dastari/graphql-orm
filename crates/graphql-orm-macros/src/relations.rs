@@ -3,9 +3,10 @@ use crate::backend::{
     backend_pool_type_tokens, backend_quote_identifier_path, backend_relation_key_cast,
 };
 use crate::entity::{
-    collect_parsed_fields, graphql_field_name, has_graphql_complex, parse_entity_metadata,
+    collect_parsed_fields, has_graphql_complex, parse_entity_metadata,
     relation_change_propagation_tokens, relation_delete_policy_tokens,
 };
+use crate::naming::{apply_graphql_case, graphql_field_name, selected_argument_case};
 use syn::spanned::Spanned;
 
 struct RelationDef {
@@ -138,10 +139,12 @@ pub(crate) fn generate_graphql_relations(
     };
 
     let entity_meta = parse_entity_metadata(&input.attrs)?;
-    let rename_all_rule = entity_meta
-        .graphql_rename_fields
-        .as_deref()
-        .or(entity_meta.serde_rename_all.as_deref());
+    let graphql_rename_fields = entity_meta.graphql_rename_fields.as_deref();
+    let serde_rename_all = entity_meta.serde_rename_all.as_deref();
+    let argument_case = selected_argument_case();
+    let where_arg_name = apply_graphql_case("where", argument_case);
+    let order_by_arg_name = apply_graphql_case("orderBy", argument_case);
+    let page_arg_name = apply_graphql_case("page", argument_case);
     let legacy_graphql_complex = has_graphql_complex(&input.attrs);
     let parsed_fields = collect_parsed_fields(fields.iter())?;
 
@@ -167,7 +170,8 @@ pub(crate) fn generate_graphql_relations(
 
         let field_name = field.ident.clone().unwrap();
         let rust_name = field_name.to_string();
-        let graphql_name = graphql_field_name(meta, &rust_name, rename_all_rule);
+        let graphql_name =
+            graphql_field_name(meta, &rust_name, graphql_rename_fields, serde_rename_all);
 
         let target_type = meta
             .relation_target
@@ -425,9 +429,9 @@ pub(crate) fn generate_graphql_relations(
                 async fn #field_name(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
-                    #[graphql(name = "where")] where_input: Option<#where_input>,
-                    #[graphql(name = "orderBy")] order_by: Option<#order_by_input>,
-                    #[graphql(name = "page")] page: Option<::graphql_orm::graphql::orm::PageInput>,
+                    #[graphql(name = #where_arg_name)] where_input: Option<#where_input>,
+                    #[graphql(name = #order_by_arg_name)] order_by: Option<#order_by_input>,
+                    #[graphql(name = #page_arg_name)] page: Option<::graphql_orm::graphql::orm::PageInput>,
                 ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, DatabaseOrderBy, EntityQuery, SqlValue};
 

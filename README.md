@@ -331,6 +331,7 @@ Generated names now align with serde naming and standard GraphQL casing:
 - `serde(rename_all = "...")`
 - `#[graphql(rename_fields = "...")]` on the entity when GraphQL naming should diverge from serde naming
 - default field/input/filter/order names are camelCase even when the Rust field is snake_case
+- crate-wide `resolver-case-*`, `argument-case-*`, and `field-case-*` feature flags when a whole build needs a non-default GraphQL naming contract
 
 GraphQL naming contract:
 
@@ -339,6 +340,55 @@ GraphQL naming contract:
 - arguments are camelCase
 - root query/mutation/subscription fields are camelCase
 - wrapper/result payload fields are camelCase
+
+The default schema remains camelCase. For compatibility with schemas that require another convention, enable one feature from each case group as needed:
+
+```toml
+graphql-orm = {
+  version = "0.2.6",
+  default-features = false,
+  features = [
+    "sqlite",
+    "resolver-case-pascal",
+    "argument-case-pascal",
+    "field-case-pascal",
+  ],
+}
+```
+
+Resolver case features control generated root query, mutation, and subscription fields:
+
+- `resolver-case-pascal`
+- `resolver-case-snake`
+- `resolver-case-screaming-snake`
+- `resolver-case-lower`
+- `resolver-case-upper`
+
+Argument case features control generated GraphQL argument names such as `where`, `orderBy`, `page`, `id`, `input`, and `filter`:
+
+- `argument-case-pascal`
+- `argument-case-snake`
+- `argument-case-screaming-snake`
+- `argument-case-lower`
+- `argument-case-upper`
+
+Field case features control generated object fields, relation fields, input/filter/order fields, wrapper/result fields, and runtime helper fields such as `pageInfo`, `hasNextPage`, `notIn`, and `isNull`:
+
+- `field-case-pascal`
+- `field-case-snake`
+- `field-case-screaming-snake`
+- `field-case-lower`
+- `field-case-upper`
+
+At most one feature in each group may be enabled. `camelCase` remains the default and has no explicit feature.
+
+GraphQL naming is intentionally independent from serde serialization naming. Explicit GraphQL attributes win first, then crate-wide `field-case-*`, then serde rename rules:
+
+1. `#[graphql(name = "...")]` on a field
+2. `#[graphql(rename_fields = "...")]` on the entity
+3. crate-wide `field-case-*`
+4. `serde(rename = "...")` or `serde(rename_all = "...")`
+5. default camelCase
 
 Breaking change:
 

@@ -2,9 +2,13 @@ use super::*;
 use crate::backend::backend_database_type_tokens;
 use crate::backend::backend_pool_type_tokens;
 use crate::entity::{
-    FieldMetadata, graphql_field_name, is_bool_type, is_byte_vec_type, is_option_type,
-    is_uuid_type, is_vec_type, maybe_wrap_write_transform, option_inner_type,
-    parse_entity_metadata, parse_field_metadata, type_path_last_ident,
+    FieldMetadata, is_bool_type, is_byte_vec_type, is_option_type, is_uuid_type, is_vec_type,
+    maybe_wrap_write_transform, option_inner_type, parse_entity_metadata, parse_field_metadata,
+    type_path_last_ident,
+};
+use crate::naming::{
+    apply_graphql_case, graphql_field_name, selected_argument_case, selected_field_case,
+    selected_field_case_rule, selected_resolver_case,
 };
 use std::collections::HashMap;
 use syn::spanned::Spanned;
@@ -94,7 +98,8 @@ fn resolve_upsert_config(
     struct_name: &syn::Ident,
     fields: &syn::punctuated::Punctuated<Field, syn::token::Comma>,
     entity_meta: &crate::entity::EntityMetadata,
-    rename_all_rule: Option<&str>,
+    graphql_rename_fields: Option<&str>,
+    serde_rename_all: Option<&str>,
     auto_generated_pk: bool,
 ) -> syn::Result<Option<ResolvedUpsertConfig>> {
     let Some(requested_targets) = entity_meta.upsert.as_ref() else {
@@ -104,7 +109,8 @@ fn resolve_upsert_config(
     #[cfg(any(feature = "mysql", feature = "mssql"))]
     {
         let _ = fields;
-        let _ = rename_all_rule;
+        let _ = graphql_rename_fields;
+        let _ = serde_rename_all;
         let _ = auto_generated_pk;
         let _ = requested_targets;
         return Err(syn::Error::new(
@@ -122,7 +128,8 @@ fn resolve_upsert_config(
             let field_name = field.ident.clone().expect("named field");
             let meta = parse_field_metadata(field)?;
             let rust_name = field_name.to_string();
-            let graphql_name = graphql_field_name(&meta, &rust_name, rename_all_rule);
+            let graphql_name =
+                graphql_field_name(&meta, &rust_name, graphql_rename_fields, serde_rename_all);
             let db_column = meta.db_column.clone().unwrap_or_else(|| rust_name.clone());
             field_columns.insert(rust_name.clone(), db_column.clone());
             field_columns.insert(db_column.clone(), db_column.clone());
@@ -396,10 +403,8 @@ pub(crate) fn generate_graphql_operations(
     };
 
     let entity_meta = parse_entity_metadata(&input.attrs)?;
-    let rename_all_rule = entity_meta
-        .graphql_rename_fields
-        .as_deref()
-        .or(entity_meta.serde_rename_all.as_deref());
+    let graphql_rename_fields = entity_meta.graphql_rename_fields.as_deref();
+    let serde_rename_all = entity_meta.serde_rename_all.as_deref();
     let table_name = entity_meta.table_name.as_deref().unwrap_or("unknown");
     let plural_name = entity_meta
         .plural_name
@@ -468,7 +473,8 @@ pub(crate) fn generate_graphql_operations(
         struct_name,
         fields,
         &entity_meta,
-        rename_all_rule,
+        graphql_rename_fields,
+        serde_rename_all,
         auto_generated_pk,
     )?;
     let pk_is_uuid = is_uuid_type(&pk_type_ty);
@@ -498,7 +504,8 @@ pub(crate) fn generate_graphql_operations(
 
         let field_name = field.ident.clone().unwrap();
         let rust_name = field_name.to_string();
-        let graphql_name = graphql_field_name(&meta, &rust_name, rename_all_rule);
+        let graphql_name =
+            graphql_field_name(&meta, &rust_name, graphql_rename_fields, serde_rename_all);
         let source_column = meta
             .relation_from
             .clone()
@@ -561,17 +568,35 @@ pub(crate) fn generate_graphql_operations(
     let changed_event =
         syn::Ident::new(&format!("{}ChangedEvent", struct_name), struct_name.span());
 
-    // GraphQL operation names: public fields are camelCase, type names remain PascalCase.
-    let list_query_name = plural_name.to_case(Case::Camel);
-    let single_query_name = struct_name_str.to_case(Case::Camel);
-    let create_mutation_name = format!("create{}", struct_name).to_case(Case::Camel);
-    let upsert_mutation_name = format!("upsert{}", struct_name).to_case(Case::Camel);
-    let update_mutation_name = format!("update{}", struct_name).to_case(Case::Camel);
-    let update_many_mutation_name = format!("update{}", plural_name).to_case(Case::Camel);
-    let delete_mutation_name = format!("delete{}", struct_name).to_case(Case::Camel);
-    let delete_many_mutation_name = format!("delete{}", plural_name).to_case(Case::Camel);
-    let subscription_name = format!("{}Changed", struct_name).to_case(Case::Camel);
-    let entity_result_field_name = struct_name_str.to_case(Case::Camel);
+    // GraphQL type names remain PascalCase; public fields follow crate naming features.
+    let resolver_case = selected_resolver_case();
+    let argument_case = selected_argument_case();
+    let field_case = selected_field_case();
+    let field_case_rule = selected_field_case_rule();
+    let list_query_name = apply_graphql_case(&plural_name, resolver_case);
+    let single_query_name = apply_graphql_case(&struct_name_str, resolver_case);
+    let create_mutation_name = apply_graphql_case(&format!("create{}", struct_name), resolver_case);
+    let upsert_mutation_name = apply_graphql_case(&format!("upsert{}", struct_name), resolver_case);
+    let update_mutation_name = apply_graphql_case(&format!("update{}", struct_name), resolver_case);
+    let update_many_mutation_name =
+        apply_graphql_case(&format!("update{}", plural_name), resolver_case);
+    let delete_mutation_name = apply_graphql_case(&format!("delete{}", struct_name), resolver_case);
+    let delete_many_mutation_name =
+        apply_graphql_case(&format!("delete{}", plural_name), resolver_case);
+    let subscription_name = apply_graphql_case(&format!("{}Changed", struct_name), resolver_case);
+    let entity_result_field_name = apply_graphql_case(&struct_name_str, field_case);
+    let where_arg_name = apply_graphql_case("where", argument_case);
+    let order_by_arg_name = apply_graphql_case("orderBy", argument_case);
+    let page_arg_name = apply_graphql_case("page", argument_case);
+    let id_arg_name = apply_graphql_case("id", argument_case);
+    let input_arg_name = apply_graphql_case("input", argument_case);
+    let filter_arg_name = apply_graphql_case("filter", argument_case);
+    let page_info_field_name = apply_graphql_case("pageInfo", field_case);
+    let change_kind_field_name = apply_graphql_case("changeKind", field_case);
+    let source_entity_field_name = apply_graphql_case("sourceEntity", field_case);
+    let source_id_field_name = apply_graphql_case("sourceId", field_case);
+    let deleted_count_field_name = apply_graphql_case("deletedCount", field_case);
+    let affected_count_field_name = apply_graphql_case("affectedCount", field_case);
     let upsert_result_type =
         syn::Ident::new(&format!("Upsert{}Result", struct_name), struct_name.span());
     let update_many_result_type =
@@ -712,7 +737,8 @@ pub(crate) fn generate_graphql_operations(
         }
 
         let rust_name = field_name.to_string();
-        let graphql_name = graphql_field_name(&meta, &rust_name, rename_all_rule);
+        let graphql_name =
+            graphql_field_name(&meta, &rust_name, graphql_rename_fields, serde_rename_all);
         let db_col = meta.db_column.clone().unwrap_or_else(|| rust_name.clone());
 
         // Track string-filterable fields for fuzzy search
@@ -1650,7 +1676,7 @@ pub(crate) fn generate_graphql_operations(
     let upsert_result_definition = if upsert_config.is_some() {
         quote! {
             #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject)]
-            #[graphql(name = #upsert_result_type_str)]
+            #[graphql(name = #upsert_result_type_str, rename_fields = #field_case_rule)]
             pub struct #upsert_result_type {
                 pub success: bool,
                 pub error: Option<String>,
@@ -1842,7 +1868,7 @@ pub(crate) fn generate_graphql_operations(
             async fn upsert(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = "input")] input: #graphql_create_input,
+                #[graphql(name = #input_arg_name)] input: #graphql_create_input,
             ) -> ::graphql_orm::async_graphql::Result<#upsert_result_type> {
                 use ::graphql_orm::graphql::auth::AuthExt;
 
@@ -2040,16 +2066,17 @@ pub(crate) fn generate_graphql_operations(
             // ============================================================================
 
             #[derive(::graphql_orm::async_graphql::SimpleObject, Debug, Clone)]
-            #[graphql(name = #edge_type_str)]
+            #[graphql(name = #edge_type_str, rename_fields = #field_case_rule)]
             pub struct #edge_type {
                 pub node: #struct_name,
                 pub cursor: String,
             }
 
             #[derive(::graphql_orm::async_graphql::SimpleObject, Debug, Clone)]
-            #[graphql(name = #connection_type_str)]
+            #[graphql(name = #connection_type_str, rename_fields = #field_case_rule)]
             pub struct #connection_type {
                 pub edges: Vec<#edge_type>,
+                #[graphql(name = #page_info_field_name)]
                 pub page_info: ::graphql_orm::graphql::pagination::PageInfo,
             }
 
@@ -2085,9 +2112,9 @@ pub(crate) fn generate_graphql_operations(
                 async fn list(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
-                    #[graphql(name = "where")] where_input: Option<#where_input>,
-                    #[graphql(name = "orderBy")] order_by: Option<Vec<#order_by_input>>,
-                    #[graphql(name = "page")] page: Option<::graphql_orm::graphql::orm::PageInput>,
+                    #[graphql(name = #where_arg_name)] where_input: Option<#where_input>,
+                    #[graphql(name = #order_by_arg_name)] order_by: Option<Vec<#order_by_input>>,
+                    #[graphql(name = #page_arg_name)] page: Option<::graphql_orm::graphql::orm::PageInput>,
                 ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
                     use ::graphql_orm::graphql::auth::AuthExt;
                     use ::graphql_orm::graphql::orm::{DatabaseOrderBy, EntityQuery};
@@ -2194,7 +2221,7 @@ pub(crate) fn generate_graphql_operations(
                 async fn get_by_id(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
-                    #[graphql(name = "id")] id: #pk_type,
+                    #[graphql(name = #id_arg_name)] id: #pk_type,
                 ) -> ::graphql_orm::async_graphql::Result<Option<#struct_name>> {
                     use ::graphql_orm::graphql::auth::AuthExt;
                     use ::graphql_orm::graphql::orm::EntityQuery;
@@ -2293,7 +2320,7 @@ pub(crate) fn generate_graphql_operations(
 
         /// Edge containing a node and cursor
         #[derive(::graphql_orm::async_graphql::SimpleObject, Debug, Clone)]
-        #[graphql(name = #edge_type_str)]
+        #[graphql(name = #edge_type_str, rename_fields = #field_case_rule)]
         pub struct #edge_type {
             /// The item at the end of the edge
             pub node: #struct_name,
@@ -2303,11 +2330,12 @@ pub(crate) fn generate_graphql_operations(
 
         /// Connection containing edges and page info
         #[derive(::graphql_orm::async_graphql::SimpleObject, Debug, Clone)]
-        #[graphql(name = #connection_type_str)]
+        #[graphql(name = #connection_type_str, rename_fields = #field_case_rule)]
         pub struct #connection_type {
             /// The edges in this connection
             pub edges: Vec<#edge_type>,
             /// Pagination information
+            #[graphql(name = #page_info_field_name)]
             pub page_info: ::graphql_orm::graphql::pagination::PageInfo,
         }
 
@@ -2349,7 +2377,7 @@ pub(crate) fn generate_graphql_operations(
         }
 
         #[derive(::graphql_orm::async_graphql::InputObject, Clone, Debug)]
-        #[graphql(name = #create_input_str)]
+        #[graphql(name = #create_input_str, rename_fields = #field_case_rule)]
         struct #graphql_create_input {
             #(#graphql_create_input_fields)*
         }
@@ -2363,7 +2391,7 @@ pub(crate) fn generate_graphql_operations(
         }
 
         #[derive(::graphql_orm::async_graphql::InputObject, Clone, Debug, Default)]
-        #[graphql(name = #update_input_str)]
+        #[graphql(name = #update_input_str, rename_fields = #field_case_rule)]
         struct #graphql_update_input {
             #(#graphql_update_input_fields)*
         }
@@ -2378,7 +2406,7 @@ pub(crate) fn generate_graphql_operations(
 
         /// Result type for #struct_name mutations
         #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject)]
-        #[graphql(name = #result_type_str)]
+        #[graphql(name = #result_type_str, rename_fields = #field_case_rule)]
         pub struct #result_type {
             pub success: bool,
             pub error: Option<String>,
@@ -2401,12 +2429,15 @@ pub(crate) fn generate_graphql_operations(
 
         /// Event for #struct_name changes (subscriptions)
         #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject, serde::Serialize, serde::Deserialize)]
-        #[graphql(name = #changed_event_str)]
+        #[graphql(name = #changed_event_str, rename_fields = #field_case_rule)]
         pub struct #changed_event {
             pub action: ::graphql_orm::graphql::orm::ChangeAction,
+            #[graphql(name = #change_kind_field_name)]
             pub change_kind: ::graphql_orm::graphql::orm::ChangeKind,
             pub id: #pk_type,
+            #[graphql(name = #source_entity_field_name)]
             pub source_entity: Option<String>,
+            #[graphql(name = #source_id_field_name)]
             pub source_id: Option<String>,
             pub path: Vec<String>,
             #[graphql(name = #entity_result_field_name)]
@@ -2415,10 +2446,11 @@ pub(crate) fn generate_graphql_operations(
 
         /// Result of bulk delete by Where filter
         #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject)]
-        #[graphql(name = #delete_many_result_type_str)]
+        #[graphql(name = #delete_many_result_type_str, rename_fields = #field_case_rule)]
         pub struct #delete_many_result_type {
             pub success: bool,
             pub error: Option<String>,
+            #[graphql(name = #deleted_count_field_name)]
             pub deleted_count: i64,
         }
 
@@ -2433,10 +2465,11 @@ pub(crate) fn generate_graphql_operations(
 
         /// Result of bulk update by Where filter
         #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject)]
-        #[graphql(name = #update_many_result_type_str)]
+        #[graphql(name = #update_many_result_type_str, rename_fields = #field_case_rule)]
         pub struct #update_many_result_type {
             pub success: bool,
             pub error: Option<String>,
+            #[graphql(name = #affected_count_field_name)]
             pub affected_count: i64,
         }
 
@@ -2464,9 +2497,9 @@ pub(crate) fn generate_graphql_operations(
             async fn list(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = "where")] where_input: Option<#where_input>,
-                #[graphql(name = "orderBy")] order_by: Option<Vec<#order_by_input>>,
-                #[graphql(name = "page")] page: Option<::graphql_orm::graphql::orm::PageInput>,
+                #[graphql(name = #where_arg_name)] where_input: Option<#where_input>,
+                #[graphql(name = #order_by_arg_name)] order_by: Option<Vec<#order_by_input>>,
+                #[graphql(name = #page_arg_name)] page: Option<::graphql_orm::graphql::orm::PageInput>,
             ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, DatabaseOrderBy, EntityQuery, FromSqlRow};
                 use ::graphql_orm::graphql::auth::AuthExt;
@@ -2574,7 +2607,7 @@ pub(crate) fn generate_graphql_operations(
             async fn get_by_id(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = "id")] id: #pk_type,
+                #[graphql(name = #id_arg_name)] id: #pk_type,
             ) -> ::graphql_orm::async_graphql::Result<Option<#struct_name>> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
                 use ::graphql_orm::graphql::auth::AuthExt;
@@ -2633,7 +2666,7 @@ pub(crate) fn generate_graphql_operations(
             async fn create(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = "input")] input: #graphql_create_input,
+                #[graphql(name = #input_arg_name)] input: #graphql_create_input,
             ) -> ::graphql_orm::async_graphql::Result<#result_type> {
                 use ::graphql_orm::graphql::auth::AuthExt;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
@@ -2727,8 +2760,8 @@ pub(crate) fn generate_graphql_operations(
             async fn update(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = "id")] id: #pk_type,
-                #[graphql(name = "input")] input: #graphql_update_input,
+                #[graphql(name = #id_arg_name)] id: #pk_type,
+                #[graphql(name = #input_arg_name)] input: #graphql_update_input,
             ) -> ::graphql_orm::async_graphql::Result<#result_type> {
                 use ::graphql_orm::graphql::auth::AuthExt;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
@@ -2871,7 +2904,7 @@ pub(crate) fn generate_graphql_operations(
             async fn delete(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = "id")] id: #pk_type,
+                #[graphql(name = #id_arg_name)] id: #pk_type,
             ) -> ::graphql_orm::async_graphql::Result<#result_type> {
                 use ::graphql_orm::graphql::auth::AuthExt;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, SqlValue};
@@ -2976,8 +3009,8 @@ pub(crate) fn generate_graphql_operations(
             async fn update_many(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = "where")] where_input: Option<#where_input>,
-                #[graphql(name = "input")] input: #graphql_update_input,
+                #[graphql(name = #where_arg_name)] where_input: Option<#where_input>,
+                #[graphql(name = #input_arg_name)] input: #graphql_update_input,
             ) -> ::graphql_orm::async_graphql::Result<#update_many_result_type> {
                 use ::graphql_orm::graphql::auth::AuthExt;
                 use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
@@ -3009,7 +3042,7 @@ pub(crate) fn generate_graphql_operations(
             async fn delete_many(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = "where")] where_input: Option<#where_input>,
+                #[graphql(name = #where_arg_name)] where_input: Option<#where_input>,
             ) -> ::graphql_orm::async_graphql::Result<#delete_many_result_type> {
                 use ::graphql_orm::graphql::auth::AuthExt;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow};
@@ -3051,7 +3084,7 @@ pub(crate) fn generate_graphql_operations(
             async fn on_changed(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = "filter")] _filter: Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>,
+                #[graphql(name = #filter_arg_name)] _filter: Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>,
             ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = #changed_event>> {
                 use ::graphql_orm::futures::StreamExt;
                 use ::graphql_orm::graphql::auth::AuthExt;

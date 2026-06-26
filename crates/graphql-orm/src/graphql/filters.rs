@@ -1,31 +1,79 @@
 #[derive(async_graphql::InputObject, Clone, Debug, Default)]
+#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
+#[cfg_attr(
+    feature = "field-case-screaming-snake",
+    graphql(rename_fields = "SCREAMING_SNAKE_CASE")
+)]
+#[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
+#[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
 pub struct SimilarityInput {
     pub value: String,
 }
 
 #[derive(async_graphql::InputObject, Clone, Debug, Default)]
+#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
+#[cfg_attr(
+    feature = "field-case-screaming-snake",
+    graphql(rename_fields = "SCREAMING_SNAKE_CASE")
+)]
+#[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
+#[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
 pub struct UuidFilter {
     pub eq: Option<uuid::Uuid>,
     pub ne: Option<uuid::Uuid>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "inlist"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "INLIST"))]
     pub in_list: Option<Vec<uuid::Uuid>>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "notin"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "NOTIN"))]
     pub not_in: Option<Vec<uuid::Uuid>>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "isnull"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "ISNULL"))]
     pub is_null: Option<bool>,
 }
 
 #[derive(async_graphql::InputObject, Clone, Debug, Default)]
+#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
+#[cfg_attr(
+    feature = "field-case-screaming-snake",
+    graphql(rename_fields = "SCREAMING_SNAKE_CASE")
+)]
+#[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
+#[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
 pub struct StringFilter {
     pub eq: Option<String>,
     pub ne: Option<String>,
     pub contains: Option<String>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "startswith"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "STARTSWITH"))]
     pub starts_with: Option<String>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "endswith"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "ENDSWITH"))]
     pub ends_with: Option<String>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "inlist"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "INLIST"))]
     pub in_list: Option<Vec<String>>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "notin"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "NOTIN"))]
     pub not_in: Option<Vec<String>>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "isnull"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "ISNULL"))]
     pub is_null: Option<bool>,
     pub similar: Option<SimilarityInput>,
 }
 
 #[derive(async_graphql::InputObject, Clone, Debug, Default)]
+#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
+#[cfg_attr(
+    feature = "field-case-screaming-snake",
+    graphql(rename_fields = "SCREAMING_SNAKE_CASE")
+)]
+#[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
+#[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
 pub struct IntFilter {
     pub eq: Option<i32>,
     pub ne: Option<i32>,
@@ -33,25 +81,57 @@ pub struct IntFilter {
     pub lte: Option<i32>,
     pub gt: Option<i32>,
     pub gte: Option<i32>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "inlist"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "INLIST"))]
     pub in_list: Option<Vec<i32>>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "notin"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "NOTIN"))]
     pub not_in: Option<Vec<i32>>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "isnull"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "ISNULL"))]
     pub is_null: Option<bool>,
 }
 
 #[derive(async_graphql::InputObject, Clone, Debug, Default)]
+#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
+#[cfg_attr(
+    feature = "field-case-screaming-snake",
+    graphql(rename_fields = "SCREAMING_SNAKE_CASE")
+)]
+#[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
+#[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
 pub struct BoolFilter {
     pub eq: Option<bool>,
     pub ne: Option<bool>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "isnull"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "ISNULL"))]
     pub is_null: Option<bool>,
 }
 
 #[derive(async_graphql::InputObject, Clone, Debug, Default)]
+#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
+#[cfg_attr(
+    feature = "field-case-screaming-snake",
+    graphql(rename_fields = "SCREAMING_SNAKE_CASE")
+)]
+#[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
+#[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
 pub struct DateRangeInput {
     pub start: Option<String>,
     pub end: Option<String>,
 }
 
 #[derive(async_graphql::InputObject, Clone, Debug, Default)]
+#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
+#[cfg_attr(
+    feature = "field-case-screaming-snake",
+    graphql(rename_fields = "SCREAMING_SNAKE_CASE")
+)]
+#[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
+#[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
 pub struct RelativeDateInput {
     pub days: i32,
 }
@@ -67,6 +147,14 @@ impl RelativeDateInput {
 }
 
 #[derive(async_graphql::InputObject, Clone, Debug, Default)]
+#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
+#[cfg_attr(
+    feature = "field-case-screaming-snake",
+    graphql(rename_fields = "SCREAMING_SNAKE_CASE")
+)]
+#[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
+#[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
 pub struct DateFilter {
     pub eq: Option<String>,
     pub ne: Option<String>,
@@ -75,12 +163,28 @@ pub struct DateFilter {
     pub gt: Option<String>,
     pub gte: Option<String>,
     pub between: Option<DateRangeInput>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "isnull"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "ISNULL"))]
     pub is_null: Option<bool>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "inpast"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "INPAST"))]
     pub in_past: Option<bool>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "infuture"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "INFUTURE"))]
     pub in_future: Option<bool>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "istoday"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "ISTODAY"))]
     pub is_today: Option<bool>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "recentdays"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "RECENTDAYS"))]
     pub recent_days: Option<i32>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "withindays"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "WITHINDAYS"))]
     pub within_days: Option<i32>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "gterelative"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "GTERELATIVE"))]
     pub gte_relative: Option<RelativeDateInput>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "lterelative"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "LTERELATIVE"))]
     pub lte_relative: Option<RelativeDateInput>,
 }

@@ -3,6 +3,7 @@ use crate::backend::{
     backend_current_epoch_expr, backend_helper_import_tokens, backend_quote_identifier_path,
     backend_row_type_tokens,
 };
+use crate::naming::{graphql_field_name, selected_field_case_rule};
 use syn::spanned::Spanned;
 
 #[derive(Default)]
@@ -622,36 +623,6 @@ fn validate_relation_delete_policy(
     Ok(())
 }
 
-fn apply_rename_rule(name: &str, rule: &str) -> String {
-    match rule {
-        "lowercase" => name.to_case(Case::Lower),
-        "UPPERCASE" => name.to_case(Case::Upper),
-        "camelCase" => name.to_case(Case::Camel),
-        "PascalCase" => name.to_case(Case::Pascal),
-        "snake_case" => name.to_case(Case::Snake),
-        "SCREAMING_SNAKE_CASE" => name.to_case(Case::UpperSnake),
-        "kebab-case" => name.to_case(Case::Kebab),
-        "SCREAMING-KEBAB-CASE" => name.to_case(Case::UpperKebab),
-        _ => name.to_string(),
-    }
-}
-
-pub(crate) fn graphql_field_name(
-    meta: &FieldMetadata,
-    rust_name: &str,
-    rename_all: Option<&str>,
-) -> String {
-    if let Some(graphql_name) = &meta.graphql_name {
-        graphql_name.clone()
-    } else if let Some(serde_name) = &meta.serde_name {
-        serde_name.clone()
-    } else if let Some(rule) = rename_all {
-        apply_rename_rule(rust_name, rule)
-    } else {
-        rust_name.to_case(Case::Camel)
-    }
-}
-
 /// Wrap a value expression with an async, context-aware write transform.
 ///
 /// The transform function must have the signature:
@@ -835,10 +806,9 @@ fn generate_entity_impl(
         .backup_restore_order
         .map(|order| quote! { Some(#order) })
         .unwrap_or_else(|| quote! { None });
-    let rename_all_rule = entity_meta
-        .graphql_rename_fields
-        .as_deref()
-        .or(entity_meta.serde_rename_all.as_deref());
+    let graphql_rename_fields = entity_meta.graphql_rename_fields.as_deref();
+    let serde_rename_all = entity_meta.serde_rename_all.as_deref();
+    let field_case_rule = selected_field_case_rule();
     let read_policy = entity_meta
         .read_policy
         .as_ref()
@@ -927,7 +897,12 @@ fn generate_entity_impl(
             if field_meta.is_relation {
                 validate_relation_delete_policy(struct_name, field, &field_meta, &parsed_fields)?;
                 let rust_name = field_name.to_string();
-                let graphql_name = graphql_field_name(&field_meta, &rust_name, rename_all_rule);
+                let graphql_name = graphql_field_name(
+                    &field_meta,
+                    &rust_name,
+                    graphql_rename_fields,
+                    serde_rename_all,
+                );
                 let target_type = field_meta
                     .relation_target
                     .clone()
@@ -977,7 +952,12 @@ fn generate_entity_impl(
         }
 
         let rust_name = field_name.to_string();
-        let graphql_name = graphql_field_name(&field_meta, &rust_name, rename_all_rule);
+        let graphql_name = graphql_field_name(
+            &field_meta,
+            &rust_name,
+            graphql_rename_fields,
+            serde_rename_all,
+        );
         let db_col = field_meta
             .db_column
             .clone()
@@ -1225,7 +1205,7 @@ fn generate_entity_impl(
     Ok(quote! {
         // WhereInput for filtering
         #[derive(::graphql_orm::async_graphql::InputObject, Default, Clone, Debug)]
-        #[graphql(name = #where_input_name_str)]
+        #[graphql(name = #where_input_name_str, rename_fields = #field_case_rule)]
         pub struct #where_input_name {
             #(#where_input_fields)*
 
@@ -1241,7 +1221,7 @@ fn generate_entity_impl(
 
         // OrderByInput for sorting
         #[derive(::graphql_orm::async_graphql::InputObject, Default, Clone, Debug)]
-        #[graphql(name = #order_by_name_str)]
+        #[graphql(name = #order_by_name_str, rename_fields = #field_case_rule)]
         pub struct #order_by_name {
             #(#order_by_fields)*
         }
