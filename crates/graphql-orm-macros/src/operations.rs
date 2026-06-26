@@ -1769,7 +1769,7 @@ pub(crate) fn generate_graphql_operations(
                     .into_iter()
                     .map(|edge| edge.node)
                     .collect::<Vec<_>>();
-                <#struct_name as ::graphql_orm::graphql::orm::RelationLoader>::bulk_load_relations(
+                <#struct_name as ::graphql_orm::graphql::orm::RelationLoader<#backend_marker>>::bulk_load_relations(
                     &mut entities,
                     pool,
                     &selection,
@@ -1790,7 +1790,7 @@ pub(crate) fn generate_graphql_operations(
         quote! {
             if let Some(entity) = entity.as_mut() {
                 let selection = ctx.field().selection_set().collect::<Vec<_>>();
-                <#struct_name as ::graphql_orm::graphql::orm::RelationLoader>::load_relations(
+                <#struct_name as ::graphql_orm::graphql::orm::RelationLoader<#backend_marker>>::load_relations(
                     entity,
                     pool,
                     &selection,
