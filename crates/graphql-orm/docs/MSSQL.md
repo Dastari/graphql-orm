@@ -13,7 +13,7 @@ not provide an MSSQL driver.
 For a service that only uses SQL Server, select the `mssql` backend feature:
 
 ```toml
-graphql-orm = { version = "0.2.8", default-features = false, features = ["mssql"] }
+graphql-orm = { version = "0.2.9", default-features = false, features = ["mssql"] }
 ```
 
 When exactly one of `sqlite`, `postgres`, or `mssql` is enabled, the legacy implicit backend remains
@@ -24,7 +24,12 @@ Multiple backend features may be enabled by Cargo feature unification in a works
 each generated entity and schema root must select a backend explicitly:
 
 ```rust
-#[graphql_entity(backend = "mssql", table = "dbo.Jobs", plural = "Jobs")]
+#[graphql_entity(
+    backend = "mssql",
+    table = "dbo.Jobs",
+    plural = "Jobs",
+    schema_policy = "external_read_only"
+)]
 pub struct Job {
     #[primary_key]
     #[graphql_orm(db_column = "JobId")]
@@ -33,18 +38,20 @@ pub struct Job {
 
 schema_roots! {
     backend: "mssql",
+    schema_policy: "external_read_only",
     query_custom_ops: [],
     entities: [Job],
 }
 ```
 
 If multiple backend features are enabled and an entity or schema root does not specify a backend,
-the macro emits a compile-time error. In multi-backend builds, `DbPool` and `DbRow` are intentionally
-not exported; use explicit backend types such as `graphql_orm::db::Database::<graphql_orm::MssqlBackend>`.
+the macro emits a compile-time error. In multi-backend builds, schema roots must also declare
+`schema_policy`. In multi-backend builds, `DbPool` and `DbRow` are intentionally not exported; use
+explicit backend types such as `graphql_orm::db::Database::<graphql_orm::MssqlBackend>`.
 
-Migration and backup APIs remain limited to exactly-one SQLite or Postgres builds. SQL Server is
-read-only, and backend-explicit migrations/backups for mixed-backend workspaces are not included in
-this phase.
+Migration capability is backend-gated. SQLite and Postgres implement migration application; SQL
+Server does not. SQL Server is read-only, and attempting to apply migrations through MSSQL fails at
+compile time when the `MigrationBackend` bound is required.
 
 The SQL Server driver dependencies are also feature-gated. `tiberius`, `tokio-util`, and the Tokio
 TCP support required by Tiberius are optional dependencies and are activated only by the `mssql`
@@ -87,7 +94,9 @@ let pool = graphql_orm::db::mssql::MssqlPool::connect_ado(
 )
 .await?;
 
-let database = graphql_orm::db::Database::<graphql_orm::MssqlBackend>::new(pool);
+let database = graphql_orm::db::Database::<graphql_orm::MssqlBackend>::builder(pool)
+    .schema_policy(graphql_orm::graphql::orm::SchemaPolicy::ExternalReadOnly)
+    .build();
 let schema = schema_builder(database)
     .data("current-user".to_string())
     .finish();
@@ -107,6 +116,7 @@ use graphql_orm::prelude::*;
     backend = "mssql",
     table = "dbo.Jobs",
     plural = "Jobs",
+    schema_policy = "external_read_only",
     default_sort = "[JobId] ASC"
 )]
 pub struct LegacyJob {
@@ -144,6 +154,7 @@ Composite primary keys are supported for read paths by marking each key field wi
     backend = "mssql",
     table = "dbo.JimLabour",
     plural = "JimLabourEntries",
+    schema_policy = "external_read_only",
     default_sort = "[JimObjectType] ASC, [RefNo] ASC, [LineNum] ASC"
 )]
 pub struct JimLabourEntry {
@@ -281,6 +292,7 @@ docker run --rm -e ACCEPT_EULA=Y \
 ```
 
 Do not run migrations or generated writes against Jim or other legacy SQL Server databases in this
-phase. The migration path is to port one simple read-only entity first, then a relation-heavy entity,
-and only then replace the old local SQL Server-specific GraphQL read path with the generic MSSQL
-backend.
+phase. Use `SchemaPolicy::ExternalReadOnly` at runtime and `schema_policy = "external_read_only"`
+in the entity/root macros. The migration path is to port one simple read-only entity first, then a
+relation-heavy entity, and only then replace the old local SQL Server-specific GraphQL read path
+with the generic MSSQL backend.

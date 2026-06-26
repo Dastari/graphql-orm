@@ -1,4 +1,4 @@
-use super::core::SqlValue;
+use super::core::{AppliedMigrationRecord, MigrationApplicationMetadata, SchemaModel, SqlValue};
 use super::dialect::{DatabaseBackend, SqlDialect};
 use futures::future::BoxFuture;
 
@@ -56,18 +56,25 @@ pub trait SqlxBackend: OrmBackend {
 
 pub trait WriteBackend: SqlxBackend {}
 #[allow(async_fn_in_trait)]
-pub trait MigrationBackend: WriteBackend {
+pub trait IntrospectionBackend: OrmBackend {
+    async fn introspect_schema(pool: &Self::Pool) -> Result<SchemaModel, sqlx::Error>;
+}
+
+#[allow(async_fn_in_trait)]
+pub trait MigrationBackend: IntrospectionBackend + WriteBackend {
     async fn prepare_migration_runtime(pool: &Self::Pool) -> Result<(), sqlx::Error>;
 
-    async fn load_applied_migration_versions(
+    async fn load_applied_migrations(
         pool: &Self::Pool,
-    ) -> Result<std::collections::HashSet<String>, sqlx::Error>;
+    ) -> Result<Vec<AppliedMigrationRecord>, sqlx::Error>;
 
     async fn apply_migration_statements_transactionally<S>(
         pool: &Self::Pool,
         version: &str,
         description: &str,
         statements: &[S],
+        metadata: Option<&MigrationApplicationMetadata>,
+        record_history: bool,
     ) -> Result<(), sqlx::Error>
     where
         S: AsRef<str> + Send + Sync;

@@ -28,6 +28,9 @@ The shared app-facing contract now includes:
 - first-class `#[graphql_orm(json)]` persistence for typed structured fields
 - tracked, transaction-wrapped migration application through `MigrationRunner::apply_migrations(...)`
 - staged app-schema migration orchestration through `SchemaStage` and `SchemaStageRunner::apply_schema_stages(...)`
+- explicit schema ownership through `SchemaPolicy` and `Database::builder(pool).schema_policy(...)`
+- validation/planning/application APIs through `database.schema()`
+- ABI-style schema upgrades through `SchemaAbi` and `database.schema().apply_upgrade(...)`
 - `#[derive(GraphQLSchemaEntity)]` for schema-only migration metadata without GraphQL/runtime code generation
 
 Typical setup:
@@ -54,7 +57,7 @@ Single-backend applications can continue selecting one backend feature and using
 implicit backend behavior:
 
 ```toml
-graphql-orm = { version = "0.2.8", default-features = false, features = ["sqlite"] }
+graphql-orm = { version = "0.2.9", default-features = false, features = ["sqlite"] }
 ```
 
 When exactly one of `sqlite`, `postgres`, or `mssql` is enabled, `graphql_orm::DbPool`,
@@ -66,7 +69,12 @@ workspace. In that mode, choose the backend explicitly on each generated entity 
 
 ```rust
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
-#[graphql_entity(backend = "mssql", table = "dbo.Jobs", plural = "Jobs")]
+#[graphql_entity(
+    backend = "mssql",
+    table = "dbo.Jobs",
+    plural = "Jobs",
+    schema_policy = "external_read_only"
+)]
 pub struct Job {
     #[primary_key]
     #[graphql_orm(db_column = "JobId")]
@@ -75,6 +83,7 @@ pub struct Job {
 
 schema_roots! {
     backend: "mssql",
+    schema_policy: "external_read_only",
     query_custom_ops: [],
     entities: [Job],
 }
@@ -84,8 +93,13 @@ In multi-backend builds, `DbPool` and `DbRow` are intentionally not exported. Us
 types such as `graphql_orm::db::Database::<graphql_orm::MssqlBackend>` or
 `graphql_orm::db::Database::<graphql_orm::SqliteBackend>`.
 
-Migration and backup APIs remain available for exactly-one SQLite or Postgres builds. Backend-explicit
-migrations/backups in mixed-backend builds are not part of this release.
+In multi-backend builds, `schema_roots!` also requires `schema_policy`. Use `managed` for
+greenfield/owned SQLite or Postgres schemas and `external_read_only` for legacy/read-only schemas
+such as MSSQL Jim tables.
+
+Migration APIs are capability-gated by backend type. SQLite and Postgres implement migration
+capability; MSSQL intentionally does not. Backup APIs remain limited to exactly-one SQLite or
+Postgres builds.
 
 Generated subscriptions are operational by default through the `Database` runtime injected by `schema_builder(database)`.
 Host apps do not need to register one broadcast sender per entity changed-event type.
@@ -440,7 +454,7 @@ The default schema remains camelCase. For compatibility with schemas that requir
 
 ```toml
 graphql-orm = {
-  version = "0.2.8",
+  version = "0.2.9",
   default-features = false,
   features = [
     "sqlite",
@@ -1174,6 +1188,90 @@ Behavior:
 
 This is the intended way to clean up names like `roles_json -> roles` or `metadata_json -> metadata` without breaking existing databases.
 
+## Schema Ownership Policy
+
+Backend features compile database support. They do not grant permission to mutate a database.
+Schema ownership is declared separately with `SchemaPolicy`:
+
+- `ExternalReadOnly` - existing database is source of truth; generated/runtime write paths and schema mutation are rejected
+- `ExternalWritable` - existing database is source of truth; entity writes may run when supported, but schema application is rejected
+- `ValidateOnly` - validation is allowed, but planning and application are rejected
+- `PlanOnly` - validation and planning are allowed, but application is rejected
+- `Managed` - ORM entity metadata/schema ABI is source of truth and explicit migration application is allowed
+
+`Database::new(pool)` remains compatibility-friendly: SQLite/Postgres default to `Managed`, and
+MSSQL defaults to `ExternalReadOnly`. New code should prefer the explicit builder:
+
+```rust
+use graphql_orm::graphql::orm::SchemaPolicy;
+
+let database = graphql_orm::db::Database::builder(pool)
+    .schema_policy(SchemaPolicy::Managed)
+    .build();
+```
+
+External SQL Server usage should be declared both in macros and at runtime:
+
+```rust
+#[graphql_entity(
+    backend = "mssql",
+    table = "dbo.Jobs",
+    plural = "Jobs",
+    schema_policy = "external_read_only"
+)]
+pub struct Job {
+    #[primary_key]
+    #[graphql_orm(db_column = "JobId", write = false)]
+    pub id: i32,
+}
+
+schema_roots! {
+    backend: "mssql",
+    schema_policy: "external_read_only",
+    query_custom_ops: [],
+    entities: [Job],
+}
+
+let database = graphql_orm::db::Database::<graphql_orm::MssqlBackend>::builder(pool)
+    .schema_policy(SchemaPolicy::ExternalReadOnly)
+    .build();
+```
+
+No schema mutation happens during `Database::new`, `Database::builder(...).build()`,
+`schema_roots!`, or `schema_builder(database)`.
+
+## Schema Validation And Planning
+
+Use `database.schema()` for explicit schema work:
+
+```rust
+use graphql_orm::graphql::orm::{ApplyOptions, Entity};
+
+let report = database
+    .schema()
+    .validate_against_entities(&[<User as Entity>::metadata()])
+    .await?;
+
+let plan = database
+    .schema()
+    .plan_migration_to_entities(
+        "2026062601",
+        "add users",
+        &[<User as Entity>::metadata()],
+    )
+    .await?;
+
+database
+    .schema()
+    .apply_migration(&plan, ApplyOptions::default())
+    .await?;
+```
+
+Validation returns structured diagnostics such as missing tables/columns, type or nullability
+mismatches, primary-key mismatches, and unsupported backend capabilities. Planning returns
+structured steps with risk classification (`Additive`, `Compatible`, `Risky`, `Destructive`) plus
+rendered backend SQL. `ApplyOptions::default()` rejects destructive steps.
+
 ## Migration Application
 
 `MigrationRunner::apply_migrations(...)` is now safe to call repeatedly at startup.
@@ -1191,6 +1289,12 @@ Migration history table shape:
 - `version`
 - `description`
 - `applied_at`
+- `backend`
+- `graphql_orm_version`
+- `source_schema_hash`
+- `target_schema_hash`
+- `plan_hash`
+- `policy`
 
 This keeps host apps out of the runtime's temp-table details. If a SQLite rewrite failed after creating `__graphql_orm_<table>_new`, the next `apply_migrations(...)` run recovers automatically and retries cleanly.
 
@@ -1243,6 +1347,42 @@ Behavior:
 - plans are computed incrementally from the current database state to each missing stage target
 - rerunning startup after stage `N` is already applied is a no-op for stages `<= N`
 - the lower-level `build_migration_plan(...)` and `apply_migrations(...)` APIs remain available
+
+`SchemaStage` now stores the target schema hash, so staged migrations can be treated as ABI
+versions instead of raw SQL files.
+
+## Schema ABI Upgrades
+
+For apps that own their schema, `SchemaAbi` provides an automatic forward path from the database's
+recorded version to any later ABI version:
+
+```rust
+use graphql_orm::graphql::orm::{ApplyOptions, Entity, SchemaAbi, SchemaStage};
+
+let abi = SchemaAbi::new(vec![
+    SchemaStage::from_entities(
+        "1",
+        "initial schema",
+        &[<User as Entity>::metadata()],
+    ),
+    SchemaStage::from_entities(
+        "2",
+        "add audit tables",
+        &[<User as Entity>::metadata(), <AuditLog as Entity>::metadata()],
+    ),
+])?;
+
+database
+    .schema()
+    .apply_upgrade(&abi, "2", ApplyOptions::default())
+    .await?;
+```
+
+The runtime reads `__graphql_orm_migrations`, resolves the unapplied ABI stages in declaration
+order, validates the current baseline when requested, plans each missing stage from structured
+schema metadata, applies the rendered SQL explicitly, and records hashes/checksums for each stage.
+The ABI model is generated from Rust/entity metadata; `.sql` files are optional rendered artifacts,
+not the source of truth.
 
 ## Development
 

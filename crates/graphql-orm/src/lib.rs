@@ -89,8 +89,9 @@ compile_error!("Enable at most one argument-case-* feature for graphql-orm.");
 compile_error!("Enable at most one field-case-* feature for graphql-orm.");
 
 pub use crate::graphql::orm::{
-    DefaultBackend, DefaultWriteBackend, MigrationBackend, MssqlBackend, NoDefaultBackend,
-    OrmBackend, PostgresBackend, SqliteBackend, SqlxBackend, SubscriptionBackend, WriteBackend,
+    DefaultBackend, DefaultWriteBackend, IntrospectionBackend, MigrationBackend, MssqlBackend,
+    NoDefaultBackend, OrmBackend, PostgresBackend, SqliteBackend, SqlxBackend, SubscriptionBackend,
+    WriteBackend,
 };
 
 #[cfg(any(

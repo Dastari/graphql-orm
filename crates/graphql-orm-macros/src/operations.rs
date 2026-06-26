@@ -444,6 +444,10 @@ pub(crate) fn generate_graphql_operations(
         struct_name.span(),
         "graphql_entity",
     )?;
+    let schema_policy_read_only = matches!(
+        entity_meta.schema_policy.as_deref(),
+        Some("external_read_only")
+    );
     let backend_marker = backend_marker_tokens(backend);
     let pool_type = backend_pool_type_tokens(backend);
     let database_type = backend_database_type_tokens(backend);
@@ -1865,7 +1869,9 @@ pub(crate) fn generate_graphql_operations(
         }
     };
 
-    let composite_write_stubs = if has_composite_primary_key && backend != BackendKind::Mssql {
+    let composite_write_stubs = if (has_composite_primary_key || schema_policy_read_only)
+        && backend != BackendKind::Mssql
+    {
         quote! {
             #[derive(Default)]
             pub struct #mutations_struct;
@@ -2309,7 +2315,7 @@ pub(crate) fn generate_graphql_operations(
         quote! {}
     };
 
-    if backend == BackendKind::Mssql || has_composite_primary_key {
+    if backend == BackendKind::Mssql || schema_policy_read_only || has_composite_primary_key {
         return Ok(quote! {
             // ============================================================================
             // Connection/Edge Types (for pagination)

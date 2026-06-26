@@ -1,60 +1,19 @@
-#[cfg(any(
-    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-))]
-use super::DefaultBackend;
-#[cfg(any(
-    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-))]
-use super::core::{PlannedSchemaStage, SchemaStage};
-use super::core::{SqlValue, record_executed_query};
-#[cfg(any(
-    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-))]
-use super::dialect::current_backend;
-#[cfg(any(
-    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-))]
-use super::migrations::{build_migration_plan, introspect_schema};
-use super::{OrmBackend, SqlxBackend};
-#[cfg(any(
-    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-))]
-use crate::DbPool;
-#[cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
-use sqlx::Acquire;
-#[cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
-use sqlx::Row;
-#[cfg(any(
-    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-))]
+use super::core::{
+    AppliedMigrationRecord, MigrationApplicationMetadata, PlannedSchemaStage, SchemaPolicy,
+    SchemaStage, SqlValue, record_executed_query,
+};
+use super::migrations::build_migration_plan;
+use super::{MigrationBackend, OrmBackend, SqlxBackend};
 use std::collections::HashSet;
 
-#[cfg(any(
-    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-))]
-const MIGRATION_HISTORY_TABLE: &str = "__graphql_orm_migrations";
+pub const MIGRATION_HISTORY_TABLE: &str = "__graphql_orm_migrations";
 
-#[cfg(any(
-    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-))]
 pub struct Migration {
     pub version: &'static str,
     pub description: &'static str,
     pub statements: &'static [&'static str],
 }
 
-#[cfg(any(
-    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-))]
 pub trait MigrationSource {
     fn migrations() -> &'static [Migration] {
         &[]
@@ -62,19 +21,11 @@ pub trait MigrationSource {
 }
 
 #[allow(async_fn_in_trait)]
-#[cfg(any(
-    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-))]
 pub trait MigrationRunner {
     async fn apply_migrations(&self, migrations: &[Migration]) -> Result<(), sqlx::Error>;
 }
 
 #[allow(async_fn_in_trait)]
-#[cfg(any(
-    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-))]
 pub trait SchemaStageRunner {
     async fn plan_schema_stages(
         &self,
@@ -84,23 +35,25 @@ pub trait SchemaStageRunner {
     async fn apply_schema_stages(&self, stages: &[SchemaStage]) -> Result<(), sqlx::Error>;
 }
 
-#[cfg(any(
-    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-))]
-impl MigrationRunner for crate::db::Database {
+impl<B> MigrationRunner for crate::db::Database<B>
+where
+    B: MigrationBackend,
+{
     async fn apply_migrations(&self, migrations: &[Migration]) -> Result<(), sqlx::Error> {
-        prepare_migration_runtime(self.pool()).await?;
-        let mut applied_versions = load_applied_migration_versions(self.pool()).await?;
+        ensure_managed_policy(self.schema_policy(), "apply legacy migrations")?;
+        B::prepare_migration_runtime(self.pool()).await?;
+        let mut applied_versions = applied_version_set::<B>(self.pool()).await?;
         for migration in migrations {
             if applied_versions.contains(migration.version) {
                 continue;
             }
-            apply_migration_statements_transactionally(
+            B::apply_migration_statements_transactionally(
                 self.pool(),
                 migration.version,
                 migration.description,
                 migration.statements,
+                None,
+                true,
             )
             .await?;
             applied_versions.insert(migration.version.to_string());
@@ -109,34 +62,35 @@ impl MigrationRunner for crate::db::Database {
     }
 }
 
-#[cfg(any(
-    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-))]
-impl SchemaStageRunner for crate::db::Database {
+impl<B> SchemaStageRunner for crate::db::Database<B>
+where
+    B: MigrationBackend,
+{
     async fn plan_schema_stages(
         &self,
         stages: &[SchemaStage],
     ) -> Result<Vec<PlannedSchemaStage>, sqlx::Error> {
-        prepare_migration_runtime(self.pool()).await?;
+        ensure_planning_policy(self.schema_policy(), "plan schema stages")?;
+        B::prepare_migration_runtime(self.pool()).await?;
         validate_schema_stages(stages)?;
 
-        let applied_versions = load_applied_migration_versions(self.pool()).await?;
+        let applied_versions = applied_version_set::<B>(self.pool()).await?;
         ensure_applied_stages_form_prefix(stages, &applied_versions)?;
 
-        let mut current_schema = introspect_schema(self.pool()).await?;
+        let mut current_schema = B::introspect_schema(self.pool()).await?;
         let mut planned = Vec::new();
 
         for stage in stages {
             if applied_versions.contains(&stage.version) {
+                current_schema = stage.target_schema.clone();
                 continue;
             }
 
-            let plan =
-                build_migration_plan(current_backend(), &current_schema, &stage.target_schema);
+            let plan = build_migration_plan(B::DIALECT, &current_schema, &stage.target_schema);
             planned.push(PlannedSchemaStage {
                 version: stage.version.clone(),
                 description: stage.description.clone(),
+                target_schema_hash: stage.target_schema_hash.clone(),
                 plan,
             });
             current_schema = stage.target_schema.clone();
@@ -146,13 +100,24 @@ impl SchemaStageRunner for crate::db::Database {
     }
 
     async fn apply_schema_stages(&self, stages: &[SchemaStage]) -> Result<(), sqlx::Error> {
+        ensure_managed_policy(self.schema_policy(), "apply schema stages")?;
         let planned = self.plan_schema_stages(stages).await?;
         for stage in planned {
-            apply_migration_statements_transactionally(
+            let metadata = MigrationApplicationMetadata {
+                backend: B::DIALECT.name(),
+                graphql_orm_version: env!("CARGO_PKG_VERSION"),
+                source_schema_hash: None,
+                target_schema_hash: stage.target_schema_hash.clone(),
+                plan_hash: stage.plan.stable_hash(),
+                policy: self.schema_policy(),
+            };
+            B::apply_migration_statements_transactionally(
                 self.pool(),
                 &stage.version,
                 &stage.description,
                 &stage.plan.statements,
+                Some(&metadata),
+                true,
             )
             .await?;
         }
@@ -160,22 +125,30 @@ impl SchemaStageRunner for crate::db::Database {
     }
 }
 
-#[cfg(any(
-    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-))]
-async fn prepare_migration_runtime(pool: &DbPool) -> Result<(), sqlx::Error> {
-    ensure_migration_history_table(pool).await?;
-    #[cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
-    cleanup_stale_sqlite_rewrite_tables(pool).await?;
-    Ok(())
+pub(crate) fn ensure_managed_policy(policy: SchemaPolicy, action: &str) -> Result<(), sqlx::Error> {
+    if policy.allows_application() {
+        Ok(())
+    } else {
+        Err(sqlx::Error::Protocol(format!(
+            "graphql-orm schema policy {policy} does not allow {action}"
+        )))
+    }
 }
 
-#[cfg(any(
-    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-))]
-fn validate_schema_stages(stages: &[SchemaStage]) -> Result<(), sqlx::Error> {
+pub(crate) fn ensure_planning_policy(
+    policy: SchemaPolicy,
+    action: &str,
+) -> Result<(), sqlx::Error> {
+    if policy.allows_planning() {
+        Ok(())
+    } else {
+        Err(sqlx::Error::Protocol(format!(
+            "graphql-orm schema policy {policy} does not allow {action}"
+        )))
+    }
+}
+
+pub(crate) fn validate_schema_stages(stages: &[SchemaStage]) -> Result<(), sqlx::Error> {
     let mut seen = HashSet::new();
     for stage in stages {
         if stage.version.trim().is_empty() {
@@ -198,11 +171,7 @@ fn validate_schema_stages(stages: &[SchemaStage]) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-#[cfg(any(
-    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-))]
-fn ensure_applied_stages_form_prefix(
+pub(crate) fn ensure_applied_stages_form_prefix(
     stages: &[SchemaStage],
     applied_versions: &HashSet<String>,
 ) -> Result<(), sqlx::Error> {
@@ -222,8 +191,97 @@ fn ensure_applied_stages_form_prefix(
     Ok(())
 }
 
-#[cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
-async fn ensure_migration_history_table(pool: &DbPool) -> Result<(), sqlx::Error> {
+pub(crate) async fn applied_migration_records<B: MigrationBackend>(
+    pool: &B::Pool,
+) -> Result<Vec<AppliedMigrationRecord>, sqlx::Error> {
+    B::prepare_migration_runtime(pool).await?;
+    B::load_applied_migrations(pool).await
+}
+
+pub(crate) async fn applied_version_set<B: MigrationBackend>(
+    pool: &B::Pool,
+) -> Result<HashSet<String>, sqlx::Error> {
+    Ok(applied_migration_records::<B>(pool)
+        .await?
+        .into_iter()
+        .map(|record| record.version)
+        .collect())
+}
+
+#[cfg(feature = "sqlite")]
+impl MigrationBackend for super::SqliteBackend {
+    async fn prepare_migration_runtime(pool: &Self::Pool) -> Result<(), sqlx::Error> {
+        ensure_sqlite_migration_history_table(pool).await?;
+        cleanup_stale_sqlite_rewrite_tables(pool).await?;
+        Ok(())
+    }
+
+    async fn load_applied_migrations(
+        pool: &Self::Pool,
+    ) -> Result<Vec<AppliedMigrationRecord>, sqlx::Error> {
+        load_sqlite_applied_migrations(pool).await
+    }
+
+    async fn apply_migration_statements_transactionally<S>(
+        pool: &Self::Pool,
+        version: &str,
+        description: &str,
+        statements: &[S],
+        metadata: Option<&MigrationApplicationMetadata>,
+        record_history: bool,
+    ) -> Result<(), sqlx::Error>
+    where
+        S: AsRef<str> + Send + Sync,
+    {
+        apply_sqlite_migration_statements_transactionally(
+            pool,
+            version,
+            description,
+            statements,
+            metadata,
+            record_history,
+        )
+        .await
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl MigrationBackend for super::PostgresBackend {
+    async fn prepare_migration_runtime(pool: &Self::Pool) -> Result<(), sqlx::Error> {
+        ensure_postgres_migration_history_table(pool).await
+    }
+
+    async fn load_applied_migrations(
+        pool: &Self::Pool,
+    ) -> Result<Vec<AppliedMigrationRecord>, sqlx::Error> {
+        load_postgres_applied_migrations(pool).await
+    }
+
+    async fn apply_migration_statements_transactionally<S>(
+        pool: &Self::Pool,
+        version: &str,
+        description: &str,
+        statements: &[S],
+        metadata: Option<&MigrationApplicationMetadata>,
+        record_history: bool,
+    ) -> Result<(), sqlx::Error>
+    where
+        S: AsRef<str> + Send + Sync,
+    {
+        apply_postgres_migration_statements_transactionally(
+            pool,
+            version,
+            description,
+            statements,
+            metadata,
+            record_history,
+        )
+        .await
+    }
+}
+
+#[cfg(feature = "sqlite")]
+async fn ensure_sqlite_migration_history_table(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query(&format!(
         "CREATE TABLE IF NOT EXISTS {} (
             version TEXT PRIMARY KEY,
@@ -234,45 +292,134 @@ async fn ensure_migration_history_table(pool: &DbPool) -> Result<(), sqlx::Error
     ))
     .execute(pool)
     .await?;
+
+    let existing = sqlx::query(&format!("PRAGMA table_info({})", MIGRATION_HISTORY_TABLE))
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|row| sqlx::Row::try_get::<String, _>(&row, "name"))
+        .collect::<Result<HashSet<_>, _>>()?;
+    for (column, sql_type) in [
+        ("backend", "TEXT"),
+        ("graphql_orm_version", "TEXT"),
+        ("source_schema_hash", "TEXT"),
+        ("target_schema_hash", "TEXT"),
+        ("plan_hash", "TEXT"),
+        ("policy", "TEXT"),
+    ] {
+        if !existing.contains(column) {
+            sqlx::query(&format!(
+                "ALTER TABLE {} ADD COLUMN {} {}",
+                MIGRATION_HISTORY_TABLE, column, sql_type
+            ))
+            .execute(pool)
+            .await?;
+        }
+    }
     Ok(())
 }
 
-#[cfg(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql"))))]
-async fn ensure_migration_history_table(pool: &DbPool) -> Result<(), sqlx::Error> {
+#[cfg(feature = "postgres")]
+async fn ensure_postgres_migration_history_table(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
     sqlx::query(&format!(
         "CREATE TABLE IF NOT EXISTS {} (
             version TEXT PRIMARY KEY,
             description TEXT NOT NULL,
-            applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            backend TEXT,
+            graphql_orm_version TEXT,
+            source_schema_hash TEXT,
+            target_schema_hash TEXT,
+            plan_hash TEXT,
+            policy TEXT
         )",
         MIGRATION_HISTORY_TABLE
     ))
     .execute(pool)
     .await?;
+
+    for column in [
+        "backend",
+        "graphql_orm_version",
+        "source_schema_hash",
+        "target_schema_hash",
+        "plan_hash",
+        "policy",
+    ] {
+        sqlx::query(&format!(
+            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} TEXT",
+            MIGRATION_HISTORY_TABLE, column
+        ))
+        .execute(pool)
+        .await?;
+    }
     Ok(())
 }
 
-#[cfg(any(
-    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-))]
-async fn load_applied_migration_versions(pool: &DbPool) -> Result<HashSet<String>, sqlx::Error> {
-    let rows = fetch_rows::<DefaultBackend>(
-        pool,
-        &format!(
-            "SELECT version FROM {} ORDER BY version",
-            MIGRATION_HISTORY_TABLE
-        ),
-        &[],
-    )
+#[cfg(feature = "sqlite")]
+async fn load_sqlite_applied_migrations(
+    pool: &sqlx::SqlitePool,
+) -> Result<Vec<AppliedMigrationRecord>, sqlx::Error> {
+    let rows = sqlx::query(&format!(
+        "SELECT version, description, applied_at, backend, graphql_orm_version,
+                source_schema_hash, target_schema_hash, plan_hash, policy
+         FROM {}
+         ORDER BY version",
+        MIGRATION_HISTORY_TABLE
+    ))
+    .fetch_all(pool)
     .await?;
+
     rows.into_iter()
-        .map(|row| DefaultBackend::try_get_string(&row, "version"))
+        .map(|row| {
+            Ok(AppliedMigrationRecord {
+                version: sqlx::Row::try_get(&row, "version")?,
+                description: sqlx::Row::try_get(&row, "description")?,
+                applied_at: sqlx::Row::try_get(&row, "applied_at")?,
+                backend: sqlx::Row::try_get(&row, "backend")?,
+                graphql_orm_version: sqlx::Row::try_get(&row, "graphql_orm_version")?,
+                source_schema_hash: sqlx::Row::try_get(&row, "source_schema_hash")?,
+                target_schema_hash: sqlx::Row::try_get(&row, "target_schema_hash")?,
+                plan_hash: sqlx::Row::try_get(&row, "plan_hash")?,
+                policy: sqlx::Row::try_get(&row, "policy")?,
+            })
+        })
         .collect()
 }
 
-#[cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
-async fn cleanup_stale_sqlite_rewrite_tables(pool: &DbPool) -> Result<(), sqlx::Error> {
+#[cfg(feature = "postgres")]
+async fn load_postgres_applied_migrations(
+    pool: &sqlx::PgPool,
+) -> Result<Vec<AppliedMigrationRecord>, sqlx::Error> {
+    let rows = sqlx::query(&format!(
+        "SELECT version, description, applied_at::TEXT AS applied_at, backend, graphql_orm_version,
+                source_schema_hash, target_schema_hash, plan_hash, policy
+         FROM {}
+         ORDER BY version",
+        MIGRATION_HISTORY_TABLE
+    ))
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(AppliedMigrationRecord {
+                version: sqlx::Row::try_get(&row, "version")?,
+                description: sqlx::Row::try_get(&row, "description")?,
+                applied_at: sqlx::Row::try_get(&row, "applied_at")?,
+                backend: sqlx::Row::try_get(&row, "backend")?,
+                graphql_orm_version: sqlx::Row::try_get(&row, "graphql_orm_version")?,
+                source_schema_hash: sqlx::Row::try_get(&row, "source_schema_hash")?,
+                target_schema_hash: sqlx::Row::try_get(&row, "target_schema_hash")?,
+                plan_hash: sqlx::Row::try_get(&row, "plan_hash")?,
+                policy: sqlx::Row::try_get(&row, "policy")?,
+            })
+        })
+        .collect()
+}
+
+#[cfg(feature = "sqlite")]
+async fn cleanup_stale_sqlite_rewrite_tables(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
     let rows = sqlx::query(
         "SELECT name
          FROM sqlite_master
@@ -284,7 +431,7 @@ async fn cleanup_stale_sqlite_rewrite_tables(pool: &DbPool) -> Result<(), sqlx::
     .await?;
 
     for row in rows {
-        let table_name: String = row.try_get("name")?;
+        let table_name: String = sqlx::Row::try_get(&row, "name")?;
         let escaped = table_name.replace('"', "\"\"");
         sqlx::query(&format!("DROP TABLE IF EXISTS \"{}\"", escaped))
             .execute(pool)
@@ -294,16 +441,20 @@ async fn cleanup_stale_sqlite_rewrite_tables(pool: &DbPool) -> Result<(), sqlx::
     Ok(())
 }
 
-#[cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
-async fn apply_migration_statements_transactionally<S>(
-    pool: &DbPool,
+#[cfg(feature = "sqlite")]
+async fn apply_sqlite_migration_statements_transactionally<S>(
+    pool: &sqlx::SqlitePool,
     version: &str,
     description: &str,
     statements: &[S],
+    metadata: Option<&MigrationApplicationMetadata>,
+    record_history: bool,
 ) -> Result<(), sqlx::Error>
 where
     S: AsRef<str>,
 {
+    use sqlx::Acquire;
+
     let mut conn = pool.acquire().await?;
     let suspend_foreign_keys = statements.iter().any(|statement| {
         statement
@@ -342,14 +493,9 @@ where
             }
         }
 
-        sqlx::query(&format!(
-            "INSERT INTO {} (version, description) VALUES (?, ?)",
-            MIGRATION_HISTORY_TABLE
-        ))
-        .bind(version)
-        .bind(description)
-        .execute(&mut *tx)
-        .await?;
+        if record_history {
+            insert_sqlite_history_row(&mut tx, version, description, metadata).await?;
+        }
 
         Ok::<(), sqlx::Error>(())
     }
@@ -372,12 +518,41 @@ where
     final_result
 }
 
-#[cfg(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql"))))]
-async fn apply_migration_statements_transactionally<S>(
-    pool: &DbPool,
+#[cfg(feature = "sqlite")]
+async fn insert_sqlite_history_row(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    version: &str,
+    description: &str,
+    metadata: Option<&MigrationApplicationMetadata>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(&format!(
+        "INSERT INTO {} (
+            version, description, backend, graphql_orm_version, source_schema_hash,
+            target_schema_hash, plan_hash, policy
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        MIGRATION_HISTORY_TABLE
+    ))
+    .bind(version)
+    .bind(description)
+    .bind(metadata.map(|metadata| metadata.backend))
+    .bind(metadata.map(|metadata| metadata.graphql_orm_version))
+    .bind(metadata.and_then(|metadata| metadata.source_schema_hash.as_deref()))
+    .bind(metadata.map(|metadata| metadata.target_schema_hash.as_str()))
+    .bind(metadata.map(|metadata| metadata.plan_hash.as_str()))
+    .bind(metadata.map(|metadata| metadata.policy.as_str()))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+async fn apply_postgres_migration_statements_transactionally<S>(
+    pool: &sqlx::PgPool,
     version: &str,
     description: &str,
     statements: &[S],
+    metadata: Option<&MigrationApplicationMetadata>,
+    record_history: bool,
 ) -> Result<(), sqlx::Error>
 where
     S: AsRef<str>,
@@ -391,16 +566,38 @@ where
         sqlx::query(statement).execute(&mut *tx).await?;
     }
 
+    if record_history {
+        insert_postgres_history_row(&mut tx, version, description, metadata).await?;
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+async fn insert_postgres_history_row(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    version: &str,
+    description: &str,
+    metadata: Option<&MigrationApplicationMetadata>,
+) -> Result<(), sqlx::Error> {
     sqlx::query(&format!(
-        "INSERT INTO {} (version, description) VALUES ($1, $2)",
+        "INSERT INTO {} (
+            version, description, backend, graphql_orm_version, source_schema_hash,
+            target_schema_hash, plan_hash, policy
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         MIGRATION_HISTORY_TABLE
     ))
     .bind(version)
     .bind(description)
-    .execute(&mut *tx)
+    .bind(metadata.map(|metadata| metadata.backend))
+    .bind(metadata.map(|metadata| metadata.graphql_orm_version))
+    .bind(metadata.and_then(|metadata| metadata.source_schema_hash.as_deref()))
+    .bind(metadata.map(|metadata| metadata.target_schema_hash.as_str()))
+    .bind(metadata.map(|metadata| metadata.plan_hash.as_str()))
+    .bind(metadata.map(|metadata| metadata.policy.as_str()))
+    .execute(&mut **tx)
     .await?;
-
-    tx.commit().await?;
     Ok(())
 }
 
@@ -444,4 +641,31 @@ where
     E: sqlx::Executor<'e, Database = B::Database> + Send + 'e,
 {
     B::fetch_rows_on(executor, sql.to_string(), values.to_vec()).await
+}
+
+trait MigrationPlanHashExt {
+    fn stable_hash(&self) -> String;
+}
+
+impl MigrationPlanHashExt for super::MigrationPlan {
+    fn stable_hash(&self) -> String {
+        let mut canonical = format!("{:?}\n", self.backend);
+        for step in &self.steps {
+            canonical.push_str(&format!("{step:?}\n"));
+        }
+        for statement in &self.statements {
+            canonical.push_str(statement);
+            canonical.push('\n');
+        }
+        format!("{:016x}", fnv1a64(canonical.as_bytes()))
+    }
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }

@@ -22,6 +22,7 @@ pub struct AuthUser {
 
 schema_roots! {
     backend: "sqlite",
+    schema_policy: "managed",
     query_custom_ops: [],
     entities: [AuthUser],
 }
@@ -31,4 +32,3 @@ pub fn build_schema(
 ) -> graphql_orm::async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot> {
     schema_builder(graphql_orm::db::Database::<graphql_orm::SqliteBackend>::new(pool)).finish()
 }
-

@@ -69,7 +69,9 @@ and row aliases:
 
 More than one backend may be enabled in a workspace through Cargo feature unification. In that mode,
 generated code must select its backend explicitly with `#[graphql_entity(backend = "...")]` and
-`schema_roots! { backend: "...", ... }`; `DbPool` and `DbRow` are not exported.
+`schema_roots! { backend: "...", schema_policy: "...", ... }`; `DbPool` and `DbRow` are not
+exported. Use `schema_policy = "external_read_only"` on entities/roots that map existing read-only
+databases, and `schema_policy: "managed"` for roots whose schema is owned by the ORM metadata.
 
 SQLite and PostgreSQL are covered by live integration tests through `graphql-orm`. SQL Server has
 read-only compile and opt-in integration coverage. MySQL remains planned.

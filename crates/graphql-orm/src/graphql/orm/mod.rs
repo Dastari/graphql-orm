@@ -7,12 +7,10 @@ mod backup;
 mod core;
 mod dialect;
 mod execution;
-#[cfg(any(
-    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 mod migrations;
 mod query;
+mod schema_manager;
 
 pub use backend::*;
 #[cfg(any(
@@ -23,9 +21,7 @@ pub use backup::*;
 pub use core::*;
 pub use dialect::*;
 pub use execution::*;
-#[cfg(any(
-    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
-    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
-))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub use migrations::*;
 pub use query::*;
+pub use schema_manager::*;

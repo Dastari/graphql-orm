@@ -1164,6 +1164,7 @@ pub struct EntityMetadata {
     pub primary_key: &'static str,
     /// All primary-key columns in declaration order.
     pub primary_keys: Box<[&'static str]>,
+    pub schema_policy: Option<SchemaPolicy>,
     pub default_sort: &'static str,
     pub backup_enabled: bool,
     pub backup_export_order: Option<i32>,
@@ -1194,6 +1195,7 @@ impl EntityMetadata {
             plural_name: T::PLURAL_NAME,
             primary_key: T::PRIMARY_KEY,
             primary_keys: T::PRIMARY_KEYS.to_vec().into_boxed_slice(),
+            schema_policy: T::SCHEMA_POLICY,
             default_sort: T::DEFAULT_SORT,
             backup_enabled,
             backup_export_order,
@@ -1239,7 +1241,10 @@ pub struct ForeignKeyModel {
 pub struct TableModel {
     pub entity_name: String,
     pub table_name: String,
+    /// Compatibility accessor for the first primary-key column.
     pub primary_key: String,
+    /// All primary-key columns in declaration order.
+    pub primary_keys: Vec<String>,
     pub default_sort: String,
     pub columns: Vec<ColumnModel>,
     pub indexes: Vec<IndexMetadata>,
@@ -1247,9 +1252,25 @@ pub struct TableModel {
     pub foreign_keys: Vec<ForeignKeyModel>,
 }
 
+impl TableModel {
+    pub fn primary_keys(&self) -> &[String] {
+        if self.primary_keys.is_empty() {
+            std::slice::from_ref(&self.primary_key)
+        } else {
+            &self.primary_keys
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SchemaModel {
     pub tables: Vec<TableModel>,
+}
+
+impl SchemaModel {
+    pub fn stable_hash(&self) -> String {
+        stable_schema_model_hash(self)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1297,6 +1318,7 @@ pub struct SchemaStage {
     pub version: String,
     pub description: String,
     pub target_schema: SchemaModel,
+    pub target_schema_hash: String,
 }
 
 impl SchemaStage {
@@ -1305,10 +1327,12 @@ impl SchemaStage {
         description: impl Into<String>,
         target_schema: SchemaModel,
     ) -> Self {
+        let target_schema_hash = target_schema.stable_hash();
         Self {
             version: version.into(),
             description: description.into(),
             target_schema,
+            target_schema_hash,
         }
     }
 
@@ -1330,18 +1354,98 @@ impl SchemaStage {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct SchemaAbi {
+    pub stages: Vec<SchemaStage>,
+}
+
+impl SchemaAbi {
+    pub fn new(stages: Vec<SchemaStage>) -> Result<Self, sqlx::Error> {
+        let mut seen = std::collections::HashSet::new();
+        for stage in &stages {
+            if stage.version.trim().is_empty() {
+                return Err(sqlx::Error::Protocol(
+                    "Schema ABI stage version must not be empty".to_string(),
+                ));
+            }
+            if !seen.insert(stage.version.clone()) {
+                return Err(sqlx::Error::Protocol(format!(
+                    "Duplicate schema ABI stage version: {}",
+                    stage.version
+                )));
+            }
+        }
+        Ok(Self { stages })
+    }
+
+    pub fn latest(&self) -> Option<&SchemaStage> {
+        self.stages.last()
+    }
+
+    pub fn stage(&self, version: &str) -> Option<&SchemaStage> {
+        self.stages.iter().find(|stage| stage.version == version)
+    }
+
+    pub fn path(
+        &self,
+        from_version: Option<&str>,
+        to_version: &str,
+    ) -> Result<Vec<&SchemaStage>, sqlx::Error> {
+        let to_index = self
+            .stages
+            .iter()
+            .position(|stage| stage.version == to_version)
+            .ok_or_else(|| {
+                sqlx::Error::Protocol(format!("Unknown target schema ABI version: {to_version}"))
+            })?;
+
+        let from_index = match from_version {
+            Some(version) => Some(
+                self.stages
+                    .iter()
+                    .position(|stage| stage.version == version)
+                    .ok_or_else(|| {
+                        sqlx::Error::Protocol(format!(
+                            "Current schema ABI version {version} is not present in the ABI"
+                        ))
+                    })?,
+            ),
+            None => None,
+        };
+
+        if let Some(from_index) = from_index {
+            if from_index > to_index {
+                return Err(sqlx::Error::Protocol(format!(
+                    "Cannot downgrade schema ABI from {} to {}",
+                    self.stages[from_index].version, to_version
+                )));
+            }
+        }
+
+        let start = from_index.map(|index| index + 1).unwrap_or(0);
+        Ok(self.stages[start..=to_index].iter().collect())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct PlannedSchemaStage {
     pub version: String,
     pub description: String,
+    pub target_schema_hash: String,
     pub plan: MigrationPlan,
 }
 
 impl From<&EntityMetadata> for TableModel {
     fn from(value: &EntityMetadata) -> Self {
+        let primary_keys = value
+            .primary_keys
+            .iter()
+            .map(|column| (*column).to_string())
+            .collect::<Vec<_>>();
         Self {
             entity_name: value.entity_name.to_string(),
             table_name: value.table_name.to_string(),
             primary_key: value.primary_key.to_string(),
+            primary_keys,
             default_sort: value.default_sort.to_string(),
             columns: value
                 .fields
@@ -1582,6 +1686,97 @@ pub fn stable_schema_hash(entities: &[EntityBackupDescriptor]) -> String {
     format!("{:016x}", fnv1a64(canonical.as_bytes()))
 }
 
+pub fn stable_schema_model_hash(schema: &SchemaModel) -> String {
+    let mut canonical = String::new();
+    let mut tables = schema.tables.iter().collect::<Vec<_>>();
+    tables.sort_by(|left, right| left.table_name.cmp(&right.table_name));
+
+    for table in tables {
+        canonical.push_str("table:");
+        canonical.push_str(&table.entity_name);
+        canonical.push('|');
+        canonical.push_str(&table.table_name);
+        canonical.push('|');
+        canonical.push_str(&table.primary_key);
+        canonical.push('|');
+        canonical.push_str(&table.primary_keys().join(","));
+        canonical.push('|');
+        canonical.push_str(&table.default_sort);
+        canonical.push('\n');
+
+        let mut columns = table.columns.iter().collect::<Vec<_>>();
+        columns.sort_by(|left, right| left.name.cmp(&right.name));
+        for column in columns {
+            canonical.push_str("column:");
+            canonical.push_str(&column.name);
+            canonical.push('|');
+            canonical.push_str(&column.sql_type);
+            canonical.push('|');
+            canonical.push_str(if column.nullable {
+                "nullable"
+            } else {
+                "not_null"
+            });
+            canonical.push('|');
+            canonical.push_str(if column.is_primary_key {
+                "pk"
+            } else {
+                "not_pk"
+            });
+            canonical.push('|');
+            canonical.push_str(if column.is_unique {
+                "unique"
+            } else {
+                "not_unique"
+            });
+            canonical.push('|');
+            canonical.push_str(column.default.as_deref().unwrap_or(""));
+            canonical.push('\n');
+        }
+
+        let mut indexes = table.indexes.iter().collect::<Vec<_>>();
+        indexes.sort_by(|left, right| left.name.cmp(right.name));
+        for index in indexes {
+            canonical.push_str("index:");
+            canonical.push_str(index.name);
+            canonical.push('|');
+            canonical.push_str(&index.columns.join(","));
+            canonical.push('|');
+            canonical.push_str(if index.is_unique { "unique" } else { "index" });
+            canonical.push('\n');
+        }
+
+        let mut foreign_keys = table.foreign_keys.iter().collect::<Vec<_>>();
+        foreign_keys.sort_by(|left, right| {
+            (
+                &left.source_column,
+                &left.target_table,
+                &left.target_column,
+                &left.on_delete,
+            )
+                .cmp(&(
+                    &right.source_column,
+                    &right.target_table,
+                    &right.target_column,
+                    &right.on_delete,
+                ))
+        });
+        for foreign_key in foreign_keys {
+            canonical.push_str("foreign_key:");
+            canonical.push_str(&foreign_key.source_column);
+            canonical.push('|');
+            canonical.push_str(&foreign_key.target_table);
+            canonical.push('|');
+            canonical.push_str(&foreign_key.target_column);
+            canonical.push('|');
+            canonical.push_str(foreign_key.on_delete.as_sql());
+            canonical.push('\n');
+        }
+    }
+
+    format!("{:016x}", fnv1a64(canonical.as_bytes()))
+}
+
 impl BackupValueKind {
     pub fn as_schema_str(self) -> &'static str {
         match self {
@@ -1724,4 +1919,221 @@ pub struct MigrationPlan {
     pub backend: DatabaseBackend,
     pub steps: Vec<MigrationStep>,
     pub statements: Vec<String>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SchemaPolicy {
+    ExternalReadOnly,
+    ExternalWritable,
+    ValidateOnly,
+    PlanOnly,
+    Managed,
+}
+
+impl SchemaPolicy {
+    pub const fn allows_entity_writes(self) -> bool {
+        !matches!(self, Self::ExternalReadOnly)
+    }
+
+    pub const fn allows_validation(self) -> bool {
+        true
+    }
+
+    pub const fn allows_planning(self) -> bool {
+        matches!(
+            self,
+            Self::ExternalWritable | Self::PlanOnly | Self::Managed
+        )
+    }
+
+    pub const fn allows_application(self) -> bool {
+        matches!(self, Self::Managed)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExternalReadOnly => "external_read_only",
+            Self::ExternalWritable => "external_writable",
+            Self::ValidateOnly => "validate_only",
+            Self::PlanOnly => "plan_only",
+            Self::Managed => "managed",
+        }
+    }
+}
+
+impl std::fmt::Display for SchemaPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for SchemaPolicy {
+    type Err = sqlx::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "external_read_only" => Ok(Self::ExternalReadOnly),
+            "external_writable" => Ok(Self::ExternalWritable),
+            "validate_only" => Ok(Self::ValidateOnly),
+            "plan_only" => Ok(Self::PlanOnly),
+            "managed" => Ok(Self::Managed),
+            other => Err(sqlx::Error::Protocol(format!(
+                "Unknown graphql-orm schema policy: {other}"
+            ))),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApplyOptions {
+    pub allow_destructive: bool,
+    pub require_clean_schema: bool,
+    pub dry_run: bool,
+    pub expected_current_schema_hash: Option<String>,
+    pub record_history: bool,
+}
+
+impl Default for ApplyOptions {
+    fn default() -> Self {
+        Self {
+            allow_destructive: false,
+            require_clean_schema: true,
+            dry_run: false,
+            expected_current_schema_hash: None,
+            record_history: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SchemaDiagnosticSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SchemaDiagnosticKind {
+    MissingTable,
+    ExtraTable,
+    MissingColumn,
+    ExtraColumn,
+    NullabilityMismatch,
+    TypeMismatch,
+    PrimaryKeyMismatch,
+    IndexMismatch,
+    UniqueConstraintMismatch,
+    ForeignKeyMismatch,
+    UnsupportedBackendCapability,
+    WriteFieldOnReadOnlyBackend,
+    ReadOnlyFieldWritable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemaDiagnostic {
+    pub severity: SchemaDiagnosticSeverity,
+    pub kind: SchemaDiagnosticKind,
+    pub table: Option<String>,
+    pub column: Option<String>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemaValidationReport {
+    pub backend: &'static str,
+    pub policy: SchemaPolicy,
+    pub current_schema_hash: Option<String>,
+    pub target_schema_hash: String,
+    pub diagnostics: Vec<SchemaDiagnostic>,
+}
+
+impl SchemaValidationReport {
+    pub fn has_errors(&self) -> bool {
+        self.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == SchemaDiagnosticSeverity::Error)
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MigrationRisk {
+    Additive,
+    Compatible,
+    Risky,
+    Destructive,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlannedMigrationStep {
+    pub step: MigrationStep,
+    pub risk: MigrationRisk,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlannedMigration {
+    pub version: String,
+    pub description: String,
+    pub backend: &'static str,
+    pub source_schema_hash: Option<String>,
+    pub target_schema_hash: String,
+    pub plan_hash: String,
+    pub steps: Vec<PlannedMigrationStep>,
+    pub statements: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlannedSchemaUpgrade {
+    pub stages: Vec<PlannedMigration>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppliedMigrationReport {
+    pub version: String,
+    pub dry_run: bool,
+    pub statements_applied: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppliedSchemaUpgrade {
+    pub applied: Vec<AppliedMigrationReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppliedMigrationRecord {
+    pub version: String,
+    pub description: String,
+    pub applied_at: Option<String>,
+    pub backend: Option<String>,
+    pub graphql_orm_version: Option<String>,
+    pub source_schema_hash: Option<String>,
+    pub target_schema_hash: Option<String>,
+    pub plan_hash: Option<String>,
+    pub policy: Option<String>,
+}
+
+impl AppliedMigrationRecord {
+    pub fn legacy(version: String) -> Self {
+        Self {
+            version,
+            description: String::new(),
+            applied_at: None,
+            backend: None,
+            graphql_orm_version: None,
+            source_schema_hash: None,
+            target_schema_hash: None,
+            plan_hash: None,
+            policy: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MigrationApplicationMetadata {
+    pub backend: &'static str,
+    pub graphql_orm_version: &'static str,
+    pub source_schema_hash: Option<String>,
+    pub target_schema_hash: String,
+    pub plan_hash: String,
+    pub policy: SchemaPolicy,
 }

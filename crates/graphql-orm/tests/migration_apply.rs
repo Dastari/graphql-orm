@@ -80,6 +80,7 @@ async fn sqlite_migration_runner_applies_rebuild_plan() -> Result<(), Box<dyn st
             entity_name: "User".to_string(),
             table_name: "users".to_string(),
             primary_key: "id".to_string(),
+            primary_keys: vec!["id".to_string()],
             default_sort: "name ASC".to_string(),
             columns: vec![
                 ColumnModel {
@@ -109,6 +110,7 @@ async fn sqlite_migration_runner_applies_rebuild_plan() -> Result<(), Box<dyn st
             entity_name: "User".to_string(),
             table_name: "users".to_string(),
             primary_key: "id".to_string(),
+            primary_keys: vec!["id".to_string()],
             default_sort: "name ASC".to_string(),
             columns: vec![
                 ColumnModel {
@@ -274,6 +276,7 @@ async fn postgres_migration_runner_applies_plan() -> Result<(), Box<dyn std::err
             entity_name: "User".to_string(),
             table_name: table_name.clone(),
             primary_key: "id".to_string(),
+            primary_keys: vec!["id".to_string()],
             default_sort: "name ASC".to_string(),
             columns: vec![
                 ColumnModel {
@@ -383,6 +386,7 @@ fn users_v1_like() -> TableModel {
         entity_name: "User".to_string(),
         table_name: "users".to_string(),
         primary_key: "id".to_string(),
+        primary_keys: vec!["id".to_string()],
         default_sort: "name ASC".to_string(),
         columns: vec![
             ColumnModel {
@@ -493,6 +497,7 @@ fn sqlite_table(
         entity_name: entity_name.to_string(),
         table_name: table_name.to_string(),
         primary_key: "id".to_string(),
+        primary_keys: vec!["id".to_string()],
         default_sort: default_sort.to_string(),
         columns,
         indexes: vec![],

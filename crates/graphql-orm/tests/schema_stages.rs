@@ -249,6 +249,7 @@ fn sqlite_vocabularies_v1() -> TableModel {
         entity_name: "Vocabulary".to_string(),
         table_name: "vocabularies".to_string(),
         primary_key: "id".to_string(),
+        primary_keys: vec!["id".to_string()],
         default_sort: "slug ASC".to_string(),
         columns: vec![text_column("id", true), text_column("slug", false)],
         indexes: vec![IndexDef::new("idx_vocabularies_slug", &["slug"])],
@@ -263,6 +264,7 @@ fn sqlite_vocabulary_terms_v1() -> TableModel {
         entity_name: "VocabularyTerm".to_string(),
         table_name: "vocabulary_terms".to_string(),
         primary_key: "id".to_string(),
+        primary_keys: vec!["id".to_string()],
         default_sort: "term ASC".to_string(),
         columns: vec![
             text_column("id", true),

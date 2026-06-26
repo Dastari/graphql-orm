@@ -27,6 +27,8 @@ Working today:
 - backend-aware query rendering through a small typed query IR
 - schema models built from runtime metadata
 - schema diffing and migration planning
+- explicit schema ownership policy through `SchemaPolicy`
+- schema validation, structured migration plans, and ABI upgrade orchestration through `Database::schema()`
 - migration file rendering and migration application helpers
 - live schema introspection for SQLite and PostgreSQL
 

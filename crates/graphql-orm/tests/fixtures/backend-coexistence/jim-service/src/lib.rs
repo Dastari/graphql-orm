@@ -5,6 +5,7 @@ use graphql_orm::prelude::*;
     backend = "mssql",
     table = "dbo.Jobs",
     plural = "Jobs",
+    schema_policy = "external_read_only",
     default_sort = "JobId ASC"
 )]
 pub struct Job {
@@ -26,6 +27,7 @@ pub struct Job {
 
 schema_roots! {
     backend: "mssql",
+    schema_policy: "external_read_only",
     query_custom_ops: [],
     entities: [Job],
 }
@@ -35,4 +37,3 @@ pub fn build_schema(
 ) -> graphql_orm::async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot> {
     schema_builder(graphql_orm::db::Database::<graphql_orm::MssqlBackend>::new(pool)).finish()
 }
-

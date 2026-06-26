@@ -6,6 +6,17 @@ pub enum DatabaseBackend {
     Mssql,
 }
 
+impl DatabaseBackend {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Sqlite => "sqlite",
+            Self::Postgres => "postgres",
+            Self::Mysql => "mysql",
+            Self::Mssql => "mssql",
+        }
+    }
+}
+
 pub trait SqlDialect {
     fn backend(&self) -> DatabaseBackend;
     fn quote_identifier(&self, identifier: &str) -> String;

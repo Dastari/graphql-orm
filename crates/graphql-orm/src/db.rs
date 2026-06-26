@@ -1,6 +1,6 @@
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 use crate::graphql::orm::WriteBackend;
-use crate::graphql::orm::{DefaultBackend, OrmBackend};
+use crate::graphql::orm::{DefaultBackend, OrmBackend, SchemaManager, SchemaPolicy};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -25,6 +25,7 @@ pub struct Database<B: OrmBackend = DefaultBackend> {
     write_input_transform: Option<Arc<dyn Any + Send + Sync>>,
     post_commit_error_handler: Option<Arc<dyn Any + Send + Sync>>,
     change_journal_enabled: bool,
+    schema_policy: SchemaPolicy,
     event_senders: Arc<EventSenders>,
     _backend: PhantomData<B>,
 }
@@ -40,6 +41,7 @@ impl<B: OrmBackend> Clone for Database<B> {
             write_input_transform: self.write_input_transform.clone(),
             post_commit_error_handler: self.post_commit_error_handler.clone(),
             change_journal_enabled: self.change_journal_enabled,
+            schema_policy: self.schema_policy,
             event_senders: self.event_senders.clone(),
             _backend: PhantomData,
         }
@@ -50,6 +52,7 @@ impl<B: OrmBackend> std::fmt::Debug for Database<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut debug = f.debug_struct("Database");
         debug.field("pool", &"DbPool");
+        debug.field("schema_policy", &self.schema_policy);
         debug.field("has_mutation_hook", &self.mutation_hook.is_some());
         debug
             .field("has_field_policy", &self.field_policy.is_some())
@@ -58,7 +61,15 @@ impl<B: OrmBackend> std::fmt::Debug for Database<B> {
 }
 
 impl<B: OrmBackend> Database<B> {
-    pub fn new(pool: B::Pool) -> Self {
+    fn default_schema_policy() -> SchemaPolicy {
+        if B::READ_ONLY {
+            SchemaPolicy::ExternalReadOnly
+        } else {
+            SchemaPolicy::Managed
+        }
+    }
+
+    fn base(pool: B::Pool, schema_policy: SchemaPolicy) -> Self {
         Self {
             pool,
             mutation_hook: None,
@@ -68,6 +79,7 @@ impl<B: OrmBackend> Database<B> {
             write_input_transform: None,
             post_commit_error_handler: None,
             change_journal_enabled: false,
+            schema_policy,
             event_senders: Arc::new(EventSenders::default()),
             _backend: PhantomData,
         }
@@ -89,6 +101,7 @@ impl<B: OrmBackend> Database<B> {
             write_input_transform: None,
             post_commit_error_handler: None,
             change_journal_enabled: false,
+            schema_policy: Self::default_schema_policy(),
             event_senders: Arc::new(EventSenders::default()),
             _backend: PhantomData,
         }
@@ -107,6 +120,7 @@ impl<B: OrmBackend> Database<B> {
             write_input_transform: None,
             post_commit_error_handler: None,
             change_journal_enabled: false,
+            schema_policy: Self::default_schema_policy(),
             event_senders: Arc::new(EventSenders::default()),
             _backend: PhantomData,
         }
@@ -125,6 +139,7 @@ impl<B: OrmBackend> Database<B> {
             write_input_transform: None,
             post_commit_error_handler: None,
             change_journal_enabled: false,
+            schema_policy: Self::default_schema_policy(),
             event_senders: Arc::new(EventSenders::default()),
             _backend: PhantomData,
         }
@@ -143,6 +158,7 @@ impl<B: OrmBackend> Database<B> {
             write_input_transform: None,
             post_commit_error_handler: None,
             change_journal_enabled: false,
+            schema_policy: Self::default_schema_policy(),
             event_senders: Arc::new(EventSenders::default()),
             _backend: PhantomData,
         }
@@ -164,6 +180,7 @@ impl<B: OrmBackend> Database<B> {
             write_input_transform: Some(Arc::new(transform)),
             post_commit_error_handler: None,
             change_journal_enabled: false,
+            schema_policy: Self::default_schema_policy(),
             event_senders: Arc::new(EventSenders::default()),
             _backend: PhantomData,
         }
@@ -192,6 +209,7 @@ impl<B: OrmBackend> Database<B> {
             write_input_transform: None,
             post_commit_error_handler: None,
             change_journal_enabled: false,
+            schema_policy: Self::default_schema_policy(),
             event_senders: Arc::new(EventSenders::default()),
             _backend: PhantomData,
         }
@@ -199,6 +217,23 @@ impl<B: OrmBackend> Database<B> {
 
     pub fn pool(&self) -> &B::Pool {
         &self.pool
+    }
+
+    pub fn schema_policy(&self) -> SchemaPolicy {
+        self.schema_policy
+    }
+
+    pub fn set_schema_policy(&mut self, schema_policy: SchemaPolicy) {
+        self.schema_policy = schema_policy;
+    }
+
+    pub fn with_schema_policy(mut self, schema_policy: SchemaPolicy) -> Self {
+        self.schema_policy = schema_policy;
+        self
+    }
+
+    pub fn schema(&self) -> SchemaManager<'_, B> {
+        SchemaManager::new(self)
     }
 
     pub fn with_change_journal(mut self) -> Self {
@@ -389,6 +424,11 @@ impl<B: OrmBackend> Database<B> {
         kind: crate::graphql::orm::EntityAccessKind,
         surface: crate::graphql::orm::EntityAccessSurface,
     ) -> async_graphql::Result<bool> {
+        if kind == crate::graphql::orm::EntityAccessKind::Write
+            && !self.schema_policy.allows_entity_writes()
+        {
+            return Ok(false);
+        }
         if let Some(policy) = &self.entity_policy {
             policy
                 .can_access_entity(ctx, self, entity_name, policy_key, kind, surface)
@@ -445,6 +485,9 @@ impl<B: OrmBackend> Database<B> {
         record: Option<&(dyn Any + Send + Sync)>,
         value: Option<&(dyn Any + Send + Sync)>,
     ) -> async_graphql::Result<bool> {
+        if !self.schema_policy.allows_entity_writes() {
+            return Ok(false);
+        }
         if let Some(policy) = &self.field_policy {
             policy
                 .can_write_field(
@@ -530,6 +573,9 @@ impl<B: OrmBackend> Database<B> {
         surface: crate::graphql::orm::EntityAccessSurface,
         row: &(dyn Any + Send + Sync),
     ) -> async_graphql::Result<bool> {
+        if !self.schema_policy.allows_entity_writes() {
+            return Ok(false);
+        }
         if let Some(policy) = &self.row_policy {
             policy
                 .can_write_row(ctx, self, entity_name, policy_key, surface, row)
@@ -667,6 +713,71 @@ impl<B: OrmBackend> Database<B> {
         } else {
             Ok(())
         }
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl Database<crate::graphql::orm::SqliteBackend> {
+    pub fn new(pool: <crate::graphql::orm::SqliteBackend as OrmBackend>::Pool) -> Self {
+        Self::base(pool, Self::default_schema_policy())
+    }
+
+    pub fn builder(
+        pool: <crate::graphql::orm::SqliteBackend as OrmBackend>::Pool,
+    ) -> DatabaseBuilder<crate::graphql::orm::SqliteBackend> {
+        DatabaseBuilder {
+            database: Self::new(pool),
+        }
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl Database<crate::graphql::orm::PostgresBackend> {
+    pub fn new(pool: <crate::graphql::orm::PostgresBackend as OrmBackend>::Pool) -> Self {
+        Self::base(pool, Self::default_schema_policy())
+    }
+
+    pub fn builder(
+        pool: <crate::graphql::orm::PostgresBackend as OrmBackend>::Pool,
+    ) -> DatabaseBuilder<crate::graphql::orm::PostgresBackend> {
+        DatabaseBuilder {
+            database: Self::new(pool),
+        }
+    }
+}
+
+#[cfg(feature = "mssql")]
+impl Database<crate::graphql::orm::MssqlBackend> {
+    pub fn new(pool: <crate::graphql::orm::MssqlBackend as OrmBackend>::Pool) -> Self {
+        Self::base(pool, Self::default_schema_policy())
+    }
+
+    pub fn builder(
+        pool: <crate::graphql::orm::MssqlBackend as OrmBackend>::Pool,
+    ) -> DatabaseBuilder<crate::graphql::orm::MssqlBackend> {
+        DatabaseBuilder {
+            database: Self::new(pool),
+        }
+    }
+}
+
+pub struct DatabaseBuilder<B: OrmBackend = DefaultBackend> {
+    database: Database<B>,
+}
+
+impl<B: OrmBackend> DatabaseBuilder<B> {
+    pub fn schema_policy(mut self, schema_policy: SchemaPolicy) -> Self {
+        self.database.schema_policy = schema_policy;
+        self
+    }
+
+    pub fn change_journal_enabled(mut self, enabled: bool) -> Self {
+        self.database.change_journal_enabled = enabled;
+        self
+    }
+
+    pub fn build(self) -> Database<B> {
+        self.database
     }
 }
 

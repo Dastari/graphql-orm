@@ -1,5 +1,6 @@
 use super::*;
 use crate::backend::{BackendKind, backend_dialect_expr, backend_marker_tokens, resolve_backend};
+use crate::entity::{schema_policy_tokens, validate_schema_policy};
 
 pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let args = match syn::parse::<SchemaRootsArgs>(input) {
@@ -19,6 +20,20 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     };
     let backend_marker = backend_marker_tokens(backend);
     let backend_dialect = backend_dialect_expr(backend);
+    if cfg!(any(
+        all(feature = "sqlite", feature = "postgres"),
+        all(feature = "sqlite", feature = "mssql"),
+        all(feature = "postgres", feature = "mssql")
+    )) && args.schema_policy.is_none()
+    {
+        return quote! {
+            compile_error!("schema_roots! requires `schema_policy: \"...\"` when multiple graphql-orm backend features are enabled");
+        }
+        .into();
+    }
+    let schema_policy_const = schema_policy_tokens(args.schema_policy.as_deref());
+    let schema_policy_read_only =
+        matches!(args.schema_policy.as_deref(), Some("external_read_only"));
 
     let span = proc_macro2::Span::mixed_site();
     let custom_op_types: Vec<proc_macro2::TokenStream> = query_custom_ops
@@ -89,16 +104,16 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         async_graphql_merged_object_derive(),
     );
 
-    if backend == BackendKind::Mssql {
+    if backend == BackendKind::Mssql || schema_policy_read_only {
         if !args.extra_mutation_types.is_empty() {
             return quote! {
-                compile_error!("graphql-orm mssql is read-only; extra mutation root types are not supported");
+                compile_error!("graphql-orm schema policy is read-only; extra mutation root types are not supported");
             }
             .into();
         }
         if !args.extra_subscription_types.is_empty() {
             return quote! {
-                compile_error!("graphql-orm mssql does not generate subscription roots in read-only mode");
+                compile_error!("graphql-orm schema policy is read-only; extra subscription root types are not supported");
             }
             .into();
         }
@@ -131,6 +146,8 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             pub type MutationRoot = ::graphql_orm::async_graphql::EmptyMutation;
             pub type SubscriptionRoot = ::graphql_orm::async_graphql::EmptySubscription;
             pub type AppSchema = ::graphql_orm::async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
+
+            pub const GRAPHQL_ORM_SCHEMA_POLICY: Option<::graphql_orm::graphql::orm::SchemaPolicy> = #schema_policy_const;
 
             pub fn schema_builder(
                 database: ::graphql_orm::db::Database<#backend_marker>,
@@ -211,6 +228,8 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         #subscription_root
 
         pub type AppSchema = ::graphql_orm::async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
+
+        pub const GRAPHQL_ORM_SCHEMA_POLICY: Option<::graphql_orm::graphql::orm::SchemaPolicy> = #schema_policy_const;
 
         pub fn schema_builder(
             database: ::graphql_orm::db::Database<#backend_marker>,
@@ -325,6 +344,7 @@ fn emit_chunked_merged_subscription(
 
 struct SchemaRootsArgs {
     backend: Option<String>,
+    schema_policy: Option<String>,
     query_custom_ops: Vec<Ident>,
     entities: Vec<Ident>,
     extra_mutation_types: Vec<Ident>,
@@ -340,15 +360,28 @@ impl Parse for SchemaRootsArgs {
         }
 
         let mut backend = None;
+        let mut schema_policy = None;
 
-        // Optional backend: "sqlite" | "postgres" | "mssql",
+        // Optional backend/schema_policy headers.
         let mut label: Ident = input.parse()?;
-        if label == "backend" {
-            input.parse::<Token![:]>()?;
-            let lit: syn::LitStr = input.parse()?;
-            backend = Some(lit.value());
-            let _: Option<Token![,]> = input.parse().ok();
-            label = input.parse()?;
+        loop {
+            if label == "backend" {
+                input.parse::<Token![:]>()?;
+                let lit: syn::LitStr = input.parse()?;
+                backend = Some(lit.value());
+                let _: Option<Token![,]> = input.parse().ok();
+                label = input.parse()?;
+            } else if label == "schema_policy" {
+                input.parse::<Token![:]>()?;
+                let lit: syn::LitStr = input.parse()?;
+                let value = lit.value();
+                validate_schema_policy(&value, lit.span())?;
+                schema_policy = Some(value);
+                let _: Option<Token![,]> = input.parse().ok();
+                label = input.parse()?;
+            } else {
+                break;
+            }
         }
 
         // query_custom_ops: [ ... ],
@@ -406,6 +439,7 @@ impl Parse for SchemaRootsArgs {
 
         Ok(SchemaRootsArgs {
             backend,
+            schema_policy,
             query_custom_ops,
             entities,
             extra_mutation_types,

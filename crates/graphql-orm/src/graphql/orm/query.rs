@@ -4,7 +4,7 @@ use super::MssqlBackend;
 use super::PostgresBackend;
 #[cfg(feature = "sqlite")]
 use super::SqliteBackend;
-use super::core::{ColumnDef, EntityMetadata, IndexDef, RelationMetadata, SqlValue};
+use super::core::{ColumnDef, EntityMetadata, IndexDef, RelationMetadata, SchemaPolicy, SqlValue};
 use super::dialect::{DatabaseBackend, SqlDialect, current_backend};
 use super::{DefaultBackend, OrmBackend, SqlxBackend};
 use crate::graphql::pagination::{Connection, Edge, PageInfo, encode_cursor};
@@ -17,6 +17,7 @@ pub trait DatabaseEntity {
     const PRIMARY_KEY: &'static str;
     /// All primary-key columns in declaration order.
     const PRIMARY_KEYS: &'static [&'static str] = &[Self::PRIMARY_KEY];
+    const SCHEMA_POLICY: Option<SchemaPolicy> = None;
     const DEFAULT_SORT: &'static str;
 
     fn column_names() -> &'static [&'static str];

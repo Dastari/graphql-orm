@@ -916,6 +916,54 @@ let updated = User::update_by_id(
 
 Manual `register_event_sender::<T>(...)` is optional now. Generated subscriptions and generated writes auto-wire against the runtime-owned transport lazily on first use.
 
+## Schema Ownership Policy
+
+Backend features compile database support. They do not grant permission to mutate a database.
+Host apps should choose a schema policy explicitly for new code:
+
+```rust
+use graphql_orm::graphql::orm::SchemaPolicy;
+
+let database = graphql_orm::db::Database::builder(pool)
+    .schema_policy(SchemaPolicy::Managed)
+    .build();
+```
+
+Available policies:
+
+- `ExternalReadOnly` - existing database is source of truth; generated/runtime write paths and schema mutation are rejected
+- `ExternalWritable` - existing database is source of truth; entity writes may run when supported, but schema application is rejected
+- `ValidateOnly` - validation is allowed, but planning and application are rejected
+- `PlanOnly` - validation and planning are allowed, but application is rejected
+- `Managed` - ORM entity metadata/schema ABI is source of truth and explicit migration application is allowed
+
+`Database::new(pool)` remains compatibility-friendly for existing SQLite/Postgres apps. New
+external-database integrations should use the builder and declare matching macro policy:
+
+```rust
+#[graphql_entity(
+    backend = "mssql",
+    table = "dbo.Jobs",
+    plural = "Jobs",
+    schema_policy = "external_read_only"
+)]
+pub struct Job {
+    #[primary_key]
+    #[graphql_orm(db_column = "JobId", write = false)]
+    pub id: i32,
+}
+
+schema_roots! {
+    backend: "mssql",
+    schema_policy: "external_read_only",
+    query_custom_ops: [],
+    entities: [Job],
+}
+```
+
+No schema mutation happens during `Database::new`, schema-root construction, or
+`schema_builder(database)`.
+
 ## Migration Application Contract
 
 Host apps should continue using:
@@ -938,6 +986,12 @@ The migration history table contains:
 - `version`
 - `description`
 - `applied_at`
+- `backend`
+- `graphql_orm_version`
+- `source_schema_hash`
+- `target_schema_hash`
+- `plan_hash`
+- `policy`
 
 This is automatic recovery, not a host-side cleanup chore. If a prior SQLite table rewrite failed after creating `__graphql_orm_<table>_new`, the next migration run will clear that stale internal table and retry the pending migration set cleanly.
 
@@ -988,6 +1042,35 @@ Semantics:
 - `build_migration_plan(...)` and `MigrationRunner::apply_migrations(...)` remain the lower-level escape hatches
 
 Internal runtime tables such as `__graphql_orm_migrations` and SQLite rewrite tables are excluded from schema-stage planning so host stages only reason about application tables.
+
+## Schema ABI Upgrades
+
+`SchemaStage` is now also usable as an ABI schema version: each stage contains a target
+`SchemaModel` and deterministic target schema hash. A `SchemaAbi` declares the ordered forward path
+between versions:
+
+```rust
+use graphql_orm::graphql::orm::{ApplyOptions, Entity, SchemaAbi, SchemaStage};
+
+let abi = SchemaAbi::new(vec![
+    SchemaStage::from_entities("1", "initial", &[<User as Entity>::metadata()]),
+    SchemaStage::from_entities(
+        "2",
+        "add records",
+        &[<User as Entity>::metadata(), <Record as Entity>::metadata()],
+    ),
+])?;
+
+database
+    .schema()
+    .apply_upgrade(&abi, "2", ApplyOptions::default())
+    .await?;
+```
+
+The runtime reads the current version from `__graphql_orm_migrations`, resolves unapplied ABI
+stages, plans from the live database schema to each target schema, rejects destructive operations by
+default, applies explicitly, and records schema/plan hashes. SQL files remain optional rendered
+artifacts; the ABI schema is derived from Rust metadata.
 
 ## Naming Rules
 

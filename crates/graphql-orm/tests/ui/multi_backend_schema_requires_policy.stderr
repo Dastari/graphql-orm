@@ -1,0 +1,11 @@
+error: schema_roots! requires `schema_policy: "..."` when multiple graphql-orm backend features are enabled
+  --> tests/ui/multi_backend_schema_requires_policy.rs:18:1
+   |
+18 | / schema_roots! {
+19 | |     backend: "sqlite",
+20 | |     query_custom_ops: [],
+21 | |     entities: [ExplicitPolicyExample],
+22 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `schema_roots` (in Nightly builds, run with -Z macro-backtrace for more info)

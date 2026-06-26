@@ -12,6 +12,7 @@ pub(crate) struct EntityMetadata {
     pub(crate) table_name: Option<String>,
     pub(crate) plural_name: Option<String>,
     pub(crate) default_sort: Option<String>,
+    pub(crate) schema_policy: Option<String>,
     pub(crate) schema_only: bool,
     pub(crate) backup_enabled: Option<bool>,
     pub(crate) backup_export_order: Option<i32>,
@@ -49,6 +50,12 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
                     metadata.default_sort = Some(lit.value());
+                } else if meta.path.is_ident("schema_policy") {
+                    let value = meta.value()?;
+                    let lit: syn::LitStr = value.parse()?;
+                    let value = lit.value();
+                    validate_schema_policy(&value, lit.span())?;
+                    metadata.schema_policy = Some(value);
                 } else if meta.path.is_ident("schema_only") {
                     let value = meta.value()?;
                     let lit: syn::LitBool = value.parse()?;
@@ -157,6 +164,37 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
     }
 
     Ok(metadata)
+}
+
+pub(crate) fn validate_schema_policy(value: &str, span: proc_macro2::Span) -> syn::Result<()> {
+    match value {
+        "external_read_only" | "external_writable" | "validate_only" | "plan_only" | "managed" => {
+            Ok(())
+        }
+        _ => Err(syn::Error::new(
+            span,
+            "schema_policy must be one of \"external_read_only\", \"external_writable\", \"validate_only\", \"plan_only\", or \"managed\"",
+        )),
+    }
+}
+
+pub(crate) fn schema_policy_tokens(policy: Option<&str>) -> proc_macro2::TokenStream {
+    match policy {
+        Some("external_read_only") => {
+            quote! { Some(::graphql_orm::graphql::orm::SchemaPolicy::ExternalReadOnly) }
+        }
+        Some("external_writable") => {
+            quote! { Some(::graphql_orm::graphql::orm::SchemaPolicy::ExternalWritable) }
+        }
+        Some("validate_only") => {
+            quote! { Some(::graphql_orm::graphql::orm::SchemaPolicy::ValidateOnly) }
+        }
+        Some("plan_only") => {
+            quote! { Some(::graphql_orm::graphql::orm::SchemaPolicy::PlanOnly) }
+        }
+        Some("managed") => quote! { Some(::graphql_orm::graphql::orm::SchemaPolicy::Managed) },
+        _ => quote! { None },
+    }
 }
 
 pub(crate) fn has_graphql_complex(attrs: &[syn::Attribute]) -> bool {
@@ -1119,6 +1157,7 @@ fn generate_entity_impl(
         .iter()
         .map(|column| syn::LitStr::new(column, struct_name.span()))
         .collect();
+    let schema_policy_const = schema_policy_tokens(entity_meta.schema_policy.as_deref());
     let columns_array: Vec<&str> = column_names.iter().map(|s| s.as_str()).collect();
 
     // Generate type names (as strings for #[graphql(name = "...")] and as idents for struct names)
@@ -1159,6 +1198,7 @@ fn generate_entity_impl(
                 const PLURAL_NAME: &'static str = #plural_name;
                 const PRIMARY_KEY: &'static str = #primary_key;
                 const PRIMARY_KEYS: &'static [&'static str] = &[#(#primary_key_literals),*];
+                const SCHEMA_POLICY: Option<::graphql_orm::graphql::orm::SchemaPolicy> = #schema_policy_const;
                 const DEFAULT_SORT: &'static str = #default_sort;
 
                 fn column_names() -> &'static [&'static str] {
@@ -1314,6 +1354,7 @@ fn generate_entity_impl(
             const PLURAL_NAME: &'static str = #plural_name;
             const PRIMARY_KEY: &'static str = #primary_key;
             const PRIMARY_KEYS: &'static [&'static str] = &[#(#primary_key_literals),*];
+            const SCHEMA_POLICY: Option<::graphql_orm::graphql::orm::SchemaPolicy> = #schema_policy_const;
             const DEFAULT_SORT: &'static str = #default_sort;
 
             fn column_names() -> &'static [&'static str] {

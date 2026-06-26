@@ -1,11 +1,20 @@
+use super::IntrospectionBackend;
+#[cfg(feature = "mssql")]
+use super::OrmBackend;
+#[cfg(feature = "mssql")]
+use super::core::SqlValue;
 use super::core::{
-    ColumnModel, DeletePolicy, ForeignKeyModel, IndexDef, MigrationPlan, MigrationStep, SchemaDiff,
-    SchemaModel, TableModel,
+    ColumnModel, ForeignKeyModel, MigrationPlan, MigrationRisk, MigrationStep,
+    PlannedMigrationStep, SchemaDiff, SchemaModel, TableModel,
 };
 use super::dialect::DatabaseBackend;
+#[cfg(feature = "mssql")]
+use super::dialect::SqlDialect;
 use super::query::PoolProvider;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use sqlx::Row;
 
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 fn is_internal_graphql_orm_table(table_name: &str) -> bool {
     table_name.starts_with("__graphql_orm_")
 }
@@ -38,12 +47,16 @@ fn render_default_clause(backend: DatabaseBackend, default: &str) -> String {
     }
 }
 
-fn render_column_definition(backend: DatabaseBackend, column: &ColumnModel) -> String {
+fn render_column_definition(
+    backend: DatabaseBackend,
+    column: &ColumnModel,
+    inline_primary_key: bool,
+) -> String {
     let mut parts = vec![format!("{} {}", column.name, column.sql_type)];
     if !column.nullable {
         parts.push("NOT NULL".to_string());
     }
-    if column.is_primary_key {
+    if inline_primary_key && column.is_primary_key {
         parts.push("PRIMARY KEY".to_string());
     }
     if column.is_unique && !column.is_primary_key {
@@ -67,11 +80,15 @@ fn render_create_table_statement_for_name(
     table: &TableModel,
     table_name: &str,
 ) -> String {
+    let has_composite_primary_key = table.primary_keys().len() > 1;
     let mut parts = table
         .columns
         .iter()
-        .map(|column| render_column_definition(backend, column))
+        .map(|column| render_column_definition(backend, column, !has_composite_primary_key))
         .collect::<Vec<_>>();
+    if has_composite_primary_key {
+        parts.push(format!("PRIMARY KEY ({})", table.primary_keys().join(", ")));
+    }
     parts.extend(table.foreign_keys.iter().map(|foreign_key| {
         let constraint_name = foreign_key_constraint_name(table_name, foreign_key);
         format!(
@@ -395,7 +412,7 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
         MigrationStep::AddColumn { table_name, column } => vec![format!(
             "ALTER TABLE {} ADD COLUMN {}",
             table_name,
-            render_column_definition(backend, column)
+            render_column_definition(backend, column, true)
         )],
         MigrationStep::DropColumn {
             table_name,
@@ -529,6 +546,69 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
     }
 }
 
+pub fn classify_migration_step(step: &MigrationStep) -> PlannedMigrationStep {
+    let (risk, reason) = match step {
+        MigrationStep::CreateTable(_) => (
+            MigrationRisk::Additive,
+            "creates a new table without changing existing data",
+        ),
+        MigrationStep::DropTable { .. } => (
+            MigrationRisk::Destructive,
+            "drops an existing table and its data",
+        ),
+        MigrationStep::AddColumn { column, .. } if column.nullable || column.default.is_some() => (
+            MigrationRisk::Additive,
+            "adds a nullable or defaulted column",
+        ),
+        MigrationStep::AddColumn { .. } => (
+            MigrationRisk::Risky,
+            "adds a required column without a default",
+        ),
+        MigrationStep::DropColumn { .. } => (
+            MigrationRisk::Destructive,
+            "drops an existing column and its data",
+        ),
+        MigrationStep::AlterColumn { before, after, .. } => {
+            if before.nullable && !after.nullable {
+                (
+                    MigrationRisk::Risky,
+                    "tightens nullability on an existing column",
+                )
+            } else if before.sql_type == after.sql_type {
+                (
+                    MigrationRisk::Compatible,
+                    "changes column metadata without changing the SQL type",
+                )
+            } else {
+                (MigrationRisk::Risky, "changes an existing column type")
+            }
+        }
+        MigrationStep::CreateIndex { .. } => (
+            MigrationRisk::Additive,
+            "creates an index without changing row data",
+        ),
+        MigrationStep::DropIndex { .. } => (MigrationRisk::Risky, "drops an existing index"),
+        MigrationStep::AddForeignKey { .. } => (
+            MigrationRisk::Risky,
+            "adds a constraint that may reject existing rows",
+        ),
+        MigrationStep::DropForeignKey { .. } => (
+            MigrationRisk::Risky,
+            "drops an existing referential constraint",
+        ),
+    };
+
+    PlannedMigrationStep {
+        step: step.clone(),
+        risk,
+        reason: reason.to_string(),
+    }
+}
+
+pub fn classify_migration_steps(steps: &[MigrationStep]) -> Vec<PlannedMigrationStep> {
+    steps.iter().map(classify_migration_step).collect()
+}
+
 pub fn build_migration_plan(
     backend: DatabaseBackend,
     current: &SchemaModel,
@@ -646,8 +726,18 @@ pub fn write_migration_file(
     Ok(path)
 }
 
+pub async fn introspect_schema<B, P>(provider: &P) -> Result<SchemaModel, sqlx::Error>
+where
+    B: IntrospectionBackend,
+    P: PoolProvider<B>,
+{
+    B::introspect_schema(provider.pool()).await
+}
+
 #[cfg(feature = "sqlite")]
-pub async fn introspect_schema(provider: &impl PoolProvider) -> Result<SchemaModel, sqlx::Error> {
+pub async fn introspect_sqlite_schema(
+    provider: &impl PoolProvider<super::SqliteBackend>,
+) -> Result<SchemaModel, sqlx::Error> {
     let pool = provider.pool();
     let table_rows = sqlx::query(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
@@ -682,10 +772,14 @@ pub async fn introspect_schema(provider: &impl PoolProvider) -> Result<SchemaMod
                 })
             })
             .collect::<Result<Vec<_>, sqlx::Error>>()?;
-        let primary_key = columns
+        let primary_keys = columns
             .iter()
-            .find(|column| column.is_primary_key)
+            .filter(|column| column.is_primary_key)
             .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        let primary_key = primary_keys
+            .first()
+            .cloned()
             .unwrap_or_else(|| "id".to_string());
 
         let pragma_index_list = format!("PRAGMA index_list({})", table_name);
@@ -711,7 +805,7 @@ pub async fn introspect_schema(provider: &impl PoolProvider) -> Result<SchemaMod
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
             );
-            indexes.push(IndexDef {
+            indexes.push(super::core::IndexDef {
                 name: leaked_name,
                 columns: leaked_columns,
                 is_unique: unique,
@@ -729,9 +823,9 @@ pub async fn introspect_schema(provider: &impl PoolProvider) -> Result<SchemaMod
                     target_column: row.try_get("to")?,
                     is_multiple: false,
                     on_delete: match row.try_get::<String, _>("on_delete")?.as_str() {
-                        "CASCADE" => DeletePolicy::Cascade,
-                        "SET NULL" => DeletePolicy::SetNull,
-                        _ => DeletePolicy::Restrict,
+                        "CASCADE" => super::core::DeletePolicy::Cascade,
+                        "SET NULL" => super::core::DeletePolicy::SetNull,
+                        _ => super::core::DeletePolicy::Restrict,
                     },
                 })
             })
@@ -741,6 +835,7 @@ pub async fn introspect_schema(provider: &impl PoolProvider) -> Result<SchemaMod
             entity_name: table_name.clone(),
             table_name,
             primary_key: primary_key.clone(),
+            primary_keys,
             default_sort: primary_key.clone(),
             columns,
             indexes,
@@ -752,8 +847,17 @@ pub async fn introspect_schema(provider: &impl PoolProvider) -> Result<SchemaMod
     Ok(SchemaModel { tables })
 }
 
+#[cfg(feature = "sqlite")]
+impl IntrospectionBackend for super::SqliteBackend {
+    async fn introspect_schema(pool: &Self::Pool) -> Result<SchemaModel, sqlx::Error> {
+        introspect_sqlite_schema(pool).await
+    }
+}
+
 #[cfg(feature = "postgres")]
-pub async fn introspect_schema(provider: &impl PoolProvider) -> Result<SchemaModel, sqlx::Error> {
+pub async fn introspect_postgres_schema(
+    provider: &impl PoolProvider<super::PostgresBackend>,
+) -> Result<SchemaModel, sqlx::Error> {
     let pool = provider.pool();
     let table_rows = sqlx::query(
         "SELECT table_name
@@ -871,7 +975,7 @@ pub async fn introspect_schema(provider: &impl PoolProvider) -> Result<SchemaMod
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
             );
-            indexes.push(IndexDef {
+            indexes.push(super::core::IndexDef {
                 name: leaked_name,
                 columns: leaked_columns,
                 is_unique: unique,
@@ -910,9 +1014,9 @@ pub async fn introspect_schema(provider: &impl PoolProvider) -> Result<SchemaMod
                     target_column: row.try_get("target_column")?,
                     is_multiple: false,
                     on_delete: match row.try_get::<String, _>("delete_rule")?.as_str() {
-                        "CASCADE" => DeletePolicy::Cascade,
-                        "SET NULL" => DeletePolicy::SetNull,
-                        _ => DeletePolicy::Restrict,
+                        "CASCADE" => super::core::DeletePolicy::Cascade,
+                        "SET NULL" => super::core::DeletePolicy::SetNull,
+                        _ => super::core::DeletePolicy::Restrict,
                     },
                 })
             })
@@ -922,6 +1026,7 @@ pub async fn introspect_schema(provider: &impl PoolProvider) -> Result<SchemaMod
             entity_name: table_name.clone(),
             table_name,
             primary_key: primary_key.clone(),
+            primary_keys: primary_key_columns.clone(),
             default_sort: primary_key,
             columns,
             indexes,
@@ -931,4 +1036,146 @@ pub async fn introspect_schema(provider: &impl PoolProvider) -> Result<SchemaMod
     }
 
     Ok(SchemaModel { tables })
+}
+
+#[cfg(feature = "postgres")]
+impl IntrospectionBackend for super::PostgresBackend {
+    async fn introspect_schema(pool: &Self::Pool) -> Result<SchemaModel, sqlx::Error> {
+        introspect_postgres_schema(pool).await
+    }
+}
+
+#[cfg(feature = "mssql")]
+pub async fn introspect_mssql_schema(
+    provider: &impl PoolProvider<super::MssqlBackend>,
+) -> Result<SchemaModel, sqlx::Error> {
+    let pool = provider.pool();
+    let table_rows = super::MssqlBackend::fetch_rows(
+        pool,
+        "SELECT TABLE_SCHEMA AS table_schema, TABLE_NAME AS table_name
+         FROM INFORMATION_SCHEMA.TABLES
+         WHERE TABLE_TYPE = 'BASE TABLE'
+           AND TABLE_SCHEMA NOT IN ('sys', 'INFORMATION_SCHEMA')
+         ORDER BY TABLE_SCHEMA, TABLE_NAME",
+        &[],
+    )
+    .await?;
+
+    let mut tables = Vec::new();
+    for row in table_rows {
+        let schema_name = super::MssqlBackend::try_get_string(&row, "table_schema")?;
+        let raw_table_name = super::MssqlBackend::try_get_string(&row, "table_name")?;
+        let table_path = format!("{schema_name}.{raw_table_name}");
+        if is_internal_graphql_orm_table(&raw_table_name) {
+            continue;
+        }
+
+        let column_rows = super::MssqlBackend::fetch_rows(
+            pool,
+            "SELECT COLUMN_NAME AS column_name,
+                    DATA_TYPE AS data_type,
+                    IS_NULLABLE AS is_nullable,
+                    COLUMN_DEFAULT AS column_default
+             FROM INFORMATION_SCHEMA.COLUMNS
+             WHERE TABLE_SCHEMA = @P1 AND TABLE_NAME = @P2
+             ORDER BY ORDINAL_POSITION",
+            &[
+                SqlValue::String(schema_name.clone()),
+                SqlValue::String(raw_table_name.clone()),
+            ],
+        )
+        .await?;
+
+        let primary_key_rows = super::MssqlBackend::fetch_rows(
+            pool,
+            "SELECT kcu.COLUMN_NAME AS column_name
+             FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+             JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+               ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+              AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA
+              AND tc.TABLE_NAME = kcu.TABLE_NAME
+             WHERE tc.TABLE_SCHEMA = @P1
+               AND tc.TABLE_NAME = @P2
+               AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+             ORDER BY kcu.ORDINAL_POSITION",
+            &[
+                SqlValue::String(schema_name.clone()),
+                SqlValue::String(raw_table_name.clone()),
+            ],
+        )
+        .await?;
+        let primary_keys = primary_key_rows
+            .into_iter()
+            .map(|row| {
+                super::MssqlBackend::try_get_string(&row, "column_name")
+                    .map(|column| DatabaseBackend::Mssql.quote_identifier(&column))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let primary_key = primary_keys
+            .first()
+            .cloned()
+            .unwrap_or_else(|| DatabaseBackend::Mssql.quote_identifier("id"));
+
+        let unique_rows = super::MssqlBackend::fetch_rows(
+            pool,
+            "SELECT kcu.COLUMN_NAME AS column_name
+             FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+             JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+               ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+              AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA
+              AND tc.TABLE_NAME = kcu.TABLE_NAME
+             WHERE tc.TABLE_SCHEMA = @P1
+               AND tc.TABLE_NAME = @P2
+               AND tc.CONSTRAINT_TYPE = 'UNIQUE'",
+            &[
+                SqlValue::String(schema_name.clone()),
+                SqlValue::String(raw_table_name.clone()),
+            ],
+        )
+        .await?;
+        let unique_columns = unique_rows
+            .into_iter()
+            .map(|row| {
+                super::MssqlBackend::try_get_string(&row, "column_name")
+                    .map(|column| DatabaseBackend::Mssql.quote_identifier(&column))
+            })
+            .collect::<Result<std::collections::HashSet<_>, _>>()?;
+
+        let columns = column_rows
+            .into_iter()
+            .map(|row| {
+                let raw_name = super::MssqlBackend::try_get_string(&row, "column_name")?;
+                let name = DatabaseBackend::Mssql.quote_identifier(&raw_name);
+                Ok(ColumnModel {
+                    is_primary_key: primary_keys.iter().any(|column| column == &name),
+                    is_unique: unique_columns.contains(&name),
+                    name,
+                    sql_type: super::MssqlBackend::try_get_string(&row, "data_type")?,
+                    nullable: super::MssqlBackend::try_get_string(&row, "is_nullable")? == "YES",
+                    default: row.try_get::<Option<String>, _>("column_default")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+
+        tables.push(TableModel {
+            entity_name: raw_table_name.clone(),
+            table_name: DatabaseBackend::Mssql.quote_identifier_path(&table_path),
+            primary_key: primary_key.clone(),
+            primary_keys,
+            default_sort: format!("{primary_key} ASC"),
+            columns,
+            indexes: Vec::new(),
+            composite_unique_indexes: Vec::new(),
+            foreign_keys: Vec::new(),
+        });
+    }
+
+    Ok(SchemaModel { tables })
+}
+
+#[cfg(feature = "mssql")]
+impl IntrospectionBackend for super::MssqlBackend {
+    async fn introspect_schema(pool: &Self::Pool) -> Result<SchemaModel, sqlx::Error> {
+        introspect_mssql_schema(pool).await
+    }
 }

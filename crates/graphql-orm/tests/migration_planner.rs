@@ -9,6 +9,7 @@ fn users_v1() -> TableModel {
         entity_name: "User".to_string(),
         table_name: "users".to_string(),
         primary_key: "id".to_string(),
+        primary_keys: vec!["id".to_string()],
         default_sort: "name ASC".to_string(),
         columns: vec![
             ColumnModel {
@@ -72,6 +73,7 @@ fn posts_with_fk() -> TableModel {
         entity_name: "Post".to_string(),
         table_name: "posts".to_string(),
         primary_key: "id".to_string(),
+        primary_keys: vec!["id".to_string()],
         default_sort: "title ASC".to_string(),
         columns: vec![
             ColumnModel {
