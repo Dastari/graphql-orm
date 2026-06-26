@@ -1,4 +1,5 @@
 use super::*;
+use crate::backend::{BackendKind, backend_dialect_expr, backend_marker_tokens, resolve_backend};
 
 pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let args = match syn::parse::<SchemaRootsArgs>(input) {
@@ -8,6 +9,16 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
 
     let query_custom_ops = &args.query_custom_ops;
     let entities = &args.entities;
+    let backend = match resolve_backend(
+        args.backend.as_deref(),
+        proc_macro2::Span::mixed_site(),
+        "schema_roots!",
+    ) {
+        Ok(backend) => backend,
+        Err(err) => return err.to_compile_error().into(),
+    };
+    let backend_marker = backend_marker_tokens(backend);
+    let backend_dialect = backend_dialect_expr(backend);
 
     let span = proc_macro2::Span::mixed_site();
     let custom_op_types: Vec<proc_macro2::TokenStream> = query_custom_ops
@@ -78,7 +89,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         async_graphql_merged_object_derive(),
     );
 
-    if cfg!(feature = "mssql") {
+    if backend == BackendKind::Mssql {
         if !args.extra_mutation_types.is_empty() {
             return quote! {
                 compile_error!("graphql-orm mssql is read-only; extra mutation root types are not supported");
@@ -98,7 +109,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 quote! {
                     let builder = builder.data(
                         ::graphql_orm::async_graphql::dataloader::DataLoader::new(
-                            ::graphql_orm::graphql::loaders::RelationLoader::<#entity>::new(database.clone()),
+                            ::graphql_orm::graphql::loaders::RelationLoader::<#entity, #backend_marker>::new(database.clone()),
                             ::graphql_orm::tokio::spawn,
                         )
                     );
@@ -122,7 +133,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             pub type AppSchema = ::graphql_orm::async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 
             pub fn schema_builder(
-                database: ::graphql_orm::db::Database,
+                database: ::graphql_orm::db::Database<#backend_marker>,
             ) -> ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot> {
                 let builder = ::graphql_orm::async_graphql::Schema::build(
                     QueryRoot::default(),
@@ -152,7 +163,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 migration_version: impl Into<String>,
             ) -> ::graphql_orm::graphql::orm::GraphqlOrmSchemaSnapshot {
                 ::graphql_orm::graphql::orm::schema_snapshot_from_entities(
-                    ::graphql_orm::graphql::orm::current_backend(),
+                    #backend_dialect,
                     migration_version,
                     &graphql_orm_entity_metadata(),
                 )
@@ -178,7 +189,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             quote! {
                 let builder = builder.data(
                     ::graphql_orm::async_graphql::dataloader::DataLoader::new(
-                        ::graphql_orm::graphql::loaders::RelationLoader::<#entity>::new(database.clone()),
+                    ::graphql_orm::graphql::loaders::RelationLoader::<#entity, #backend_marker>::new(database.clone()),
                         ::graphql_orm::tokio::spawn,
                     )
                 );
@@ -202,7 +213,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         pub type AppSchema = ::graphql_orm::async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 
         pub fn schema_builder(
-            database: ::graphql_orm::db::Database,
+            database: ::graphql_orm::db::Database<#backend_marker>,
         ) -> ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot> {
             let builder = ::graphql_orm::async_graphql::Schema::build(
                 QueryRoot::default(),
@@ -232,7 +243,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             migration_version: impl Into<String>,
         ) -> ::graphql_orm::graphql::orm::GraphqlOrmSchemaSnapshot {
             ::graphql_orm::graphql::orm::schema_snapshot_from_entities(
-                ::graphql_orm::graphql::orm::current_backend(),
+                #backend_dialect,
                 migration_version,
                 &graphql_orm_entity_metadata(),
             )
@@ -313,6 +324,7 @@ fn emit_chunked_merged_subscription(
 }
 
 struct SchemaRootsArgs {
+    backend: Option<String>,
     query_custom_ops: Vec<Ident>,
     entities: Vec<Ident>,
     extra_mutation_types: Vec<Ident>,
@@ -327,8 +339,19 @@ impl Parse for SchemaRootsArgs {
             Ok(list.into_iter().collect())
         }
 
+        let mut backend = None;
+
+        // Optional backend: "sqlite" | "postgres" | "mssql",
+        let mut label: Ident = input.parse()?;
+        if label == "backend" {
+            input.parse::<Token![:]>()?;
+            let lit: syn::LitStr = input.parse()?;
+            backend = Some(lit.value());
+            let _: Option<Token![,]> = input.parse().ok();
+            label = input.parse()?;
+        }
+
         // query_custom_ops: [ ... ],
-        let label: Ident = input.parse()?;
         if label != "query_custom_ops" {
             return Err(syn::Error::new(label.span(), "expected `query_custom_ops`"));
         }
@@ -382,6 +405,7 @@ impl Parse for SchemaRootsArgs {
         }
 
         Ok(SchemaRootsArgs {
+            backend,
             query_custom_ops,
             entities,
             extra_mutation_types,

@@ -1,0 +1,5 @@
+error: multiple graphql-orm backend features are enabled (sqlite, mssql); specify backend = "sqlite", "postgres", or "mssql" on graphql_entity
+ --> tests/ui/multi_backend_entity_requires_backend.rs:5:8
+  |
+5 | struct MissingBackendExample {
+  |        ^^^^^^^^^^^^^^^^^^^^^

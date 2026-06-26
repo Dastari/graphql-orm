@@ -28,23 +28,8 @@ mod operations;
 mod relations;
 mod schema_roots;
 
-#[cfg(not(any(
-    feature = "sqlite",
-    feature = "postgres",
-    feature = "mysql",
-    feature = "mssql"
-)))]
-compile_error!("Enable exactly one database backend feature: sqlite, postgres, mysql, or mssql.");
-
-#[cfg(any(
-    all(feature = "sqlite", feature = "postgres"),
-    all(feature = "sqlite", feature = "mysql"),
-    all(feature = "sqlite", feature = "mssql"),
-    all(feature = "postgres", feature = "mysql"),
-    all(feature = "postgres", feature = "mssql"),
-    all(feature = "mysql", feature = "mssql")
-))]
-compile_error!("Enable only one database backend feature at a time.");
+#[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mssql")))]
+compile_error!("Enable at least one database backend feature: sqlite, postgres, or mssql.");
 
 #[cfg(any(
     all(feature = "resolver-case-pascal", feature = "resolver-case-snake"),

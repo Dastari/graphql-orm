@@ -4,7 +4,11 @@ use super::{
     backup_descriptors_from_entities, current_backend, execute_with_binds_on,
     schema_snapshot_from_entities,
 };
-use crate::DbPool;
+#[cfg(feature = "postgres")]
+use crate::PostgresBackend;
+#[cfg(feature = "sqlite")]
+use crate::SqliteBackend;
+use crate::{DbPool, DefaultBackend};
 use sqlx::Row;
 use std::collections::BTreeMap;
 
@@ -379,10 +383,15 @@ async fn ensure_change_journal_table(pool: &DbPool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-pub(crate) async fn record_change_journal_event(
-    hook_ctx: &mut super::MutationContext<'_>,
+pub(crate) async fn record_change_journal_event<B>(
+    hook_ctx: &mut super::MutationContext<'_, B>,
     event: &MutationEvent,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), sqlx::Error>
+where
+    B: super::WriteBackend,
+    for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
+        sqlx::Executor<'c, Database = B::Database> + Send,
+{
     if !cfg!(feature = "change-journal")
         || !hook_ctx.database().change_journal_enabled()
         || event.phase != MutationPhase::After
@@ -426,7 +435,7 @@ pub(crate) async fn record_change_journal_event(
         SqlValue::Null,
         SqlValue::Null,
     ];
-    execute_with_binds_on(hook_ctx.executor(), &sql, &values).await?;
+    execute_with_binds_on::<B, _>(hook_ctx.executor(), &sql, &values).await?;
     Ok(())
 }
 
@@ -448,7 +457,7 @@ async fn export_changes(
         quote_identifier(CHANGE_JOURNAL_TABLE),
         conditions.join(" AND ")
     );
-    let rows = super::fetch_rows(pool, &sql, &values).await?;
+    let rows = super::fetch_rows::<DefaultBackend>(pool, &sql, &values).await?;
     rows.into_iter().map(decode_backup_change).collect()
 }
 
@@ -706,7 +715,7 @@ async fn execute_import_insert(
     sql: &str,
     values: &[SqlValue],
 ) -> Result<(), sqlx::Error> {
-    execute_with_binds_on(&mut **tx, sql, values).await?;
+    execute_with_binds_on::<SqliteBackend, _>(&mut **tx, sql, values).await?;
     Ok(())
 }
 
@@ -729,7 +738,7 @@ async fn execute_import_insert(
     sql: &str,
     values: &[SqlValue],
 ) -> Result<(), sqlx::Error> {
-    execute_with_binds_on(&mut **tx, sql, values).await?;
+    execute_with_binds_on::<PostgresBackend, _>(&mut **tx, sql, values).await?;
     Ok(())
 }
 

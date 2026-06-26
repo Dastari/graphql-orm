@@ -1,12 +1,13 @@
+#[cfg(feature = "mssql")]
+use super::MssqlBackend;
+#[cfg(feature = "postgres")]
+use super::PostgresBackend;
+#[cfg(feature = "sqlite")]
+use super::SqliteBackend;
 use super::core::{ColumnDef, EntityMetadata, IndexDef, RelationMetadata, SqlValue};
 use super::dialect::{DatabaseBackend, SqlDialect, current_backend};
-use super::execution::fetch_rows;
-#[cfg(not(feature = "mssql"))]
-use super::execution::fetch_rows_on;
+use super::{DefaultBackend, OrmBackend, SqlxBackend};
 use crate::graphql::pagination::{Connection, Edge, PageInfo, encode_cursor};
-use crate::{DbPool, DbRow};
-#[cfg(not(feature = "mssql"))]
-use sqlx::Row;
 use std::marker::PhantomData;
 
 pub trait DatabaseEntity {
@@ -35,8 +36,8 @@ pub trait Entity: DatabaseEntity + DatabaseSchema + EntityRelations {
     fn metadata() -> &'static EntityMetadata;
 }
 
-pub trait FromSqlRow: Sized {
-    fn from_row(row: &DbRow) -> Result<Self, sqlx::Error>;
+pub trait FromSqlRow<B: OrmBackend = DefaultBackend>: Sized {
+    fn from_row(row: &B::Row) -> Result<Self, sqlx::Error>;
 }
 
 pub trait DatabaseFilter {
@@ -195,43 +196,65 @@ impl PageInput {
     }
 }
 
-pub trait PoolProvider {
-    fn pool(&self) -> &DbPool;
+pub trait PoolProvider<B: OrmBackend = DefaultBackend> {
+    fn pool(&self) -> &B::Pool;
 }
 
-pub trait DatabaseExecutor: PoolProvider {
+pub trait DatabaseExecutor<B: OrmBackend = DefaultBackend>: PoolProvider<B> {
     fn backend(&self) -> DatabaseBackend {
-        current_backend()
+        B::DIALECT
     }
 }
 
-impl PoolProvider for DbPool {
-    fn pool(&self) -> &DbPool {
+#[cfg(feature = "sqlite")]
+impl PoolProvider<SqliteBackend> for sqlx::SqlitePool {
+    fn pool(&self) -> &<SqliteBackend as OrmBackend>::Pool {
         self
     }
 }
 
-impl DatabaseExecutor for DbPool {}
+#[cfg(feature = "sqlite")]
+impl DatabaseExecutor<SqliteBackend> for sqlx::SqlitePool {}
 
-impl PoolProvider for crate::db::Database {
-    fn pool(&self) -> &DbPool {
+#[cfg(feature = "postgres")]
+impl PoolProvider<PostgresBackend> for sqlx::PgPool {
+    fn pool(&self) -> &<PostgresBackend as OrmBackend>::Pool {
+        self
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl DatabaseExecutor<PostgresBackend> for sqlx::PgPool {}
+
+#[cfg(feature = "mssql")]
+impl PoolProvider<MssqlBackend> for crate::db::mssql::MssqlPool {
+    fn pool(&self) -> &<MssqlBackend as OrmBackend>::Pool {
+        self
+    }
+}
+
+#[cfg(feature = "mssql")]
+impl DatabaseExecutor<MssqlBackend> for crate::db::mssql::MssqlPool {}
+
+impl<B: OrmBackend> PoolProvider<B> for crate::db::Database<B> {
+    fn pool(&self) -> &B::Pool {
         self.pool()
     }
 }
 
-impl DatabaseExecutor for crate::db::Database {}
+impl<B: OrmBackend> DatabaseExecutor<B> for crate::db::Database<B> {}
 
 #[allow(async_fn_in_trait)]
-pub trait RelationLoader {
+pub trait RelationLoader<B: OrmBackend = DefaultBackend> {
     async fn load_relations(
         &mut self,
-        pool: &DbPool,
+        pool: &B::Pool,
         selection: &[async_graphql::context::SelectionField<'_>],
     ) -> Result<(), sqlx::Error>;
 
     async fn bulk_load_relations(
         entities: &mut [Self],
-        pool: &DbPool,
+        pool: &B::Pool,
         selection: &[async_graphql::context::SelectionField<'_>],
     ) -> Result<(), sqlx::Error>
     where
@@ -509,15 +532,15 @@ pub fn build_upsert_sql(
         update_updated_at,
     )
 }
-pub struct EntityQuery<T> {
+pub struct EntityQuery<T, B: OrmBackend = DefaultBackend> {
     pub where_clauses: Vec<String>,
     pub values: Vec<SqlValue>,
     pub order_clauses: Vec<String>,
     pub page: Option<PageInput>,
-    _marker: PhantomData<T>,
+    _marker: PhantomData<(T, B)>,
 }
 
-impl<T> Clone for EntityQuery<T> {
+impl<T, B: OrmBackend> Clone for EntityQuery<T, B> {
     fn clone(&self) -> Self {
         Self {
             where_clauses: self.where_clauses.clone(),
@@ -529,9 +552,10 @@ impl<T> Clone for EntityQuery<T> {
     }
 }
 
-impl<T> EntityQuery<T>
+impl<T, B> EntityQuery<T, B>
 where
-    T: DatabaseEntity + FromSqlRow + Clone + Send + Sync,
+    B: OrmBackend,
+    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync,
 {
     pub fn new() -> Self {
         Self {
@@ -600,103 +624,70 @@ where
 
     pub async fn fetch_all<P>(&self, provider: &P) -> Result<Vec<T>, sqlx::Error>
     where
-        P: PoolProvider + ?Sized,
+        P: PoolProvider<B> + ?Sized,
     {
-        let rendered = render_select_query(current_backend(), &self.build_select_query());
-        let rows = fetch_rows(provider.pool(), &rendered.sql, &rendered.values).await?;
+        let rendered = render_select_query(B::DIALECT, &self.build_select_query());
+        let rows = B::fetch_rows(provider.pool(), &rendered.sql, &rendered.values).await?;
         rows.iter().map(T::from_row).collect()
     }
 
-    #[cfg(feature = "sqlite")]
     pub async fn fetch_all_on<'e, E>(&self, executor: E) -> Result<Vec<T>, sqlx::Error>
     where
-        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+        B: SqlxBackend,
+        E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
     {
-        let rendered = render_select_query(current_backend(), &self.build_select_query());
-        let rows = fetch_rows_on(executor, &rendered.sql, &rendered.values).await?;
-        rows.iter().map(T::from_row).collect()
-    }
-
-    #[cfg(feature = "postgres")]
-    pub async fn fetch_all_on<'e, E>(&self, executor: E) -> Result<Vec<T>, sqlx::Error>
-    where
-        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-    {
-        let rendered = render_select_query(current_backend(), &self.build_select_query());
-        let rows = fetch_rows_on(executor, &rendered.sql, &rendered.values).await?;
+        let rendered = render_select_query(B::DIALECT, &self.build_select_query());
+        let rows = B::fetch_rows_on(executor, rendered.sql, rendered.values).await?;
         rows.iter().map(T::from_row).collect()
     }
 
     pub async fn fetch_one<P>(&self, provider: &P) -> Result<Option<T>, sqlx::Error>
     where
-        P: PoolProvider + ?Sized,
+        P: PoolProvider<B> + ?Sized,
     {
         Ok(self.fetch_all(provider).await?.into_iter().next())
     }
 
-    #[cfg(feature = "sqlite")]
     pub async fn fetch_one_on<'e, E>(&self, executor: E) -> Result<Option<T>, sqlx::Error>
     where
-        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
-    {
-        Ok(self.fetch_all_on(executor).await?.into_iter().next())
-    }
-
-    #[cfg(feature = "postgres")]
-    pub async fn fetch_one_on<'e, E>(&self, executor: E) -> Result<Option<T>, sqlx::Error>
-    where
-        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+        B: SqlxBackend,
+        E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
     {
         Ok(self.fetch_all_on(executor).await?.into_iter().next())
     }
 
     pub async fn count<P>(&self, provider: &P) -> Result<i64, sqlx::Error>
     where
-        P: PoolProvider + ?Sized,
+        P: PoolProvider<B> + ?Sized,
     {
         let mut query = self.build_select_query();
         query.count_only = true;
         query.pagination = None;
         query.sorts.clear();
-        let rendered = render_select_query(current_backend(), &query);
-        let rows = fetch_rows(provider.pool(), &rendered.sql, &rendered.values).await?;
+        let rendered = render_select_query(B::DIALECT, &query);
+        let rows = B::fetch_rows(provider.pool(), &rendered.sql, &rendered.values).await?;
         let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
-        row.try_get::<i64, _>("count")
+        B::try_get_i64(row, "count")
     }
 
-    #[cfg(feature = "sqlite")]
     pub async fn count_on<'e, E>(&self, executor: E) -> Result<i64, sqlx::Error>
     where
-        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+        B: SqlxBackend,
+        E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
     {
         let mut query = self.build_select_query();
         query.count_only = true;
         query.pagination = None;
         query.sorts.clear();
-        let rendered = render_select_query(current_backend(), &query);
-        let rows = fetch_rows_on(executor, &rendered.sql, &rendered.values).await?;
+        let rendered = render_select_query(B::DIALECT, &query);
+        let rows = B::fetch_rows_on(executor, rendered.sql, rendered.values).await?;
         let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
-        row.try_get::<i64, _>("count")
-    }
-
-    #[cfg(feature = "postgres")]
-    pub async fn count_on<'e, E>(&self, executor: E) -> Result<i64, sqlx::Error>
-    where
-        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-    {
-        let mut query = self.build_select_query();
-        query.count_only = true;
-        query.pagination = None;
-        query.sorts.clear();
-        let rendered = render_select_query(current_backend(), &query);
-        let rows = fetch_rows_on(executor, &rendered.sql, &rendered.values).await?;
-        let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
-        row.try_get::<i64, _>("count")
+        B::try_get_i64(row, "count")
     }
 
     pub fn build_delete_sql(&self) -> (String, Vec<SqlValue>) {
         let rendered = render_delete_query(
-            current_backend(),
+            B::DIALECT,
             &DeleteQuery {
                 table: T::TABLE_NAME,
                 filter: filter_expression_from_raw_parts(&self.where_clauses, &self.values),
@@ -707,7 +698,7 @@ where
 
     pub async fn fetch_connection<P>(&self, provider: &P) -> Result<Connection<T>, sqlx::Error>
     where
-        P: PoolProvider + ?Sized,
+        P: PoolProvider<B> + ?Sized,
     {
         let total = self.count(provider).await?;
         let offset = self.page.as_ref().map(|p| p.offset()).unwrap_or(0) as usize;
@@ -734,20 +725,21 @@ where
     }
 }
 
-pub struct FindQuery<'a, T, W, O>
+pub struct FindQuery<'a, T, W, O, B: OrmBackend = DefaultBackend>
 where
-    T: DatabaseEntity + FromSqlRow + Clone + Send + Sync,
+    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync,
 {
-    pool: &'a DbPool,
-    query: EntityQuery<T>,
-    _marker: PhantomData<(W, O)>,
+    pool: &'a B::Pool,
+    query: EntityQuery<T, B>,
+    _marker: PhantomData<(W, O, B)>,
 }
 
-impl<'a, T, W, O> FindQuery<'a, T, W, O>
+impl<'a, T, W, O, B> FindQuery<'a, T, W, O, B>
 where
-    T: DatabaseEntity + FromSqlRow + Clone + Send + Sync,
+    B: OrmBackend,
+    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync,
 {
-    pub fn new(pool: &'a DbPool) -> Self {
+    pub fn new(pool: &'a B::Pool) -> Self {
         Self {
             pool,
             query: EntityQuery::new(),
@@ -787,99 +779,77 @@ where
     }
 
     pub async fn fetch_all(self) -> Result<Vec<T>, sqlx::Error> {
-        self.query.fetch_all(self.pool).await
+        let rendered = render_select_query(B::DIALECT, &self.query.build_select_query());
+        let rows = B::fetch_rows(self.pool, &rendered.sql, &rendered.values).await?;
+        rows.iter().map(T::from_row).collect()
     }
 
-    #[cfg(feature = "sqlite")]
     pub async fn fetch_all_on<'e, E>(self, executor: E) -> Result<Vec<T>, sqlx::Error>
     where
-        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
-    {
-        self.query.fetch_all_on(executor).await
-    }
-
-    #[cfg(feature = "postgres")]
-    pub async fn fetch_all_on<'e, E>(self, executor: E) -> Result<Vec<T>, sqlx::Error>
-    where
-        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+        B: SqlxBackend,
+        E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
     {
         self.query.fetch_all_on(executor).await
     }
 
     pub async fn fetch_one(self) -> Result<Option<T>, sqlx::Error> {
-        self.query.fetch_one(self.pool).await
+        Ok(self.fetch_all().await?.into_iter().next())
     }
 
-    #[cfg(feature = "sqlite")]
     pub async fn fetch_one_on<'e, E>(self, executor: E) -> Result<Option<T>, sqlx::Error>
     where
-        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
-    {
-        self.query.fetch_one_on(executor).await
-    }
-
-    #[cfg(feature = "postgres")]
-    pub async fn fetch_one_on<'e, E>(self, executor: E) -> Result<Option<T>, sqlx::Error>
-    where
-        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+        B: SqlxBackend,
+        E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
     {
         self.query.fetch_one_on(executor).await
     }
 
     pub async fn count(self) -> Result<i64, sqlx::Error> {
-        self.query.count(self.pool).await
+        let mut query = self.query.build_select_query();
+        query.count_only = true;
+        query.pagination = None;
+        query.sorts.clear();
+        let rendered = render_select_query(B::DIALECT, &query);
+        let rows = B::fetch_rows(self.pool, &rendered.sql, &rendered.values).await?;
+        let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+        B::try_get_i64(row, "count")
     }
 
-    #[cfg(feature = "sqlite")]
     pub async fn count_on<'e, E>(self, executor: E) -> Result<i64, sqlx::Error>
     where
-        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
-    {
-        self.query.count_on(executor).await
-    }
-
-    #[cfg(feature = "postgres")]
-    pub async fn count_on<'e, E>(self, executor: E) -> Result<i64, sqlx::Error>
-    where
-        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+        B: SqlxBackend,
+        E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
     {
         self.query.count_on(executor).await
     }
 
     pub async fn exists(self) -> Result<bool, sqlx::Error> {
-        Ok(self.query.count(self.pool).await? > 0)
+        Ok(self.count().await? > 0)
     }
 
-    #[cfg(feature = "sqlite")]
     pub async fn exists_on<'e, E>(self, executor: E) -> Result<bool, sqlx::Error>
     where
-        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
-    {
-        Ok(self.query.count_on(executor).await? > 0)
-    }
-
-    #[cfg(feature = "postgres")]
-    pub async fn exists_on<'e, E>(self, executor: E) -> Result<bool, sqlx::Error>
-    where
-        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+        B: SqlxBackend,
+        E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
     {
         Ok(self.query.count_on(executor).await? > 0)
     }
 }
 
-pub struct CountQuery<'a, W> {
-    pool: &'a DbPool,
+pub struct CountQuery<'a, W, B: OrmBackend = DefaultBackend> {
+    pool: &'a B::Pool,
     table: &'static str,
     filters: Vec<String>,
     values: Vec<SqlValue>,
-    _marker: PhantomData<W>,
+    _marker: PhantomData<(W, B)>,
 }
 
-impl<'a, W> CountQuery<'a, W>
+impl<'a, W, B> CountQuery<'a, W, B>
 where
+    B: OrmBackend,
     W: DatabaseFilter,
 {
-    pub fn new(pool: &'a DbPool, table: &'static str) -> Self {
+    pub fn new(pool: &'a B::Pool, table: &'static str) -> Self {
         Self {
             pool,
             table,
@@ -898,7 +868,7 @@ where
 
     pub async fn count(self) -> Result<i64, sqlx::Error> {
         let rendered = render_select_query(
-            current_backend(),
+            B::DIALECT,
             &SelectQuery {
                 table: self.table,
                 columns: Vec::new(),
@@ -908,18 +878,18 @@ where
                 count_only: true,
             },
         );
-        let rows = fetch_rows(self.pool, &rendered.sql, &rendered.values).await?;
+        let rows = B::fetch_rows(self.pool, &rendered.sql, &rendered.values).await?;
         let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
-        row.try_get::<i64, _>("count")
+        B::try_get_i64(row, "count")
     }
 
-    #[cfg(feature = "sqlite")]
     pub async fn count_on<'e, E>(self, executor: E) -> Result<i64, sqlx::Error>
     where
-        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+        B: SqlxBackend,
+        E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
     {
         let rendered = render_select_query(
-            current_backend(),
+            B::DIALECT,
             &SelectQuery {
                 table: self.table,
                 columns: Vec::new(),
@@ -929,29 +899,8 @@ where
                 count_only: true,
             },
         );
-        let rows = fetch_rows_on(executor, &rendered.sql, &rendered.values).await?;
+        let rows = B::fetch_rows_on(executor, rendered.sql, rendered.values).await?;
         let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
-        row.try_get::<i64, _>("count")
-    }
-
-    #[cfg(feature = "postgres")]
-    pub async fn count_on<'e, E>(self, executor: E) -> Result<i64, sqlx::Error>
-    where
-        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-    {
-        let rendered = render_select_query(
-            current_backend(),
-            &SelectQuery {
-                table: self.table,
-                columns: Vec::new(),
-                filter: filter_expression_from_raw_parts(&self.filters, &self.values),
-                sorts: Vec::new(),
-                pagination: None,
-                count_only: true,
-            },
-        );
-        let rows = fetch_rows_on(executor, &rendered.sql, &rendered.values).await?;
-        let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
-        row.try_get::<i64, _>("count")
+        B::try_get_i64(row, "count")
     }
 }

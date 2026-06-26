@@ -1,29 +1,60 @@
-#[cfg(not(feature = "mssql"))]
+#[cfg(any(
+    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+))]
+use super::DefaultBackend;
+#[cfg(any(
+    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+))]
 use super::core::{PlannedSchemaStage, SchemaStage};
 use super::core::{SqlValue, record_executed_query};
-#[cfg(not(feature = "mssql"))]
+#[cfg(any(
+    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+))]
 use super::dialect::current_backend;
-#[cfg(not(feature = "mssql"))]
+#[cfg(any(
+    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+))]
 use super::migrations::{build_migration_plan, introspect_schema};
-use crate::{DbPool, DbRow};
-#[cfg(feature = "sqlite")]
+use super::{OrmBackend, SqlxBackend};
+#[cfg(any(
+    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+))]
+use crate::DbPool;
+#[cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
 use sqlx::Acquire;
-#[cfg(not(feature = "mssql"))]
+#[cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
 use sqlx::Row;
-#[cfg(not(feature = "mssql"))]
+#[cfg(any(
+    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+))]
 use std::collections::HashSet;
 
-#[cfg(not(feature = "mssql"))]
+#[cfg(any(
+    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+))]
 const MIGRATION_HISTORY_TABLE: &str = "__graphql_orm_migrations";
 
-#[cfg(not(feature = "mssql"))]
+#[cfg(any(
+    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+))]
 pub struct Migration {
     pub version: &'static str,
     pub description: &'static str,
     pub statements: &'static [&'static str],
 }
 
-#[cfg(not(feature = "mssql"))]
+#[cfg(any(
+    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+))]
 pub trait MigrationSource {
     fn migrations() -> &'static [Migration] {
         &[]
@@ -31,13 +62,19 @@ pub trait MigrationSource {
 }
 
 #[allow(async_fn_in_trait)]
-#[cfg(not(feature = "mssql"))]
+#[cfg(any(
+    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+))]
 pub trait MigrationRunner {
     async fn apply_migrations(&self, migrations: &[Migration]) -> Result<(), sqlx::Error>;
 }
 
 #[allow(async_fn_in_trait)]
-#[cfg(not(feature = "mssql"))]
+#[cfg(any(
+    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+))]
 pub trait SchemaStageRunner {
     async fn plan_schema_stages(
         &self,
@@ -47,7 +84,10 @@ pub trait SchemaStageRunner {
     async fn apply_schema_stages(&self, stages: &[SchemaStage]) -> Result<(), sqlx::Error>;
 }
 
-#[cfg(not(feature = "mssql"))]
+#[cfg(any(
+    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+))]
 impl MigrationRunner for crate::db::Database {
     async fn apply_migrations(&self, migrations: &[Migration]) -> Result<(), sqlx::Error> {
         prepare_migration_runtime(self.pool()).await?;
@@ -69,7 +109,10 @@ impl MigrationRunner for crate::db::Database {
     }
 }
 
-#[cfg(not(feature = "mssql"))]
+#[cfg(any(
+    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+))]
 impl SchemaStageRunner for crate::db::Database {
     async fn plan_schema_stages(
         &self,
@@ -117,15 +160,21 @@ impl SchemaStageRunner for crate::db::Database {
     }
 }
 
-#[cfg(not(feature = "mssql"))]
+#[cfg(any(
+    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+))]
 async fn prepare_migration_runtime(pool: &DbPool) -> Result<(), sqlx::Error> {
     ensure_migration_history_table(pool).await?;
-    #[cfg(feature = "sqlite")]
+    #[cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
     cleanup_stale_sqlite_rewrite_tables(pool).await?;
     Ok(())
 }
 
-#[cfg(not(feature = "mssql"))]
+#[cfg(any(
+    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+))]
 fn validate_schema_stages(stages: &[SchemaStage]) -> Result<(), sqlx::Error> {
     let mut seen = HashSet::new();
     for stage in stages {
@@ -149,7 +198,10 @@ fn validate_schema_stages(stages: &[SchemaStage]) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-#[cfg(not(feature = "mssql"))]
+#[cfg(any(
+    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+))]
 fn ensure_applied_stages_form_prefix(
     stages: &[SchemaStage],
     applied_versions: &HashSet<String>,
@@ -170,7 +222,7 @@ fn ensure_applied_stages_form_prefix(
     Ok(())
 }
 
-#[cfg(feature = "sqlite")]
+#[cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
 async fn ensure_migration_history_table(pool: &DbPool) -> Result<(), sqlx::Error> {
     sqlx::query(&format!(
         "CREATE TABLE IF NOT EXISTS {} (
@@ -185,7 +237,7 @@ async fn ensure_migration_history_table(pool: &DbPool) -> Result<(), sqlx::Error
     Ok(())
 }
 
-#[cfg(feature = "postgres")]
+#[cfg(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql"))))]
 async fn ensure_migration_history_table(pool: &DbPool) -> Result<(), sqlx::Error> {
     sqlx::query(&format!(
         "CREATE TABLE IF NOT EXISTS {} (
@@ -200,9 +252,12 @@ async fn ensure_migration_history_table(pool: &DbPool) -> Result<(), sqlx::Error
     Ok(())
 }
 
-#[cfg(not(feature = "mssql"))]
+#[cfg(any(
+    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+))]
 async fn load_applied_migration_versions(pool: &DbPool) -> Result<HashSet<String>, sqlx::Error> {
-    let rows = fetch_rows(
+    let rows = fetch_rows::<DefaultBackend>(
         pool,
         &format!(
             "SELECT version FROM {} ORDER BY version",
@@ -212,11 +267,11 @@ async fn load_applied_migration_versions(pool: &DbPool) -> Result<HashSet<String
     )
     .await?;
     rows.into_iter()
-        .map(|row| row.try_get::<String, _>("version"))
+        .map(|row| DefaultBackend::try_get_string(&row, "version"))
         .collect()
 }
 
-#[cfg(feature = "sqlite")]
+#[cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
 async fn cleanup_stale_sqlite_rewrite_tables(pool: &DbPool) -> Result<(), sqlx::Error> {
     let rows = sqlx::query(
         "SELECT name
@@ -239,7 +294,7 @@ async fn cleanup_stale_sqlite_rewrite_tables(pool: &DbPool) -> Result<(), sqlx::
     Ok(())
 }
 
-#[cfg(feature = "sqlite")]
+#[cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
 async fn apply_migration_statements_transactionally<S>(
     pool: &DbPool,
     version: &str,
@@ -317,7 +372,7 @@ where
     final_result
 }
 
-#[cfg(feature = "postgres")]
+#[cfg(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql"))))]
 async fn apply_migration_statements_transactionally<S>(
     pool: &DbPool,
     version: &str,
@@ -349,176 +404,44 @@ where
     Ok(())
 }
 
-#[cfg(feature = "sqlite")]
-pub async fn execute_with_binds(
+pub async fn execute_with_binds<B: SqlxBackend>(
     sql: &str,
     values: &[SqlValue],
-    pool: &DbPool,
-) -> Result<sqlx::sqlite::SqliteQueryResult, sqlx::Error> {
+    pool: &B::Pool,
+) -> Result<B::QueryResult, sqlx::Error> {
     record_executed_query();
-    execute_with_binds_on(pool, sql, values).await
+    B::execute_with_binds(pool, sql, values).await
 }
 
-#[cfg(feature = "postgres")]
-pub async fn execute_with_binds(
+pub async fn fetch_rows<B: OrmBackend>(
+    pool: &B::Pool,
     sql: &str,
     values: &[SqlValue],
-    pool: &DbPool,
-) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error> {
+) -> Result<Vec<B::Row>, sqlx::Error> {
     record_executed_query();
-    execute_with_binds_on(pool, sql, values).await
+    B::fetch_rows(pool, sql, values).await
 }
 
-pub async fn fetch_rows(
-    pool: &DbPool,
-    sql: &str,
-    values: &[SqlValue],
-) -> Result<Vec<DbRow>, sqlx::Error> {
-    record_executed_query();
-    fetch_rows_on(pool, sql, values).await
-}
-
-#[cfg(feature = "mssql")]
-pub struct MssqlWriteResult;
-
-#[cfg(feature = "mssql")]
-impl MssqlWriteResult {
-    pub fn rows_affected(&self) -> u64 {
-        0
-    }
-}
-
-#[cfg(feature = "mssql")]
-pub async fn execute_with_binds(
-    _sql: &str,
-    _values: &[SqlValue],
-    _pool: &DbPool,
-) -> Result<MssqlWriteResult, sqlx::Error> {
-    Err(sqlx::Error::Protocol(
-        "graphql-orm MSSQL backend is read-only; write execution is not available".to_string(),
-    ))
-}
-
-#[cfg(feature = "sqlite")]
-pub async fn execute_with_binds_on<'e, E>(
+pub async fn execute_with_binds_on<'e, B, E>(
     executor: E,
     sql: &str,
     values: &[SqlValue],
-) -> Result<sqlx::sqlite::SqliteQueryResult, sqlx::Error>
+) -> Result<B::QueryResult, sqlx::Error>
 where
-    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    B: SqlxBackend,
+    E: sqlx::Executor<'e, Database = B::Database> + Send + 'e,
 {
-    let mut query = sqlx::query(sql);
-    for value in values {
-        query = match value {
-            SqlValue::String(value) => query.bind(value),
-            SqlValue::Bytes(value) => query.bind(value),
-            SqlValue::BytesNull => query.bind(Option::<Vec<u8>>::None),
-            SqlValue::Json(value) => query.bind(value.to_string()),
-            SqlValue::JsonNull => query.bind(Option::<String>::None),
-            SqlValue::Uuid(value) => query.bind(crate::db::sqlite_helpers::uuid_to_string(value)),
-            SqlValue::Int(value) => query.bind(*value),
-            SqlValue::Float(value) => query.bind(*value),
-            SqlValue::Bool(value) => query.bind(*value),
-            SqlValue::Null => query.bind(Option::<String>::None),
-        };
-    }
-    query.execute(executor).await
+    B::execute_with_binds_on(executor, sql.to_string(), values.to_vec()).await
 }
 
-#[cfg(feature = "postgres")]
-pub async fn execute_with_binds_on<'e, E>(
+pub async fn fetch_rows_on<'e, B, E>(
     executor: E,
     sql: &str,
     values: &[SqlValue],
-) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+) -> Result<Vec<B::Row>, sqlx::Error>
 where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    B: SqlxBackend,
+    E: sqlx::Executor<'e, Database = B::Database> + Send + 'e,
 {
-    let sql = super::query::normalize_sql(sql, 1);
-    let mut query = sqlx::query(&sql);
-    for value in values {
-        query = match value {
-            SqlValue::String(value) => query.bind(value),
-            SqlValue::Bytes(value) => query.bind(value),
-            SqlValue::BytesNull => query.bind(Option::<Vec<u8>>::None),
-            SqlValue::Json(value) => query.bind(sqlx::types::Json(value.clone())),
-            SqlValue::JsonNull => query.bind(Option::<sqlx::types::Json<serde_json::Value>>::None),
-            SqlValue::Uuid(value) => query.bind(*value),
-            SqlValue::Int(value) => query.bind(*value),
-            SqlValue::Float(value) => query.bind(*value),
-            SqlValue::Bool(value) => query.bind(*value),
-            SqlValue::Null => query.bind(Option::<String>::None),
-        };
-    }
-    query.execute(executor).await
-}
-
-#[cfg(feature = "sqlite")]
-pub async fn fetch_rows_on<'e, E>(
-    executor: E,
-    sql: &str,
-    values: &[SqlValue],
-) -> Result<Vec<DbRow>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
-{
-    #[cfg(feature = "sqlite")]
-    {
-        let mut query = sqlx::query(sql);
-        for value in values {
-            query = match value {
-                SqlValue::String(value) => query.bind(value),
-                SqlValue::Bytes(value) => query.bind(value),
-                SqlValue::BytesNull => query.bind(Option::<Vec<u8>>::None),
-                SqlValue::Json(value) => query.bind(value.to_string()),
-                SqlValue::JsonNull => query.bind(Option::<String>::None),
-                SqlValue::Uuid(value) => {
-                    query.bind(crate::db::sqlite_helpers::uuid_to_string(value))
-                }
-                SqlValue::Int(value) => query.bind(*value),
-                SqlValue::Float(value) => query.bind(*value),
-                SqlValue::Bool(value) => query.bind(*value),
-                SqlValue::Null => query.bind(Option::<String>::None),
-            };
-        }
-        query.fetch_all(executor).await
-    }
-}
-
-#[cfg(feature = "postgres")]
-pub async fn fetch_rows_on<'e, E>(
-    executor: E,
-    sql: &str,
-    values: &[SqlValue],
-) -> Result<Vec<DbRow>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let sql = super::query::normalize_sql(sql, 1);
-    let mut query = sqlx::query(&sql);
-    for value in values {
-        query = match value {
-            SqlValue::String(value) => query.bind(value),
-            SqlValue::Bytes(value) => query.bind(value),
-            SqlValue::BytesNull => query.bind(Option::<Vec<u8>>::None),
-            SqlValue::Json(value) => query.bind(sqlx::types::Json(value.clone())),
-            SqlValue::JsonNull => query.bind(Option::<sqlx::types::Json<serde_json::Value>>::None),
-            SqlValue::Uuid(value) => query.bind(*value),
-            SqlValue::Int(value) => query.bind(*value),
-            SqlValue::Float(value) => query.bind(*value),
-            SqlValue::Bool(value) => query.bind(*value),
-            SqlValue::Null => query.bind(Option::<String>::None),
-        };
-    }
-    query.fetch_all(executor).await
-}
-
-#[cfg(feature = "mssql")]
-pub async fn fetch_rows_on(
-    pool: &DbPool,
-    sql: &str,
-    values: &[SqlValue],
-) -> Result<Vec<DbRow>, sqlx::Error> {
-    pool.fetch_rows(sql, values).await
+    B::fetch_rows_on(executor, sql.to_string(), values.to_vec()).await
 }

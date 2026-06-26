@@ -1,6 +1,9 @@
-use crate::DbPool;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+use crate::graphql::orm::WriteBackend;
+use crate::graphql::orm::{DefaultBackend, OrmBackend};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::sync::{Arc, RwLock};
 
 #[cfg(feature = "mssql")]
@@ -13,27 +16,40 @@ struct EventSenders {
 
 const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 256;
 
-#[derive(Clone)]
-pub struct Database {
-    pool: DbPool,
-    #[cfg(not(feature = "mssql"))]
-    mutation_hook: Option<Arc<dyn crate::graphql::orm::MutationHook>>,
-    entity_policy: Option<Arc<dyn crate::graphql::orm::EntityPolicy>>,
-    field_policy: Option<Arc<dyn crate::graphql::orm::FieldPolicy>>,
-    row_policy: Option<Arc<dyn crate::graphql::orm::RowPolicy>>,
-    #[cfg(not(feature = "mssql"))]
-    write_input_transform: Option<Arc<dyn crate::graphql::orm::WriteInputTransform>>,
-    #[cfg(not(feature = "mssql"))]
-    post_commit_error_handler: Option<Arc<dyn crate::graphql::orm::PostCommitErrorHandler>>,
+pub struct Database<B: OrmBackend = DefaultBackend> {
+    pool: B::Pool,
+    mutation_hook: Option<Arc<dyn Any + Send + Sync>>,
+    entity_policy: Option<Arc<dyn crate::graphql::orm::EntityPolicy<B>>>,
+    field_policy: Option<Arc<dyn crate::graphql::orm::FieldPolicy<B>>>,
+    row_policy: Option<Arc<dyn crate::graphql::orm::RowPolicy<B>>>,
+    write_input_transform: Option<Arc<dyn Any + Send + Sync>>,
+    post_commit_error_handler: Option<Arc<dyn Any + Send + Sync>>,
     change_journal_enabled: bool,
     event_senders: Arc<EventSenders>,
+    _backend: PhantomData<B>,
 }
 
-impl std::fmt::Debug for Database {
+impl<B: OrmBackend> Clone for Database<B> {
+    fn clone(&self) -> Self {
+        Self {
+            pool: self.pool.clone(),
+            mutation_hook: self.mutation_hook.clone(),
+            entity_policy: self.entity_policy.clone(),
+            field_policy: self.field_policy.clone(),
+            row_policy: self.row_policy.clone(),
+            write_input_transform: self.write_input_transform.clone(),
+            post_commit_error_handler: self.post_commit_error_handler.clone(),
+            change_journal_enabled: self.change_journal_enabled,
+            event_senders: self.event_senders.clone(),
+            _backend: PhantomData,
+        }
+    }
+}
+
+impl<B: OrmBackend> std::fmt::Debug for Database<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut debug = f.debug_struct("Database");
         debug.field("pool", &"DbPool");
-        #[cfg(not(feature = "mssql"))]
         debug.field("has_mutation_hook", &self.mutation_hook.is_some());
         debug
             .field("has_field_policy", &self.field_policy.is_some())
@@ -41,29 +57,29 @@ impl std::fmt::Debug for Database {
     }
 }
 
-impl Database {
-    pub fn new(pool: DbPool) -> Self {
+impl<B: OrmBackend> Database<B> {
+    pub fn new(pool: B::Pool) -> Self {
         Self {
             pool,
-            #[cfg(not(feature = "mssql"))]
             mutation_hook: None,
             entity_policy: None,
             field_policy: None,
             row_policy: None,
-            #[cfg(not(feature = "mssql"))]
             write_input_transform: None,
-            #[cfg(not(feature = "mssql"))]
             post_commit_error_handler: None,
             change_journal_enabled: false,
             event_senders: Arc::new(EventSenders::default()),
+            _backend: PhantomData,
         }
     }
 
-    #[cfg(not(feature = "mssql"))]
-    pub fn with_mutation_hook<H>(pool: DbPool, hook: H) -> Self
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub fn with_mutation_hook<H>(pool: B::Pool, hook: H) -> Self
     where
-        H: crate::graphql::orm::MutationHook + 'static,
+        B: WriteBackend,
+        H: crate::graphql::orm::MutationHook<B> + 'static,
     {
+        let hook: Arc<dyn crate::graphql::orm::MutationHook<B>> = Arc::new(hook);
         Self {
             pool,
             mutation_hook: Some(Arc::new(hook)),
@@ -74,74 +90,71 @@ impl Database {
             post_commit_error_handler: None,
             change_journal_enabled: false,
             event_senders: Arc::new(EventSenders::default()),
+            _backend: PhantomData,
         }
     }
 
-    pub fn with_entity_policy<H>(pool: DbPool, policy: H) -> Self
+    pub fn with_entity_policy<H>(pool: B::Pool, policy: H) -> Self
     where
-        H: crate::graphql::orm::EntityPolicy + 'static,
+        H: crate::graphql::orm::EntityPolicy<B> + 'static,
     {
         Self {
             pool,
-            #[cfg(not(feature = "mssql"))]
             mutation_hook: None,
             entity_policy: Some(Arc::new(policy)),
             field_policy: None,
             row_policy: None,
-            #[cfg(not(feature = "mssql"))]
             write_input_transform: None,
-            #[cfg(not(feature = "mssql"))]
             post_commit_error_handler: None,
             change_journal_enabled: false,
             event_senders: Arc::new(EventSenders::default()),
+            _backend: PhantomData,
         }
     }
 
-    pub fn with_field_policy<H>(pool: DbPool, policy: H) -> Self
+    pub fn with_field_policy<H>(pool: B::Pool, policy: H) -> Self
     where
-        H: crate::graphql::orm::FieldPolicy + 'static,
+        H: crate::graphql::orm::FieldPolicy<B> + 'static,
     {
         Self {
             pool,
-            #[cfg(not(feature = "mssql"))]
             mutation_hook: None,
             entity_policy: None,
             field_policy: Some(Arc::new(policy)),
             row_policy: None,
-            #[cfg(not(feature = "mssql"))]
             write_input_transform: None,
-            #[cfg(not(feature = "mssql"))]
             post_commit_error_handler: None,
             change_journal_enabled: false,
             event_senders: Arc::new(EventSenders::default()),
+            _backend: PhantomData,
         }
     }
 
-    pub fn with_row_policy<H>(pool: DbPool, policy: H) -> Self
+    pub fn with_row_policy<H>(pool: B::Pool, policy: H) -> Self
     where
-        H: crate::graphql::orm::RowPolicy + 'static,
+        H: crate::graphql::orm::RowPolicy<B> + 'static,
     {
         Self {
             pool,
-            #[cfg(not(feature = "mssql"))]
             mutation_hook: None,
             entity_policy: None,
             field_policy: None,
             row_policy: Some(Arc::new(policy)),
-            #[cfg(not(feature = "mssql"))]
             write_input_transform: None,
-            #[cfg(not(feature = "mssql"))]
             post_commit_error_handler: None,
             change_journal_enabled: false,
             event_senders: Arc::new(EventSenders::default()),
+            _backend: PhantomData,
         }
     }
 
-    #[cfg(not(feature = "mssql"))]
-    pub fn with_write_input_transform<H>(pool: DbPool, transform: H) -> Self
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub fn with_write_input_transform<H>(pool: B::Pool, transform: H) -> Self
     where
-        H: crate::graphql::orm::WriteInputTransform + 'static,
+        B: WriteBackend,
+        H: crate::graphql::orm::WriteInputTransform<B> + 'static,
     {
+        let transform: Arc<dyn crate::graphql::orm::WriteInputTransform<B>> = Arc::new(transform);
         Self {
             pool,
             mutation_hook: None,
@@ -152,21 +165,24 @@ impl Database {
             post_commit_error_handler: None,
             change_journal_enabled: false,
             event_senders: Arc::new(EventSenders::default()),
+            _backend: PhantomData,
         }
     }
 
-    #[cfg(not(feature = "mssql"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub fn with_hooks<M, E, F>(
-        pool: DbPool,
+        pool: B::Pool,
         mutation_hook: M,
         entity_policy: E,
         field_policy: F,
     ) -> Self
     where
-        M: crate::graphql::orm::MutationHook + 'static,
-        E: crate::graphql::orm::EntityPolicy + 'static,
-        F: crate::graphql::orm::FieldPolicy + 'static,
+        B: WriteBackend,
+        M: crate::graphql::orm::MutationHook<B> + 'static,
+        E: crate::graphql::orm::EntityPolicy<B> + 'static,
+        F: crate::graphql::orm::FieldPolicy<B> + 'static,
     {
+        let mutation_hook: Arc<dyn crate::graphql::orm::MutationHook<B>> = Arc::new(mutation_hook);
         Self {
             pool,
             mutation_hook: Some(Arc::new(mutation_hook)),
@@ -177,10 +193,11 @@ impl Database {
             post_commit_error_handler: None,
             change_journal_enabled: false,
             event_senders: Arc::new(EventSenders::default()),
+            _backend: PhantomData,
         }
     }
 
-    pub fn pool(&self) -> &DbPool {
+    pub fn pool(&self) -> &B::Pool {
         &self.pool
     }
 
@@ -197,80 +214,101 @@ impl Database {
         self.change_journal_enabled
     }
 
-    #[cfg(not(feature = "mssql"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub fn set_mutation_hook<H>(&mut self, hook: H)
     where
-        H: crate::graphql::orm::MutationHook + 'static,
+        B: WriteBackend,
+        H: crate::graphql::orm::MutationHook<B> + 'static,
     {
+        let hook: Arc<dyn crate::graphql::orm::MutationHook<B>> = Arc::new(hook);
         self.mutation_hook = Some(Arc::new(hook));
     }
 
-    #[cfg(not(feature = "mssql"))]
-    pub fn mutation_hook(&self) -> Option<&Arc<dyn crate::graphql::orm::MutationHook>> {
-        self.mutation_hook.as_ref()
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub fn mutation_hook(&self) -> Option<&Arc<dyn crate::graphql::orm::MutationHook<B>>>
+    where
+        B: WriteBackend,
+    {
+        self.mutation_hook
+            .as_ref()
+            .and_then(|hook| hook.downcast_ref::<Arc<dyn crate::graphql::orm::MutationHook<B>>>())
     }
 
     pub fn set_entity_policy<H>(&mut self, policy: H)
     where
-        H: crate::graphql::orm::EntityPolicy + 'static,
+        H: crate::graphql::orm::EntityPolicy<B> + 'static,
     {
         self.entity_policy = Some(Arc::new(policy));
     }
 
-    pub fn entity_policy(&self) -> Option<&Arc<dyn crate::graphql::orm::EntityPolicy>> {
+    pub fn entity_policy(&self) -> Option<&Arc<dyn crate::graphql::orm::EntityPolicy<B>>> {
         self.entity_policy.as_ref()
     }
 
     pub fn set_field_policy<H>(&mut self, policy: H)
     where
-        H: crate::graphql::orm::FieldPolicy + 'static,
+        H: crate::graphql::orm::FieldPolicy<B> + 'static,
     {
         self.field_policy = Some(Arc::new(policy));
     }
 
-    pub fn field_policy(&self) -> Option<&Arc<dyn crate::graphql::orm::FieldPolicy>> {
+    pub fn field_policy(&self) -> Option<&Arc<dyn crate::graphql::orm::FieldPolicy<B>>> {
         self.field_policy.as_ref()
     }
 
     pub fn set_row_policy<H>(&mut self, policy: H)
     where
-        H: crate::graphql::orm::RowPolicy + 'static,
+        H: crate::graphql::orm::RowPolicy<B> + 'static,
     {
         self.row_policy = Some(Arc::new(policy));
     }
 
-    pub fn row_policy(&self) -> Option<&Arc<dyn crate::graphql::orm::RowPolicy>> {
+    pub fn row_policy(&self) -> Option<&Arc<dyn crate::graphql::orm::RowPolicy<B>>> {
         self.row_policy.as_ref()
     }
 
-    #[cfg(not(feature = "mssql"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub fn set_write_input_transform<H>(&mut self, transform: H)
     where
-        H: crate::graphql::orm::WriteInputTransform + 'static,
+        B: WriteBackend,
+        H: crate::graphql::orm::WriteInputTransform<B> + 'static,
     {
+        let transform: Arc<dyn crate::graphql::orm::WriteInputTransform<B>> = Arc::new(transform);
         self.write_input_transform = Some(Arc::new(transform));
     }
 
-    #[cfg(not(feature = "mssql"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub fn write_input_transform(
         &self,
-    ) -> Option<&Arc<dyn crate::graphql::orm::WriteInputTransform>> {
-        self.write_input_transform.as_ref()
+    ) -> Option<&Arc<dyn crate::graphql::orm::WriteInputTransform<B>>>
+    where
+        B: WriteBackend,
+    {
+        self.write_input_transform.as_ref().and_then(|transform| {
+            transform.downcast_ref::<Arc<dyn crate::graphql::orm::WriteInputTransform<B>>>()
+        })
     }
 
-    #[cfg(not(feature = "mssql"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub fn set_post_commit_error_handler<H>(&mut self, handler: H)
     where
-        H: crate::graphql::orm::PostCommitErrorHandler + 'static,
+        B: WriteBackend,
+        H: crate::graphql::orm::PostCommitErrorHandler<B> + 'static,
     {
+        let handler: Arc<dyn crate::graphql::orm::PostCommitErrorHandler<B>> = Arc::new(handler);
         self.post_commit_error_handler = Some(Arc::new(handler));
     }
 
-    #[cfg(not(feature = "mssql"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub fn post_commit_error_handler(
         &self,
-    ) -> Option<&Arc<dyn crate::graphql::orm::PostCommitErrorHandler>> {
-        self.post_commit_error_handler.as_ref()
+    ) -> Option<&Arc<dyn crate::graphql::orm::PostCommitErrorHandler<B>>>
+    where
+        B: WriteBackend,
+    {
+        self.post_commit_error_handler.as_ref().and_then(|handler| {
+            handler.downcast_ref::<Arc<dyn crate::graphql::orm::PostCommitErrorHandler<B>>>()
+        })
     }
 
     pub fn register_event_sender<T>(&self, sender: tokio::sync::broadcast::Sender<T>)
@@ -331,9 +369,12 @@ impl Database {
         let _ = sender.send(event);
     }
 
-    #[cfg(not(feature = "mssql"))]
-    pub async fn report_post_commit_error(&self, error: String) {
-        if let Some(handler) = &self.post_commit_error_handler {
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub async fn report_post_commit_error(&self, error: String)
+    where
+        B: WriteBackend,
+    {
+        if let Some(handler) = self.post_commit_error_handler() {
             handler.on_post_commit_error(self, &error).await;
         } else {
             eprintln!("graphql-orm post-commit action failed: {error}");
@@ -519,13 +560,16 @@ impl Database {
         }
     }
 
-    #[cfg(not(feature = "mssql"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub async fn run_before_create(
         &self,
         ctx: Option<&async_graphql::Context<'_>>,
         entity_name: &'static str,
         input: &mut (dyn Any + Send + Sync),
-    ) -> async_graphql::Result<()> {
+    ) -> async_graphql::Result<()>
+    where
+        B: WriteBackend,
+    {
         let mut write_ctx = if let Some(ctx) = ctx {
             crate::graphql::orm::WriteInputContext::graphql(self, ctx, entity_name)
         } else {
@@ -535,27 +579,33 @@ impl Database {
             .await
     }
 
-    #[cfg(not(feature = "mssql"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub async fn run_before_create_with_context(
         &self,
-        write_ctx: &mut crate::graphql::orm::WriteInputContext<'_, '_>,
+        write_ctx: &mut crate::graphql::orm::WriteInputContext<'_, '_, B>,
         input: &mut (dyn Any + Send + Sync),
-    ) -> async_graphql::Result<()> {
-        if let Some(transform) = &self.write_input_transform {
+    ) -> async_graphql::Result<()>
+    where
+        B: WriteBackend,
+    {
+        if let Some(transform) = self.write_input_transform() {
             transform.before_create_with_context(write_ctx, input).await
         } else {
             Ok(())
         }
     }
 
-    #[cfg(not(feature = "mssql"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub async fn run_before_update(
         &self,
         ctx: Option<&async_graphql::Context<'_>>,
         entity_name: &'static str,
         existing_row: Option<&(dyn Any + Send + Sync)>,
         input: &mut (dyn Any + Send + Sync),
-    ) -> async_graphql::Result<()> {
+    ) -> async_graphql::Result<()>
+    where
+        B: WriteBackend,
+    {
         let mut write_ctx = if let Some(ctx) = ctx {
             crate::graphql::orm::WriteInputContext::graphql(self, ctx, entity_name)
         } else {
@@ -565,14 +615,17 @@ impl Database {
             .await
     }
 
-    #[cfg(not(feature = "mssql"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub async fn run_before_update_with_context(
         &self,
-        write_ctx: &mut crate::graphql::orm::WriteInputContext<'_, '_>,
+        write_ctx: &mut crate::graphql::orm::WriteInputContext<'_, '_, B>,
         existing_row: Option<&(dyn Any + Send + Sync)>,
         input: &mut (dyn Any + Send + Sync),
-    ) -> async_graphql::Result<()> {
-        if let Some(transform) = &self.write_input_transform {
+    ) -> async_graphql::Result<()>
+    where
+        B: WriteBackend,
+    {
+        if let Some(transform) = self.write_input_transform() {
             transform
                 .before_update_with_context(write_ctx, existing_row, input)
                 .await
@@ -581,13 +634,16 @@ impl Database {
         }
     }
 
-    #[cfg(not(feature = "mssql"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub async fn run_before_upsert(
         &self,
         ctx: Option<&async_graphql::Context<'_>>,
         entity_name: &'static str,
         input: &mut (dyn Any + Send + Sync),
-    ) -> async_graphql::Result<()> {
+    ) -> async_graphql::Result<()>
+    where
+        B: WriteBackend,
+    {
         let mut write_ctx = if let Some(ctx) = ctx {
             crate::graphql::orm::WriteInputContext::graphql(self, ctx, entity_name)
         } else {
@@ -597,13 +653,16 @@ impl Database {
             .await
     }
 
-    #[cfg(not(feature = "mssql"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub async fn run_before_upsert_with_context(
         &self,
-        write_ctx: &mut crate::graphql::orm::WriteInputContext<'_, '_>,
+        write_ctx: &mut crate::graphql::orm::WriteInputContext<'_, '_, B>,
         input: &mut (dyn Any + Send + Sync),
-    ) -> async_graphql::Result<()> {
-        if let Some(transform) = &self.write_input_transform {
+    ) -> async_graphql::Result<()>
+    where
+        B: WriteBackend,
+    {
+        if let Some(transform) = self.write_input_transform() {
             transform.before_upsert_with_context(write_ctx, input).await
         } else {
             Ok(())

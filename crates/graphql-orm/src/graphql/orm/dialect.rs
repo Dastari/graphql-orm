@@ -194,16 +194,22 @@ impl SqlDialect for DatabaseBackend {
 }
 
 pub fn current_backend() -> DatabaseBackend {
-    #[cfg(feature = "sqlite")]
-    {
+    if cfg!(all(
+        feature = "sqlite",
+        not(any(feature = "postgres", feature = "mssql"))
+    )) {
         DatabaseBackend::Sqlite
-    }
-    #[cfg(feature = "postgres")]
-    {
+    } else if cfg!(all(
+        feature = "postgres",
+        not(any(feature = "sqlite", feature = "mssql"))
+    )) {
         DatabaseBackend::Postgres
-    }
-    #[cfg(feature = "mssql")]
-    {
+    } else if cfg!(all(
+        feature = "mssql",
+        not(any(feature = "sqlite", feature = "postgres"))
+    )) {
         DatabaseBackend::Mssql
+    } else {
+        DatabaseBackend::Sqlite
     }
 }

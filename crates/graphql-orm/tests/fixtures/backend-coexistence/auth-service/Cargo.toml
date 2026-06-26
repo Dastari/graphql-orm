@@ -1,0 +1,14 @@
+[package]
+name = "auth-service"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-graphql = { version = "7", features = ["dataloader", "uuid"] }
+graphql-orm = { path = "../../../../", default-features = false, features = [
+  "sqlite",
+  "resolver-case-pascal",
+  "argument-case-pascal",
+  "field-case-pascal",
+] }
+serde = { version = "1", features = ["derive"] }

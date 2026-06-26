@@ -1,6 +1,7 @@
 use super::*;
 use crate::backend::{
-    backend_pool_type_tokens, backend_quote_identifier_path, backend_relation_key_cast,
+    backend_marker_tokens, backend_pool_type_tokens, backend_quote_identifier_path,
+    backend_relation_key_cast, resolve_backend,
 };
 use crate::entity::{
     collect_parsed_fields, has_graphql_complex, parse_entity_metadata,
@@ -116,7 +117,14 @@ pub(crate) fn generate_graphql_relations(
     input: &DeriveInput,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let struct_name = &input.ident;
-    let pool_type = backend_pool_type_tokens();
+    let entity_meta = parse_entity_metadata(&input.attrs)?;
+    let backend = resolve_backend(
+        entity_meta.backend.as_deref(),
+        struct_name.span(),
+        "graphql_entity",
+    )?;
+    let backend_marker = backend_marker_tokens(backend);
+    let pool_type = backend_pool_type_tokens(backend);
 
     let data = match &input.data {
         Data::Struct(data) => data,
@@ -138,7 +146,6 @@ pub(crate) fn generate_graphql_relations(
         }
     };
 
-    let entity_meta = parse_entity_metadata(&input.attrs)?;
     let graphql_rename_fields = entity_meta.graphql_rename_fields.as_deref();
     let serde_rename_all = entity_meta.serde_rename_all.as_deref();
     let argument_case = selected_argument_case();
@@ -275,7 +282,7 @@ pub(crate) fn generate_graphql_relations(
         let field_name = &r.field_name;
         let graphql_name = &r.graphql_name;
         let fk_column = &r.fk_column;
-        let fk_column_sql = backend_quote_identifier_path(fk_column);
+        let fk_column_sql = backend_quote_identifier_path(backend, fk_column);
         let source_column = &r.source_column;
         let source_field = syn::Ident::new(source_column, struct_name.span());
         let source_supports_dataloader = r.source_supports_dataloader;
@@ -435,7 +442,7 @@ pub(crate) fn generate_graphql_relations(
                 ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, DatabaseOrderBy, EntityQuery, SqlValue};
 
-                    let db = ctx.data_unchecked::<::graphql_orm::db::Database>();
+                    let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                     db.ensure_entity_access(
                         Some(ctx),
                         <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name(),
@@ -473,7 +480,7 @@ pub(crate) fn generate_graphql_relations(
                         use ::graphql_orm::graphql::loaders::RelationLoader;
                         use ::graphql_orm::async_graphql::dataloader::DataLoader;
 
-                        let loader = ctx.data_unchecked::<DataLoader<RelationLoader<#target_type>>>();
+                        let loader = ctx.data_unchecked::<DataLoader<RelationLoader<#target_type, #backend_marker>>>();
                         loader
                             .load_one(#relation_query_key)
                             .await
@@ -487,7 +494,7 @@ pub(crate) fn generate_graphql_relations(
                             })
                     } else {
                         // Slow path: Use direct query with full SQL support
-                        let mut query = EntityQuery::<#target_type>::new()
+                        let mut query = EntityQuery::<#target_type, #backend_marker>::new()
                             .where_clause(
                                 &format!("{} = {}", #fk_column_sql, #target_type::__gom_placeholder(1)),
                                 relation_sql_value
@@ -578,7 +585,7 @@ pub(crate) fn generate_graphql_relations(
                         #preloaded_single
                     }
 
-                    let db = ctx.data_unchecked::<::graphql_orm::db::Database>();
+                    let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                     db.ensure_entity_access(
                         Some(ctx),
                         <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name(),
@@ -592,14 +599,14 @@ pub(crate) fn generate_graphql_relations(
                         use ::graphql_orm::graphql::loaders::RelationLoader;
                         use ::graphql_orm::async_graphql::dataloader::DataLoader;
 
-                        let loader = ctx.data_unchecked::<DataLoader<RelationLoader<#target_type>>>();
+                        let loader = ctx.data_unchecked::<DataLoader<RelationLoader<#target_type, #backend_marker>>>();
                         loader
                             .load_one(#single_relation_query_key)
                             .await
                             .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?
                             .and_then(|mut result| result.entities.drain(..).next())
                     } else {
-                        EntityQuery::<#target_type>::new()
+                        EntityQuery::<#target_type, #backend_marker>::new()
                             .where_clause(
                                 &format!("{} = {}", #fk_column_sql, #target_type::__gom_placeholder(1)),
                                 relation_sql_value
@@ -622,8 +629,8 @@ pub(crate) fn generate_graphql_relations(
             let field_name = &r.field_name;
             let graphql_name = &r.graphql_name;
             let fk_column = &r.fk_column;
-            let fk_column_sql = backend_quote_identifier_path(fk_column);
-            let relation_key_cast = backend_relation_key_cast(fk_column);
+            let fk_column_sql = backend_quote_identifier_path(backend, fk_column);
+            let relation_key_cast = backend_relation_key_cast(backend, fk_column);
             let source_column = &r.source_column;
             let source_field = syn::Ident::new(source_column, struct_name.span());
             let target_type = syn::Ident::new(&r.target_type_str, struct_name.span());
@@ -789,11 +796,10 @@ pub(crate) fn generate_graphql_relations(
                             placeholders.join(", ")
                         );
 
-                        let rows = ::graphql_orm::graphql::orm::fetch_rows(pool, &sql, &bind_values).await?;
+                        let rows = ::graphql_orm::graphql::orm::fetch_rows::<#backend_marker>(pool, &sql, &bind_values).await?;
                         for row in rows {
-                            use ::graphql_orm::sqlx::Row;
-                            let relation_key: String = row.try_get("__gom_relation_key")?;
-                            let related = <#target_type as ::graphql_orm::graphql::orm::FromSqlRow>::from_row(&row)?;
+                            let relation_key = <#backend_marker as ::graphql_orm::OrmBackend>::try_get_string(&row, "__gom_relation_key")?;
+                            let related = <#target_type as ::graphql_orm::graphql::orm::FromSqlRow<#backend_marker>>::from_row(&row)?;
                             #insert_grouped
                         }
                     }
@@ -830,7 +836,7 @@ pub(crate) fn generate_graphql_relations(
     };
 
     Ok(quote! {
-        impl ::graphql_orm::graphql::orm::RelationLoader for #struct_name {
+        impl ::graphql_orm::graphql::orm::RelationLoader<#backend_marker> for #struct_name {
             async fn load_relations(
                 &mut self,
                 pool: &#pool_type,

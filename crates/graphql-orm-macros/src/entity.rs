@@ -1,13 +1,14 @@
 use super::*;
 use crate::backend::{
-    backend_current_epoch_expr, backend_helper_import_tokens, backend_quote_identifier_path,
-    backend_row_type_tokens,
+    BackendKind, backend_current_epoch_expr, backend_helper_import_tokens, backend_marker_tokens,
+    backend_quote_identifier_path, backend_row_type_tokens, resolve_backend,
 };
 use crate::naming::{graphql_field_name, selected_field_case_rule};
 use syn::spanned::Spanned;
 
 #[derive(Default)]
 pub(crate) struct EntityMetadata {
+    pub(crate) backend: Option<String>,
     pub(crate) table_name: Option<String>,
     pub(crate) plural_name: Option<String>,
     pub(crate) default_sort: Option<String>,
@@ -36,6 +37,10 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
                     metadata.table_name = Some(lit.value());
+                } else if meta.path.is_ident("backend") {
+                    let value = meta.value()?;
+                    let lit: syn::LitStr = value.parse()?;
+                    metadata.backend = Some(lit.value());
                 } else if meta.path.is_ident("plural") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
@@ -693,16 +698,23 @@ fn generate_entity_impl(
     schema_only_override: bool,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let struct_name = &input.ident;
-    let row_type = backend_row_type_tokens();
-    let helper_import = backend_helper_import_tokens();
-    let placeholder_body = if cfg!(feature = "postgres") {
+    let entity_meta = parse_entity_metadata(&input.attrs)?;
+    let backend = resolve_backend(
+        entity_meta.backend.as_deref(),
+        struct_name.span(),
+        "graphql_entity",
+    )?;
+    let backend_marker = backend_marker_tokens(backend);
+    let row_type = backend_row_type_tokens(backend);
+    let helper_import = backend_helper_import_tokens(backend);
+    let placeholder_body = if backend == BackendKind::Postgres {
         quote! { format!("${}", index) }
-    } else if cfg!(feature = "mssql") {
+    } else if backend == BackendKind::Mssql {
         quote! { format!("@P{}", index) }
     } else {
         quote! { "?".to_string() }
     };
-    let rebind_loop_body = if cfg!(feature = "postgres") || cfg!(feature = "mssql") {
+    let rebind_loop_body = if backend == BackendKind::Postgres || backend == BackendKind::Mssql {
         quote! {
             if chars[i] == '?' {
                 rebound.push_str(&Self::__gom_placeholder(next_index));
@@ -735,40 +747,40 @@ fn generate_entity_impl(
             }
         }
     };
-    let ci_like_body = if cfg!(feature = "postgres") {
+    let ci_like_body = if backend == BackendKind::Postgres {
         quote! { format!("{} ILIKE {}", column, placeholder) }
     } else {
         quote! { format!("LOWER({}) LIKE LOWER({})", column, placeholder) }
     };
-    let bool_sql_value_body = if cfg!(feature = "postgres") || cfg!(feature = "mssql") {
+    let bool_sql_value_body = if backend == BackendKind::Postgres || backend == BackendKind::Mssql {
         quote! { ::graphql_orm::graphql::orm::SqlValue::Bool(value) }
     } else {
         quote! { ::graphql_orm::graphql::orm::SqlValue::Int(if value { 1 } else { 0 }) }
     };
-    let current_epoch_runtime = if cfg!(feature = "postgres") {
+    let current_epoch_runtime = if backend == BackendKind::Postgres {
         quote! { "EXTRACT(EPOCH FROM NOW())::bigint" }
-    } else if cfg!(feature = "mssql") {
+    } else if backend == BackendKind::Mssql {
         quote! { "DATEDIFF_BIG(second, '1970-01-01', SYSUTCDATETIME())" }
     } else {
         quote! { "unixepoch()" }
     };
-    let current_date_runtime = if cfg!(feature = "postgres") {
+    let current_date_runtime = if backend == BackendKind::Postgres {
         quote! { "CURRENT_DATE" }
-    } else if cfg!(feature = "mssql") {
+    } else if backend == BackendKind::Mssql {
         quote! { "CAST(GETDATE() AS date)" }
     } else {
         quote! { "date('now')" }
     };
-    let days_ago_runtime = if cfg!(feature = "postgres") {
+    let days_ago_runtime = if backend == BackendKind::Postgres {
         quote! { format!("(CURRENT_DATE - INTERVAL '{} days')::date", days) }
-    } else if cfg!(feature = "mssql") {
+    } else if backend == BackendKind::Mssql {
         quote! { format!("DATEADD(day, -{}, CAST(GETDATE() AS date))", days) }
     } else {
         quote! { format!("date('now', '-{} days')", days) }
     };
-    let days_ahead_runtime = if cfg!(feature = "postgres") {
+    let days_ahead_runtime = if backend == BackendKind::Postgres {
         quote! { format!("(CURRENT_DATE + INTERVAL '{} days')::date", days) }
-    } else if cfg!(feature = "mssql") {
+    } else if backend == BackendKind::Mssql {
         quote! { format!("DATEADD(day, {}, CAST(GETDATE() AS date))", days) }
     } else {
         quote! { format!("date('now', '+{} days')", days) }
@@ -794,7 +806,6 @@ fn generate_entity_impl(
         }
     };
 
-    let entity_meta = parse_entity_metadata(&input.attrs)?;
     let schema_only = schema_only_override || entity_meta.schema_only;
     let entity_name_lit = struct_name.to_string();
     let backup_enabled = entity_meta.backup_enabled.unwrap_or(true);
@@ -827,7 +838,7 @@ fn generate_entity_impl(
         .unwrap_or_else(|| quote! { None });
     let legacy_graphql_complex = has_graphql_complex(&input.attrs);
     let raw_table_name = entity_meta.table_name.as_deref().unwrap_or("unknown");
-    let table_name = backend_quote_identifier_path(raw_table_name);
+    let table_name = backend_quote_identifier_path(backend, raw_table_name);
     let plural_name = entity_meta
         .plural_name
         .as_deref()
@@ -835,8 +846,8 @@ fn generate_entity_impl(
         .unwrap_or_else(|| format!("{}s", struct_name));
     let raw_default_sort = entity_meta.default_sort.as_deref().unwrap_or("id");
     let default_sort =
-        if cfg!(feature = "mssql") && !raw_default_sort.chars().any(char::is_whitespace) {
-            backend_quote_identifier_path(raw_default_sort)
+        if backend == BackendKind::Mssql && !raw_default_sort.chars().any(char::is_whitespace) {
+            backend_quote_identifier_path(backend, raw_default_sort)
         } else {
             raw_default_sort.to_string()
         };
@@ -962,7 +973,7 @@ fn generate_entity_impl(
             .db_column
             .clone()
             .unwrap_or_else(|| rust_name.clone());
-        let db_col_sql = backend_quote_identifier_path(&db_col);
+        let db_col_sql = backend_quote_identifier_path(backend, &db_col);
 
         column_names.push(db_col_sql.clone());
 
@@ -976,10 +987,10 @@ fn generate_entity_impl(
         let backup_policy =
             backup_policy_tokens(field_meta.backup_policy.as_deref(), field.span())?;
         let logical_type = backup_value_kind_tokens(field_type, &field_meta);
-        let sql_type = rust_type_to_sql_type(field_type, &field_meta);
+        let sql_type = rust_type_to_sql_type(backend, field_type, &field_meta);
         let default_val = field_meta.default.clone().or_else(|| {
             if rust_name == "created_at" || rust_name == "updated_at" {
-                Some(backend_current_epoch_expr().to_string())
+                Some(backend_current_epoch_expr(backend).to_string())
             } else {
                 None
             }
@@ -1081,7 +1092,7 @@ fn generate_entity_impl(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
                 ) -> ::graphql_orm::async_graphql::Result<#field_type> {
-                    let db = ctx.data_unchecked::<::graphql_orm::db::Database>();
+                    let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                     #subscribe_check
                     #policy_check
                     #return_expr
@@ -1091,12 +1102,12 @@ fn generate_entity_impl(
 
         // Generate FromSqlRow field assignment
         let row_assignment =
-            generate_row_field_assignment(field_name, field_type, &db_col, &field_meta)?;
+            generate_row_field_assignment(backend, field_name, field_type, &db_col, &field_meta)?;
         from_row_fields.push(row_assignment);
     }
 
-    let default_primary_key = if cfg!(feature = "mssql") {
-        backend_quote_identifier_path("id")
+    let default_primary_key = if backend == BackendKind::Mssql {
+        backend_quote_identifier_path(backend, "id")
     } else {
         "id".to_string()
     };
@@ -1397,9 +1408,8 @@ fn generate_entity_impl(
             }
         }
 
-        impl ::graphql_orm::graphql::orm::FromSqlRow for #struct_name {
+        impl ::graphql_orm::graphql::orm::FromSqlRow<#backend_marker> for #struct_name {
             fn from_row(row: &#row_type) -> Result<Self, ::graphql_orm::sqlx::Error> {
-                use ::graphql_orm::sqlx::Row;
                 #helper_import
 
                 Ok(Self {
@@ -1764,12 +1774,13 @@ fn generate_filter_field(
 // ============================================================================
 
 fn generate_row_field_assignment(
+    backend: BackendKind,
     field_name: &syn::Ident,
     field_type: &syn::Type,
     db_col: &str,
     meta: &FieldMetadata,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    let bool_expr = if cfg!(feature = "postgres") || cfg!(feature = "mssql") {
+    let bool_expr = if backend == BackendKind::Postgres || backend == BackendKind::Mssql {
         quote! { row.try_get::<bool, _>(#db_col)? }
     } else {
         quote! {{
@@ -1777,7 +1788,7 @@ fn generate_row_field_assignment(
             int_to_bool(i)
         }}
     };
-    let uuid_expr = if cfg!(feature = "postgres") || cfg!(feature = "mssql") {
+    let uuid_expr = if backend == BackendKind::Postgres || backend == BackendKind::Mssql {
         quote! { row.try_get(#db_col)? }
     } else {
         quote! {{
@@ -1785,7 +1796,7 @@ fn generate_row_field_assignment(
             str_to_uuid(&s).map_err(|e| ::graphql_orm::sqlx::Error::Decode(e.into()))?
         }}
     };
-    let datetime_expr = if cfg!(feature = "postgres") {
+    let datetime_expr = if backend == BackendKind::Postgres {
         quote! { row.try_get(#db_col)? }
     } else {
         quote! {{
@@ -1810,7 +1821,7 @@ fn generate_row_field_assignment(
     }
 
     if meta.is_json_field && !is_option_type(field_type) {
-        let json_expr = if cfg!(feature = "postgres") {
+        let json_expr = if backend == BackendKind::Postgres {
             quote! {{
                 let value: ::graphql_orm::sqlx::types::Json<::graphql_orm::serde_json::Value> =
                     row.try_get(#db_col)?;
@@ -1864,7 +1875,7 @@ fn generate_row_field_assignment(
                     if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
                         if let Some(syn::GenericArgument::Type(inner_type)) = args.args.first() {
                             return generate_option_row_field_assignment(
-                                field_name, inner_type, db_col, meta,
+                                backend, field_name, inner_type, db_col, meta,
                             );
                         }
                     }
@@ -1900,12 +1911,13 @@ fn generate_row_field_assignment(
 }
 
 fn generate_option_row_field_assignment(
+    backend: BackendKind,
     field_name: &syn::Ident,
     inner_type: &syn::Type,
     db_col: &str,
     meta: &FieldMetadata,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    let optional_bool_expr = if cfg!(feature = "postgres") || cfg!(feature = "mssql") {
+    let optional_bool_expr = if backend == BackendKind::Postgres || backend == BackendKind::Mssql {
         quote! { row.try_get(#db_col)? }
     } else {
         quote! {{
@@ -1913,7 +1925,7 @@ fn generate_option_row_field_assignment(
             i.map(int_to_bool)
         }}
     };
-    let optional_uuid_expr = if cfg!(feature = "postgres") || cfg!(feature = "mssql") {
+    let optional_uuid_expr = if backend == BackendKind::Postgres || backend == BackendKind::Mssql {
         quote! { row.try_get(#db_col)? }
     } else {
         quote! {{
@@ -1923,7 +1935,7 @@ fn generate_option_row_field_assignment(
                 .map_err(|e| ::graphql_orm::sqlx::Error::Decode(e.into()))?
         }}
     };
-    let optional_datetime_expr = if cfg!(feature = "postgres") {
+    let optional_datetime_expr = if backend == BackendKind::Postgres {
         quote! { row.try_get(#db_col)? }
     } else {
         quote! {{
@@ -1938,7 +1950,7 @@ fn generate_option_row_field_assignment(
             let inner_name = segment.ident.to_string();
 
             if meta.is_json_field {
-                let json_expr = if cfg!(feature = "postgres") {
+                let json_expr = if backend == BackendKind::Postgres {
                     quote! {{
                         let value: Option<::graphql_orm::sqlx::types::Json<::graphql_orm::serde_json::Value>> =
                             row.try_get(#db_col)?;
@@ -2116,7 +2128,11 @@ pub(crate) fn is_uuid_type(ty: &syn::Type) -> bool {
 }
 
 /// Convert Rust type to the configured backend SQL type string
-pub(crate) fn rust_type_to_sql_type(ty: &syn::Type, meta: &FieldMetadata) -> &'static str {
+pub(crate) fn rust_type_to_sql_type(
+    backend: BackendKind,
+    ty: &syn::Type,
+    meta: &FieldMetadata,
+) -> &'static str {
     // Handle Option<T> by unwrapping
     let inner_type = if is_option_type(ty) {
         if let syn::Type::Path(type_path) = ty {
@@ -2142,24 +2158,24 @@ pub(crate) fn rust_type_to_sql_type(ty: &syn::Type, meta: &FieldMetadata) -> &'s
 
     // Check field metadata first
     if meta.is_boolean_field {
-        return if cfg!(feature = "postgres") {
-            "BOOLEAN"
-        } else {
-            "INTEGER"
+        return match backend {
+            BackendKind::Postgres => "BOOLEAN",
+            BackendKind::Mssql => "BIT",
+            BackendKind::Sqlite => "INTEGER",
         };
     }
     if meta.is_json_field {
-        return if cfg!(feature = "postgres") {
-            "JSONB"
-        } else {
-            "TEXT"
+        return match backend {
+            BackendKind::Postgres => "JSONB",
+            BackendKind::Mssql => "NVARCHAR(MAX)",
+            BackendKind::Sqlite => "TEXT",
         };
     }
     if meta.is_date_field {
-        return if cfg!(feature = "postgres") {
-            "TIMESTAMPTZ"
-        } else {
-            "TEXT"
+        return match backend {
+            BackendKind::Postgres => "TIMESTAMPTZ",
+            BackendKind::Mssql => "DATETIME2",
+            BackendKind::Sqlite => "TEXT",
         };
     }
 
@@ -2168,54 +2184,60 @@ pub(crate) fn rust_type_to_sql_type(ty: &syn::Type, meta: &FieldMetadata) -> &'s
         if let Some(segment) = type_path.path.segments.last() {
             let type_name = segment.ident.to_string();
             match type_name.as_str() {
-                "String" | "str" => return "TEXT",
-                "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => {
-                    return if cfg!(feature = "postgres") {
-                        "BIGINT"
+                "String" | "str" => {
+                    return if backend == BackendKind::Mssql {
+                        "NVARCHAR(MAX)"
                     } else {
-                        "INTEGER"
+                        "TEXT"
+                    };
+                }
+                "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => {
+                    return match backend {
+                        BackendKind::Postgres => "BIGINT",
+                        BackendKind::Mssql => "BIGINT",
+                        BackendKind::Sqlite => "INTEGER",
                     };
                 }
                 "f32" | "f64" => {
-                    return if cfg!(feature = "postgres") {
-                        "DOUBLE PRECISION"
-                    } else {
-                        "REAL"
+                    return match backend {
+                        BackendKind::Postgres => "DOUBLE PRECISION",
+                        BackendKind::Mssql => "FLOAT",
+                        BackendKind::Sqlite => "REAL",
                     };
                 }
                 "bool" => {
-                    return if cfg!(feature = "postgres") {
-                        "BOOLEAN"
-                    } else {
-                        "INTEGER"
+                    return match backend {
+                        BackendKind::Postgres => "BOOLEAN",
+                        BackendKind::Mssql => "BIT",
+                        BackendKind::Sqlite => "INTEGER",
                     };
                 }
                 "Vec" => {
                     if is_byte_vec_type(inner_type) {
-                        return if cfg!(feature = "postgres") {
-                            "BYTEA"
-                        } else {
-                            "BLOB"
+                        return match backend {
+                            BackendKind::Postgres => "BYTEA",
+                            BackendKind::Mssql => "VARBINARY(MAX)",
+                            BackendKind::Sqlite => "BLOB",
                         };
                     }
-                    return if cfg!(feature = "postgres") {
-                        "JSONB"
-                    } else {
-                        "TEXT"
+                    return match backend {
+                        BackendKind::Postgres => "JSONB",
+                        BackendKind::Mssql => "NVARCHAR(MAX)",
+                        BackendKind::Sqlite => "TEXT",
                     };
                 }
                 "Uuid" => {
-                    return if cfg!(feature = "postgres") {
-                        "UUID"
-                    } else {
-                        "TEXT"
+                    return match backend {
+                        BackendKind::Postgres => "UUID",
+                        BackendKind::Mssql => "UNIQUEIDENTIFIER",
+                        BackendKind::Sqlite => "TEXT",
                     };
                 }
                 "DateTime" => {
-                    return if cfg!(feature = "postgres") {
-                        "TIMESTAMPTZ"
-                    } else {
-                        "TEXT"
+                    return match backend {
+                        BackendKind::Postgres => "TIMESTAMPTZ",
+                        BackendKind::Mssql => "DATETIME2",
+                        BackendKind::Sqlite => "TEXT",
                     };
                 }
                 _ => return "TEXT",

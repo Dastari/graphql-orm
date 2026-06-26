@@ -48,6 +48,45 @@ let schema = schema_builder(database)
 
 Apps can still attach extra app-specific data after `schema_builder(...)`. Auth, policy, and domain rules remain app concerns.
 
+## Backend Feature Selection
+
+Single-backend applications can continue selecting one backend feature and using the existing
+implicit backend behavior:
+
+```toml
+graphql-orm = { version = "0.2.7", default-features = false, features = ["sqlite"] }
+```
+
+When exactly one of `sqlite`, `postgres`, or `mssql` is enabled, `graphql_orm::DbPool`,
+`graphql_orm::DbRow`, derives without `backend = "..."`, and existing `schema_roots!` calls keep
+working as before.
+
+Cargo feature unification can enable more than one backend for the same `graphql-orm` package in a
+workspace. In that mode, choose the backend explicitly on each generated entity and schema root:
+
+```rust
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
+#[graphql_entity(backend = "mssql", table = "dbo.Jobs", plural = "Jobs")]
+pub struct Job {
+    #[primary_key]
+    #[graphql_orm(db_column = "JobId")]
+    pub id: i32,
+}
+
+schema_roots! {
+    backend: "mssql",
+    query_custom_ops: [],
+    entities: [Job],
+}
+```
+
+In multi-backend builds, `DbPool` and `DbRow` are intentionally not exported. Use explicit backend
+types such as `graphql_orm::db::Database::<graphql_orm::MssqlBackend>` or
+`graphql_orm::db::Database::<graphql_orm::SqliteBackend>`.
+
+Migration and backup APIs remain available for exactly-one SQLite or Postgres builds. Backend-explicit
+migrations/backups in mixed-backend builds are not part of this release.
+
 Generated subscriptions are operational by default through the `Database` runtime injected by `schema_builder(database)`.
 Host apps do not need to register one broadcast sender per entity changed-event type.
 If the schema is built without `Database` in schema data, generated subscriptions now fail explicitly instead of returning a silent empty stream.
@@ -345,7 +384,7 @@ The default schema remains camelCase. For compatibility with schemas that requir
 
 ```toml
 graphql-orm = {
-  version = "0.2.6",
+  version = "0.2.7",
   default-features = false,
   features = [
     "sqlite",
@@ -1187,6 +1226,10 @@ SQL Server support is available behind the `mssql` feature as a read/query-only 
 Tiberius. The SQL Server driver dependencies are optional and are not built unless the `mssql`
 feature is selected. It generates query operations, filters, ordering, pagination, relation loading,
 and read repository helpers, but intentionally omits writes and migrations.
+
+The `mssql` feature can coexist with SQLite or Postgres in a larger Cargo workspace. If more than
+one backend feature is enabled, MSSQL entities and schema roots must use `backend = "mssql"`
+explicitly.
 
 See [crates/graphql-orm/docs/MSSQL.md](crates/graphql-orm/docs/MSSQL.md) for setup, mapping, and
 opt-in integration test details.

@@ -10,14 +10,41 @@ not provide an MSSQL driver.
 
 ## Feature Selection
 
-Select exactly one backend feature:
+For a service that only uses SQL Server, select the `mssql` backend feature:
 
 ```toml
-graphql-orm = { version = "0.2.5", default-features = false, features = ["mssql"] }
+graphql-orm = { version = "0.2.7", default-features = false, features = ["mssql"] }
 ```
 
-The `sqlite`, `postgres`, and `mssql` features are mutually exclusive. Enabling more than one, or
-disabling all three, produces a compile-time error.
+When exactly one of `sqlite`, `postgres`, or `mssql` is enabled, the legacy implicit backend remains
+available. Existing derives without a backend attribute, existing `schema_roots!` calls, and
+`graphql_orm::DbPool` / `graphql_orm::DbRow` continue to work.
+
+Multiple backend features may be enabled by Cargo feature unification in a workspace. In that mode,
+each generated entity and schema root must select a backend explicitly:
+
+```rust
+#[graphql_entity(backend = "mssql", table = "dbo.Jobs", plural = "Jobs")]
+pub struct Job {
+    #[primary_key]
+    #[graphql_orm(db_column = "JobId")]
+    pub id: i32,
+}
+
+schema_roots! {
+    backend: "mssql",
+    query_custom_ops: [],
+    entities: [Job],
+}
+```
+
+If multiple backend features are enabled and an entity or schema root does not specify a backend,
+the macro emits a compile-time error. In multi-backend builds, `DbPool` and `DbRow` are intentionally
+not exported; use explicit backend types such as `graphql_orm::db::Database::<graphql_orm::MssqlBackend>`.
+
+Migration and backup APIs remain limited to exactly-one SQLite or Postgres builds. SQL Server is
+read-only, and backend-explicit migrations/backups for mixed-backend workspaces are not included in
+this phase.
 
 The SQL Server driver dependencies are also feature-gated. `tiberius`, `tokio-util`, and the Tokio
 TCP support required by Tiberius are optional dependencies and are activated only by the `mssql`
@@ -59,7 +86,7 @@ let pool = graphql_orm::db::mssql::MssqlPool::connect_ado(
 )
 .await?;
 
-let database = graphql_orm::db::Database::new(pool);
+let database = graphql_orm::db::Database::<graphql_orm::MssqlBackend>::new(pool);
 let schema = schema_builder(database)
     .data("current-user".to_string())
     .finish();
@@ -76,6 +103,7 @@ use graphql_orm::prelude::*;
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
 #[graphql_entity(
+    backend = "mssql",
     table = "dbo.Jobs",
     plural = "Jobs",
     default_sort = "[JobId] ASC"
@@ -102,6 +130,10 @@ pub struct LegacyJob {
     pub started_at: Option<String>,
 }
 ```
+
+For single-backend MSSQL builds, the `backend = "mssql"` attribute is optional. Keeping it on legacy
+SQL Server entities is recommended because it keeps the code valid in larger workspaces where SQLite
+or Postgres may be enabled by another service.
 
 The SQL Server dialect quotes generated identifiers as `[Name]`, renders schema-qualified tables as
 `[dbo].[Jobs]`, binds parameters as `@P1`, `@P2`, and uses:

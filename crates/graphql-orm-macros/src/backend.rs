@@ -1,73 +1,155 @@
 use super::*;
 
-pub(crate) fn backend_row_type_tokens() -> proc_macro2::TokenStream {
-    if cfg!(feature = "sqlite") {
-        quote! { ::graphql_orm::DbRow }
-    } else if cfg!(feature = "postgres") {
-        quote! { ::graphql_orm::DbRow }
-    } else if cfg!(feature = "mysql") {
-        quote! { ::graphql_orm::DbRow }
-    } else if cfg!(feature = "mssql") {
-        quote! { ::graphql_orm::DbRow }
-    } else {
-        proc_macro2::TokenStream::new()
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BackendKind {
+    Sqlite,
+    Postgres,
+    Mssql,
+}
+
+impl BackendKind {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Sqlite => "sqlite",
+            Self::Postgres => "postgres",
+            Self::Mssql => "mssql",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "sqlite" => Some(Self::Sqlite),
+            "postgres" | "postgresql" => Some(Self::Postgres),
+            "mssql" | "sqlserver" | "sql-server" => Some(Self::Mssql),
+            _ => None,
+        }
+    }
+
+    fn feature_enabled(self) -> bool {
+        match self {
+            Self::Sqlite => cfg!(feature = "sqlite"),
+            Self::Postgres => cfg!(feature = "postgres"),
+            Self::Mssql => cfg!(feature = "mssql"),
+        }
     }
 }
 
-pub(crate) fn backend_pool_type_tokens() -> proc_macro2::TokenStream {
+pub(crate) fn enabled_backends() -> Vec<BackendKind> {
+    let mut backends = Vec::new();
     if cfg!(feature = "sqlite") {
-        quote! { ::graphql_orm::DbPool }
-    } else if cfg!(feature = "postgres") {
-        quote! { ::graphql_orm::DbPool }
-    } else if cfg!(feature = "mysql") {
-        quote! { ::graphql_orm::DbPool }
-    } else if cfg!(feature = "mssql") {
-        quote! { ::graphql_orm::DbPool }
-    } else {
-        proc_macro2::TokenStream::new()
+        backends.push(BackendKind::Sqlite);
     }
-}
-
-pub(crate) fn backend_database_type_tokens() -> proc_macro2::TokenStream {
-    if cfg!(feature = "sqlite") {
-        quote! { ::graphql_orm::sqlx::Sqlite }
-    } else if cfg!(feature = "postgres") {
-        quote! { ::graphql_orm::sqlx::Postgres }
-    } else if cfg!(feature = "mysql") {
-        quote! { ::graphql_orm::sqlx::MySql }
-    } else if cfg!(feature = "mssql") {
-        quote! { ::graphql_orm::db::mssql::Mssql }
-    } else {
-        proc_macro2::TokenStream::new()
-    }
-}
-
-pub(crate) fn backend_helper_import_tokens() -> proc_macro2::TokenStream {
-    if cfg!(feature = "sqlite") {
-        quote! { use ::graphql_orm::db::sqlite_helpers::*; }
-    } else if cfg!(feature = "postgres") {
-        quote! { use ::graphql_orm::db::postgres_helpers::*; }
-    } else if cfg!(feature = "mysql") {
-        quote! { use ::graphql_orm::db::mysql_helpers::*; }
-    } else if cfg!(feature = "mssql") {
-        quote! { use ::graphql_orm::db::mssql_helpers::*; }
-    } else {
-        proc_macro2::TokenStream::new()
-    }
-}
-
-pub(crate) fn backend_current_epoch_expr() -> &'static str {
     if cfg!(feature = "postgres") {
-        "(EXTRACT(EPOCH FROM NOW())::bigint)"
-    } else if cfg!(feature = "mssql") {
-        "DATEDIFF_BIG(second, '1970-01-01', SYSUTCDATETIME())"
-    } else {
-        "(unixepoch())"
+        backends.push(BackendKind::Postgres);
+    }
+    if cfg!(feature = "mssql") {
+        backends.push(BackendKind::Mssql);
+    }
+    backends
+}
+
+pub(crate) fn resolve_backend(
+    requested: Option<&str>,
+    span: proc_macro2::Span,
+    context: &str,
+) -> syn::Result<BackendKind> {
+    if let Some(requested) = requested {
+        let backend = BackendKind::from_name(requested).ok_or_else(|| {
+            syn::Error::new(
+                span,
+                format!(
+                    "unsupported graphql-orm backend `{requested}`; expected sqlite, postgres, or mssql"
+                ),
+            )
+        })?;
+        if !backend.feature_enabled() {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "graphql-orm backend `{}` was requested for {context}, but the `{}` feature is not enabled",
+                    backend.name(),
+                    backend.name()
+                ),
+            ));
+        }
+        return Ok(backend);
+    }
+
+    let enabled = enabled_backends();
+    match enabled.as_slice() {
+        [backend] => Ok(*backend),
+        [] => Err(syn::Error::new(
+            span,
+            "enable at least one graphql-orm backend feature: sqlite, postgres, or mssql",
+        )),
+        _ => Err(syn::Error::new(
+            span,
+            format!(
+                "multiple graphql-orm backend features are enabled ({}); specify backend = \"sqlite\", \"postgres\", or \"mssql\" on {context}",
+                enabled
+                    .iter()
+                    .map(|backend| backend.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )),
     }
 }
 
-pub(crate) fn backend_quote_identifier(identifier: &str) -> String {
-    if cfg!(feature = "mssql") {
+pub(crate) fn backend_marker_tokens(backend: BackendKind) -> proc_macro2::TokenStream {
+    match backend {
+        BackendKind::Sqlite => quote! { ::graphql_orm::SqliteBackend },
+        BackendKind::Postgres => quote! { ::graphql_orm::PostgresBackend },
+        BackendKind::Mssql => quote! { ::graphql_orm::MssqlBackend },
+    }
+}
+
+pub(crate) fn backend_row_type_tokens(backend: BackendKind) -> proc_macro2::TokenStream {
+    let marker = backend_marker_tokens(backend);
+    quote! { <#marker as ::graphql_orm::OrmBackend>::Row }
+}
+
+pub(crate) fn backend_pool_type_tokens(backend: BackendKind) -> proc_macro2::TokenStream {
+    let marker = backend_marker_tokens(backend);
+    quote! { <#marker as ::graphql_orm::OrmBackend>::Pool }
+}
+
+pub(crate) fn backend_database_type_tokens(backend: BackendKind) -> proc_macro2::TokenStream {
+    let marker = backend_marker_tokens(backend);
+    quote! { <#marker as ::graphql_orm::SqlxBackend>::Database }
+}
+
+pub(crate) fn backend_dialect_expr(backend: BackendKind) -> proc_macro2::TokenStream {
+    let marker = backend_marker_tokens(backend);
+    quote! { <#marker as ::graphql_orm::OrmBackend>::DIALECT }
+}
+
+pub(crate) fn backend_helper_import_tokens(backend: BackendKind) -> proc_macro2::TokenStream {
+    match backend {
+        BackendKind::Sqlite => quote! {
+            use ::graphql_orm::sqlx::Row;
+            use ::graphql_orm::db::sqlite_helpers::*;
+        },
+        BackendKind::Postgres => quote! {
+            use ::graphql_orm::sqlx::Row;
+            use ::graphql_orm::db::postgres_helpers::*;
+        },
+        BackendKind::Mssql => quote! {
+            use ::graphql_orm::db::mssql_helpers::*;
+        },
+    }
+}
+
+pub(crate) fn backend_current_epoch_expr(backend: BackendKind) -> &'static str {
+    match backend {
+        BackendKind::Postgres => "(EXTRACT(EPOCH FROM NOW())::bigint)",
+        BackendKind::Mssql => "DATEDIFF_BIG(second, '1970-01-01', SYSUTCDATETIME())",
+        BackendKind::Sqlite => "(unixepoch())",
+    }
+}
+
+pub(crate) fn backend_quote_identifier(backend: BackendKind, identifier: &str) -> String {
+    if backend == BackendKind::Mssql {
         if identifier.starts_with('[') && identifier.ends_with(']') {
             identifier.to_string()
         } else {
@@ -78,12 +160,12 @@ pub(crate) fn backend_quote_identifier(identifier: &str) -> String {
     }
 }
 
-pub(crate) fn backend_quote_identifier_path(identifier: &str) -> String {
-    if cfg!(feature = "mssql") {
+pub(crate) fn backend_quote_identifier_path(backend: BackendKind, identifier: &str) -> String {
+    if backend == BackendKind::Mssql {
         identifier
             .split('.')
             .filter(|part| !part.is_empty())
-            .map(backend_quote_identifier)
+            .map(|part| backend_quote_identifier(backend, part))
             .collect::<Vec<_>>()
             .join(".")
     } else {
@@ -91,11 +173,11 @@ pub(crate) fn backend_quote_identifier_path(identifier: &str) -> String {
     }
 }
 
-pub(crate) fn backend_relation_key_cast(column: &str) -> String {
-    if cfg!(feature = "mssql") {
+pub(crate) fn backend_relation_key_cast(backend: BackendKind, column: &str) -> String {
+    if backend == BackendKind::Mssql {
         format!(
             "CAST({} AS NVARCHAR(4000))",
-            backend_quote_identifier_path(column)
+            backend_quote_identifier_path(backend, column)
         )
     } else {
         format!("CAST({column} AS TEXT)")

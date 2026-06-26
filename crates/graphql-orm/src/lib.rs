@@ -19,15 +19,8 @@ pub use tokio_stream;
 pub use tokio_util;
 pub use uuid;
 
-#[cfg(any(
-    all(feature = "sqlite", feature = "postgres"),
-    all(feature = "sqlite", feature = "mssql"),
-    all(feature = "postgres", feature = "mssql")
-))]
-compile_error!("Enable only one backend feature for graphql-orm.");
-
 #[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mssql")))]
-compile_error!("Enable exactly one backend feature for graphql-orm.");
+compile_error!("Enable at least one backend feature for graphql-orm.");
 
 #[cfg(any(
     all(feature = "resolver-case-pascal", feature = "resolver-case-snake"),
@@ -95,20 +88,24 @@ compile_error!("Enable at most one argument-case-* feature for graphql-orm.");
 ))]
 compile_error!("Enable at most one field-case-* feature for graphql-orm.");
 
-#[cfg(feature = "sqlite")]
-pub type DbPool = sqlx::SqlitePool;
-#[cfg(feature = "sqlite")]
-pub type DbRow = sqlx::sqlite::SqliteRow;
+pub use crate::graphql::orm::{
+    DefaultBackend, DefaultWriteBackend, MigrationBackend, MssqlBackend, NoDefaultBackend,
+    OrmBackend, PostgresBackend, SqliteBackend, SqlxBackend, SubscriptionBackend, WriteBackend,
+};
 
-#[cfg(feature = "postgres")]
-pub type DbPool = sqlx::PgPool;
-#[cfg(feature = "postgres")]
-pub type DbRow = sqlx::postgres::PgRow;
+#[cfg(any(
+    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql"))),
+    all(feature = "mssql", not(any(feature = "sqlite", feature = "postgres")))
+))]
+pub type DbPool = <DefaultBackend as OrmBackend>::Pool;
 
-#[cfg(feature = "mssql")]
-pub type DbPool = crate::db::mssql::MssqlPool;
-#[cfg(feature = "mssql")]
-pub type DbRow = crate::db::mssql::MssqlRow;
+#[cfg(any(
+    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql"))),
+    all(feature = "mssql", not(any(feature = "sqlite", feature = "postgres")))
+))]
+pub type DbRow = <DefaultBackend as OrmBackend>::Row;
 
 pub mod db;
 pub mod graphql;

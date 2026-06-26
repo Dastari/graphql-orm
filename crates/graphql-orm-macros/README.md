@@ -24,7 +24,7 @@ Use it with:
 The paired `graphql-orm` runtime now provides:
 
 - runtime metadata types generated from derives
-- backend-aware query rendering for SQLite and PostgreSQL
+- backend-aware query rendering for SQLite, PostgreSQL, and read-only SQL Server
 - schema models, diffing, migration planning, migration-file rendering, and live schema introspection
 - live integration coverage for generated CRUD, nested relations, subscriptions, and N+1-preload behavior
 
@@ -36,7 +36,7 @@ The macro crate remains responsible for code generation. Runtime execution, sche
 cargo check
 ```
 
-## Planned Feature Flags
+## Feature Flags
 
 - `sqlite`
 - `postgres`
@@ -58,14 +58,20 @@ cargo check
 - `field-case-lower`
 - `field-case-upper`
 
-Exactly one backend flag must be enabled at a time. The selected flag now controls the generated runtime pool and row aliases:
+When exactly one backend flag is enabled, the selected backend controls the generated runtime pool
+and row aliases:
 
 - `sqlite` -> `graphql_orm::DbPool`, `graphql_orm::DbRow`
 - `postgres` -> `graphql_orm::DbPool`, `graphql_orm::DbRow`
 - `mysql` -> planned
-- `mssql` -> planned
+- `mssql` -> `graphql_orm::DbPool`, `graphql_orm::DbRow` in read-only builds
 
-SQLite and PostgreSQL are covered by live integration tests through `graphql-orm`. MySQL and SQL Server remain planned.
+More than one backend may be enabled in a workspace through Cargo feature unification. In that mode,
+generated code must select its backend explicitly with `#[graphql_entity(backend = "...")]` and
+`schema_roots! { backend: "...", ... }`; `DbPool` and `DbRow` are not exported.
+
+SQLite and PostgreSQL are covered by live integration tests through `graphql-orm`. SQL Server has
+read-only compile and opt-in integration coverage. MySQL remains planned.
 
 The naming feature groups are independent:
 

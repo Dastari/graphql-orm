@@ -1,21 +1,19 @@
-use crate::DbRow;
+use crate::graphql::orm::{DefaultBackend, OrmBackend};
 use async_graphql::dataloader::Loader;
-#[cfg(not(feature = "mssql"))]
-use sqlx::Row;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
-pub trait BatchLoadEntity:
+pub trait BatchLoadEntity<B: OrmBackend = DefaultBackend>:
     crate::graphql::orm::DatabaseEntity
-    + crate::graphql::orm::FromSqlRow
+    + crate::graphql::orm::FromSqlRow<B>
     + Clone
     + Send
     + Sync
     + 'static
 {
     fn batch_column() -> &'static str;
-    fn batch_key_from_row(row: &DbRow) -> Result<String, sqlx::Error>;
+    fn batch_key_from_row(row: &B::Row) -> Result<String, sqlx::Error>;
 }
 
 #[derive(Clone, Debug)]
@@ -74,13 +72,13 @@ struct RelationGroupKey {
     page_signature: Option<String>,
 }
 
-pub struct RelationLoader<T> {
-    db: crate::db::Database,
-    _marker: PhantomData<T>,
+pub struct RelationLoader<T, B: OrmBackend = DefaultBackend> {
+    db: crate::db::Database<B>,
+    _marker: PhantomData<(T, B)>,
 }
 
-impl<T> RelationLoader<T> {
-    pub fn new(db: crate::db::Database) -> Self {
+impl<T, B: OrmBackend> RelationLoader<T, B> {
+    pub fn new(db: crate::db::Database<B>) -> Self {
         Self {
             db,
             _marker: PhantomData,
@@ -88,9 +86,10 @@ impl<T> RelationLoader<T> {
     }
 }
 
-impl<T> Loader<String> for RelationLoader<T>
+impl<T, B> Loader<String> for RelationLoader<T, B>
 where
-    T: BatchLoadEntity,
+    B: OrmBackend,
+    T: BatchLoadEntity<B>,
 {
     type Value = Vec<T>;
     type Error = String;
@@ -103,13 +102,13 @@ where
         let keys = keys.to_vec();
         let db = self.db.clone();
         async move {
-            use crate::graphql::orm::{SqlDialect, SqlValue, current_backend, fetch_rows};
+            use crate::graphql::orm::{SqlDialect, SqlValue};
 
             if keys.is_empty() {
                 return Ok(HashMap::new());
             }
 
-            let backend = current_backend();
+            let backend = B::DIALECT;
             let params = (1..=keys.len())
                 .map(|index| backend.placeholder(index))
                 .collect::<Vec<_>>()
@@ -128,7 +127,7 @@ where
                 .map(SqlValue::String)
                 .collect::<Vec<_>>();
 
-            let rows = fetch_rows(db.pool(), &sql, &values)
+            let rows = B::fetch_rows(db.pool(), &sql, &values)
                 .await
                 .map_err(|error| error.to_string())?;
 
@@ -146,9 +145,10 @@ where
     }
 }
 
-impl<T> Loader<RelationQueryKey> for RelationLoader<T>
+impl<T, B> Loader<RelationQueryKey> for RelationLoader<T, B>
 where
-    T: BatchLoadEntity,
+    B: OrmBackend,
+    T: BatchLoadEntity<B>,
 {
     type Value = RelationLoadResult<T>;
     type Error = String;
@@ -164,8 +164,8 @@ where
 
         async move {
             use crate::graphql::orm::{
-                DatabaseBackend, FilterExpression, PaginationRequest, SelectQuery, SortExpression,
-                SqlDialect, current_backend, fetch_rows, render_select_query,
+                FilterExpression, PaginationRequest, SelectQuery, SortExpression, SqlDialect,
+                render_select_query,
             };
 
             if keys.is_empty() {
@@ -198,16 +198,10 @@ where
                     parent_key_order.push(key.parent_key.clone());
                 }
 
-                let placeholders = match current_backend() {
-                    DatabaseBackend::Postgres => (1..=parent_values.len())
-                        .map(|index| format!("${index}"))
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    _ => (0..parent_values.len())
-                        .map(|_| "?".to_string())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                };
+                let placeholders = (1..=parent_values.len())
+                    .map(B::placeholder)
+                    .collect::<Vec<_>>()
+                    .join(", ");
 
                 let parent_filter = FilterExpression::Raw {
                     clause: format!("{} IN ({})", sample.fk_column, placeholders),
@@ -224,7 +218,7 @@ where
                 sorts.extend(sample.sorts.clone());
 
                 let rendered = render_select_query(
-                    current_backend(),
+                    B::DIALECT,
                     &SelectQuery {
                         table: T::TABLE_NAME,
                         columns: T::column_names()
@@ -232,7 +226,7 @@ where
                             .map(|column| (*column).to_string())
                             .chain(std::iter::once(format!(
                                 "{} AS __gom_relation_key",
-                                current_backend().relation_key_cast(sample.fk_column)
+                                B::DIALECT.relation_key_cast(sample.fk_column)
                             )))
                             .collect(),
                         filter: Some(filter),
@@ -242,7 +236,7 @@ where
                     },
                 );
 
-                let rows = fetch_rows(db.pool(), &rendered.sql, &rendered.values)
+                let rows = B::fetch_rows(db.pool(), &rendered.sql, &rendered.values)
                     .await
                     .map_err(|error| error.to_string())?;
 
@@ -253,8 +247,7 @@ where
                     .collect();
 
                 for row in rows {
-                    let parent_key = row
-                        .try_get::<String, _>("__gom_relation_key")
+                    let parent_key = B::try_get_string(&row, "__gom_relation_key")
                         .map_err(|error| error.to_string())?;
                     let entity = T::from_row(&row).map_err(|error| error.to_string())?;
                     grouped_entities.entry(parent_key).or_default().push(entity);

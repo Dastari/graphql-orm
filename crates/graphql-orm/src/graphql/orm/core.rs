@@ -1,7 +1,10 @@
 use super::dialect::DatabaseBackend;
 use super::query::{ChangeAction, DatabaseEntity, DatabaseSchema, EntityRelations};
-#[cfg(not(feature = "mssql"))]
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use super::query::{DatabaseFilter, DatabaseOrderBy, EntityQuery, FromSqlRow};
+use super::{DefaultBackend, OrmBackend};
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+use super::{DefaultWriteBackend, WriteBackend};
 use std::any::Any;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -108,20 +111,20 @@ impl MutationEvent {
     }
 }
 
-#[cfg(not(feature = "mssql"))]
-trait DeferredEventEmitter: Send {
-    fn emit(self: Box<Self>, db: &crate::db::Database);
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+trait DeferredEventEmitter<B: OrmBackend>: Send {
+    fn emit(self: Box<Self>, db: &crate::db::Database<B>);
 }
 
-#[cfg(not(feature = "mssql"))]
-trait PostCommitActionRunner: Send {
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+trait PostCommitActionRunner<B: OrmBackend>: Send {
     fn run(
         self: Box<Self>,
-        db: crate::db::Database,
+        db: crate::db::Database<B>,
     ) -> futures::future::BoxFuture<'static, Result<(), String>>;
 }
 
-#[cfg(not(feature = "mssql"))]
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 struct DeferredEvent<T>
 where
     T: Clone + Send + Sync + 'static,
@@ -129,31 +132,33 @@ where
     event: T,
 }
 
-#[cfg(not(feature = "mssql"))]
-impl<T> DeferredEventEmitter for DeferredEvent<T>
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+impl<T, B> DeferredEventEmitter<B> for DeferredEvent<T>
 where
+    B: OrmBackend,
     T: Clone + Send + Sync + 'static,
 {
-    fn emit(self: Box<Self>, db: &crate::db::Database) {
+    fn emit(self: Box<Self>, db: &crate::db::Database<B>) {
         db.emit_event(self.event);
     }
 }
 
-#[cfg(not(feature = "mssql"))]
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 struct DeferredAction<F> {
     action: Option<F>,
 }
 
-#[cfg(not(feature = "mssql"))]
-impl<F, Fut, E> PostCommitActionRunner for DeferredAction<F>
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+impl<F, Fut, E, B> PostCommitActionRunner<B> for DeferredAction<F>
 where
-    F: FnOnce(crate::db::Database) -> Fut + Send + 'static,
+    B: OrmBackend,
+    F: FnOnce(crate::db::Database<B>) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Result<(), E>> + Send + 'static,
     E: std::fmt::Display + Send + 'static,
 {
     fn run(
         mut self: Box<Self>,
-        db: crate::db::Database,
+        db: crate::db::Database<B>,
     ) -> futures::future::BoxFuture<'static, Result<(), String>> {
         let action = self
             .action
@@ -163,37 +168,32 @@ where
     }
 }
 
-#[cfg(feature = "sqlite")]
-pub struct MutationContext<'tx> {
-    db: &'tx crate::db::Database,
-    tx: sqlx::Transaction<'tx, sqlx::Sqlite>,
-    deferred_events: Vec<Box<dyn DeferredEventEmitter>>,
-    deferred_actions: Vec<Box<dyn PostCommitActionRunner>>,
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
+    db: &'tx crate::db::Database<B>,
+    tx: sqlx::Transaction<'tx, B::Database>,
+    deferred_events: Vec<Box<dyn DeferredEventEmitter<B>>>,
+    deferred_actions: Vec<Box<dyn PostCommitActionRunner<B>>>,
 }
 
-#[cfg(feature = "postgres")]
-pub struct MutationContext<'tx> {
-    db: &'tx crate::db::Database,
-    tx: sqlx::Transaction<'tx, sqlx::Postgres>,
-    deferred_events: Vec<Box<dyn DeferredEventEmitter>>,
-    deferred_actions: Vec<Box<dyn PostCommitActionRunner>>,
-}
-
-#[cfg(not(feature = "mssql"))]
-pub struct MutationQuery<'ctx, 'tx, T>
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub struct MutationQuery<'ctx, 'tx, T, B: WriteBackend = DefaultWriteBackend>
 where
-    T: DatabaseEntity + FromSqlRow + Clone + Send + Sync,
+    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync,
 {
-    hook_ctx: &'ctx mut MutationContext<'tx>,
-    query: EntityQuery<T>,
+    hook_ctx: &'ctx mut MutationContext<'tx, B>,
+    query: EntityQuery<T, B>,
 }
 
-#[cfg(not(feature = "mssql"))]
-impl<'ctx, 'tx, T> MutationQuery<'ctx, 'tx, T>
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+impl<'ctx, 'tx, T, B> MutationQuery<'ctx, 'tx, T, B>
 where
-    T: DatabaseEntity + FromSqlRow + Clone + Send + Sync,
+    B: WriteBackend,
+    for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
+        sqlx::Executor<'c, Database = B::Database> + Send,
+    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync,
 {
-    fn new(hook_ctx: &'ctx mut MutationContext<'tx>) -> Self {
+    fn new(hook_ctx: &'ctx mut MutationContext<'tx, B>) -> Self {
         Self {
             hook_ctx,
             query: EntityQuery::new(),
@@ -260,28 +260,31 @@ where
     }
 }
 
-#[cfg(not(feature = "mssql"))]
-pub struct WriteInputContext<'ctx, 'tx> {
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub struct WriteInputContext<'ctx, 'tx, B: WriteBackend = DefaultWriteBackend> {
     graphql_ctx: Option<&'ctx async_graphql::Context<'ctx>>,
     entity_name: &'static str,
     origin: WriteOrigin,
-    database: Option<&'ctx crate::db::Database>,
-    mutation_ctx: Option<&'ctx mut MutationContext<'tx>>,
+    database: Option<&'ctx crate::db::Database<B>>,
+    mutation_ctx: Option<&'ctx mut MutationContext<'tx, B>>,
 }
 
-#[cfg(not(feature = "mssql"))]
-pub struct WriteQuery<'ctx, 'write, 'tx, T>
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub struct WriteQuery<'ctx, 'write, 'tx, T, B: WriteBackend = DefaultWriteBackend>
 where
-    T: DatabaseEntity + FromSqlRow + Clone + Send + Sync,
+    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync,
 {
-    write_ctx: &'ctx mut WriteInputContext<'write, 'tx>,
-    query: EntityQuery<T>,
+    write_ctx: &'ctx mut WriteInputContext<'write, 'tx, B>,
+    query: EntityQuery<T, B>,
 }
 
-#[cfg(not(feature = "mssql"))]
-impl<'ctx, 'write> WriteInputContext<'ctx, 'write> {
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+impl<'ctx, 'write, B> WriteInputContext<'ctx, 'write, B>
+where
+    B: WriteBackend,
+{
     pub fn graphql(
-        db: &'ctx crate::db::Database,
+        db: &'ctx crate::db::Database<B>,
         ctx: &'ctx async_graphql::Context<'ctx>,
         entity_name: &'static str,
     ) -> Self {
@@ -294,7 +297,7 @@ impl<'ctx, 'write> WriteInputContext<'ctx, 'write> {
         }
     }
 
-    pub fn repository(db: &'ctx crate::db::Database, entity_name: &'static str) -> Self {
+    pub fn repository(db: &'ctx crate::db::Database<B>, entity_name: &'static str) -> Self {
         Self {
             graphql_ctx: None,
             entity_name,
@@ -306,7 +309,7 @@ impl<'ctx, 'write> WriteInputContext<'ctx, 'write> {
 
     pub fn internal(
         entity_name: &'static str,
-        hook_ctx: &'ctx mut MutationContext<'write>,
+        hook_ctx: &'ctx mut MutationContext<'write, B>,
     ) -> Self {
         Self {
             graphql_ctx: None,
@@ -329,7 +332,7 @@ impl<'ctx, 'write> WriteInputContext<'ctx, 'write> {
         self.origin
     }
 
-    pub fn database(&self) -> &crate::db::Database {
+    pub fn database(&self) -> &crate::db::Database<B> {
         if let Some(db) = self.database {
             db
         } else {
@@ -357,9 +360,9 @@ impl<'ctx, 'write> WriteInputContext<'ctx, 'write> {
             .auth_user()
     }
 
-    pub fn query<'a, T>(&'a mut self) -> WriteQuery<'a, 'ctx, 'write, T>
+    pub fn query<'a, T>(&'a mut self) -> WriteQuery<'a, 'ctx, 'write, T, B>
     where
-        T: DatabaseEntity + FromSqlRow + Clone + Send + Sync,
+        T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync,
     {
         WriteQuery {
             write_ctx: self,
@@ -368,10 +371,13 @@ impl<'ctx, 'write> WriteInputContext<'ctx, 'write> {
     }
 }
 
-#[cfg(not(feature = "mssql"))]
-impl<'ctx, 'write, 'tx, T> WriteQuery<'ctx, 'write, 'tx, T>
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+impl<'ctx, 'write, 'tx, T, B> WriteQuery<'ctx, 'write, 'tx, T, B>
 where
-    T: DatabaseEntity + FromSqlRow + Clone + Send + Sync,
+    B: WriteBackend,
+    for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
+        sqlx::Executor<'c, Database = B::Database> + Send,
+    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync,
 {
     pub fn filter<F>(mut self, filter: F) -> Self
     where
@@ -445,10 +451,12 @@ where
     }
 }
 
-#[cfg(not(feature = "mssql"))]
-impl<'tx> MutationContext<'tx> {
-    #[cfg(feature = "sqlite")]
-    pub fn new(db: &'tx crate::db::Database, tx: sqlx::Transaction<'tx, sqlx::Sqlite>) -> Self {
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+impl<'tx, B> MutationContext<'tx, B>
+where
+    B: WriteBackend,
+{
+    pub fn new(db: &'tx crate::db::Database<B>, tx: sqlx::Transaction<'tx, B::Database>) -> Self {
         Self {
             db,
             tx,
@@ -457,17 +465,7 @@ impl<'tx> MutationContext<'tx> {
         }
     }
 
-    #[cfg(feature = "postgres")]
-    pub fn new(db: &'tx crate::db::Database, tx: sqlx::Transaction<'tx, sqlx::Postgres>) -> Self {
-        Self {
-            db,
-            tx,
-            deferred_events: Vec::new(),
-            deferred_actions: Vec::new(),
-        }
-    }
-
-    pub fn database(&self) -> &crate::db::Database {
+    pub fn database(&self) -> &crate::db::Database<B> {
         self.db
     }
 
@@ -488,13 +486,11 @@ impl<'tx> MutationContext<'tx> {
             .auth_user()
     }
 
-    #[cfg(feature = "sqlite")]
-    pub fn executor(&mut self) -> &mut sqlx::SqliteConnection {
-        self.tx.as_mut()
-    }
-
-    #[cfg(feature = "postgres")]
-    pub fn executor(&mut self) -> &mut sqlx::PgConnection {
+    pub fn executor(&mut self) -> &mut <B::Database as sqlx::Database>::Connection
+    where
+        for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
+            sqlx::Executor<'c, Database = B::Database> + Send,
+    {
         self.tx.as_mut()
     }
 
@@ -507,7 +503,7 @@ impl<'tx> MutationContext<'tx> {
 
     pub fn defer<F, Fut, E>(&mut self, action: F)
     where
-        F: FnOnce(crate::db::Database) -> Fut + Send + 'static,
+        F: FnOnce(crate::db::Database<B>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<(), E>> + Send + 'static,
         E: std::fmt::Display + Send + 'static,
     {
@@ -545,185 +541,197 @@ impl<'tx> MutationContext<'tx> {
         &'a mut self,
         ctx: Option<&'a async_graphql::Context<'_>>,
         event: &'a MutationEvent,
-    ) -> async_graphql::Result<()> {
+    ) -> async_graphql::Result<()>
+    where
+        for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
+            sqlx::Executor<'c, Database = B::Database> + Send,
+    {
         if let Some(hook) = self.db.mutation_hook() {
             hook.on_mutation(ctx, self, event).await?;
         }
-        super::backup::record_change_journal_event(self, event)
-            .await
-            .map_err(|error| async_graphql::Error::new(error.to_string()))?;
+        #[cfg(any(
+            all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+            all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+        ))]
+        {
+            super::backup::record_change_journal_event(self, event)
+                .await
+                .map_err(|error| async_graphql::Error::new(error.to_string()))?;
+        }
 
         Ok(())
     }
 
     pub async fn insert<'a, T>(
         &'a mut self,
-        input: <T as MutationContextInsert>::CreateInput,
+        input: <T as MutationContextInsert<B>>::CreateInput,
     ) -> Result<T, sqlx::Error>
     where
-        T: MutationContextInsert,
+        T: MutationContextInsert<B>,
     {
         T::insert_in_mutation_context(self, input).await
     }
 
     pub async fn upsert<'a, T>(
         &'a mut self,
-        input: <T as MutationContextUpsert>::UpsertInput,
+        input: <T as MutationContextUpsert<B>>::UpsertInput,
     ) -> Result<UpsertOutcome<T>, sqlx::Error>
     where
-        T: MutationContextUpsert,
+        T: MutationContextUpsert<B>,
     {
         T::upsert_in_mutation_context(self, input).await
     }
 
     pub async fn update_by_id<'a, T>(
         &'a mut self,
-        id: &'a <T as MutationContextUpdateById>::Id,
-        input: <T as MutationContextUpdateById>::UpdateInput,
+        id: &'a <T as MutationContextUpdateById<B>>::Id,
+        input: <T as MutationContextUpdateById<B>>::UpdateInput,
     ) -> Result<Option<T>, sqlx::Error>
     where
-        T: MutationContextUpdateById,
+        T: MutationContextUpdateById<B>,
     {
         T::update_by_id_in_mutation_context(self, id, input).await
     }
 
     pub async fn update_where<'a, T>(
         &'a mut self,
-        where_input: <T as MutationContextUpdateWhere>::WhereInput,
-        input: <T as MutationContextUpdateWhere>::UpdateInput,
+        where_input: <T as MutationContextUpdateWhere<B>>::WhereInput,
+        input: <T as MutationContextUpdateWhere<B>>::UpdateInput,
     ) -> Result<i64, sqlx::Error>
     where
-        T: MutationContextUpdateWhere,
+        T: MutationContextUpdateWhere<B>,
     {
         T::update_where_in_mutation_context(self, where_input, input).await
     }
 
     pub async fn delete_by_id<'a, T>(
         &'a mut self,
-        id: &'a <T as MutationContextDeleteById>::Id,
+        id: &'a <T as MutationContextDeleteById<B>>::Id,
     ) -> Result<bool, sqlx::Error>
     where
-        T: MutationContextDeleteById,
+        T: MutationContextDeleteById<B>,
     {
         T::delete_by_id_in_mutation_context(self, id).await
     }
 
     pub async fn delete_where<'a, T>(
         &'a mut self,
-        where_input: <T as MutationContextDeleteWhere>::WhereInput,
+        where_input: <T as MutationContextDeleteWhere<B>>::WhereInput,
     ) -> Result<i64, sqlx::Error>
     where
-        T: MutationContextDeleteWhere,
+        T: MutationContextDeleteWhere<B>,
     {
         T::delete_where_in_mutation_context(self, where_input).await
     }
 
-    pub fn query<'a, T>(&'a mut self) -> MutationQuery<'a, 'tx, T>
+    pub fn query<'a, T>(&'a mut self) -> MutationQuery<'a, 'tx, T, B>
     where
-        T: DatabaseEntity + FromSqlRow + Clone + Send + Sync,
+        for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
+            sqlx::Executor<'c, Database = B::Database> + Send,
+        T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync,
     {
         MutationQuery::new(self)
     }
 
     pub async fn find_by_id<'a, T>(
         &'a mut self,
-        id: &'a <T as MutationContextFindById>::Id,
+        id: &'a <T as MutationContextFindById<B>>::Id,
     ) -> Result<Option<T>, sqlx::Error>
     where
-        T: MutationContextFindById,
+        T: MutationContextFindById<B>,
     {
         T::find_by_id_in_mutation_context(self, id).await
     }
 }
 
-#[cfg(not(feature = "mssql"))]
-pub trait MutationHook: Send + Sync {
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub trait MutationHook<B: WriteBackend = DefaultWriteBackend>: Send + Sync {
     fn on_mutation<'a>(
         &'a self,
         ctx: Option<&'a async_graphql::Context<'_>>,
-        hook_ctx: &'a mut MutationContext<'_>,
+        hook_ctx: &'a mut MutationContext<'_, B>,
         event: &'a MutationEvent,
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>>;
 }
 
-#[cfg(not(feature = "mssql"))]
-pub trait MutationContextInsert: Sized {
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub trait MutationContextInsert<B: WriteBackend = DefaultWriteBackend>: Sized {
     type CreateInput;
 
     fn insert_in_mutation_context<'a>(
-        hook_ctx: &'a mut MutationContext<'_>,
+        hook_ctx: &'a mut MutationContext<'_, B>,
         input: Self::CreateInput,
     ) -> futures::future::BoxFuture<'a, Result<Self, sqlx::Error>>;
 }
 
-#[cfg(not(feature = "mssql"))]
-pub trait MutationContextUpsert: Sized {
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub trait MutationContextUpsert<B: WriteBackend = DefaultWriteBackend>: Sized {
     type UpsertInput;
 
     fn upsert_in_mutation_context<'a>(
-        hook_ctx: &'a mut MutationContext<'_>,
+        hook_ctx: &'a mut MutationContext<'_, B>,
         input: Self::UpsertInput,
     ) -> futures::future::BoxFuture<'a, Result<UpsertOutcome<Self>, sqlx::Error>>;
 }
 
-#[cfg(not(feature = "mssql"))]
-pub trait MutationContextUpdateById: Sized {
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub trait MutationContextUpdateById<B: WriteBackend = DefaultWriteBackend>: Sized {
     type Id;
     type UpdateInput;
 
     fn update_by_id_in_mutation_context<'a>(
-        hook_ctx: &'a mut MutationContext<'_>,
+        hook_ctx: &'a mut MutationContext<'_, B>,
         id: &'a Self::Id,
         input: Self::UpdateInput,
     ) -> futures::future::BoxFuture<'a, Result<Option<Self>, sqlx::Error>>;
 }
 
-#[cfg(not(feature = "mssql"))]
-pub trait MutationContextUpdateWhere: Sized {
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub trait MutationContextUpdateWhere<B: WriteBackend = DefaultWriteBackend>: Sized {
     type WhereInput;
     type UpdateInput;
 
     fn update_where_in_mutation_context<'a>(
-        hook_ctx: &'a mut MutationContext<'_>,
+        hook_ctx: &'a mut MutationContext<'_, B>,
         where_input: Self::WhereInput,
         input: Self::UpdateInput,
     ) -> futures::future::BoxFuture<'a, Result<i64, sqlx::Error>>;
 }
 
-#[cfg(not(feature = "mssql"))]
-pub trait MutationContextDeleteById: Sized {
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub trait MutationContextDeleteById<B: WriteBackend = DefaultWriteBackend>: Sized {
     type Id;
 
     fn delete_by_id_in_mutation_context<'a>(
-        hook_ctx: &'a mut MutationContext<'_>,
+        hook_ctx: &'a mut MutationContext<'_, B>,
         id: &'a Self::Id,
     ) -> futures::future::BoxFuture<'a, Result<bool, sqlx::Error>>;
 }
 
-#[cfg(not(feature = "mssql"))]
-pub trait MutationContextDeleteWhere: Sized {
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub trait MutationContextDeleteWhere<B: WriteBackend = DefaultWriteBackend>: Sized {
     type WhereInput;
 
     fn delete_where_in_mutation_context<'a>(
-        hook_ctx: &'a mut MutationContext<'_>,
+        hook_ctx: &'a mut MutationContext<'_, B>,
         where_input: Self::WhereInput,
     ) -> futures::future::BoxFuture<'a, Result<i64, sqlx::Error>>;
 }
 
-#[cfg(not(feature = "mssql"))]
-pub trait MutationContextFindById: Sized {
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub trait MutationContextFindById<B: WriteBackend = DefaultWriteBackend>: Sized {
     type Id;
 
     fn find_by_id_in_mutation_context<'a>(
-        hook_ctx: &'a mut MutationContext<'_>,
+        hook_ctx: &'a mut MutationContext<'_, B>,
         id: &'a Self::Id,
     ) -> futures::future::BoxFuture<'a, Result<Option<Self>, sqlx::Error>>;
 }
 
-pub trait PostCommitErrorHandler: Send + Sync {
+pub trait PostCommitErrorHandler<B: OrmBackend = DefaultBackend>: Send + Sync {
     fn on_post_commit_error<'a>(
         &'a self,
-        db: &'a crate::db::Database,
+        db: &'a crate::db::Database<B>,
         error: &'a str,
     ) -> futures::future::BoxFuture<'a, ()>;
 }
@@ -743,11 +751,11 @@ pub enum EntityAccessSurface {
     Repository,
 }
 
-pub trait EntityPolicy: Send + Sync {
+pub trait EntityPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
     fn can_access_entity<'a>(
         &'a self,
         ctx: Option<&'a async_graphql::Context<'_>>,
-        db: &'a crate::db::Database,
+        db: &'a crate::db::Database<B>,
         entity_name: &'static str,
         policy_key: Option<&'static str>,
         kind: EntityAccessKind,
@@ -755,11 +763,11 @@ pub trait EntityPolicy: Send + Sync {
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>>;
 }
 
-pub trait FieldPolicy: Send + Sync {
+pub trait FieldPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
     fn can_read_field<'a>(
         &'a self,
         ctx: &'a async_graphql::Context<'_>,
-        db: &'a crate::db::Database,
+        db: &'a crate::db::Database<B>,
         entity_name: &'static str,
         field_name: &'static str,
         policy_key: Option<&'static str>,
@@ -769,7 +777,7 @@ pub trait FieldPolicy: Send + Sync {
     fn can_write_field<'a>(
         &'a self,
         ctx: &'a async_graphql::Context<'_>,
-        db: &'a crate::db::Database,
+        db: &'a crate::db::Database<B>,
         entity_name: &'static str,
         field_name: &'static str,
         policy_key: Option<&'static str>,
@@ -778,11 +786,11 @@ pub trait FieldPolicy: Send + Sync {
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>>;
 }
 
-pub trait RowPolicy: Send + Sync {
+pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
     fn can_read_row<'a>(
         &'a self,
         ctx: Option<&'a async_graphql::Context<'_>>,
-        db: &'a crate::db::Database,
+        db: &'a crate::db::Database<B>,
         entity_name: &'static str,
         policy_key: Option<&'static str>,
         surface: EntityAccessSurface,
@@ -792,7 +800,7 @@ pub trait RowPolicy: Send + Sync {
     fn can_write_row<'a>(
         &'a self,
         ctx: Option<&'a async_graphql::Context<'_>>,
-        db: &'a crate::db::Database,
+        db: &'a crate::db::Database<B>,
         entity_name: &'static str,
         policy_key: Option<&'static str>,
         surface: EntityAccessSurface,
@@ -800,11 +808,11 @@ pub trait RowPolicy: Send + Sync {
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>>;
 }
 
-#[cfg(not(feature = "mssql"))]
-pub trait WriteInputTransform: Send + Sync {
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub trait WriteInputTransform<B: WriteBackend = DefaultWriteBackend>: Send + Sync {
     fn before_create_with_context<'a>(
         &'a self,
-        write_ctx: &'a mut WriteInputContext<'_, '_>,
+        write_ctx: &'a mut WriteInputContext<'_, '_, B>,
         input: &'a mut (dyn std::any::Any + Send + Sync),
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>> {
         self.before_create(
@@ -817,7 +825,7 @@ pub trait WriteInputTransform: Send + Sync {
 
     fn before_update_with_context<'a>(
         &'a self,
-        write_ctx: &'a mut WriteInputContext<'_, '_>,
+        write_ctx: &'a mut WriteInputContext<'_, '_, B>,
         existing_row: Option<&'a (dyn std::any::Any + Send + Sync)>,
         input: &'a mut (dyn std::any::Any + Send + Sync),
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>> {
@@ -832,7 +840,7 @@ pub trait WriteInputTransform: Send + Sync {
 
     fn before_upsert_with_context<'a>(
         &'a self,
-        write_ctx: &'a mut WriteInputContext<'_, '_>,
+        write_ctx: &'a mut WriteInputContext<'_, '_, B>,
         input: &'a mut (dyn std::any::Any + Send + Sync),
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>> {
         self.before_upsert(
@@ -846,7 +854,7 @@ pub trait WriteInputTransform: Send + Sync {
     fn before_create<'a>(
         &'a self,
         ctx: Option<&'a async_graphql::Context<'_>>,
-        db: &'a crate::db::Database,
+        db: &'a crate::db::Database<B>,
         entity_name: &'static str,
         input: &'a mut (dyn std::any::Any + Send + Sync),
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>> {
@@ -857,7 +865,7 @@ pub trait WriteInputTransform: Send + Sync {
     fn before_update<'a>(
         &'a self,
         ctx: Option<&'a async_graphql::Context<'_>>,
-        db: &'a crate::db::Database,
+        db: &'a crate::db::Database<B>,
         entity_name: &'static str,
         existing_row: Option<&'a (dyn std::any::Any + Send + Sync)>,
         input: &'a mut (dyn std::any::Any + Send + Sync),
@@ -869,7 +877,7 @@ pub trait WriteInputTransform: Send + Sync {
     fn before_upsert<'a>(
         &'a self,
         ctx: Option<&'a async_graphql::Context<'_>>,
-        db: &'a crate::db::Database,
+        db: &'a crate::db::Database<B>,
         entity_name: &'static str,
         input: &'a mut (dyn std::any::Any + Send + Sync),
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>> {

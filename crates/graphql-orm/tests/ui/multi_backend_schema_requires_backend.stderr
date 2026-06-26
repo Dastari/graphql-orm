@@ -1,0 +1,10 @@
+error: multiple graphql-orm backend features are enabled (sqlite, mssql); specify backend = "sqlite", "postgres", or "mssql" on schema_roots!
+  --> tests/ui/multi_backend_schema_requires_backend.rs:18:1
+   |
+18 | / schema_roots! {
+19 | |     query_custom_ops: [],
+20 | |     entities: [ExplicitBackendExample],
+21 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `schema_roots` (in Nightly builds, run with -Z macro-backtrace for more info)
