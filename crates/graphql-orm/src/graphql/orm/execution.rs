@@ -1,20 +1,29 @@
-use super::core::{PlannedSchemaStage, SchemaStage, SqlValue, record_executed_query};
+#[cfg(not(feature = "mssql"))]
+use super::core::{PlannedSchemaStage, SchemaStage};
+use super::core::{SqlValue, record_executed_query};
+#[cfg(not(feature = "mssql"))]
 use super::dialect::current_backend;
+#[cfg(not(feature = "mssql"))]
 use super::migrations::{build_migration_plan, introspect_schema};
 use crate::{DbPool, DbRow};
 #[cfg(feature = "sqlite")]
 use sqlx::Acquire;
+#[cfg(not(feature = "mssql"))]
 use sqlx::Row;
+#[cfg(not(feature = "mssql"))]
 use std::collections::HashSet;
 
+#[cfg(not(feature = "mssql"))]
 const MIGRATION_HISTORY_TABLE: &str = "__graphql_orm_migrations";
 
+#[cfg(not(feature = "mssql"))]
 pub struct Migration {
     pub version: &'static str,
     pub description: &'static str,
     pub statements: &'static [&'static str],
 }
 
+#[cfg(not(feature = "mssql"))]
 pub trait MigrationSource {
     fn migrations() -> &'static [Migration] {
         &[]
@@ -22,11 +31,13 @@ pub trait MigrationSource {
 }
 
 #[allow(async_fn_in_trait)]
+#[cfg(not(feature = "mssql"))]
 pub trait MigrationRunner {
     async fn apply_migrations(&self, migrations: &[Migration]) -> Result<(), sqlx::Error>;
 }
 
 #[allow(async_fn_in_trait)]
+#[cfg(not(feature = "mssql"))]
 pub trait SchemaStageRunner {
     async fn plan_schema_stages(
         &self,
@@ -36,6 +47,7 @@ pub trait SchemaStageRunner {
     async fn apply_schema_stages(&self, stages: &[SchemaStage]) -> Result<(), sqlx::Error>;
 }
 
+#[cfg(not(feature = "mssql"))]
 impl MigrationRunner for crate::db::Database {
     async fn apply_migrations(&self, migrations: &[Migration]) -> Result<(), sqlx::Error> {
         prepare_migration_runtime(self.pool()).await?;
@@ -57,6 +69,7 @@ impl MigrationRunner for crate::db::Database {
     }
 }
 
+#[cfg(not(feature = "mssql"))]
 impl SchemaStageRunner for crate::db::Database {
     async fn plan_schema_stages(
         &self,
@@ -104,6 +117,7 @@ impl SchemaStageRunner for crate::db::Database {
     }
 }
 
+#[cfg(not(feature = "mssql"))]
 async fn prepare_migration_runtime(pool: &DbPool) -> Result<(), sqlx::Error> {
     ensure_migration_history_table(pool).await?;
     #[cfg(feature = "sqlite")]
@@ -111,6 +125,7 @@ async fn prepare_migration_runtime(pool: &DbPool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+#[cfg(not(feature = "mssql"))]
 fn validate_schema_stages(stages: &[SchemaStage]) -> Result<(), sqlx::Error> {
     let mut seen = HashSet::new();
     for stage in stages {
@@ -134,6 +149,7 @@ fn validate_schema_stages(stages: &[SchemaStage]) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+#[cfg(not(feature = "mssql"))]
 fn ensure_applied_stages_form_prefix(
     stages: &[SchemaStage],
     applied_versions: &HashSet<String>,
@@ -184,6 +200,7 @@ async fn ensure_migration_history_table(pool: &DbPool) -> Result<(), sqlx::Error
     Ok(())
 }
 
+#[cfg(not(feature = "mssql"))]
 async fn load_applied_migration_versions(pool: &DbPool) -> Result<HashSet<String>, sqlx::Error> {
     let rows = fetch_rows(
         pool,
@@ -361,6 +378,27 @@ pub async fn fetch_rows(
     fetch_rows_on(pool, sql, values).await
 }
 
+#[cfg(feature = "mssql")]
+pub struct MssqlWriteResult;
+
+#[cfg(feature = "mssql")]
+impl MssqlWriteResult {
+    pub fn rows_affected(&self) -> u64 {
+        0
+    }
+}
+
+#[cfg(feature = "mssql")]
+pub async fn execute_with_binds(
+    _sql: &str,
+    _values: &[SqlValue],
+    _pool: &DbPool,
+) -> Result<MssqlWriteResult, sqlx::Error> {
+    Err(sqlx::Error::Protocol(
+        "graphql-orm MSSQL backend is read-only; write execution is not available".to_string(),
+    ))
+}
+
 #[cfg(feature = "sqlite")]
 pub async fn execute_with_binds_on<'e, E>(
     executor: E,
@@ -474,4 +512,13 @@ where
         };
     }
     query.fetch_all(executor).await
+}
+
+#[cfg(feature = "mssql")]
+pub async fn fetch_rows_on(
+    pool: &DbPool,
+    sql: &str,
+    values: &[SqlValue],
+) -> Result<Vec<DbRow>, sqlx::Error> {
+    pool.fetch_rows(sql, values).await
 }

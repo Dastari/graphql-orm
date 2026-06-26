@@ -1,5 +1,7 @@
 use crate::DbRow;
 use async_graphql::dataloader::Loader;
+#[cfg(not(feature = "mssql"))]
+use sqlx::Row;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
@@ -101,40 +103,32 @@ where
         let keys = keys.to_vec();
         let db = self.db.clone();
         async move {
+            use crate::graphql::orm::{SqlDialect, SqlValue, current_backend, fetch_rows};
+
             if keys.is_empty() {
                 return Ok(HashMap::new());
             }
 
-            let sql = if cfg!(feature = "postgres") {
-                let params = (1..=keys.len())
-                    .map(|index| format!("${index}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(
-                    "SELECT {} FROM {} WHERE {} IN ({})",
-                    T::column_names().join(", "),
-                    T::TABLE_NAME,
-                    T::batch_column(),
-                    params
-                )
-            } else {
-                let params = (0..keys.len()).map(|_| "?").collect::<Vec<_>>().join(", ");
-                format!(
-                    "SELECT {} FROM {} WHERE {} IN ({})",
-                    T::column_names().join(", "),
-                    T::TABLE_NAME,
-                    T::batch_column(),
-                    params
-                )
-            };
+            let backend = current_backend();
+            let params = (1..=keys.len())
+                .map(|index| backend.placeholder(index))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let batch_column = backend.quote_identifier_path(T::batch_column());
+            let sql = format!(
+                "SELECT {} FROM {} WHERE {} IN ({})",
+                T::column_names().join(", "),
+                T::TABLE_NAME,
+                batch_column,
+                params
+            );
+            let values = keys
+                .iter()
+                .cloned()
+                .map(SqlValue::String)
+                .collect::<Vec<_>>();
 
-            let mut query = sqlx::query(&sql);
-            for key in &keys {
-                query = query.bind(key);
-            }
-
-            let rows = query
-                .fetch_all(db.pool())
+            let rows = fetch_rows(db.pool(), &sql, &values)
                 .await
                 .map_err(|error| error.to_string())?;
 
@@ -171,9 +165,8 @@ where
         async move {
             use crate::graphql::orm::{
                 DatabaseBackend, FilterExpression, PaginationRequest, SelectQuery, SortExpression,
-                current_backend, fetch_rows, render_select_query,
+                SqlDialect, current_backend, fetch_rows, render_select_query,
             };
-            use sqlx::Row;
 
             if keys.is_empty() {
                 return Ok(HashMap::new());
@@ -238,8 +231,8 @@ where
                             .iter()
                             .map(|column| (*column).to_string())
                             .chain(std::iter::once(format!(
-                                "CAST({} AS TEXT) AS __gom_relation_key",
-                                sample.fk_column
+                                "{} AS __gom_relation_key",
+                                current_backend().relation_key_cast(sample.fk_column)
                             )))
                             .collect(),
                         filter: Some(filter),

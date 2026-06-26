@@ -36,7 +36,7 @@ pub(crate) fn backend_database_type_tokens() -> proc_macro2::TokenStream {
     } else if cfg!(feature = "mysql") {
         quote! { ::graphql_orm::sqlx::MySql }
     } else if cfg!(feature = "mssql") {
-        quote! { ::graphql_orm::sqlx::Mssql }
+        quote! { ::graphql_orm::db::mssql::Mssql }
     } else {
         proc_macro2::TokenStream::new()
     }
@@ -59,7 +59,45 @@ pub(crate) fn backend_helper_import_tokens() -> proc_macro2::TokenStream {
 pub(crate) fn backend_current_epoch_expr() -> &'static str {
     if cfg!(feature = "postgres") {
         "(EXTRACT(EPOCH FROM NOW())::bigint)"
+    } else if cfg!(feature = "mssql") {
+        "DATEDIFF_BIG(second, '1970-01-01', SYSUTCDATETIME())"
     } else {
         "(unixepoch())"
+    }
+}
+
+pub(crate) fn backend_quote_identifier(identifier: &str) -> String {
+    if cfg!(feature = "mssql") {
+        if identifier.starts_with('[') && identifier.ends_with(']') {
+            identifier.to_string()
+        } else {
+            format!("[{}]", identifier.replace(']', "]]"))
+        }
+    } else {
+        identifier.to_string()
+    }
+}
+
+pub(crate) fn backend_quote_identifier_path(identifier: &str) -> String {
+    if cfg!(feature = "mssql") {
+        identifier
+            .split('.')
+            .filter(|part| !part.is_empty())
+            .map(backend_quote_identifier)
+            .collect::<Vec<_>>()
+            .join(".")
+    } else {
+        identifier.to_string()
+    }
+}
+
+pub(crate) fn backend_relation_key_cast(column: &str) -> String {
+    if cfg!(feature = "mssql") {
+        format!(
+            "CAST({} AS NVARCHAR(4000))",
+            backend_quote_identifier_path(column)
+        )
+    } else {
+        format!("CAST({column} AS TEXT)")
     }
 }

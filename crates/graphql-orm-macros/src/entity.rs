@@ -1,6 +1,7 @@
 use super::*;
 use crate::backend::{
-    backend_current_epoch_expr, backend_helper_import_tokens, backend_row_type_tokens,
+    backend_current_epoch_expr, backend_helper_import_tokens, backend_quote_identifier_path,
+    backend_row_type_tokens,
 };
 use syn::spanned::Spanned;
 
@@ -10,6 +11,9 @@ pub(crate) struct EntityMetadata {
     pub(crate) plural_name: Option<String>,
     pub(crate) default_sort: Option<String>,
     pub(crate) schema_only: bool,
+    pub(crate) backup_enabled: Option<bool>,
+    pub(crate) backup_export_order: Option<i32>,
+    pub(crate) backup_restore_order: Option<i32>,
     pub(crate) read_policy: Option<String>,
     pub(crate) write_policy: Option<String>,
     /// Optional async hook path invoked after create/update/delete mutations.
@@ -43,6 +47,18 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitBool = value.parse()?;
                     metadata.schema_only = lit.value;
+                } else if meta.path.is_ident("backup") {
+                    let value = meta.value()?;
+                    let lit: syn::LitBool = value.parse()?;
+                    metadata.backup_enabled = Some(lit.value);
+                } else if meta.path.is_ident("backup_export_order") {
+                    let value = meta.value()?;
+                    let lit: syn::LitInt = value.parse()?;
+                    metadata.backup_export_order = Some(lit.base10_parse()?);
+                } else if meta.path.is_ident("backup_restore_order") {
+                    let value = meta.value()?;
+                    let lit: syn::LitInt = value.parse()?;
+                    metadata.backup_restore_order = Some(lit.base10_parse()?);
                 } else if meta.path.is_ident("read_policy") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
@@ -190,6 +206,7 @@ pub(crate) struct FieldMetadata {
     pub(crate) transform_read: Option<String>,
     pub(crate) default: Option<String>,
     pub(crate) auto_generated: Option<bool>,
+    pub(crate) backup_policy: Option<String>,
     /// If true, include in Create/Update inputs even if #[graphql(skip)] is set.
     /// Useful for fields that should be writable but never exposed in queries.
     pub(crate) input_only: bool,
@@ -229,6 +246,7 @@ impl Default for FieldMetadata {
             transform_read: None,
             default: None,
             auto_generated: None,
+            backup_policy: None,
             input_only: false,
             read: true,
             write: true,
@@ -318,6 +336,18 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let value = nested.value()?;
                             let lit: syn::LitBool = value.parse()?;
                             meta.auto_generated = Some(lit.value);
+                        }
+                        Ok(())
+                    });
+                }
+                "backup" => {
+                    let _ = attr.parse_nested_meta(|nested| {
+                        if nested.path.is_ident("include") {
+                            meta.backup_policy = Some("include".to_string());
+                        } else if nested.path.is_ident("exclude") {
+                            meta.backup_policy = Some("exclude".to_string());
+                        } else if nested.path.is_ident("redact") {
+                            meta.backup_policy = Some("redact".to_string());
                         }
                         Ok(())
                     });
@@ -489,6 +519,56 @@ pub(crate) fn relation_change_propagation_tokens(
     }
 }
 
+fn backup_policy_tokens(
+    policy: Option<&str>,
+    span: proc_macro2::Span,
+) -> syn::Result<proc_macro2::TokenStream> {
+    match policy.unwrap_or("include") {
+        "include" => Ok(quote! { ::graphql_orm::graphql::orm::ColumnBackupPolicy::Include }),
+        "exclude" => Ok(quote! { ::graphql_orm::graphql::orm::ColumnBackupPolicy::Exclude }),
+        "redact" => Ok(quote! { ::graphql_orm::graphql::orm::ColumnBackupPolicy::Redact }),
+        other => Err(syn::Error::new(
+            span,
+            format!(
+                "unsupported backup policy '{other}'; expected 'include', 'exclude', or 'redact'"
+            ),
+        )),
+    }
+}
+
+fn backup_value_kind_tokens(ty: &syn::Type, meta: &FieldMetadata) -> proc_macro2::TokenStream {
+    if meta.is_json_field {
+        return quote! { ::graphql_orm::graphql::orm::BackupValueKind::Json };
+    }
+    if meta.is_boolean_field {
+        return quote! { ::graphql_orm::graphql::orm::BackupValueKind::Bool };
+    }
+    if meta.is_date_field {
+        return quote! { ::graphql_orm::graphql::orm::BackupValueKind::String };
+    }
+    if is_uuid_type(ty) {
+        return quote! { ::graphql_orm::graphql::orm::BackupValueKind::Uuid };
+    }
+    if is_byte_vec_type(ty) {
+        return quote! { ::graphql_orm::graphql::orm::BackupValueKind::Bytes };
+    }
+
+    let inner_type = option_inner_type(ty).unwrap_or(ty);
+    if let Some(ident) = type_path_last_ident(inner_type) {
+        return match ident.to_string().as_str() {
+            "bool" => quote! { ::graphql_orm::graphql::orm::BackupValueKind::Bool },
+            "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => {
+                quote! { ::graphql_orm::graphql::orm::BackupValueKind::Integer }
+            }
+            "f32" | "f64" => quote! { ::graphql_orm::graphql::orm::BackupValueKind::Float },
+            "Vec" => quote! { ::graphql_orm::graphql::orm::BackupValueKind::Json },
+            _ => quote! { ::graphql_orm::graphql::orm::BackupValueKind::String },
+        };
+    }
+
+    quote! { ::graphql_orm::graphql::orm::BackupValueKind::String }
+}
+
 fn validate_relation_delete_policy(
     struct_name: &syn::Ident,
     field: &Field,
@@ -646,22 +726,21 @@ fn generate_entity_impl(
     let helper_import = backend_helper_import_tokens();
     let placeholder_body = if cfg!(feature = "postgres") {
         quote! { format!("${}", index) }
+    } else if cfg!(feature = "mssql") {
+        quote! { format!("@P{}", index) }
     } else {
         quote! { "?".to_string() }
     };
-    let rebind_loop_body = if cfg!(feature = "postgres") {
+    let rebind_loop_body = if cfg!(feature = "postgres") || cfg!(feature = "mssql") {
         quote! {
             if chars[i] == '?' {
                 rebound.push_str(&Self::__gom_placeholder(next_index));
                 next_index += 1;
                 i += 1;
-                while i < chars.len() && chars[i].is_ascii_digit() {
-                    i += 1;
-                }
-            } else if chars[i] == '$' {
+            } else if chars[i] == '$' || (chars[i] == '@' && i + 1 < chars.len() && chars[i + 1].eq_ignore_ascii_case(&'p')) {
                 rebound.push_str(&Self::__gom_placeholder(next_index));
                 next_index += 1;
-                i += 1;
+                i += if chars[i] == '@' { 2 } else { 1 };
                 while i < chars.len() && chars[i].is_ascii_digit() {
                     i += 1;
                 }
@@ -690,28 +769,36 @@ fn generate_entity_impl(
     } else {
         quote! { format!("LOWER({}) LIKE LOWER({})", column, placeholder) }
     };
-    let bool_sql_value_body = if cfg!(feature = "postgres") {
+    let bool_sql_value_body = if cfg!(feature = "postgres") || cfg!(feature = "mssql") {
         quote! { ::graphql_orm::graphql::orm::SqlValue::Bool(value) }
     } else {
         quote! { ::graphql_orm::graphql::orm::SqlValue::Int(if value { 1 } else { 0 }) }
     };
     let current_epoch_runtime = if cfg!(feature = "postgres") {
         quote! { "EXTRACT(EPOCH FROM NOW())::bigint" }
+    } else if cfg!(feature = "mssql") {
+        quote! { "DATEDIFF_BIG(second, '1970-01-01', SYSUTCDATETIME())" }
     } else {
         quote! { "unixepoch()" }
     };
     let current_date_runtime = if cfg!(feature = "postgres") {
         quote! { "CURRENT_DATE" }
+    } else if cfg!(feature = "mssql") {
+        quote! { "CAST(GETDATE() AS date)" }
     } else {
         quote! { "date('now')" }
     };
     let days_ago_runtime = if cfg!(feature = "postgres") {
         quote! { format!("(CURRENT_DATE - INTERVAL '{} days')::date", days) }
+    } else if cfg!(feature = "mssql") {
+        quote! { format!("DATEADD(day, -{}, CAST(GETDATE() AS date))", days) }
     } else {
         quote! { format!("date('now', '-{} days')", days) }
     };
     let days_ahead_runtime = if cfg!(feature = "postgres") {
         quote! { format!("(CURRENT_DATE + INTERVAL '{} days')::date", days) }
+    } else if cfg!(feature = "mssql") {
+        quote! { format!("DATEADD(day, {}, CAST(GETDATE() AS date))", days) }
     } else {
         quote! { format!("date('now', '+{} days')", days) }
     };
@@ -739,6 +826,15 @@ fn generate_entity_impl(
     let entity_meta = parse_entity_metadata(&input.attrs)?;
     let schema_only = schema_only_override || entity_meta.schema_only;
     let entity_name_lit = struct_name.to_string();
+    let backup_enabled = entity_meta.backup_enabled.unwrap_or(true);
+    let backup_export_order = entity_meta
+        .backup_export_order
+        .map(|order| quote! { Some(#order) })
+        .unwrap_or_else(|| quote! { None });
+    let backup_restore_order = entity_meta
+        .backup_restore_order
+        .map(|order| quote! { Some(#order) })
+        .unwrap_or_else(|| quote! { None });
     let rename_all_rule = entity_meta
         .graphql_rename_fields
         .as_deref()
@@ -760,13 +856,20 @@ fn generate_entity_impl(
         })
         .unwrap_or_else(|| quote! { None });
     let legacy_graphql_complex = has_graphql_complex(&input.attrs);
-    let table_name = entity_meta.table_name.as_deref().unwrap_or("unknown");
+    let raw_table_name = entity_meta.table_name.as_deref().unwrap_or("unknown");
+    let table_name = backend_quote_identifier_path(raw_table_name);
     let plural_name = entity_meta
         .plural_name
         .as_deref()
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("{}s", struct_name));
-    let default_sort = entity_meta.default_sort.as_deref().unwrap_or("id");
+    let raw_default_sort = entity_meta.default_sort.as_deref().unwrap_or("id");
+    let default_sort =
+        if cfg!(feature = "mssql") && !raw_default_sort.chars().any(char::is_whitespace) {
+            backend_quote_identifier_path(raw_default_sort)
+        } else {
+            raw_default_sort.to_string()
+        };
     let composite_unique_indexes = entity_meta
         .unique_composite
         .iter()
@@ -782,7 +885,7 @@ fn generate_entity_impl(
         .indexes
         .iter()
         .map(|(unique, cols)| {
-            let name = format!("idx_{}_{}", table_name, cols.join("_"));
+            let name = format!("idx_{}_{}", raw_table_name, cols.join("_"));
             let col_lits = cols
                 .iter()
                 .map(|c| syn::LitStr::new(c, struct_name.span()))
@@ -809,7 +912,7 @@ fn generate_entity_impl(
     let mut filter_to_sql = Vec::new();
     let mut from_row_fields = Vec::new();
     let mut relation_metadata_defs = Vec::new();
-    let mut sortable_columns: Vec<String> = Vec::new();
+    let mut sortable_columns: Vec<(String, String)> = Vec::new();
     let mut object_field_methods = Vec::new();
     let parsed_fields = collect_parsed_fields(fields.iter())?;
 
@@ -879,13 +982,20 @@ fn generate_entity_impl(
             .db_column
             .clone()
             .unwrap_or_else(|| rust_name.clone());
+        let db_col_sql = backend_quote_identifier_path(&db_col);
 
-        column_names.push(db_col.clone());
+        column_names.push(db_col_sql.clone());
 
         // Determine SQL type and nullability
         let is_nullable = is_option_type(field_type);
         let is_pk = field_meta.is_primary_key;
         let is_unique = field_meta.unique;
+        let is_generated = field_meta
+            .auto_generated
+            .unwrap_or(field_meta.is_primary_key && rust_name == "id");
+        let backup_policy =
+            backup_policy_tokens(field_meta.backup_policy.as_deref(), field.span())?;
+        let logical_type = backup_value_kind_tokens(field_type, &field_meta);
         let sql_type = rust_type_to_sql_type(field_type, &field_meta);
         let default_val = field_meta.default.clone().or_else(|| {
             if rust_name == "created_at" || rust_name == "updated_at" {
@@ -907,17 +1017,21 @@ fn generate_entity_impl(
         column_defs.push(quote! {
             ::graphql_orm::graphql::orm::ColumnDef {
                 name: #db_col,
+                rust_name: #rust_name,
                 sql_type: #sql_type,
+                logical_type: #logical_type,
                 nullable: #is_nullable,
                 is_primary_key: #is_pk,
                 is_unique: #is_unique,
+                is_generated: #is_generated,
+                backup_policy: #backup_policy,
                 default: #default_expr,
                 references: None,
             }
         });
 
         if field_meta.is_primary_key {
-            primary_key_col = Some(db_col.clone());
+            primary_key_col = Some(db_col_sql.clone());
         }
 
         // Generate WhereInput field for filterable fields
@@ -927,7 +1041,7 @@ fn generate_entity_impl(
                     struct_name,
                     field_name,
                     &graphql_name,
-                    &db_col,
+                    &db_col_sql,
                     filter_type,
                 )?;
                 where_input_fields.push(input_field);
@@ -937,7 +1051,7 @@ fn generate_entity_impl(
 
         // Generate OrderByInput field for sortable fields
         if field_meta.sortable && field_meta.order {
-            sortable_columns.push(db_col.clone());
+            sortable_columns.push((to_snake_case(&graphql_name), db_col_sql.clone()));
             let order_field_name =
                 syn::Ident::new(&to_snake_case(&graphql_name), field_name.span());
             order_by_fields.push(quote! {
@@ -1001,7 +1115,12 @@ fn generate_entity_impl(
         from_row_fields.push(row_assignment);
     }
 
-    let primary_key = primary_key_col.as_deref().unwrap_or("id");
+    let default_primary_key = if cfg!(feature = "mssql") {
+        backend_quote_identifier_path("id")
+    } else {
+        "id".to_string()
+    };
+    let primary_key = primary_key_col.as_deref().unwrap_or(&default_primary_key);
     let columns_array: Vec<&str> = column_names.iter().map(|s| s.as_str()).collect();
 
     // Generate type names (as strings for #[graphql(name = "...")] and as idents for struct names)
@@ -1014,8 +1133,8 @@ fn generate_entity_impl(
     // Generate order_by to_sql_order implementation
     let order_by_match_arms: Vec<_> = sortable_columns
         .iter()
-        .map(|col| {
-            let field_name = syn::Ident::new(&to_snake_case(col), struct_name.span());
+        .map(|(field_ident, col)| {
+            let field_name = syn::Ident::new(field_ident, struct_name.span());
             quote! {
                 if let Some(dir) = &self.#field_name {
                     parts.push(format!("{} {}", #col, dir.to_sql()));
@@ -1091,6 +1210,9 @@ fn generate_entity_impl(
                     METADATA.get_or_init(|| {
                         ::graphql_orm::graphql::orm::EntityMetadata::from_schema::<Self>(
                             #struct_name_str,
+                            #backup_enabled,
+                            #backup_export_order,
+                            #backup_restore_order,
                             #read_policy,
                             #write_policy,
                         )
@@ -1285,6 +1407,9 @@ fn generate_entity_impl(
                 METADATA.get_or_init(|| {
                     ::graphql_orm::graphql::orm::EntityMetadata::from_schema::<Self>(
                         #struct_name_str,
+                        #backup_enabled,
+                        #backup_export_order,
+                        #backup_restore_order,
                         #read_policy,
                         #write_policy,
                     )
@@ -1664,7 +1789,7 @@ fn generate_row_field_assignment(
     db_col: &str,
     meta: &FieldMetadata,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    let bool_expr = if cfg!(feature = "postgres") {
+    let bool_expr = if cfg!(feature = "postgres") || cfg!(feature = "mssql") {
         quote! { row.try_get::<bool, _>(#db_col)? }
     } else {
         quote! {{
@@ -1672,7 +1797,7 @@ fn generate_row_field_assignment(
             int_to_bool(i)
         }}
     };
-    let uuid_expr = if cfg!(feature = "postgres") {
+    let uuid_expr = if cfg!(feature = "postgres") || cfg!(feature = "mssql") {
         quote! { row.try_get(#db_col)? }
     } else {
         quote! {{
@@ -1800,7 +1925,7 @@ fn generate_option_row_field_assignment(
     db_col: &str,
     meta: &FieldMetadata,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    let optional_bool_expr = if cfg!(feature = "postgres") {
+    let optional_bool_expr = if cfg!(feature = "postgres") || cfg!(feature = "mssql") {
         quote! { row.try_get(#db_col)? }
     } else {
         quote! {{
@@ -1808,7 +1933,7 @@ fn generate_option_row_field_assignment(
             i.map(int_to_bool)
         }}
     };
-    let optional_uuid_expr = if cfg!(feature = "postgres") {
+    let optional_uuid_expr = if cfg!(feature = "postgres") || cfg!(feature = "mssql") {
         quote! { row.try_get(#db_col)? }
     } else {
         quote! {{

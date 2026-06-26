@@ -1,5 +1,7 @@
 use super::*;
-use crate::backend::backend_pool_type_tokens;
+use crate::backend::{
+    backend_pool_type_tokens, backend_quote_identifier_path, backend_relation_key_cast,
+};
 use crate::entity::{
     collect_parsed_fields, graphql_field_name, has_graphql_complex, parse_entity_metadata,
     relation_change_propagation_tokens, relation_delete_policy_tokens,
@@ -269,6 +271,7 @@ pub(crate) fn generate_graphql_relations(
         let field_name = &r.field_name;
         let graphql_name = &r.graphql_name;
         let fk_column = &r.fk_column;
+        let fk_column_sql = backend_quote_identifier_path(fk_column);
         let source_column = &r.source_column;
         let source_field = syn::Ident::new(source_column, struct_name.span());
         let source_supports_dataloader = r.source_supports_dataloader;
@@ -358,7 +361,7 @@ pub(crate) fn generate_graphql_relations(
                 relation: #graphql_name,
                 parent_key: relation_loader_key.clone(),
                 parent_value: relation_sql_value.clone(),
-                fk_column: #fk_column,
+                fk_column: #fk_column_sql,
                 where_signature: where_input
                     .as_ref()
                     .and_then(|filter| filter.to_filter_expression().map(|expr| format!("{expr:?}"))),
@@ -383,7 +386,7 @@ pub(crate) fn generate_graphql_relations(
                 relation: #graphql_name,
                 parent_key: relation_loader_key.clone(),
                 parent_value: relation_sql_value.clone(),
-                fk_column: #fk_column,
+                fk_column: #fk_column_sql,
                 where_signature: None,
                 order_signature: None,
                 page_signature: None,
@@ -482,7 +485,7 @@ pub(crate) fn generate_graphql_relations(
                         // Slow path: Use direct query with full SQL support
                         let mut query = EntityQuery::<#target_type>::new()
                             .where_clause(
-                                &format!("{} = {}", #fk_column, #target_type::__gom_placeholder(1)),
+                                &format!("{} = {}", #fk_column_sql, #target_type::__gom_placeholder(1)),
                                 relation_sql_value
                             );
 
@@ -594,7 +597,7 @@ pub(crate) fn generate_graphql_relations(
                     } else {
                         EntityQuery::<#target_type>::new()
                             .where_clause(
-                                &format!("{} = {}", #fk_column, #target_type::__gom_placeholder(1)),
+                                &format!("{} = {}", #fk_column_sql, #target_type::__gom_placeholder(1)),
                                 relation_sql_value
                             )
                             .fetch_one(db)
@@ -615,6 +618,8 @@ pub(crate) fn generate_graphql_relations(
             let field_name = &r.field_name;
             let graphql_name = &r.graphql_name;
             let fk_column = &r.fk_column;
+            let fk_column_sql = backend_quote_identifier_path(fk_column);
+            let relation_key_cast = backend_relation_key_cast(fk_column);
             let source_column = &r.source_column;
             let source_field = syn::Ident::new(source_column, struct_name.span());
             let target_type = syn::Ident::new(&r.target_type_str, struct_name.span());
@@ -772,11 +777,11 @@ pub(crate) fn generate_graphql_relations(
                             .map(|index| <#target_type>::__gom_placeholder(index + 1))
                             .collect::<Vec<_>>();
                         let sql = format!(
-                            "SELECT {}, CAST({} AS TEXT) AS __gom_relation_key FROM {} WHERE {} IN ({})",
+                            "SELECT {}, {} AS __gom_relation_key FROM {} WHERE {} IN ({})",
                             <#target_type as ::graphql_orm::graphql::orm::DatabaseEntity>::column_names().join(", "),
-                            #fk_column,
+                            #relation_key_cast,
                             <#target_type as ::graphql_orm::graphql::orm::DatabaseEntity>::TABLE_NAME,
-                            #fk_column,
+                            #fk_column_sql,
                             placeholders.join(", ")
                         );
 

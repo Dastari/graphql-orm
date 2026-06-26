@@ -1,8 +1,11 @@
 use super::core::{ColumnDef, EntityMetadata, IndexDef, RelationMetadata, SqlValue};
 use super::dialect::{DatabaseBackend, SqlDialect, current_backend};
-use super::execution::{fetch_rows, fetch_rows_on};
+use super::execution::fetch_rows;
+#[cfg(not(feature = "mssql"))]
+use super::execution::fetch_rows_on;
 use crate::graphql::pagination::{Connection, Edge, PageInfo, encode_cursor};
 use crate::{DbPool, DbRow};
+#[cfg(not(feature = "mssql"))]
 use sqlx::Row;
 use std::marker::PhantomData;
 
@@ -329,6 +332,20 @@ fn count_placeholders(clause: &str) -> usize {
                     i += 1;
                 }
             }
+            '@' if i + 1 < chars.len() && chars[i + 1].eq_ignore_ascii_case(&'p') => {
+                let mut j = i + 2;
+                let mut saw_digit = false;
+                while j < chars.len() && chars[j].is_ascii_digit() {
+                    saw_digit = true;
+                    j += 1;
+                }
+                if saw_digit {
+                    count += 1;
+                    i = j;
+                } else {
+                    i += 1;
+                }
+            }
             _ => i += 1,
         }
     }
@@ -367,7 +384,7 @@ fn render_filter_expression(
 
 pub fn render_select_query(dialect: DatabaseBackend, query: &SelectQuery) -> RenderedQuery {
     let projection = if query.count_only {
-        "COUNT(*) AS count".to_string()
+        dialect.count_projection().to_string()
     } else {
         query.columns.join(", ")
     };
@@ -397,12 +414,10 @@ pub fn render_select_query(dialect: DatabaseBackend, query: &SelectQuery) -> Ren
 
     if !query.count_only {
         if let Some(page) = &query.pagination {
-            if let Some(limit) = page.limit {
-                sql.push_str(&format!(" LIMIT {}", limit));
+            if dialect == DatabaseBackend::Mssql && query.sorts.is_empty() {
+                sql.push_str(" ORDER BY (SELECT 1)");
             }
-            if page.offset > 0 {
-                sql.push_str(&format!(" OFFSET {}", page.offset));
-            }
+            sql.push_str(&dialect.render_pagination(page.limit, page.offset));
         }
     }
 
@@ -692,7 +707,7 @@ where
 
         Ok(Connection {
             page_info: PageInfo {
-                has_next_page: false,
+                has_next_page: (offset as i64 + edges.len() as i64) < total,
                 has_previous_page: offset > 0,
                 start_cursor: edges.first().map(|edge| edge.cursor.clone()),
                 end_cursor: edges.last().map(|edge| edge.cursor.clone()),
@@ -866,12 +881,18 @@ where
     }
 
     pub async fn count(self) -> Result<i64, sqlx::Error> {
-        let mut sql = format!("SELECT COUNT(*) AS count FROM {}", self.table);
-        if !self.filters.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(&self.filters.join(" AND "));
-        }
-        let rows = fetch_rows(self.pool, &sql, &self.values).await?;
+        let rendered = render_select_query(
+            current_backend(),
+            &SelectQuery {
+                table: self.table,
+                columns: Vec::new(),
+                filter: filter_expression_from_raw_parts(&self.filters, &self.values),
+                sorts: Vec::new(),
+                pagination: None,
+                count_only: true,
+            },
+        );
+        let rows = fetch_rows(self.pool, &rendered.sql, &rendered.values).await?;
         let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
         row.try_get::<i64, _>("count")
     }
@@ -881,12 +902,18 @@ where
     where
         E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
     {
-        let mut sql = format!("SELECT COUNT(*) AS count FROM {}", self.table);
-        if !self.filters.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(&self.filters.join(" AND "));
-        }
-        let rows = fetch_rows_on(executor, &sql, &self.values).await?;
+        let rendered = render_select_query(
+            current_backend(),
+            &SelectQuery {
+                table: self.table,
+                columns: Vec::new(),
+                filter: filter_expression_from_raw_parts(&self.filters, &self.values),
+                sorts: Vec::new(),
+                pagination: None,
+                count_only: true,
+            },
+        );
+        let rows = fetch_rows_on(executor, &rendered.sql, &rendered.values).await?;
         let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
         row.try_get::<i64, _>("count")
     }
@@ -896,12 +923,18 @@ where
     where
         E: sqlx::Executor<'e, Database = sqlx::Postgres>,
     {
-        let mut sql = format!("SELECT COUNT(*) AS count FROM {}", self.table);
-        if !self.filters.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(&self.filters.join(" AND "));
-        }
-        let rows = fetch_rows_on(executor, &sql, &self.values).await?;
+        let rendered = render_select_query(
+            current_backend(),
+            &SelectQuery {
+                table: self.table,
+                columns: Vec::new(),
+                filter: filter_expression_from_raw_parts(&self.filters, &self.values),
+                sorts: Vec::new(),
+                pagination: None,
+                count_only: true,
+            },
+        );
+        let rows = fetch_rows_on(executor, &rendered.sql, &rendered.values).await?;
         let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
         row.try_get::<i64, _>("count")
     }

@@ -103,6 +103,10 @@ fn resolve_upsert_config(
 
     #[cfg(any(feature = "mysql", feature = "mssql"))]
     {
+        let _ = fields;
+        let _ = rename_all_rule;
+        let _ = auto_generated_pk;
+        let _ = requested_targets;
         return Err(syn::Error::new(
             struct_name.span(),
             "graphql-orm upsert is only supported for sqlite and postgres in v1",
@@ -2028,6 +2032,259 @@ pub(crate) fn generate_graphql_operations(
     } else {
         quote! {}
     };
+
+    if cfg!(feature = "mssql") {
+        return Ok(quote! {
+            // ============================================================================
+            // Connection/Edge Types (for pagination)
+            // ============================================================================
+
+            #[derive(::graphql_orm::async_graphql::SimpleObject, Debug, Clone)]
+            #[graphql(name = #edge_type_str)]
+            pub struct #edge_type {
+                pub node: #struct_name,
+                pub cursor: String,
+            }
+
+            #[derive(::graphql_orm::async_graphql::SimpleObject, Debug, Clone)]
+            #[graphql(name = #connection_type_str)]
+            pub struct #connection_type {
+                pub edges: Vec<#edge_type>,
+                pub page_info: ::graphql_orm::graphql::pagination::PageInfo,
+            }
+
+            impl #connection_type {
+                pub fn from_generic(conn: ::graphql_orm::graphql::pagination::Connection<#struct_name>) -> Self {
+                    Self {
+                        edges: conn.edges.into_iter().map(|e| #edge_type {
+                            node: e.node,
+                            cursor: e.cursor,
+                        }).collect(),
+                        page_info: conn.page_info,
+                    }
+                }
+
+                pub fn empty() -> Self {
+                    Self {
+                        edges: Vec::new(),
+                        page_info: ::graphql_orm::graphql::pagination::PageInfo::default(),
+                    }
+                }
+            }
+
+            // ============================================================================
+            // Query Struct
+            // ============================================================================
+
+            #[derive(Default)]
+            pub struct #queries_struct;
+
+            #[::graphql_orm::async_graphql::Object]
+            impl #queries_struct {
+                #[graphql(name = #list_query_name)]
+                async fn list(
+                    &self,
+                    ctx: &::graphql_orm::async_graphql::Context<'_>,
+                    #[graphql(name = "where")] where_input: Option<#where_input>,
+                    #[graphql(name = "orderBy")] order_by: Option<Vec<#order_by_input>>,
+                    #[graphql(name = "page")] page: Option<::graphql_orm::graphql::orm::PageInput>,
+                ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
+                    use ::graphql_orm::graphql::auth::AuthExt;
+                    use ::graphql_orm::graphql::orm::{DatabaseOrderBy, EntityQuery};
+
+                    let _user = ctx.auth_user()?;
+                    let db = ctx.data_unchecked::<::graphql_orm::db::Database>();
+                    let pool = db.pool();
+                    db.ensure_entity_access(
+                        Some(ctx),
+                        #entity_name_lit,
+                        <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                        ::graphql_orm::graphql::orm::EntityAccessKind::Read,
+                        ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
+                    ).await?;
+
+                    let mut query = EntityQuery::<#struct_name>::new();
+
+                    if let Some(ref filter) = where_input {
+                        query = query.filter(filter);
+                    }
+
+                    if let Some(ref orders) = order_by {
+                        for order in orders {
+                            query = query.order_by(order);
+                        }
+                    }
+
+                    if query.order_clauses.is_empty() {
+                        query = query.default_order();
+                    }
+
+                    if db.row_policy().is_some() {
+                        let base_query = query.clone();
+                        let requested_page = page.clone();
+
+                        let mut all_rows = base_query.fetch_all(pool).await
+                            .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+
+                        let mut visible_rows = Vec::new();
+                        for row in all_rows.drain(..) {
+                            if db.can_read_row(
+                                Some(ctx),
+                                #entity_name_lit,
+                                <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                                ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
+                                &row as &(dyn ::std::any::Any + Send + Sync),
+                            ).await? {
+                                visible_rows.push(row);
+                            }
+                        }
+
+                        let total = visible_rows.len() as i64;
+                        let offset = requested_page.as_ref().map(|p| p.offset()).unwrap_or(0) as usize;
+                        let limit = requested_page.as_ref().and_then(|p| p.limit()).map(|limit| limit as usize);
+
+                        let paged_rows: Vec<#struct_name> = if offset >= visible_rows.len() {
+                            Vec::new()
+                        } else if let Some(limit) = limit {
+                            visible_rows.into_iter().skip(offset).take(limit).collect()
+                        } else {
+                            visible_rows.into_iter().skip(offset).collect()
+                        };
+
+                        let has_next_page = (offset as i64 + paged_rows.len() as i64) < total;
+                        let has_previous_page = offset > 0;
+
+                        let mut generic_conn = ::graphql_orm::graphql::pagination::Connection {
+                            edges: paged_rows.into_iter().enumerate().map(|(index, node)| {
+                                ::graphql_orm::graphql::pagination::Edge {
+                                    cursor: ::graphql_orm::graphql::pagination::encode_cursor((offset + index) as i64),
+                                    node,
+                                }
+                            }).collect::<Vec<_>>(),
+                            page_info: ::graphql_orm::graphql::pagination::PageInfo {
+                                has_next_page,
+                                has_previous_page,
+                                start_cursor: None,
+                                end_cursor: None,
+                                total_count: Some(total),
+                            },
+                        };
+
+                        generic_conn.page_info.start_cursor = generic_conn.edges.first().map(|edge| edge.cursor.clone());
+                        generic_conn.page_info.end_cursor = generic_conn.edges.last().map(|edge| edge.cursor.clone());
+
+                        #relation_preload_list
+
+                        return Ok(#connection_type::from_generic(generic_conn));
+                    }
+
+                    if let Some(ref p) = page {
+                        query = query.paginate(p);
+                    }
+
+                    let mut generic_conn = query.fetch_connection(pool).await
+                        .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+
+                    #relation_preload_list
+
+                    Ok(#connection_type::from_generic(generic_conn))
+                }
+
+                #[graphql(name = #single_query_name)]
+                async fn get_by_id(
+                    &self,
+                    ctx: &::graphql_orm::async_graphql::Context<'_>,
+                    #[graphql(name = "id")] id: #pk_type,
+                ) -> ::graphql_orm::async_graphql::Result<Option<#struct_name>> {
+                    use ::graphql_orm::graphql::auth::AuthExt;
+                    use ::graphql_orm::graphql::orm::EntityQuery;
+
+                    let _user = ctx.auth_user()?;
+                    let db = ctx.data_unchecked::<::graphql_orm::db::Database>();
+                    let pool = db.pool();
+                    db.ensure_entity_access(
+                        Some(ctx),
+                        #entity_name_lit,
+                        <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                        ::graphql_orm::graphql::orm::EntityAccessKind::Read,
+                        ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
+                    ).await?;
+
+                    let pk_col = #struct_name::PRIMARY_KEY;
+                    let mut entity = EntityQuery::<#struct_name>::new()
+                        .where_clause(
+                            &format!("{} = {}", pk_col, #struct_name::__gom_placeholder(1)),
+                            #pk_bind_value
+                        )
+                        .fetch_one(pool)
+                        .await
+                        .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+
+                    if let Some(ref loaded) = entity {
+                        if !db.can_read_row(
+                            Some(ctx),
+                            #entity_name_lit,
+                            <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                            ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
+                            loaded as &(dyn ::std::any::Any + Send + Sync),
+                        ).await? {
+                            return Ok(None);
+                        }
+                    }
+
+                    #relation_preload_single
+
+                    Ok(entity)
+                }
+            }
+
+            impl #struct_name {
+                pub fn query<'a>(pool: &'a #pool_type) -> ::graphql_orm::graphql::orm::FindQuery<'a, Self, #where_input, #order_by_input> {
+                    ::graphql_orm::graphql::orm::FindQuery::new(pool)
+                }
+
+                pub async fn find_by_id(
+                    db: &::graphql_orm::db::Database,
+                    id: &#pk_type_ty,
+                ) -> Result<Option<Self>, ::graphql_orm::sqlx::Error> {
+                    db.ensure_entity_access(
+                        None,
+                        #entity_name_lit,
+                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                        ::graphql_orm::graphql::orm::EntityAccessKind::Read,
+                        ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                    ).await.map_err(|e| ::graphql_orm::sqlx::Error::Protocol(format!("{e:?}")))?;
+
+                    let entity = ::graphql_orm::graphql::orm::EntityQuery::<Self>::new()
+                        .where_clause(
+                            &format!("{} = {}", Self::PRIMARY_KEY, Self::__gom_placeholder(1)),
+                            #pk_bind_value_ref
+                        )
+                        .fetch_one(db)
+                        .await?;
+
+                    if let Some(ref loaded) = entity {
+                        if !db.can_read_row(
+                            None,
+                            #entity_name_lit,
+                            <Self as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                            ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                            loaded as &(dyn ::std::any::Any + Send + Sync),
+                        ).await.map_err(|e| ::graphql_orm::sqlx::Error::Protocol(format!("{e:?}")))? {
+                            return Ok(None);
+                        }
+                    }
+
+                    Ok(entity)
+                }
+
+                pub fn count_query<'a>(pool: &'a #pool_type) -> ::graphql_orm::graphql::orm::CountQuery<'a, #where_input> {
+                    use ::graphql_orm::graphql::orm::DatabaseEntity;
+                    ::graphql_orm::graphql::orm::CountQuery::new(pool, <Self as DatabaseEntity>::TABLE_NAME)
+                }
+            }
+        });
+    }
 
     Ok(quote! {
         // ============================================================================

@@ -70,6 +70,7 @@ pub fn mutation_result(input: TokenStream) -> TokenStream {
         json_field,
         transform,
         input_only,
+        backup,
         index,
         unique_index
     )
@@ -101,6 +102,7 @@ pub fn derive_graphql_entity(input: TokenStream) -> TokenStream {
         json_field,
         transform,
         input_only,
+        backup,
         index,
         unique_index
     )

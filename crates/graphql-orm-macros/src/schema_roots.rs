@@ -77,6 +77,90 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         &query_types,
         async_graphql_merged_object_derive(),
     );
+
+    if cfg!(feature = "mssql") {
+        if !args.extra_mutation_types.is_empty() {
+            return quote! {
+                compile_error!("graphql-orm mssql is read-only; extra mutation root types are not supported");
+            }
+            .into();
+        }
+        if !args.extra_subscription_types.is_empty() {
+            return quote! {
+                compile_error!("graphql-orm mssql does not generate subscription roots in read-only mode");
+            }
+            .into();
+        }
+
+        let schema_loader_data: Vec<proc_macro2::TokenStream> = entities
+            .iter()
+            .map(|entity| {
+                quote! {
+                    let builder = builder.data(
+                        ::graphql_orm::async_graphql::dataloader::DataLoader::new(
+                            ::graphql_orm::graphql::loaders::RelationLoader::<#entity>::new(database.clone()),
+                            ::graphql_orm::tokio::spawn,
+                        )
+                    );
+                }
+            })
+            .collect();
+        let entity_metadata_items: Vec<proc_macro2::TokenStream> = entities
+            .iter()
+            .map(|entity| {
+                quote! {
+                    <#entity as ::graphql_orm::graphql::orm::Entity>::metadata()
+                }
+            })
+            .collect();
+
+        return quote! {
+            #query_root
+
+            pub type MutationRoot = ::graphql_orm::async_graphql::EmptyMutation;
+            pub type SubscriptionRoot = ::graphql_orm::async_graphql::EmptySubscription;
+            pub type AppSchema = ::graphql_orm::async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
+
+            pub fn schema_builder(
+                database: ::graphql_orm::db::Database,
+            ) -> ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot> {
+                let builder = ::graphql_orm::async_graphql::Schema::build(
+                    QueryRoot::default(),
+                    ::graphql_orm::async_graphql::EmptyMutation,
+                    ::graphql_orm::async_graphql::EmptySubscription,
+                )
+                .data(database.clone());
+                #(#schema_loader_data)*
+                builder
+            }
+
+            pub fn graphql_orm_entity_metadata(
+            ) -> Vec<&'static ::graphql_orm::graphql::orm::EntityMetadata> {
+                vec![
+                    #(#entity_metadata_items),*
+                ]
+            }
+
+            pub fn graphql_orm_backup_entities(
+            ) -> Vec<::graphql_orm::graphql::orm::EntityBackupDescriptor> {
+                ::graphql_orm::graphql::orm::backup_descriptors_from_entities(
+                    &graphql_orm_entity_metadata(),
+                )
+            }
+
+            pub fn graphql_orm_schema_snapshot(
+                migration_version: impl Into<String>,
+            ) -> ::graphql_orm::graphql::orm::GraphqlOrmSchemaSnapshot {
+                ::graphql_orm::graphql::orm::schema_snapshot_from_entities(
+                    ::graphql_orm::graphql::orm::current_backend(),
+                    migration_version,
+                    &graphql_orm_entity_metadata(),
+                )
+            }
+        }
+        .into();
+    }
+
     let mutation_root = emit_chunked_merged(
         "Mutation",
         mutation_custom_ops,
@@ -101,6 +185,14 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             }
         })
         .collect();
+    let entity_metadata_items: Vec<proc_macro2::TokenStream> = entities
+        .iter()
+        .map(|entity| {
+            quote! {
+                <#entity as ::graphql_orm::graphql::orm::Entity>::metadata()
+            }
+        })
+        .collect();
 
     quote! {
         #query_root
@@ -120,6 +212,30 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             .data(database.clone());
             #(#schema_loader_data)*
             builder
+        }
+
+        pub fn graphql_orm_entity_metadata(
+        ) -> Vec<&'static ::graphql_orm::graphql::orm::EntityMetadata> {
+            vec![
+                #(#entity_metadata_items),*
+            ]
+        }
+
+        pub fn graphql_orm_backup_entities(
+        ) -> Vec<::graphql_orm::graphql::orm::EntityBackupDescriptor> {
+            ::graphql_orm::graphql::orm::backup_descriptors_from_entities(
+                &graphql_orm_entity_metadata(),
+            )
+        }
+
+        pub fn graphql_orm_schema_snapshot(
+            migration_version: impl Into<String>,
+        ) -> ::graphql_orm::graphql::orm::GraphqlOrmSchemaSnapshot {
+            ::graphql_orm::graphql::orm::schema_snapshot_from_entities(
+                ::graphql_orm::graphql::orm::current_backend(),
+                migration_version,
+                &graphql_orm_entity_metadata(),
+            )
         }
     }
     .into()

@@ -3,6 +3,9 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+#[cfg(feature = "mssql")]
+pub mod mssql;
+
 #[derive(Default)]
 struct EventSenders {
     senders: RwLock<HashMap<TypeId, Box<dyn Any + Send + Sync>>>,
@@ -13,20 +16,26 @@ const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 256;
 #[derive(Clone)]
 pub struct Database {
     pool: DbPool,
+    #[cfg(not(feature = "mssql"))]
     mutation_hook: Option<Arc<dyn crate::graphql::orm::MutationHook>>,
     entity_policy: Option<Arc<dyn crate::graphql::orm::EntityPolicy>>,
     field_policy: Option<Arc<dyn crate::graphql::orm::FieldPolicy>>,
     row_policy: Option<Arc<dyn crate::graphql::orm::RowPolicy>>,
+    #[cfg(not(feature = "mssql"))]
     write_input_transform: Option<Arc<dyn crate::graphql::orm::WriteInputTransform>>,
+    #[cfg(not(feature = "mssql"))]
     post_commit_error_handler: Option<Arc<dyn crate::graphql::orm::PostCommitErrorHandler>>,
+    change_journal_enabled: bool,
     event_senders: Arc<EventSenders>,
 }
 
 impl std::fmt::Debug for Database {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Database")
-            .field("pool", &"DbPool")
-            .field("has_mutation_hook", &self.mutation_hook.is_some())
+        let mut debug = f.debug_struct("Database");
+        debug.field("pool", &"DbPool");
+        #[cfg(not(feature = "mssql"))]
+        debug.field("has_mutation_hook", &self.mutation_hook.is_some());
+        debug
             .field("has_field_policy", &self.field_policy.is_some())
             .finish()
     }
@@ -36,16 +45,21 @@ impl Database {
     pub fn new(pool: DbPool) -> Self {
         Self {
             pool,
+            #[cfg(not(feature = "mssql"))]
             mutation_hook: None,
             entity_policy: None,
             field_policy: None,
             row_policy: None,
+            #[cfg(not(feature = "mssql"))]
             write_input_transform: None,
+            #[cfg(not(feature = "mssql"))]
             post_commit_error_handler: None,
+            change_journal_enabled: false,
             event_senders: Arc::new(EventSenders::default()),
         }
     }
 
+    #[cfg(not(feature = "mssql"))]
     pub fn with_mutation_hook<H>(pool: DbPool, hook: H) -> Self
     where
         H: crate::graphql::orm::MutationHook + 'static,
@@ -58,6 +72,7 @@ impl Database {
             row_policy: None,
             write_input_transform: None,
             post_commit_error_handler: None,
+            change_journal_enabled: false,
             event_senders: Arc::new(EventSenders::default()),
         }
     }
@@ -68,12 +83,16 @@ impl Database {
     {
         Self {
             pool,
+            #[cfg(not(feature = "mssql"))]
             mutation_hook: None,
             entity_policy: Some(Arc::new(policy)),
             field_policy: None,
             row_policy: None,
+            #[cfg(not(feature = "mssql"))]
             write_input_transform: None,
+            #[cfg(not(feature = "mssql"))]
             post_commit_error_handler: None,
+            change_journal_enabled: false,
             event_senders: Arc::new(EventSenders::default()),
         }
     }
@@ -84,12 +103,16 @@ impl Database {
     {
         Self {
             pool,
+            #[cfg(not(feature = "mssql"))]
             mutation_hook: None,
             entity_policy: None,
             field_policy: Some(Arc::new(policy)),
             row_policy: None,
+            #[cfg(not(feature = "mssql"))]
             write_input_transform: None,
+            #[cfg(not(feature = "mssql"))]
             post_commit_error_handler: None,
+            change_journal_enabled: false,
             event_senders: Arc::new(EventSenders::default()),
         }
     }
@@ -100,16 +123,21 @@ impl Database {
     {
         Self {
             pool,
+            #[cfg(not(feature = "mssql"))]
             mutation_hook: None,
             entity_policy: None,
             field_policy: None,
             row_policy: Some(Arc::new(policy)),
+            #[cfg(not(feature = "mssql"))]
             write_input_transform: None,
+            #[cfg(not(feature = "mssql"))]
             post_commit_error_handler: None,
+            change_journal_enabled: false,
             event_senders: Arc::new(EventSenders::default()),
         }
     }
 
+    #[cfg(not(feature = "mssql"))]
     pub fn with_write_input_transform<H>(pool: DbPool, transform: H) -> Self
     where
         H: crate::graphql::orm::WriteInputTransform + 'static,
@@ -122,10 +150,12 @@ impl Database {
             row_policy: None,
             write_input_transform: Some(Arc::new(transform)),
             post_commit_error_handler: None,
+            change_journal_enabled: false,
             event_senders: Arc::new(EventSenders::default()),
         }
     }
 
+    #[cfg(not(feature = "mssql"))]
     pub fn with_hooks<M, E, F>(
         pool: DbPool,
         mutation_hook: M,
@@ -145,6 +175,7 @@ impl Database {
             row_policy: None,
             write_input_transform: None,
             post_commit_error_handler: None,
+            change_journal_enabled: false,
             event_senders: Arc::new(EventSenders::default()),
         }
     }
@@ -153,6 +184,20 @@ impl Database {
         &self.pool
     }
 
+    pub fn with_change_journal(mut self) -> Self {
+        self.change_journal_enabled = true;
+        self
+    }
+
+    pub fn set_change_journal_enabled(&mut self, enabled: bool) {
+        self.change_journal_enabled = enabled;
+    }
+
+    pub fn change_journal_enabled(&self) -> bool {
+        self.change_journal_enabled
+    }
+
+    #[cfg(not(feature = "mssql"))]
     pub fn set_mutation_hook<H>(&mut self, hook: H)
     where
         H: crate::graphql::orm::MutationHook + 'static,
@@ -160,6 +205,7 @@ impl Database {
         self.mutation_hook = Some(Arc::new(hook));
     }
 
+    #[cfg(not(feature = "mssql"))]
     pub fn mutation_hook(&self) -> Option<&Arc<dyn crate::graphql::orm::MutationHook>> {
         self.mutation_hook.as_ref()
     }
@@ -197,6 +243,7 @@ impl Database {
         self.row_policy.as_ref()
     }
 
+    #[cfg(not(feature = "mssql"))]
     pub fn set_write_input_transform<H>(&mut self, transform: H)
     where
         H: crate::graphql::orm::WriteInputTransform + 'static,
@@ -204,12 +251,14 @@ impl Database {
         self.write_input_transform = Some(Arc::new(transform));
     }
 
+    #[cfg(not(feature = "mssql"))]
     pub fn write_input_transform(
         &self,
     ) -> Option<&Arc<dyn crate::graphql::orm::WriteInputTransform>> {
         self.write_input_transform.as_ref()
     }
 
+    #[cfg(not(feature = "mssql"))]
     pub fn set_post_commit_error_handler<H>(&mut self, handler: H)
     where
         H: crate::graphql::orm::PostCommitErrorHandler + 'static,
@@ -217,6 +266,7 @@ impl Database {
         self.post_commit_error_handler = Some(Arc::new(handler));
     }
 
+    #[cfg(not(feature = "mssql"))]
     pub fn post_commit_error_handler(
         &self,
     ) -> Option<&Arc<dyn crate::graphql::orm::PostCommitErrorHandler>> {
@@ -281,6 +331,7 @@ impl Database {
         let _ = sender.send(event);
     }
 
+    #[cfg(not(feature = "mssql"))]
     pub async fn report_post_commit_error(&self, error: String) {
         if let Some(handler) = &self.post_commit_error_handler {
             handler.on_post_commit_error(self, &error).await;
@@ -468,6 +519,7 @@ impl Database {
         }
     }
 
+    #[cfg(not(feature = "mssql"))]
     pub async fn run_before_create(
         &self,
         ctx: Option<&async_graphql::Context<'_>>,
@@ -483,6 +535,7 @@ impl Database {
             .await
     }
 
+    #[cfg(not(feature = "mssql"))]
     pub async fn run_before_create_with_context(
         &self,
         write_ctx: &mut crate::graphql::orm::WriteInputContext<'_, '_>,
@@ -495,6 +548,7 @@ impl Database {
         }
     }
 
+    #[cfg(not(feature = "mssql"))]
     pub async fn run_before_update(
         &self,
         ctx: Option<&async_graphql::Context<'_>>,
@@ -511,6 +565,7 @@ impl Database {
             .await
     }
 
+    #[cfg(not(feature = "mssql"))]
     pub async fn run_before_update_with_context(
         &self,
         write_ctx: &mut crate::graphql::orm::WriteInputContext<'_, '_>,
@@ -526,6 +581,7 @@ impl Database {
         }
     }
 
+    #[cfg(not(feature = "mssql"))]
     pub async fn run_before_upsert(
         &self,
         ctx: Option<&async_graphql::Context<'_>>,
@@ -541,6 +597,7 @@ impl Database {
             .await
     }
 
+    #[cfg(not(feature = "mssql"))]
     pub async fn run_before_upsert_with_context(
         &self,
         write_ctx: &mut crate::graphql::orm::WriteInputContext<'_, '_>,
@@ -617,5 +674,38 @@ pub mod postgres_helpers {
         T: serde::de::DeserializeOwned,
     {
         serde_json::from_str(value).unwrap_or_default()
+    }
+}
+
+#[cfg(feature = "mssql")]
+pub mod mssql_helpers {
+    pub fn json_from_str<T>(value: &str) -> Result<T, sqlx::Error>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        serde_json::from_str(value).map_err(|error| sqlx::Error::Decode(Box::new(error)))
+    }
+
+    pub fn uuid_to_string(value: &uuid::Uuid) -> String {
+        value.to_string()
+    }
+
+    pub fn int_to_bool(value: i32) -> bool {
+        value != 0
+    }
+
+    pub fn str_to_uuid(value: &str) -> Result<uuid::Uuid, uuid::Error> {
+        uuid::Uuid::parse_str(value)
+    }
+
+    pub fn str_to_datetime(value: &str) -> Result<String, std::convert::Infallible> {
+        Ok(value.to_string())
+    }
+
+    pub fn json_to_vec<T>(value: &str) -> Vec<T>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        json_from_str(value).unwrap_or_default()
     }
 }

@@ -1130,3 +1130,13 @@ Or override the database target explicitly:
 ```bash
 TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:55432/postgres cargo test -p graphql-orm --no-default-features --features postgres
 ```
+
+## SQL Server Read-Only Backend
+
+SQL Server support is available behind the `mssql` feature as a read/query-only backend using
+Tiberius. The SQL Server driver dependencies are optional and are not built unless the `mssql`
+feature is selected. It generates query operations, filters, ordering, pagination, relation loading,
+and read repository helpers, but intentionally omits writes and migrations.
+
+See [crates/graphql-orm/docs/MSSQL.md](crates/graphql-orm/docs/MSSQL.md) for setup, mapping, and
+opt-in integration test details.
