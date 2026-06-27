@@ -13,7 +13,7 @@ not provide an MSSQL driver.
 For a service that only uses SQL Server, select the `mssql` backend feature:
 
 ```toml
-graphql-orm = { version = "0.2.9", default-features = false, features = ["mssql"] }
+graphql-orm = { version = "0.2.10", default-features = false, features = ["mssql"] }
 ```
 
 When exactly one of `sqlite`, `postgres`, or `mssql` is enabled, the legacy implicit backend remains
@@ -215,12 +215,8 @@ arguments or the entity default order.
 Relations are ORM metadata only. They do not require physical SQL Server foreign keys and do not
 create or migrate constraints.
 
-Relation declarations currently describe single-column edges. Composite primary keys do not block
-future composite relation support, but composite foreign-key relation loading is not first-class in
-this phase.
-
 For renamed SQL Server columns, use the Rust source field in `from` and the target database column in
-`to`:
+`to`. Single-column relation syntax remains unchanged:
 
 ```rust
 #[graphql_orm(db_column = "CustomerId", write = false)]
@@ -236,6 +232,123 @@ pub customer_id: i64,
 )]
 pub customer: Option<LegacyCustomer>,
 ```
+
+Composite relations use array syntax. `from` lists Rust source fields on the current entity, and
+`to` lists target database columns on the related entity. The arity must match:
+
+```rust
+#[derive(GraphQLEntity, GraphQLRelations, GraphQLOperations, SimpleObject, Clone, Debug)]
+#[graphql(rename_fields = "PascalCase")]
+#[graphql(complex)]
+#[graphql_entity(
+    backend = "mssql",
+    table = "dbo.JimCardFileContacts",
+    plural = "JimCardFileContacts",
+    schema_policy = "external_read_only",
+    default_sort = "[CardNo] ASC, [ContNo] ASC"
+)]
+pub struct JimCardFileContact {
+    #[primary_key]
+    #[graphql(name = "CardNo")]
+    #[graphql_orm(db_column = "CardNo", write = false)]
+    pub card_no: i32,
+
+    #[primary_key]
+    #[graphql(name = "ContNo")]
+    #[graphql_orm(db_column = "ContNo", write = false)]
+    pub cont_no: i32,
+
+    #[graphql(skip, name = "Details")]
+    #[relation(
+        target = "JimCardFileDetail",
+        from = ["card_no", "cont_no"],
+        to = ["CardNo", "ContNo"],
+        multiple,
+        emit_fk = false
+    )]
+    pub details: Vec<JimCardFileDetail>,
+}
+```
+
+The Jim card-file shape can be mapped as:
+
+```rust
+#[graphql(skip, name = "Contacts")]
+#[relation(
+    target = "JimCardFileContact",
+    from = "card_no",
+    to = "CardNo",
+    multiple,
+    emit_fk = false
+)]
+pub contacts: Vec<JimCardFileContact>,
+
+#[graphql(skip, name = "Details")]
+#[relation(
+    target = "JimCardFileDetail",
+    from = ["card_no", "cont_no"],
+    to = ["CardNo", "ContNo"],
+    multiple,
+    emit_fk = false
+)]
+pub details: Vec<JimCardFileDetail>,
+```
+
+With Pascal-case feature flags, nested reads keep the expected legacy GraphQL shape:
+
+```graphql
+query {
+  JimCardFiles {
+    Edges {
+      Node {
+        CardNo
+        CardCode
+        Name
+        Contacts {
+          Edges {
+            Node {
+              CardNo
+              ContNo
+              Details {
+                Edges {
+                  Node { Type Value }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Nested relation loading is batched by layer. The query above executes as the parent card-file query,
+one relation query for all contacts, and one relation query for all details. Relation-level
+`Where`/`OrderBy`/`Page` arguments use the same DataLoader batching path for supported scalar key
+parts, including `i16`, `i32`, `i64`, `String`, UUIDs, floats, and booleans.
+
+SQL Server composite relation predicates are rendered with bound `@P` parameters and bracketed
+identifiers:
+
+```sql
+WHERE ([CardNo] = @P1 AND [ContNo] = @P2)
+   OR ([CardNo] = @P3 AND [ContNo] = @P4)
+```
+
+If any nullable source key part is `NULL`, that parent relation is skipped and resolves to an empty
+connection or `None`. SQL `NULL = NULL` matching is not inferred.
+
+For computed fields such as a derived `MicrosoftUserId`, use async-graphql’s normal complex object
+pattern:
+
+- derive the entity with `#[graphql(complex)]`
+- keep generated relation fields marked `#[graphql(skip)]`
+- implement a manual `#[ComplexObject]` method for the computed field
+- read `Database<MssqlBackend>` or a request-scoped `DataLoader` from the GraphQL context
+
+This keeps computed database reads explicit and lets applications batch them with their own
+request-scoped loaders where needed.
 
 ## Type Notes
 

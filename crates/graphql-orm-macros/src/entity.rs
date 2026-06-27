@@ -231,6 +231,8 @@ pub(crate) struct FieldMetadata {
     pub(crate) relation_target: Option<String>,
     pub(crate) relation_from: Option<String>,
     pub(crate) relation_to: Option<String>,
+    pub(crate) relation_from_fields: Option<Vec<String>>,
+    pub(crate) relation_to_fields: Option<Vec<String>>,
     pub(crate) relation_multiple: bool,
     pub(crate) relation_emit_foreign_key: Option<bool>,
     pub(crate) relation_on_delete: Option<String>,
@@ -277,6 +279,8 @@ impl Default for FieldMetadata {
             relation_target: None,
             relation_from: None,
             relation_to: None,
+            relation_from_fields: None,
+            relation_to_fields: None,
             relation_multiple: false,
             relation_emit_foreign_key: None,
             relation_on_delete: None,
@@ -300,6 +304,34 @@ impl Default for FieldMetadata {
             read_policy: None,
             write_policy: None,
         }
+    }
+}
+
+fn parse_relation_columns(input: ParseStream<'_>) -> syn::Result<Vec<String>> {
+    let expr: syn::Expr = input.parse()?;
+    match expr {
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(lit),
+            ..
+        }) => Ok(vec![lit.value()]),
+        syn::Expr::Array(array) => array
+            .elems
+            .into_iter()
+            .map(|expr| match expr {
+                syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(lit),
+                    ..
+                }) => Ok(lit.value()),
+                other => Err(syn::Error::new_spanned(
+                    other,
+                    "relation column arrays must contain string literals",
+                )),
+            })
+            .collect(),
+        other => Err(syn::Error::new_spanned(
+            other,
+            "relation columns must be a string literal or an array of string literals",
+        )),
     }
 }
 
@@ -449,12 +481,18 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             meta.relation_target = Some(lit.value());
                         } else if nested.path.is_ident("from") {
                             let value = nested.value()?;
-                            let lit: syn::LitStr = value.parse()?;
-                            meta.relation_from = Some(lit.value());
+                            let columns = parse_relation_columns(value)?;
+                            if let Some(column) = columns.first() {
+                                meta.relation_from = Some(column.clone());
+                            }
+                            meta.relation_from_fields = Some(columns);
                         } else if nested.path.is_ident("to") {
                             let value = nested.value()?;
-                            let lit: syn::LitStr = value.parse()?;
-                            meta.relation_to = Some(lit.value());
+                            let columns = parse_relation_columns(value)?;
+                            if let Some(column) = columns.first() {
+                                meta.relation_to = Some(column.clone());
+                            }
+                            meta.relation_to_fields = Some(columns);
                         } else if nested.path.is_ident("on_delete") {
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
@@ -528,6 +566,71 @@ pub(crate) fn collect_parsed_fields<'a>(
 
 fn to_snake_case(s: &str) -> String {
     s.to_case(Case::Snake)
+}
+
+fn is_rust_keyword(ident: &str) -> bool {
+    matches!(
+        ident,
+        "as" | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "fn"
+            | "for"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "self"
+            | "Self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "type"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
+            | "async"
+            | "await"
+            | "dyn"
+            | "abstract"
+            | "become"
+            | "box"
+            | "do"
+            | "final"
+            | "macro"
+            | "override"
+            | "priv"
+            | "try"
+            | "typeof"
+            | "unsized"
+            | "virtual"
+            | "yield"
+    )
+}
+
+fn rust_ident_from_graphql_name(graphql_name: &str, span: proc_macro2::Span) -> syn::Ident {
+    let snake = to_snake_case(graphql_name);
+    if is_rust_keyword(&snake) {
+        syn::Ident::new_raw(&snake, span)
+    } else {
+        syn::Ident::new(&snake, span)
+    }
 }
 
 pub(crate) fn relation_delete_policy_tokens(
@@ -931,7 +1034,7 @@ fn generate_entity_impl(
     let mut filter_to_sql = Vec::new();
     let mut from_row_fields = Vec::new();
     let mut relation_metadata_defs = Vec::new();
-    let mut sortable_columns: Vec<(String, String)> = Vec::new();
+    let mut sortable_columns: Vec<(syn::Ident, String)> = Vec::new();
     let mut object_field_methods = Vec::new();
     let parsed_fields = collect_parsed_fields(fields.iter())?;
 
@@ -956,14 +1059,60 @@ fn generate_entity_impl(
                     .relation_target
                     .clone()
                     .unwrap_or_else(|| "Unknown".to_string());
-                let source_column = field_meta
-                    .relation_from
-                    .clone()
+                let source_columns = field_meta.relation_from_fields.clone().unwrap_or_else(|| {
+                    vec![
+                        field_meta
+                            .relation_from
+                            .clone()
+                            .unwrap_or_else(|| "id".to_string()),
+                    ]
+                });
+                let target_columns = field_meta.relation_to_fields.clone().unwrap_or_else(|| {
+                    vec![
+                        field_meta
+                            .relation_to
+                            .clone()
+                            .unwrap_or_else(|| "unknown_id".to_string()),
+                    ]
+                });
+                if source_columns.len() != target_columns.len() {
+                    return Err(syn::Error::new_spanned(
+                        field,
+                        format!(
+                            "Relation '{}' has {} source key part(s) but {} target key part(s)",
+                            rust_name,
+                            source_columns.len(),
+                            target_columns.len()
+                        ),
+                    ));
+                }
+                for source_column in &source_columns {
+                    if !parsed_fields.iter().any(|parsed| {
+                        parsed
+                            .field
+                            .ident
+                            .as_ref()
+                            .is_some_and(|ident| ident == source_column)
+                    }) {
+                        return Err(syn::Error::new_spanned(
+                            field,
+                            format!(
+                                "Relation '{}' references unknown source field '{}' on '{}'",
+                                rust_name, source_column, struct_name
+                            ),
+                        ));
+                    }
+                }
+                let source_column = source_columns
+                    .first()
+                    .cloned()
                     .unwrap_or_else(|| "id".to_string());
-                let target_column = field_meta
-                    .relation_to
-                    .clone()
+                let target_column = target_columns
+                    .first()
+                    .cloned()
                     .unwrap_or_else(|| "unknown_id".to_string());
+                let source_columns_tokens = source_columns.iter().collect::<Vec<_>>();
+                let target_columns_tokens = target_columns.iter().collect::<Vec<_>>();
                 let is_multiple = field_meta.relation_multiple;
                 let emit_foreign_key = field_meta.relation_emit_foreign_key.unwrap_or(!is_multiple);
                 let on_delete = relation_delete_policy_tokens(
@@ -981,6 +1130,8 @@ fn generate_entity_impl(
                         target_type: #target_type,
                         source_column: #source_column,
                         target_column: #target_column,
+                        source_columns: &[#(#source_columns_tokens),*],
+                        target_columns: &[#(#target_columns_tokens),*],
                         is_multiple: #is_multiple,
                         emit_foreign_key: #emit_foreign_key,
                         on_delete: #on_delete,
@@ -1080,9 +1231,8 @@ fn generate_entity_impl(
 
         // Generate OrderByInput field for sortable fields
         if field_meta.sortable && field_meta.order {
-            sortable_columns.push((to_snake_case(&graphql_name), db_col_sql.clone()));
-            let order_field_name =
-                syn::Ident::new(&to_snake_case(&graphql_name), field_name.span());
+            let order_field_name = rust_ident_from_graphql_name(&graphql_name, field_name.span());
+            sortable_columns.push((order_field_name.clone(), db_col_sql.clone()));
             order_by_fields.push(quote! {
                 #[graphql(name = #graphql_name)]
                 pub #order_field_name: Option<::graphql_orm::graphql::orm::OrderDirection>,
@@ -1171,9 +1321,8 @@ fn generate_entity_impl(
     let order_by_match_arms: Vec<_> = sortable_columns
         .iter()
         .map(|(field_ident, col)| {
-            let field_name = syn::Ident::new(field_ident, struct_name.span());
             quote! {
-                if let Some(dir) = &self.#field_name {
+                if let Some(dir) = &self.#field_ident {
                     parts.push(format!("{} {}", #col, dir.to_sql()));
                 }
             }
@@ -1481,7 +1630,7 @@ fn generate_filter_field(
     db_col: &str,
     filter_type: &str,
 ) -> syn::Result<(proc_macro2::TokenStream, proc_macro2::TokenStream)> {
-    let filter_field_name = syn::Ident::new(&to_snake_case(graphql_name), field_name.span());
+    let filter_field_name = rust_ident_from_graphql_name(graphql_name, field_name.span());
 
     match filter_type {
         "string" => {

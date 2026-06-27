@@ -23,7 +23,7 @@ Working today:
 - read/query-only SQL Server runtime support through Tiberius
 - generated entity metadata through the runtime contract
 - composite primary-key metadata and generated read lookups
-- generated CRUD and opt-in upsert operations, subscriptions, relation loading, and batched nested traversal
+- generated CRUD and opt-in upsert operations, subscriptions, relation loading, composite relation keys, and batched nested traversal
 - backend-aware query rendering through a small typed query IR
 - schema models built from runtime metadata
 - schema diffing and migration planning

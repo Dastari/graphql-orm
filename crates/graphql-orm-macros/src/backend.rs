@@ -172,14 +172,3 @@ pub(crate) fn backend_quote_identifier_path(backend: BackendKind, identifier: &s
         identifier.to_string()
     }
 }
-
-pub(crate) fn backend_relation_key_cast(backend: BackendKind, column: &str) -> String {
-    if backend == BackendKind::Mssql {
-        format!(
-            "CAST({} AS NVARCHAR(4000))",
-            backend_quote_identifier_path(backend, column)
-        )
-    } else {
-        format!("CAST({column} AS TEXT)")
-    }
-}

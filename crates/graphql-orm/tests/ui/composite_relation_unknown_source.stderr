@@ -1,0 +1,10 @@
+error: Relation 'parent' references unknown source field 'missing_tenant_id' on 'Child'
+  --> tests/ui/composite_relation_unknown_source.rs:26:5
+   |
+26 | /     #[relation(
+27 | |         target = "Parent",
+28 | |         from = ["parent_id", "missing_tenant_id"],
+29 | |         to = ["id", "tenant_id"]
+30 | |     )]
+31 | |     pub parent: Option<Parent>,
+   | |______________________________^

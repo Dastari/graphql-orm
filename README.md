@@ -57,7 +57,7 @@ Single-backend applications can continue selecting one backend feature and using
 implicit backend behavior:
 
 ```toml
-graphql-orm = { version = "0.2.9", default-features = false, features = ["sqlite"] }
+graphql-orm = { version = "0.2.10", default-features = false, features = ["sqlite"] }
 ```
 
 When exactly one of `sqlite`, `postgres`, or `mssql` is enabled, `graphql_orm::DbPool`,
@@ -293,8 +293,57 @@ entities alias that key type to the existing ID type and keep `find_by_id` / `ge
 
 Composite-key writes are not generated in this phase for SQLite/Postgres, and MSSQL remains
 read-only. Pagination cursors are offset-based today, so they do not encode or assume a single ID.
-Relation metadata still models single-column relation edges; composite foreign-key relations are a
-future extension.
+
+## Composite Relations And Nested Batching
+
+Single-column relation syntax remains unchanged:
+
+```rust
+#[graphql(skip)]
+#[relation(target = "JimCardFile", from = "name_no", to = "CardNo")]
+pub name: Option<JimCardFile>,
+```
+
+Composite relation keys use array syntax for `from` and `to`. The `from` entries are Rust source
+field names on the current entity; the `to` entries are target database column names:
+
+```rust
+#[graphql(skip, name = "Details")]
+#[relation(
+    target = "JimCardFileDetail",
+    from = ["card_no", "cont_no"],
+    to = ["CardNo", "ContNo"],
+    multiple,
+    emit_fk = false
+)]
+pub details: Vec<JimCardFileDetail>,
+```
+
+The macro validates that `from` and `to` have the same arity and that every source field exists.
+Target columns are compile-time metadata literals and are used for generated SQL.
+
+Nested selected relations are batched by relation layer. For a query shaped like
+`JimCardFiles -> Contacts -> Details`, the runtime performs the parent query, one relation query for
+all selected contacts, and one relation query for all selected details. It does not issue one query
+per card or one query per contact.
+
+There are two batching paths:
+
+- selected no-argument relation preload, used when a relation field is selected without `where`,
+  `orderBy`, or `page`
+- argument-bearing relation DataLoader batching, used when relation-level filters, ordering, or
+  pagination are present
+
+Both paths support single and composite relation keys across SQLite, Postgres, and MSSQL. Composite
+key predicates use bound parameters and portable OR-of-AND SQL, for example on SQL Server:
+
+```sql
+WHERE ([CardNo] = @P1 AND [ContNo] = @P2)
+   OR ([CardNo] = @P3 AND [ContNo] = @P4)
+```
+
+If any nullable source key part is `NULL`, that parent relation is not loaded and resolves to
+`None` or an empty connection. SQL `NULL = NULL` matching is intentionally not inferred.
 
 ## Generated Upserts
 
@@ -454,7 +503,7 @@ The default schema remains camelCase. For compatibility with schemas that requir
 
 ```toml
 graphql-orm = {
-  version = "0.2.9",
+  version = "0.2.10",
   default-features = false,
   features = [
     "sqlite",

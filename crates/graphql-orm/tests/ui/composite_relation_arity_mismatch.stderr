@@ -1,0 +1,10 @@
+error: Relation 'parent' has 2 source key part(s) but 1 target key part(s)
+  --> tests/ui/composite_relation_arity_mismatch.rs:29:5
+   |
+29 | /     #[relation(
+30 | |         target = "Parent",
+31 | |         from = ["parent_id", "parent_tenant_id"],
+32 | |         to = ["id"]
+33 | |     )]
+34 | |     pub parent: Option<Parent>,
+   | |______________________________^

@@ -1149,6 +1149,8 @@ pub struct RelationMetadata {
     pub target_type: &'static str,
     pub source_column: &'static str,
     pub target_column: &'static str,
+    pub source_columns: &'static [&'static str],
+    pub target_columns: &'static [&'static str],
     pub is_multiple: bool,
     pub emit_foreign_key: bool,
     pub on_delete: DeletePolicy,
