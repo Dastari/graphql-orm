@@ -9,6 +9,12 @@ use super::migrations::{build_migration_plan, classify_migration_steps};
 use super::{IntrospectionBackend, MigrationBackend, OrmBackend};
 use crate::db::Database;
 
+/// Explicit schema validation, planning, and migration API for a [`Database`].
+///
+/// A `SchemaManager` is created with [`Database::schema`](crate::db::Database::schema).
+/// Its methods honor the database's [`SchemaPolicy`]. Validation never mutates
+/// the database; migration application requires a backend implementing
+/// [`MigrationBackend`].
 pub struct SchemaManager<'db, B: OrmBackend> {
     database: &'db Database<B>,
 }
@@ -18,10 +24,15 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         Self { database }
     }
 
+    /// Return the schema policy currently attached to the database handle.
     pub fn policy(&self) -> SchemaPolicy {
         self.database.schema_policy()
     }
 
+    /// Validate an already-built schema model against a target model.
+    ///
+    /// This is a pure in-memory comparison and does not introspect or mutate a
+    /// live database.
     pub fn validate(
         &self,
         current: &SchemaModel,
@@ -42,6 +53,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         ))
     }
 
+    /// Introspect the live database and compare it to metadata from generated entities.
     pub async fn validate_against_entities(
         &self,
         entities: &[&'static EntityMetadata],
@@ -54,6 +66,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         self.validate(&current, &target)
     }
 
+    /// Build a structured migration plan from one schema model to another.
     pub fn plan_migration(
         &self,
         version: impl Into<String>,
@@ -72,6 +85,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         ))
     }
 
+    /// Introspect the live database and plan a migration to generated entity metadata.
     pub async fn plan_migration_to_entities(
         &self,
         version: impl Into<String>,
@@ -86,6 +100,10 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         self.plan_migration(version, description, &current, &target)
     }
 
+    /// Apply a planned migration according to [`ApplyOptions`].
+    ///
+    /// This method is only available for backends that implement
+    /// [`MigrationBackend`].
     pub async fn apply_migration(
         &self,
         plan: &PlannedMigration,
@@ -139,6 +157,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         })
     }
 
+    /// Return the latest version recorded in `__graphql_orm_migrations`.
     pub async fn current_version(&self) -> Result<Option<String>, sqlx::Error>
     where
         B: MigrationBackend,
@@ -149,6 +168,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             .map(|record| record.version.clone()))
     }
 
+    /// Plan a forward upgrade through a [`SchemaAbi`] to the requested target version.
     pub async fn plan_upgrade(
         &self,
         abi: &SchemaAbi,
@@ -179,6 +199,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         Ok(PlannedSchemaUpgrade { stages })
     }
 
+    /// Apply a forward upgrade through a [`SchemaAbi`] to the requested target version.
     pub async fn apply_upgrade(
         &self,
         abi: &SchemaAbi,

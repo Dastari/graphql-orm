@@ -1,15 +1,34 @@
 #![allow(clippy::collapsible_if, clippy::if_same_then_else)]
 
-//! Procedural macros for GraphQL/ORM backends.
+//! Procedural macros for `graphql-orm`.
 //!
-//! This crate provides macros to reduce boilerplate for an `async-graphql` +
-//! SQLx-style backend:
+//! Applications normally depend on `graphql-orm` and use these macros through
+//! its re-exports. The macros generate `async-graphql` types and resolver code
+//! that targets the `graphql-orm` runtime crate.
 //!
 //! - `mutation_result!` - Generate GraphQL mutation result types
 //! - `#[derive(GraphQLEntity)]` - Generate GraphQL types, filters, and SQL helpers from a struct
 //! - `#[derive(GraphQLSchemaEntity)]` - Generate schema metadata only for migration planning
 //! - `#[derive(GraphQLRelations)]` - Generate relation loading with look_ahead support
 //! - `#[derive(GraphQLOperations)]` - Generate Query/Mutation/Subscription structs
+//! - `schema_roots!` - Generate root query/mutation/subscription types for a set of entities
+//!
+//! # Backends
+//!
+//! The macro crate mirrors the runtime backend features: `sqlite`, `postgres`,
+//! and `mssql`. When multiple backend features are enabled, entity derives must
+//! select a backend explicitly:
+//!
+//! ```ignore
+//! #[graphql_entity(backend = "mssql", table = "dbo.Jobs", schema_policy = "external_read_only")]
+//! pub struct Job {
+//!     #[primary_key]
+//!     pub job_id: i32,
+//! }
+//! ```
+//!
+//! Naming feature groups (`resolver-case-*`, `argument-case-*`, and
+//! `field-case-*`) remain independent from backend selection.
 
 use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
@@ -98,6 +117,9 @@ compile_error!("Enable at most one argument-case-* feature at a time.");
 compile_error!("Enable at most one field-case-* feature at a time.");
 
 #[proc_macro]
+/// Generate GraphQL mutation result object types.
+///
+/// Most users get this macro through `graphql_orm::mutation_result`.
 pub fn mutation_result(input: TokenStream) -> TokenStream {
     let parsed = parse_macro_input!(input as mutation_result::MutationResultInput);
     mutation_result::expand(parsed).into()
@@ -127,6 +149,11 @@ pub fn mutation_result(input: TokenStream) -> TokenStream {
         unique_index
     )
 )]
+/// Derive the full entity runtime contract for a persisted GraphQL object.
+///
+/// This derive emits metadata, filters, order inputs, row decoding, query SQL
+/// helpers, optional write inputs, and backup descriptors depending on field
+/// attributes and backend capabilities.
 pub fn derive_graphql_entity(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match entity::generate_graphql_entity(&input) {
@@ -159,6 +186,10 @@ pub fn derive_graphql_entity(input: TokenStream) -> TokenStream {
         unique_index
     )
 )]
+/// Derive schema metadata without generating GraphQL operations.
+///
+/// Use this for entities that should participate in schema validation or
+/// migration planning but do not need generated GraphQL resolvers.
 pub fn derive_graphql_schema_entity(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match entity::generate_graphql_schema_entity(&input) {
@@ -180,6 +211,11 @@ pub fn derive_graphql_schema_entity(input: TokenStream) -> TokenStream {
         unique
     )
 )]
+/// Derive relation resolvers and batched relation loading.
+///
+/// Supports single-column and composite relation keys. For `async-graphql`
+/// object fields, pair relation fields with `#[graphql(skip)]` and
+/// `#[graphql(complex)]` on the entity type.
 pub fn derive_graphql_relations(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match relations::generate_graphql_relations(&input) {
@@ -201,6 +237,11 @@ pub fn derive_graphql_relations(input: TokenStream) -> TokenStream {
         unique
     )
 )]
+/// Derive generated root operation types for one entity.
+///
+/// Read operations are generated for every backend. Mutation and subscription
+/// surfaces are generated only when the selected backend and schema policy allow
+/// them.
 pub fn derive_graphql_operations(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match operations::generate_graphql_operations(&input) {
@@ -210,6 +251,10 @@ pub fn derive_graphql_operations(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro]
+/// Generate schema root aliases for a set of generated operation types.
+///
+/// In multi-backend builds, pass `backend` and `schema_policy` explicitly so
+/// the macro can choose the correct root behavior.
 pub fn schema_roots(input: TokenStream) -> TokenStream {
     schema_roots::expand(input)
 }

@@ -1,60 +1,43 @@
 # `graphql-orm`
 
-Runtime support crate for `graphql-orm-macros`.
+Runtime crate for [`graphql-orm`](../../README.md).
 
-## Purpose
+This crate provides the public runtime contract targeted by the derive macros:
 
-This crate owns the runtime contract that generated code targets:
+- backend traits and database handles
+- filters, ordering, pagination, and row decoding
+- relation loaders and nested relation batching
+- repository helpers and write hooks
+- row, field, and entity policies
+- schema models, validation, migration planning, and explicit migration application
+- SQLite, Postgres, and read-only SQL Server runtime support
 
-- database pool and row aliases
-- backend and dialect abstractions
-- entity metadata types
-- GraphQL auth, filter, pagination, and relation-loader support
-- query helpers and bind execution
-- shared ORM traits such as `Entity`, `DatabaseEntity`, `DatabaseSchema`, `DatabaseFilter`, `DatabaseOrderBy`, `FromSqlRow`, and `RelationLoader`
-- migration traits and migration records
+Most users should start with the repository [README](../../README.md) and the
+root [docs](../../docs/README.md). This crate README is intentionally short so
+the package page points at the maintained project documentation.
 
-## Current Scope
-
-Working today:
-
-- SQLite runtime support
-- PostgreSQL runtime support
-- read/query-only SQL Server runtime support through Tiberius
-- generated entity metadata through the runtime contract
-- composite primary-key metadata and generated read lookups
-- generated CRUD and opt-in upsert operations, subscriptions, relation loading, composite relation keys, and batched nested traversal
-- backend-aware query rendering through a small typed query IR
-- schema models built from runtime metadata
-- schema diffing and migration planning
-- explicit schema ownership policy through `SchemaPolicy`
-- schema validation, structured migration plans, and ABI upgrade orchestration through `Database::schema()`
-- migration file rendering and migration application helpers
-- live schema introspection for SQLite and PostgreSQL
-
-Still remaining:
-
-- MySQL runtime support
-- SQL Server writes, migrations, and schema management
-- richer query IR coverage beyond the current CRUD/filter/sort/pagination subset
-- more complete migration execution for backend-specific edge cases and review workflows
-
-## Usage
-
-Add `graphql-orm` and derive through its re-exports:
+## Example
 
 ```rust
 use graphql_orm::prelude::*;
 
-#[derive(GraphQLEntity, GraphQLRelations, GraphQLOperations)]
-pub struct Entity {
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
+#[graphql_entity(table = "users", plural = "Users")]
+pub struct User {
     #[primary_key]
-    pub id: String,
+    pub id: i64,
+
+    #[filterable]
+    #[sortable]
+    pub name: String,
 }
 ```
 
-The generated code now targets `::graphql_orm::*` directly.
+## Documentation
 
-## Notes
-
-Current macro output still expects the application to derive or import GraphQL-facing item macros such as `SimpleObject` on its entity types, and to provide any application-specific auth user data in the GraphQL context.
+- [Getting started](../../docs/getting-started.md)
+- [Backend features](../../docs/backends.md)
+- [Entities and relations](../../docs/entities-and-relations.md)
+- [Schema management](../../docs/schema-management.md)
+- [Runtime writes and policies](../../docs/runtime-and-writes.md)
+- [SQL Server read-only backend](../../docs/mssql.md)

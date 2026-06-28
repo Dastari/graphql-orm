@@ -16,6 +16,12 @@ struct EventSenders {
 
 const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 256;
 
+/// Runtime database handle used by generated resolvers and repository helpers.
+///
+/// `Database` stores the backend pool plus optional runtime policies, hooks,
+/// change-journal state, and schema ownership policy. Cloning a `Database`
+/// clones the pool handle and shared runtime state; it does not open a new
+/// database connection by itself.
 pub struct Database<B: OrmBackend = DefaultBackend> {
     pool: B::Pool,
     mutation_hook: Option<Arc<dyn Any + Send + Sync>>,
@@ -215,23 +221,28 @@ impl<B: OrmBackend> Database<B> {
         }
     }
 
+    /// Return the backend pool used by generated code.
     pub fn pool(&self) -> &B::Pool {
         &self.pool
     }
 
+    /// Return the schema ownership policy attached to this database handle.
     pub fn schema_policy(&self) -> SchemaPolicy {
         self.schema_policy
     }
 
+    /// Update the schema ownership policy in place.
     pub fn set_schema_policy(&mut self, schema_policy: SchemaPolicy) {
         self.schema_policy = schema_policy;
     }
 
+    /// Return a copy of this handle with a different schema ownership policy.
     pub fn with_schema_policy(mut self, schema_policy: SchemaPolicy) -> Self {
         self.schema_policy = schema_policy;
         self
     }
 
+    /// Create a schema manager for explicit validation, planning, and migration application.
     pub fn schema(&self) -> SchemaManager<'_, B> {
         SchemaManager::new(self)
     }
@@ -766,16 +777,19 @@ pub struct DatabaseBuilder<B: OrmBackend = DefaultBackend> {
 }
 
 impl<B: OrmBackend> DatabaseBuilder<B> {
+    /// Set the schema ownership policy for the resulting [`Database`].
     pub fn schema_policy(mut self, schema_policy: SchemaPolicy) -> Self {
         self.database.schema_policy = schema_policy;
         self
     }
 
+    /// Enable or disable change-journal recording for generated write paths.
     pub fn change_journal_enabled(mut self, enabled: bool) -> Self {
         self.database.change_journal_enabled = enabled;
         self
     }
 
+    /// Build the configured [`Database`] handle.
     pub fn build(self) -> Database<B> {
         self.database
     }

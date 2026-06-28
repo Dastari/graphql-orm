@@ -1315,6 +1315,11 @@ pub struct GraphqlOrmSchemaSnapshot {
     pub schema_hash: String,
 }
 
+/// A named schema ABI stage.
+///
+/// Each stage points at a complete target [`SchemaModel`]. The schema manager
+/// can compute a forward plan from the currently applied stage to a later
+/// stage.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SchemaStage {
     pub version: String,
@@ -1355,6 +1360,10 @@ impl SchemaStage {
     }
 }
 
+/// Ordered schema ABI used for automatic forward upgrades.
+///
+/// Stages are interpreted in vector order. Versions must be unique, and a
+/// database can be upgraded only along a known forward path.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SchemaAbi {
     pub stages: Vec<SchemaStage>,
@@ -1923,12 +1932,22 @@ pub struct MigrationPlan {
     pub statements: Vec<String>,
 }
 
+/// Runtime schema ownership and safety policy.
+///
+/// Backend features compile database support. `SchemaPolicy` decides which
+/// schema-management operations and generated write paths are allowed for a
+/// concrete [`crate::db::Database`] value.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SchemaPolicy {
+    /// Existing database is the source of truth; query and validation only.
     ExternalReadOnly,
+    /// Existing database is the source of truth; entity writes may run, schema application may not.
     ExternalWritable,
+    /// Compare metadata to the live schema without planning or applying changes.
     ValidateOnly,
+    /// Validate and build migration plans without applying them.
     PlanOnly,
+    /// Rust entity metadata is the source of truth; explicit application is allowed.
     Managed,
 }
 
@@ -1986,12 +2005,18 @@ impl std::str::FromStr for SchemaPolicy {
     }
 }
 
+/// Safety switches for explicit migration application.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApplyOptions {
+    /// Permit steps classified as [`MigrationRisk::Destructive`].
     pub allow_destructive: bool,
+    /// Validate the live schema against the expected ABI baseline before upgrades.
     pub require_clean_schema: bool,
+    /// Produce an application report without executing migration SQL.
     pub dry_run: bool,
+    /// Optional source schema hash that must match the planned baseline.
     pub expected_current_schema_hash: Option<String>,
+    /// Record successful application in `__graphql_orm_migrations`.
     pub record_history: bool,
 }
 
@@ -2040,6 +2065,7 @@ pub struct SchemaDiagnostic {
     pub message: String,
 }
 
+/// Structured result of validating a current schema model against a target model.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SchemaValidationReport {
     pub backend: &'static str,
@@ -2072,6 +2098,7 @@ pub struct PlannedMigrationStep {
     pub reason: String,
 }
 
+/// A backend-rendered migration plan with stable hashes and risk-classified steps.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlannedMigration {
     pub version: String,

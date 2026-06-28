@@ -56,18 +56,31 @@ pub trait SqlxBackend: OrmBackend {
 
 pub trait WriteBackend: SqlxBackend {}
 #[allow(async_fn_in_trait)]
+/// Backend capability for read-only live schema inspection.
+///
+/// Backends that implement this trait can power validation against an existing
+/// database without applying schema changes.
 pub trait IntrospectionBackend: OrmBackend {
+    /// Return a structured schema model for the live database.
     async fn introspect_schema(pool: &Self::Pool) -> Result<SchemaModel, sqlx::Error>;
 }
 
 #[allow(async_fn_in_trait)]
+/// Backend capability for applying explicit schema migrations.
+///
+/// SQLite and Postgres implement this trait. MSSQL intentionally does not,
+/// which keeps migration application unavailable for the read-only SQL Server
+/// backend at compile time in generic APIs.
 pub trait MigrationBackend: IntrospectionBackend + WriteBackend {
+    /// Prepare backend-owned migration infrastructure such as history tables.
     async fn prepare_migration_runtime(pool: &Self::Pool) -> Result<(), sqlx::Error>;
 
+    /// Load applied migration records from the backend's history table.
     async fn load_applied_migrations(
         pool: &Self::Pool,
     ) -> Result<Vec<AppliedMigrationRecord>, sqlx::Error>;
 
+    /// Apply rendered SQL statements transactionally and optionally record history.
     async fn apply_migration_statements_transactionally<S>(
         pool: &Self::Pool,
         version: &str,
