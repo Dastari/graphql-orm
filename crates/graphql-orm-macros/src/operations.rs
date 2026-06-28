@@ -4,9 +4,9 @@ use crate::backend::{
     resolve_backend,
 };
 use crate::entity::{
-    FieldMetadata, is_bool_type, is_byte_vec_type, is_option_type, is_uuid_type, is_vec_type,
-    maybe_wrap_write_transform, option_inner_type, parse_entity_metadata, parse_field_metadata,
-    type_path_last_ident,
+    FieldMetadata, is_bool_type, is_byte_vec_type, is_option_type, is_serde_json_value_or_option,
+    is_uuid_type, is_vec_type, maybe_wrap_write_transform, option_inner_type,
+    parse_entity_metadata, parse_field_metadata, type_path_last_ident,
 };
 use crate::naming::{
     apply_graphql_case, graphql_field_name, selected_argument_case, selected_field_case,
@@ -856,6 +856,7 @@ pub(crate) fn generate_graphql_operations(
 
     // For SQL generation
     let mut insert_columns: Vec<String> = Vec::new();
+    let mut insert_value_exprs: Vec<String> = Vec::new();
     let mut insert_default_columns: Vec<String> = Vec::new();
     let mut insert_default_exprs: Vec<String> = Vec::new();
     let mut insert_binds_graphql: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -892,6 +893,21 @@ pub(crate) fn generate_graphql_operations(
         // Skip relations and computed fields
         if meta.is_relation || meta.skip_db {
             continue;
+        }
+
+        if meta.spatial.is_some() {
+            if backend != BackendKind::Postgres {
+                return Err(syn::Error::new(
+                    field.span(),
+                    "spatial fields are only supported for backend = \"postgres\"",
+                ));
+            }
+            if !is_serde_json_value_or_option(field_type) {
+                return Err(syn::Error::new(
+                    field.span(),
+                    "spatial fields must use serde_json::Value or Option<serde_json::Value>",
+                ));
+            }
         }
 
         let rust_name = field_name.to_string();
@@ -1072,6 +1088,14 @@ pub(crate) fn generate_graphql_operations(
 
             // Track columns for INSERT
             insert_columns.push(db_col.clone());
+            insert_value_exprs.push(
+                meta.spatial
+                    .as_ref()
+                    .map(|spatial| {
+                        format!("ST_SetSRID(ST_GeomFromGeoJSON(?::jsonb), {})", spatial.srid)
+                    })
+                    .unwrap_or_else(|| "?".to_string()),
+            );
 
             // Generate bind value push based on field type
             // We push to bind_values vector to avoid lifetime issues with ::graphql_orm::sqlx::query
@@ -1337,7 +1361,47 @@ pub(crate) fn generate_graphql_operations(
             };
             update_policy_checks.push(update_policy_check);
 
-            if meta.is_boolean_field || is_bool_type(field_type) {
+            if let Some(spatial) = &meta.spatial {
+                let spatial_value_expr =
+                    format!("ST_SetSRID(ST_GeomFromGeoJSON(?::jsonb), {})", spatial.srid);
+                if is_already_optional {
+                    update_field_checks_graphql.push(quote! {
+                        if let Some(ref val) = input.#field_name {
+                            changed_fields.push(#db_col);
+                            set_clauses.push(format!("{} = {}", #db_col, #spatial_value_expr));
+                            match val {
+                                Some(value) => values.push(::graphql_orm::graphql::orm::json_sql_value::<_, ::graphql_orm::async_graphql::Error>(value)?),
+                                None => values.push(::graphql_orm::graphql::orm::SqlValue::JsonNull),
+                            }
+                        }
+                    });
+                    update_field_checks_repo.push(quote! {
+                        if let Some(ref val) = input.#field_name {
+                            changed_fields.push(#db_col);
+                            set_clauses.push(format!("{} = {}", #db_col, #spatial_value_expr));
+                            match val {
+                                Some(value) => values.push(::graphql_orm::graphql::orm::json_sql_value::<_, ::graphql_orm::sqlx::Error>(value)?),
+                                None => values.push(::graphql_orm::graphql::orm::SqlValue::JsonNull),
+                            }
+                        }
+                    });
+                } else {
+                    update_field_checks_graphql.push(quote! {
+                        if let Some(ref val) = input.#field_name {
+                            changed_fields.push(#db_col);
+                            set_clauses.push(format!("{} = {}", #db_col, #spatial_value_expr));
+                            values.push(::graphql_orm::graphql::orm::json_sql_value::<_, ::graphql_orm::async_graphql::Error>(val)?);
+                        }
+                    });
+                    update_field_checks_repo.push(quote! {
+                        if let Some(ref val) = input.#field_name {
+                            changed_fields.push(#db_col);
+                            set_clauses.push(format!("{} = {}", #db_col, #spatial_value_expr));
+                            values.push(::graphql_orm::graphql::orm::json_sql_value::<_, ::graphql_orm::sqlx::Error>(val)?);
+                        }
+                    });
+                }
+            } else if meta.is_boolean_field || is_bool_type(field_type) {
                 if is_already_optional {
                     // Option<Option<bool>> case
                     let update_tokens = quote! {
@@ -1626,14 +1690,13 @@ pub(crate) fn generate_graphql_operations(
     }
 
     // Build INSERT SQL template
-    let insert_placeholders: Vec<&str> = insert_columns.iter().map(|_| "?").collect();
     let insert_sql = if auto_generated_pk {
         let mut columns = vec!["id".to_string()];
         columns.extend(insert_default_columns.iter().cloned());
         columns.extend(insert_columns.iter().cloned());
         let mut placeholders = vec!["?".to_string()];
         placeholders.extend(insert_default_exprs.iter().cloned());
-        placeholders.extend(insert_placeholders.iter().map(|value| value.to_string()));
+        placeholders.extend(insert_value_exprs.iter().cloned());
         format!(
             "INSERT INTO {} ({}) VALUES ({})",
             table_name,
@@ -1644,7 +1707,7 @@ pub(crate) fn generate_graphql_operations(
         let mut columns = insert_default_columns.clone();
         columns.extend(insert_columns.iter().cloned());
         let mut placeholders = insert_default_exprs.clone();
-        placeholders.extend(insert_placeholders.iter().map(|value| value.to_string()));
+        placeholders.extend(insert_value_exprs.iter().cloned());
         format!(
             "INSERT INTO {} ({}) VALUES ({})",
             table_name,
@@ -1700,13 +1763,13 @@ pub(crate) fn generate_graphql_operations(
             columns.extend(insert_columns.iter().cloned());
             let mut values = vec!["?".to_string()];
             values.extend(insert_default_exprs.iter().cloned());
-            values.extend(insert_placeholders.iter().map(|value| value.to_string()));
+            values.extend(insert_value_exprs.iter().cloned());
             (columns, values)
         } else {
             let mut columns = insert_default_columns.clone();
             columns.extend(insert_columns.iter().cloned());
             let mut values = insert_default_exprs.clone();
-            values.extend(insert_placeholders.iter().map(|value| value.to_string()));
+            values.extend(insert_value_exprs.iter().cloned());
             (columns, values)
         };
     let upsert_insert_column_literals: Vec<syn::LitStr> = upsert_insert_columns
@@ -2017,7 +2080,12 @@ pub(crate) fn generate_graphql_operations(
 
                 let where_clause = vec![#(#upsert_fetch_conditions),*].join(" AND ");
                 let sql = Self::__gom_rebind_sql(
-                    &format!("SELECT * FROM {} WHERE {}", #table_name, where_clause),
+                    &format!(
+                        "SELECT {} FROM {} WHERE {}",
+                        <Self as ::graphql_orm::graphql::orm::DatabaseEntity>::column_names().join(", "),
+                        #table_name,
+                        where_clause
+                    ),
                     1,
                 );
                 let mut bind_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
@@ -3446,7 +3514,12 @@ pub(crate) fn generate_graphql_operations(
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, FromSqlRow, SqlValue};
 
                 let sql = Self::__gom_rebind_sql(
-                    &format!("SELECT * FROM {} WHERE {} = ?", #table_name, Self::PRIMARY_KEY),
+                    &format!(
+                        "SELECT {} FROM {} WHERE {} = ?",
+                        <Self as ::graphql_orm::graphql::orm::DatabaseEntity>::column_names().join(", "),
+                        #table_name,
+                        Self::PRIMARY_KEY
+                    ),
                     1,
                 );
                 let values = [#pk_bind_value_ref];

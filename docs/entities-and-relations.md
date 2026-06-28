@@ -201,3 +201,49 @@ Typed structured fields can be persisted as JSON with `#[graphql_orm(json)]`:
 #[filterable(type = "json")]
 pub metadata: serde_json::Value,
 ```
+
+## PostGIS Spatial Fields
+
+Spatial fields are currently implemented for PostgreSQL/PostGIS only. A spatial field persists as a
+PostGIS `geometry(<type>, <srid>)` column and is exposed through Rust and GraphQL as a GeoJSON
+geometry object.
+
+```rust
+#[graphql_orm(spatial(kind = "geometry", geometry_type = "Point", srid = 4326, index = true))]
+#[filterable(type = "spatial")]
+pub location: serde_json::Value,
+```
+
+Supported geometry types are `Geometry`, `Point`, `LineString`, `Polygon`, `MultiPoint`,
+`MultiLineString`, `MultiPolygon`, and `GeometryCollection`. The only supported spatial kind is
+`geometry`; the default SRID is `4326`. Spatial Rust fields must be `serde_json::Value` or
+`Option<serde_json::Value>`.
+
+Generated queries project spatial columns as GeoJSON using `ST_AsGeoJSON`. Generated writes bind the
+GeoJSON value and wrap it with `ST_SetSRID(ST_GeomFromGeoJSON(...), srid)`. Invalid GeoJSON or invalid
+geometry is reported by PostGIS.
+
+Spatial filters use `SpatialFilter`:
+
+```graphql
+places(where: {
+  location: {
+    contains: { type: "Point", coordinates: [144.96, -37.81] }
+  }
+})
+```
+
+The supported predicates are `equals`, `disjoint`, `intersects`, `touches`, `crosses`, `within`,
+`contains`, and `overlaps`. Multiple predicates on one field are combined with `AND`. `isNull` emits
+`IS NULL` or `IS NOT NULL` without binding a geometry. `disjoint` renders as
+`NOT ST_Intersects(...)` so Postgres can still use spatial-index-friendly planning.
+
+When `index = true`, migrations create a GiST spatial index:
+
+```sql
+CREATE INDEX idx_places_location_spatial ON places USING GIST (location)
+```
+
+Managed migrations enable PostGIS with `CREATE EXTENSION IF NOT EXISTS postgis` when any entity uses a
+spatial column. Managed migrations do not use `CREATE INDEX CONCURRENTLY`; plan a separate operational
+migration if a production table needs a concurrent index build.

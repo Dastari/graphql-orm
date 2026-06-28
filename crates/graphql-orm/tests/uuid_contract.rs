@@ -234,7 +234,10 @@ async fn uuid_ids_are_first_class_across_crud_migrations_and_hooks()
     let target_schema = graphql_orm::graphql::orm::SchemaModel::from_entities(&[metadata]);
     let plan = graphql_orm::graphql::orm::build_migration_plan(
         graphql_orm::graphql::orm::current_backend(),
-        &graphql_orm::graphql::orm::SchemaModel { tables: Vec::new() },
+        &graphql_orm::graphql::orm::SchemaModel {
+            extensions: Vec::new(),
+            tables: Vec::new(),
+        },
         &target_schema,
     );
     assert!(

@@ -1,0 +1,5 @@
+error: spatial fields are only supported for backend = "postgres"
+ --> tests/ui/spatial_sqlite_backend.rs:9:5
+  |
+9 |     #[graphql_orm(spatial(kind = "geometry", geometry_type = "Point", srid = 4326))]
+  |     ^

@@ -6,6 +6,18 @@ pub enum DatabaseBackend {
     Mssql,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SpatialPredicate {
+    Equals,
+    Disjoint,
+    Intersects,
+    Touches,
+    Crosses,
+    Within,
+    Contains,
+    Overlaps,
+}
+
 impl DatabaseBackend {
     pub const fn name(self) -> &'static str {
         match self {
@@ -31,6 +43,13 @@ pub trait SqlDialect {
     fn ci_like(&self, column: &str, placeholder: &str) -> String;
     fn days_ago_expr(&self, days: i64) -> String;
     fn days_ahead_expr(&self, days: i64) -> String;
+    fn spatial_geojson_expr(&self, placeholder: &str, srid: i32) -> String;
+    fn spatial_predicate(
+        &self,
+        predicate: SpatialPredicate,
+        column: &str,
+        geometry_expr: &str,
+    ) -> String;
 }
 
 impl SqlDialect for DatabaseBackend {
@@ -199,6 +218,44 @@ impl SqlDialect for DatabaseBackend {
             }
             DatabaseBackend::Sqlite | DatabaseBackend::Mysql => {
                 format!("date('now', '+{days} days')")
+            }
+        }
+    }
+
+    fn spatial_geojson_expr(&self, placeholder: &str, srid: i32) -> String {
+        match self {
+            DatabaseBackend::Postgres => {
+                format!("ST_SetSRID(ST_GeomFromGeoJSON({placeholder}::jsonb), {srid})")
+            }
+            DatabaseBackend::Sqlite | DatabaseBackend::Mysql | DatabaseBackend::Mssql => {
+                format!("/* spatial unsupported on {} */ {placeholder}", self.name())
+            }
+        }
+    }
+
+    fn spatial_predicate(
+        &self,
+        predicate: SpatialPredicate,
+        column: &str,
+        geometry_expr: &str,
+    ) -> String {
+        match self {
+            DatabaseBackend::Postgres => match predicate {
+                SpatialPredicate::Equals => format!("ST_Equals({column}, {geometry_expr})"),
+                SpatialPredicate::Disjoint => {
+                    format!("NOT ST_Intersects({column}, {geometry_expr})")
+                }
+                SpatialPredicate::Intersects => {
+                    format!("ST_Intersects({column}, {geometry_expr})")
+                }
+                SpatialPredicate::Touches => format!("ST_Touches({column}, {geometry_expr})"),
+                SpatialPredicate::Crosses => format!("ST_Crosses({column}, {geometry_expr})"),
+                SpatialPredicate::Within => format!("ST_Within({column}, {geometry_expr})"),
+                SpatialPredicate::Contains => format!("ST_Contains({column}, {geometry_expr})"),
+                SpatialPredicate::Overlaps => format!("ST_Overlaps({column}, {geometry_expr})"),
+            },
+            DatabaseBackend::Sqlite | DatabaseBackend::Mysql | DatabaseBackend::Mssql => {
+                format!("FALSE /* spatial unsupported on {} */", self.name())
             }
         }
     }

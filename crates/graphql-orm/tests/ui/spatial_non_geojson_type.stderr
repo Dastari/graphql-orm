@@ -1,0 +1,5 @@
+error: spatial fields must use serde_json::Value or Option<serde_json::Value>
+ --> tests/ui/spatial_non_geojson_type.rs:9:5
+  |
+9 |     #[graphql_orm(spatial(kind = "geometry", geometry_type = "Point", srid = 4326))]
+  |     ^

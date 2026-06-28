@@ -124,7 +124,10 @@ async fn typed_json_fields_round_trip_through_runtime_and_migrations()
         } else {
             DatabaseBackend::Sqlite
         },
-        &graphql_orm::graphql::orm::SchemaModel { tables: Vec::new() },
+        &graphql_orm::graphql::orm::SchemaModel {
+            extensions: Vec::new(),
+            tables: Vec::new(),
+        },
         &target_schema,
     );
     let leaked_statements: &'static [&'static str] = Box::leak(
@@ -308,7 +311,10 @@ async fn typed_json_fields_are_writable_through_generated_graphql_mutations()
         } else {
             DatabaseBackend::Sqlite
         },
-        &graphql_orm::graphql::orm::SchemaModel { tables: Vec::new() },
+        &graphql_orm::graphql::orm::SchemaModel {
+            extensions: Vec::new(),
+            tables: Vec::new(),
+        },
         &target_schema,
     );
     let statements: &'static [&'static str] = Box::leak(

@@ -4,9 +4,11 @@ use super::OrmBackend;
 #[cfg(feature = "mssql")]
 use super::core::SqlValue;
 use super::core::{
-    ColumnModel, ForeignKeyModel, MigrationPlan, MigrationRisk, MigrationStep,
+    ColumnModel, ForeignKeyModel, IndexMethod, MigrationPlan, MigrationRisk, MigrationStep,
     PlannedMigrationStep, SchemaDiff, SchemaModel, TableModel,
 };
+#[cfg(feature = "postgres")]
+use super::core::{SpatialColumnDef, SpatialGeometryType};
 use super::dialect::DatabaseBackend;
 #[cfg(feature = "mssql")]
 use super::dialect::SqlDialect;
@@ -16,7 +18,7 @@ use sqlx::Row;
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 fn is_internal_graphql_orm_table(table_name: &str) -> bool {
-    table_name.starts_with("__graphql_orm_")
+    table_name.starts_with("__graphql_orm_") || table_name == "spatial_ref_sys"
 }
 
 fn render_default_clause(backend: DatabaseBackend, default: &str) -> String {
@@ -170,6 +172,19 @@ pub fn diff_schema_models(current: &SchemaModel, target: &SchemaModel) -> Schema
 
     let mut steps = Vec::new();
 
+    let current_extensions = current
+        .extensions
+        .iter()
+        .map(|extension| extension.to_ascii_lowercase())
+        .collect::<std::collections::BTreeSet<_>>();
+    for extension in &target.extensions {
+        if !current_extensions.contains(&extension.to_ascii_lowercase()) {
+            steps.push(MigrationStep::EnableExtension {
+                name: extension.clone(),
+            });
+        }
+    }
+
     for table in order_tables_by_foreign_keys(&target_tables) {
         let table_name = &table.table_name;
         if !current_tables.contains_key(table_name) {
@@ -241,7 +256,18 @@ pub fn diff_schema_models(current: &SchemaModel, target: &SchemaModel) -> Schema
             .collect::<std::collections::BTreeMap<_, _>>();
 
         for (index_name, index) in &target_indexes {
-            if !current_indexes.contains_key(index_name) {
+            if let Some(current_index) = current_indexes.get(index_name) {
+                if *current_index != *index {
+                    steps.push(MigrationStep::DropIndex {
+                        table_name: table_name.clone(),
+                        index_name: index_name.clone(),
+                    });
+                    steps.push(MigrationStep::CreateIndex {
+                        table_name: table_name.clone(),
+                        index: (*index).clone(),
+                    });
+                }
+            } else {
                 steps.push(MigrationStep::CreateIndex {
                     table_name: table_name.clone(),
                     index: (*index).clone(),
@@ -320,6 +346,7 @@ fn foreign_key_constraint_name(table_name: &str, foreign_key: &ForeignKeyModel) 
 
 fn migration_step_table_name(step: &MigrationStep) -> Option<&str> {
     match step {
+        MigrationStep::EnableExtension { .. } => None,
         MigrationStep::CreateTable(table) => Some(&table.table_name),
         MigrationStep::DropTable { table_name } => Some(table_name),
         MigrationStep::AddColumn { table_name, .. } => Some(table_name),
@@ -339,6 +366,26 @@ fn sqlite_requires_table_rebuild(step: &MigrationStep) -> bool {
             | MigrationStep::AlterColumn { .. }
             | MigrationStep::AddForeignKey { .. }
             | MigrationStep::DropForeignKey { .. }
+    )
+}
+
+fn render_create_index_statement(
+    backend: DatabaseBackend,
+    table_name: &str,
+    index: &super::core::IndexDef,
+) -> String {
+    let unique = if index.is_unique { "UNIQUE " } else { "" };
+    let method = match (backend, index.method) {
+        (DatabaseBackend::Postgres, IndexMethod::Gist) => " USING GIST",
+        _ => "",
+    };
+    format!(
+        "CREATE {}INDEX {} ON {}{} ({})",
+        unique,
+        index.name,
+        table_name,
+        method,
+        index.columns.join(", ")
     )
 }
 
@@ -378,32 +425,31 @@ fn render_sqlite_table_rebuild_statements(
         temp_table_name, target_table.table_name
     ));
     statements.extend(target_table.indexes.iter().map(|index| {
-        let unique = if index.is_unique { "UNIQUE " } else { "" };
-        format!(
-            "CREATE {}INDEX {} ON {} ({})",
-            unique,
-            index.name,
-            target_table.table_name,
-            index.columns.join(", ")
-        )
+        render_create_index_statement(DatabaseBackend::Sqlite, &target_table.table_name, index)
     }));
     statements
 }
 
 pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> Vec<String> {
     match step {
+        MigrationStep::EnableExtension { name } => match backend {
+            DatabaseBackend::Postgres => vec![format!("CREATE EXTENSION IF NOT EXISTS {name}")],
+            DatabaseBackend::Sqlite | DatabaseBackend::Mysql | DatabaseBackend::Mssql => {
+                vec![format!(
+                    "-- extension {} is not supported on {}",
+                    name,
+                    backend.name()
+                )]
+            }
+        },
         MigrationStep::CreateTable(table) => {
             let mut statements = vec![render_create_table_statement(backend, table)];
-            statements.extend(table.indexes.iter().map(|index| {
-                let unique = if index.is_unique { "UNIQUE " } else { "" };
-                format!(
-                    "CREATE {}INDEX {} ON {} ({})",
-                    unique,
-                    index.name,
-                    table.table_name,
-                    index.columns.join(", ")
-                )
-            }));
+            statements.extend(
+                table
+                    .indexes
+                    .iter()
+                    .map(|index| render_create_index_statement(backend, &table.table_name, index)),
+            );
             statements
         }
         MigrationStep::DropTable { table_name } => {
@@ -463,14 +509,7 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
             )],
         },
         MigrationStep::CreateIndex { table_name, index } => {
-            let unique = if index.is_unique { "UNIQUE " } else { "" };
-            vec![format!(
-                "CREATE {}INDEX {} ON {} ({})",
-                unique,
-                index.name,
-                table_name,
-                index.columns.join(", ")
-            )]
+            vec![render_create_index_statement(backend, table_name, index)]
         }
         MigrationStep::DropIndex {
             table_name,
@@ -548,6 +587,10 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
 
 pub fn classify_migration_step(step: &MigrationStep) -> PlannedMigrationStep {
     let (risk, reason) = match step {
+        MigrationStep::EnableExtension { .. } => (
+            MigrationRisk::Additive,
+            "enables a database extension without changing row data",
+        ),
         MigrationStep::CreateTable(_) => (
             MigrationRisk::Additive,
             "creates a new table without changing existing data",
@@ -765,6 +808,7 @@ pub async fn introspect_sqlite_schema(
                 Ok(ColumnModel {
                     name,
                     sql_type,
+                    spatial: None,
                     nullable,
                     is_primary_key,
                     is_unique: false,
@@ -809,6 +853,8 @@ pub async fn introspect_sqlite_schema(
                 name: leaked_name,
                 columns: leaked_columns,
                 is_unique: unique,
+                method: IndexMethod::Default,
+                is_spatial: false,
             });
         }
 
@@ -844,7 +890,10 @@ pub async fn introspect_sqlite_schema(
         });
     }
 
-    Ok(SchemaModel { tables })
+    Ok(SchemaModel {
+        extensions: Vec::new(),
+        tables,
+    })
 }
 
 #[cfg(feature = "sqlite")]
@@ -855,10 +904,42 @@ impl IntrospectionBackend for super::SqliteBackend {
 }
 
 #[cfg(feature = "postgres")]
+fn parse_postgres_geometry_type(sql_type: &str) -> Option<SpatialColumnDef> {
+    let trimmed = sql_type.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower == "geometry" {
+        return Some(SpatialColumnDef::geometry(SpatialGeometryType::Geometry, 0));
+    }
+    if !lower.starts_with("geometry(") || !lower.ends_with(')') {
+        return None;
+    }
+
+    let inner = &trimmed["geometry(".len()..trimmed.len() - 1];
+    let mut parts = inner.split(',').map(str::trim);
+    let geometry_type = parts
+        .next()
+        .and_then(SpatialGeometryType::from_sql)
+        .unwrap_or(SpatialGeometryType::Geometry);
+    let srid = parts
+        .next()
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(0);
+    Some(SpatialColumnDef::geometry(geometry_type, srid))
+}
+
+#[cfg(feature = "postgres")]
 pub async fn introspect_postgres_schema(
     provider: &impl PoolProvider<super::PostgresBackend>,
 ) -> Result<SchemaModel, sqlx::Error> {
     let pool = provider.pool();
+    let extension_rows = sqlx::query("SELECT extname FROM pg_extension ORDER BY extname")
+        .fetch_all(pool)
+        .await?;
+    let extensions = extension_rows
+        .into_iter()
+        .map(|row| row.try_get::<String, _>("extname"))
+        .collect::<Result<Vec<_>, _>>()?;
+
     let table_rows = sqlx::query(
         "SELECT table_name
          FROM information_schema.tables
@@ -875,10 +956,21 @@ pub async fn introspect_postgres_schema(
             continue;
         }
         let column_rows = sqlx::query(
-            "SELECT column_name, data_type, is_nullable, column_default
-             FROM information_schema.columns
-             WHERE table_schema = 'public' AND table_name = $1
-             ORDER BY ordinal_position",
+            "SELECT a.attname AS column_name,
+                    format_type(a.atttypid, a.atttypmod) AS data_type,
+                    NOT a.attnotnull AS nullable,
+                    pg_get_expr(ad.adbin, ad.adrelid) AS column_default
+             FROM pg_attribute a
+             JOIN pg_class c ON c.oid = a.attrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             LEFT JOIN pg_attrdef ad
+               ON ad.adrelid = a.attrelid
+              AND ad.adnum = a.attnum
+             WHERE n.nspname = 'public'
+               AND c.relname = $1
+               AND a.attnum > 0
+               AND NOT a.attisdropped
+             ORDER BY a.attnum",
         )
         .bind(&table_name)
         .fetch_all(pool)
@@ -924,12 +1016,15 @@ pub async fn introspect_postgres_schema(
             .into_iter()
             .map(|row| {
                 let name: String = row.try_get("column_name")?;
+                let sql_type: String = row.try_get("data_type")?;
+                let spatial = parse_postgres_geometry_type(&sql_type);
                 Ok(ColumnModel {
                     is_primary_key: primary_key_columns.iter().any(|column| column == &name),
                     is_unique: unique_columns.contains(&name),
                     name,
-                    sql_type: row.try_get::<String, _>("data_type")?,
-                    nullable: row.try_get::<String, _>("is_nullable")? == "YES",
+                    sql_type,
+                    spatial,
+                    nullable: row.try_get::<bool, _>("nullable")?,
                     default: row.try_get::<Option<String>, _>("column_default")?,
                 })
             })
@@ -941,9 +1036,24 @@ pub async fn introspect_postgres_schema(
             .unwrap_or_else(|| "id".to_string());
 
         let index_rows = sqlx::query(
-            "SELECT indexname, indexdef
-             FROM pg_indexes
-             WHERE schemaname = 'public' AND tablename = $1",
+            "SELECT i.relname AS indexname,
+                    ix.indisunique AS is_unique,
+                    am.amname AS method,
+                    array_remove(array_agg(a.attname ORDER BY cols.ordinality), NULL) AS columns
+             FROM pg_class t
+             JOIN pg_namespace n ON n.oid = t.relnamespace
+             JOIN pg_index ix ON ix.indrelid = t.oid
+             JOIN pg_class i ON i.oid = ix.indexrelid
+             JOIN pg_am am ON am.oid = i.relam
+             LEFT JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS cols(attnum, ordinality)
+               ON true
+             LEFT JOIN pg_attribute a
+               ON a.attrelid = t.oid
+              AND a.attnum = cols.attnum
+             WHERE n.nspname = 'public'
+               AND t.relname = $1
+             GROUP BY i.relname, ix.indisunique, am.amname
+             ORDER BY i.relname",
         )
         .bind(&table_name)
         .fetch_all(pool)
@@ -954,19 +1064,19 @@ pub async fn introspect_postgres_schema(
             if index_name.ends_with("_pkey") {
                 continue;
             }
-            let indexdef: String = row.try_get("indexdef")?;
-            let unique = indexdef.contains("CREATE UNIQUE INDEX");
-            let columns_segment = indexdef
-                .split('(')
-                .nth(1)
-                .and_then(|segment| segment.split(')').next())
-                .unwrap_or("");
-            let column_names = columns_segment
-                .split(',')
-                .map(str::trim)
-                .filter(|column| !column.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>();
+            let unique: bool = row.try_get("is_unique")?;
+            let method_name: String = row.try_get("method")?;
+            let method = match method_name.to_ascii_lowercase().as_str() {
+                "gist" => IndexMethod::Gist,
+                _ => IndexMethod::Default,
+            };
+            let column_names: Vec<String> = row.try_get("columns")?;
+            let is_spatial = method == IndexMethod::Gist
+                && column_names.iter().any(|column_name| {
+                    columns
+                        .iter()
+                        .any(|column| column.name == *column_name && column.spatial.is_some())
+                });
             let leaked_name: &'static str = Box::leak(index_name.into_boxed_str());
             let leaked_columns: &'static [&'static str] = Box::leak(
                 column_names
@@ -979,6 +1089,8 @@ pub async fn introspect_postgres_schema(
                 name: leaked_name,
                 columns: leaked_columns,
                 is_unique: unique,
+                method,
+                is_spatial,
             });
         }
 
@@ -1035,7 +1147,7 @@ pub async fn introspect_postgres_schema(
         });
     }
 
-    Ok(SchemaModel { tables })
+    Ok(SchemaModel { extensions, tables })
 }
 
 #[cfg(feature = "postgres")]
@@ -1151,6 +1263,7 @@ pub async fn introspect_mssql_schema(
                     is_unique: unique_columns.contains(&name),
                     name,
                     sql_type: super::MssqlBackend::try_get_string(&row, "data_type")?,
+                    spatial: None,
                     nullable: super::MssqlBackend::try_get_string(&row, "is_nullable")? == "YES",
                     default: row.try_get::<Option<String>, _>("column_default")?,
                 })
@@ -1170,7 +1283,10 @@ pub async fn introspect_mssql_schema(
         });
     }
 
-    Ok(SchemaModel { tables })
+    Ok(SchemaModel {
+        extensions: Vec::new(),
+        tables,
+    })
 }
 
 #[cfg(feature = "mssql")]

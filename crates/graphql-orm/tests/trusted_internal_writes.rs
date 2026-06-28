@@ -278,7 +278,10 @@ async fn apply_schema(
         } else {
             DatabaseBackend::Sqlite
         },
-        &graphql_orm::graphql::orm::SchemaModel { tables: Vec::new() },
+        &graphql_orm::graphql::orm::SchemaModel {
+            extensions: Vec::new(),
+            tables: Vec::new(),
+        },
         &target_schema,
     );
     let statements: &'static [&'static str] = Box::leak(

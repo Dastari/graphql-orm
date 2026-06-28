@@ -263,6 +263,23 @@ pub fn validate_schema_models(
         .collect::<std::collections::BTreeMap<_, _>>();
     let mut diagnostics = Vec::new();
 
+    let current_extensions = current
+        .extensions
+        .iter()
+        .map(|extension| extension.to_ascii_lowercase())
+        .collect::<std::collections::BTreeSet<_>>();
+    for extension in &target.extensions {
+        if !current_extensions.contains(&extension.to_ascii_lowercase()) {
+            diagnostics.push(diagnostic(
+                SchemaDiagnosticSeverity::Error,
+                SchemaDiagnosticKind::UnsupportedBackendCapability,
+                None,
+                None,
+                format!("Missing database extension {extension}"),
+            ));
+        }
+    }
+
     for (table_name, target_table) in &target_tables {
         let Some(current_table) = current_tables.get(table_name) else {
             diagnostics.push(diagnostic(
@@ -345,6 +362,33 @@ pub fn validate_schema_models(
                     Some((*table_name).to_string()),
                     Some((*column_name).to_string()),
                     format!("Extra column {table_name}.{column_name}"),
+                ));
+            }
+        }
+
+        let current_indexes = current_table
+            .indexes
+            .iter()
+            .map(|index| (index.name, index))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for target_index in &target_table.indexes {
+            let Some(current_index) = current_indexes.get(target_index.name) else {
+                diagnostics.push(diagnostic(
+                    SchemaDiagnosticSeverity::Error,
+                    SchemaDiagnosticKind::IndexMismatch,
+                    Some((*table_name).to_string()),
+                    None,
+                    format!("Missing index {} on {table_name}", target_index.name),
+                ));
+                continue;
+            };
+            if *current_index != target_index {
+                diagnostics.push(diagnostic(
+                    SchemaDiagnosticSeverity::Error,
+                    SchemaDiagnosticKind::IndexMismatch,
+                    Some((*table_name).to_string()),
+                    None,
+                    format!("Index mismatch on {table_name}.{}", target_index.name),
                 ));
             }
         }

@@ -220,6 +220,7 @@ fn text_column(name: &str, primary_key: bool) -> ColumnModel {
     ColumnModel {
         name: name.to_string(),
         sql_type: "TEXT".to_string(),
+        spatial: None,
         nullable: false,
         is_primary_key: primary_key,
         is_unique: false,
@@ -323,6 +324,7 @@ async fn sqlite_schema_stage_rebuilds_related_tables_in_one_stage()
             format!("{version_prefix}_01"),
             "vocabulary_foundation",
             SchemaModel {
+                extensions: Vec::new(),
                 tables: vec![sqlite_vocabularies_v1(), sqlite_vocabulary_terms_v1()],
             },
         ),
@@ -330,6 +332,7 @@ async fn sqlite_schema_stage_rebuilds_related_tables_in_one_stage()
             format!("{version_prefix}_02"),
             "vocabulary_rebuild",
             SchemaModel {
+                extensions: Vec::new(),
                 tables: vec![sqlite_vocabularies_v2(), sqlite_vocabulary_terms_v2()],
             },
         ),

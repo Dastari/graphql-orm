@@ -7,7 +7,7 @@ database schema. Schema ownership and migration behavior are controlled by runti
 ## Features
 
 ```toml
-graphql-orm = { version = "0.2.10", default-features = false, features = ["sqlite"] }
+graphql-orm = { version = "0.2.11", default-features = false, features = ["sqlite"] }
 ```
 
 Available backend features:
@@ -18,6 +18,26 @@ Available backend features:
 
 The `mssql` feature activates optional `tiberius`, `tokio-util`, and Tokio TCP support. Projects that
 do not select `mssql` do not build the SQL Server driver path.
+
+## Spatial Support
+
+Spatial fields, spatial indexes, and topological `where` predicates are implemented for the
+`postgres` backend with PostGIS. The `sqlite` and `mssql` backends reject `#[graphql_orm(spatial(...))]`
+at compile time in this phase.
+
+SQLite has several industry-standard spatial options, but they have different semantics and
+deployment costs:
+
+- SpatiaLite is the best fit for exact OGC-style predicates and `CreateSpatialIndex`. It requires
+  extension loading, spatial metadata tables, and GEOS-backed functions.
+- SQLite R*Tree is available through SQLite's R*Tree module and is useful for bounding-box
+  prefiltering, but it does not provide exact topology predicates by itself.
+- GeoPackage is an interoperable SQLite-based GIS container with geometry metadata and RTree
+  conventions. It is useful for file exchange but heavier for ORM-managed application schemas.
+
+The recommended future path is an optional `spatialite` feature if exact SQLite predicates are
+required. Plain R*Tree should be reserved for explicit bounding-box APIs, not for exact
+`contains`/`within`/`overlaps` semantics.
 
 ## Single-Backend Builds
 
@@ -84,7 +104,7 @@ Example:
 
 ```toml
 graphql-orm = {
-  version = "0.2.10",
+  version = "0.2.11",
   default-features = false,
   features = [
     "mssql",

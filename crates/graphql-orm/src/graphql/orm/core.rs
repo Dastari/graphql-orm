@@ -954,6 +954,7 @@ pub struct ColumnDef {
     pub name: &'static str,
     pub rust_name: &'static str,
     pub sql_type: &'static str,
+    pub spatial: Option<SpatialColumnDef>,
     pub logical_type: BackupValueKind,
     pub nullable: bool,
     pub is_primary_key: bool,
@@ -982,6 +983,7 @@ impl ColumnDef {
             name,
             rust_name: name,
             sql_type,
+            spatial: None,
             logical_type: BackupValueKind::String,
             nullable: true,
             is_primary_key: false,
@@ -1038,6 +1040,11 @@ impl ColumnDef {
         self.references = Some(references);
         self
     }
+
+    pub const fn spatial(mut self, spatial: SpatialColumnDef) -> Self {
+        self.spatial = Some(spatial);
+        self
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1045,6 +1052,7 @@ pub struct FieldMetadata {
     pub name: &'static str,
     pub rust_name: &'static str,
     pub sql_type: &'static str,
+    pub spatial: Option<SpatialColumnDef>,
     pub logical_type: BackupValueKind,
     pub nullable: bool,
     pub is_primary_key: bool,
@@ -1061,6 +1069,7 @@ impl From<&ColumnDef> for FieldMetadata {
             name: value.name,
             rust_name: value.rust_name,
             sql_type: value.sql_type,
+            spatial: value.spatial,
             logical_type: value.logical_type,
             nullable: value.nullable,
             is_primary_key: value.is_primary_key,
@@ -1096,11 +1105,108 @@ pub enum BackupValueKind {
     Bytes,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SpatialKind {
+    Geometry,
+}
+
+impl SpatialKind {
+    pub const fn as_sql(self) -> &'static str {
+        match self {
+            Self::Geometry => "geometry",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SpatialGeometryType {
+    Geometry,
+    Point,
+    LineString,
+    Polygon,
+    MultiPoint,
+    MultiLineString,
+    MultiPolygon,
+    GeometryCollection,
+}
+
+impl SpatialGeometryType {
+    pub const fn as_sql(self) -> &'static str {
+        match self {
+            Self::Geometry => "Geometry",
+            Self::Point => "Point",
+            Self::LineString => "LineString",
+            Self::Polygon => "Polygon",
+            Self::MultiPoint => "MultiPoint",
+            Self::MultiLineString => "MultiLineString",
+            Self::MultiPolygon => "MultiPolygon",
+            Self::GeometryCollection => "GeometryCollection",
+        }
+    }
+
+    pub fn from_sql(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "geometry" => Some(Self::Geometry),
+            "point" => Some(Self::Point),
+            "linestring" => Some(Self::LineString),
+            "polygon" => Some(Self::Polygon),
+            "multipoint" => Some(Self::MultiPoint),
+            "multilinestring" => Some(Self::MultiLineString),
+            "multipolygon" => Some(Self::MultiPolygon),
+            "geometrycollection" => Some(Self::GeometryCollection),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SpatialColumnDef {
+    pub kind: SpatialKind,
+    pub geometry_type: SpatialGeometryType,
+    pub srid: i32,
+}
+
+impl SpatialColumnDef {
+    pub const fn geometry(geometry_type: SpatialGeometryType, srid: i32) -> Self {
+        Self {
+            kind: SpatialKind::Geometry,
+            geometry_type,
+            srid,
+        }
+    }
+
+    pub fn sql_type(self) -> String {
+        format!(
+            "{}({},{})",
+            self.kind.as_sql(),
+            self.geometry_type.as_sql(),
+            self.srid
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum IndexMethod {
+    Default,
+    Gist,
+}
+
+impl IndexMethod {
+    pub const fn as_sql(self) -> Option<&'static str> {
+        match self {
+            Self::Default => None,
+            Self::Gist => Some("GIST"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct IndexDef {
     pub name: &'static str,
     pub columns: &'static [&'static str],
     pub is_unique: bool,
+    pub method: IndexMethod,
+    pub is_spatial: bool,
 }
 
 impl IndexDef {
@@ -1109,12 +1215,24 @@ impl IndexDef {
             name,
             columns,
             is_unique: false,
+            method: IndexMethod::Default,
+            is_spatial: false,
         }
     }
 
     pub const fn unique(mut self) -> Self {
         self.is_unique = true;
         self
+    }
+
+    pub const fn spatial_gist(name: &'static str, columns: &'static [&'static str]) -> Self {
+        Self {
+            name,
+            columns,
+            is_unique: false,
+            method: IndexMethod::Gist,
+            is_spatial: true,
+        }
     }
 }
 
@@ -1224,6 +1342,7 @@ impl EntityMetadata {
 pub struct ColumnModel {
     pub name: String,
     pub sql_type: String,
+    pub spatial: Option<SpatialColumnDef>,
     pub nullable: bool,
     pub is_primary_key: bool,
     pub is_unique: bool,
@@ -1266,6 +1385,7 @@ impl TableModel {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SchemaModel {
+    pub extensions: Vec<String>,
     pub tables: Vec<TableModel>,
 }
 
@@ -1464,6 +1584,7 @@ impl From<&EntityMetadata> for TableModel {
                 .map(|field| ColumnModel {
                     name: field.name.to_string(),
                     sql_type: field.sql_type.to_string(),
+                    spatial: field.spatial,
                     nullable: field.nullable,
                     is_primary_key: field.is_primary_key,
                     is_unique: field.is_unique,
@@ -1498,8 +1619,17 @@ impl SchemaModel {
             .iter()
             .map(|entity| (entity.entity_name, entity.table_name))
             .collect::<std::collections::BTreeMap<_, _>>();
+        let mut extensions = Vec::new();
+        if entities
+            .iter()
+            .flat_map(|entity| entity.fields.iter())
+            .any(|field| field.spatial.is_some())
+        {
+            extensions.push("postgis".to_string());
+        }
 
         Self {
+            extensions,
             tables: entities
                 .iter()
                 .map(|entity| {
@@ -1699,6 +1829,14 @@ pub fn stable_schema_hash(entities: &[EntityBackupDescriptor]) -> String {
 
 pub fn stable_schema_model_hash(schema: &SchemaModel) -> String {
     let mut canonical = String::new();
+    let mut extensions = schema.extensions.iter().collect::<Vec<_>>();
+    extensions.sort();
+    for extension in extensions {
+        canonical.push_str("extension:");
+        canonical.push_str(extension);
+        canonical.push('\n');
+    }
+
     let mut tables = schema.tables.iter().collect::<Vec<_>>();
     tables.sort_by(|left, right| left.table_name.cmp(&right.table_name));
 
@@ -1742,6 +1880,14 @@ pub fn stable_schema_model_hash(schema: &SchemaModel) -> String {
             });
             canonical.push('|');
             canonical.push_str(column.default.as_deref().unwrap_or(""));
+            canonical.push('|');
+            if let Some(spatial) = column.spatial {
+                canonical.push_str(spatial.kind.as_sql());
+                canonical.push(':');
+                canonical.push_str(spatial.geometry_type.as_sql());
+                canonical.push(':');
+                canonical.push_str(&spatial.srid.to_string());
+            }
             canonical.push('\n');
         }
 
@@ -1754,6 +1900,17 @@ pub fn stable_schema_model_hash(schema: &SchemaModel) -> String {
             canonical.push_str(&index.columns.join(","));
             canonical.push('|');
             canonical.push_str(if index.is_unique { "unique" } else { "index" });
+            canonical.push('|');
+            canonical.push_str(match index.method {
+                IndexMethod::Default => "default",
+                IndexMethod::Gist => "gist",
+            });
+            canonical.push('|');
+            canonical.push_str(if index.is_spatial {
+                "spatial"
+            } else {
+                "not_spatial"
+            });
             canonical.push('\n');
         }
 
@@ -1885,6 +2042,9 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum MigrationStep {
+    EnableExtension {
+        name: String,
+    },
     CreateTable(TableModel),
     DropTable {
         table_name: String,

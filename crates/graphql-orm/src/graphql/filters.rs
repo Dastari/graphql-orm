@@ -74,6 +74,29 @@ pub struct StringFilter {
 )]
 #[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
 #[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
+pub struct SpatialFilter {
+    pub equals: Option<async_graphql::Json<serde_json::Value>>,
+    pub disjoint: Option<async_graphql::Json<serde_json::Value>>,
+    pub intersects: Option<async_graphql::Json<serde_json::Value>>,
+    pub touches: Option<async_graphql::Json<serde_json::Value>>,
+    pub crosses: Option<async_graphql::Json<serde_json::Value>>,
+    pub within: Option<async_graphql::Json<serde_json::Value>>,
+    pub contains: Option<async_graphql::Json<serde_json::Value>>,
+    pub overlaps: Option<async_graphql::Json<serde_json::Value>>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "isnull"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "ISNULL"))]
+    pub is_null: Option<bool>,
+}
+
+#[derive(async_graphql::InputObject, Clone, Debug, Default)]
+#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
+#[cfg_attr(
+    feature = "field-case-screaming-snake",
+    graphql(rename_fields = "SCREAMING_SNAKE_CASE")
+)]
+#[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
+#[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
 pub struct IntFilter {
     pub eq: Option<i32>,
     pub ne: Option<i32>,

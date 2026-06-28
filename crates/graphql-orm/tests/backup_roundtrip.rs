@@ -195,7 +195,10 @@ async fn apply_schema(
         } else {
             graphql_orm::graphql::orm::DatabaseBackend::Sqlite
         },
-        &graphql_orm::graphql::orm::SchemaModel { tables: Vec::new() },
+        &graphql_orm::graphql::orm::SchemaModel {
+            extensions: Vec::new(),
+            tables: Vec::new(),
+        },
         &target_schema,
     );
     let statements: &'static [&'static str] = Box::leak(
@@ -262,6 +265,7 @@ async fn full_logical_backup_restores_into_empty_database() -> Result<(), Box<dy
             source.export_table_rows(&mut snapshot, descriptor).await?,
         ));
     }
+    drop(snapshot);
 
     let dest_pool = setup_pool().await?;
     let dest = graphql_orm::db::Database::new(dest_pool.clone());

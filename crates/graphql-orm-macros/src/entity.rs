@@ -244,6 +244,7 @@ pub(crate) struct FieldMetadata {
     pub(crate) is_date_field: bool,
     pub(crate) is_boolean_field: bool,
     pub(crate) is_json_field: bool,
+    pub(crate) spatial: Option<SpatialFieldMetadata>,
     /// Async write transform: fn(&Context, String) -> Result<String>
     /// Applied before INSERT/UPDATE to transform the value (e.g., encryption)
     pub(crate) transform_write: Option<String>,
@@ -263,6 +264,27 @@ pub(crate) struct FieldMetadata {
     pub(crate) subscribe: bool,
     pub(crate) read_policy: Option<String>,
     pub(crate) write_policy: Option<String>,
+}
+
+#[derive(Clone)]
+pub(crate) struct SpatialFieldMetadata {
+    pub(crate) kind: String,
+    pub(crate) geometry_type: String,
+    pub(crate) srid: i32,
+    pub(crate) index: bool,
+    pub(crate) index_method: String,
+}
+
+impl Default for SpatialFieldMetadata {
+    fn default() -> Self {
+        Self {
+            kind: "geometry".to_string(),
+            geometry_type: "Geometry".to_string(),
+            srid: 4326,
+            index: false,
+            index_method: "gist".to_string(),
+        }
+    }
 }
 
 impl Default for FieldMetadata {
@@ -290,6 +312,7 @@ impl Default for FieldMetadata {
             is_date_field: false,
             is_boolean_field: false,
             is_json_field: false,
+            spatial: None,
             transform_write: None,
             transform_read: None,
             default: None,
@@ -335,6 +358,41 @@ fn parse_relation_columns(input: ParseStream<'_>) -> syn::Result<Vec<String>> {
     }
 }
 
+fn validate_spatial_geometry_type(value: &str, span: proc_macro2::Span) -> syn::Result<()> {
+    match value {
+        "Geometry" | "Point" | "LineString" | "Polygon" | "MultiPoint" | "MultiLineString"
+        | "MultiPolygon" | "GeometryCollection" => Ok(()),
+        _ => Err(syn::Error::new(
+            span,
+            "unsupported spatial geometry_type; expected Geometry, Point, LineString, Polygon, MultiPoint, MultiLineString, MultiPolygon, or GeometryCollection",
+        )),
+    }
+}
+
+fn spatial_geometry_type_tokens(
+    value: &str,
+    span: proc_macro2::Span,
+) -> syn::Result<proc_macro2::TokenStream> {
+    validate_spatial_geometry_type(value, span)?;
+    Ok(match value {
+        "Geometry" => quote! { ::graphql_orm::graphql::orm::SpatialGeometryType::Geometry },
+        "Point" => quote! { ::graphql_orm::graphql::orm::SpatialGeometryType::Point },
+        "LineString" => quote! { ::graphql_orm::graphql::orm::SpatialGeometryType::LineString },
+        "Polygon" => quote! { ::graphql_orm::graphql::orm::SpatialGeometryType::Polygon },
+        "MultiPoint" => quote! { ::graphql_orm::graphql::orm::SpatialGeometryType::MultiPoint },
+        "MultiLineString" => {
+            quote! { ::graphql_orm::graphql::orm::SpatialGeometryType::MultiLineString }
+        }
+        "MultiPolygon" => {
+            quote! { ::graphql_orm::graphql::orm::SpatialGeometryType::MultiPolygon }
+        }
+        "GeometryCollection" => {
+            quote! { ::graphql_orm::graphql::orm::SpatialGeometryType::GeometryCollection }
+        }
+        _ => unreachable!(),
+    })
+}
+
 #[derive(Clone)]
 pub(crate) struct ParsedField {
     pub(crate) field: Field,
@@ -360,7 +418,7 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                     });
                 }
                 "graphql_orm" => {
-                    let _ = attr.parse_nested_meta(|nested| {
+                    attr.parse_nested_meta(|nested| {
                         if nested.path.is_ident("private") {
                             meta.read = false;
                             meta.filter = false;
@@ -412,9 +470,54 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let value = nested.value()?;
                             let lit: syn::LitBool = value.parse()?;
                             meta.auto_generated = Some(lit.value);
+                        } else if nested.path.is_ident("spatial") {
+                            let mut spatial = SpatialFieldMetadata::default();
+                            nested.parse_nested_meta(|spatial_meta| {
+                                if spatial_meta.path.is_ident("kind") {
+                                    let value = spatial_meta.value()?;
+                                    let lit: syn::LitStr = value.parse()?;
+                                    let kind = lit.value();
+                                    if kind != "geometry" {
+                                        return Err(syn::Error::new(
+                                            lit.span(),
+                                            "unsupported spatial kind; only kind = \"geometry\" is supported",
+                                        ));
+                                    }
+                                    spatial.kind = kind;
+                                } else if spatial_meta.path.is_ident("geometry_type") {
+                                    let value = spatial_meta.value()?;
+                                    let lit: syn::LitStr = value.parse()?;
+                                    let geometry_type = lit.value();
+                                    validate_spatial_geometry_type(&geometry_type, lit.span())?;
+                                    spatial.geometry_type = geometry_type;
+                                } else if spatial_meta.path.is_ident("srid") {
+                                    let value = spatial_meta.value()?;
+                                    let lit: syn::LitInt = value.parse()?;
+                                    spatial.srid = lit.base10_parse()?;
+                                } else if spatial_meta.path.is_ident("index") {
+                                    let value = spatial_meta.value()?;
+                                    let lit: syn::LitBool = value.parse()?;
+                                    spatial.index = lit.value;
+                                } else if spatial_meta.path.is_ident("index_method") {
+                                    let value = spatial_meta.value()?;
+                                    let lit: syn::LitStr = value.parse()?;
+                                    let method = lit.value();
+                                    if method != "gist" {
+                                        return Err(syn::Error::new(
+                                            lit.span(),
+                                            "unsupported spatial index_method; only index_method = \"gist\" is supported",
+                                        ));
+                                    }
+                                    spatial.index_method = method;
+                                }
+                                Ok(())
+                            })?;
+                            meta.spatial = Some(spatial);
+                            meta.is_json_field = true;
+                            meta.order = false;
                         }
                         Ok(())
-                    });
+                    })?;
                 }
                 "backup" => {
                     let _ = attr.parse_nested_meta(|nested| {
@@ -1003,7 +1106,7 @@ fn generate_entity_impl(
             quote! { &[#(#col_lits),*] }
         })
         .collect::<Vec<_>>();
-    let index_defs = entity_meta
+    let mut index_defs = entity_meta
         .indexes
         .iter()
         .map(|(unique, cols)| {
@@ -1164,8 +1267,6 @@ fn generate_entity_impl(
             .unwrap_or_else(|| rust_name.clone());
         let db_col_sql = backend_quote_identifier_path(backend, &db_col);
 
-        column_names.push(db_col_sql.clone());
-
         // Determine SQL type and nullability
         let is_nullable = is_option_type(field_type);
         let is_pk = field_meta.is_primary_key;
@@ -1177,6 +1278,39 @@ fn generate_entity_impl(
             backup_policy_tokens(field_meta.backup_policy.as_deref(), field.span())?;
         let logical_type = backup_value_kind_tokens(field_type, &field_meta);
         let sql_type = rust_type_to_sql_type(backend, field_type, &field_meta);
+        let spatial_tokens = if let Some(spatial) = &field_meta.spatial {
+            if backend != BackendKind::Postgres {
+                return Err(syn::Error::new(
+                    field.span(),
+                    "spatial fields are only supported for backend = \"postgres\"",
+                ));
+            }
+            if !is_serde_json_value_or_option(field_type) {
+                return Err(syn::Error::new(
+                    field.span(),
+                    "spatial fields must use serde_json::Value or Option<serde_json::Value>",
+                ));
+            }
+            let geometry_type = spatial_geometry_type_tokens(&spatial.geometry_type, field.span())?;
+            let srid = spatial.srid;
+            if spatial.index {
+                let index_name = format!("idx_{}_{}_spatial", raw_table_name, db_col);
+                let col = syn::LitStr::new(&db_col, field.span());
+                index_defs.push(quote! {
+                    ::graphql_orm::graphql::orm::IndexDef::spatial_gist(#index_name, &[#col])
+                });
+            }
+            column_names.push(format!(
+                "ST_AsGeoJSON({}, 9, 8)::text AS {}",
+                db_col_sql, db_col_sql
+            ));
+            quote! {
+                Some(::graphql_orm::graphql::orm::SpatialColumnDef::geometry(#geometry_type, #srid))
+            }
+        } else {
+            column_names.push(db_col_sql.clone());
+            quote! { None }
+        };
         let default_val = field_meta.default.clone().or_else(|| {
             if rust_name == "created_at" || rust_name == "updated_at" {
                 Some(backend_current_epoch_expr(backend).to_string())
@@ -1199,6 +1333,7 @@ fn generate_entity_impl(
                 name: #db_col,
                 rust_name: #rust_name,
                 sql_type: #sql_type,
+                spatial: #spatial_tokens,
                 logical_type: #logical_type,
                 nullable: #is_nullable,
                 is_primary_key: #is_pk,
@@ -1223,6 +1358,7 @@ fn generate_entity_impl(
                     &graphql_name,
                     &db_col_sql,
                     filter_type,
+                    &field_meta,
                 )?;
                 where_input_fields.push(input_field);
                 filter_to_sql.push(sql_gen);
@@ -1269,17 +1405,30 @@ fn generate_entity_impl(
             } else {
                 quote! {}
             };
-            let return_expr = if is_option_type(field_type) || is_byte_vec_type(field_type) {
-                quote! { Ok(self.#field_name.clone()) }
+            let (return_type, return_expr) = if field_meta.spatial.is_some() {
+                if is_option_type(field_type) {
+                    (
+                        quote! { Option<::graphql_orm::async_graphql::Json<::graphql_orm::serde_json::Value>> },
+                        quote! { Ok(self.#field_name.clone().map(::graphql_orm::async_graphql::Json)) },
+                    )
+                } else {
+                    (
+                        quote! { ::graphql_orm::async_graphql::Json<::graphql_orm::serde_json::Value> },
+                        quote! { Ok(::graphql_orm::async_graphql::Json(self.#field_name.clone())) },
+                    )
+                }
             } else {
-                quote! { Ok(self.#field_name.clone()) }
+                (
+                    quote! { #field_type },
+                    quote! { Ok(self.#field_name.clone()) },
+                )
             };
             object_field_methods.push(quote! {
                 #[graphql(name = #graphql_name)]
                 async fn #getter_name(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
-                ) -> ::graphql_orm::async_graphql::Result<#field_type> {
+                ) -> ::graphql_orm::async_graphql::Result<#return_type> {
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                     #subscribe_check
                     #policy_check
@@ -1533,6 +1682,27 @@ fn generate_entity_impl(
                 #ci_like_body
             }
 
+            pub(crate) fn __gom_spatial_geojson_expr(placeholder: &str, srid: i32) -> String {
+                ::graphql_orm::graphql::orm::SqlDialect::spatial_geojson_expr(
+                    &<#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT,
+                    placeholder,
+                    srid,
+                )
+            }
+
+            pub(crate) fn __gom_spatial_predicate(
+                predicate: ::graphql_orm::graphql::orm::SpatialPredicate,
+                column: &str,
+                geometry_expr: &str,
+            ) -> String {
+                ::graphql_orm::graphql::orm::SqlDialect::spatial_predicate(
+                    &<#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT,
+                    predicate,
+                    column,
+                    geometry_expr,
+                )
+            }
+
             pub(crate) fn __gom_bool_sql_value(value: bool) -> ::graphql_orm::graphql::orm::SqlValue {
                 #bool_sql_value_body
             }
@@ -1629,10 +1799,116 @@ fn generate_filter_field(
     graphql_name: &str,
     db_col: &str,
     filter_type: &str,
+    field_meta: &FieldMetadata,
 ) -> syn::Result<(proc_macro2::TokenStream, proc_macro2::TokenStream)> {
     let filter_field_name = rust_ident_from_graphql_name(graphql_name, field_name.span());
 
     match filter_type {
+        "spatial" => {
+            let Some(spatial) = &field_meta.spatial else {
+                return Err(syn::Error::new(
+                    field_name.span(),
+                    "filterable(type = \"spatial\") requires #[graphql_orm(spatial(...))]",
+                ));
+            };
+            let srid = spatial.srid;
+            let input = quote! {
+                #[graphql(name = #graphql_name)]
+                pub #filter_field_name: Option<::graphql_orm::graphql::filters::SpatialFilter>,
+            };
+            let sql = quote! {
+                if let Some(ref f) = self.#filter_field_name {
+                    if let Some(ref v) = f.equals {
+                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                        let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
+                        conditions.push(#struct_name::__gom_spatial_predicate(
+                            ::graphql_orm::graphql::orm::SpatialPredicate::Equals,
+                            #db_col,
+                            &geometry,
+                        ));
+                        values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
+                    }
+                    if let Some(ref v) = f.disjoint {
+                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                        let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
+                        conditions.push(#struct_name::__gom_spatial_predicate(
+                            ::graphql_orm::graphql::orm::SpatialPredicate::Disjoint,
+                            #db_col,
+                            &geometry,
+                        ));
+                        values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
+                    }
+                    if let Some(ref v) = f.intersects {
+                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                        let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
+                        conditions.push(#struct_name::__gom_spatial_predicate(
+                            ::graphql_orm::graphql::orm::SpatialPredicate::Intersects,
+                            #db_col,
+                            &geometry,
+                        ));
+                        values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
+                    }
+                    if let Some(ref v) = f.touches {
+                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                        let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
+                        conditions.push(#struct_name::__gom_spatial_predicate(
+                            ::graphql_orm::graphql::orm::SpatialPredicate::Touches,
+                            #db_col,
+                            &geometry,
+                        ));
+                        values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
+                    }
+                    if let Some(ref v) = f.crosses {
+                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                        let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
+                        conditions.push(#struct_name::__gom_spatial_predicate(
+                            ::graphql_orm::graphql::orm::SpatialPredicate::Crosses,
+                            #db_col,
+                            &geometry,
+                        ));
+                        values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
+                    }
+                    if let Some(ref v) = f.within {
+                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                        let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
+                        conditions.push(#struct_name::__gom_spatial_predicate(
+                            ::graphql_orm::graphql::orm::SpatialPredicate::Within,
+                            #db_col,
+                            &geometry,
+                        ));
+                        values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
+                    }
+                    if let Some(ref v) = f.contains {
+                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                        let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
+                        conditions.push(#struct_name::__gom_spatial_predicate(
+                            ::graphql_orm::graphql::orm::SpatialPredicate::Contains,
+                            #db_col,
+                            &geometry,
+                        ));
+                        values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
+                    }
+                    if let Some(ref v) = f.overlaps {
+                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                        let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
+                        conditions.push(#struct_name::__gom_spatial_predicate(
+                            ::graphql_orm::graphql::orm::SpatialPredicate::Overlaps,
+                            #db_col,
+                            &geometry,
+                        ));
+                        values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
+                    }
+                    if let Some(is_null) = f.is_null {
+                        if is_null {
+                            conditions.push(format!("{} IS NULL", #db_col));
+                        } else {
+                            conditions.push(format!("{} IS NOT NULL", #db_col));
+                        }
+                    }
+                }
+            };
+            Ok((input, sql))
+        }
         "string" => {
             let input = quote! {
                 #[graphql(name = #graphql_name)]
@@ -2019,6 +2295,26 @@ fn generate_row_field_assignment(
         });
     }
 
+    if meta.spatial.is_some() {
+        if is_option_type(field_type) {
+            return Ok(quote! {
+                #field_name: {
+                    let s: Option<String> = row.try_get(#db_col)?;
+                    s.map(|value| ::graphql_orm::serde_json::from_str::<::graphql_orm::serde_json::Value>(&value))
+                        .transpose()
+                        .map_err(|e| ::graphql_orm::sqlx::Error::Decode(e.into()))?
+                },
+            });
+        }
+        return Ok(quote! {
+            #field_name: {
+                let s: String = row.try_get(#db_col)?;
+                ::graphql_orm::serde_json::from_str::<::graphql_orm::serde_json::Value>(&s)
+                    .map_err(|e| ::graphql_orm::sqlx::Error::Decode(e.into()))?
+            },
+        });
+    }
+
     if meta.is_json_field && !is_option_type(field_type) {
         let json_expr = if backend == BackendKind::Postgres {
             quote! {{
@@ -2326,12 +2622,37 @@ pub(crate) fn is_uuid_type(ty: &syn::Type) -> bool {
     option_inner_type(ty).is_some_and(is_uuid_type)
 }
 
+fn is_serde_json_value_type(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(type_path) = ty {
+        let segments = type_path
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        return segments.last().is_some_and(|ident| ident == "Value")
+            && (segments.len() == 1
+                || segments
+                    .windows(2)
+                    .any(|window| window[0] == "serde_json" && window[1] == "Value")
+                || segments.windows(3).any(|window| {
+                    window[0] == "graphql_orm" && window[1] == "serde_json" && window[2] == "Value"
+                }));
+    }
+
+    false
+}
+
+pub(crate) fn is_serde_json_value_or_option(ty: &syn::Type) -> bool {
+    is_serde_json_value_type(ty) || option_inner_type(ty).is_some_and(is_serde_json_value_type)
+}
+
 /// Convert Rust type to the configured backend SQL type string
 pub(crate) fn rust_type_to_sql_type(
     backend: BackendKind,
     ty: &syn::Type,
     meta: &FieldMetadata,
-) -> &'static str {
+) -> String {
     // Handle Option<T> by unwrapping
     let inner_type = if is_option_type(ty) {
         if let syn::Type::Path(type_path) = ty {
@@ -2356,26 +2677,32 @@ pub(crate) fn rust_type_to_sql_type(
     };
 
     // Check field metadata first
+    if let Some(spatial) = &meta.spatial {
+        return format!("geometry({},{})", spatial.geometry_type, spatial.srid);
+    }
     if meta.is_boolean_field {
         return match backend {
             BackendKind::Postgres => "BOOLEAN",
             BackendKind::Mssql => "BIT",
             BackendKind::Sqlite => "INTEGER",
-        };
+        }
+        .to_string();
     }
     if meta.is_json_field {
         return match backend {
             BackendKind::Postgres => "JSONB",
             BackendKind::Mssql => "NVARCHAR(MAX)",
             BackendKind::Sqlite => "TEXT",
-        };
+        }
+        .to_string();
     }
     if meta.is_date_field {
         return match backend {
             BackendKind::Postgres => "TIMESTAMPTZ",
             BackendKind::Mssql => "DATETIME2",
             BackendKind::Sqlite => "TEXT",
-        };
+        }
+        .to_string();
     }
 
     // Infer from Rust type first (so f64 becomes REAL not INTEGER for "number" filter)
@@ -2388,28 +2715,32 @@ pub(crate) fn rust_type_to_sql_type(
                         "NVARCHAR(MAX)"
                     } else {
                         "TEXT"
-                    };
+                    }
+                    .to_string();
                 }
                 "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => {
                     return match backend {
                         BackendKind::Postgres => "BIGINT",
                         BackendKind::Mssql => "BIGINT",
                         BackendKind::Sqlite => "INTEGER",
-                    };
+                    }
+                    .to_string();
                 }
                 "f32" | "f64" => {
                     return match backend {
                         BackendKind::Postgres => "DOUBLE PRECISION",
                         BackendKind::Mssql => "FLOAT",
                         BackendKind::Sqlite => "REAL",
-                    };
+                    }
+                    .to_string();
                 }
                 "bool" => {
                     return match backend {
                         BackendKind::Postgres => "BOOLEAN",
                         BackendKind::Mssql => "BIT",
                         BackendKind::Sqlite => "INTEGER",
-                    };
+                    }
+                    .to_string();
                 }
                 "Vec" => {
                     if is_byte_vec_type(inner_type) {
@@ -2417,32 +2748,36 @@ pub(crate) fn rust_type_to_sql_type(
                             BackendKind::Postgres => "BYTEA",
                             BackendKind::Mssql => "VARBINARY(MAX)",
                             BackendKind::Sqlite => "BLOB",
-                        };
+                        }
+                        .to_string();
                     }
                     return match backend {
                         BackendKind::Postgres => "JSONB",
                         BackendKind::Mssql => "NVARCHAR(MAX)",
                         BackendKind::Sqlite => "TEXT",
-                    };
+                    }
+                    .to_string();
                 }
                 "Uuid" => {
                     return match backend {
                         BackendKind::Postgres => "UUID",
                         BackendKind::Mssql => "UNIQUEIDENTIFIER",
                         BackendKind::Sqlite => "TEXT",
-                    };
+                    }
+                    .to_string();
                 }
                 "DateTime" => {
                     return match backend {
                         BackendKind::Postgres => "TIMESTAMPTZ",
                         BackendKind::Mssql => "DATETIME2",
                         BackendKind::Sqlite => "TEXT",
-                    };
+                    }
+                    .to_string();
                 }
-                _ => return "TEXT",
+                _ => return "TEXT".to_string(),
             }
         }
     }
 
-    "TEXT"
+    "TEXT".to_string()
 }

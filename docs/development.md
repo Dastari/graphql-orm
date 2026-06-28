@@ -36,8 +36,15 @@ cargo test
 Postgres integration tests use `TEST_DATABASE_URL` when provided.
 
 ```bash
+docker run -d --name graphql-orm-postgis-test \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=postgres \
+  -p 55432:5432 \
+  postgis/postgis:16-3.4
+
 TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:55432/postgres \
-  cargo test -p graphql-orm --no-default-features --features postgres
+  cargo test -p graphql-orm --no-default-features --features postgres -- --test-threads=1
 ```
 
 ## SQL Server Tests

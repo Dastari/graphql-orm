@@ -76,6 +76,7 @@ async fn sqlite_migration_runner_applies_rebuild_plan() -> Result<(), Box<dyn st
         .await?;
 
     let current = SchemaModel {
+        extensions: Vec::new(),
         tables: vec![TableModel {
             entity_name: "User".to_string(),
             table_name: "users".to_string(),
@@ -86,6 +87,7 @@ async fn sqlite_migration_runner_applies_rebuild_plan() -> Result<(), Box<dyn st
                 ColumnModel {
                     name: "id".to_string(),
                     sql_type: "TEXT".to_string(),
+                    spatial: None,
                     nullable: false,
                     is_primary_key: true,
                     is_unique: false,
@@ -94,6 +96,7 @@ async fn sqlite_migration_runner_applies_rebuild_plan() -> Result<(), Box<dyn st
                 ColumnModel {
                     name: "name".to_string(),
                     sql_type: "TEXT".to_string(),
+                    spatial: None,
                     nullable: false,
                     is_primary_key: false,
                     is_unique: false,
@@ -106,6 +109,7 @@ async fn sqlite_migration_runner_applies_rebuild_plan() -> Result<(), Box<dyn st
         }],
     };
     let target = SchemaModel {
+        extensions: Vec::new(),
         tables: vec![TableModel {
             entity_name: "User".to_string(),
             table_name: "users".to_string(),
@@ -116,6 +120,7 @@ async fn sqlite_migration_runner_applies_rebuild_plan() -> Result<(), Box<dyn st
                 ColumnModel {
                     name: "id".to_string(),
                     sql_type: "TEXT".to_string(),
+                    spatial: None,
                     nullable: false,
                     is_primary_key: true,
                     is_unique: false,
@@ -124,6 +129,7 @@ async fn sqlite_migration_runner_applies_rebuild_plan() -> Result<(), Box<dyn st
                 ColumnModel {
                     name: "name".to_string(),
                     sql_type: "VARCHAR(255)".to_string(),
+                    spatial: None,
                     nullable: false,
                     is_primary_key: false,
                     is_unique: false,
@@ -132,6 +138,7 @@ async fn sqlite_migration_runner_applies_rebuild_plan() -> Result<(), Box<dyn st
                 ColumnModel {
                     name: "active".to_string(),
                     sql_type: "BOOLEAN".to_string(),
+                    spatial: None,
                     nullable: false,
                     is_primary_key: false,
                     is_unique: false,
@@ -195,9 +202,11 @@ async fn sqlite_migration_runner_recovers_from_stale_rewrite_table()
     let plan = build_migration_plan(
         DatabaseBackend::Sqlite,
         &SchemaModel {
+            extensions: Vec::new(),
             tables: vec![users_v1_like()],
         },
         &SchemaModel {
+            extensions: Vec::new(),
             tables: vec![users_v2_like()],
         },
     );
@@ -272,6 +281,7 @@ async fn postgres_migration_runner_applies_plan() -> Result<(), Box<dyn std::err
     let index_name = format!("idx_{}_name", table_name);
 
     let target = SchemaModel {
+        extensions: Vec::new(),
         tables: vec![TableModel {
             entity_name: "User".to_string(),
             table_name: table_name.clone(),
@@ -282,6 +292,7 @@ async fn postgres_migration_runner_applies_plan() -> Result<(), Box<dyn std::err
                 ColumnModel {
                     name: "id".to_string(),
                     sql_type: "TEXT".to_string(),
+                    spatial: None,
                     nullable: false,
                     is_primary_key: true,
                     is_unique: false,
@@ -290,6 +301,7 @@ async fn postgres_migration_runner_applies_plan() -> Result<(), Box<dyn std::err
                 ColumnModel {
                     name: "name".to_string(),
                     sql_type: "TEXT".to_string(),
+                    spatial: None,
                     nullable: false,
                     is_primary_key: false,
                     is_unique: false,
@@ -304,7 +316,10 @@ async fn postgres_migration_runner_applies_plan() -> Result<(), Box<dyn std::err
 
     let plan = build_migration_plan(
         DatabaseBackend::Postgres,
-        &SchemaModel { tables: vec![] },
+        &SchemaModel {
+            extensions: Vec::new(),
+            tables: vec![],
+        },
         &target,
     );
     let database = graphql_orm::db::Database::new(pool.clone());
@@ -392,6 +407,7 @@ fn users_v1_like() -> TableModel {
             ColumnModel {
                 name: "id".to_string(),
                 sql_type: "TEXT".to_string(),
+                spatial: None,
                 nullable: false,
                 is_primary_key: true,
                 is_unique: false,
@@ -400,6 +416,7 @@ fn users_v1_like() -> TableModel {
             ColumnModel {
                 name: "name".to_string(),
                 sql_type: "TEXT".to_string(),
+                spatial: None,
                 nullable: false,
                 is_primary_key: false,
                 is_unique: false,
@@ -419,6 +436,7 @@ fn users_v2_like() -> TableModel {
             ColumnModel {
                 name: "id".to_string(),
                 sql_type: "TEXT".to_string(),
+                spatial: None,
                 nullable: false,
                 is_primary_key: true,
                 is_unique: false,
@@ -427,6 +445,7 @@ fn users_v2_like() -> TableModel {
             ColumnModel {
                 name: "name".to_string(),
                 sql_type: "VARCHAR(255)".to_string(),
+                spatial: None,
                 nullable: false,
                 is_primary_key: false,
                 is_unique: false,
@@ -435,6 +454,7 @@ fn users_v2_like() -> TableModel {
             ColumnModel {
                 name: "active".to_string(),
                 sql_type: "BOOLEAN".to_string(),
+                spatial: None,
                 nullable: false,
                 is_primary_key: false,
                 is_unique: false,
@@ -519,6 +539,7 @@ async fn sqlite_migration_runner_rebuilds_parent_child_chain_in_one_migration()
         .await?;
 
     let current = SchemaModel {
+        extensions: Vec::new(),
         tables: vec![
             sqlite_table(
                 "Grandparent",
@@ -555,6 +576,7 @@ async fn sqlite_migration_runner_rebuilds_parent_child_chain_in_one_migration()
         ],
     };
     let target = SchemaModel {
+        extensions: Vec::new(),
         tables: vec![
             sqlite_table(
                 "Grandparent",
@@ -596,7 +618,10 @@ async fn sqlite_migration_runner_rebuilds_parent_child_chain_in_one_migration()
         .apply_migrations(&[leak_migration(
             &build_migration_plan(
                 DatabaseBackend::Sqlite,
-                &SchemaModel { tables: vec![] },
+                &SchemaModel {
+                    extensions: Vec::new(),
+                    tables: vec![],
+                },
                 &current,
             ),
             "2026040201",
@@ -682,6 +707,7 @@ async fn sqlite_migration_runner_rebuilds_self_referential_table()
         .await?;
 
     let current = SchemaModel {
+        extensions: Vec::new(),
         tables: vec![sqlite_table(
             "Node",
             "stage_nodes",
@@ -695,6 +721,7 @@ async fn sqlite_migration_runner_rebuilds_self_referential_table()
         )],
     };
     let target = SchemaModel {
+        extensions: Vec::new(),
         tables: vec![sqlite_table(
             "Node",
             "stage_nodes",
@@ -713,7 +740,10 @@ async fn sqlite_migration_runner_rebuilds_self_referential_table()
         .apply_migrations(&[leak_migration(
             &build_migration_plan(
                 DatabaseBackend::Sqlite,
-                &SchemaModel { tables: vec![] },
+                &SchemaModel {
+                    extensions: Vec::new(),
+                    tables: vec![],
+                },
                 &current,
             ),
             "2026040203",

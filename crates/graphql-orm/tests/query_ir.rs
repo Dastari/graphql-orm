@@ -1,6 +1,7 @@
 use graphql_orm::graphql::orm::{
     DatabaseBackend, DeleteQuery, FilterExpression, PaginationRequest, RenderedQuery, SelectQuery,
-    SortExpression, SqlDialect, SqlValue, render_delete_query, render_select_query,
+    SortExpression, SpatialPredicate, SqlDialect, SqlValue, render_delete_query,
+    render_select_query,
 };
 
 fn sample_select() -> SelectQuery {
@@ -174,4 +175,53 @@ fn delete_renderer_uses_filter_ir() {
 
     assert_eq!(rendered.sql, "DELETE FROM users WHERE id = $1");
     assert_eq!(rendered.values, vec![SqlValue::String("u1".to_string())]);
+}
+
+#[test]
+fn postgres_spatial_dialect_renders_geojson_predicates() {
+    let dialect = DatabaseBackend::Postgres;
+    let geometry = dialect.spatial_geojson_expr("$1", 4326);
+    assert_eq!(geometry, "ST_SetSRID(ST_GeomFromGeoJSON($1::jsonb), 4326)");
+
+    let cases = [
+        (
+            SpatialPredicate::Equals,
+            "ST_Equals(location, ST_SetSRID(ST_GeomFromGeoJSON($1::jsonb), 4326))",
+        ),
+        (
+            SpatialPredicate::Disjoint,
+            "NOT ST_Intersects(location, ST_SetSRID(ST_GeomFromGeoJSON($1::jsonb), 4326))",
+        ),
+        (
+            SpatialPredicate::Intersects,
+            "ST_Intersects(location, ST_SetSRID(ST_GeomFromGeoJSON($1::jsonb), 4326))",
+        ),
+        (
+            SpatialPredicate::Touches,
+            "ST_Touches(location, ST_SetSRID(ST_GeomFromGeoJSON($1::jsonb), 4326))",
+        ),
+        (
+            SpatialPredicate::Crosses,
+            "ST_Crosses(location, ST_SetSRID(ST_GeomFromGeoJSON($1::jsonb), 4326))",
+        ),
+        (
+            SpatialPredicate::Within,
+            "ST_Within(location, ST_SetSRID(ST_GeomFromGeoJSON($1::jsonb), 4326))",
+        ),
+        (
+            SpatialPredicate::Contains,
+            "ST_Contains(location, ST_SetSRID(ST_GeomFromGeoJSON($1::jsonb), 4326))",
+        ),
+        (
+            SpatialPredicate::Overlaps,
+            "ST_Overlaps(location, ST_SetSRID(ST_GeomFromGeoJSON($1::jsonb), 4326))",
+        ),
+    ];
+
+    for (predicate, expected) in cases {
+        assert_eq!(
+            dialect.spatial_predicate(predicate, "location", &geometry),
+            expected
+        );
+    }
 }

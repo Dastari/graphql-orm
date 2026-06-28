@@ -100,6 +100,7 @@ async fn external_read_only_schema_omits_generated_mutations()
 #[tokio::test]
 async fn validate_reports_structured_primary_key_drift() -> Result<(), Box<dyn std::error::Error>> {
     let current = SchemaModel {
+        extensions: Vec::new(),
         tables: vec![users_v1("policy_users")],
     };
     let mut target_table = users_v1("policy_users");
@@ -111,6 +112,7 @@ async fn validate_reports_structured_primary_key_drift() -> Result<(), Box<dyn s
         .expect("name column")
         .is_primary_key = true;
     let target = SchemaModel {
+        extensions: Vec::new(),
         tables: vec![target_table],
     };
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
@@ -131,8 +133,12 @@ async fn external_read_only_rejects_planning() -> Result<(), Box<dyn std::error:
     let database = graphql_orm::db::Database::builder(pool)
         .schema_policy(SchemaPolicy::ExternalReadOnly)
         .build();
-    let current = SchemaModel { tables: vec![] };
+    let current = SchemaModel {
+        extensions: Vec::new(),
+        tables: vec![],
+    };
     let target = SchemaModel {
+        extensions: Vec::new(),
         tables: vec![users_v1("readonly_users")],
     };
 
@@ -154,8 +160,12 @@ async fn plan_only_rejects_application_and_classifies_risk()
     let database = graphql_orm::db::Database::builder(pool)
         .schema_policy(SchemaPolicy::PlanOnly)
         .build();
-    let current = SchemaModel { tables: vec![] };
+    let current = SchemaModel {
+        extensions: Vec::new(),
+        tables: vec![],
+    };
     let target = SchemaModel {
+        extensions: Vec::new(),
         tables: vec![users_v1("plan_only_users")],
     };
     let plan = database
@@ -181,9 +191,13 @@ async fn managed_rejects_destructive_migration_by_default() -> Result<(), Box<dy
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
     let database = graphql_orm::db::Database::new(pool);
     let current = SchemaModel {
+        extensions: Vec::new(),
         tables: vec![users_v1("destructive_users")],
     };
-    let target = SchemaModel { tables: vec![] };
+    let target = SchemaModel {
+        extensions: Vec::new(),
+        tables: vec![],
+    };
     let plan = database
         .schema()
         .plan_migration("2", "drop users", &current, &target)?;
@@ -211,6 +225,7 @@ async fn managed_schema_abi_applies_forward_path() -> Result<(), Box<dyn std::er
             format!("{}_01", suffix),
             "create users",
             SchemaModel {
+                extensions: Vec::new(),
                 tables: vec![users_v1(&table_name)],
             },
         ),
@@ -218,6 +233,7 @@ async fn managed_schema_abi_applies_forward_path() -> Result<(), Box<dyn std::er
             format!("{}_02", suffix),
             "add email",
             SchemaModel {
+                extensions: Vec::new(),
                 tables: vec![users_v2(&table_name)],
             },
         ),

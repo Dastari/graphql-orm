@@ -158,4 +158,8 @@ Existing rows without the newer metadata remain valid.
 
 SQLite and Postgres implement validation, planning, and migration application.
 
+For PostgreSQL spatial fields, managed plans include `CREATE EXTENSION IF NOT EXISTS postgis` before
+table creation. Spatial indexes are rendered as normal migration statements, not concurrent index
+builds.
+
 MSSQL is read-only in this phase. It can be used for queries and read-only validation where supported, but it does not implement migration application or write capability traits.
