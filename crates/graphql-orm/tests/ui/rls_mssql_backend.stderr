@@ -1,0 +1,10 @@
+error: #[graphql_rls] is only supported for the Postgres backend
+ --> tests/ui/rls_mssql_backend.rs:4:1
+  |
+4 | / #[graphql_entity(backend = "mssql", table = "mssql_rls_notes", plural = "MssqlRlsNotes")]
+5 | | #[graphql_rls(select(scope = "notes.read"))]
+6 | | struct MssqlRlsNote {
+7 | |     #[primary_key]
+8 | |     pub id: String,
+9 | | }
+  | |_^

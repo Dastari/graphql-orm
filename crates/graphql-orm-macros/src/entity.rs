@@ -26,6 +26,24 @@ pub(crate) struct EntityMetadata {
     pub(crate) indexes: Vec<(bool, Vec<String>)>,
     pub(crate) serde_rename_all: Option<String>,
     pub(crate) graphql_rename_fields: Option<String>,
+    pub(crate) rls: Option<RlsMetadata>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct RlsMetadata {
+    pub(crate) force: bool,
+    pub(crate) select: Option<RlsOperationMetadata>,
+    pub(crate) insert: Option<RlsOperationMetadata>,
+    pub(crate) update: Option<RlsOperationMetadata>,
+    pub(crate) delete: Option<RlsOperationMetadata>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct RlsOperationMetadata {
+    pub(crate) predicate: Option<String>,
+    pub(crate) scope: Option<String>,
+    pub(crate) tenant_column: Option<String>,
+    pub(crate) owner_column: Option<String>,
 }
 
 pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<EntityMetadata> {
@@ -142,6 +160,14 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                 }
                 Ok(())
             })?;
+        } else if attr.path().is_ident("graphql_rls") {
+            if metadata.rls.is_some() {
+                return Err(syn::Error::new(
+                    attr.span(),
+                    "graphql_rls may only be declared once per entity",
+                ));
+            }
+            metadata.rls = Some(parse_rls_metadata(attr)?);
         } else if attr.path().is_ident("graphql") {
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("rename_fields") {
@@ -164,6 +190,85 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
     }
 
     Ok(metadata)
+}
+
+fn parse_rls_metadata(attr: &syn::Attribute) -> syn::Result<RlsMetadata> {
+    let mut rls = RlsMetadata {
+        force: true,
+        ..RlsMetadata::default()
+    };
+
+    if matches!(&attr.meta, syn::Meta::Path(_)) {
+        return Ok(rls);
+    }
+
+    attr.parse_nested_meta(|meta| {
+        if meta.path.is_ident("force") {
+            let value = meta.value()?;
+            let lit: syn::LitBool = value.parse()?;
+            rls.force = lit.value;
+            return Ok(());
+        }
+
+        let target = if meta.path.is_ident("select") {
+            &mut rls.select
+        } else if meta.path.is_ident("insert") {
+            &mut rls.insert
+        } else if meta.path.is_ident("update") {
+            &mut rls.update
+        } else if meta.path.is_ident("delete") {
+            &mut rls.delete
+        } else {
+            return Err(syn::Error::new(
+                meta.path.span(),
+                "unsupported graphql_rls option; expected force, select, insert, update, or delete",
+            ));
+        };
+
+        if target.is_some() {
+            return Err(syn::Error::new(
+                meta.path.span(),
+                "graphql_rls operation may only be declared once",
+            ));
+        }
+
+        let mut operation = RlsOperationMetadata::default();
+        meta.parse_nested_meta(|op| {
+            let value = op.value()?;
+            let lit: syn::LitStr = value.parse()?;
+            if op.path.is_ident("predicate") {
+                operation.predicate = Some(lit.value());
+            } else if op.path.is_ident("scope") {
+                operation.scope = Some(lit.value());
+            } else if op.path.is_ident("tenant") {
+                operation.tenant_column = Some(lit.value());
+            } else if op.path.is_ident("owner") {
+                operation.owner_column = Some(lit.value());
+            } else {
+                return Err(syn::Error::new(
+                    op.path.span(),
+                    "unsupported graphql_rls operation option; expected predicate, scope, tenant, or owner",
+                ));
+            }
+            Ok(())
+        })?;
+
+        if operation.predicate.is_some()
+            && (operation.scope.is_some()
+                || operation.tenant_column.is_some()
+                || operation.owner_column.is_some())
+        {
+            return Err(syn::Error::new(
+                meta.path.span(),
+                "graphql_rls predicate cannot be combined with scope, tenant, or owner on the same operation",
+            ));
+        }
+
+        *target = Some(operation);
+        Ok(())
+    })?;
+
+    Ok(rls)
 }
 
 pub(crate) fn validate_schema_policy(value: &str, span: proc_macro2::Span) -> syn::Result<()> {
@@ -194,6 +299,101 @@ pub(crate) fn schema_policy_tokens(policy: Option<&str>) -> proc_macro2::TokenSt
         }
         Some("managed") => quote! { Some(::graphql_orm::graphql::orm::SchemaPolicy::Managed) },
         _ => quote! { None },
+    }
+}
+
+fn option_lit_tokens(value: Option<&str>, span: proc_macro2::Span) -> proc_macro2::TokenStream {
+    value
+        .map(|value| {
+            let lit = syn::LitStr::new(value, span);
+            quote! { Some(#lit) }
+        })
+        .unwrap_or_else(|| quote! { None })
+}
+
+fn rls_operation_policy_tokens(
+    operation: proc_macro2::TokenStream,
+    policy: &RlsOperationMetadata,
+    span: proc_macro2::Span,
+) -> proc_macro2::TokenStream {
+    if let Some(predicate) = policy.predicate.as_deref() {
+        let lit = syn::LitStr::new(predicate, span);
+        return quote! {
+            ::graphql_orm::graphql::orm::RlsOperationPolicy::custom(#operation, #lit)
+        };
+    }
+
+    let scope = option_lit_tokens(policy.scope.as_deref(), span);
+    let tenant = option_lit_tokens(policy.tenant_column.as_deref(), span);
+    let owner = option_lit_tokens(policy.owner_column.as_deref(), span);
+    quote! {
+        ::graphql_orm::graphql::orm::RlsOperationPolicy::generated(
+            #operation,
+            #scope,
+            #tenant,
+            #owner,
+        )
+    }
+}
+
+fn rls_impl_tokens(
+    struct_name: &syn::Ident,
+    entity_name_lit: &str,
+    table_name: &str,
+    rls: Option<&RlsMetadata>,
+) -> proc_macro2::TokenStream {
+    let Some(rls) = rls else {
+        return quote! {
+            impl ::graphql_orm::graphql::orm::DatabaseRls for #struct_name {}
+        };
+    };
+
+    let span = struct_name.span();
+    let entity_name = syn::LitStr::new(entity_name_lit, span);
+    let table_name = syn::LitStr::new(table_name, span);
+    let force = rls.force;
+    let mut policies = Vec::new();
+    for (operation, policy) in [
+        (
+            quote! { ::graphql_orm::graphql::orm::RlsOperation::Select },
+            rls.select.as_ref(),
+        ),
+        (
+            quote! { ::graphql_orm::graphql::orm::RlsOperation::Insert },
+            rls.insert.as_ref(),
+        ),
+        (
+            quote! { ::graphql_orm::graphql::orm::RlsOperation::Update },
+            rls.update.as_ref(),
+        ),
+        (
+            quote! { ::graphql_orm::graphql::orm::RlsOperation::Delete },
+            rls.delete.as_ref(),
+        ),
+    ] {
+        if let Some(policy) = policy {
+            policies.push(rls_operation_policy_tokens(operation, policy, span));
+        }
+    }
+
+    quote! {
+        impl ::graphql_orm::graphql::orm::DatabaseRls for #struct_name {
+            fn rls_metadata() -> Option<&'static ::graphql_orm::graphql::orm::RlsEntityMetadata> {
+                static POLICIES: &[::graphql_orm::graphql::orm::RlsOperationPolicy] = &[
+                    #(#policies),*
+                ];
+                static METADATA: ::std::sync::OnceLock<::graphql_orm::graphql::orm::RlsEntityMetadata> =
+                    ::std::sync::OnceLock::new();
+                Some(METADATA.get_or_init(|| {
+                    ::graphql_orm::graphql::orm::RlsEntityMetadata {
+                        entity_name: #entity_name,
+                        table_name: #table_name,
+                        force: #force,
+                        policies: POLICIES,
+                    }
+                }))
+            }
+        }
     }
 }
 
@@ -458,6 +658,10 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             meta.read_policy = Some(lit.value());
+                        } else if nested.path.is_ident("write_policy") {
+                            let value = nested.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            meta.write_policy = Some(lit.value());
                         } else if nested.path.is_ident("db_column") {
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
@@ -948,6 +1152,12 @@ fn generate_entity_impl(
         struct_name.span(),
         "graphql_entity",
     )?;
+    if entity_meta.rls.is_some() && backend != BackendKind::Postgres {
+        return Err(syn::Error::new_spanned(
+            input,
+            "#[graphql_rls] is only supported for the Postgres backend",
+        ));
+    }
     let backend_marker = backend_marker_tokens(backend);
     let row_type = backend_row_type_tokens(backend);
     let helper_import = backend_helper_import_tokens(backend);
@@ -1083,6 +1293,12 @@ fn generate_entity_impl(
     let legacy_graphql_complex = has_graphql_complex(&input.attrs);
     let raw_table_name = entity_meta.table_name.as_deref().unwrap_or("unknown");
     let table_name = backend_quote_identifier_path(backend, raw_table_name);
+    let rls_impl = rls_impl_tokens(
+        struct_name,
+        &struct_name.to_string(),
+        &table_name,
+        entity_meta.rls.as_ref(),
+    );
     let plural_name = entity_meta
         .plural_name
         .as_deref()
@@ -1491,6 +1707,8 @@ fn generate_entity_impl(
 
     if schema_only {
         return Ok(quote! {
+            #rls_impl
+
             impl ::graphql_orm::graphql::orm::DatabaseEntity for #struct_name {
                 const TABLE_NAME: &'static str = #table_name;
                 const PLURAL_NAME: &'static str = #plural_name;
@@ -1560,6 +1778,8 @@ fn generate_entity_impl(
     }
 
     Ok(quote! {
+        #rls_impl
+
         // WhereInput for filtering
         #[derive(::graphql_orm::async_graphql::InputObject, Default, Clone, Debug)]
         #[graphql(name = #where_input_name_str, rename_fields = #field_case_rule)]

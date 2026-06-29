@@ -4,7 +4,9 @@ use super::MssqlBackend;
 use super::PostgresBackend;
 #[cfg(feature = "sqlite")]
 use super::SqliteBackend;
-use super::core::{ColumnDef, EntityMetadata, IndexDef, RelationMetadata, SchemaPolicy, SqlValue};
+use super::core::{
+    ColumnDef, DbAuthContext, EntityMetadata, IndexDef, RelationMetadata, SchemaPolicy, SqlValue,
+};
 use super::dialect::{DatabaseBackend, SqlDialect, current_backend};
 use super::{DefaultBackend, OrmBackend, SqlxBackend};
 use crate::graphql::pagination::{Connection, Edge, PageInfo, encode_cursor};
@@ -38,6 +40,17 @@ pub trait EntityRelations {
 pub trait Entity: DatabaseEntity + DatabaseSchema + EntityRelations {
     fn entity_name() -> &'static str;
     fn metadata() -> &'static EntityMetadata;
+}
+
+/// Optional generated PostgreSQL row-level security metadata for an entity.
+///
+/// Entities without `#[graphql_rls]` use the default `None` implementation and
+/// keep existing schema-management behavior.
+pub trait DatabaseRls {
+    /// Return generated RLS metadata for this entity, when configured.
+    fn rls_metadata() -> Option<&'static super::core::RlsEntityMetadata> {
+        None
+    }
 }
 
 pub trait FromSqlRow<B: OrmBackend = DefaultBackend>: Sized {
@@ -263,6 +276,27 @@ pub trait RelationLoader<B: OrmBackend = DefaultBackend> {
     ) -> Result<(), sqlx::Error>
     where
         Self: Sized;
+
+    async fn load_relations_with_auth(
+        &mut self,
+        pool: &B::Pool,
+        selection: &[async_graphql::context::SelectionField<'_>],
+        _auth: Option<&DbAuthContext>,
+    ) -> Result<(), sqlx::Error> {
+        self.load_relations(pool, selection).await
+    }
+
+    async fn bulk_load_relations_with_auth(
+        entities: &mut [Self],
+        pool: &B::Pool,
+        selection: &[async_graphql::context::SelectionField<'_>],
+        _auth: Option<&DbAuthContext>,
+    ) -> Result<(), sqlx::Error>
+    where
+        Self: Sized,
+    {
+        Self::bulk_load_relations(entities, pool, selection).await
+    }
 }
 
 pub struct FuzzyMatcher {
@@ -641,6 +675,20 @@ where
         rows.iter().map(T::from_row).collect()
     }
 
+    pub async fn fetch_all_with_auth<P>(
+        &self,
+        provider: &P,
+        auth: Option<&DbAuthContext>,
+    ) -> Result<Vec<T>, sqlx::Error>
+    where
+        P: PoolProvider<B> + ?Sized,
+    {
+        let rendered = render_select_query(B::DIALECT, &self.build_select_query());
+        let rows =
+            B::fetch_rows_with_auth(provider.pool(), &rendered.sql, &rendered.values, auth).await?;
+        rows.iter().map(T::from_row).collect()
+    }
+
     pub async fn fetch_all_on<'e, E>(&self, executor: E) -> Result<Vec<T>, sqlx::Error>
     where
         B: SqlxBackend,
@@ -656,6 +704,21 @@ where
         P: PoolProvider<B> + ?Sized,
     {
         Ok(self.fetch_all(provider).await?.into_iter().next())
+    }
+
+    pub async fn fetch_one_with_auth<P>(
+        &self,
+        provider: &P,
+        auth: Option<&DbAuthContext>,
+    ) -> Result<Option<T>, sqlx::Error>
+    where
+        P: PoolProvider<B> + ?Sized,
+    {
+        Ok(self
+            .fetch_all_with_auth(provider, auth)
+            .await?
+            .into_iter()
+            .next())
     }
 
     pub async fn fetch_one_on<'e, E>(&self, executor: E) -> Result<Option<T>, sqlx::Error>
@@ -676,6 +739,25 @@ where
         query.sorts.clear();
         let rendered = render_select_query(B::DIALECT, &query);
         let rows = B::fetch_rows(provider.pool(), &rendered.sql, &rendered.values).await?;
+        let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+        B::try_get_i64(row, "count")
+    }
+
+    pub async fn count_with_auth<P>(
+        &self,
+        provider: &P,
+        auth: Option<&DbAuthContext>,
+    ) -> Result<i64, sqlx::Error>
+    where
+        P: PoolProvider<B> + ?Sized,
+    {
+        let mut query = self.build_select_query();
+        query.count_only = true;
+        query.pagination = None;
+        query.sorts.clear();
+        let rendered = render_select_query(B::DIALECT, &query);
+        let rows =
+            B::fetch_rows_with_auth(provider.pool(), &rendered.sql, &rendered.values, auth).await?;
         let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
         B::try_get_i64(row, "count")
     }
@@ -713,6 +795,57 @@ where
         let total = self.count(provider).await?;
         let offset = self.page.as_ref().map(|p| p.offset()).unwrap_or(0) as usize;
         let nodes = self.fetch_all(provider).await?;
+        let edges = nodes
+            .into_iter()
+            .enumerate()
+            .map(|(index, node)| Edge {
+                node,
+                cursor: encode_cursor((offset + index) as i64),
+            })
+            .collect::<Vec<_>>();
+
+        Ok(Connection {
+            page_info: PageInfo {
+                has_next_page: (offset as i64 + edges.len() as i64) < total,
+                has_previous_page: offset > 0,
+                start_cursor: edges.first().map(|edge| edge.cursor.clone()),
+                end_cursor: edges.last().map(|edge| edge.cursor.clone()),
+                total_count: Some(total),
+            },
+            edges,
+        })
+    }
+
+    pub async fn fetch_connection_with_auth<P>(
+        &self,
+        provider: &P,
+        auth: Option<&DbAuthContext>,
+    ) -> Result<Connection<T>, sqlx::Error>
+    where
+        P: PoolProvider<B> + ?Sized,
+    {
+        let mut count_query = self.build_select_query();
+        count_query.count_only = true;
+        count_query.pagination = None;
+        count_query.sorts.clear();
+        let count_rendered = render_select_query(B::DIALECT, &count_query);
+        let row_rendered = render_select_query(B::DIALECT, &self.build_select_query());
+        let (count_rows, rows) = B::fetch_rows_pair_with_auth(
+            provider.pool(),
+            &count_rendered.sql,
+            &count_rendered.values,
+            &row_rendered.sql,
+            &row_rendered.values,
+            auth,
+        )
+        .await?;
+        let count_row = count_rows.first().ok_or(sqlx::Error::RowNotFound)?;
+        let total = B::try_get_i64(count_row, "count")?;
+        let offset = self.page.as_ref().map(|p| p.offset()).unwrap_or(0) as usize;
+        let nodes = rows
+            .iter()
+            .map(T::from_row)
+            .collect::<Result<Vec<_>, _>>()?;
         let edges = nodes
             .into_iter()
             .enumerate()

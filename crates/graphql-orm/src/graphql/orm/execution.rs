@@ -1,6 +1,6 @@
 use super::core::{
-    AppliedMigrationRecord, MigrationApplicationMetadata, PlannedSchemaStage, SchemaPolicy,
-    SchemaStage, SqlValue, record_executed_query,
+    AppliedMigrationRecord, DbAuthContext, MigrationApplicationMetadata, PlannedSchemaStage,
+    SchemaPolicy, SchemaStage, SqlValue, record_executed_query,
 };
 use super::migrations::build_migration_plan;
 use super::{MigrationBackend, OrmBackend, SqlxBackend};
@@ -619,6 +619,37 @@ pub async fn fetch_rows<B: OrmBackend>(
     B::fetch_rows(pool, sql, values).await
 }
 
+pub async fn fetch_rows_with_auth<B: OrmBackend>(
+    pool: &B::Pool,
+    sql: &str,
+    values: &[SqlValue],
+    auth: Option<&DbAuthContext>,
+) -> Result<Vec<B::Row>, sqlx::Error> {
+    record_executed_query();
+    B::fetch_rows_with_auth(pool, sql, values, auth).await
+}
+
+pub async fn fetch_rows_pair_with_auth<B: OrmBackend>(
+    pool: &B::Pool,
+    first_sql: &str,
+    first_values: &[SqlValue],
+    second_sql: &str,
+    second_values: &[SqlValue],
+    auth: Option<&DbAuthContext>,
+) -> Result<(Vec<B::Row>, Vec<B::Row>), sqlx::Error> {
+    record_executed_query();
+    record_executed_query();
+    B::fetch_rows_pair_with_auth(
+        pool,
+        first_sql,
+        first_values,
+        second_sql,
+        second_values,
+        auth,
+    )
+    .await
+}
+
 pub async fn execute_with_binds_on<'e, B, E>(
     executor: E,
     sql: &str,
@@ -629,6 +660,13 @@ where
     E: sqlx::Executor<'e, Database = B::Database> + Send + 'e,
 {
     B::execute_with_binds_on(executor, sql.to_string(), values.to_vec()).await
+}
+
+pub async fn apply_db_auth_context_to_transaction<B: SqlxBackend>(
+    tx: &mut sqlx::Transaction<'_, B::Database>,
+    auth: Option<&DbAuthContext>,
+) -> Result<(), sqlx::Error> {
+    B::apply_auth_context_to_transaction(tx, auth).await
 }
 
 pub async fn fetch_rows_on<'e, B, E>(

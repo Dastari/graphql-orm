@@ -10,6 +10,7 @@ mod execution;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 mod migrations;
 mod query;
+mod rls;
 mod schema_manager;
 
 pub use backend::*;
@@ -24,4 +25,5 @@ pub use execution::*;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub use migrations::*;
 pub use query::*;
+pub use rls::*;
 pub use schema_manager::*;

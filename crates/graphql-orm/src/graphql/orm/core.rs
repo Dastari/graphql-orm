@@ -11,18 +11,112 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static QUERY_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Runtime SQL bind value used by generated queries and mutation helpers.
+///
+/// The typed `*Null` variants let generated code preserve the intended
+/// database type for nullable fields when a backend requires typed null binds.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SqlValue {
+    /// Text value.
     String(String),
+    /// Typed null for text-like values.
+    StringNull,
+    /// Binary value.
     Bytes(Vec<u8>),
+    /// Typed null for binary values.
     BytesNull,
+    /// JSON value.
     Json(serde_json::Value),
+    /// Typed null for JSON values.
     JsonNull,
+    /// UUID value.
     Uuid(uuid::Uuid),
+    /// Typed null for UUID values.
+    UuidNull,
+    /// Integer value represented as `i64`.
     Int(i64),
+    /// Typed null for integer values.
+    IntNull,
+    /// Floating point value represented as `f64`.
     Float(f64),
+    /// Typed null for floating point values.
+    FloatNull,
+    /// Boolean value.
     Bool(bool),
+    /// Typed null for boolean values.
+    BoolNull,
+    /// Untyped null used when a generated path has no more specific type.
     Null,
+}
+
+/// Request-local database authorization context for PostgreSQL RLS.
+///
+/// Attach this value to an `async-graphql` request with `request.data(...)`.
+/// Generated PostgreSQL resolvers read it from the GraphQL context and apply it
+/// as transaction-local `app.*` settings before executing database work. When it
+/// is absent, generated resolvers use the existing non-RLS-aware execution path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DbAuthContext {
+    /// Application user identifier exposed as `app.user_id`.
+    pub user_id: Option<String>,
+    /// Auth subject exposed as `app.subject`.
+    pub subject: Option<String>,
+    /// Tenant identifier exposed as `app.tenant_id`.
+    pub tenant_id: Option<String>,
+    /// Application roles serialized to `app.roles`.
+    pub roles: Vec<String>,
+    /// Application scopes serialized to `app.scopes`.
+    pub scopes: Vec<String>,
+    /// Optional JSON claims serialized to `app.claims`.
+    pub claims_json: Option<serde_json::Value>,
+}
+
+impl DbAuthContext {
+    /// Return a stable key for batching and cache partitioning.
+    ///
+    /// Roles and scopes are sorted in the key so equivalent contexts do not
+    /// batch separately due only to caller ordering.
+    pub fn canonical_key(&self) -> String {
+        let mut roles = self.roles.clone();
+        roles.sort();
+        let mut scopes = self.scopes.clone();
+        scopes.sort();
+        serde_json::json!({
+            "user_id": self.user_id,
+            "subject": self.subject,
+            "tenant_id": self.tenant_id,
+            "roles": roles,
+            "scopes": scopes,
+            "claims_json": self.claims_json,
+        })
+        .to_string()
+    }
+
+    /// Render PostgreSQL setting names and values for transaction-local auth.
+    ///
+    /// The returned values are intended for `set_config(name, value, true)`.
+    pub fn postgres_settings(&self) -> Result<Vec<(&'static str, String)>, sqlx::Error> {
+        let roles = serde_json::to_string(&self.roles)
+            .map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+        let scopes = serde_json::to_string(&self.scopes)
+            .map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+        let claims = self
+            .claims_json
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| sqlx::Error::Encode(Box::new(error)))?
+            .unwrap_or_default();
+
+        Ok(vec![
+            ("app.user_id", self.user_id.clone().unwrap_or_default()),
+            ("app.subject", self.subject.clone().unwrap_or_default()),
+            ("app.tenant_id", self.tenant_id.clone().unwrap_or_default()),
+            ("app.roles", roles),
+            ("app.scopes", scopes),
+            ("app.claims", claims),
+        ])
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1395,6 +1489,222 @@ impl SchemaModel {
     }
 }
 
+/// Database operation covered by a generated PostgreSQL RLS policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RlsOperation {
+    /// `FOR SELECT USING (...)`.
+    Select,
+    /// `FOR INSERT WITH CHECK (...)`.
+    Insert,
+    /// `FOR UPDATE USING (...) WITH CHECK (...)`.
+    Update,
+    /// `FOR DELETE USING (...)`.
+    Delete,
+}
+
+impl RlsOperation {
+    /// Lowercase operation name used in deterministic generated policy names.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Select => "select",
+            Self::Insert => "insert",
+            Self::Update => "update",
+            Self::Delete => "delete",
+        }
+    }
+
+    /// Uppercase SQL action name reported by PostgreSQL policy introspection.
+    pub const fn sql_action(self) -> &'static str {
+        match self {
+            Self::Select => "SELECT",
+            Self::Insert => "INSERT",
+            Self::Update => "UPDATE",
+            Self::Delete => "DELETE",
+        }
+    }
+}
+
+/// Row-level security configuration for one operation on one entity.
+///
+/// Generated metadata uses either a custom predicate or a conservative
+/// predicate built from scope, tenant column, and owner column. A policy with no
+/// predicate and no generated fields intentionally emits no PostgreSQL policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RlsOperationPolicy {
+    /// Operation this policy applies to.
+    pub operation: RlsOperation,
+    /// Custom SQL predicate used exactly as provided.
+    pub predicate: Option<&'static str>,
+    /// Exact scope checked with `graphql_orm.has_scope(...)`.
+    pub scope: Option<&'static str>,
+    /// Database column compared with `graphql_orm.current_tenant_id()`.
+    pub tenant_column: Option<&'static str>,
+    /// Database column compared with `graphql_orm.current_user_id()`.
+    pub owner_column: Option<&'static str>,
+}
+
+impl RlsOperationPolicy {
+    /// Create a policy backed by an exact custom SQL predicate.
+    pub const fn custom(operation: RlsOperation, predicate: &'static str) -> Self {
+        Self {
+            operation,
+            predicate: Some(predicate),
+            scope: None,
+            tenant_column: None,
+            owner_column: None,
+        }
+    }
+
+    /// Create a policy whose predicate is generated from configured fields.
+    pub const fn generated(
+        operation: RlsOperation,
+        scope: Option<&'static str>,
+        tenant_column: Option<&'static str>,
+        owner_column: Option<&'static str>,
+    ) -> Self {
+        Self {
+            operation,
+            predicate: None,
+            scope,
+            tenant_column,
+            owner_column,
+        }
+    }
+}
+
+/// Generated RLS metadata for one entity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RlsEntityMetadata {
+    /// Rust entity name.
+    pub entity_name: &'static str,
+    /// Quoted database table path used in generated SQL.
+    pub table_name: &'static str,
+    /// Whether to emit `FORCE ROW LEVEL SECURITY`.
+    pub force: bool,
+    /// Operation policies for this table.
+    pub policies: &'static [RlsOperationPolicy],
+}
+
+/// Collection of all generated RLS metadata in a schema root.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RlsSchemaModel {
+    /// Entity-level RLS metadata.
+    pub entities: Vec<RlsEntityMetadata>,
+}
+
+impl RlsSchemaModel {
+    /// Build an RLS model from generated optional entity metadata.
+    pub fn from_entities(entities: &[Option<&'static RlsEntityMetadata>]) -> Self {
+        Self {
+            entities: entities
+                .iter()
+                .filter_map(|entity| (*entity).cloned())
+                .collect(),
+        }
+    }
+
+    /// Stable hash of the RLS target for planning and history metadata.
+    pub fn stable_hash(&self) -> String {
+        stable_rls_schema_hash(self)
+    }
+}
+
+/// Full desired database target for schema management.
+///
+/// This extends table schema metadata with optional PostgreSQL RLS metadata.
+/// `schema_roots!` generates a `graphql_orm_schema_target()` helper returning
+/// this type.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SchemaTarget {
+    /// Desired tables, columns, indexes, constraints, and extensions.
+    pub schema: SchemaModel,
+    /// Desired PostgreSQL RLS state.
+    pub rls: RlsSchemaModel,
+}
+
+impl SchemaTarget {
+    /// Build a full schema target from generated entity metadata.
+    pub fn from_entities(
+        entities: &[&EntityMetadata],
+        rls_entities: &[Option<&'static RlsEntityMetadata>],
+    ) -> Self {
+        Self {
+            schema: SchemaModel::from_entities(entities),
+            rls: RlsSchemaModel::from_entities(rls_entities),
+        }
+    }
+
+    /// Stable hash covering both table schema and RLS metadata.
+    pub fn stable_hash(&self) -> String {
+        let canonical = format!(
+            "schema:{}\nrls:{}\n",
+            self.schema.stable_hash(),
+            self.rls.stable_hash()
+        );
+        format!("{:016x}", fnv1a64(canonical.as_bytes()))
+    }
+}
+
+/// Planned RLS SQL statements for a full schema target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RlsPolicyPlan {
+    /// Backend name used when the plan was produced.
+    pub backend: &'static str,
+    /// Stable hash of the target RLS model.
+    pub target_rls_hash: String,
+    /// Deterministic SQL statements for helper functions, RLS flags, and policies.
+    pub statements: Vec<String>,
+}
+
+/// Planned table migration plus RLS SQL for a [`SchemaTarget`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlannedSchemaTarget {
+    /// Migration version identifier.
+    pub version: String,
+    /// Human-readable migration description.
+    pub description: String,
+    /// Backend name used when the plan was produced.
+    pub backend: &'static str,
+    /// Stable hash of the introspected source table schema, when available.
+    pub source_schema_hash: Option<String>,
+    /// Stable hash of the target table schema.
+    pub target_schema_hash: String,
+    /// Stable hash of the full target, including RLS.
+    pub target_hash: String,
+    /// Stable hash of rendered table and RLS statements.
+    pub plan_hash: String,
+    /// Table migration plan.
+    pub migration: PlannedMigration,
+    /// RLS policy plan.
+    pub rls: RlsPolicyPlan,
+    /// Combined table migration and RLS statements in execution order.
+    pub statements: Vec<String>,
+}
+
+/// Validation report for a full schema target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemaTargetValidationReport {
+    /// Backend name used for validation.
+    pub backend: &'static str,
+    /// Runtime schema policy used for validation.
+    pub policy: SchemaPolicy,
+    /// Table-schema validation report.
+    pub schema: SchemaValidationReport,
+    /// RLS-specific diagnostics.
+    pub rls_diagnostics: Vec<SchemaDiagnostic>,
+}
+
+impl SchemaTargetValidationReport {
+    /// Return true when table or RLS diagnostics include an error.
+    pub fn has_errors(&self) -> bool {
+        self.schema.has_errors()
+            || self
+                .rls_diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == SchemaDiagnosticSeverity::Error)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EntityBackupDescriptor {
     pub entity_name: String,
@@ -1945,6 +2255,44 @@ pub fn stable_schema_model_hash(schema: &SchemaModel) -> String {
     format!("{:016x}", fnv1a64(canonical.as_bytes()))
 }
 
+/// Compute the stable hash used for generated RLS schema models.
+///
+/// The hash is order-independent for entities and operation policies, making it
+/// suitable for plan metadata and drift checks.
+pub fn stable_rls_schema_hash(schema: &RlsSchemaModel) -> String {
+    let mut canonical = String::new();
+    let mut entities = schema.entities.iter().collect::<Vec<_>>();
+    entities.sort_by(|left, right| left.table_name.cmp(right.table_name));
+
+    for entity in entities {
+        canonical.push_str("rls_table:");
+        canonical.push_str(entity.entity_name);
+        canonical.push('|');
+        canonical.push_str(entity.table_name);
+        canonical.push('|');
+        canonical.push_str(if entity.force { "force" } else { "enable" });
+        canonical.push('\n');
+
+        let mut policies = entity.policies.iter().collect::<Vec<_>>();
+        policies.sort_by(|left, right| left.operation.cmp(&right.operation));
+        for policy in policies {
+            canonical.push_str("policy:");
+            canonical.push_str(policy.operation.as_str());
+            canonical.push('|');
+            canonical.push_str(policy.predicate.unwrap_or(""));
+            canonical.push('|');
+            canonical.push_str(policy.scope.unwrap_or(""));
+            canonical.push('|');
+            canonical.push_str(policy.tenant_column.unwrap_or(""));
+            canonical.push('|');
+            canonical.push_str(policy.owner_column.unwrap_or(""));
+            canonical.push('\n');
+        }
+    }
+
+    format!("{:016x}", fnv1a64(canonical.as_bytes()))
+}
+
 impl BackupValueKind {
     pub fn as_schema_str(self) -> &'static str {
         match self {
@@ -2214,6 +2562,7 @@ pub enum SchemaDiagnosticKind {
     UnsupportedBackendCapability,
     WriteFieldOnReadOnlyBackend,
     ReadOnlyFieldWritable,
+    RlsMismatch,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

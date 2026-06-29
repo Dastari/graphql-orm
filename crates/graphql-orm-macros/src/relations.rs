@@ -501,6 +501,7 @@ pub(crate) fn generate_graphql_relations(
                     .into_iter()
                     .collect(),
                 pagination: page.as_ref().map(::graphql_orm::graphql::orm::PaginationRequest::from),
+                auth_context: auth_context.clone(),
             }
         };
 
@@ -517,6 +518,7 @@ pub(crate) fn generate_graphql_relations(
                 filter: None,
                 sorts: Vec::new(),
                 pagination: None,
+                auth_context: auth_context.clone(),
             }
         };
         let fallback_predicate_parts = fk_columns_sql
@@ -569,6 +571,9 @@ pub(crate) fn generate_graphql_relations(
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, DatabaseOrderBy, EntityQuery, SqlValue};
 
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                    let auth_context = ctx
+                        .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
+                        .cloned();
                     db.ensure_entity_access(
                         Some(ctx),
                         <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name(),
@@ -642,13 +647,14 @@ pub(crate) fn generate_graphql_relations(
                         // Count must be computed before/independent of pagination window.
                         // EntityQuery::count ignores limit/offset and uses only WHERE clauses.
                         let total = query
-                            .count(db)
+                            .count_with_auth(db, auth_context.as_ref())
                             .await
                             .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
 
                         let offset = page.as_ref().map(|p| p.offset()).unwrap_or(0) as usize;
 
-                        let entities = query.fetch_all(db)
+                        let entities = query
+                            .fetch_all_with_auth(db, auth_context.as_ref())
                             .await
                             .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
 
@@ -709,6 +715,9 @@ pub(crate) fn generate_graphql_relations(
                     }
 
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                    let auth_context = ctx
+                        .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
+                        .cloned();
                     db.ensure_entity_access(
                         Some(ctx),
                         <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name(),
@@ -731,7 +740,7 @@ pub(crate) fn generate_graphql_relations(
                     } else {
                         EntityQuery::<#target_type, #backend_marker>::new()
                             .where_values(&#fallback_relation_clause, relation_sql_values.clone())
-                            .fetch_one(db)
+                            .fetch_one_with_auth(db, auth_context.as_ref())
                             .await
                             .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?
                     };
@@ -994,7 +1003,13 @@ pub(crate) fn generate_graphql_relations(
                             relation_predicate,
                         );
 
-                        let rows = ::graphql_orm::graphql::orm::fetch_rows::<#backend_marker>(pool, &sql, &bind_values).await?;
+                        let rows = <#backend_marker as ::graphql_orm::OrmBackend>::fetch_rows_with_auth(
+                            pool,
+                            &sql,
+                            &bind_values,
+                            auth_context,
+                        )
+                        .await?;
                         for row in rows {
                             let relation_key = ::graphql_orm::graphql::loaders::RelationKey::new(vec![
                                 #(<#backend_marker as ::graphql_orm::OrmBackend>::try_get_string(&row, #relation_key_aliases)?),*
@@ -1042,13 +1057,31 @@ pub(crate) fn generate_graphql_relations(
                 pool: &#pool_type,
                 selection: &[::graphql_orm::async_graphql::context::SelectionField<'_>],
             ) -> Result<(), ::graphql_orm::sqlx::Error> {
-                Self::bulk_load_relations(std::slice::from_mut(self), pool, selection).await
+                Self::bulk_load_relations_with_auth(std::slice::from_mut(self), pool, selection, None).await
             }
 
             async fn bulk_load_relations(
                 entities: &mut [Self],
                 pool: &#pool_type,
                 selection: &[::graphql_orm::async_graphql::context::SelectionField<'_>],
+            ) -> Result<(), ::graphql_orm::sqlx::Error> {
+                Self::bulk_load_relations_with_auth(entities, pool, selection, None).await
+            }
+
+            async fn load_relations_with_auth(
+                &mut self,
+                pool: &#pool_type,
+                selection: &[::graphql_orm::async_graphql::context::SelectionField<'_>],
+                auth_context: Option<&::graphql_orm::graphql::orm::DbAuthContext>,
+            ) -> Result<(), ::graphql_orm::sqlx::Error> {
+                Self::bulk_load_relations_with_auth(std::slice::from_mut(self), pool, selection, auth_context).await
+            }
+
+            async fn bulk_load_relations_with_auth(
+                entities: &mut [Self],
+                pool: &#pool_type,
+                selection: &[::graphql_orm::async_graphql::context::SelectionField<'_>],
+                auth_context: Option<&::graphql_orm::graphql::orm::DbAuthContext>,
             ) -> Result<(), ::graphql_orm::sqlx::Error> {
                 #(#bulk_load_blocks)*
                 Ok(())

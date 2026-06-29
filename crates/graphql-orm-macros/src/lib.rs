@@ -129,6 +129,7 @@ pub fn mutation_result(input: TokenStream) -> TokenStream {
     GraphQLEntity,
     attributes(
         graphql_entity,
+        graphql_rls,
         graphql,
         graphql_orm,
         serde,
@@ -166,6 +167,7 @@ pub fn derive_graphql_entity(input: TokenStream) -> TokenStream {
     GraphQLSchemaEntity,
     attributes(
         graphql_entity,
+        graphql_rls,
         graphql,
         graphql_orm,
         serde,
@@ -202,6 +204,7 @@ pub fn derive_graphql_schema_entity(input: TokenStream) -> TokenStream {
     GraphQLRelations,
     attributes(
         graphql_entity,
+        graphql_rls,
         graphql,
         graphql_orm,
         serde,
@@ -228,6 +231,7 @@ pub fn derive_graphql_relations(input: TokenStream) -> TokenStream {
     GraphQLOperations,
     attributes(
         graphql_entity,
+        graphql_rls,
         graphql,
         graphql_orm,
         serde,

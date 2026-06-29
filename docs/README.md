@@ -5,6 +5,7 @@ This directory contains the project documentation that is too detailed for the r
 - [Getting started](getting-started.md)
 - [Backend features and multi-backend workspaces](backends.md)
 - [Entities, keys, columns, naming, and relations](entities-and-relations.md)
+- [PostgreSQL RLS and auth-aware execution](postgres.md)
 - [Microsoft SQL Server read-only backend](mssql.md)
 - [Schema ownership, validation, planning, and ABI migrations](schema-management.md)
 - [Runtime writes, hooks, subscriptions, and policies](runtime-and-writes.md)

@@ -305,7 +305,7 @@ fn push_create_input_sql_value_tokens(
             quote! {
                 match #field_access {
                     Some(value) => bind_values.push(#struct_name::__gom_bool_sql_value(value)),
-                    None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                    None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::BoolNull),
                 }
             }
         } else {
@@ -331,7 +331,7 @@ fn push_create_input_sql_value_tokens(
             quote! {
                 match #field_access {
                     Some(value) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Uuid(value)),
-                    None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                    None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::UuidNull),
                 }
             }
         } else {
@@ -351,7 +351,7 @@ fn push_create_input_sql_value_tokens(
         quote! {
             match #field_access {
                 Some(value) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Int(value as i64)),
-                None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::IntNull),
             }
         }
     } else if option_inner_type(field_type)
@@ -361,7 +361,7 @@ fn push_create_input_sql_value_tokens(
         quote! {
             match #field_access {
                 Some(value) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Float(value.into())),
-                None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::FloatNull),
             }
         }
     } else if type_path_last_ident(field_type).is_some_and(|ident| {
@@ -402,14 +402,14 @@ fn push_create_input_sql_value_tokens(
                         let __transformed = #value_expr;
                         bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(__transformed));
                     }
-                    None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                    None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
                 }
             }
         } else {
             quote! {
                 match &#field_access {
                     Some(value) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr)),
-                    None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                    None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
                 }
             }
         }
@@ -1104,7 +1104,7 @@ pub(crate) fn generate_graphql_operations(
                     let bind_tokens = quote! {
                         match input.#field_name {
                             Some(b) => bind_values.push(#struct_name::__gom_bool_sql_value(b)),
-                            None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                            None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::BoolNull),
                         }
                     };
                     insert_binds_graphql.push(bind_tokens.clone());
@@ -1145,7 +1145,7 @@ pub(crate) fn generate_graphql_operations(
                     let bind_tokens = quote! {
                         match input.#field_name {
                             Some(v) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Uuid(v)),
-                            None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                            None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::UuidNull),
                         }
                     };
                     insert_binds_graphql.push(bind_tokens.clone());
@@ -1177,7 +1177,7 @@ pub(crate) fn generate_graphql_operations(
                 let bind_tokens = quote! {
                     match input.#field_name {
                         Some(v) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Int(v as i64)),
-                        None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                        None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::IntNull),
                     }
                 };
                 insert_binds_graphql.push(bind_tokens.clone());
@@ -1189,7 +1189,7 @@ pub(crate) fn generate_graphql_operations(
                 let bind_tokens = quote! {
                     match input.#field_name {
                         Some(v) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Float(v.into())),
-                        None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                        None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::FloatNull),
                     }
                 };
                 insert_binds_graphql.push(bind_tokens.clone());
@@ -1241,7 +1241,7 @@ pub(crate) fn generate_graphql_operations(
                                 let __transformed = #value_expr;
                                 bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(__transformed));
                             }
-                            None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                            None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
                         }
                     };
                     insert_binds_graphql.push(bind_tokens.clone());
@@ -1250,7 +1250,7 @@ pub(crate) fn generate_graphql_operations(
                     let bind_tokens = quote! {
                         match &input.#field_name {
                             Some(v) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr)),
-                            None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                            None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
                         }
                     };
                     insert_binds_graphql.push(bind_tokens.clone());
@@ -1410,7 +1410,7 @@ pub(crate) fn generate_graphql_operations(
                             set_clauses.push(format!("{} = ?", #db_col));
                             match val {
                                 Some(b) => values.push(#struct_name::__gom_bool_sql_value(*b)),
-                                None => values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                                None => values.push(::graphql_orm::graphql::orm::SqlValue::BoolNull),
                             }
                         }
                     };
@@ -1476,7 +1476,7 @@ pub(crate) fn generate_graphql_operations(
                             set_clauses.push(format!("{} = ?", #db_col));
                             match val {
                                 Some(v) => values.push(::graphql_orm::graphql::orm::SqlValue::Uuid(*v)),
-                                None => values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                                None => values.push(::graphql_orm::graphql::orm::SqlValue::UuidNull),
                             }
                         }
                     };
@@ -1517,7 +1517,7 @@ pub(crate) fn generate_graphql_operations(
                         set_clauses.push(format!("{} = ?", #db_col));
                         match val {
                             Some(v) => values.push(::graphql_orm::graphql::orm::SqlValue::Int((*v) as i64)),
-                            None => values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                            None => values.push(::graphql_orm::graphql::orm::SqlValue::IntNull),
                         }
                     }
                 };
@@ -1534,7 +1534,7 @@ pub(crate) fn generate_graphql_operations(
                         set_clauses.push(format!("{} = ?", #db_col));
                         match val {
                             Some(v) => values.push(::graphql_orm::graphql::orm::SqlValue::Float((*v).into())),
-                            None => values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                            None => values.push(::graphql_orm::graphql::orm::SqlValue::FloatNull),
                         }
                     }
                 };
@@ -1569,7 +1569,7 @@ pub(crate) fn generate_graphql_operations(
                                     let __transformed = #value_expr;
                                     values.push(::graphql_orm::graphql::orm::SqlValue::String(__transformed));
                                 }
-                                None => values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                                None => values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
                             }
                         }
                     };
@@ -1582,7 +1582,7 @@ pub(crate) fn generate_graphql_operations(
                             set_clauses.push(format!("{} = ?", #db_col));
                             match val {
                                 Some(v) => values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr)),
-                                None => values.push(::graphql_orm::graphql::orm::SqlValue::Null),
+                                None => values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
                             }
                         }
                     };
@@ -1832,10 +1832,11 @@ pub(crate) fn generate_graphql_operations(
                     .into_iter()
                     .map(|edge| edge.node)
                     .collect::<Vec<_>>();
-                <#struct_name as ::graphql_orm::graphql::orm::RelationLoader<#backend_marker>>::bulk_load_relations(
+                <#struct_name as ::graphql_orm::graphql::orm::RelationLoader<#backend_marker>>::bulk_load_relations_with_auth(
                     &mut entities,
                     pool,
                     &selection,
+                    auth_context.as_ref(),
                 )
                 .await
                 .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
@@ -1853,10 +1854,11 @@ pub(crate) fn generate_graphql_operations(
         quote! {
             if let Some(entity) = entity.as_mut() {
                 let selection = ctx.field().selection_set().collect::<Vec<_>>();
-                <#struct_name as ::graphql_orm::graphql::orm::RelationLoader<#backend_marker>>::load_relations(
+                <#struct_name as ::graphql_orm::graphql::orm::RelationLoader<#backend_marker>>::load_relations_with_auth(
                     entity,
                     pool,
                     &selection,
+                    auth_context.as_ref(),
                 )
                 .await
                 .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
@@ -2097,6 +2099,37 @@ pub(crate) fn generate_graphql_operations(
             }
 
             #[doc(hidden)]
+            pub(crate) async fn __gom_fetch_by_upsert_with_auth(
+                db: &::graphql_orm::db::Database<#backend_marker>,
+                input: &#create_input,
+                auth_context: Option<&::graphql_orm::graphql::orm::DbAuthContext>,
+            ) -> Result<Option<Self>, ::graphql_orm::sqlx::Error> {
+                use ::graphql_orm::graphql::orm::FromSqlRow;
+
+                let where_clause = vec![#(#upsert_fetch_conditions),*].join(" AND ");
+                let sql = Self::__gom_rebind_sql(
+                    &format!(
+                        "SELECT {} FROM {} WHERE {}",
+                        <Self as ::graphql_orm::graphql::orm::DatabaseEntity>::column_names().join(", "),
+                        #table_name,
+                        where_clause
+                    ),
+                    1,
+                );
+                let mut bind_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                #(#upsert_fetch_bind_tokens)*
+                let rows = ::graphql_orm::graphql::orm::fetch_rows_with_auth::<#backend_marker>(
+                    db.pool(),
+                    &sql,
+                    &bind_values,
+                    auth_context,
+                ).await?;
+                rows.first()
+                    .map(<Self as ::graphql_orm::graphql::orm::FromSqlRow<#backend_marker>>::from_row)
+                    .transpose()
+            }
+
+            #[doc(hidden)]
             async fn __gom_upsert_with_mutation_context<'a>(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 input: #create_input,
@@ -2199,6 +2232,9 @@ pub(crate) fn generate_graphql_operations(
                 let _user = ctx.auth_user()?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let pool = db.pool();
+                let auth_context = ctx
+                    .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
+                    .cloned();
                 db.ensure_entity_access(
                     Some(ctx),
                     #entity_name_lit,
@@ -2213,7 +2249,7 @@ pub(crate) fn generate_graphql_operations(
                     &mut input as &mut (dyn ::std::any::Any + Send + Sync),
                 ).await?;
 
-                let current_entity = #struct_name::__gom_fetch_by_upsert_on(pool, &input)
+                let current_entity = #struct_name::__gom_fetch_by_upsert_with_auth(db, &input, auth_context.as_ref())
                     .await
                     .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
                 if let Some(current_entity) = current_entity.as_ref() {
@@ -2257,7 +2293,13 @@ pub(crate) fn generate_graphql_operations(
                     ::graphql_orm::graphql::orm::mutation_changes(&[#(#create_mutation_field_literals),*], &bind_values)
                 };
 
-                let tx = pool.begin().await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                let mut tx = pool.begin().await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                ::graphql_orm::graphql::orm::apply_db_auth_context_to_transaction::<#backend_marker>(
+                    &mut tx,
+                    auth_context.as_ref(),
+                )
+                .await
+                .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::new(db, tx);
                 hook_ctx.run_mutation_hook(
                     Some(ctx),
@@ -2448,6 +2490,9 @@ pub(crate) fn generate_graphql_operations(
                     let _user = ctx.auth_user()?;
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                     let pool = db.pool();
+                    let auth_context = ctx
+                        .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
+                        .cloned();
                     db.ensure_entity_access(
                         Some(ctx),
                         #entity_name_lit,
@@ -2476,7 +2521,9 @@ pub(crate) fn generate_graphql_operations(
                         let base_query = query.clone();
                         let requested_page = page.clone();
 
-                        let mut all_rows = base_query.fetch_all(pool).await
+                        let mut all_rows = base_query
+                            .fetch_all_with_auth(db, auth_context.as_ref())
+                            .await
                             .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
 
                         let mut visible_rows = Vec::new();
@@ -2535,7 +2582,9 @@ pub(crate) fn generate_graphql_operations(
                         query = query.paginate(p);
                     }
 
-                    let mut generic_conn = query.fetch_connection(pool).await
+                    let mut generic_conn = query
+                        .fetch_connection_with_auth(db, auth_context.as_ref())
+                        .await
                         .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
 
                     #relation_preload_list
@@ -2556,6 +2605,9 @@ pub(crate) fn generate_graphql_operations(
                     let _user = ctx.auth_user()?;
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                     let pool = db.pool();
+                    let auth_context = ctx
+                        .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
+                        .cloned();
                     db.ensure_entity_access(
                         Some(ctx),
                         #entity_name_lit,
@@ -2566,7 +2618,7 @@ pub(crate) fn generate_graphql_operations(
 
                     let mut entity = EntityQuery::<#struct_name, #backend_marker>::new()
                         .where_values(&#struct_name::__gom_key_where_clause(), #struct_name::__gom_key_values(&key))
-                        .fetch_one(pool)
+                        .fetch_one_with_auth(db, auth_context.as_ref())
                         .await
                         .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
 
@@ -2803,6 +2855,9 @@ pub(crate) fn generate_graphql_operations(
                 let _user = ctx.auth_user()?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let pool = db.pool();
+                let auth_context = ctx
+                    .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
+                    .cloned();
                 db.ensure_entity_access(
                     Some(ctx),
                     #entity_name_lit,
@@ -2831,7 +2886,9 @@ pub(crate) fn generate_graphql_operations(
                     let base_query = query.clone();
                     let requested_page = page.clone();
 
-                    let mut all_rows = base_query.fetch_all(pool).await
+                    let mut all_rows = base_query
+                        .fetch_all_with_auth(db, auth_context.as_ref())
+                        .await
                         .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
 
                     let mut visible_rows = Vec::new();
@@ -2890,7 +2947,9 @@ pub(crate) fn generate_graphql_operations(
                     query = query.paginate(p);
                 }
 
-                let mut generic_conn = query.fetch_connection(pool).await
+                let mut generic_conn = query
+                    .fetch_connection_with_auth(db, auth_context.as_ref())
+                    .await
                     .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
 
                 #relation_preload_list
@@ -2912,6 +2971,9 @@ pub(crate) fn generate_graphql_operations(
                 let _user = ctx.auth_user()?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let pool = db.pool();
+                let auth_context = ctx
+                    .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
+                    .cloned();
                 db.ensure_entity_access(
                     Some(ctx),
                     #entity_name_lit,
@@ -2922,7 +2984,7 @@ pub(crate) fn generate_graphql_operations(
 
                 let mut entity = EntityQuery::<#struct_name, #backend_marker>::new()
                     .where_values(&#struct_name::__gom_key_where_clause(), #struct_name::__gom_key_values(&key))
-                    .fetch_one(pool)
+                    .fetch_one_with_auth(db, auth_context.as_ref())
                     .await
                     .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
 
@@ -2967,6 +3029,9 @@ pub(crate) fn generate_graphql_operations(
                 let _user = ctx.auth_user()?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let pool = db.pool();
+                let auth_context = ctx
+                    .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
+                    .cloned();
                 db.ensure_entity_access(
                     Some(ctx),
                     #entity_name_lit,
@@ -2991,7 +3056,13 @@ pub(crate) fn generate_graphql_operations(
                 #(#insert_binds_graphql)*
                 let mutation_fields = [#(#create_mutation_field_literals),*];
                 let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&mutation_fields, &bind_values);
-                let tx = pool.begin().await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                let mut tx = pool.begin().await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                ::graphql_orm::graphql::orm::apply_db_auth_context_to_transaction::<#backend_marker>(
+                    &mut tx,
+                    auth_context.as_ref(),
+                )
+                .await
+                .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::new(db, tx);
                 hook_ctx.run_mutation_hook(
                     Some(ctx),
@@ -3062,6 +3133,9 @@ pub(crate) fn generate_graphql_operations(
                 let _user = ctx.auth_user()?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let pool = db.pool();
+                let auth_context = ctx
+                    .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
+                    .cloned();
                 db.ensure_entity_access(
                     Some(ctx),
                     #entity_name_lit,
@@ -3075,7 +3149,7 @@ pub(crate) fn generate_graphql_operations(
                         &format!("{} = {}", #struct_name::PRIMARY_KEY, #struct_name::__gom_placeholder(1)),
                         #pk_bind_value
                     )
-                    .fetch_one(pool)
+                    .fetch_one_with_auth(db, auth_context.as_ref())
                     .await
                     .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
 
@@ -3116,7 +3190,13 @@ pub(crate) fn generate_graphql_operations(
                 let before_state = #struct_name::__gom_capture_entity_state(&current_entity)
                     .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
                 let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
-                let tx = pool.begin().await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                let mut tx = pool.begin().await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                ::graphql_orm::graphql::orm::apply_db_auth_context_to_transaction::<#backend_marker>(
+                    &mut tx,
+                    auth_context.as_ref(),
+                )
+                .await
+                .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::new(db, tx);
                 hook_ctx.run_mutation_hook(
                     Some(ctx),
@@ -3205,6 +3285,9 @@ pub(crate) fn generate_graphql_operations(
                 let _user = ctx.auth_user()?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let pool = db.pool();
+                let auth_context = ctx
+                    .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
+                    .cloned();
                 db.ensure_entity_access(
                     Some(ctx),
                     #entity_name_lit,
@@ -3219,7 +3302,7 @@ pub(crate) fn generate_graphql_operations(
                         &format!("{} = {}", #struct_name::PRIMARY_KEY, #struct_name::__gom_placeholder(1)),
                         #pk_bind_value
                     )
-                    .fetch_one(pool)
+                    .fetch_one_with_auth(db, auth_context.as_ref())
                     .await
                     .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
 
@@ -3236,7 +3319,13 @@ pub(crate) fn generate_graphql_operations(
                 ).await?;
                 let before_state = #struct_name::__gom_capture_entity_state(&entity)
                     .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
-                let tx = pool.begin().await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                let mut tx = pool.begin().await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                ::graphql_orm::graphql::orm::apply_db_auth_context_to_transaction::<#backend_marker>(
+                    &mut tx,
+                    auth_context.as_ref(),
+                )
+                .await
+                .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::new(db, tx);
                 hook_ctx.run_mutation_hook(
                     Some(ctx),
@@ -3310,6 +3399,9 @@ pub(crate) fn generate_graphql_operations(
 
                 let _user = ctx.auth_user()?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                let auth_context = ctx
+                    .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
+                    .cloned();
                 db.ensure_entity_access(
                     Some(ctx),
                     #entity_name_lit,
@@ -3324,7 +3416,7 @@ pub(crate) fn generate_graphql_operations(
                     _ => return Ok(#update_many_result_type::err("Where filter is required for bulk update and must not be empty")),
                 };
 
-                match #struct_name::update_where(db, filter.clone(), input).await {
+                match #struct_name::__gom_update_where_with_auth(db, filter.clone(), input, auth_context.as_ref()).await {
                     Ok(affected_count) => Ok(#update_many_result_type::ok(affected_count)),
                     Err(e) => Ok(#update_many_result_type::err(e.to_string())),
                 }
@@ -3342,6 +3434,9 @@ pub(crate) fn generate_graphql_operations(
 
                 let _user = ctx.auth_user()?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                let auth_context = ctx
+                    .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
+                    .cloned();
                 db.ensure_entity_access(
                     Some(ctx),
                     #entity_name_lit,
@@ -3355,7 +3450,7 @@ pub(crate) fn generate_graphql_operations(
                     _ => return Ok(#delete_many_result_type::err("Where filter is required for bulk delete and must not be empty")),
                 };
 
-                match #struct_name::delete_where(db, filter.clone()).await {
+                match #struct_name::__gom_delete_where_with_auth(db, filter.clone(), auth_context.as_ref()).await {
                     Ok(deleted_count) => Ok(#delete_many_result_type::ok(deleted_count)),
                     Err(e) => Ok(#delete_many_result_type::err(e.to_string())),
                 }
@@ -4135,7 +4230,17 @@ pub(crate) fn generate_graphql_operations(
             pub async fn update_where(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 where_input: #where_input,
+                input: #update_input,
+            ) -> Result<i64, ::graphql_orm::sqlx::Error> {
+                Self::__gom_update_where_with_auth(db, where_input, input, None).await
+            }
+
+            #[doc(hidden)]
+            pub(crate) async fn __gom_update_where_with_auth(
+                db: &::graphql_orm::db::Database<#backend_marker>,
+                where_input: #where_input,
                 mut input: #update_input,
+                auth_context: Option<&::graphql_orm::graphql::orm::DbAuthContext>,
             ) -> Result<i64, ::graphql_orm::sqlx::Error> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow, SqlValue};
 
@@ -4153,7 +4258,7 @@ pub(crate) fn generate_graphql_operations(
                 ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
                 let matched_entities = EntityQuery::<Self, #backend_marker>::new()
                     .filter(&where_input)
-                    .fetch_all(pool)
+                    .fetch_all_with_auth(db, auth_context)
                     .await?;
 
                 if matched_entities.is_empty() {
@@ -4192,7 +4297,12 @@ pub(crate) fn generate_graphql_operations(
                 }
 
                 let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
-                let tx = pool.begin().await?;
+                let mut tx = pool.begin().await?;
+                ::graphql_orm::graphql::orm::apply_db_auth_context_to_transaction::<#backend_marker>(
+                    &mut tx,
+                    auth_context,
+                )
+                .await?;
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::new(db, tx);
                 for entity in &matched_entities {
                     hook_ctx.run_mutation_hook(
@@ -4356,6 +4466,15 @@ pub(crate) fn generate_graphql_operations(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 where_input: #where_input,
             ) -> Result<i64, ::graphql_orm::sqlx::Error> {
+                Self::__gom_delete_where_with_auth(db, where_input, None).await
+            }
+
+            #[doc(hidden)]
+            pub(crate) async fn __gom_delete_where_with_auth(
+                db: &::graphql_orm::db::Database<#backend_marker>,
+                where_input: #where_input,
+                auth_context: Option<&::graphql_orm::graphql::orm::DbAuthContext>,
+            ) -> Result<i64, ::graphql_orm::sqlx::Error> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow};
 
                 if where_input.is_empty() {
@@ -4372,7 +4491,7 @@ pub(crate) fn generate_graphql_operations(
                 ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
                 let matched_entities = EntityQuery::<Self, #backend_marker>::new()
                     .filter(&where_input)
-                    .fetch_all(pool)
+                    .fetch_all_with_auth(db, auth_context)
                     .await?;
 
                 if matched_entities.is_empty() {
@@ -4388,7 +4507,12 @@ pub(crate) fn generate_graphql_operations(
                     ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
                 }
 
-                let tx = pool.begin().await?;
+                let mut tx = pool.begin().await?;
+                ::graphql_orm::graphql::orm::apply_db_auth_context_to_transaction::<#backend_marker>(
+                    &mut tx,
+                    auth_context,
+                )
+                .await?;
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::new(db, tx);
                 for entity in &matched_entities {
                     hook_ctx.run_mutation_hook(

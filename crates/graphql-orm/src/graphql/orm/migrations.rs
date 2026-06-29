@@ -1,6 +1,7 @@
-use super::IntrospectionBackend;
 #[cfg(feature = "mssql")]
 use super::OrmBackend;
+#[cfg(feature = "postgres")]
+use super::core::RlsOperation;
 #[cfg(feature = "mssql")]
 use super::core::SqlValue;
 use super::core::{
@@ -13,6 +14,9 @@ use super::dialect::DatabaseBackend;
 #[cfg(feature = "mssql")]
 use super::dialect::SqlDialect;
 use super::query::PoolProvider;
+#[cfg(feature = "postgres")]
+use super::rls::{LiveRlsPolicy, LiveRlsTable};
+use super::{IntrospectionBackend, RlsIntrospectionBackend};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 use sqlx::Row;
 
@@ -903,6 +907,9 @@ impl IntrospectionBackend for super::SqliteBackend {
     }
 }
 
+#[cfg(feature = "sqlite")]
+impl RlsIntrospectionBackend for super::SqliteBackend {}
+
 #[cfg(feature = "postgres")]
 fn parse_postgres_geometry_type(sql_type: &str) -> Option<SpatialColumnDef> {
     let trimmed = sql_type.trim();
@@ -1157,6 +1164,86 @@ impl IntrospectionBackend for super::PostgresBackend {
     }
 }
 
+#[cfg(feature = "postgres")]
+impl RlsIntrospectionBackend for super::PostgresBackend {
+    async fn introspect_rls(pool: &Self::Pool) -> Result<Vec<LiveRlsTable>, sqlx::Error> {
+        let table_rows = sqlx::query(
+            "SELECT n.nspname AS schema_name,
+                    c.relname AS table_name,
+                    c.relrowsecurity AS enabled,
+                    c.relforcerowsecurity AS forced
+             FROM pg_class c
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE c.relkind IN ('r', 'p')
+               AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+             ORDER BY n.nspname, c.relname",
+        )
+        .fetch_all(pool)
+        .await?;
+
+        let policy_rows = sqlx::query(
+            "SELECT schemaname,
+                    tablename,
+                    policyname,
+                    cmd,
+                    qual,
+                    with_check
+             FROM pg_policies
+             ORDER BY schemaname, tablename, policyname",
+        )
+        .fetch_all(pool)
+        .await?;
+
+        let mut policies_by_table: std::collections::BTreeMap<String, Vec<LiveRlsPolicy>> =
+            std::collections::BTreeMap::new();
+        for row in policy_rows {
+            let schema_name: String = row.try_get("schemaname")?;
+            let table_name: String = row.try_get("tablename")?;
+            let key = if schema_name == "public" {
+                table_name.clone()
+            } else {
+                format!("{schema_name}_{table_name}")
+            };
+            let cmd: String = row.try_get("cmd")?;
+            let operation = match cmd.as_str() {
+                "SELECT" => RlsOperation::Select,
+                "INSERT" => RlsOperation::Insert,
+                "UPDATE" => RlsOperation::Update,
+                "DELETE" => RlsOperation::Delete,
+                _ => continue,
+            };
+            policies_by_table
+                .entry(key)
+                .or_default()
+                .push(LiveRlsPolicy {
+                    policy_name: row.try_get("policyname")?,
+                    operation,
+                    using_expression: row.try_get("qual")?,
+                    check_expression: row.try_get("with_check")?,
+                });
+        }
+
+        table_rows
+            .into_iter()
+            .map(|row| {
+                let schema_name: String = row.try_get("schema_name")?;
+                let table_name: String = row.try_get("table_name")?;
+                let key = if schema_name == "public" {
+                    table_name.clone()
+                } else {
+                    format!("{schema_name}_{table_name}")
+                };
+                Ok(LiveRlsTable {
+                    table_name: key.clone(),
+                    enabled: row.try_get("enabled")?,
+                    forced: row.try_get("forced")?,
+                    policies: policies_by_table.remove(&key).unwrap_or_default(),
+                })
+            })
+            .collect()
+    }
+}
+
 #[cfg(feature = "mssql")]
 pub async fn introspect_mssql_schema(
     provider: &impl PoolProvider<super::MssqlBackend>,
@@ -1295,3 +1382,6 @@ impl IntrospectionBackend for super::MssqlBackend {
         introspect_mssql_schema(pool).await
     }
 }
+
+#[cfg(feature = "mssql")]
+impl RlsIntrospectionBackend for super::MssqlBackend {}

@@ -139,6 +139,14 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 }
             })
             .collect();
+        let entity_rls_items: Vec<proc_macro2::TokenStream> = entities
+            .iter()
+            .map(|entity| {
+                quote! {
+                    <#entity as ::graphql_orm::graphql::orm::DatabaseRls>::rls_metadata()
+                }
+            })
+            .collect();
 
         return quote! {
             #query_root
@@ -185,6 +193,16 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                     &graphql_orm_entity_metadata(),
                 )
             }
+
+            pub fn graphql_orm_schema_target(
+            ) -> ::graphql_orm::graphql::orm::SchemaTarget {
+                ::graphql_orm::graphql::orm::SchemaTarget::from_entities(
+                    &graphql_orm_entity_metadata(),
+                    &[
+                        #(#entity_rls_items),*
+                    ],
+                )
+            }
         }
         .into();
     }
@@ -218,6 +236,14 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         .map(|entity| {
             quote! {
                 <#entity as ::graphql_orm::graphql::orm::Entity>::metadata()
+            }
+        })
+        .collect();
+    let entity_rls_items: Vec<proc_macro2::TokenStream> = entities
+        .iter()
+        .map(|entity| {
+            quote! {
+                <#entity as ::graphql_orm::graphql::orm::DatabaseRls>::rls_metadata()
             }
         })
         .collect();
@@ -265,6 +291,16 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 #backend_dialect,
                 migration_version,
                 &graphql_orm_entity_metadata(),
+            )
+        }
+
+        pub fn graphql_orm_schema_target(
+        ) -> ::graphql_orm::graphql::orm::SchemaTarget {
+            ::graphql_orm::graphql::orm::SchemaTarget::from_entities(
+                &graphql_orm_entity_metadata(),
+                &[
+                    #(#entity_rls_items),*
+                ],
             )
         }
     }

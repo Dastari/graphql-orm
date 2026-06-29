@@ -24,6 +24,7 @@ It is designed for two related use cases:
 - explicit schema ownership policies for managed, external, validate-only, and plan-only schemas
 - ABI-style schema migration stages for managed SQLite/Postgres schemas
 - row, field, and entity policy hooks for application-owned access control
+- opt-in PostgreSQL row-level security metadata and request-local database auth context
 
 ## Install
 
@@ -177,6 +178,7 @@ batched relation query per relation layer, not N+1 or nested N*N queries.
 - [Getting started](docs/getting-started.md)
 - [Backend features and multi-backend workspaces](docs/backends.md)
 - [Entities, keys, columns, naming, and relations](docs/entities-and-relations.md)
+- [PostgreSQL RLS and auth-aware execution](docs/postgres.md)
 - [SQL Server read-only backend](docs/mssql.md)
 - [Schema ownership, validation, planning, and ABI migrations](docs/schema-management.md)
 - [Writes, repository helpers, hooks, subscriptions, and policies](docs/runtime-and-writes.md)

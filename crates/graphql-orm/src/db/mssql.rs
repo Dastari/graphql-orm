@@ -32,6 +32,10 @@ enum MssqlParamValue {
     Bool(bool),
     NullString,
     NullBytes,
+    NullUuid,
+    NullInt,
+    NullFloat,
+    NullBool,
 }
 
 pub trait MssqlColumnIndex: Copy {
@@ -371,6 +375,10 @@ impl<'a> tiberius::IntoSql<'a> for MssqlParamValue {
             Self::Bool(value) => ColumnData::Bit(Some(value)),
             Self::NullString => ColumnData::String(None),
             Self::NullBytes => ColumnData::Binary(None),
+            Self::NullUuid => ColumnData::Guid(None),
+            Self::NullInt => ColumnData::I64(None),
+            Self::NullFloat => ColumnData::F64(None),
+            Self::NullBool => ColumnData::Bit(None),
         }
     }
 }
@@ -396,14 +404,19 @@ impl From<&SqlValue> for MssqlParamValue {
     fn from(value: &SqlValue) -> Self {
         match value {
             SqlValue::String(value) => Self::String(value.clone()),
+            SqlValue::StringNull => Self::NullString,
             SqlValue::Bytes(value) => Self::Bytes(value.clone()),
             SqlValue::BytesNull => Self::NullBytes,
             SqlValue::Json(value) => Self::String(value.to_string()),
             SqlValue::JsonNull => Self::NullString,
             SqlValue::Uuid(value) => Self::Uuid(*value),
+            SqlValue::UuidNull => Self::NullUuid,
             SqlValue::Int(value) => Self::Int(*value),
+            SqlValue::IntNull => Self::NullInt,
             SqlValue::Float(value) => Self::Float(*value),
+            SqlValue::FloatNull => Self::NullFloat,
             SqlValue::Bool(value) => Self::Bool(*value),
+            SqlValue::BoolNull => Self::NullBool,
             SqlValue::Null => Self::NullString,
         }
     }

@@ -1,0 +1,5 @@
+error: graphql_rls predicate cannot be combined with scope, tenant, or owner on the same operation
+ --> tests/ui/rls_mixed_predicate.rs:5:15
+  |
+5 | #[graphql_rls(select(
+  |               ^^^^^^

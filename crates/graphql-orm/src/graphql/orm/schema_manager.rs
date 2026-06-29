@@ -1,12 +1,14 @@
 use super::core::{
     AppliedMigrationReport, AppliedSchemaUpgrade, ApplyOptions, EntityMetadata,
     MigrationApplicationMetadata, MigrationRisk, PlannedMigration, PlannedMigrationStep,
-    PlannedSchemaUpgrade, SchemaAbi, SchemaDiagnostic, SchemaDiagnosticKind,
-    SchemaDiagnosticSeverity, SchemaModel, SchemaPolicy, SchemaValidationReport,
+    PlannedSchemaTarget, PlannedSchemaUpgrade, SchemaAbi, SchemaDiagnostic, SchemaDiagnosticKind,
+    SchemaDiagnosticSeverity, SchemaModel, SchemaPolicy, SchemaTarget,
+    SchemaTargetValidationReport, SchemaValidationReport,
 };
 use super::execution::{applied_migration_records, ensure_managed_policy, ensure_planning_policy};
 use super::migrations::{build_migration_plan, classify_migration_steps};
-use super::{IntrospectionBackend, MigrationBackend, OrmBackend};
+use super::rls::{build_rls_policy_plan, validate_rls_models};
+use super::{IntrospectionBackend, MigrationBackend, OrmBackend, RlsIntrospectionBackend};
 use crate::db::Database;
 
 /// Explicit schema validation, planning, and migration API for a [`Database`].
@@ -66,6 +68,34 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         self.validate(&current, &target)
     }
 
+    /// Introspect the live database and validate it against a full schema target,
+    /// including Postgres RLS metadata when the schema policy manages or validates it.
+    pub async fn validate_target(
+        &self,
+        target: &SchemaTarget,
+    ) -> Result<SchemaTargetValidationReport, sqlx::Error>
+    where
+        B: IntrospectionBackend + RlsIntrospectionBackend,
+    {
+        let current = B::introspect_schema(self.database.pool()).await?;
+        let schema = self.validate(&current, &target.schema)?;
+        let rls_diagnostics = if matches!(
+            self.policy(),
+            SchemaPolicy::ExternalReadOnly | SchemaPolicy::ExternalWritable
+        ) {
+            Vec::new()
+        } else {
+            let current_rls = B::introspect_rls(self.database.pool()).await?;
+            validate_rls_models(B::DIALECT, self.policy(), &current_rls, &target.rls)
+        };
+        Ok(SchemaTargetValidationReport {
+            backend: B::DIALECT.name(),
+            policy: self.policy(),
+            schema,
+            rls_diagnostics,
+        })
+    }
+
     /// Build a structured migration plan from one schema model to another.
     pub fn plan_migration(
         &self,
@@ -98,6 +128,48 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         let current = B::introspect_schema(self.database.pool()).await?;
         let target = SchemaModel::from_entities(entities);
         self.plan_migration(version, description, &current, &target)
+    }
+
+    /// Introspect the live database and plan a full schema target, including
+    /// deterministic Postgres RLS statements when policy allows planning them.
+    pub async fn plan_schema_target(
+        &self,
+        version: impl Into<String>,
+        description: impl Into<String>,
+        target: &SchemaTarget,
+    ) -> Result<PlannedSchemaTarget, sqlx::Error>
+    where
+        B: IntrospectionBackend,
+    {
+        ensure_planning_policy(self.policy(), "plan schema target")?;
+        let version = version.into();
+        let description = description.into();
+        let current = B::introspect_schema(self.database.pool()).await?;
+        let migration = plan_migration_for_backend::<B>(
+            version.clone(),
+            description.clone(),
+            Some(current.stable_hash()),
+            target.schema.stable_hash(),
+            &current,
+            &target.schema,
+        );
+        let rls = build_rls_policy_plan(B::DIALECT, self.policy(), &target.rls);
+        let mut statements = migration.statements.clone();
+        statements.extend(rls.statements.clone());
+        let target_hash = target.stable_hash();
+        let plan_hash = stable_plan_hash(B::DIALECT.name(), &migration.steps, &statements);
+        Ok(PlannedSchemaTarget {
+            version,
+            description,
+            backend: B::DIALECT.name(),
+            source_schema_hash: migration.source_schema_hash.clone(),
+            target_schema_hash: migration.target_schema_hash.clone(),
+            target_hash,
+            plan_hash,
+            migration,
+            rls,
+            statements,
+        })
     }
 
     /// Apply a planned migration according to [`ApplyOptions`].
@@ -136,6 +208,60 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             graphql_orm_version: env!("CARGO_PKG_VERSION"),
             source_schema_hash: plan.source_schema_hash.clone(),
             target_schema_hash: plan.target_schema_hash.clone(),
+            plan_hash: plan.plan_hash.clone(),
+            policy: self.policy(),
+        };
+        B::prepare_migration_runtime(self.database.pool()).await?;
+        B::apply_migration_statements_transactionally(
+            self.database.pool(),
+            &plan.version,
+            &plan.description,
+            &plan.statements,
+            Some(&metadata),
+            options.record_history,
+        )
+        .await?;
+
+        Ok(AppliedMigrationReport {
+            version: plan.version.clone(),
+            dry_run: false,
+            statements_applied: plan.statements.len(),
+        })
+    }
+
+    /// Apply a planned full schema target transactionally.
+    pub async fn apply_schema_target(
+        &self,
+        plan: &PlannedSchemaTarget,
+        options: ApplyOptions,
+    ) -> Result<AppliedMigrationReport, sqlx::Error>
+    where
+        B: MigrationBackend,
+    {
+        ensure_managed_policy(self.policy(), "apply schema target")?;
+        reject_disallowed_risks(&plan.migration, &options)?;
+        if let Some(expected) = &options.expected_current_schema_hash {
+            if plan.source_schema_hash.as_ref() != Some(expected) {
+                return Err(sqlx::Error::Protocol(format!(
+                    "Schema target baseline hash mismatch: expected {}, planned {:?}",
+                    expected, plan.source_schema_hash
+                )));
+            }
+        }
+
+        if options.dry_run {
+            return Ok(AppliedMigrationReport {
+                version: plan.version.clone(),
+                dry_run: true,
+                statements_applied: 0,
+            });
+        }
+
+        let metadata = MigrationApplicationMetadata {
+            backend: B::DIALECT.name(),
+            graphql_orm_version: env!("CARGO_PKG_VERSION"),
+            source_schema_hash: plan.source_schema_hash.clone(),
+            target_schema_hash: plan.target_hash.clone(),
             plan_hash: plan.plan_hash.clone(),
             policy: self.policy(),
         };

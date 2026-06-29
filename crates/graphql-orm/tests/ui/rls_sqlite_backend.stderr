@@ -1,0 +1,10 @@
+error: #[graphql_rls] is only supported for the Postgres backend
+ --> tests/ui/rls_sqlite_backend.rs:4:1
+  |
+4 | / #[graphql_entity(backend = "sqlite", table = "sqlite_rls_notes", plural = "SqliteRlsNotes")]
+5 | | #[graphql_rls(select(scope = "notes.read"))]
+6 | | struct SqliteRlsNote {
+7 | |     #[primary_key]
+8 | |     pub id: String,
+9 | | }
+  | |_^

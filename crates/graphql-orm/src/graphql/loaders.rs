@@ -1,4 +1,4 @@
-use crate::graphql::orm::{DatabaseBackend, DefaultBackend, OrmBackend};
+use crate::graphql::orm::{DatabaseBackend, DbAuthContext, DefaultBackend, OrmBackend};
 use async_graphql::dataloader::Loader;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -70,6 +70,7 @@ pub struct RelationQueryKey {
     pub filter: Option<crate::graphql::orm::FilterExpression>,
     pub sorts: Vec<crate::graphql::orm::SortExpression>,
     pub pagination: Option<crate::graphql::orm::PaginationRequest>,
+    pub auth_context: Option<DbAuthContext>,
 }
 
 #[derive(Clone, Debug)]
@@ -85,6 +86,7 @@ pub struct CompositeRelationQueryKey {
     pub filter: Option<crate::graphql::orm::FilterExpression>,
     pub sorts: Vec<crate::graphql::orm::SortExpression>,
     pub pagination: Option<crate::graphql::orm::PaginationRequest>,
+    pub auth_context: Option<DbAuthContext>,
 }
 
 impl PartialEq for RelationQueryKey {
@@ -95,6 +97,11 @@ impl PartialEq for RelationQueryKey {
             && self.where_signature == other.where_signature
             && self.order_signature == other.order_signature
             && self.page_signature == other.page_signature
+            && self.auth_context.as_ref().map(DbAuthContext::canonical_key)
+                == other
+                    .auth_context
+                    .as_ref()
+                    .map(DbAuthContext::canonical_key)
     }
 }
 
@@ -108,6 +115,10 @@ impl Hash for RelationQueryKey {
         self.where_signature.hash(state);
         self.order_signature.hash(state);
         self.page_signature.hash(state);
+        self.auth_context
+            .as_ref()
+            .map(DbAuthContext::canonical_key)
+            .hash(state);
     }
 }
 
@@ -119,6 +130,11 @@ impl PartialEq for CompositeRelationQueryKey {
             && self.where_signature == other.where_signature
             && self.order_signature == other.order_signature
             && self.page_signature == other.page_signature
+            && self.auth_context.as_ref().map(DbAuthContext::canonical_key)
+                == other
+                    .auth_context
+                    .as_ref()
+                    .map(DbAuthContext::canonical_key)
     }
 }
 
@@ -132,6 +148,10 @@ impl Hash for CompositeRelationQueryKey {
         self.where_signature.hash(state);
         self.order_signature.hash(state);
         self.page_signature.hash(state);
+        self.auth_context
+            .as_ref()
+            .map(DbAuthContext::canonical_key)
+            .hash(state);
     }
 }
 
@@ -152,6 +172,7 @@ struct RelationGroupKey {
     where_signature: Option<String>,
     order_signature: Option<String>,
     page_signature: Option<String>,
+    auth_context_key: Option<String>,
 }
 
 fn sql_value_key_part(value: &crate::graphql::orm::SqlValue) -> String {
@@ -163,8 +184,13 @@ fn sql_value_key_part(value: &crate::graphql::orm::SqlValue) -> String {
         crate::graphql::orm::SqlValue::Bool(value) => value.to_string(),
         crate::graphql::orm::SqlValue::Bytes(value) => String::from_utf8_lossy(value).to_string(),
         crate::graphql::orm::SqlValue::Json(value) => value.to_string(),
-        crate::graphql::orm::SqlValue::BytesNull
+        crate::graphql::orm::SqlValue::StringNull
+        | crate::graphql::orm::SqlValue::BytesNull
         | crate::graphql::orm::SqlValue::JsonNull
+        | crate::graphql::orm::SqlValue::UuidNull
+        | crate::graphql::orm::SqlValue::IntNull
+        | crate::graphql::orm::SqlValue::FloatNull
+        | crate::graphql::orm::SqlValue::BoolNull
         | crate::graphql::orm::SqlValue::Null => String::new(),
     }
 }
@@ -267,6 +293,7 @@ where
             where_signature: key.where_signature.clone(),
             order_signature: key.order_signature.clone(),
             page_signature: key.page_signature.clone(),
+            auth_context_key: key.auth_context.as_ref().map(DbAuthContext::canonical_key),
         };
         grouped_keys.entry(group_key).or_default().push(key);
     }
@@ -330,9 +357,14 @@ where
             },
         );
 
-        let rows = crate::graphql::orm::fetch_rows::<B>(db.pool(), &rendered.sql, &rendered.values)
-            .await
-            .map_err(|error| error.to_string())?;
+        let rows = B::fetch_rows_with_auth(
+            db.pool(),
+            &rendered.sql,
+            &rendered.values,
+            sample.auth_context.as_ref(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
 
         let mut grouped_entities: HashMap<RelationKey, Vec<T>> = parent_key_order
             .iter()
@@ -494,6 +526,7 @@ where
                     filter: key.filter.clone(),
                     sorts: key.sorts.clone(),
                     pagination: key.pagination.clone(),
+                    auth_context: key.auth_context.clone(),
                 })
                 .collect::<Vec<_>>();
             let composite_results =
@@ -512,6 +545,7 @@ where
                     filter: key.filter.clone(),
                     sorts: key.sorts.clone(),
                     pagination: key.pagination.clone(),
+                    auth_context: key.auth_context.clone(),
                 };
                 results.insert(
                     key,

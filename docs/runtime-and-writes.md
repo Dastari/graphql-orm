@@ -68,6 +68,30 @@ let database = Database::with_row_policy(pool, MyRowPolicy);
 
 For new code that also needs schema policy configuration, prefer the builder plus setter methods or compose your own construction helper.
 
+PostgreSQL RLS support is defense in depth, not a replacement for GraphQL authorization. Generated
+resolvers still call `ctx.auth_user()?` and still evaluate configured entity, row, and field
+policies. Keep root field, mutation, and subscription authorization in the GraphQL layer.
+
+When a request carries `DbAuthContext`, generated PostgreSQL resolvers run database work through
+transaction-local settings so RLS policies can read the authenticated user, tenant, roles, scopes,
+and claims:
+
+```rust
+let request = request.data(DbAuthContext {
+    user_id: Some(identity.user_id.to_string()),
+    subject: Some(identity.user_id.to_string()),
+    tenant_id: identity.tenant_id.clone(),
+    roles: identity.roles.clone(),
+    scopes: identity.scopes.clone(),
+    claims_json: None,
+});
+```
+
+If `DbAuthContext` is absent, generated resolvers use the same execution paths as before. Relation
+preload batching includes the canonical auth context in loader keys so requests with different
+database auth contexts do not batch together. PostgreSQL settings are applied with transaction-local
+`set_config(..., true)` and are cleared by commit or rollback before pooled connections are reused.
+
 ## Hooks
 
 Write-capable backends can run mutation hooks around generated creates, updates, deletes, and upserts.
