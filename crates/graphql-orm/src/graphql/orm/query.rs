@@ -343,6 +343,15 @@ impl PageInput {
     /// Return the explicit requested limit clamped by the default pagination
     /// config. This does not apply the default connection limit when the field
     /// is omitted.
+    ///
+    /// This compatibility helper cannot observe a `Database` handle's custom
+    /// pagination configuration. Use [`Self::limit_with_config`] or
+    /// [`PaginationConfig::resolve_page`] for application code that supports
+    /// configured caps.
+    #[deprecated(
+        since = "0.2.17",
+        note = "use PageInput::limit_with_config or PaginationConfig::resolve_page"
+    )]
     pub fn limit(&self) -> Option<i64> {
         PaginationConfig::default().clamp_explicit_limit(self.limit)
     }

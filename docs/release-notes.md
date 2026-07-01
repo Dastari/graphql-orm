@@ -3,6 +3,20 @@
 This page records user-facing changes for recent `graphql-orm` releases. Version numbers refer to
 the runtime crate unless a macro crate version is called out separately.
 
+## 0.2.17
+
+Pagination compatibility follow-up.
+
+- Bumped `graphql-orm` to `0.2.17`.
+- Bumped `graphql-orm-macros` to `0.3.18`.
+- Deprecated `PageInput::limit()` because it clamps with the default pagination cap and cannot see
+  per-`Database` `PaginationConfig` overrides.
+- Documented `PageInput::limit_with_config(...)` and `PaginationConfig::resolve_page(...)` as the
+  correct host-code APIs for direct `PageInput` handling.
+- Updated the full-stack fixture to route page limits through the provider pagination config.
+- Added regression coverage showing raised max limits, such as `5_000`, are honored by configured
+  pagination paths.
+
 ## 0.2.16
 
 Pagination configuration follow-up for the audit release.

@@ -86,6 +86,23 @@ fn pagination_config_resolves_defaults_and_caps() {
             offset: 0,
         }
     );
+    let raised_cap = PaginationConfig::default().with_max_limit(Some(5_000));
+    let large_page = PageInput {
+        limit: Some(4_000),
+        offset: Some(12),
+    };
+    assert_eq!(
+        raised_cap.resolve_page(Some(&large_page), true),
+        PaginationRequest {
+            limit: Some(4_000),
+            offset: 12,
+        }
+    );
+    assert_eq!(large_page.limit_with_config(raised_cap), Some(4_000));
+    #[allow(deprecated)]
+    {
+        assert_eq!(large_page.limit(), Some(1_000));
+    }
     assert_eq!(
         DatabaseBackend::Sqlite.render_pagination(Some(-5), -10),
         " LIMIT 0"

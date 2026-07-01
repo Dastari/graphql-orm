@@ -116,9 +116,13 @@
 //! limits to `1000`. Configure it on [`crate::db::Database::builder`] for
 //! services that need smaller pages, larger sync/export pages, or intentionally
 //! unbounded generated connections. Repository-style `fetch_all` helpers remain
-//! unbounded unless the caller supplies pagination. Paged relation batches use
-//! backend window functions where available so nested relation pages do not need
-//! to load every child row for every parent.
+//! unbounded unless the caller supplies pagination. Host code that inspects
+//! [`crate::graphql::orm::PageInput`] directly should use
+//! [`crate::graphql::orm::PageInput::limit_with_config`] or
+//! [`crate::graphql::orm::PaginationConfig::resolve_page`]; the legacy
+//! `PageInput::limit()` helper is deprecated because it can only use the default
+//! cap. Paged relation batches use backend window functions where available so
+//! nested relation pages do not need to load every child row for every parent.
 //!
 //! # Generated Entity Example
 //!

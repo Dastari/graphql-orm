@@ -44,15 +44,31 @@ pub mod db {
     #[derive(Clone)]
     pub struct Database {
         pool: DbPool,
+        pagination_config: crate::graphql::orm::PaginationConfig,
     }
 
     impl Database {
         pub fn new(pool: DbPool) -> Self {
-            Self { pool }
+            Self {
+                pool,
+                pagination_config: crate::graphql::orm::PaginationConfig::default(),
+            }
         }
 
         pub fn pool(&self) -> &DbPool {
             &self.pool
+        }
+
+        pub fn pagination_config(&self) -> crate::graphql::orm::PaginationConfig {
+            self.pagination_config
+        }
+
+        pub fn with_pagination_config(
+            mut self,
+            pagination_config: crate::graphql::orm::PaginationConfig,
+        ) -> Self {
+            self.pagination_config = pagination_config;
+            self
         }
     }
 
@@ -414,13 +430,54 @@ pub mod graphql {
                 self.offset.unwrap_or(0)
             }
 
+            #[deprecated(
+                since = "0.2.17",
+                note = "use PageInput::limit_with_config or PaginationConfig::resolve_page"
+            )]
             pub fn limit(&self) -> Option<i64> {
-                self.limit
+                PaginationConfig::default().clamp_explicit_limit(self.limit)
+            }
+
+            pub fn limit_with_config(&self, config: PaginationConfig) -> Option<i64> {
+                config.clamp_explicit_limit(self.limit)
+            }
+        }
+
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        pub struct PaginationConfig {
+            pub default_limit: Option<i64>,
+            pub max_limit: Option<i64>,
+        }
+
+        impl Default for PaginationConfig {
+            fn default() -> Self {
+                Self {
+                    default_limit: Some(1000),
+                    max_limit: Some(1000),
+                }
+            }
+        }
+
+        impl PaginationConfig {
+            pub fn clamp_explicit_limit(&self, limit: Option<i64>) -> Option<i64> {
+                limit.map(|limit| self.clamp_limit_value(limit))
+            }
+
+            fn clamp_limit_value(&self, limit: i64) -> i64 {
+                let normalized = limit.max(0);
+                match self.max_limit {
+                    Some(max_limit) => normalized.min(max_limit.max(0)),
+                    None => normalized,
+                }
             }
         }
 
         pub trait PoolProvider {
             fn pool(&self) -> &DbPool;
+
+            fn pagination_config(&self) -> PaginationConfig {
+                PaginationConfig::default()
+            }
         }
 
         impl PoolProvider for DbPool {
@@ -432,6 +489,10 @@ pub mod graphql {
         impl PoolProvider for crate::db::Database {
             fn pool(&self) -> &DbPool {
                 self.pool()
+            }
+
+            fn pagination_config(&self) -> PaginationConfig {
+                crate::db::Database::pagination_config(self)
             }
         }
 
@@ -696,7 +757,7 @@ pub mod graphql {
                 self
             }
 
-            fn build_select_sql(&self) -> String {
+            fn build_select_sql(&self, pagination_config: PaginationConfig) -> String {
                 let mut sql = format!(
                     "SELECT {} FROM {}",
                     T::column_names().join(", "),
@@ -711,7 +772,7 @@ pub mod graphql {
                     sql.push_str(&self.order_clauses.join(", "));
                 }
                 if let Some(page) = &self.page {
-                    if let Some(limit) = page.limit() {
+                    if let Some(limit) = page.limit_with_config(pagination_config) {
                         sql.push_str(&format!(" LIMIT {}", limit));
                     }
                     if page.offset() > 0 {
@@ -725,7 +786,7 @@ pub mod graphql {
             where
                 P: PoolProvider + ?Sized,
             {
-                let sql = self.build_select_sql();
+                let sql = self.build_select_sql(provider.pagination_config());
                 let rows = fetch_rows(provider.pool(), &sql, &self.values).await?;
                 rows.iter().map(T::from_row).collect()
             }

@@ -167,6 +167,11 @@ let database = Database::builder(pool)
 Repository-style `fetch_all` paths remain intentionally unbounded unless the caller supplies
 pagination. The default limit is applied to connection-style APIs, not to every low-level helper.
 
+Host code that handles `PageInput` directly should call `limit_with_config(database.pagination_config())`
+or `database.pagination_config().resolve_page(...)`. The compatibility helper `PageInput::limit()` is
+deprecated because it only has access to the default `1000` cap and cannot observe per-application
+settings such as `.max_page_limit(Some(5_000))`.
+
 When a query includes predicates that must run in Rust, such as SQLite spatial topology checks, the
 runtime now pushes the SQL-safe prefix of the filter first and applies only the residual predicate in
 memory. The in-memory connection path fetches the filtered candidate set once, counts it, then slices
