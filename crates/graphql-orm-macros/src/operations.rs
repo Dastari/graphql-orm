@@ -602,6 +602,11 @@ pub(crate) fn generate_graphql_operations(
     } else {
         quote! { ::graphql_orm::graphql::orm::SqlValue::String(entity.#pk_field.to_string()) }
     };
+    let pk_bind_value_for_previous = if pk_is_uuid {
+        quote! { ::graphql_orm::graphql::orm::SqlValue::Uuid(previous.#pk_field) }
+    } else {
+        quote! { ::graphql_orm::graphql::orm::SqlValue::String(previous.#pk_field.to_string()) }
+    };
     let created_pk_value = if pk_is_uuid {
         quote! { ::graphql_orm::graphql::orm::SqlValue::Uuid(created_pk) }
     } else {
@@ -997,15 +1002,30 @@ pub(crate) fn generate_graphql_operations(
                 quote! { #field_type }
             };
             let create_policy_check = if let Some(policy_key) = &meta.write_policy {
-                quote! {
-                    db.ensure_writable_field(
-                        ctx,
-                        #entity_name_lit,
-                        #graphql_name,
-                        Some(#policy_key),
-                        None,
-                        Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
-                    ).await?;
+                if is_option_type(field_type) {
+                    quote! {
+                        if !db.can_write_field(
+                            ctx,
+                            #entity_name_lit,
+                            #graphql_name,
+                            Some(#policy_key),
+                            None,
+                            Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
+                        ).await? {
+                            input.#field_name = None;
+                        }
+                    }
+                } else {
+                    quote! {
+                        db.ensure_writable_field(
+                            ctx,
+                            #entity_name_lit,
+                            #graphql_name,
+                            Some(#policy_key),
+                            None,
+                            Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
+                        ).await?;
+                    }
                 }
             } else {
                 quote! {}
@@ -1046,11 +1066,53 @@ pub(crate) fn generate_graphql_operations(
                     !meta.is_primary_key && !upsert_target_db_columns.contains(&db_col);
 
                 if let Some(policy_key) = &meta.write_policy {
-                    let graphql_check = if upsert_update_candidate {
+                    let graphql_check = if is_option_type(field_type) {
+                        if upsert_update_candidate {
+                            quote! {
+                                let __gom_field_write_allowed = if let Some(current_entity) = current_entity.as_ref() {
+                                    db.can_write_field(
+                                        ctx,
+                                        #entity_name_lit,
+                                        #graphql_name,
+                                        Some(#policy_key),
+                                        Some(current_entity as &(dyn ::std::any::Any + Send + Sync)),
+                                        Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
+                                    ).await?
+                                } else {
+                                    db.can_write_field(
+                                        ctx,
+                                        #entity_name_lit,
+                                        #graphql_name,
+                                        Some(#policy_key),
+                                        None,
+                                        Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
+                                    ).await?
+                                };
+                                if !__gom_field_write_allowed {
+                                    input.#field_name = None;
+                                }
+                            }
+                        } else {
+                            quote! {
+                                if current_entity.is_none()
+                                    && !db.can_write_field(
+                                        ctx,
+                                        #entity_name_lit,
+                                        #graphql_name,
+                                        Some(#policy_key),
+                                        None,
+                                        Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
+                                    ).await?
+                                {
+                                    input.#field_name = None;
+                                }
+                            }
+                        }
+                    } else if upsert_update_candidate {
                         quote! {
                             if let Some(current_entity) = current_entity.as_ref() {
                                 db.ensure_writable_field(
-                                    Some(ctx),
+                                    ctx,
                                     #entity_name_lit,
                                     #graphql_name,
                                     Some(#policy_key),
@@ -1059,7 +1121,7 @@ pub(crate) fn generate_graphql_operations(
                                 ).await?;
                             } else {
                                 db.ensure_writable_field(
-                                    Some(ctx),
+                                    ctx,
                                     #entity_name_lit,
                                     #graphql_name,
                                     Some(#policy_key),
@@ -1072,7 +1134,7 @@ pub(crate) fn generate_graphql_operations(
                         quote! {
                             if current_entity.is_none() {
                                 db.ensure_writable_field(
-                                    Some(ctx),
+                                    ctx,
                                     #entity_name_lit,
                                     #graphql_name,
                                     Some(#policy_key),
@@ -1424,15 +1486,20 @@ pub(crate) fn generate_graphql_operations(
             // Generate update field check
             let update_policy_check = if let Some(policy_key) = &meta.write_policy {
                 quote! {
-                    if let Some(ref val) = input.#field_name {
-                        db.ensure_writable_field(
+                    let __gom_field_write_allowed = if let Some(ref val) = input.#field_name {
+                        db.can_write_field(
                             ctx,
                             #entity_name_lit,
                             #graphql_name,
                             Some(#policy_key),
                             Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
                             Some(val as &(dyn ::std::any::Any + Send + Sync)),
-                        ).await?;
+                        ).await?
+                    } else {
+                        true
+                    };
+                    if !__gom_field_write_allowed {
+                        input.#field_name = None;
                     }
                 }
             } else {
@@ -4305,8 +4372,40 @@ pub(crate) fn generate_graphql_operations(
                 let result = ::graphql_orm::graphql::orm::execute_with_binds_on::<#backend_marker, _>(hook_ctx.executor(), &sql, &values).await?;
                 let affected = result.rows_affected() as i64;
 
+                let mut after_fetch_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                let after_fetch_placeholders = matched_entities
+                    .iter()
+                    .enumerate()
+                    .map(|(index, previous)| {
+                        after_fetch_values.push(#pk_bind_value_for_previous);
+                        Self::__gom_placeholder(index + 1)
+                    })
+                    .collect::<Vec<_>>();
+                let after_fetch_sql = Self::__gom_rebind_sql(
+                    &format!(
+                        "SELECT {} FROM {} WHERE {} IN ({})",
+                        <Self as ::graphql_orm::graphql::orm::DatabaseEntity>::column_names().join(", "),
+                        #table_name,
+                        Self::PRIMARY_KEY,
+                        after_fetch_placeholders.join(", ")
+                    ),
+                    1,
+                );
+                let after_rows = ::graphql_orm::graphql::orm::fetch_rows_on::<#backend_marker, _>(
+                    hook_ctx.executor(),
+                    &after_fetch_sql,
+                    &after_fetch_values,
+                ).await?;
+                let mut after_entities = after_rows
+                    .iter()
+                    .map(<Self as ::graphql_orm::graphql::orm::FromSqlRow<#backend_marker>>::from_row)
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .map(|entity| (entity.#pk_field.to_string(), entity))
+                    .collect::<::std::collections::HashMap<_, _>>();
+
                 for previous in matched_entities {
-                    if let Some(entity) = Self::__gom_fetch_by_id_on(hook_ctx.executor(), &previous.#pk_field).await? {
+                    if let Some(entity) = after_entities.remove(&previous.#pk_field.to_string()) {
                         hook_ctx.run_mutation_hook(
                             None,
                             &::graphql_orm::graphql::orm::MutationEvent {
@@ -4805,8 +4904,40 @@ pub(crate) fn generate_graphql_operations(
                 let result = ::graphql_orm::graphql::orm::execute_with_binds_on::<#backend_marker, _>(hook_ctx.executor(), &sql, &values).await?;
                 let affected = result.rows_affected() as i64;
 
+                let mut after_fetch_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                let after_fetch_placeholders = matched_entities
+                    .iter()
+                    .enumerate()
+                    .map(|(index, previous)| {
+                        after_fetch_values.push(#pk_bind_value_for_previous);
+                        Self::__gom_placeholder(index + 1)
+                    })
+                    .collect::<Vec<_>>();
+                let after_fetch_sql = Self::__gom_rebind_sql(
+                    &format!(
+                        "SELECT {} FROM {} WHERE {} IN ({})",
+                        <Self as ::graphql_orm::graphql::orm::DatabaseEntity>::column_names().join(", "),
+                        #table_name,
+                        Self::PRIMARY_KEY,
+                        after_fetch_placeholders.join(", ")
+                    ),
+                    1,
+                );
+                let after_rows = ::graphql_orm::graphql::orm::fetch_rows_on::<#backend_marker, _>(
+                    hook_ctx.executor(),
+                    &after_fetch_sql,
+                    &after_fetch_values,
+                ).await?;
+                let mut after_entities = after_rows
+                    .iter()
+                    .map(<Self as ::graphql_orm::graphql::orm::FromSqlRow<#backend_marker>>::from_row)
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .map(|entity| (entity.#pk_field.to_string(), entity))
+                    .collect::<::std::collections::HashMap<_, _>>();
+
                 for previous in matched_entities {
-                    if let Some(entity) = Self::__gom_fetch_by_id_on(hook_ctx.executor(), &previous.#pk_field).await? {
+                    if let Some(entity) = after_entities.remove(&previous.#pk_field.to_string()) {
                         hook_ctx.run_mutation_hook(
                             None,
                             &::graphql_orm::graphql::orm::MutationEvent {

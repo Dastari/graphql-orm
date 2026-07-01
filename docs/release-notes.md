@@ -3,6 +3,36 @@
 This page records user-facing changes for recent `graphql-orm` releases. Version numbers refer to
 the runtime crate unless a macro crate version is called out separately.
 
+## 0.2.15
+
+Audit follow-up release focused on correctness and native execution paths.
+
+- Bumped `graphql-orm` to `0.2.15`.
+- Bumped `graphql-orm-macros` to `0.3.16`.
+- Fixed field-level write policy handling so denied optional create fields are omitted and denied
+  update fields are skipped instead of hard-failing the whole mutation. Required create fields still
+  fail when denied because the ORM cannot safely synthesize a value.
+- Fixed relative date filter SQL to use the selected backend dialect instead of Cargo feature
+  detection in multi-backend workspaces.
+- Escaped `%`, `_`, and `\` in generated `LIKE`/`ILIKE` patterns and added SQL `ESCAPE '\\'`
+  clauses so wildcard characters in user input are treated literally.
+- Clamped negative and very large page limits at SQL rendering and `PageInput` handling.
+- Reduced fallback connection pagination from two full scans to one filtered scan plus in-memory
+  slicing.
+- Added residual-filter prefiltering so fallback paths, such as SQLite spatial predicates, still
+  push safe SQL predicates before exact in-memory checks.
+- Added native full-text search execution under `DbAuthContext`, so PostgreSQL RLS/authenticated
+  requests can still use native search indexes.
+- Added native full-text search pagination and native count queries for generated search
+  connections.
+- Added windowed relation pagination for paged relation batches using `ROW_NUMBER() OVER
+  (PARTITION BY ...)` plus grouped counts.
+- Batched bulk-update after-hook refetches into one `WHERE pk IN (...)` query.
+- Collapsed PostgreSQL auth context setup into one transaction-local `set_config` statement.
+- Improved placeholder normalization so placeholder-looking text inside SQL string literals is not
+  rewritten.
+- Normalized SQLite float relation-key projections with `printf` to avoid silent relation misses.
+
 ## 0.2.14
 
 Documentation and release metadata pass for the spatial and full-text search work.

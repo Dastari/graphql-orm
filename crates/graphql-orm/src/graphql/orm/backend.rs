@@ -363,14 +363,10 @@ impl OrmBackend for PostgresBackend {
         auth: Option<&'a DbAuthContext>,
     ) -> BoxFuture<'a, Result<(Vec<Self::Row>, Vec<Self::Row>), sqlx::Error>> {
         Box::pin(async move {
-            let Some(auth) = auth else {
-                let first = Self::fetch_rows(pool, first_sql, first_values).await?;
-                let second = Self::fetch_rows(pool, second_sql, second_values).await?;
-                return Ok((first, second));
-            };
-
             let mut tx = pool.begin().await?;
-            apply_postgres_auth_context(&mut tx, auth).await?;
+            if let Some(auth) = auth {
+                apply_postgres_auth_context(&mut tx, auth).await?;
+            }
 
             let first_sql = Self::normalize_sql(first_sql, 1);
             let mut first_query = sqlx::query(&first_sql);
@@ -539,13 +535,25 @@ async fn apply_postgres_auth_context(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     auth: &DbAuthContext,
 ) -> Result<(), sqlx::Error> {
-    for (setting, value) in auth.postgres_settings()? {
-        sqlx::query("SELECT set_config($1, $2, true)")
-            .bind(setting)
-            .bind(value)
-            .execute(&mut **tx)
-            .await?;
+    let settings = auth.postgres_settings()?;
+    if settings.is_empty() {
+        return Ok(());
     }
+    let projections = settings
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let base = index * 2 + 1;
+            format!("set_config(${base}, ${}, true)", base + 1)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!("SELECT {projections}");
+    let mut query = sqlx::query(&sql);
+    for (setting, value) in &settings {
+        query = query.bind(*setting).bind(value);
+    }
+    query.execute(&mut **tx).await?;
     Ok(())
 }
 

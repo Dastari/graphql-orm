@@ -212,10 +212,11 @@ pub fn relation_key_projection(
                 format!("CASE WHEN {column} THEN 'true' ELSE 'false' END")
             }
         },
-        RelationKeyPartKind::String
-        | RelationKeyPartKind::Uuid
-        | RelationKeyPartKind::Int
-        | RelationKeyPartKind::Float => {
+        RelationKeyPartKind::Float => match dialect {
+            DatabaseBackend::Sqlite => format!("printf('%.17g', {column})"),
+            _ => crate::graphql::orm::SqlDialect::relation_key_cast(&dialect, column),
+        },
+        RelationKeyPartKind::String | RelationKeyPartKind::Uuid | RelationKeyPartKind::Int => {
             crate::graphql::orm::SqlDialect::relation_key_cast(&dialect, column)
         }
     }
@@ -276,7 +277,8 @@ where
     T: BatchLoadEntity<B>,
 {
     use crate::graphql::orm::{
-        FilterExpression, PaginationRequest, SelectQuery, SortExpression, render_select_query,
+        FilterExpression, PaginationRequest, SelectQuery, SortExpression, SqlDialect,
+        render_filter_expression, render_select_query,
     };
 
     if keys.is_empty() {
@@ -326,6 +328,11 @@ where
             })
             .collect::<Vec<_>>();
         sorts.extend(sample.sorts.clone());
+        let sort_sql = sorts
+            .iter()
+            .map(|sort| sort.clause.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
 
         let relation_key_columns = sample
             .fk_columns
@@ -340,6 +347,140 @@ where
                 )
             })
             .collect::<Vec<_>>();
+
+        if let Some(PaginationRequest { limit, offset }) = sample.pagination.clone() {
+            let partition_columns = sample.fk_columns.join(", ");
+            let mut paged_columns = T::column_names()
+                .iter()
+                .map(|column| (*column).to_string())
+                .chain(relation_key_columns.clone())
+                .collect::<Vec<_>>();
+            paged_columns.push(format!(
+                "ROW_NUMBER() OVER (PARTITION BY {partition_columns} ORDER BY {sort_sql}) AS __gom_relation_row_number"
+            ));
+            paged_columns.push(format!(
+                "COUNT(*) OVER (PARTITION BY {partition_columns}) AS __gom_relation_total_count"
+            ));
+
+            let rendered_inner = render_select_query(
+                B::DIALECT,
+                &SelectQuery {
+                    table: T::TABLE_NAME,
+                    columns: paged_columns,
+                    filter: Some(filter.clone()),
+                    sorts: Vec::new(),
+                    pagination: None,
+                    count_only: false,
+                },
+            );
+
+            let start = offset.max(0);
+            let mut row_values = rendered_inner.values.clone();
+            let mut row_sql = format!(
+                "SELECT * FROM ({}) __gom_relation_page WHERE __gom_relation_row_number > {}",
+                rendered_inner.sql,
+                B::DIALECT.placeholder(row_values.len() + 1)
+            );
+            row_values.push(crate::graphql::orm::SqlValue::Int(start));
+            if let Some(limit) = limit {
+                let end = start.saturating_add(limit.max(0));
+                row_sql.push_str(&format!(
+                    " AND __gom_relation_row_number <= {}",
+                    B::DIALECT.placeholder(row_values.len() + 1)
+                ));
+                row_values.push(crate::graphql::orm::SqlValue::Int(end));
+            }
+            row_sql.push_str(" ORDER BY ");
+            row_sql.push_str(&sort_sql);
+            row_sql.push_str(", __gom_relation_row_number ASC");
+
+            let mut count_values = Vec::new();
+            let mut next_index = 1usize;
+            let where_sql =
+                render_filter_expression(B::DIALECT, &filter, &mut next_index, &mut count_values);
+            let count_columns = relation_key_columns
+                .iter()
+                .cloned()
+                .chain(std::iter::once(
+                    "COUNT(*) AS __gom_relation_total_count".to_string(),
+                ))
+                .collect::<Vec<_>>();
+            let mut count_sql =
+                format!("SELECT {} FROM {}", count_columns.join(", "), T::TABLE_NAME);
+            if !where_sql.is_empty() {
+                count_sql.push_str(" WHERE ");
+                count_sql.push_str(&where_sql);
+            }
+            count_sql.push_str(" GROUP BY ");
+            count_sql.push_str(&partition_columns);
+
+            let (count_rows, rows) = B::fetch_rows_pair_with_auth(
+                db.pool(),
+                &count_sql,
+                &count_values,
+                &row_sql,
+                &row_values,
+                sample.auth_context.as_ref(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+            let mut total_counts: HashMap<RelationKey, i64> = parent_key_order
+                .iter()
+                .cloned()
+                .map(|parent_key| (parent_key, 0))
+                .collect();
+            for row in count_rows {
+                let mut key_parts = Vec::with_capacity(sample.fk_columns.len());
+                for index in 0..sample.fk_columns.len() {
+                    let alias = relation_key_alias(index);
+                    let part =
+                        B::try_get_string(&row, &alias).map_err(|error| error.to_string())?;
+                    key_parts.push(part);
+                }
+                let parent_key = RelationKey::new(key_parts);
+                let total = B::try_get_i64(&row, "__gom_relation_total_count")
+                    .map_err(|error| error.to_string())?;
+                total_counts.insert(parent_key, total);
+            }
+
+            let mut grouped_entities: HashMap<RelationKey, Vec<T>> = parent_key_order
+                .iter()
+                .cloned()
+                .map(|parent_key| (parent_key, Vec::new()))
+                .collect();
+            for row in rows {
+                let mut key_parts = Vec::with_capacity(sample.fk_columns.len());
+                for index in 0..sample.fk_columns.len() {
+                    let alias = relation_key_alias(index);
+                    let part =
+                        B::try_get_string(&row, &alias).map_err(|error| error.to_string())?;
+                    key_parts.push(part);
+                }
+                let parent_key = RelationKey::new(key_parts);
+                let entity = T::from_row(&row).map_err(|error| error.to_string())?;
+                grouped_entities.entry(parent_key).or_default().push(entity);
+            }
+
+            for key in group {
+                let entities = grouped_entities.remove(&key.parent_key).unwrap_or_default();
+                let total_count = *total_counts.get(&key.parent_key).unwrap_or(&0);
+                let has_previous_page = start > 0;
+                let has_next_page = (start + entities.len() as i64) < total_count;
+                results.insert(
+                    key,
+                    RelationLoadResult {
+                        entities,
+                        total_count,
+                        has_next_page,
+                        has_previous_page,
+                        offset: start,
+                    },
+                );
+            }
+
+            continue;
+        }
 
         let rendered = render_select_query(
             B::DIALECT,

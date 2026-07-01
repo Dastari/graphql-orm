@@ -105,6 +105,8 @@ async fn generated_graphql_schema_uses_pascal_case_types_and_camel_case_fields()
     assert!(sdl.contains("\tnotIn: [String!]"));
     assert!(sdl.contains("\tisNull: Boolean"));
     assert!(sdl.contains("input SimilarityInput {\n\tvalue: String!"));
-    assert!(sdl.contains("input PageInput {\n\tlimit: Int\n\toffset: Int"));
+    assert!(sdl.contains("input PageInput {"));
+    assert!(sdl.contains("\tlimit: Int"));
+    assert!(sdl.contains("\toffset: Int"));
     assert!(sdl.contains("input SubscriptionFilterInput"));
 }

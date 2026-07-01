@@ -7,7 +7,7 @@ database schema. Schema ownership and migration behavior are controlled by runti
 ## Features
 
 ```toml
-graphql-orm = { version = "0.2.14", default-features = false, features = ["sqlite"] }
+graphql-orm = { version = "0.2.15", default-features = false, features = ["sqlite"] }
 ```
 
 Available backend features:
@@ -29,9 +29,10 @@ migrations create a GiST spatial index and predicates render to PostGIS function
 
 SQLite stores spatial fields as GeoJSON in `TEXT` columns. Writes validate that the value is a
 GeoJSON geometry of the declared type, and spatial predicates are evaluated in Rust after rows are
-loaded. This keeps application code portable, but it is not spatial-indexed and can be inefficient on
-large tables. `index = true` is accepted on SQLite for schema portability, but no SQLite index is
-created.
+loaded. Other SQL-able filters in the same `where` input are still pushed into SQLite first so the
+Rust topology check sees a smaller candidate set. This keeps application code portable, but it is not
+spatial-indexed and can be inefficient on large tables. `index = true` is accepted on SQLite for
+schema portability, but no SQLite index is created.
 
 The `mssql` backend still rejects `#[graphql_orm(spatial(...))]` at compile time in this phase.
 
@@ -54,7 +55,8 @@ of exact `contains`/`within`/`overlaps` semantics.
 Full-text search is exposed through the same generated API on supported backends:
 
 - Postgres uses a managed shadow table with `tsvector`, `tsquery`, `ts_rank_cd`, and a GIN index on
-  `document_vector`.
+  `document_vector`. Native search is used for authenticated requests with `DbAuthContext` as well
+  as anonymous requests.
 - SQLite creates an FTS5 virtual table with the `unicode61` tokenizer by default. If native FTS
   execution is unavailable at runtime and fallback is enabled, query helpers can fall back to the
   deterministic Rust scorer over loaded entities.
@@ -64,6 +66,10 @@ Full-text search is exposed through the same generated API on supported backends
 Search documents are denormalized per entity. Local `searchable(...)` fields are maintained by
 generated ORM writes. Writes made outside `graphql-orm` require an explicit rebuild before native
 search indexes reflect the new data.
+
+Native Postgres and SQLite FTS5 search paths push scoring, ordering, limit, offset, and count into
+SQL. The Rust fallback path is reserved for missing native structures or explicit fallback use; it is
+not used to mask arbitrary native search errors.
 
 Postgres SQL shape:
 
@@ -165,7 +171,7 @@ Example:
 
 ```toml
 graphql-orm = {
-  version = "0.2.14",
+  version = "0.2.15",
   default-features = false,
   features = [
     "mssql",

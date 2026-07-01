@@ -33,6 +33,108 @@ impl DatabaseBackend {
     }
 }
 
+const DEFAULT_MAX_PAGE_LIMIT: i64 = 1000;
+
+fn clamp_limit(limit: i64) -> i64 {
+    limit.max(0).min(DEFAULT_MAX_PAGE_LIMIT)
+}
+
+fn normalize_sql_placeholders(backend: DatabaseBackend, sql: &str, start_index: usize) -> String {
+    if !matches!(backend, DatabaseBackend::Postgres | DatabaseBackend::Mssql) {
+        return sql.to_string();
+    }
+
+    let chars: Vec<char> = sql.chars().collect();
+    let mut out = String::with_capacity(sql.len() + 16);
+    let mut i = 0usize;
+    let mut next = start_index;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut in_bracket_quote = false;
+
+    while i < chars.len() {
+        let ch = chars[i];
+
+        if in_single_quote {
+            out.push(ch);
+            if ch == '\'' {
+                if i + 1 < chars.len() && chars[i + 1] == '\'' {
+                    out.push(chars[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                in_single_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_double_quote {
+            out.push(ch);
+            if ch == '"' {
+                if i + 1 < chars.len() && chars[i + 1] == '"' {
+                    out.push(chars[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                in_double_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_bracket_quote {
+            out.push(ch);
+            if ch == ']' {
+                if i + 1 < chars.len() && chars[i + 1] == ']' {
+                    out.push(chars[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                in_bracket_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if ch == '\'' {
+            in_single_quote = true;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == '"' {
+            in_double_quote = true;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+        if backend == DatabaseBackend::Mssql && ch == '[' {
+            in_bracket_quote = true;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+
+        if ch == '?'
+            || ch == '$'
+            || (ch == '@' && i + 1 < chars.len() && chars[i + 1].eq_ignore_ascii_case(&'p'))
+        {
+            out.push_str(&backend.placeholder(next));
+            next += 1;
+            i += if ch == '@' { 2 } else { 1 };
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                i += 1;
+            }
+        } else {
+            out.push(ch);
+            i += 1;
+        }
+    }
+
+    out
+}
+
 pub trait SqlDialect {
     fn backend(&self) -> DatabaseBackend;
     fn quote_identifier(&self, identifier: &str) -> String;
@@ -77,12 +179,22 @@ impl SqlDialect for DatabaseBackend {
                     format!("\"{}\"", identifier.replace('"', "\"\""))
                 }
             }
-            DatabaseBackend::Sqlite | DatabaseBackend::Mysql => identifier.to_string(),
+            DatabaseBackend::Sqlite => {
+                if identifier.starts_with('"') && identifier.ends_with('"') {
+                    identifier.to_string()
+                } else {
+                    format!("\"{}\"", identifier.replace('"', "\"\""))
+                }
+            }
+            DatabaseBackend::Mysql => identifier.to_string(),
         }
     }
 
     fn quote_identifier_path(&self, identifier: &str) -> String {
-        if *self != DatabaseBackend::Mssql && *self != DatabaseBackend::Postgres {
+        if *self != DatabaseBackend::Mssql
+            && *self != DatabaseBackend::Postgres
+            && *self != DatabaseBackend::Sqlite
+        {
             return identifier.to_string();
         }
 
@@ -103,33 +215,7 @@ impl SqlDialect for DatabaseBackend {
     }
 
     fn normalize_sql(&self, sql: &str, start_index: usize) -> String {
-        if !matches!(self, DatabaseBackend::Postgres | DatabaseBackend::Mssql) {
-            return sql.to_string();
-        }
-
-        let chars: Vec<char> = sql.chars().collect();
-        let mut out = String::with_capacity(sql.len() + 16);
-        let mut i = 0usize;
-        let mut next = start_index;
-        while i < chars.len() {
-            if chars[i] == '?'
-                || chars[i] == '$'
-                || (chars[i] == '@'
-                    && i + 1 < chars.len()
-                    && chars[i + 1].eq_ignore_ascii_case(&'p'))
-            {
-                out.push_str(&self.placeholder(next));
-                next += 1;
-                i += if chars[i] == '@' { 2 } else { 1 };
-                while i < chars.len() && chars[i].is_ascii_digit() {
-                    i += 1;
-                }
-            } else {
-                out.push(chars[i]);
-                i += 1;
-            }
-        }
-        out
+        normalize_sql_placeholders(*self, sql, start_index)
     }
 
     fn count_projection(&self) -> &'static str {
@@ -146,7 +232,7 @@ impl SqlDialect for DatabaseBackend {
                     format!(
                         " OFFSET {} ROWS FETCH NEXT {} ROWS ONLY",
                         offset.max(0),
-                        limit
+                        clamp_limit(limit)
                     )
                 }
                 None if offset > 0 => format!(" OFFSET {} ROWS", offset),
@@ -155,7 +241,7 @@ impl SqlDialect for DatabaseBackend {
             _ => {
                 let mut sql = String::new();
                 if let Some(limit) = limit {
-                    sql.push_str(&format!(" LIMIT {}", limit));
+                    sql.push_str(&format!(" LIMIT {}", clamp_limit(limit)));
                 }
                 if offset > 0 {
                     sql.push_str(&format!(" OFFSET {}", offset));
@@ -191,9 +277,9 @@ impl SqlDialect for DatabaseBackend {
 
     fn ci_like(&self, column: &str, placeholder: &str) -> String {
         match self {
-            DatabaseBackend::Postgres => format!("{column} ILIKE {placeholder}"),
+            DatabaseBackend::Postgres => format!("{column} ILIKE {placeholder} ESCAPE '\\'"),
             DatabaseBackend::Sqlite | DatabaseBackend::Mysql | DatabaseBackend::Mssql => {
-                format!("LOWER({column}) LIKE LOWER({placeholder})")
+                format!("LOWER({column}) LIKE LOWER({placeholder}) ESCAPE '\\'")
             }
         }
     }

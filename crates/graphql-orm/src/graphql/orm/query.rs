@@ -70,8 +70,27 @@ pub trait DatabaseFilter {
     fn to_sql_conditions(&self) -> (Vec<String>, Vec<SqlValue>);
     fn is_empty(&self) -> bool;
 
+    /// Return true when at least one predicate must be evaluated against decoded
+    /// Rust entities instead of being rendered entirely into SQL.
     fn requires_in_memory_filtering(&self, _backend: DatabaseBackend) -> bool {
         false
+    }
+
+    /// Return SQL predicates that are safe to apply before a residual in-memory
+    /// matcher runs.
+    ///
+    /// Generated filters override this for backends such as SQLite spatial
+    /// fallback, where ordinary field predicates can still shrink the candidate
+    /// set before exact topology checks run in Rust.
+    fn to_sql_prefilter_conditions(
+        &self,
+        backend: DatabaseBackend,
+    ) -> (Vec<String>, Vec<SqlValue>) {
+        if self.requires_in_memory_filtering(backend) {
+            (Vec::new(), Vec::new())
+        } else {
+            self.to_sql_conditions()
+        }
     }
 
     fn matches_entity(&self, _entity: &(dyn Any + Send + Sync)) -> Result<bool, sqlx::Error> {
@@ -215,18 +234,27 @@ pub struct SubscriptionFilterInput {
 )]
 #[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
 #[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
+/// Offset pagination input shared by generated list, relation, and search APIs.
 pub struct PageInput {
+    /// Requested page size. Explicit limits are clamped to
+    /// [`PageInput::MAX_LIMIT`] before SQL rendering.
     pub limit: Option<i64>,
+    /// Requested offset. Negative offsets are treated as `0`.
     pub offset: Option<i64>,
 }
 
 impl PageInput {
+    /// Hard runtime cap for explicit page limits.
+    pub const MAX_LIMIT: i64 = 1000;
+
+    /// Return a non-negative offset for SQL rendering and in-memory slicing.
     pub fn offset(&self) -> i64 {
-        self.offset.unwrap_or(0)
+        self.offset.unwrap_or(0).max(0)
     }
 
+    /// Return the requested limit clamped into `0..=MAX_LIMIT`.
     pub fn limit(&self) -> Option<i64> {
-        self.limit
+        self.limit.map(|limit| limit.max(0).min(Self::MAX_LIMIT))
     }
 }
 
@@ -316,6 +344,7 @@ pub trait RelationLoader<B: OrmBackend = DefaultBackend> {
     }
 }
 
+/// Small deterministic substring scorer used by fallback query paths.
 pub struct FuzzyMatcher {
     query: String,
     threshold: f64,
@@ -367,8 +396,39 @@ impl FuzzyMatcher {
     }
 }
 
+/// Escape `%`, `_`, and `\` in a user string before binding it to a SQL
+/// `LIKE`/`ILIKE` predicate that uses `ESCAPE '\'`.
+pub fn escape_like_pattern(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' | '%' | '_' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+/// Build an escaped contains pattern for SQL `LIKE`/`ILIKE`.
+pub fn contains_like_pattern(value: &str) -> String {
+    format!("%{}%", escape_like_pattern(value))
+}
+
+/// Build an escaped starts-with pattern for SQL `LIKE`/`ILIKE`.
+pub fn starts_with_like_pattern(value: &str) -> String {
+    format!("{}%", escape_like_pattern(value))
+}
+
+/// Build an escaped ends-with pattern for SQL `LIKE`/`ILIKE`.
+pub fn ends_with_like_pattern(value: &str) -> String {
+    format!("%{}", escape_like_pattern(value))
+}
+
 pub fn generate_candidate_pattern(value: &str) -> String {
-    format!("%{}%", value)
+    contains_like_pattern(value)
 }
 
 fn filter_expression_from_raw_parts(
@@ -402,12 +462,61 @@ fn filter_expression_from_raw_parts(
     }
 }
 
-fn count_placeholders(clause: &str) -> usize {
+pub fn count_placeholders(clause: &str) -> usize {
     let chars: Vec<char> = clause.chars().collect();
     let mut count = 0usize;
     let mut i = 0usize;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut in_bracket_quote = false;
     while i < chars.len() {
-        match chars[i] {
+        let ch = chars[i];
+        if in_single_quote {
+            if ch == '\'' {
+                if i + 1 < chars.len() && chars[i + 1] == '\'' {
+                    i += 2;
+                    continue;
+                }
+                in_single_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_double_quote {
+            if ch == '"' {
+                if i + 1 < chars.len() && chars[i + 1] == '"' {
+                    i += 2;
+                    continue;
+                }
+                in_double_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_bracket_quote {
+            if ch == ']' {
+                if i + 1 < chars.len() && chars[i + 1] == ']' {
+                    i += 2;
+                    continue;
+                }
+                in_bracket_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        match ch {
+            '\'' => {
+                in_single_quote = true;
+                i += 1;
+            }
+            '"' => {
+                in_double_quote = true;
+                i += 1;
+            }
+            '[' => {
+                in_bracket_quote = true;
+                i += 1;
+            }
             '?' => {
                 count += 1;
                 i += 1;
@@ -446,7 +555,7 @@ fn count_placeholders(clause: &str) -> usize {
     count
 }
 
-fn render_filter_expression(
+pub fn render_filter_expression(
     dialect: DatabaseBackend,
     filter: &FilterExpression,
     next_index: &mut usize,
@@ -664,6 +773,9 @@ where
         F: DatabaseFilter + Clone + Send + Sync + 'static,
     {
         if filter.requires_in_memory_filtering(B::DIALECT) {
+            let (conds, values) = filter.to_sql_prefilter_conditions(B::DIALECT);
+            self.where_clauses.extend(conds);
+            self.values.extend(values);
             let filter = filter.clone();
             self.entity_matchers
                 .push(Arc::new(move |entity| filter.matches_entity(entity)));
@@ -926,10 +1038,24 @@ where
         P: PoolProvider<B> + ?Sized,
     {
         if self.requires_in_memory_filtering() {
-            let total = self.fetch_unpaged_filtered(provider).await?.len() as i64;
+            let nodes = self.fetch_unpaged_filtered(provider).await?;
+            let total = nodes.len() as i64;
             let offset = self.page.as_ref().map(|p| p.offset()).unwrap_or(0) as usize;
-            let nodes = self.fetch_all(provider).await?;
-            let edges = nodes
+            let limit = self
+                .page
+                .as_ref()
+                .and_then(|page| page.limit())
+                .map(|limit| limit.max(0) as usize);
+            let page_nodes = if offset >= nodes.len() {
+                Vec::new()
+            } else {
+                let iter = nodes.into_iter().skip(offset);
+                match limit {
+                    Some(limit) => iter.take(limit).collect(),
+                    None => iter.collect(),
+                }
+            };
+            let edges = page_nodes
                 .into_iter()
                 .enumerate()
                 .map(|(index, node)| Edge {
@@ -949,9 +1075,28 @@ where
                 edges,
             });
         }
-        let total = self.count(provider).await?;
         let offset = self.page.as_ref().map(|p| p.offset()).unwrap_or(0) as usize;
-        let nodes = self.fetch_all(provider).await?;
+        let mut count_query = self.build_select_query();
+        count_query.count_only = true;
+        count_query.pagination = None;
+        count_query.sorts.clear();
+        let count_rendered = render_select_query(B::DIALECT, &count_query);
+        let row_rendered = render_select_query(B::DIALECT, &self.build_select_query());
+        let (count_rows, rows) = B::fetch_rows_pair_with_auth(
+            provider.pool(),
+            &count_rendered.sql,
+            &count_rendered.values,
+            &row_rendered.sql,
+            &row_rendered.values,
+            None,
+        )
+        .await?;
+        let count_row = count_rows.first().ok_or(sqlx::Error::RowNotFound)?;
+        let total = B::try_get_i64(count_row, "count")?;
+        let nodes = rows
+            .iter()
+            .map(T::from_row)
+            .collect::<Result<Vec<_>, _>>()?;
         let edges = nodes
             .into_iter()
             .enumerate()
@@ -982,13 +1127,26 @@ where
         P: PoolProvider<B> + ?Sized,
     {
         if self.requires_in_memory_filtering() {
-            let total = self
+            let nodes = self
                 .fetch_unpaged_filtered_with_auth(provider, auth)
-                .await?
-                .len() as i64;
+                .await?;
+            let total = nodes.len() as i64;
             let offset = self.page.as_ref().map(|p| p.offset()).unwrap_or(0) as usize;
-            let nodes = self.fetch_all_with_auth(provider, auth).await?;
-            let edges = nodes
+            let limit = self
+                .page
+                .as_ref()
+                .and_then(|page| page.limit())
+                .map(|limit| limit.max(0) as usize);
+            let page_nodes = if offset >= nodes.len() {
+                Vec::new()
+            } else {
+                let iter = nodes.into_iter().skip(offset);
+                match limit {
+                    Some(limit) => iter.take(limit).collect(),
+                    None => iter.collect(),
+                }
+            };
+            let edges = page_nodes
                 .into_iter()
                 .enumerate()
                 .map(|(index, node)| Edge {

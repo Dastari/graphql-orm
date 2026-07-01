@@ -256,28 +256,24 @@ async fn field_policy_callbacks_gate_generated_read_and_write_paths()
 
     policy.allow_read("user.email.read");
     let allowed_read = schema
-        .execute(
-            "query {
-                users(where: { displayName: { eq: \"Visible Name\" } }, orderBy: [{ displayName: ASC }]) {
-                    edges {
-                        node {
-                            principal
-                            displayName
-                            emailAddress
-                        }
-                    }
-                }
-            }",
-        )
+        .execute(format!(
+            "query {{
+                user(id: \"{user_id}\") {{
+                    principal
+                    displayName
+                    emailAddress
+                }}
+            }}"
+        ))
         .await;
     assert!(allowed_read.errors.is_empty(), "{:?}", allowed_read.errors);
     let allowed_json = allowed_read.data.into_json()?;
     assert_eq!(
-        allowed_json["users"]["edges"][0]["node"]["displayName"].as_str(),
+        allowed_json["user"]["displayName"].as_str(),
         Some("Visible Name")
     );
     assert_eq!(
-        allowed_json["users"]["edges"][0]["node"]["emailAddress"].as_str(),
+        allowed_json["user"]["emailAddress"].as_str(),
         Some("user@example.com")
     );
     assert!(!policy.reads().is_empty());

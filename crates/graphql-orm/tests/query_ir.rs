@@ -1,7 +1,7 @@
 use graphql_orm::graphql::orm::{
     DatabaseBackend, DeleteQuery, FilterExpression, PaginationRequest, RenderedQuery, SelectQuery,
-    SortExpression, SpatialPredicate, SqlDialect, SqlValue, render_delete_query,
-    render_select_query,
+    SortExpression, SpatialPredicate, SqlDialect, SqlValue, contains_like_pattern,
+    render_delete_query, render_select_query,
 };
 
 fn sample_select() -> SelectQuery {
@@ -48,6 +48,36 @@ fn postgres_renderer_numbers_placeholders() {
 }
 
 #[test]
+fn placeholder_normalization_skips_quoted_literals() {
+    let rendered = DatabaseBackend::Postgres.normalize_sql("note = '$1?' AND id = ?", 1);
+    assert_eq!(rendered, "note = '$1?' AND id = $1");
+
+    let rendered = DatabaseBackend::Mssql.normalize_sql("[note?] = '@P1' AND [id] = ?", 1);
+    assert_eq!(rendered, "[note?] = '@P1' AND [id] = @P1");
+}
+
+#[test]
+fn pagination_limits_are_clamped() {
+    assert_eq!(
+        DatabaseBackend::Sqlite.render_pagination(Some(-5), -10),
+        " LIMIT 0"
+    );
+    assert_eq!(
+        DatabaseBackend::Postgres.render_pagination(Some(5001), 2),
+        " LIMIT 1000 OFFSET 2"
+    );
+    assert_eq!(
+        DatabaseBackend::Mssql.render_pagination(Some(5001), 2),
+        " OFFSET 2 ROWS FETCH NEXT 1000 ROWS ONLY"
+    );
+}
+
+#[test]
+fn like_patterns_escape_wildcards() {
+    assert_eq!(contains_like_pattern(r"50%_off\sale"), r"%50\%\_off\\sale%");
+}
+
+#[test]
 fn mssql_dialect_quotes_identifiers_and_renders_helpers() {
     let dialect = DatabaseBackend::Mssql;
 
@@ -57,7 +87,7 @@ fn mssql_dialect_quotes_identifiers_and_renders_helpers() {
     assert_eq!(dialect.placeholder(3), "@P3");
     assert_eq!(
         dialect.ci_like("[JobName]", "@P1"),
-        "LOWER([JobName]) LIKE LOWER(@P1)"
+        "LOWER([JobName]) LIKE LOWER(@P1) ESCAPE '\\'"
     );
     assert_eq!(
         dialect.relation_key_cast("[JobId]"),

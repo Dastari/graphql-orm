@@ -153,6 +153,12 @@ let hits = Article::search(&pool, SearchInput {
 Search modes are `Plain`, `Phrase`, `Web`, and `Prefix`. Results order by relevance descending, then
 the entity default sort where native SQL can apply it.
 
+Postgres and SQLite FTS5 search push the match expression, score, count, limit, and offset into SQL
+when the native structures exist. Authenticated PostgreSQL requests that include `DbAuthContext`
+still use native search inside the same transaction-local auth context used by normal resolvers, so
+database RLS policies and indexed search compose. SQLite can fall back to the deterministic Rust
+search scorer when FTS structures are unavailable and fallback is enabled.
+
 ## Relations
 
 Relation fields should generally be skipped from `SimpleObject` and exposed by `GraphQLRelations`:
@@ -231,6 +237,12 @@ Selected relation fields are loaded in batches by relation layer. A query shaped
 This applies to single-key and composite-key relations. Relation-level `where`, `orderBy`, and
 `page` arguments use the DataLoader batching path for supported scalar key parts.
 
+Paged relation connections are pushed into SQL with `ROW_NUMBER() OVER (PARTITION BY ...)` and a
+grouped count on SQLite, Postgres, and MSSQL-capable relation reads. This avoids loading every child
+row for every selected parent when a nested field asks for the first page of a large relation. When a
+relation has no page argument, the loader keeps the simpler batched query and groups the returned
+rows in memory.
+
 Nullable key semantics are explicit: if any source key part is `NULL`, that parent relation is not
 loaded and resolves to `None` or an empty connection. SQL `NULL = NULL` matching is not inferred.
 
@@ -304,9 +316,10 @@ writes bind the GeoJSON value and wrap it with `ST_SetSRID(ST_GeomFromGeoJSON(..
 GeoJSON or invalid geometry is reported by PostGIS.
 
 On SQLite, generated migrations use `TEXT`, writes validate and store canonical GeoJSON, and spatial
-predicates run in memory after rows are loaded. This gives projects a portable spatial field API
-without requiring a SQLite extension, but it is not spatial-indexed and should not be treated as an
-efficient large-table geospatial query engine.
+predicates run in memory after rows are loaded. SQL-safe predicates in the same `where` input are
+still pushed into SQL before the exact spatial check runs. This gives projects a portable spatial
+field API without requiring a SQLite extension, but it is not spatial-indexed and should not be
+treated as an efficient large-table geospatial query engine.
 
 Spatial filters use `SpatialFilter`:
 

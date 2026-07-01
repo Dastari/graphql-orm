@@ -212,11 +212,12 @@ pub struct RelativeDateInput {
 }
 
 impl RelativeDateInput {
-    pub fn to_sql_expr(&self) -> String {
-        if cfg!(feature = "postgres") {
-            format!("CURRENT_DATE + INTERVAL '{} days'", self.days)
+    pub fn to_sql_expr(&self, backend: crate::graphql::orm::DatabaseBackend) -> String {
+        let days = i64::from(self.days);
+        if days < 0 {
+            crate::graphql::orm::SqlDialect::days_ago_expr(&backend, days.abs())
         } else {
-            format!("date('now', '+{} days')", self.days)
+            crate::graphql::orm::SqlDialect::days_ahead_expr(&backend, days)
         }
     }
 }

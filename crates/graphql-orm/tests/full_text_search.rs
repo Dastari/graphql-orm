@@ -165,6 +165,28 @@ async fn sqlite_managed_fts_is_maintained_by_orm_writes() -> Result<(), Box<dyn 
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].entity.id, created.id);
 
+    SearchArticle::insert(
+        &db,
+        CreateSearchArticleInput {
+            title: "Melbourne Markets".to_string(),
+            body: Some("Food and events".to_string()),
+            published: true,
+        },
+    )
+    .await?;
+    let limited_hits = SearchArticle::search(
+        db.pool(),
+        SearchInput {
+            query: "melbourne".to_string(),
+            mode: Some(SearchMode::Plain),
+            min_score: None,
+        },
+    )
+    .limit(1)
+    .fetch_all()
+    .await?;
+    assert_eq!(limited_hits.len(), 1);
+
     SearchArticle::rebuild_search_index(&db).await?;
     let rebuilt_hits = SearchArticle::search(
         db.pool(),

@@ -2,7 +2,7 @@ use super::core::{SearchIndexDef, SearchWeight, SqlValue};
 use super::dialect::{DatabaseBackend, SqlDialect};
 use super::query::{
     DatabaseEntity, DatabaseFilter, DatabaseOrderBy, DatabaseSearchSchema, EntityQuery, FromSqlRow,
-    PageInput, PoolProvider,
+    PageInput, PoolProvider, count_placeholders,
 };
 use super::{DbAuthContext, OrmBackend, WriteBackend};
 use crate::graphql::filters::{SearchInput, SearchMode};
@@ -271,48 +271,15 @@ pub fn postgres_prefix_query(input: &SearchInput, min_token_len: usize) -> Strin
         .join(" & ")
 }
 
-fn count_placeholders(clause: &str) -> usize {
-    let chars = clause.chars().collect::<Vec<_>>();
-    let mut count = 0usize;
-    let mut i = 0usize;
-    while i < chars.len() {
-        match chars[i] {
-            '?' => {
-                count += 1;
-                i += 1;
-            }
-            '$' => {
-                let mut j = i + 1;
-                let mut saw_digit = false;
-                while j < chars.len() && chars[j].is_ascii_digit() {
-                    saw_digit = true;
-                    j += 1;
-                }
-                if saw_digit {
-                    count += 1;
-                    i = j;
-                } else {
-                    i += 1;
-                }
-            }
-            '@' if i + 1 < chars.len() && chars[i + 1].eq_ignore_ascii_case(&'p') => {
-                let mut j = i + 2;
-                let mut saw_digit = false;
-                while j < chars.len() && chars[j].is_ascii_digit() {
-                    saw_digit = true;
-                    j += 1;
-                }
-                if saw_digit {
-                    count += 1;
-                    i = j;
-                } else {
-                    i += 1;
-                }
-            }
-            _ => i += 1,
-        }
+fn native_search_can_fallback(index: &SearchIndexDef, error: &sqlx::Error) -> bool {
+    if !index.fallback_enabled {
+        return false;
     }
-    count
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("no such table")
+        || message.contains("no such module")
+        || message.contains("does not exist")
+        || message.contains("undefined table")
 }
 
 /// Builder returned by generated `Entity::search(...)` helpers.
@@ -410,22 +377,24 @@ where
         hits
     }
 
-    async fn try_fetch_native(&self) -> Option<Result<Vec<SearchHit<T>>, sqlx::Error>> {
+    async fn try_fetch_native(
+        &self,
+        auth: Option<&DbAuthContext>,
+    ) -> Option<Result<Vec<SearchHit<T>>, sqlx::Error>> {
         let index = T::search_index()?;
         if !index.enabled || self.query.requires_in_memory_filtering() {
             return None;
         }
 
         let rendered = match B::DIALECT {
-            DatabaseBackend::Postgres => self.render_postgres_search(index),
-            DatabaseBackend::Sqlite => self.render_sqlite_fts_search(index),
+            DatabaseBackend::Postgres => self.render_postgres_search(index, false),
+            DatabaseBackend::Sqlite => self.render_sqlite_fts_search(index, false),
             DatabaseBackend::Mysql | DatabaseBackend::Mssql => return None,
         };
 
-        let rows = match B::fetch_rows(self.pool, &rendered.0, &rendered.1).await {
+        let rows = match B::fetch_rows_with_auth(self.pool, &rendered.0, &rendered.1, auth).await {
             Ok(rows) => rows,
-            Err(error) if index.fallback_enabled => {
-                let _ = error;
+            Err(error) if native_search_can_fallback(index, &error) => {
                 return None;
             }
             Err(error) => return Some(Err(error)),
@@ -442,7 +411,95 @@ where
         )
     }
 
-    fn render_postgres_search(&self, index: &SearchIndexDef) -> (String, Vec<SqlValue>) {
+    async fn try_fetch_native_connection(
+        &self,
+        auth: Option<&DbAuthContext>,
+    ) -> Option<Result<SearchConnection<T>, sqlx::Error>> {
+        let index = T::search_index()?;
+        if !index.enabled || self.query.requires_in_memory_filtering() {
+            return None;
+        }
+
+        let (count_sql, count_values, row_sql, row_values) = match B::DIALECT {
+            DatabaseBackend::Postgres => {
+                let (count_sql, count_values) = self.render_postgres_search(index, true);
+                let (row_sql, row_values) = self.render_postgres_search(index, false);
+                (count_sql, count_values, row_sql, row_values)
+            }
+            DatabaseBackend::Sqlite => {
+                let (count_sql, count_values) = self.render_sqlite_fts_search(index, true);
+                let (row_sql, row_values) = self.render_sqlite_fts_search(index, false);
+                (count_sql, count_values, row_sql, row_values)
+            }
+            DatabaseBackend::Mysql | DatabaseBackend::Mssql => return None,
+        };
+
+        let (count_rows, rows) = match B::fetch_rows_pair_with_auth(
+            self.pool,
+            &count_sql,
+            &count_values,
+            &row_sql,
+            &row_values,
+            auth,
+        )
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) if native_search_can_fallback(index, &error) => return None,
+            Err(error) => return Some(Err(error)),
+        };
+
+        let total = match count_rows.first() {
+            Some(row) => match B::try_get_i64(row, "count") {
+                Ok(total) => total,
+                Err(error) => return Some(Err(error)),
+            },
+            None => 0,
+        };
+        let offset = self
+            .query
+            .page
+            .as_ref()
+            .map(|page| page.offset())
+            .unwrap_or(0) as usize;
+        let edges = match rows
+            .iter()
+            .map(|row| {
+                let entity = T::from_row(row)?;
+                let score = B::try_get_f64(row, "__gom_search_score")?;
+                Ok(SearchHit { score, entity })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()
+        {
+            Ok(hits) => hits
+                .into_iter()
+                .enumerate()
+                .map(|(index, hit)| SearchConnectionEdge {
+                    cursor: encode_cursor((offset + index) as i64),
+                    score: hit.score,
+                    node: hit.entity,
+                })
+                .collect::<Vec<_>>(),
+            Err(error) => return Some(Err(error)),
+        };
+
+        Some(Ok(SearchConnection {
+            page_info: PageInfo {
+                has_next_page: (offset as i64 + edges.len() as i64) < total,
+                has_previous_page: offset > 0,
+                start_cursor: edges.first().map(|edge| edge.cursor.clone()),
+                end_cursor: edges.last().map(|edge| edge.cursor.clone()),
+                total_count: Some(total),
+            },
+            edges,
+        }))
+    }
+
+    fn render_postgres_search(
+        &self,
+        index: &SearchIndexDef,
+        count_only: bool,
+    ) -> (String, Vec<SqlValue>) {
         let mode = self.search.mode.unwrap_or_default();
         let query_text = if mode == SearchMode::Prefix {
             postgres_prefix_query(&self.search, index.min_token_len)
@@ -451,13 +508,21 @@ where
         };
         let function = postgres_tsquery_function(mode);
         let search_table = search_table_name(index.table_name);
+        let projection = if count_only {
+            B::DIALECT.count_projection().to_string()
+        } else {
+            format!(
+                "{}, ts_rank_cd(s.document_vector, q.query) AS __gom_search_score",
+                T::column_names().join(", ")
+            )
+        };
         let mut sql = format!(
-            "SELECT {}, ts_rank_cd(s.document_vector, q.query) AS __gom_search_score \
+            "SELECT {} \
              FROM {} \
              JOIN {} s ON s.entity_pk = {}::text \
              CROSS JOIN {}('{}', ?) q(query) \
              WHERE s.document_vector @@ q.query",
-            T::column_names().join(", "),
+            projection,
             T::TABLE_NAME,
             search_table,
             T::PRIMARY_KEY,
@@ -466,23 +531,40 @@ where
         );
         let mut values = vec![SqlValue::String(query_text)];
         self.append_filter_sql(&mut sql, &mut values);
-        sql.push_str(" ORDER BY __gom_search_score DESC");
-        if !T::DEFAULT_SORT.trim().is_empty() {
-            sql.push_str(", ");
-            sql.push_str(T::DEFAULT_SORT);
+        if !count_only {
+            sql.push_str(" ORDER BY __gom_search_score DESC");
+            if !T::DEFAULT_SORT.trim().is_empty() {
+                sql.push_str(", ");
+                sql.push_str(T::DEFAULT_SORT);
+            }
+            if let Some(page) = &self.query.page {
+                sql.push_str(&B::DIALECT.render_pagination(page.limit(), page.offset()));
+            }
         }
         (sql, values)
     }
 
-    fn render_sqlite_fts_search(&self, index: &SearchIndexDef) -> (String, Vec<SqlValue>) {
+    fn render_sqlite_fts_search(
+        &self,
+        index: &SearchIndexDef,
+        count_only: bool,
+    ) -> (String, Vec<SqlValue>) {
         let fts_table = sqlite_fts_table_name(index.table_name);
+        let projection = if count_only {
+            B::DIALECT.count_projection().to_string()
+        } else {
+            format!(
+                "{}, bm25({}, 1.0, 0.7, 0.4, 0.1, 0.1) * -1.0 AS __gom_search_score",
+                T::column_names().join(", "),
+                fts_table
+            )
+        };
         let mut sql = format!(
-            "SELECT {}, bm25({}, 1.0, 0.7, 0.4, 0.1, 0.1) * -1.0 AS __gom_search_score \
+            "SELECT {} \
              FROM {} \
              JOIN {} ON {}.entity_pk = CAST({} AS TEXT) \
              WHERE {} MATCH ?",
-            T::column_names().join(", "),
-            fts_table,
+            projection,
             T::TABLE_NAME,
             fts_table,
             fts_table,
@@ -494,10 +576,15 @@ where
             index.min_token_len,
         ))];
         self.append_filter_sql(&mut sql, &mut values);
-        sql.push_str(" ORDER BY __gom_search_score DESC");
-        if !T::DEFAULT_SORT.trim().is_empty() {
-            sql.push_str(", ");
-            sql.push_str(T::DEFAULT_SORT);
+        if !count_only {
+            sql.push_str(" ORDER BY __gom_search_score DESC");
+            if !T::DEFAULT_SORT.trim().is_empty() {
+                sql.push_str(", ");
+                sql.push_str(T::DEFAULT_SORT);
+            }
+            if let Some(page) = &self.query.page {
+                sql.push_str(&B::DIALECT.render_pagination(page.limit(), page.offset()));
+            }
         }
         (sql, values)
     }
@@ -517,6 +604,29 @@ where
                     .cloned(),
             );
             value_index += placeholder_count;
+        }
+    }
+
+    fn slice_hits(&self, hits: Vec<SearchHit<T>>) -> Vec<SearchHit<T>> {
+        let offset = self
+            .query
+            .page
+            .as_ref()
+            .map(|page| page.offset())
+            .unwrap_or(0) as usize;
+        let limit = self
+            .query
+            .page
+            .as_ref()
+            .and_then(|page| page.limit())
+            .map(|limit| limit.max(0) as usize);
+        if offset >= hits.len() {
+            return Vec::new();
+        }
+        let iter = hits.into_iter().skip(offset);
+        match limit {
+            Some(limit) => iter.take(limit).collect(),
+            None => iter.collect(),
         }
     }
 
@@ -564,57 +674,75 @@ where
         }
     }
 
-    /// Execute the search and return all matching hits.
+    /// Execute the search and return matching hits.
+    ///
+    /// Native Postgres and SQLite FTS5 strategies apply any configured
+    /// `limit`/`offset` in SQL. Fallback scoring loads candidates, scores them
+    /// in Rust, and then slices the requested page.
     pub async fn fetch_all(self) -> Result<Vec<SearchHit<T>>, sqlx::Error> {
-        if let Some(result) = self.try_fetch_native().await {
+        if let Some(result) = self.try_fetch_native(None).await {
             return result;
         }
         let mut query = self.query.clone();
         query.page = None;
         let entities = query.fetch_all(&PoolRef { pool: self.pool }).await?;
-        Ok(self.score_entities(entities))
+        Ok(self.slice_hits(self.score_entities(entities)))
     }
 
     /// Execute the search with an optional database auth context.
+    ///
+    /// PostgreSQL keeps native search enabled when `auth` is present by running
+    /// the search SQL inside the same transaction-local auth context used by
+    /// generated resolvers.
     pub async fn fetch_all_with_auth(
         self,
         auth: Option<&DbAuthContext>,
     ) -> Result<Vec<SearchHit<T>>, sqlx::Error> {
-        if auth.is_none() {
-            if let Some(result) = self.try_fetch_native().await {
-                return result;
-            }
+        if let Some(result) = self.try_fetch_native(auth).await {
+            return result;
         }
         let mut query = self.query.clone();
         query.page = None;
         let entities = query
             .fetch_all_with_auth(&PoolRef { pool: self.pool }, auth)
             .await?;
-        Ok(self.score_entities(entities))
+        Ok(self.slice_hits(self.score_entities(entities)))
     }
 
     /// Execute the search and return a GraphQL-style connection.
+    ///
+    /// Native strategies run a count query and a page query through the backend
+    /// pair-fetch API. Fallback strategies score once, count the scored hits,
+    /// and slice the requested page in memory.
     pub async fn fetch_connection(self) -> Result<SearchConnection<T>, sqlx::Error> {
-        let hits = self.clone_for_fetch().fetch_all().await?;
+        if let Some(result) = self.try_fetch_native_connection(None).await {
+            return result;
+        }
+        let mut query = self.query.clone();
+        query.page = None;
+        let entities = query.fetch_all(&PoolRef { pool: self.pool }).await?;
+        let hits = self.score_entities(entities);
         Ok(self.paginate_hits(hits))
     }
 
     /// Execute the search with auth and return a GraphQL-style connection.
+    ///
+    /// PostgreSQL database auth context and RLS settings are applied to both
+    /// the count query and row query.
     pub async fn fetch_connection_with_auth(
         self,
         auth: Option<&DbAuthContext>,
     ) -> Result<SearchConnection<T>, sqlx::Error> {
-        let hits = self.clone_for_fetch().fetch_all_with_auth(auth).await?;
-        Ok(self.paginate_hits(hits))
-    }
-
-    fn clone_for_fetch(&self) -> Self {
-        Self {
-            pool: self.pool,
-            search: self.search.clone(),
-            query: self.query.clone(),
-            _where: PhantomData,
+        if let Some(result) = self.try_fetch_native_connection(auth).await {
+            return result;
         }
+        let mut query = self.query.clone();
+        query.page = None;
+        let entities = query
+            .fetch_all_with_auth(&PoolRef { pool: self.pool }, auth)
+            .await?;
+        let hits = self.score_entities(entities);
+        Ok(self.paginate_hits(hits))
     }
 }
 

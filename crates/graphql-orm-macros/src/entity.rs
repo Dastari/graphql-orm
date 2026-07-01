@@ -1395,43 +1395,10 @@ fn generate_entity_impl(
     } else {
         quote! { "?".to_string() }
     };
-    let rebind_loop_body = if backend == BackendKind::Postgres || backend == BackendKind::Mssql {
-        quote! {
-            if chars[i] == '?' {
-                rebound.push_str(&Self::__gom_placeholder(next_index));
-                next_index += 1;
-                i += 1;
-            } else if chars[i] == '$' || (chars[i] == '@' && i + 1 < chars.len() && chars[i + 1].eq_ignore_ascii_case(&'p')) {
-                rebound.push_str(&Self::__gom_placeholder(next_index));
-                next_index += 1;
-                i += if chars[i] == '@' { 2 } else { 1 };
-                while i < chars.len() && chars[i].is_ascii_digit() {
-                    i += 1;
-                }
-            } else {
-                rebound.push(chars[i]);
-                i += 1;
-            }
-        }
-    } else {
-        quote! {
-            if chars[i] == '?' {
-                rebound.push_str(&Self::__gom_placeholder(next_index));
-                next_index += 1;
-                i += 1;
-                while i < chars.len() && chars[i].is_ascii_digit() {
-                    i += 1;
-                }
-            } else {
-                rebound.push(chars[i]);
-                i += 1;
-            }
-        }
-    };
     let ci_like_body = if backend == BackendKind::Postgres {
-        quote! { format!("{} ILIKE {}", column, placeholder) }
+        quote! { format!("{} ILIKE {} ESCAPE '\\'", column, placeholder) }
     } else {
-        quote! { format!("LOWER({}) LIKE LOWER({})", column, placeholder) }
+        quote! { format!("LOWER({}) LIKE LOWER({}) ESCAPE '\\'", column, placeholder) }
     };
     let bool_sql_value_body = if backend == BackendKind::Postgres || backend == BackendKind::Mssql {
         quote! { ::graphql_orm::graphql::orm::SqlValue::Bool(value) }
@@ -2341,6 +2308,16 @@ fn generate_entity_impl(
                 !backend.supports_native_spatial_predicates() && self.__gom_contains_spatial_filter()
             }
 
+            fn to_sql_prefilter_conditions(
+                &self,
+                backend: ::graphql_orm::graphql::orm::DatabaseBackend,
+            ) -> (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>) {
+                if !self.requires_in_memory_filtering(backend) {
+                    return self.to_sql_conditions();
+                }
+                self.__gom_to_sql_prefilter_conditions()
+            }
+
             fn matches_entity(
                 &self,
                 entity: &(dyn ::std::any::Any + Send + Sync),
@@ -2356,6 +2333,23 @@ fn generate_entity_impl(
         }
 
         impl #where_input_name {
+            fn __gom_to_sql_prefilter_conditions(&self) -> (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>) {
+                let mut conditions = Vec::new();
+                let mut values = Vec::new();
+
+                #(#filter_to_sql)*
+
+                if let Some(ref and_filters) = self.and {
+                    for filter in and_filters {
+                        let (sub_conds, sub_vals) = filter.__gom_to_sql_prefilter_conditions();
+                        conditions.extend(sub_conds);
+                        values.extend(sub_vals);
+                    }
+                }
+
+                (conditions, values)
+            }
+
             fn __gom_is_empty(&self) -> bool {
                 #(#filter_is_empty_checks)*
 
@@ -2457,16 +2451,11 @@ fn generate_entity_impl(
             }
 
             pub(crate) fn __gom_rebind_sql(sql: &str, start_index: usize) -> String {
-                let mut rebound = String::with_capacity(sql.len() + 16);
-                let chars: Vec<char> = sql.chars().collect();
-                let mut i = 0usize;
-                let mut next_index = start_index;
-
-                while i < chars.len() {
-                    #rebind_loop_body
-                }
-
-                rebound
+                ::graphql_orm::graphql::orm::SqlDialect::normalize_sql(
+                    &<#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT,
+                    sql,
+                    start_index,
+                )
             }
 
             pub(crate) fn __gom_ci_like(column: &str, placeholder: &str) -> String {
@@ -2616,6 +2605,11 @@ fn generate_filter_field(
     proc_macro2::TokenStream,
 )> {
     let filter_field_name = rust_ident_from_graphql_name(graphql_name, field_name.span());
+    let backend_expr = match backend {
+        BackendKind::Sqlite => quote! { ::graphql_orm::graphql::orm::DatabaseBackend::Sqlite },
+        BackendKind::Postgres => quote! { ::graphql_orm::graphql::orm::DatabaseBackend::Postgres },
+        BackendKind::Mssql => quote! { ::graphql_orm::graphql::orm::DatabaseBackend::Mssql },
+    };
     let is_empty_check = quote! {
         if self.#filter_field_name.is_some() {
             return false;
@@ -2784,17 +2778,23 @@ fn generate_filter_field(
                     if let Some(ref v) = f.contains {
                         let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
                         conditions.push(#struct_name::__gom_ci_like(#db_col, &placeholder));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::String(format!("%{}%", v)));
+                        values.push(::graphql_orm::graphql::orm::SqlValue::String(
+                            ::graphql_orm::graphql::orm::contains_like_pattern(v)
+                        ));
                     }
                     if let Some(ref v) = f.starts_with {
                         let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
                         conditions.push(#struct_name::__gom_ci_like(#db_col, &placeholder));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::String(format!("{}%", v)));
+                        values.push(::graphql_orm::graphql::orm::SqlValue::String(
+                            ::graphql_orm::graphql::orm::starts_with_like_pattern(v)
+                        ));
                     }
                     if let Some(ref v) = f.ends_with {
                         let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
                         conditions.push(#struct_name::__gom_ci_like(#db_col, &placeholder));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::String(format!("%{}", v)));
+                        values.push(::graphql_orm::graphql::orm::SqlValue::String(
+                            ::graphql_orm::graphql::orm::ends_with_like_pattern(v)
+                        ));
                     }
                     if let Some(ref list) = f.in_list {
                         if !list.is_empty() {
@@ -2828,11 +2828,11 @@ fn generate_filter_field(
                             conditions.push(format!("{} IS NOT NULL", #db_col));
                         }
                     }
-                    // Similar/fuzzy matching - use LIKE for candidate filtering
+                    // Similar matching uses LIKE for candidate filtering.
                     // Actual scoring happens in Rust post-processing
                     if let Some(ref sim) = f.similar {
                         // Use a broad LIKE pattern to get candidates
-                        // Fuzzy scoring with strsim happens after fetch
+                        // Generated fallback paths use deterministic substring scoring after fetch.
                         let pattern = ::graphql_orm::graphql::orm::generate_candidate_pattern(&sim.value);
                         let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
                         conditions.push(#struct_name::__gom_ci_like(#db_col, &placeholder));
@@ -3145,11 +3145,11 @@ fn generate_filter_field(
                         ));
                     }
                     if let Some(ref rel) = f.gte_relative {
-                        let expr = rel.to_sql_expr();
+                        let expr = rel.to_sql_expr(#backend_expr);
                         conditions.push(format!("{} >= {}", #db_col, expr));
                     }
                     if let Some(ref rel) = f.lte_relative {
-                        let expr = rel.to_sql_expr();
+                        let expr = rel.to_sql_expr(#backend_expr);
                         conditions.push(format!("{} <= {}", #db_col, expr));
                     }
                 }

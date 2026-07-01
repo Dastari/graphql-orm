@@ -68,6 +68,12 @@ let database = Database::with_row_policy(pool, MyRowPolicy);
 
 For new code that also needs schema policy configuration, prefer the builder plus setter methods or compose your own construction helper.
 
+Field-level write denials have a narrower contract than entity or row denials. For optional create
+fields, a denied write policy drops that field from the generated insert so database defaults or
+`NULL` semantics can apply. For update inputs, a denied field is skipped and the rest of the update
+can continue. Required create fields still fail when denied because generated code cannot synthesize
+a safe value. Entity-level and row-level write denials remain hard errors.
+
 PostgreSQL RLS support is defense in depth, not a replacement for GraphQL authorization. Generated
 resolvers still call `ctx.auth_user()?` and still evaluate configured entity, row, and field
 policies. Keep root field, mutation, and subscription authorization in the GraphQL layer.
@@ -115,6 +121,29 @@ denormalized search document.
 Search resolvers still enforce entity and row policies before returning results. Snippets/highlights
 are intentionally not generated in this pass because denormalized documents can include protected
 source fields.
+
+Postgres and SQLite FTS5 search resolvers push native search, ranking, count, limit, and offset into
+SQL when the native search structures are available. PostgreSQL requests that carry `DbAuthContext`
+still use the native search SQL inside an auth-context transaction, so database RLS policies compose
+with indexed search. If native SQLite FTS structures are missing and fallback is enabled, the runtime
+can fall back to deterministic Rust scoring; other native search errors are returned instead of being
+silently swallowed.
+
+## Pagination
+
+Generated connections use offset-style cursors. Cursors are intentionally simple and are not stable
+under concurrent inserts or deletes ahead of the current offset. Native SQL paths request count and
+page rows through the same backend pair-fetch API so the result is taken from a consistent execution
+context where the backend supports it.
+
+`PageInput` clamps negative offsets to `0` and clamps explicit limits into `0..=1000`. Omitting a
+limit leaves the query unbounded unless the application or resolver layer supplies one, while an
+explicit negative limit becomes `0` rather than an unbounded backend-specific value.
+
+When a query includes predicates that must run in Rust, such as SQLite spatial topology checks, the
+runtime now pushes the SQL-safe prefix of the filter first and applies only the residual predicate in
+memory. The in-memory connection path fetches the filtered candidate set once, counts it, then slices
+the requested page.
 
 ## Subscriptions
 

@@ -103,6 +103,17 @@
 //! backfill existing data automatically. Run the generated
 //! `Entity::rebuild_search_index(&database)` helper after adding or changing a
 //! search index on an existing table.
+//! Native PostgreSQL and SQLite FTS5 search paths push score, count, limit, and
+//! offset into SQL. PostgreSQL requests that carry a database auth context still
+//! use native search inside the same transaction-local context used for RLS.
+//!
+//! # Pagination And Relation Loading
+//!
+//! Generated connections use offset-style cursors. [`crate::graphql::orm::PageInput`]
+//! clamps negative offsets to `0` and explicit limits into `0..=1000` before SQL
+//! rendering. Paged relation batches use backend window functions where
+//! available so nested relation pages do not need to load every child row for
+//! every parent.
 //!
 //! # Generated Entity Example
 //!
