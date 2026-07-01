@@ -9,6 +9,7 @@ use crate::graphql::filters::{SearchInput, SearchMode};
 use crate::graphql::pagination::{PageInfo, encode_cursor};
 use std::marker::PhantomData;
 
+/// One weighted text fragment inside a generated search document.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchDocumentChunk {
     pub source: SearchDocumentSource,
@@ -16,17 +17,19 @@ pub struct SearchDocumentChunk {
     pub text: String,
 }
 
+/// Origin of a generated search document chunk.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SearchDocumentSource {
-    Field {
-        field_name: &'static str,
-    },
+    /// Text came from a local entity field.
+    Field { field_name: &'static str },
+    /// Text came from a configured relation field.
     RelationField {
         relation_field: &'static str,
         target_field: &'static str,
     },
 }
 
+/// Denormalized search document for one entity row.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchDocument {
     pub entity_pk: String,
@@ -35,6 +38,7 @@ pub struct SearchDocument {
 }
 
 impl SearchDocument {
+    /// Concatenate all non-empty chunks into one document string.
     pub fn document_text(&self) -> String {
         self.chunks
             .iter()
@@ -44,6 +48,7 @@ impl SearchDocument {
             .join(" ")
     }
 
+    /// Concatenate non-empty chunks that use the requested search weight.
     pub fn text_for_weight(&self, weight: SearchWeight) -> String {
         self.chunks
             .iter()
@@ -55,12 +60,14 @@ impl SearchDocument {
     }
 }
 
+/// One scored search result returned by generated Rust search helpers.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchHit<T> {
     pub score: f64,
     pub entity: T,
 }
 
+/// GraphQL connection edge for generated search resolvers.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchConnectionEdge<T> {
     pub cursor: String,
@@ -68,15 +75,19 @@ pub struct SearchConnectionEdge<T> {
     pub node: T,
 }
 
+/// GraphQL-style connection returned by generated search resolvers.
 #[derive(Clone, Debug)]
 pub struct SearchConnection<T> {
     pub edges: Vec<SearchConnectionEdge<T>>,
     pub page_info: PageInfo,
 }
 
+/// Options for explicit search document rebuilds.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchRebuildOptions {
+    /// Number of entity rows processed per rebuild batch.
     pub batch_size: usize,
+    /// Whether rebuilds should delete search rows without matching entity rows.
     pub delete_orphans: bool,
 }
 
@@ -89,20 +100,27 @@ impl Default for SearchRebuildOptions {
     }
 }
 
+/// Trait implemented by generated entities that have full-text search metadata.
 pub trait SearchableEntity: DatabaseSearchSchema {
+    /// Stable text key used in denormalized search tables.
     fn search_key(&self) -> String;
+    /// JSON representation of the entity key for rebuild and diagnostics.
     fn search_key_json(&self) -> serde_json::Value;
+    /// Build the current denormalized search document for this entity value.
     fn search_document(&self) -> SearchDocument;
 }
 
+/// Return the managed PostgreSQL/fallback search table name for a base table.
 pub fn search_table_name(table_name: &str) -> String {
     format!("__graphql_orm_search_{}", sanitize_search_name(table_name))
 }
 
+/// Return the managed SQLite FTS5 table name for a base table.
 pub fn sqlite_fts_table_name(table_name: &str) -> String {
     format!("__graphql_orm_fts_{}", sanitize_search_name(table_name))
 }
 
+/// Return the managed fallback token table name for a base table.
 pub fn search_token_table_name(table_name: &str) -> String {
     format!(
         "__graphql_orm_search_token_{}",
@@ -110,10 +128,12 @@ pub fn search_token_table_name(table_name: &str) -> String {
     )
 }
 
+/// Name of the shared search metadata table.
 pub fn search_metadata_table_name() -> &'static str {
     "__graphql_orm_search_metadata"
 }
 
+/// Sanitize a table name for use in managed search helper table names.
 pub fn sanitize_search_name(value: &str) -> String {
     value
         .chars()
@@ -127,6 +147,7 @@ pub fn sanitize_search_name(value: &str) -> String {
         .collect()
 }
 
+/// Normalize text for deterministic fallback search matching.
 pub fn normalize_search_text(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut last_was_space = true;
@@ -142,6 +163,7 @@ pub fn normalize_search_text(value: &str) -> String {
     out.trim().to_string()
 }
 
+/// Tokenize text using the fallback tokenizer and minimum token length.
 pub fn tokenize_search_text(value: &str, min_token_len: usize) -> Vec<String> {
     normalize_search_text(value)
         .split_whitespace()
@@ -154,6 +176,7 @@ fn query_tokens(input: &SearchInput, min_token_len: usize) -> Vec<String> {
     tokenize_search_text(&input.query, min_token_len)
 }
 
+/// Compute a deterministic fallback score for a query against one search document.
 pub fn fallback_score_document(
     input: &SearchInput,
     document: &SearchDocument,
@@ -214,6 +237,7 @@ pub fn fallback_score_document(
     }
 }
 
+/// Convert a search input into a SQLite FTS5 query string.
 pub fn sqlite_fts_query(input: &SearchInput, min_token_len: usize) -> String {
     match input.mode.unwrap_or_default() {
         SearchMode::Phrase => format!("\"{}\"", input.query.replace('"', "\"\"")),
@@ -228,6 +252,7 @@ pub fn sqlite_fts_query(input: &SearchInput, min_token_len: usize) -> String {
     }
 }
 
+/// Return the PostgreSQL tsquery function used for a search mode.
 pub fn postgres_tsquery_function(mode: SearchMode) -> &'static str {
     match mode {
         SearchMode::Plain => "plainto_tsquery",
@@ -237,6 +262,7 @@ pub fn postgres_tsquery_function(mode: SearchMode) -> &'static str {
     }
 }
 
+/// Convert a prefix-mode search input into a PostgreSQL `to_tsquery` string.
 pub fn postgres_prefix_query(input: &SearchInput, min_token_len: usize) -> String {
     tokenize_search_text(&input.query, min_token_len)
         .into_iter()
@@ -289,6 +315,7 @@ fn count_placeholders(clause: &str) -> usize {
     count
 }
 
+/// Builder returned by generated `Entity::search(...)` helpers.
 pub struct EntitySearchQuery<'a, T, W, B: OrmBackend> {
     pool: &'a B::Pool,
     search: SearchInput,
@@ -301,6 +328,7 @@ where
     B: OrmBackend,
     T: DatabaseEntity + SearchableEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
 {
+    /// Create a search query builder for an entity, pool, and search input.
     pub fn new(pool: &'a B::Pool, search: SearchInput) -> Self {
         Self {
             pool,
@@ -310,6 +338,7 @@ where
         }
     }
 
+    /// Add a generated entity `where` filter to the search.
     pub fn filter(mut self, filter: W) -> Self
     where
         W: DatabaseFilter + Clone + Send + Sync + 'static,
@@ -318,6 +347,7 @@ where
         self
     }
 
+    /// Add a generated order-by expression.
     pub fn order_by<O>(mut self, order: O) -> Self
     where
         O: DatabaseOrderBy,
@@ -326,11 +356,13 @@ where
         self
     }
 
+    /// Apply the entity default sort after relevance where supported.
     pub fn default_order(mut self) -> Self {
         self.query = self.query.default_order();
         self
     }
 
+    /// Limit the number of hits returned.
     pub fn limit(mut self, limit: i64) -> Self {
         let mut page = self.query.page.unwrap_or_default();
         page.limit = Some(limit);
@@ -338,6 +370,7 @@ where
         self
     }
 
+    /// Offset the returned hits.
     pub fn offset(mut self, offset: i64) -> Self {
         let mut page = self.query.page.unwrap_or_default();
         page.offset = Some(offset);
@@ -345,6 +378,7 @@ where
         self
     }
 
+    /// Apply a generated page input.
     pub fn paginate(mut self, page: PageInput) -> Self {
         self.query = self.query.paginate(&page);
         self
@@ -530,6 +564,7 @@ where
         }
     }
 
+    /// Execute the search and return all matching hits.
     pub async fn fetch_all(self) -> Result<Vec<SearchHit<T>>, sqlx::Error> {
         if let Some(result) = self.try_fetch_native().await {
             return result;
@@ -540,6 +575,7 @@ where
         Ok(self.score_entities(entities))
     }
 
+    /// Execute the search with an optional database auth context.
     pub async fn fetch_all_with_auth(
         self,
         auth: Option<&DbAuthContext>,
@@ -557,11 +593,13 @@ where
         Ok(self.score_entities(entities))
     }
 
+    /// Execute the search and return a GraphQL-style connection.
     pub async fn fetch_connection(self) -> Result<SearchConnection<T>, sqlx::Error> {
         let hits = self.clone_for_fetch().fetch_all().await?;
         Ok(self.paginate_hits(hits))
     }
 
+    /// Execute the search with auth and return a GraphQL-style connection.
     pub async fn fetch_connection_with_auth(
         self,
         auth: Option<&DbAuthContext>,
@@ -590,6 +628,7 @@ impl<B: OrmBackend> PoolProvider<B> for PoolRef<'_, B> {
     }
 }
 
+/// Upsert a generated search document inside an existing write transaction.
 pub async fn upsert_search_document_on<B>(
     executor: &mut <B::Database as sqlx::Database>::Connection,
     index: &SearchIndexDef,
@@ -689,6 +728,7 @@ where
     Ok(())
 }
 
+/// Delete a generated search document inside an existing write transaction.
 pub async fn delete_search_document_on<B>(
     executor: &mut <B::Database as sqlx::Database>::Connection,
     index: &SearchIndexDef,

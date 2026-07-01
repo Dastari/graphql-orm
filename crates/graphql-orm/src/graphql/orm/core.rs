@@ -1210,11 +1210,16 @@ pub enum BackupValueKind {
     Bytes,
 }
 
+/// Relative importance for a field inside a denormalized search document.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SearchWeight {
+    /// Highest importance.
     A,
+    /// High importance.
     B,
+    /// Medium importance.
     C,
+    /// Lowest importance.
     D,
 }
 
@@ -1247,18 +1252,25 @@ impl SearchWeight {
     }
 }
 
+/// Whether a search index should use a backend-native implementation or fallback matching.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SearchBackendStrategy {
     Native,
     Fallback,
 }
 
+/// Physical search storage strategy selected for a generated entity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SearchIndexStrategy {
+    /// PostgreSQL shadow table with `tsvector` and a GIN index.
     PostgresTsvector,
+    /// SQLite FTS5 virtual table.
     SqliteFts5,
+    /// Portable token/document table fallback.
     FallbackTable,
+    /// Reserved for future MySQL `FULLTEXT` support.
     MysqlFullText,
+    /// Reserved for future SQL Server full-text catalog support.
     MssqlFullText,
 }
 
@@ -1274,43 +1286,71 @@ impl SearchIndexStrategy {
     }
 }
 
+/// Search metadata for one local persisted text field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SearchFieldDef {
+    /// Rust field name on the entity.
     pub field_name: &'static str,
+    /// Database column name used for writes and schema metadata.
     pub column_name: &'static str,
+    /// Field weight inside the search document.
     pub weight: SearchWeight,
+    /// Optional logical label for diagnostics.
     pub alias: Option<&'static str>,
+    /// Optional policy key required for read-policy-protected source fields.
     pub policy: Option<&'static str>,
 }
 
+/// Search metadata for related fields copied into a parent entity search document.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SearchRelationFieldDef {
+    /// Rust relation field on the source entity.
     pub relation_field: &'static str,
+    /// Target entity type name.
     pub target_type: &'static str,
+    /// Target Rust field names included in the document.
     pub fields: &'static [&'static str],
+    /// Weight assigned to all copied target fields.
     pub weight: SearchWeight,
+    /// Maximum related rows included for multi-value relations.
     pub max_items: usize,
+    /// Optional policy key required for protected related fields.
     pub policy: Option<&'static str>,
 }
 
+/// Entity-level full-text search definition emitted by generated code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SearchIndexDef {
+    /// Rust entity type name.
     pub entity_name: &'static str,
+    /// Database table name for the searched entity.
     pub table_name: &'static str,
+    /// Primary-key column used to join search rows back to entities.
     pub primary_key: &'static str,
+    /// Generated physical search index or table name.
     pub index_name: &'static str,
+    /// Backend strategy for physical search storage.
     pub strategy: SearchIndexStrategy,
+    /// Whether search storage should be created and queried.
     pub enabled: bool,
+    /// Backend search language/config, such as PostgreSQL `english`.
     pub language: &'static str,
+    /// SQLite FTS tokenizer, such as `unicode61`.
     pub tokenizer: &'static str,
+    /// Minimum token length used by fallback tokenization.
     pub min_token_len: usize,
+    /// Whether runtime fallback scoring may be used when native search fails.
     pub fallback_enabled: bool,
+    /// Local searchable fields.
     pub fields: &'static [SearchFieldDef],
+    /// Related fields copied into denormalized documents.
     pub relations: &'static [SearchRelationFieldDef],
 }
 
+/// Logical spatial storage kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SpatialKind {
+    /// OGC/PostGIS geometry semantics.
     Geometry,
 }
 
@@ -1322,6 +1362,7 @@ impl SpatialKind {
     }
 }
 
+/// Supported GeoJSON/PostGIS geometry type declarations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SpatialGeometryType {
     Geometry,
@@ -1363,10 +1404,14 @@ impl SpatialGeometryType {
     }
 }
 
+/// Spatial column metadata used by schema planning and generated SQL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SpatialColumnDef {
+    /// Spatial kind. Only geometry is currently supported.
     pub kind: SpatialKind,
+    /// Declared geometry type.
     pub geometry_type: SpatialGeometryType,
+    /// Spatial reference identifier. Defaults to 4326 in generated metadata.
     pub srid: i32,
 }
 
@@ -1389,9 +1434,12 @@ impl SpatialColumnDef {
     }
 }
 
+/// Optional physical index method for generated index metadata.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IndexMethod {
+    /// Backend default index method.
     Default,
+    /// PostgreSQL GiST index method, used for PostGIS spatial indexes.
     Gist,
 }
 
@@ -1584,6 +1632,7 @@ pub struct SearchRelationFieldModel {
     pub policy: Option<String>,
 }
 
+/// Search index representation in a structured schema model.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchIndexModel {
     pub name: String,

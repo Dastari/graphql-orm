@@ -53,6 +53,57 @@
 //! apply schema changes. Use `database.schema()` for explicit validation,
 //! planning, and migration application.
 //!
+//! # Spatial Fields
+//!
+//! PostgreSQL and SQLite entities can expose spatial values as GeoJSON through
+//! `serde_json::Value` fields. PostgreSQL stores those fields as PostGIS
+//! `geometry(<type>, <srid>)` columns and can create GiST spatial indexes.
+//! SQLite stores canonical GeoJSON in `TEXT` columns and evaluates spatial
+//! predicates in Rust, which keeps the entity API portable at the cost of
+//! large-table query efficiency.
+//!
+//! ```ignore
+//! #[graphql_orm(spatial(kind = "geometry", geometry_type = "Point", srid = 4326, index = true))]
+//! #[filterable(type = "spatial")]
+//! pub location: serde_json::Value;
+//! ```
+//!
+//! Spatial filters support `equals`, `disjoint`, `intersects`, `touches`,
+//! `crosses`, `within`, `contains`, `overlaps`, and `is_null`.
+//!
+//! # Full-Text Search
+//!
+//! Text fields can be marked searchable. Generated operations then expose a
+//! backend-neutral search resolver and Rust query helper. PostgreSQL uses
+//! managed `tsvector` search tables and GIN indexes. SQLite uses FTS5 where
+//! available, with fallback scoring available through the runtime search
+//! document path.
+//!
+//! ```ignore
+//! #[graphql_orm(search(index = true, language = "english"))]
+//! pub struct Article {
+//!     #[primary_key]
+//!     pub id: uuid::Uuid,
+//!
+//!     #[graphql_orm(searchable(weight = "A"))]
+//!     pub title: String,
+//! }
+//!
+//! let hits = Article::search(&pool, SearchInput {
+//!     query: "melbourne park".to_string(),
+//!     mode: Some(SearchMode::Web),
+//!     min_score: None,
+//! })
+//! .limit(20)
+//! .fetch_all()
+//! .await?;
+//! ```
+//!
+//! Managed migrations create search tables and indexes, but they do not
+//! backfill existing data automatically. Run the generated
+//! `Entity::rebuild_search_index(&database)` helper after adding or changing a
+//! search index on an existing table.
+//!
 //! # Generated Entity Example
 //!
 //! ```ignore

@@ -14,10 +14,15 @@ pub struct SimilarityInput {
 #[derive(
     async_graphql::Enum, serde::Serialize, serde::Deserialize, Copy, Clone, Debug, Eq, PartialEq,
 )]
+/// Full-text search query interpretation used by generated search resolvers.
 pub enum SearchMode {
+    /// Tokenize the query as plain words and require backend-default term matching.
     Plain,
+    /// Treat the query as a phrase where the backend supports phrase search.
     Phrase,
+    /// Use web-search style syntax where the backend supports it.
     Web,
+    /// Match sanitized query tokens as prefixes.
     Prefix,
 }
 
@@ -36,9 +41,13 @@ impl Default for SearchMode {
 )]
 #[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
 #[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
+/// Input accepted by generated per-entity full-text search resolvers.
 pub struct SearchInput {
+    /// User-provided search text.
     pub query: String,
+    /// Optional query mode. Defaults to [`SearchMode::Plain`].
     pub mode: Option<SearchMode>,
+    /// Optional minimum relevance score applied before results are returned.
     #[cfg_attr(feature = "field-case-lower", graphql(name = "minscore"))]
     #[cfg_attr(feature = "field-case-upper", graphql(name = "MINSCORE"))]
     pub min_score: Option<f64>,
@@ -107,15 +116,25 @@ pub struct StringFilter {
 )]
 #[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
 #[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
+/// Spatial predicate filter for GeoJSON geometry fields.
 pub struct SpatialFilter {
+    /// Topological equality predicate.
     pub equals: Option<async_graphql::Json<serde_json::Value>>,
+    /// Topological disjoint predicate.
     pub disjoint: Option<async_graphql::Json<serde_json::Value>>,
+    /// Topological intersection predicate.
     pub intersects: Option<async_graphql::Json<serde_json::Value>>,
+    /// Topological touches predicate.
     pub touches: Option<async_graphql::Json<serde_json::Value>>,
+    /// Topological crosses predicate.
     pub crosses: Option<async_graphql::Json<serde_json::Value>>,
+    /// Topological within predicate.
     pub within: Option<async_graphql::Json<serde_json::Value>>,
+    /// Topological contains predicate.
     pub contains: Option<async_graphql::Json<serde_json::Value>>,
+    /// Topological overlaps predicate.
     pub overlaps: Option<async_graphql::Json<serde_json::Value>>,
+    /// Null check. When set, no geometry value is bound for this predicate.
     #[cfg_attr(feature = "field-case-lower", graphql(name = "isnull"))]
     #[cfg_attr(feature = "field-case-upper", graphql(name = "ISNULL"))]
     pub is_null: Option<bool>,

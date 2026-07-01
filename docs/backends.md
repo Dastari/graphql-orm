@@ -7,7 +7,7 @@ database schema. Schema ownership and migration behavior are controlled by runti
 ## Features
 
 ```toml
-graphql-orm = { version = "0.2.13", default-features = false, features = ["sqlite"] }
+graphql-orm = { version = "0.2.14", default-features = false, features = ["sqlite"] }
 ```
 
 Available backend features:
@@ -165,7 +165,7 @@ Example:
 
 ```toml
 graphql-orm = {
-  version = "0.2.13",
+  version = "0.2.14",
   default-features = false,
   features = [
     "mssql",

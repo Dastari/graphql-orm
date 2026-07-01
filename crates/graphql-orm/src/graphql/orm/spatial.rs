@@ -64,6 +64,7 @@ fn value_to_geo_types(value: &serde_json::Value) -> Result<geo_types::Geometry<f
     geometry_to_geo_types(parse_geojson_geometry(value)?)
 }
 
+/// Validate that a JSON value is a GeoJSON geometry matching the declared spatial column.
 pub fn validate_geojson_value(
     value: &serde_json::Value,
     spatial: SpatialColumnDef,
@@ -72,6 +73,7 @@ pub fn validate_geojson_value(
     ensure_geometry_type(&geometry, spatial)
 }
 
+/// Validate and convert a GeoJSON geometry into the SQL value used by SQLite fallback storage.
 pub fn canonical_geojson_sql_value(
     value: &serde_json::Value,
     spatial: SpatialColumnDef,
@@ -80,6 +82,7 @@ pub fn canonical_geojson_sql_value(
     Ok(super::core::SqlValue::Json(value.clone()))
 }
 
+/// Evaluate one topological spatial predicate against two GeoJSON geometries.
 pub fn spatial_predicate_matches(
     predicate: SpatialPredicate,
     left: &serde_json::Value,
@@ -109,6 +112,7 @@ fn spatial_filter_predicate(
     spatial_predicate_matches(predicate, stored, &input.0)
 }
 
+/// Evaluate a generated spatial filter against an optional stored GeoJSON value.
 pub fn spatial_filter_matches_value(
     stored: Option<&serde_json::Value>,
     filter: &SpatialFilter,
@@ -209,6 +213,7 @@ pub fn spatial_filter_matches_value(
     Ok(true)
 }
 
+/// Evaluate a string filter in memory for fallback query paths.
 pub fn string_filter_matches(
     value: Option<&str>,
     filter: &crate::graphql::filters::StringFilter,
@@ -292,6 +297,7 @@ pub fn string_filter_matches(
     true
 }
 
+/// Evaluate an integer filter in memory for fallback query paths.
 pub fn int_filter_matches(value: Option<i64>, filter: &crate::graphql::filters::IntFilter) -> bool {
     if let Some(is_null) = filter.is_null {
         if value.is_none() != is_null {
@@ -345,6 +351,7 @@ pub fn int_filter_matches(value: Option<i64>, filter: &crate::graphql::filters::
     true
 }
 
+/// Evaluate a UUID filter in memory for fallback query paths.
 pub fn uuid_filter_matches(
     value: Option<uuid::Uuid>,
     filter: &crate::graphql::filters::UuidFilter,
@@ -383,6 +390,7 @@ pub fn uuid_filter_matches(
     true
 }
 
+/// Evaluate a boolean filter in memory for fallback query paths.
 pub fn bool_filter_matches(
     value: Option<bool>,
     filter: &crate::graphql::filters::BoolFilter,
@@ -404,6 +412,7 @@ pub fn bool_filter_matches(
     true
 }
 
+/// Evaluate a date-string filter in memory for fallback query paths.
 pub fn date_filter_matches(
     value: Option<&str>,
     filter: &crate::graphql::filters::DateFilter,

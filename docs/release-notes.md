@@ -1,0 +1,83 @@
+# Release Notes
+
+This page records user-facing changes for recent `graphql-orm` releases. Version numbers refer to
+the runtime crate unless a macro crate version is called out separately.
+
+## 0.2.14
+
+Documentation and release metadata pass for the spatial and full-text search work.
+
+- Bumped `graphql-orm` to `0.2.14`.
+- Bumped `graphql-orm-macros` to `0.3.15`.
+- Updated install snippets to the current runtime version.
+- Expanded Rustdoc coverage for the portable spatial and search APIs.
+- Added release notes for the recent spatial, search, and PostgreSQL RLS changes.
+
+## 0.2.13
+
+Portable spatial fields, portable per-entity full-text search, and PostgreSQL RLS support.
+
+### Spatial Fields
+
+- Added `#[graphql_orm(spatial(...))]` field metadata for GeoJSON-backed spatial fields.
+- Added `#[filterable(type = "spatial")]` and generated `SpatialFilter` support for `equals`,
+  `disjoint`, `intersects`, `touches`, `crosses`, `within`, `contains`, and `overlaps`.
+- Added native PostGIS storage for PostgreSQL as `geometry(<type>, <srid>)`.
+- Added managed PostGIS extension planning through `CREATE EXTENSION IF NOT EXISTS postgis`.
+- Added generated PostGIS read/write SQL using `ST_AsGeoJSON`, `ST_GeomFromGeoJSON`, and
+  `ST_SetSRID`.
+- Added GiST spatial index metadata and migration rendering for PostgreSQL when `index = true`.
+- Added SQLite spatial compatibility by storing canonical GeoJSON in `TEXT` columns.
+- Added SQLite in-memory spatial predicate evaluation so applications can use the same field and
+  filter API without branching on the database backend.
+- Documented SQLite spatial indexing options for future work: SpatiaLite, SQLite R*Tree, and
+  GeoPackage.
+
+### Full-Text Search
+
+- Added entity-level `#[graphql_orm(search(...))]` metadata.
+- Added field-level `#[graphql_orm(searchable(...))]` metadata for `String` and `Option<String>`.
+- Added relation-level `#[graphql_orm(search_relation(...))]` metadata for denormalized related
+  search fields.
+- Added generated per-entity GraphQL search resolvers such as `articlesSearch`.
+- Added generated Rust search helpers returning scored `SearchHit<T>` values.
+- Added `SearchInput` and `SearchMode` with `Plain`, `Phrase`, `Web`, and `Prefix` modes.
+- Added PostgreSQL native full-text search structures using managed search shadow tables,
+  `tsvector`, `tsquery`, `ts_rank_cd`, and GIN indexes.
+- Added SQLite FTS5 search table planning with the `unicode61` tokenizer by default.
+- Added deterministic Rust fallback scoring for search paths where native execution is unavailable
+  and fallback is enabled.
+- Added generated rebuild APIs including `Entity::rebuild_search_index` and
+  `Entity::rebuild_search_document`.
+- Added search schema metadata, schema hash participation, migration steps, and introspection
+  support for managed search structures.
+- Added policy validation rules that reject private searchable fields and require explicit search
+  policies for read-policy-protected fields.
+- Added future strategy metadata for MySQL and MSSQL full-text search without enabling execution for
+  those backends in this pass.
+
+### PostgreSQL RLS
+
+- Added PostgreSQL row-level security metadata through `#[graphql_rls(...)]`.
+- Added schema planning and validation for PostgreSQL RLS helper functions, enabled/forced table
+  RLS state, and generated policies.
+- Added request-local `DbAuthContext` support for transaction-local PostgreSQL settings consumed by
+  RLS policies.
+- Added relation preloading safeguards so requests with different database auth contexts do not
+  share loader batches.
+
+### Schema Management And Backend Behavior
+
+- Clarified that `Database::new`, `Database::builder`, and GraphQL schema construction do not apply
+  schema changes automatically.
+- Added search structures and spatial metadata to structured schema models and migration planning.
+- Updated managed migration behavior for Postgres and SQLite spatial/search structures.
+- Preserved MSSQL as read/query-only while adding diagnostics for unsupported spatial and full-text
+  execution paths.
+
+### Tests And Verification
+
+- Added unit and integration coverage for spatial predicate rendering, SQLite spatial fallback,
+  PostGIS migrations, full-text query rendering, SQLite FTS5 structures, search rebuild behavior,
+  and RLS planning.
+- Verified focused checks across SQLite, PostgreSQL, and MSSQL feature builds during release work.

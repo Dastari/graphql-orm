@@ -29,6 +29,42 @@
 //!
 //! Naming feature groups (`resolver-case-*`, `argument-case-*`, and
 //! `field-case-*`) remain independent from backend selection.
+//!
+//! # Search And Spatial Attributes
+//!
+//! The `graphql_orm` attribute namespace carries backend-neutral feature
+//! metadata used by the runtime schema model and generated operations.
+//!
+//! Spatial fields are represented as GeoJSON in Rust and GraphQL:
+//!
+//! ```ignore
+//! #[graphql_orm(spatial(kind = "geometry", geometry_type = "Point", srid = 4326, index = true))]
+//! #[filterable(type = "spatial")]
+//! pub location: serde_json::Value;
+//! ```
+//!
+//! PostgreSQL stores these fields as PostGIS `geometry` columns. SQLite stores
+//! canonical GeoJSON in `TEXT` columns and uses runtime predicate evaluation.
+//!
+//! Full-text search is enabled with entity, field, and optional relation
+//! metadata:
+//!
+//! ```ignore
+//! #[graphql_orm(search(index = true, language = "english"))]
+//! pub struct Article {
+//!     #[graphql_orm(searchable(weight = "A"))]
+//!     pub title: String,
+//!
+//!     #[graphql(skip)]
+//!     #[relation(target = "Tag", from = "id", to = "article_id", multiple)]
+//!     #[graphql_orm(search_relation(fields = ["label"], weight = "D"))]
+//!     pub tags: Vec<Tag>,
+//! }
+//! ```
+//!
+//! Searchable fields must be persisted `String` or `Option<String>` fields.
+//! Private fields cannot be searchable, and read-policy-protected fields need
+//! an explicit `searchable(policy = "...")` opt-in.
 
 use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
