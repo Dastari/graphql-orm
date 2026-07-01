@@ -33,12 +33,6 @@ impl DatabaseBackend {
     }
 }
 
-const DEFAULT_MAX_PAGE_LIMIT: i64 = 1000;
-
-fn clamp_limit(limit: i64) -> i64 {
-    limit.max(0).min(DEFAULT_MAX_PAGE_LIMIT)
-}
-
 fn normalize_sql_placeholders(backend: DatabaseBackend, sql: &str, start_index: usize) -> String {
     if !matches!(backend, DatabaseBackend::Postgres | DatabaseBackend::Mssql) {
         return sql.to_string();
@@ -232,7 +226,7 @@ impl SqlDialect for DatabaseBackend {
                     format!(
                         " OFFSET {} ROWS FETCH NEXT {} ROWS ONLY",
                         offset.max(0),
-                        clamp_limit(limit)
+                        limit.max(0)
                     )
                 }
                 None if offset > 0 => format!(" OFFSET {} ROWS", offset),
@@ -241,7 +235,7 @@ impl SqlDialect for DatabaseBackend {
             _ => {
                 let mut sql = String::new();
                 if let Some(limit) = limit {
-                    sql.push_str(&format!(" LIMIT {}", clamp_limit(limit)));
+                    sql.push_str(&format!(" LIMIT {}", limit.max(0)));
                 }
                 if offset > 0 {
                     sql.push_str(&format!(" OFFSET {}", offset));

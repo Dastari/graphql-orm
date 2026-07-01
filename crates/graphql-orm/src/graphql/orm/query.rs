@@ -148,6 +148,93 @@ pub struct DeleteQuery {
     pub filter: Option<FilterExpression>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PaginationConfig {
+    /// Limit applied to connection-style queries when the request omits a limit.
+    pub default_limit: Option<i64>,
+    /// Maximum accepted explicit or default limit.
+    pub max_limit: Option<i64>,
+}
+
+impl Default for PaginationConfig {
+    fn default() -> Self {
+        Self {
+            default_limit: Some(Self::DEFAULT_LIMIT),
+            max_limit: Some(Self::DEFAULT_MAX_LIMIT),
+        }
+    }
+}
+
+impl PaginationConfig {
+    /// Default connection limit used when a request omits `PageInput.limit`.
+    pub const DEFAULT_LIMIT: i64 = 1000;
+    /// Default cap applied to explicit and default limits.
+    pub const DEFAULT_MAX_LIMIT: i64 = 1000;
+
+    /// Create a config that does not add a default limit and does not cap limits.
+    pub const fn unbounded() -> Self {
+        Self {
+            default_limit: None,
+            max_limit: None,
+        }
+    }
+
+    /// Create a config with the default limit disabled but explicit limits capped.
+    pub const fn explicit_only(max_limit: i64) -> Self {
+        Self {
+            default_limit: None,
+            max_limit: Some(max_limit),
+        }
+    }
+
+    /// Return a copy with a different default limit.
+    pub fn with_default_limit(mut self, default_limit: Option<i64>) -> Self {
+        self.default_limit = default_limit;
+        self
+    }
+
+    /// Return a copy with a different maximum limit.
+    pub fn with_max_limit(mut self, max_limit: Option<i64>) -> Self {
+        self.max_limit = max_limit;
+        self
+    }
+
+    /// Clamp one explicit limit without applying a default.
+    pub fn clamp_explicit_limit(&self, limit: Option<i64>) -> Option<i64> {
+        limit.map(|limit| self.clamp_limit_value(limit))
+    }
+
+    /// Resolve an optional page input into an offset/limit pair.
+    ///
+    /// When `apply_default_limit` is true, `default_limit` is used if the page
+    /// input or its `limit` field is absent. Repository-style `fetch_all` paths
+    /// pass false so callers can intentionally fetch all rows.
+    pub fn resolve_page(
+        &self,
+        page: Option<&PageInput>,
+        apply_default_limit: bool,
+    ) -> PaginationRequest {
+        let offset = page.map(PageInput::offset).unwrap_or(0);
+        let requested_limit = page.and_then(|page| page.limit);
+        let limit = if requested_limit.is_some() {
+            self.clamp_explicit_limit(requested_limit)
+        } else if apply_default_limit {
+            self.clamp_explicit_limit(self.default_limit)
+        } else {
+            None
+        };
+        PaginationRequest { limit, offset }
+    }
+
+    fn clamp_limit_value(&self, limit: i64) -> i64 {
+        let normalized = limit.max(0);
+        match self.max_limit {
+            Some(max_limit) => normalized.min(max_limit.max(0)),
+            None => normalized,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaginationRequest {
     pub limit: Option<i64>,
@@ -156,10 +243,7 @@ pub struct PaginationRequest {
 
 impl From<&PageInput> for PaginationRequest {
     fn from(value: &PageInput) -> Self {
-        Self {
-            limit: value.limit(),
-            offset: value.offset(),
-        }
+        PaginationConfig::default().resolve_page(Some(value), false)
     }
 }
 
@@ -235,31 +319,46 @@ pub struct SubscriptionFilterInput {
 #[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
 #[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
 /// Offset pagination input shared by generated list, relation, and search APIs.
+///
+/// Generated connection resolvers combine this request input with
+/// [`PaginationConfig`] from the runtime `Database`. The default config applies
+/// a limit of `1000` when this input or its `limit` field is omitted.
 pub struct PageInput {
-    /// Requested page size. Explicit limits are clamped to
-    /// [`PageInput::MAX_LIMIT`] before SQL rendering.
+    /// Requested page size. Explicit limits are clamped by the runtime
+    /// [`PaginationConfig`] before SQL rendering.
     pub limit: Option<i64>,
     /// Requested offset. Negative offsets are treated as `0`.
     pub offset: Option<i64>,
 }
 
 impl PageInput {
-    /// Hard runtime cap for explicit page limits.
-    pub const MAX_LIMIT: i64 = 1000;
+    /// Default max limit retained for compatibility with older callers.
+    pub const MAX_LIMIT: i64 = PaginationConfig::DEFAULT_MAX_LIMIT;
 
     /// Return a non-negative offset for SQL rendering and in-memory slicing.
     pub fn offset(&self) -> i64 {
         self.offset.unwrap_or(0).max(0)
     }
 
-    /// Return the requested limit clamped into `0..=MAX_LIMIT`.
+    /// Return the explicit requested limit clamped by the default pagination
+    /// config. This does not apply the default connection limit when the field
+    /// is omitted.
     pub fn limit(&self) -> Option<i64> {
-        self.limit.map(|limit| limit.max(0).min(Self::MAX_LIMIT))
+        PaginationConfig::default().clamp_explicit_limit(self.limit)
+    }
+
+    /// Resolve this input with a caller-provided pagination config.
+    pub fn limit_with_config(&self, config: PaginationConfig) -> Option<i64> {
+        config.clamp_explicit_limit(self.limit)
     }
 }
 
 pub trait PoolProvider<B: OrmBackend = DefaultBackend> {
     fn pool(&self) -> &B::Pool;
+
+    fn pagination_config(&self) -> PaginationConfig {
+        PaginationConfig::default()
+    }
 }
 
 pub trait DatabaseExecutor<B: OrmBackend = DefaultBackend>: PoolProvider<B> {
@@ -301,6 +400,10 @@ impl DatabaseExecutor<MssqlBackend> for crate::db::mssql::MssqlPool {}
 impl<B: OrmBackend> PoolProvider<B> for crate::db::Database<B> {
     fn pool(&self) -> &B::Pool {
         self.pool()
+    }
+
+    fn pagination_config(&self) -> PaginationConfig {
+        crate::db::Database::pagination_config(self)
     }
 }
 
@@ -807,7 +910,12 @@ where
         self
     }
 
-    fn build_select_query(&self) -> SelectQuery {
+    fn build_select_query_with_config(
+        &self,
+        pagination_config: PaginationConfig,
+        apply_default_limit: bool,
+    ) -> SelectQuery {
+        let page = pagination_config.resolve_page(self.page.as_ref(), apply_default_limit);
         SelectQuery {
             table: T::TABLE_NAME,
             columns: T::column_names()
@@ -823,11 +931,17 @@ where
                 .collect(),
             pagination: if self.requires_in_memory_filtering() {
                 None
+            } else if page.limit.is_some() || page.offset > 0 {
+                Some(page)
             } else {
-                self.page.as_ref().map(PaginationRequest::from)
+                None
             },
             count_only: false,
         }
+    }
+
+    fn build_select_query(&self) -> SelectQuery {
+        self.build_select_query_with_config(PaginationConfig::default(), false)
     }
 
     pub(crate) fn requires_in_memory_filtering(&self) -> bool {
@@ -845,7 +959,12 @@ where
             )
     }
 
-    fn apply_in_memory_filtering(&self, rows: Vec<B::Row>) -> Result<Vec<T>, sqlx::Error> {
+    fn apply_in_memory_filtering(
+        &self,
+        rows: Vec<B::Row>,
+        pagination_config: PaginationConfig,
+        apply_default_limit: bool,
+    ) -> Result<Vec<T>, sqlx::Error> {
         let mut entities = rows
             .iter()
             .map(T::from_row)
@@ -861,9 +980,10 @@ where
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
-            if let Some(page) = &self.page {
-                let offset = page.offset().max(0) as usize;
-                let limit = page.limit().map(|limit| limit.max(0) as usize);
+            let page = pagination_config.resolve_page(self.page.as_ref(), apply_default_limit);
+            if page.limit.is_some() || page.offset > 0 {
+                let offset = page.offset.max(0) as usize;
+                let limit = page.limit.map(|limit| limit.max(0) as usize);
                 let iter = entities.into_iter().skip(offset);
                 entities = match limit {
                     Some(limit) => iter.take(limit).collect(),
@@ -901,9 +1021,13 @@ where
     where
         P: PoolProvider<B> + ?Sized,
     {
-        let rendered = render_select_query(B::DIALECT, &self.build_select_query());
+        let pagination_config = provider.pagination_config();
+        let rendered = render_select_query(
+            B::DIALECT,
+            &self.build_select_query_with_config(pagination_config, false),
+        );
         let rows = B::fetch_rows(provider.pool(), &rendered.sql, &rendered.values).await?;
-        self.apply_in_memory_filtering(rows)
+        self.apply_in_memory_filtering(rows, pagination_config, false)
     }
 
     pub async fn fetch_all_with_auth<P>(
@@ -914,10 +1038,14 @@ where
     where
         P: PoolProvider<B> + ?Sized,
     {
-        let rendered = render_select_query(B::DIALECT, &self.build_select_query());
+        let pagination_config = provider.pagination_config();
+        let rendered = render_select_query(
+            B::DIALECT,
+            &self.build_select_query_with_config(pagination_config, false),
+        );
         let rows =
             B::fetch_rows_with_auth(provider.pool(), &rendered.sql, &rendered.values, auth).await?;
-        self.apply_in_memory_filtering(rows)
+        self.apply_in_memory_filtering(rows, pagination_config, false)
     }
 
     pub async fn fetch_all_on<'e, E>(&self, executor: E) -> Result<Vec<T>, sqlx::Error>
@@ -927,7 +1055,7 @@ where
     {
         let rendered = render_select_query(B::DIALECT, &self.build_select_query());
         let rows = B::fetch_rows_on(executor, rendered.sql, rendered.values).await?;
-        self.apply_in_memory_filtering(rows)
+        self.apply_in_memory_filtering(rows, PaginationConfig::default(), false)
     }
 
     pub async fn fetch_one<P>(&self, provider: &P) -> Result<Option<T>, sqlx::Error>
@@ -1040,12 +1168,11 @@ where
         if self.requires_in_memory_filtering() {
             let nodes = self.fetch_unpaged_filtered(provider).await?;
             let total = nodes.len() as i64;
-            let offset = self.page.as_ref().map(|p| p.offset()).unwrap_or(0) as usize;
-            let limit = self
-                .page
-                .as_ref()
-                .and_then(|page| page.limit())
-                .map(|limit| limit.max(0) as usize);
+            let page = provider
+                .pagination_config()
+                .resolve_page(self.page.as_ref(), true);
+            let offset = page.offset.max(0) as usize;
+            let limit = page.limit.map(|limit| limit.max(0) as usize);
             let page_nodes = if offset >= nodes.len() {
                 Vec::new()
             } else {
@@ -1075,13 +1202,18 @@ where
                 edges,
             });
         }
-        let offset = self.page.as_ref().map(|p| p.offset()).unwrap_or(0) as usize;
+        let pagination_config = provider.pagination_config();
+        let page = pagination_config.resolve_page(self.page.as_ref(), true);
+        let offset = page.offset.max(0) as usize;
         let mut count_query = self.build_select_query();
         count_query.count_only = true;
         count_query.pagination = None;
         count_query.sorts.clear();
         let count_rendered = render_select_query(B::DIALECT, &count_query);
-        let row_rendered = render_select_query(B::DIALECT, &self.build_select_query());
+        let row_rendered = render_select_query(
+            B::DIALECT,
+            &self.build_select_query_with_config(pagination_config, true),
+        );
         let (count_rows, rows) = B::fetch_rows_pair_with_auth(
             provider.pool(),
             &count_rendered.sql,
@@ -1131,12 +1263,11 @@ where
                 .fetch_unpaged_filtered_with_auth(provider, auth)
                 .await?;
             let total = nodes.len() as i64;
-            let offset = self.page.as_ref().map(|p| p.offset()).unwrap_or(0) as usize;
-            let limit = self
-                .page
-                .as_ref()
-                .and_then(|page| page.limit())
-                .map(|limit| limit.max(0) as usize);
+            let page = provider
+                .pagination_config()
+                .resolve_page(self.page.as_ref(), true);
+            let offset = page.offset.max(0) as usize;
+            let limit = page.limit.map(|limit| limit.max(0) as usize);
             let page_nodes = if offset >= nodes.len() {
                 Vec::new()
             } else {
@@ -1171,7 +1302,11 @@ where
         count_query.pagination = None;
         count_query.sorts.clear();
         let count_rendered = render_select_query(B::DIALECT, &count_query);
-        let row_rendered = render_select_query(B::DIALECT, &self.build_select_query());
+        let pagination_config = provider.pagination_config();
+        let row_rendered = render_select_query(
+            B::DIALECT,
+            &self.build_select_query_with_config(pagination_config, true),
+        );
         let (count_rows, rows) = B::fetch_rows_pair_with_auth(
             provider.pool(),
             &count_rendered.sql,
@@ -1183,7 +1318,8 @@ where
         .await?;
         let count_row = count_rows.first().ok_or(sqlx::Error::RowNotFound)?;
         let total = B::try_get_i64(count_row, "count")?;
-        let offset = self.page.as_ref().map(|p| p.offset()).unwrap_or(0) as usize;
+        let page = pagination_config.resolve_page(self.page.as_ref(), true);
+        let offset = page.offset.max(0) as usize;
         let nodes = rows
             .iter()
             .map(T::from_row)

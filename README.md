@@ -34,7 +34,7 @@ Select exactly the backend support your service needs:
 
 ```toml
 [dependencies]
-graphql-orm = { version = "0.2.15", default-features = false, features = ["sqlite"] }
+graphql-orm = { version = "0.2.16", default-features = false, features = ["sqlite"] }
 ```
 
 Available backend features:

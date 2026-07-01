@@ -479,7 +479,15 @@ pub(crate) fn generate_graphql_relations(
             }
         };
 
-        let relation_query_key = quote! {
+        let relation_query_key = quote! {{
+            let __gom_relation_page =
+                db.pagination_config().resolve_page(page.as_ref(), true);
+            let __gom_relation_pagination =
+                if __gom_relation_page.limit.is_some() || __gom_relation_page.offset > 0 {
+                    Some(__gom_relation_page.clone())
+                } else {
+                    None
+                };
             ::graphql_orm::graphql::loaders::CompositeRelationQueryKey {
                 relation: #graphql_name,
                 parent_key: relation_loader_key.clone(),
@@ -492,19 +500,19 @@ pub(crate) fn generate_graphql_relations(
                 order_signature: order_by
                     .as_ref()
                     .and_then(|order| order.to_sort_expression().map(|expr| expr.clause)),
-                page_signature: page
+                page_signature: __gom_relation_pagination
                     .as_ref()
-                    .map(|page| format!("limit={:?};offset={}", page.limit(), page.offset())),
+                    .map(|page| format!("limit={:?};offset={}", page.limit, page.offset)),
                 filter: where_input.as_ref().and_then(|filter| filter.to_filter_expression()),
                 sorts: order_by
                     .as_ref()
                     .and_then(|order| order.to_sort_expression())
                     .into_iter()
                     .collect(),
-                pagination: page.as_ref().map(::graphql_orm::graphql::orm::PaginationRequest::from),
+                pagination: __gom_relation_pagination,
                 auth_context: auth_context.clone(),
             }
-        };
+        }};
 
         let single_relation_query_key = quote! {
             ::graphql_orm::graphql::loaders::CompositeRelationQueryKey {
@@ -641,8 +649,13 @@ pub(crate) fn generate_graphql_relations(
                             query = query.default_order();
                         }
 
-                        if let Some(ref p) = page {
-                            query = query.paginate(p);
+                        let resolved_page =
+                            db.pagination_config().resolve_page(page.as_ref(), true);
+                        if resolved_page.limit.is_some() || resolved_page.offset > 0 {
+                            query = query.paginate(&::graphql_orm::graphql::orm::PageInput {
+                                limit: resolved_page.limit,
+                                offset: Some(resolved_page.offset),
+                            });
                         }
 
                         // Count must be computed before/independent of pagination window.
@@ -652,7 +665,7 @@ pub(crate) fn generate_graphql_relations(
                             .await
                             .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
 
-                        let offset = page.as_ref().map(|p| p.offset()).unwrap_or(0) as usize;
+                        let offset = resolved_page.offset.max(0) as usize;
 
                         let entities = query
                             .fetch_all_with_auth(db, auth_context.as_ref())

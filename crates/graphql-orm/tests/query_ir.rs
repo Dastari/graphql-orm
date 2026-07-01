@@ -1,7 +1,7 @@
 use graphql_orm::graphql::orm::{
-    DatabaseBackend, DeleteQuery, FilterExpression, PaginationRequest, RenderedQuery, SelectQuery,
-    SortExpression, SpatialPredicate, SqlDialect, SqlValue, contains_like_pattern,
-    render_delete_query, render_select_query,
+    DatabaseBackend, DeleteQuery, FilterExpression, PageInput, PaginationConfig, PaginationRequest,
+    RenderedQuery, SelectQuery, SortExpression, SpatialPredicate, SqlDialect, SqlValue,
+    contains_like_pattern, render_delete_query, render_select_query,
 };
 
 fn sample_select() -> SelectQuery {
@@ -57,18 +57,46 @@ fn placeholder_normalization_skips_quoted_literals() {
 }
 
 #[test]
-fn pagination_limits_are_clamped() {
+fn pagination_config_resolves_defaults_and_caps() {
+    let config = PaginationConfig::default();
+    assert_eq!(
+        config.resolve_page(None, true),
+        PaginationRequest {
+            limit: Some(1000),
+            offset: 0,
+        }
+    );
+    assert_eq!(
+        config.resolve_page(
+            Some(&PageInput {
+                limit: Some(5001),
+                offset: Some(-10),
+            }),
+            true,
+        ),
+        PaginationRequest {
+            limit: Some(1000),
+            offset: 0,
+        }
+    );
+    assert_eq!(
+        PaginationConfig::unbounded().resolve_page(None, true),
+        PaginationRequest {
+            limit: None,
+            offset: 0,
+        }
+    );
     assert_eq!(
         DatabaseBackend::Sqlite.render_pagination(Some(-5), -10),
         " LIMIT 0"
     );
     assert_eq!(
         DatabaseBackend::Postgres.render_pagination(Some(5001), 2),
-        " LIMIT 1000 OFFSET 2"
+        " LIMIT 5001 OFFSET 2"
     );
     assert_eq!(
         DatabaseBackend::Mssql.render_pagination(Some(5001), 2),
-        " OFFSET 2 ROWS FETCH NEXT 1000 ROWS ONLY"
+        " OFFSET 2 ROWS FETCH NEXT 5001 ROWS ONLY"
     );
 }
 

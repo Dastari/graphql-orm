@@ -110,10 +110,15 @@
 //! # Pagination And Relation Loading
 //!
 //! Generated connections use offset-style cursors. [`crate::graphql::orm::PageInput`]
-//! clamps negative offsets to `0` and explicit limits into `0..=1000` before SQL
-//! rendering. Paged relation batches use backend window functions where
-//! available so nested relation pages do not need to load every child row for
-//! every parent.
+//! clamps negative offsets to `0`. [`crate::graphql::orm::PaginationConfig`]
+//! controls generated connection defaults and caps; the default configuration
+//! applies a limit of `1000` when `page.limit` is omitted and clamps explicit
+//! limits to `1000`. Configure it on [`crate::db::Database::builder`] for
+//! services that need smaller pages, larger sync/export pages, or intentionally
+//! unbounded generated connections. Repository-style `fetch_all` helpers remain
+//! unbounded unless the caller supplies pagination. Paged relation batches use
+//! backend window functions where available so nested relation pages do not need
+//! to load every child row for every parent.
 //!
 //! # Generated Entity Example
 //!

@@ -2,7 +2,7 @@ use super::core::{SearchIndexDef, SearchWeight, SqlValue};
 use super::dialect::{DatabaseBackend, SqlDialect};
 use super::query::{
     DatabaseEntity, DatabaseFilter, DatabaseOrderBy, DatabaseSearchSchema, EntityQuery, FromSqlRow,
-    PageInput, PoolProvider, count_placeholders,
+    PageInput, PaginationConfig, PoolProvider, count_placeholders,
 };
 use super::{DbAuthContext, OrmBackend, WriteBackend};
 use crate::graphql::filters::{SearchInput, SearchMode};
@@ -287,6 +287,7 @@ pub struct EntitySearchQuery<'a, T, W, B: OrmBackend> {
     pool: &'a B::Pool,
     search: SearchInput,
     query: EntityQuery<T, B>,
+    pagination_config: PaginationConfig,
     _where: PhantomData<W>,
 }
 
@@ -301,8 +302,15 @@ where
             pool,
             search,
             query: EntityQuery::new(),
+            pagination_config: PaginationConfig::default(),
             _where: PhantomData,
         }
+    }
+
+    /// Apply runtime pagination defaults and caps to connection-style search execution.
+    pub fn pagination_config(mut self, pagination_config: PaginationConfig) -> Self {
+        self.pagination_config = pagination_config;
+        self
     }
 
     /// Add a generated entity `where` filter to the search.
@@ -387,8 +395,8 @@ where
         }
 
         let rendered = match B::DIALECT {
-            DatabaseBackend::Postgres => self.render_postgres_search(index, false),
-            DatabaseBackend::Sqlite => self.render_sqlite_fts_search(index, false),
+            DatabaseBackend::Postgres => self.render_postgres_search(index, false, false),
+            DatabaseBackend::Sqlite => self.render_sqlite_fts_search(index, false, false),
             DatabaseBackend::Mysql | DatabaseBackend::Mssql => return None,
         };
 
@@ -422,13 +430,13 @@ where
 
         let (count_sql, count_values, row_sql, row_values) = match B::DIALECT {
             DatabaseBackend::Postgres => {
-                let (count_sql, count_values) = self.render_postgres_search(index, true);
-                let (row_sql, row_values) = self.render_postgres_search(index, false);
+                let (count_sql, count_values) = self.render_postgres_search(index, true, false);
+                let (row_sql, row_values) = self.render_postgres_search(index, false, true);
                 (count_sql, count_values, row_sql, row_values)
             }
             DatabaseBackend::Sqlite => {
-                let (count_sql, count_values) = self.render_sqlite_fts_search(index, true);
-                let (row_sql, row_values) = self.render_sqlite_fts_search(index, false);
+                let (count_sql, count_values) = self.render_sqlite_fts_search(index, true, false);
+                let (row_sql, row_values) = self.render_sqlite_fts_search(index, false, true);
                 (count_sql, count_values, row_sql, row_values)
             }
             DatabaseBackend::Mysql | DatabaseBackend::Mssql => return None,
@@ -457,11 +465,10 @@ where
             None => 0,
         };
         let offset = self
-            .query
-            .page
-            .as_ref()
-            .map(|page| page.offset())
-            .unwrap_or(0) as usize;
+            .pagination_config
+            .resolve_page(self.query.page.as_ref(), true)
+            .offset
+            .max(0) as usize;
         let edges = match rows
             .iter()
             .map(|row| {
@@ -499,6 +506,7 @@ where
         &self,
         index: &SearchIndexDef,
         count_only: bool,
+        apply_default_limit: bool,
     ) -> (String, Vec<SqlValue>) {
         let mode = self.search.mode.unwrap_or_default();
         let query_text = if mode == SearchMode::Prefix {
@@ -537,8 +545,11 @@ where
                 sql.push_str(", ");
                 sql.push_str(T::DEFAULT_SORT);
             }
-            if let Some(page) = &self.query.page {
-                sql.push_str(&B::DIALECT.render_pagination(page.limit(), page.offset()));
+            let page = self
+                .pagination_config
+                .resolve_page(self.query.page.as_ref(), apply_default_limit);
+            if page.limit.is_some() || page.offset > 0 {
+                sql.push_str(&B::DIALECT.render_pagination(page.limit, page.offset));
             }
         }
         (sql, values)
@@ -548,6 +559,7 @@ where
         &self,
         index: &SearchIndexDef,
         count_only: bool,
+        apply_default_limit: bool,
     ) -> (String, Vec<SqlValue>) {
         let fts_table = sqlite_fts_table_name(index.table_name);
         let projection = if count_only {
@@ -582,8 +594,11 @@ where
                 sql.push_str(", ");
                 sql.push_str(T::DEFAULT_SORT);
             }
-            if let Some(page) = &self.query.page {
-                sql.push_str(&B::DIALECT.render_pagination(page.limit(), page.offset()));
+            let page = self
+                .pagination_config
+                .resolve_page(self.query.page.as_ref(), apply_default_limit);
+            if page.limit.is_some() || page.offset > 0 {
+                sql.push_str(&B::DIALECT.render_pagination(page.limit, page.offset));
             }
         }
         (sql, values)
@@ -608,18 +623,11 @@ where
     }
 
     fn slice_hits(&self, hits: Vec<SearchHit<T>>) -> Vec<SearchHit<T>> {
-        let offset = self
-            .query
-            .page
-            .as_ref()
-            .map(|page| page.offset())
-            .unwrap_or(0) as usize;
-        let limit = self
-            .query
-            .page
-            .as_ref()
-            .and_then(|page| page.limit())
-            .map(|limit| limit.max(0) as usize);
+        let page = self
+            .pagination_config
+            .resolve_page(self.query.page.as_ref(), false);
+        let offset = page.offset.max(0) as usize;
+        let limit = page.limit.map(|limit| limit.max(0) as usize);
         if offset >= hits.len() {
             return Vec::new();
         }
@@ -632,18 +640,11 @@ where
 
     fn paginate_hits(&self, hits: Vec<SearchHit<T>>) -> SearchConnection<T> {
         let total = hits.len() as i64;
-        let offset = self
-            .query
-            .page
-            .as_ref()
-            .map(|page| page.offset())
-            .unwrap_or(0) as usize;
-        let limit = self
-            .query
-            .page
-            .as_ref()
-            .and_then(|page| page.limit())
-            .map(|limit| limit.max(0) as usize);
+        let page = self
+            .pagination_config
+            .resolve_page(self.query.page.as_ref(), true);
+        let offset = page.offset.max(0) as usize;
+        let limit = page.limit.map(|limit| limit.max(0) as usize);
         let page_hits = if offset >= hits.len() {
             Vec::new()
         } else {

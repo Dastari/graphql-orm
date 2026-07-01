@@ -3,6 +3,22 @@
 This page records user-facing changes for recent `graphql-orm` releases. Version numbers refer to
 the runtime crate unless a macro crate version is called out separately.
 
+## 0.2.16
+
+Pagination configuration follow-up for the audit release.
+
+- Bumped `graphql-orm` to `0.2.16`.
+- Bumped `graphql-orm-macros` to `0.3.17`.
+- Added runtime `PaginationConfig` with `default_limit` and `max_limit`.
+- Added `Database::builder(...).pagination_config(...)`, `.default_page_limit(...)`,
+  `.max_page_limit(...)`, and `.unbounded_pagination()`.
+- Generated GraphQL list, search, and relation connections now apply a default limit of `1000` when
+  `page.limit` is omitted.
+- Applications can raise, lower, disable, or fully unbound pagination defaults/caps per `Database`
+  handle.
+- Repository-style `fetch_all` paths remain intentionally unbounded unless the caller supplies
+  pagination.
+
 ## 0.2.15
 
 Audit follow-up release focused on correctness and native execution paths.

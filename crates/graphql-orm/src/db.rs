@@ -1,6 +1,8 @@
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 use crate::graphql::orm::WriteBackend;
-use crate::graphql::orm::{DefaultBackend, OrmBackend, SchemaManager, SchemaPolicy};
+use crate::graphql::orm::{
+    DefaultBackend, OrmBackend, PaginationConfig, SchemaManager, SchemaPolicy,
+};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -32,6 +34,7 @@ pub struct Database<B: OrmBackend = DefaultBackend> {
     post_commit_error_handler: Option<Arc<dyn Any + Send + Sync>>,
     change_journal_enabled: bool,
     schema_policy: SchemaPolicy,
+    pagination_config: PaginationConfig,
     event_senders: Arc<EventSenders>,
     _backend: PhantomData<B>,
 }
@@ -48,6 +51,7 @@ impl<B: OrmBackend> Clone for Database<B> {
             post_commit_error_handler: self.post_commit_error_handler.clone(),
             change_journal_enabled: self.change_journal_enabled,
             schema_policy: self.schema_policy,
+            pagination_config: self.pagination_config,
             event_senders: self.event_senders.clone(),
             _backend: PhantomData,
         }
@@ -59,6 +63,7 @@ impl<B: OrmBackend> std::fmt::Debug for Database<B> {
         let mut debug = f.debug_struct("Database");
         debug.field("pool", &"DbPool");
         debug.field("schema_policy", &self.schema_policy);
+        debug.field("pagination_config", &self.pagination_config);
         debug.field("has_mutation_hook", &self.mutation_hook.is_some());
         debug
             .field("has_field_policy", &self.field_policy.is_some())
@@ -86,6 +91,7 @@ impl<B: OrmBackend> Database<B> {
             post_commit_error_handler: None,
             change_journal_enabled: false,
             schema_policy,
+            pagination_config: PaginationConfig::default(),
             event_senders: Arc::new(EventSenders::default()),
             _backend: PhantomData,
         }
@@ -108,6 +114,7 @@ impl<B: OrmBackend> Database<B> {
             post_commit_error_handler: None,
             change_journal_enabled: false,
             schema_policy: Self::default_schema_policy(),
+            pagination_config: PaginationConfig::default(),
             event_senders: Arc::new(EventSenders::default()),
             _backend: PhantomData,
         }
@@ -127,6 +134,7 @@ impl<B: OrmBackend> Database<B> {
             post_commit_error_handler: None,
             change_journal_enabled: false,
             schema_policy: Self::default_schema_policy(),
+            pagination_config: PaginationConfig::default(),
             event_senders: Arc::new(EventSenders::default()),
             _backend: PhantomData,
         }
@@ -146,6 +154,7 @@ impl<B: OrmBackend> Database<B> {
             post_commit_error_handler: None,
             change_journal_enabled: false,
             schema_policy: Self::default_schema_policy(),
+            pagination_config: PaginationConfig::default(),
             event_senders: Arc::new(EventSenders::default()),
             _backend: PhantomData,
         }
@@ -165,6 +174,7 @@ impl<B: OrmBackend> Database<B> {
             post_commit_error_handler: None,
             change_journal_enabled: false,
             schema_policy: Self::default_schema_policy(),
+            pagination_config: PaginationConfig::default(),
             event_senders: Arc::new(EventSenders::default()),
             _backend: PhantomData,
         }
@@ -187,6 +197,7 @@ impl<B: OrmBackend> Database<B> {
             post_commit_error_handler: None,
             change_journal_enabled: false,
             schema_policy: Self::default_schema_policy(),
+            pagination_config: PaginationConfig::default(),
             event_senders: Arc::new(EventSenders::default()),
             _backend: PhantomData,
         }
@@ -216,6 +227,7 @@ impl<B: OrmBackend> Database<B> {
             post_commit_error_handler: None,
             change_journal_enabled: false,
             schema_policy: Self::default_schema_policy(),
+            pagination_config: PaginationConfig::default(),
             event_senders: Arc::new(EventSenders::default()),
             _backend: PhantomData,
         }
@@ -239,6 +251,22 @@ impl<B: OrmBackend> Database<B> {
     /// Return a copy of this handle with a different schema ownership policy.
     pub fn with_schema_policy(mut self, schema_policy: SchemaPolicy) -> Self {
         self.schema_policy = schema_policy;
+        self
+    }
+
+    /// Return pagination defaults and caps used by generated connection resolvers.
+    pub fn pagination_config(&self) -> PaginationConfig {
+        self.pagination_config
+    }
+
+    /// Update pagination defaults and caps in place.
+    pub fn set_pagination_config(&mut self, pagination_config: PaginationConfig) {
+        self.pagination_config = pagination_config;
+    }
+
+    /// Return a copy of this handle with different pagination defaults and caps.
+    pub fn with_pagination_config(mut self, pagination_config: PaginationConfig) -> Self {
+        self.pagination_config = pagination_config;
         self
     }
 
@@ -786,6 +814,34 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     /// Enable or disable change-journal recording for generated write paths.
     pub fn change_journal_enabled(mut self, enabled: bool) -> Self {
         self.database.change_journal_enabled = enabled;
+        self
+    }
+
+    /// Set pagination defaults and caps for generated connection resolvers.
+    pub fn pagination_config(mut self, pagination_config: PaginationConfig) -> Self {
+        self.database.pagination_config = pagination_config;
+        self
+    }
+
+    /// Set the default connection limit used when GraphQL `page.limit` is omitted.
+    ///
+    /// Pass `None` to preserve unbounded omitted-limit behavior.
+    pub fn default_page_limit(mut self, limit: Option<i64>) -> Self {
+        self.database.pagination_config.default_limit = limit;
+        self
+    }
+
+    /// Set the maximum accepted explicit or default connection limit.
+    ///
+    /// Pass `None` to disable limit capping.
+    pub fn max_page_limit(mut self, limit: Option<i64>) -> Self {
+        self.database.pagination_config.max_limit = limit;
+        self
+    }
+
+    /// Disable both the default connection limit and max-limit cap.
+    pub fn unbounded_pagination(mut self) -> Self {
+        self.database.pagination_config = PaginationConfig::unbounded();
         self
     }
 

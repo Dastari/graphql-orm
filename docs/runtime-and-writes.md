@@ -9,6 +9,8 @@ Use `Database::new(pool)` for compatibility or `Database::builder(pool)` for exp
 ```rust
 let database = Database::builder(pool)
     .schema_policy(SchemaPolicy::Managed)
+    .default_page_limit(Some(1000))
+    .max_page_limit(Some(1000))
     .change_journal_enabled(true)
     .build();
 ```
@@ -136,9 +138,34 @@ under concurrent inserts or deletes ahead of the current offset. Native SQL path
 page rows through the same backend pair-fetch API so the result is taken from a consistent execution
 context where the backend supports it.
 
-`PageInput` clamps negative offsets to `0` and clamps explicit limits into `0..=1000`. Omitting a
-limit leaves the query unbounded unless the application or resolver layer supplies one, while an
-explicit negative limit becomes `0` rather than an unbounded backend-specific value.
+`PageInput` clamps negative offsets to `0`. Generated GraphQL list, search, and relation connection
+resolvers use `Database` pagination config to resolve limits:
+
+- default `default_limit`: `Some(1000)`
+- default `max_limit`: `Some(1000)`
+- omitted `page.limit`: uses `default_limit`
+- explicit limits above `max_limit`: clamp to `max_limit`
+- explicit negative limits: clamp to `0`
+
+Configure this per runtime handle:
+
+```rust
+let database = Database::builder(pool)
+    .default_page_limit(Some(250))
+    .max_page_limit(Some(5_000))
+    .build();
+```
+
+For export or sync services that intentionally allow unbounded generated connections:
+
+```rust
+let database = Database::builder(pool)
+    .unbounded_pagination()
+    .build();
+```
+
+Repository-style `fetch_all` paths remain intentionally unbounded unless the caller supplies
+pagination. The default limit is applied to connection-style APIs, not to every low-level helper.
 
 When a query includes predicates that must run in Rust, such as SQLite spatial topology checks, the
 runtime now pushes the SQL-safe prefix of the filter first and applies only the residual predicate in

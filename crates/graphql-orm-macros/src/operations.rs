@@ -2708,7 +2708,8 @@ pub(crate) fn generate_graphql_operations(
                     ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
                 ).await?;
 
-                let mut query = #struct_name::search(pool, search);
+                let mut query = #struct_name::search(pool, search)
+                    .pagination_config(db.pagination_config());
                 if let Some(ref filter) = where_input {
                     query = query.filter(filter.clone());
                 }
@@ -2732,9 +2733,10 @@ pub(crate) fn generate_graphql_operations(
                             visible_hits.push(hit);
                         }
                     }
+                    let resolved_page = db.pagination_config().resolve_page(requested_page.as_ref(), true);
                     let total = visible_hits.len() as i64;
-                    let offset = requested_page.as_ref().map(|p| p.offset()).unwrap_or(0) as usize;
-                    let limit = requested_page.as_ref().and_then(|p| p.limit()).map(|limit| limit.max(0) as usize);
+                    let offset = resolved_page.offset.max(0) as usize;
+                    let limit = resolved_page.limit.map(|limit| limit.max(0) as usize);
                     let paged_hits = if offset >= visible_hits.len() {
                         Vec::new()
                     } else if let Some(limit) = limit {
@@ -3003,9 +3005,10 @@ pub(crate) fn generate_graphql_operations(
                             }
                         }
 
+                        let resolved_page = db.pagination_config().resolve_page(requested_page.as_ref(), true);
                         let total = visible_rows.len() as i64;
-                        let offset = requested_page.as_ref().map(|p| p.offset()).unwrap_or(0) as usize;
-                        let limit = requested_page.as_ref().and_then(|p| p.limit()).map(|limit| limit as usize);
+                        let offset = resolved_page.offset.max(0) as usize;
+                        let limit = resolved_page.limit.map(|limit| limit as usize);
 
                         let paged_rows: Vec<#struct_name> = if offset >= visible_rows.len() {
                             Vec::new()
@@ -3374,9 +3377,10 @@ pub(crate) fn generate_graphql_operations(
                         }
                     }
 
+                    let resolved_page = db.pagination_config().resolve_page(requested_page.as_ref(), true);
                     let total = visible_rows.len() as i64;
-                    let offset = requested_page.as_ref().map(|p| p.offset()).unwrap_or(0) as usize;
-                    let limit = requested_page.as_ref().and_then(|p| p.limit()).map(|limit| limit as usize);
+                    let offset = resolved_page.offset.max(0) as usize;
+                    let limit = resolved_page.limit.map(|limit| limit as usize);
 
                     let paged_rows: Vec<#struct_name> = if offset >= visible_rows.len() {
                         Vec::new()
