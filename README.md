@@ -21,6 +21,7 @@ It is designed for two related use cases:
 - single and composite primary-key read support
 - single and composite relation-key batching, including nested legacy shapes like
   `JimCardFiles -> Contacts -> Details`
+- portable per-entity full-text search with native Postgres search tables and SQLite FTS5 support
 - explicit schema ownership policies for managed, external, validate-only, and plan-only schemas
 - ABI-style schema migration stages for managed SQLite/Postgres schemas
 - row, field, and entity policy hooks for application-owned access control
@@ -32,7 +33,7 @@ Select exactly the backend support your service needs:
 
 ```toml
 [dependencies]
-graphql-orm = { version = "0.2.11", default-features = false, features = ["sqlite"] }
+graphql-orm = { version = "0.2.13", default-features = false, features = ["sqlite"] }
 ```
 
 Available backend features:

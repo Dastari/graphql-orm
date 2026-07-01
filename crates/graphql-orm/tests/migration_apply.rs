@@ -106,6 +106,7 @@ async fn sqlite_migration_runner_applies_rebuild_plan() -> Result<(), Box<dyn st
             indexes: vec![],
             composite_unique_indexes: vec![],
             foreign_keys: vec![],
+            search_indexes: vec![],
         }],
     };
     let target = SchemaModel {
@@ -148,6 +149,7 @@ async fn sqlite_migration_runner_applies_rebuild_plan() -> Result<(), Box<dyn st
             indexes: vec![leaked_index("idx_users_name", &["name"])],
             composite_unique_indexes: vec![],
             foreign_keys: vec![],
+            search_indexes: vec![],
         }],
     };
 
@@ -311,6 +313,7 @@ async fn postgres_migration_runner_applies_plan() -> Result<(), Box<dyn std::err
             indexes: vec![leaked_index(&index_name, &["name"])],
             composite_unique_indexes: vec![],
             foreign_keys: vec![],
+            search_indexes: vec![],
         }],
     };
 
@@ -426,6 +429,7 @@ fn users_v1_like() -> TableModel {
         indexes: vec![],
         composite_unique_indexes: vec![],
         foreign_keys: vec![],
+        search_indexes: vec![],
     }
 }
 
@@ -471,6 +475,7 @@ fn sqlite_text_column(name: &str, primary_key: bool, nullable: bool) -> ColumnMo
     ColumnModel {
         name: name.to_string(),
         sql_type: "TEXT".to_string(),
+        spatial: None,
         nullable,
         is_primary_key: primary_key,
         is_unique: false,
@@ -487,6 +492,7 @@ fn sqlite_varchar_column(name: &str, primary_key: bool, nullable: bool) -> Colum
         } else {
             "VARCHAR(255)".to_string()
         },
+        spatial: None,
         nullable,
         is_primary_key: primary_key,
         is_unique: false,
@@ -523,6 +529,7 @@ fn sqlite_table(
         indexes: vec![],
         composite_unique_indexes: vec![],
         foreign_keys,
+        search_indexes: vec![],
     }
 }
 

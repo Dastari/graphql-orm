@@ -98,6 +98,24 @@ Write-capable backends can run mutation hooks around generated creates, updates,
 
 Hooks are intended for application behavior such as audit rows, validation, downstream notifications, and change journals. Keep database schema changes in the schema manager instead of mutation hooks.
 
+## Search Document Maintenance
+
+Entities with `#[graphql_orm(searchable(...))]` maintain local search documents through generated ORM
+writes once the managed search structures exist.
+
+- create/update/upsert refresh the entity document
+- delete removes the entity document
+- `Entity::rebuild_search_index(&database)` refreshes all documents for that entity
+- `Entity::rebuild_search_document(&database, &id)` refreshes one entity
+
+Writes made outside `graphql-orm` can leave native search structures stale. Run a rebuild after
+external imports, manual SQL updates, or relation-data changes that should be reflected in a
+denormalized search document.
+
+Search resolvers still enforce entity and row policies before returning results. Snippets/highlights
+are intentionally not generated in this pass because denormalized documents can include protected
+source fields.
+
 ## Subscriptions
 
 Generated subscriptions are available for write-capable backends when roots include subscription support. They are not generated for MSSQL because the MSSQL backend is read-only.

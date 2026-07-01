@@ -389,20 +389,22 @@ pub fn validate_schema_models(
         .collect::<std::collections::BTreeMap<_, _>>();
     let mut diagnostics = Vec::new();
 
-    let current_extensions = current
-        .extensions
-        .iter()
-        .map(|extension| extension.to_ascii_lowercase())
-        .collect::<std::collections::BTreeSet<_>>();
-    for extension in &target.extensions {
-        if !current_extensions.contains(&extension.to_ascii_lowercase()) {
-            diagnostics.push(diagnostic(
-                SchemaDiagnosticSeverity::Error,
-                SchemaDiagnosticKind::UnsupportedBackendCapability,
-                None,
-                None,
-                format!("Missing database extension {extension}"),
-            ));
+    if backend == "postgres" {
+        let current_extensions = current
+            .extensions
+            .iter()
+            .map(|extension| extension.to_ascii_lowercase())
+            .collect::<std::collections::BTreeSet<_>>();
+        for extension in &target.extensions {
+            if !current_extensions.contains(&extension.to_ascii_lowercase()) {
+                diagnostics.push(diagnostic(
+                    SchemaDiagnosticSeverity::Error,
+                    SchemaDiagnosticKind::UnsupportedBackendCapability,
+                    None,
+                    None,
+                    format!("Missing database extension {extension}"),
+                ));
+            }
         }
     }
 

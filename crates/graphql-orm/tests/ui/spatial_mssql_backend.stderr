@@ -1,4 +1,4 @@
-error: spatial fields are only supported for backend = "postgres"
+error: spatial fields are currently supported for backend = "postgres" and backend = "sqlite"
  --> tests/ui/spatial_mssql_backend.rs:9:5
   |
 9 |     #[graphql_orm(spatial(kind = "geometry", geometry_type = "Point", srid = 4326))]

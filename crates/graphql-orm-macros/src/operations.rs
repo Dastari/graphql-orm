@@ -6,7 +6,8 @@ use crate::backend::{
 use crate::entity::{
     FieldMetadata, is_bool_type, is_byte_vec_type, is_option_type, is_serde_json_value_or_option,
     is_uuid_type, is_vec_type, maybe_wrap_write_transform, option_inner_type,
-    parse_entity_metadata, parse_field_metadata, type_path_last_ident,
+    parse_entity_metadata, parse_field_metadata, spatial_geometry_type_tokens,
+    type_path_last_ident,
 };
 use crate::naming::{
     apply_graphql_case, graphql_field_name, selected_argument_case, selected_field_case,
@@ -294,13 +295,58 @@ fn resolve_upsert_config(
 }
 
 fn push_create_input_sql_value_tokens(
+    backend: BackendKind,
     struct_name: &syn::Ident,
     field_access: proc_macro2::TokenStream,
     field_type: &syn::Type,
     meta: &FieldMetadata,
     error_ty: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    if meta.is_boolean_field || is_bool_type(field_type) {
+    if let Some(spatial) = &meta.spatial {
+        if backend == BackendKind::Sqlite {
+            let geometry_type = spatial_geometry_type_tokens(
+                &spatial.geometry_type,
+                proc_macro2::Span::call_site(),
+            )
+            .expect("spatial metadata was already validated");
+            let srid = spatial.srid;
+            if is_option_type(field_type) {
+                quote! {
+                    match &#field_access {
+                        Some(value) => bind_values.push(
+                            ::graphql_orm::graphql::orm::spatial::canonical_geojson_sql_value(
+                                value,
+                                ::graphql_orm::graphql::orm::SpatialColumnDef::geometry(#geometry_type, #srid),
+                            )
+                            .map_err(<#error_ty as ::graphql_orm::graphql::orm::OrmResultError>::from_sqlx_error)?
+                        ),
+                        None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::JsonNull),
+                    }
+                }
+            } else {
+                quote! {
+                    bind_values.push(
+                        ::graphql_orm::graphql::orm::spatial::canonical_geojson_sql_value(
+                            &#field_access,
+                            ::graphql_orm::graphql::orm::SpatialColumnDef::geometry(#geometry_type, #srid),
+                        )
+                        .map_err(<#error_ty as ::graphql_orm::graphql::orm::OrmResultError>::from_sqlx_error)?
+                    );
+                }
+            }
+        } else if is_option_type(field_type) {
+            quote! {
+                match &#field_access {
+                    Some(value) => bind_values.push(::graphql_orm::graphql::orm::json_sql_value::<_, #error_ty>(value)?),
+                    None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::JsonNull),
+                }
+            }
+        } else {
+            quote! {
+                bind_values.push(::graphql_orm::graphql::orm::json_sql_value::<_, #error_ty>(&#field_access)?);
+            }
+        }
+    } else if meta.is_boolean_field || is_bool_type(field_type) {
         if is_option_type(field_type) {
             quote! {
                 match #field_access {
@@ -551,6 +597,11 @@ pub(crate) fn generate_graphql_operations(
     } else {
         quote! { ::graphql_orm::graphql::orm::SqlValue::String(id.to_string()) }
     };
+    let pk_bind_value_for_entity = if pk_is_uuid {
+        quote! { ::graphql_orm::graphql::orm::SqlValue::Uuid(entity.#pk_field) }
+    } else {
+        quote! { ::graphql_orm::graphql::orm::SqlValue::String(entity.#pk_field.to_string()) }
+    };
     let created_pk_value = if pk_is_uuid {
         quote! { ::graphql_orm::graphql::orm::SqlValue::Uuid(created_pk) }
     } else {
@@ -637,6 +688,7 @@ pub(crate) fn generate_graphql_operations(
     let field_case = selected_field_case();
     let field_case_rule = selected_field_case_rule();
     let list_query_name = apply_graphql_case(&plural_name, resolver_case);
+    let search_query_name = apply_graphql_case(&format!("{}Search", plural_name), resolver_case);
     let single_query_name = apply_graphql_case(&struct_name_str, resolver_case);
     let create_mutation_name = apply_graphql_case(&format!("create{}", struct_name), resolver_case);
     let upsert_mutation_name = apply_graphql_case(&format!("upsert{}", struct_name), resolver_case);
@@ -649,6 +701,7 @@ pub(crate) fn generate_graphql_operations(
     let subscription_name = apply_graphql_case(&format!("{}Changed", struct_name), resolver_case);
     let entity_result_field_name = apply_graphql_case(&struct_name_str, field_case);
     let where_arg_name = apply_graphql_case("where", argument_case);
+    let search_arg_name = apply_graphql_case("search", argument_case);
     let order_by_arg_name = apply_graphql_case("orderBy", argument_case);
     let page_arg_name = apply_graphql_case("page", argument_case);
     let id_arg_name = apply_graphql_case("id", argument_case);
@@ -727,6 +780,7 @@ pub(crate) fn generate_graphql_operations(
             .map(|field| {
                 let field_name = &field.field_name;
                 push_create_input_sql_value_tokens(
+                    backend,
                     struct_name,
                     quote! { key.#field_name.clone() },
                     &field.field_type,
@@ -737,6 +791,7 @@ pub(crate) fn generate_graphql_operations(
             .collect::<Vec<_>>()
     } else {
         vec![push_create_input_sql_value_tokens(
+            backend,
             struct_name,
             quote! { key.clone() },
             &pk_type_ty,
@@ -896,10 +951,10 @@ pub(crate) fn generate_graphql_operations(
         }
 
         if meta.spatial.is_some() {
-            if backend != BackendKind::Postgres {
+            if backend == BackendKind::Mssql {
                 return Err(syn::Error::new(
                     field.span(),
-                    "spatial fields are only supported for backend = \"postgres\"",
+                    "spatial fields are currently supported for backend = \"postgres\" and backend = \"sqlite\"",
                 ));
             }
             if !is_serde_json_value_or_option(field_type) {
@@ -914,6 +969,7 @@ pub(crate) fn generate_graphql_operations(
         let graphql_name =
             graphql_field_name(&meta, &rust_name, graphql_rename_fields, serde_rename_all);
         let db_col = meta.db_column.clone().unwrap_or_else(|| rust_name.clone());
+        let is_json_like_field = meta.is_json_field || meta.spatial.is_some();
 
         // Track string-filterable fields for fuzzy search
         if meta.filter && meta.filterable.as_deref() == Some("string") {
@@ -931,7 +987,7 @@ pub(crate) fn generate_graphql_operations(
             && meta.default.is_some();
         if include_in_create {
             let graphql_include_in_create = !meta.skip_input || meta.input_only;
-            let graphql_create_field_type = if meta.is_json_field {
+            let graphql_create_field_type = if is_json_like_field {
                 if let Some(inner_type) = option_inner_type(field_type) {
                     quote! { Option<::graphql_orm::async_graphql::Json<#inner_type>> }
                 } else {
@@ -964,7 +1020,7 @@ pub(crate) fn generate_graphql_operations(
                     #[graphql(name = #graphql_name)]
                     pub #field_name: #graphql_create_field_type,
                 });
-                if meta.is_json_field {
+                if is_json_like_field {
                     if option_inner_type(field_type).is_some() {
                         create_input_from_graphql_fields.push(quote! {
                             #field_name: input.#field_name.map(|value| value.0),
@@ -1070,6 +1126,7 @@ pub(crate) fn generate_graphql_operations(
                     upsert_update_columns.push(db_col.clone());
                     upsert_change_fields.push(db_col.clone());
                     upsert_change_binds_graphql.push(push_create_input_sql_value_tokens(
+                        backend,
                         struct_name,
                         quote! { input.#field_name.clone() },
                         field_type,
@@ -1077,6 +1134,7 @@ pub(crate) fn generate_graphql_operations(
                         quote! { ::graphql_orm::async_graphql::Error },
                     ));
                     upsert_change_binds_repo.push(push_create_input_sql_value_tokens(
+                        backend,
                         struct_name,
                         quote! { input.#field_name.clone() },
                         field_type,
@@ -1092,14 +1150,35 @@ pub(crate) fn generate_graphql_operations(
                 meta.spatial
                     .as_ref()
                     .map(|spatial| {
-                        format!("ST_SetSRID(ST_GeomFromGeoJSON(?::jsonb), {})", spatial.srid)
+                        if backend == BackendKind::Postgres {
+                            format!("ST_SetSRID(ST_GeomFromGeoJSON(?::jsonb), {})", spatial.srid)
+                        } else {
+                            "?".to_string()
+                        }
                     })
                     .unwrap_or_else(|| "?".to_string()),
             );
 
             // Generate bind value push based on field type
             // We push to bind_values vector to avoid lifetime issues with ::graphql_orm::sqlx::query
-            if meta.is_boolean_field || is_bool_type(field_type) {
+            if meta.spatial.is_some() {
+                insert_binds_graphql.push(push_create_input_sql_value_tokens(
+                    backend,
+                    struct_name,
+                    quote! { input.#field_name.clone() },
+                    field_type,
+                    &meta,
+                    quote! { ::graphql_orm::async_graphql::Error },
+                ));
+                insert_binds_repo.push(push_create_input_sql_value_tokens(
+                    backend,
+                    struct_name,
+                    quote! { input.#field_name.clone() },
+                    field_type,
+                    &meta,
+                    quote! { ::graphql_orm::sqlx::Error },
+                ));
+            } else if meta.is_boolean_field || is_bool_type(field_type) {
                 if is_option_type(field_type) {
                     let bind_tokens = quote! {
                         match input.#field_name {
@@ -1296,12 +1375,12 @@ pub(crate) fn generate_graphql_operations(
             let is_already_optional = is_option_type(field_type);
             let update_type = quote! { Option<#field_type> };
             let graphql_update_type = if let Some(inner_type) = option_inner_type(field_type) {
-                if meta.is_json_field {
+                if is_json_like_field {
                     quote! { ::graphql_orm::async_graphql::MaybeUndefined<::graphql_orm::async_graphql::Json<#inner_type>> }
                 } else {
                     quote! { ::graphql_orm::async_graphql::MaybeUndefined<#inner_type> }
                 }
-            } else if meta.is_json_field {
+            } else if is_json_like_field {
                 quote! { Option<::graphql_orm::async_graphql::Json<#field_type>> }
             } else {
                 quote! { #update_type }
@@ -1315,7 +1394,7 @@ pub(crate) fn generate_graphql_operations(
                     #[graphql(name = #graphql_name)]
                     pub #field_name: #graphql_update_type,
                 });
-                if meta.is_json_field && is_already_optional {
+                if is_json_like_field && is_already_optional {
                     update_input_from_graphql_fields.push(quote! {
                         #field_name: match input.#field_name {
                             ::graphql_orm::async_graphql::MaybeUndefined::Value(value) => Some(Some(value.0)),
@@ -1323,7 +1402,7 @@ pub(crate) fn generate_graphql_operations(
                             ::graphql_orm::async_graphql::MaybeUndefined::Undefined => None,
                         },
                     });
-                } else if meta.is_json_field {
+                } else if is_json_like_field {
                     update_input_from_graphql_fields.push(quote! {
                         #field_name: input.#field_name.map(|value| value.0),
                     });
@@ -1362,15 +1441,28 @@ pub(crate) fn generate_graphql_operations(
             update_policy_checks.push(update_policy_check);
 
             if let Some(spatial) = &meta.spatial {
-                let spatial_value_expr =
-                    format!("ST_SetSRID(ST_GeomFromGeoJSON(?::jsonb), {})", spatial.srid);
+                let spatial_value_expr = if backend == BackendKind::Postgres {
+                    format!("ST_SetSRID(ST_GeomFromGeoJSON(?::jsonb), {})", spatial.srid)
+                } else {
+                    "?".to_string()
+                };
+                let geometry_type = spatial_geometry_type_tokens(
+                    &spatial.geometry_type,
+                    proc_macro2::Span::call_site(),
+                )?;
+                let srid = spatial.srid;
                 if is_already_optional {
                     update_field_checks_graphql.push(quote! {
                         if let Some(ref val) = input.#field_name {
                             changed_fields.push(#db_col);
                             set_clauses.push(format!("{} = {}", #db_col, #spatial_value_expr));
                             match val {
-                                Some(value) => values.push(::graphql_orm::graphql::orm::json_sql_value::<_, ::graphql_orm::async_graphql::Error>(value)?),
+                                Some(value) => values.push(
+                                    #struct_name::__gom_spatial_sql_value::<::graphql_orm::async_graphql::Error>(
+                                        value,
+                                        ::graphql_orm::graphql::orm::SpatialColumnDef::geometry(#geometry_type, #srid),
+                                    )?
+                                ),
                                 None => values.push(::graphql_orm::graphql::orm::SqlValue::JsonNull),
                             }
                         }
@@ -1380,7 +1472,12 @@ pub(crate) fn generate_graphql_operations(
                             changed_fields.push(#db_col);
                             set_clauses.push(format!("{} = {}", #db_col, #spatial_value_expr));
                             match val {
-                                Some(value) => values.push(::graphql_orm::graphql::orm::json_sql_value::<_, ::graphql_orm::sqlx::Error>(value)?),
+                                Some(value) => values.push(
+                                    #struct_name::__gom_spatial_sql_value::<::graphql_orm::sqlx::Error>(
+                                        value,
+                                        ::graphql_orm::graphql::orm::SpatialColumnDef::geometry(#geometry_type, #srid),
+                                    )?
+                                ),
                                 None => values.push(::graphql_orm::graphql::orm::SqlValue::JsonNull),
                             }
                         }
@@ -1390,14 +1487,24 @@ pub(crate) fn generate_graphql_operations(
                         if let Some(ref val) = input.#field_name {
                             changed_fields.push(#db_col);
                             set_clauses.push(format!("{} = {}", #db_col, #spatial_value_expr));
-                            values.push(::graphql_orm::graphql::orm::json_sql_value::<_, ::graphql_orm::async_graphql::Error>(val)?);
+                            values.push(
+                                #struct_name::__gom_spatial_sql_value::<::graphql_orm::async_graphql::Error>(
+                                    val,
+                                    ::graphql_orm::graphql::orm::SpatialColumnDef::geometry(#geometry_type, #srid),
+                                )?
+                            );
                         }
                     });
                     update_field_checks_repo.push(quote! {
                         if let Some(ref val) = input.#field_name {
                             changed_fields.push(#db_col);
                             set_clauses.push(format!("{} = {}", #db_col, #spatial_value_expr));
-                            values.push(::graphql_orm::graphql::orm::json_sql_value::<_, ::graphql_orm::sqlx::Error>(val)?);
+                            values.push(
+                                #struct_name::__gom_spatial_sql_value::<::graphql_orm::sqlx::Error>(
+                                    val,
+                                    ::graphql_orm::graphql::orm::SpatialColumnDef::geometry(#geometry_type, #srid),
+                                )?
+                            );
                         }
                     });
                 }
@@ -1809,8 +1916,16 @@ pub(crate) fn generate_graphql_operations(
     let edge_type = syn::Ident::new(&format!("{}Edge", struct_name), struct_name.span());
     let connection_type =
         syn::Ident::new(&format!("{}Connection", struct_name), struct_name.span());
+    let search_edge_type =
+        syn::Ident::new(&format!("{}SearchEdge", struct_name), struct_name.span());
+    let search_connection_type = syn::Ident::new(
+        &format!("{}SearchConnection", struct_name),
+        struct_name.span(),
+    );
     let edge_type_str = format!("{}Edge", struct_name);
     let connection_type_str = format!("{}Connection", struct_name);
+    let search_edge_type_str = format!("{}SearchEdge", struct_name);
+    let search_connection_type_str = format!("{}SearchConnection", struct_name);
     let create_input_str = format!("Create{}Input", struct_name);
     let update_input_str = format!("Update{}Input", struct_name);
     let result_type_str = format!("{}Result", struct_name);
@@ -1819,6 +1934,10 @@ pub(crate) fn generate_graphql_operations(
         .iter()
         .filter_map(|f| parse_field_metadata(f).ok())
         .any(|m| m.is_relation);
+    let has_search = fields
+        .iter()
+        .filter_map(|f| parse_field_metadata(f).ok())
+        .any(|m| m.search.is_some() || m.search_relation.is_some());
     let relation_preload_list = if has_relations {
         quote! {
             let selection = ctx.field().selection_set().collect::<Vec<_>>();
@@ -1844,6 +1963,41 @@ pub(crate) fn generate_graphql_operations(
                     .into_iter()
                     .zip(entities.into_iter())
                     .map(|(cursor, node)| ::graphql_orm::graphql::pagination::Edge { cursor, node })
+                    .collect();
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let relation_preload_search_list = if has_relations {
+        quote! {
+            let selection = ctx.field().selection_set().collect::<Vec<_>>();
+            if !generic_conn.edges.is_empty() {
+                let edge_meta = generic_conn
+                    .edges
+                    .iter()
+                    .map(|edge| (edge.cursor.clone(), edge.score))
+                    .collect::<Vec<_>>();
+                let mut entities = std::mem::take(&mut generic_conn.edges)
+                    .into_iter()
+                    .map(|edge| edge.node)
+                    .collect::<Vec<_>>();
+                <#struct_name as ::graphql_orm::graphql::orm::RelationLoader<#backend_marker>>::bulk_load_relations_with_auth(
+                    &mut entities,
+                    pool,
+                    &selection,
+                    auth_context.as_ref(),
+                )
+                .await
+                .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                generic_conn.edges = edge_meta
+                    .into_iter()
+                    .zip(entities.into_iter())
+                    .map(|((cursor, score), node)| ::graphql_orm::graphql::orm::SearchConnectionEdge {
+                        cursor,
+                        score,
+                        node,
+                    })
                     .collect();
             }
         }
@@ -2044,6 +2198,7 @@ pub(crate) fn generate_graphql_operations(
                 .map(|field| {
                     let field_name = &field.field_name;
                     push_create_input_sql_value_tokens(
+                        backend,
                         struct_name,
                         quote! { input.#field_name.clone() },
                         &field.field_type,
@@ -2425,6 +2580,246 @@ pub(crate) fn generate_graphql_operations(
         quote! {}
     };
 
+    let search_connection_definitions = if has_search {
+        quote! {
+            #[derive(::graphql_orm::async_graphql::SimpleObject, Debug, Clone)]
+            #[graphql(name = #search_edge_type_str, rename_fields = #field_case_rule)]
+            pub struct #search_edge_type {
+                pub node: #struct_name,
+                pub cursor: String,
+                pub score: f64,
+            }
+
+            #[derive(::graphql_orm::async_graphql::SimpleObject, Debug, Clone)]
+            #[graphql(name = #search_connection_type_str, rename_fields = #field_case_rule)]
+            pub struct #search_connection_type {
+                pub edges: Vec<#search_edge_type>,
+                #[graphql(name = #page_info_field_name)]
+                pub page_info: ::graphql_orm::graphql::pagination::PageInfo,
+            }
+
+            impl #search_connection_type {
+                pub fn from_generic(conn: ::graphql_orm::graphql::orm::SearchConnection<#struct_name>) -> Self {
+                    Self {
+                        edges: conn.edges.into_iter().map(|edge| #search_edge_type {
+                            node: edge.node,
+                            cursor: edge.cursor,
+                            score: edge.score,
+                        }).collect(),
+                        page_info: conn.page_info,
+                    }
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let search_query_method = if has_search {
+        quote! {
+            #[graphql(name = #search_query_name)]
+            async fn search(
+                &self,
+                ctx: &::graphql_orm::async_graphql::Context<'_>,
+                #[graphql(name = #search_arg_name)] search: ::graphql_orm::graphql::filters::SearchInput,
+                #[graphql(name = #where_arg_name)] where_input: Option<#where_input>,
+                #[graphql(name = #page_arg_name)] page: Option<::graphql_orm::graphql::orm::PageInput>,
+            ) -> ::graphql_orm::async_graphql::Result<#search_connection_type> {
+                use ::graphql_orm::graphql::auth::AuthExt;
+
+                let _user = ctx.auth_user()?;
+                let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                let pool = db.pool();
+                let auth_context = ctx
+                    .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
+                    .cloned();
+                db.ensure_entity_access(
+                    Some(ctx),
+                    #entity_name_lit,
+                    <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                    ::graphql_orm::graphql::orm::EntityAccessKind::Read,
+                    ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
+                ).await?;
+
+                let mut query = #struct_name::search(pool, search);
+                if let Some(ref filter) = where_input {
+                    query = query.filter(filter.clone());
+                }
+                query = query.default_order();
+
+                if db.row_policy().is_some() {
+                    let requested_page = page.clone();
+                    let hits = query
+                        .fetch_all_with_auth(auth_context.as_ref())
+                        .await
+                        .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                    let mut visible_hits = Vec::new();
+                    for hit in hits {
+                        if db.can_read_row(
+                            Some(ctx),
+                            #entity_name_lit,
+                            <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                            ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
+                            &hit.entity as &(dyn ::std::any::Any + Send + Sync),
+                        ).await? {
+                            visible_hits.push(hit);
+                        }
+                    }
+                    let total = visible_hits.len() as i64;
+                    let offset = requested_page.as_ref().map(|p| p.offset()).unwrap_or(0) as usize;
+                    let limit = requested_page.as_ref().and_then(|p| p.limit()).map(|limit| limit.max(0) as usize);
+                    let paged_hits = if offset >= visible_hits.len() {
+                        Vec::new()
+                    } else if let Some(limit) = limit {
+                        visible_hits.into_iter().skip(offset).take(limit).collect::<Vec<_>>()
+                    } else {
+                        visible_hits.into_iter().skip(offset).collect::<Vec<_>>()
+                    };
+                    let paged_len = paged_hits.len();
+                    let mut generic_conn = ::graphql_orm::graphql::orm::SearchConnection {
+                        edges: paged_hits.into_iter().enumerate().map(|(index, hit)| {
+                            ::graphql_orm::graphql::orm::SearchConnectionEdge {
+                                cursor: ::graphql_orm::graphql::pagination::encode_cursor((offset + index) as i64),
+                                score: hit.score,
+                                node: hit.entity,
+                            }
+                        }).collect::<Vec<_>>(),
+                        page_info: ::graphql_orm::graphql::pagination::PageInfo {
+                            has_next_page: (offset as i64 + paged_len as i64) < total,
+                            has_previous_page: offset > 0,
+                            start_cursor: None,
+                            end_cursor: None,
+                            total_count: Some(total),
+                        },
+                    };
+                    generic_conn.page_info.start_cursor = generic_conn.edges.first().map(|edge| edge.cursor.clone());
+                    generic_conn.page_info.end_cursor = generic_conn.edges.last().map(|edge| edge.cursor.clone());
+
+                    #relation_preload_search_list
+
+                    return Ok(#search_connection_type::from_generic(generic_conn));
+                }
+
+                if let Some(page) = page {
+                    query = query.paginate(page);
+                }
+
+                let mut generic_conn = query
+                    .fetch_connection_with_auth(auth_context.as_ref())
+                    .await
+                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+
+                #relation_preload_search_list
+
+                Ok(#search_connection_type::from_generic(generic_conn))
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let search_repository_method = if has_search {
+        quote! {
+            pub fn search<'a>(
+                pool: &'a #pool_type,
+                search: ::graphql_orm::graphql::filters::SearchInput,
+            ) -> ::graphql_orm::graphql::orm::EntitySearchQuery<'a, Self, #where_input, #backend_marker> {
+                ::graphql_orm::graphql::orm::EntitySearchQuery::new(pool, search)
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let search_rebuild_methods = if has_search
+        && backend != BackendKind::Mssql
+        && !schema_policy_read_only
+        && !has_composite_primary_key
+    {
+        quote! {
+            pub async fn rebuild_search_index(
+                db: &::graphql_orm::db::Database<#backend_marker>,
+            ) -> Result<(), ::graphql_orm::sqlx::Error> {
+                let Some(index) = <Self as ::graphql_orm::graphql::orm::DatabaseSearchSchema>::search_index() else {
+                    return Ok(());
+                };
+                if !index.enabled {
+                    return Ok(());
+                }
+                let rows = ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
+                    .fetch_all(db)
+                    .await?;
+                let mut tx = db.pool().begin().await?;
+                let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::new(db, tx);
+                for entity in &rows {
+                    let document = <Self as ::graphql_orm::graphql::orm::SearchableEntity>::search_document(entity);
+                    ::graphql_orm::graphql::orm::upsert_search_document_on::<#backend_marker>(
+                        hook_ctx.executor(),
+                        index,
+                        &document,
+                    ).await?;
+                }
+                hook_ctx.commit_and_emit().await?;
+                Ok(())
+            }
+
+            pub async fn rebuild_search_document(
+                db: &::graphql_orm::db::Database<#backend_marker>,
+                id: &#pk_type_ty,
+            ) -> Result<(), ::graphql_orm::sqlx::Error> {
+                let Some(index) = <Self as ::graphql_orm::graphql::orm::DatabaseSearchSchema>::search_index() else {
+                    return Ok(());
+                };
+                if !index.enabled {
+                    return Ok(());
+                }
+                let Some(entity) = Self::find_by_key(db, id).await? else {
+                    return Ok(());
+                };
+                let mut tx = db.pool().begin().await?;
+                let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::new(db, tx);
+                let document = <Self as ::graphql_orm::graphql::orm::SearchableEntity>::search_document(&entity);
+                ::graphql_orm::graphql::orm::upsert_search_document_on::<#backend_marker>(
+                    hook_ctx.executor(),
+                    index,
+                    &document,
+                ).await?;
+                hook_ctx.commit_and_emit().await?;
+                Ok(())
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let search_write_maintenance = if has_search && backend != BackendKind::Mssql {
+        quote! {
+            if let Some(index) = <Self as ::graphql_orm::graphql::orm::DatabaseSearchSchema>::search_index() {
+                if index.enabled {
+                    match action {
+                        ::graphql_orm::graphql::orm::ChangeAction::Deleted => {
+                            let key = <Self as ::graphql_orm::graphql::orm::SearchableEntity>::search_key(entity);
+                            ::graphql_orm::graphql::orm::delete_search_document_on::<#backend_marker>(
+                                hook_ctx.executor(),
+                                index,
+                                &key,
+                            ).await?;
+                        }
+                        ::graphql_orm::graphql::orm::ChangeAction::Created
+                        | ::graphql_orm::graphql::orm::ChangeAction::Updated => {
+                            let document = <Self as ::graphql_orm::graphql::orm::SearchableEntity>::search_document(entity);
+                            ::graphql_orm::graphql::orm::upsert_search_document_on::<#backend_marker>(
+                                hook_ctx.executor(),
+                                index,
+                                &document,
+                            ).await?;
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     if backend == BackendKind::Mssql || schema_policy_read_only || has_composite_primary_key {
         return Ok(quote! {
             // ============================================================================
@@ -2467,6 +2862,8 @@ pub(crate) fn generate_graphql_operations(
                 }
             }
 
+            #search_connection_definitions
+
             // ============================================================================
             // Query Struct
             // ============================================================================
@@ -2504,7 +2901,7 @@ pub(crate) fn generate_graphql_operations(
                     let mut query = EntityQuery::<#struct_name, #backend_marker>::new();
 
                     if let Some(ref filter) = where_input {
-                        query = query.filter(filter);
+                        query = query.filter_with_entity_matching(filter);
                     }
 
                     if let Some(ref orders) = order_by {
@@ -2592,6 +2989,8 @@ pub(crate) fn generate_graphql_operations(
                     Ok(#connection_type::from_generic(generic_conn))
                 }
 
+                #search_query_method
+
                 #[graphql(name = #single_query_name)]
                 async fn get_by_id(
                     &self,
@@ -2647,11 +3046,13 @@ pub(crate) fn generate_graphql_operations(
                     ::graphql_orm::graphql::orm::FindQuery::new(pool)
                 }
 
+                #search_repository_method
+                #search_rebuild_methods
+
                 #read_repository_key_methods
 
-                pub fn count_query<'a>(pool: &'a #pool_type) -> ::graphql_orm::graphql::orm::CountQuery<'a, #where_input, #backend_marker> {
-                    use ::graphql_orm::graphql::orm::DatabaseEntity;
-                    ::graphql_orm::graphql::orm::CountQuery::new(pool, <Self as DatabaseEntity>::TABLE_NAME)
+                pub fn count_query<'a>(pool: &'a #pool_type) -> ::graphql_orm::graphql::orm::EntityCountQuery<'a, Self, #where_input, #backend_marker> {
+                    ::graphql_orm::graphql::orm::EntityCountQuery::new(pool)
                 }
             }
 
@@ -2707,6 +3108,8 @@ pub(crate) fn generate_graphql_operations(
                 }
             }
         }
+
+        #search_connection_definitions
 
         // ============================================================================
         // Create/Update Input Types
@@ -2869,7 +3272,7 @@ pub(crate) fn generate_graphql_operations(
                 let mut query = EntityQuery::<#struct_name, #backend_marker>::new();
 
                 if let Some(ref filter) = where_input {
-                    query = query.filter(filter);
+                    query = query.filter_with_entity_matching(filter);
                 }
 
                 if let Some(ref orders) = order_by {
@@ -2956,6 +3359,8 @@ pub(crate) fn generate_graphql_operations(
 
                 Ok(#connection_type::from_generic(generic_conn))
             }
+
+            #search_query_method
 
             /// Get a single #struct_name_str by ID
             #[graphql(name = #single_query_name)]
@@ -3561,6 +3966,7 @@ pub(crate) fn generate_graphql_operations(
                 entity: Option<&Self>,
             ) -> Result<(), ::graphql_orm::sqlx::Error> {
                 if let Some(entity) = entity {
+                    #search_write_maintenance
                     let source_id = entity.#pk_field.to_string();
                     hook_ctx.queue_event(#changed_event {
                         action,
@@ -3811,7 +4217,7 @@ pub(crate) fn generate_graphql_operations(
                 }
 
                 let matched_entities = EntityQuery::<Self, #backend_marker>::new()
-                    .filter(&where_input)
+                    .filter_with_entity_matching(&where_input)
                     .fetch_all_on(hook_ctx.executor())
                     .await?;
 
@@ -3865,11 +4271,27 @@ pub(crate) fn generate_graphql_operations(
                     .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
                 }
 
-                let query = EntityQuery::<Self, #backend_marker>::new().filter(&where_input);
-                let (delete_sql, filter_values) = query.build_delete_sql();
-                let where_clause = match delete_sql.split_once(" WHERE ") {
-                    Some((_, clause)) => Self::__gom_rebind_sql(clause, values.len() + 1),
-                    None => return Err(Self::__gom_runtime_error("Where filter produced empty SQL")),
+                let requires_entity_filtering =
+                    <#where_input as ::graphql_orm::graphql::orm::DatabaseFilter>::requires_in_memory_filtering(
+                        &where_input,
+                        <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT,
+                    );
+                let mut filter_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                let where_clause = if requires_entity_filtering {
+                    let mut placeholders = Vec::new();
+                    for (index, entity) in matched_entities.iter().enumerate() {
+                        placeholders.push(Self::__gom_placeholder(values.len() + index + 1));
+                        filter_values.push(#pk_bind_value_for_entity);
+                    }
+                    format!("{} IN ({})", Self::PRIMARY_KEY, placeholders.join(", "))
+                } else {
+                    let query = EntityQuery::<Self, #backend_marker>::new().filter(&where_input);
+                    let (delete_sql, built_values) = query.build_delete_sql();
+                    filter_values = built_values;
+                    match delete_sql.split_once(" WHERE ") {
+                        Some((_, clause)) => Self::__gom_rebind_sql(clause, values.len() + 1),
+                        None => return Err(Self::__gom_runtime_error("Where filter produced empty SQL")),
+                    }
                 };
 
                 let sql = format!(
@@ -3990,7 +4412,7 @@ pub(crate) fn generate_graphql_operations(
                 }
 
                 let matched_entities = EntityQuery::<Self, #backend_marker>::new()
-                    .filter(&where_input)
+                    .filter_with_entity_matching(&where_input)
                     .fetch_all_on(hook_ctx.executor())
                     .await?;
 
@@ -4017,9 +4439,32 @@ pub(crate) fn generate_graphql_operations(
                     .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
                 }
 
-                let mut query = EntityQuery::<Self, #backend_marker>::new().filter(&where_input);
-                let (sql, values) = query.build_delete_sql();
-                let sql = Self::__gom_rebind_sql(&sql, 1);
+                let requires_entity_filtering =
+                    <#where_input as ::graphql_orm::graphql::orm::DatabaseFilter>::requires_in_memory_filtering(
+                        &where_input,
+                        <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT,
+                    );
+                let (sql, values) = if requires_entity_filtering {
+                    let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                    let mut placeholders = Vec::new();
+                    for (index, entity) in matched_entities.iter().enumerate() {
+                        placeholders.push(Self::__gom_placeholder(index + 1));
+                        values.push(#pk_bind_value_for_entity);
+                    }
+                    (
+                        format!(
+                            "DELETE FROM {} WHERE {} IN ({})",
+                            #table_name,
+                            Self::PRIMARY_KEY,
+                            placeholders.join(", ")
+                        ),
+                        values,
+                    )
+                } else {
+                    let query = EntityQuery::<Self, #backend_marker>::new().filter(&where_input);
+                    let (sql, values) = query.build_delete_sql();
+                    (Self::__gom_rebind_sql(&sql, 1), values)
+                };
                 let result = ::graphql_orm::graphql::orm::execute_with_binds_on::<#backend_marker, _>(hook_ctx.executor(), &sql, &values).await?;
                 let deleted = result.rows_affected() as i64;
 
@@ -4103,6 +4548,9 @@ pub(crate) fn generate_graphql_operations(
             pub fn query<'a>(pool: &'a #pool_type) -> ::graphql_orm::graphql::orm::FindQuery<'a, Self, #where_input, #order_by_input, #backend_marker> {
                 ::graphql_orm::graphql::orm::FindQuery::new(pool)
             }
+
+            #search_repository_method
+            #search_rebuild_methods
 
             #read_repository_key_methods
 
@@ -4257,7 +4705,7 @@ pub(crate) fn generate_graphql_operations(
                     ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
                 ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
                 let matched_entities = EntityQuery::<Self, #backend_marker>::new()
-                    .filter(&where_input)
+                    .filter_with_entity_matching(&where_input)
                     .fetch_all_with_auth(db, auth_context)
                     .await?;
 
@@ -4323,11 +4771,27 @@ pub(crate) fn generate_graphql_operations(
                     .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
                 }
 
-                let query = EntityQuery::<Self, #backend_marker>::new().filter(&where_input);
-                let (delete_sql, filter_values) = query.build_delete_sql();
-                let where_clause = match delete_sql.split_once(" WHERE ") {
-                    Some((_, clause)) => Self::__gom_rebind_sql(clause, values.len() + 1),
-                    None => return Err(Self::__gom_runtime_error("Where filter produced empty SQL")),
+                let requires_entity_filtering =
+                    <#where_input as ::graphql_orm::graphql::orm::DatabaseFilter>::requires_in_memory_filtering(
+                        &where_input,
+                        <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT,
+                    );
+                let mut filter_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                let where_clause = if requires_entity_filtering {
+                    let mut placeholders = Vec::new();
+                    for (index, entity) in matched_entities.iter().enumerate() {
+                        placeholders.push(Self::__gom_placeholder(values.len() + index + 1));
+                        filter_values.push(#pk_bind_value_for_entity);
+                    }
+                    format!("{} IN ({})", Self::PRIMARY_KEY, placeholders.join(", "))
+                } else {
+                    let query = EntityQuery::<Self, #backend_marker>::new().filter(&where_input);
+                    let (delete_sql, built_values) = query.build_delete_sql();
+                    filter_values = built_values;
+                    match delete_sql.split_once(" WHERE ") {
+                        Some((_, clause)) => Self::__gom_rebind_sql(clause, values.len() + 1),
+                        None => return Err(Self::__gom_runtime_error("Where filter produced empty SQL")),
+                    }
                 };
 
                 let sql = format!(
@@ -4490,7 +4954,7 @@ pub(crate) fn generate_graphql_operations(
                     ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
                 ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
                 let matched_entities = EntityQuery::<Self, #backend_marker>::new()
-                    .filter(&where_input)
+                    .filter_with_entity_matching(&where_input)
                     .fetch_all_with_auth(db, auth_context)
                     .await?;
 
@@ -4533,9 +4997,32 @@ pub(crate) fn generate_graphql_operations(
                     .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
                 }
 
-                let mut query = EntityQuery::<Self, #backend_marker>::new().filter(&where_input);
-                let (sql, values) = query.build_delete_sql();
-                let sql = Self::__gom_rebind_sql(&sql, 1);
+                let requires_entity_filtering =
+                    <#where_input as ::graphql_orm::graphql::orm::DatabaseFilter>::requires_in_memory_filtering(
+                        &where_input,
+                        <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT,
+                    );
+                let (sql, values) = if requires_entity_filtering {
+                    let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                    let mut placeholders = Vec::new();
+                    for (index, entity) in matched_entities.iter().enumerate() {
+                        placeholders.push(Self::__gom_placeholder(index + 1));
+                        values.push(#pk_bind_value_for_entity);
+                    }
+                    (
+                        format!(
+                            "DELETE FROM {} WHERE {} IN ({})",
+                            #table_name,
+                            Self::PRIMARY_KEY,
+                            placeholders.join(", ")
+                        ),
+                        values,
+                    )
+                } else {
+                    let query = EntityQuery::<Self, #backend_marker>::new().filter(&where_input);
+                    let (sql, values) = query.build_delete_sql();
+                    (Self::__gom_rebind_sql(&sql, 1), values)
+                };
                 let result = ::graphql_orm::graphql::orm::execute_with_binds_on::<#backend_marker, _>(hook_ctx.executor(), &sql, &values).await?;
                 let deleted = result.rows_affected() as i64;
 
@@ -4568,9 +5055,8 @@ pub(crate) fn generate_graphql_operations(
             }
 
             /// Count entities matching the given filter
-            pub fn count_query<'a>(pool: &'a #pool_type) -> ::graphql_orm::graphql::orm::CountQuery<'a, #where_input, #backend_marker> {
-                use ::graphql_orm::graphql::orm::DatabaseEntity;
-                ::graphql_orm::graphql::orm::CountQuery::new(pool, <Self as DatabaseEntity>::TABLE_NAME)
+            pub fn count_query<'a>(pool: &'a #pool_type) -> ::graphql_orm::graphql::orm::EntityCountQuery<'a, Self, #where_input, #backend_marker> {
+                ::graphql_orm::graphql::orm::EntityCountQuery::new(pool)
             }
 
             /// Search entities with fuzzy/similar text matching

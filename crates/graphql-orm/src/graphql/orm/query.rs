@@ -5,12 +5,15 @@ use super::PostgresBackend;
 #[cfg(feature = "sqlite")]
 use super::SqliteBackend;
 use super::core::{
-    ColumnDef, DbAuthContext, EntityMetadata, IndexDef, RelationMetadata, SchemaPolicy, SqlValue,
+    ColumnDef, DbAuthContext, EntityMetadata, IndexDef, RelationMetadata, SchemaPolicy,
+    SearchIndexDef, SqlValue,
 };
 use super::dialect::{DatabaseBackend, SqlDialect, current_backend};
 use super::{DefaultBackend, OrmBackend, SqlxBackend};
 use crate::graphql::pagination::{Connection, Edge, PageInfo, encode_cursor};
+use std::any::Any;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 pub trait DatabaseEntity {
     const TABLE_NAME: &'static str;
@@ -37,7 +40,13 @@ pub trait EntityRelations {
     }
 }
 
-pub trait Entity: DatabaseEntity + DatabaseSchema + EntityRelations {
+pub trait DatabaseSearchSchema {
+    fn search_index() -> Option<&'static SearchIndexDef> {
+        None
+    }
+}
+
+pub trait Entity: DatabaseEntity + DatabaseSchema + EntityRelations + DatabaseSearchSchema {
     fn entity_name() -> &'static str;
     fn metadata() -> &'static EntityMetadata;
 }
@@ -60,6 +69,14 @@ pub trait FromSqlRow<B: OrmBackend = DefaultBackend>: Sized {
 pub trait DatabaseFilter {
     fn to_sql_conditions(&self) -> (Vec<String>, Vec<SqlValue>);
     fn is_empty(&self) -> bool;
+
+    fn requires_in_memory_filtering(&self, _backend: DatabaseBackend) -> bool {
+        false
+    }
+
+    fn matches_entity(&self, _entity: &(dyn Any + Send + Sync)) -> Result<bool, sqlx::Error> {
+        Ok(true)
+    }
 
     fn to_filter_expression(&self) -> Option<FilterExpression> {
         let (conditions, values) = self.to_sql_conditions();
@@ -570,11 +587,24 @@ pub fn build_upsert_sql(
         update_updated_at,
     )
 }
+type EntityMatcher<T> = Arc<dyn Fn(&T) -> Result<bool, sqlx::Error> + Send + Sync>;
+
+struct PoolRef<'a, B: OrmBackend> {
+    pool: &'a B::Pool,
+}
+
+impl<B: OrmBackend> PoolProvider<B> for PoolRef<'_, B> {
+    fn pool(&self) -> &B::Pool {
+        self.pool
+    }
+}
+
 pub struct EntityQuery<T, B: OrmBackend = DefaultBackend> {
     pub where_clauses: Vec<String>,
     pub values: Vec<SqlValue>,
     pub order_clauses: Vec<String>,
     pub page: Option<PageInput>,
+    entity_matchers: Vec<EntityMatcher<T>>,
     _marker: PhantomData<(T, B)>,
 }
 
@@ -585,6 +615,7 @@ impl<T, B: OrmBackend> Clone for EntityQuery<T, B> {
             values: self.values.clone(),
             order_clauses: self.order_clauses.clone(),
             page: self.page.clone(),
+            entity_matchers: self.entity_matchers.clone(),
             _marker: PhantomData,
         }
     }
@@ -593,7 +624,7 @@ impl<T, B: OrmBackend> Clone for EntityQuery<T, B> {
 impl<T, B> EntityQuery<T, B>
 where
     B: OrmBackend,
-    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync,
+    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
 {
     pub fn new() -> Self {
         Self {
@@ -601,6 +632,7 @@ where
             values: Vec::new(),
             order_clauses: Vec::new(),
             page: None,
+            entity_matchers: Vec::new(),
             _marker: PhantomData,
         }
     }
@@ -624,6 +656,22 @@ where
         let (conds, values) = filter.to_sql_conditions();
         self.where_clauses.extend(conds);
         self.values.extend(values);
+        self
+    }
+
+    pub fn filter_with_entity_matching<F>(mut self, filter: &F) -> Self
+    where
+        F: DatabaseFilter + Clone + Send + Sync + 'static,
+    {
+        if filter.requires_in_memory_filtering(B::DIALECT) {
+            let filter = filter.clone();
+            self.entity_matchers
+                .push(Arc::new(move |entity| filter.matches_entity(entity)));
+        } else {
+            let (conds, values) = filter.to_sql_conditions();
+            self.where_clauses.extend(conds);
+            self.values.extend(values);
+        }
         self
     }
 
@@ -661,9 +709,80 @@ where
                 .cloned()
                 .map(|clause| SortExpression { clause })
                 .collect(),
-            pagination: self.page.as_ref().map(PaginationRequest::from),
+            pagination: if self.requires_in_memory_filtering() {
+                None
+            } else {
+                self.page.as_ref().map(PaginationRequest::from)
+            },
             count_only: false,
         }
+    }
+
+    pub(crate) fn requires_in_memory_filtering(&self) -> bool {
+        !self.entity_matchers.is_empty()
+    }
+
+    fn matches_entity(&self, entity: &T) -> Result<bool, sqlx::Error> {
+        self.entity_matchers
+            .iter()
+            .try_fold(
+                true,
+                |matches, matcher| {
+                    if matches { matcher(entity) } else { Ok(false) }
+                },
+            )
+    }
+
+    fn apply_in_memory_filtering(&self, rows: Vec<B::Row>) -> Result<Vec<T>, sqlx::Error> {
+        let mut entities = rows
+            .iter()
+            .map(T::from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if self.requires_in_memory_filtering() {
+            entities = entities
+                .into_iter()
+                .filter_map(|entity| match self.matches_entity(&entity) {
+                    Ok(true) => Some(Ok(entity)),
+                    Ok(false) => None,
+                    Err(error) => Some(Err(error)),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            if let Some(page) = &self.page {
+                let offset = page.offset().max(0) as usize;
+                let limit = page.limit().map(|limit| limit.max(0) as usize);
+                let iter = entities.into_iter().skip(offset);
+                entities = match limit {
+                    Some(limit) => iter.take(limit).collect(),
+                    None => iter.collect(),
+                };
+            }
+        }
+
+        Ok(entities)
+    }
+
+    async fn fetch_unpaged_filtered<P>(&self, provider: &P) -> Result<Vec<T>, sqlx::Error>
+    where
+        P: PoolProvider<B> + ?Sized,
+    {
+        let mut query = self.clone();
+        query.page = None;
+        query.fetch_all(provider).await
+    }
+
+    async fn fetch_unpaged_filtered_with_auth<P>(
+        &self,
+        provider: &P,
+        auth: Option<&DbAuthContext>,
+    ) -> Result<Vec<T>, sqlx::Error>
+    where
+        P: PoolProvider<B> + ?Sized,
+    {
+        let mut query = self.clone();
+        query.page = None;
+        query.fetch_all_with_auth(provider, auth).await
     }
 
     pub async fn fetch_all<P>(&self, provider: &P) -> Result<Vec<T>, sqlx::Error>
@@ -672,7 +791,7 @@ where
     {
         let rendered = render_select_query(B::DIALECT, &self.build_select_query());
         let rows = B::fetch_rows(provider.pool(), &rendered.sql, &rendered.values).await?;
-        rows.iter().map(T::from_row).collect()
+        self.apply_in_memory_filtering(rows)
     }
 
     pub async fn fetch_all_with_auth<P>(
@@ -686,7 +805,7 @@ where
         let rendered = render_select_query(B::DIALECT, &self.build_select_query());
         let rows =
             B::fetch_rows_with_auth(provider.pool(), &rendered.sql, &rendered.values, auth).await?;
-        rows.iter().map(T::from_row).collect()
+        self.apply_in_memory_filtering(rows)
     }
 
     pub async fn fetch_all_on<'e, E>(&self, executor: E) -> Result<Vec<T>, sqlx::Error>
@@ -696,7 +815,7 @@ where
     {
         let rendered = render_select_query(B::DIALECT, &self.build_select_query());
         let rows = B::fetch_rows_on(executor, rendered.sql, rendered.values).await?;
-        rows.iter().map(T::from_row).collect()
+        self.apply_in_memory_filtering(rows)
     }
 
     pub async fn fetch_one<P>(&self, provider: &P) -> Result<Option<T>, sqlx::Error>
@@ -733,6 +852,9 @@ where
     where
         P: PoolProvider<B> + ?Sized,
     {
+        if self.requires_in_memory_filtering() {
+            return Ok(self.fetch_unpaged_filtered(provider).await?.len() as i64);
+        }
         let mut query = self.build_select_query();
         query.count_only = true;
         query.pagination = None;
@@ -751,6 +873,12 @@ where
     where
         P: PoolProvider<B> + ?Sized,
     {
+        if self.requires_in_memory_filtering() {
+            return Ok(self
+                .fetch_unpaged_filtered_with_auth(provider, auth)
+                .await?
+                .len() as i64);
+        }
         let mut query = self.build_select_query();
         query.count_only = true;
         query.pagination = None;
@@ -767,6 +895,11 @@ where
         B: SqlxBackend,
         E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
     {
+        if self.requires_in_memory_filtering() {
+            let mut query = self.clone();
+            query.page = None;
+            return Ok(query.fetch_all_on(executor).await?.len() as i64);
+        }
         let mut query = self.build_select_query();
         query.count_only = true;
         query.pagination = None;
@@ -792,6 +925,30 @@ where
     where
         P: PoolProvider<B> + ?Sized,
     {
+        if self.requires_in_memory_filtering() {
+            let total = self.fetch_unpaged_filtered(provider).await?.len() as i64;
+            let offset = self.page.as_ref().map(|p| p.offset()).unwrap_or(0) as usize;
+            let nodes = self.fetch_all(provider).await?;
+            let edges = nodes
+                .into_iter()
+                .enumerate()
+                .map(|(index, node)| Edge {
+                    node,
+                    cursor: encode_cursor((offset + index) as i64),
+                })
+                .collect::<Vec<_>>();
+
+            return Ok(Connection {
+                page_info: PageInfo {
+                    has_next_page: (offset as i64 + edges.len() as i64) < total,
+                    has_previous_page: offset > 0,
+                    start_cursor: edges.first().map(|edge| edge.cursor.clone()),
+                    end_cursor: edges.last().map(|edge| edge.cursor.clone()),
+                    total_count: Some(total),
+                },
+                edges,
+            });
+        }
         let total = self.count(provider).await?;
         let offset = self.page.as_ref().map(|p| p.offset()).unwrap_or(0) as usize;
         let nodes = self.fetch_all(provider).await?;
@@ -824,6 +981,33 @@ where
     where
         P: PoolProvider<B> + ?Sized,
     {
+        if self.requires_in_memory_filtering() {
+            let total = self
+                .fetch_unpaged_filtered_with_auth(provider, auth)
+                .await?
+                .len() as i64;
+            let offset = self.page.as_ref().map(|p| p.offset()).unwrap_or(0) as usize;
+            let nodes = self.fetch_all_with_auth(provider, auth).await?;
+            let edges = nodes
+                .into_iter()
+                .enumerate()
+                .map(|(index, node)| Edge {
+                    node,
+                    cursor: encode_cursor((offset + index) as i64),
+                })
+                .collect::<Vec<_>>();
+
+            return Ok(Connection {
+                page_info: PageInfo {
+                    has_next_page: (offset as i64 + edges.len() as i64) < total,
+                    has_previous_page: offset > 0,
+                    start_cursor: edges.first().map(|edge| edge.cursor.clone()),
+                    end_cursor: edges.last().map(|edge| edge.cursor.clone()),
+                    total_count: Some(total),
+                },
+                edges,
+            });
+        }
         let mut count_query = self.build_select_query();
         count_query.count_only = true;
         count_query.pagination = None;
@@ -870,7 +1054,7 @@ where
 
 pub struct FindQuery<'a, T, W, O, B: OrmBackend = DefaultBackend>
 where
-    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync,
+    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
 {
     pool: &'a B::Pool,
     query: EntityQuery<T, B>,
@@ -880,7 +1064,8 @@ where
 impl<'a, T, W, O, B> FindQuery<'a, T, W, O, B>
 where
     B: OrmBackend,
-    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync,
+    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+    W: DatabaseFilter + Clone + Send + Sync + 'static,
 {
     pub fn new(pool: &'a B::Pool) -> Self {
         Self {
@@ -890,11 +1075,8 @@ where
         }
     }
 
-    pub fn filter(mut self, filter: W) -> Self
-    where
-        W: DatabaseFilter,
-    {
-        self.query = self.query.filter(&filter);
+    pub fn filter(mut self, filter: W) -> Self {
+        self.query = self.query.filter_with_entity_matching(&filter);
         self
     }
 
@@ -907,10 +1089,9 @@ where
     }
 
     pub fn limit(mut self, limit: i64) -> Self {
-        self.query.page = Some(PageInput {
-            limit: Some(limit),
-            offset: Some(0),
-        });
+        let mut page = self.query.page.unwrap_or_default();
+        page.limit = Some(limit);
+        self.query.page = Some(page);
         self
     }
 
@@ -922,9 +1103,7 @@ where
     }
 
     pub async fn fetch_all(self) -> Result<Vec<T>, sqlx::Error> {
-        let rendered = render_select_query(B::DIALECT, &self.query.build_select_query());
-        let rows = B::fetch_rows(self.pool, &rendered.sql, &rendered.values).await?;
-        rows.iter().map(T::from_row).collect()
+        self.query.fetch_all(&PoolRef { pool: self.pool }).await
     }
 
     pub async fn fetch_all_on<'e, E>(self, executor: E) -> Result<Vec<T>, sqlx::Error>
@@ -948,14 +1127,7 @@ where
     }
 
     pub async fn count(self) -> Result<i64, sqlx::Error> {
-        let mut query = self.query.build_select_query();
-        query.count_only = true;
-        query.pagination = None;
-        query.sorts.clear();
-        let rendered = render_select_query(B::DIALECT, &query);
-        let rows = B::fetch_rows(self.pool, &rendered.sql, &rendered.values).await?;
-        let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
-        B::try_get_i64(row, "count")
+        self.query.count(&PoolRef { pool: self.pool }).await
     }
 
     pub async fn count_on<'e, E>(self, executor: E) -> Result<i64, sqlx::Error>
@@ -976,6 +1148,47 @@ where
         E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
     {
         Ok(self.query.count_on(executor).await? > 0)
+    }
+}
+
+pub struct EntityCountQuery<'a, T, W, B: OrmBackend = DefaultBackend>
+where
+    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+{
+    pool: &'a B::Pool,
+    query: EntityQuery<T, B>,
+    _marker: PhantomData<W>,
+}
+
+impl<'a, T, W, B> EntityCountQuery<'a, T, W, B>
+where
+    B: OrmBackend,
+    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+    W: DatabaseFilter + Clone + Send + Sync + 'static,
+{
+    pub fn new(pool: &'a B::Pool) -> Self {
+        Self {
+            pool,
+            query: EntityQuery::new(),
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn filter(mut self, filter: &W) -> Self {
+        self.query = self.query.filter_with_entity_matching(filter);
+        self
+    }
+
+    pub async fn count(self) -> Result<i64, sqlx::Error> {
+        self.query.count(&PoolRef { pool: self.pool }).await
+    }
+
+    pub async fn count_on<'e, E>(self, executor: E) -> Result<i64, sqlx::Error>
+    where
+        B: SqlxBackend,
+        E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
+    {
+        self.query.count_on(executor).await
     }
 }
 

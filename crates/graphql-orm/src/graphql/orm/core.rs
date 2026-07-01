@@ -1,5 +1,7 @@
 use super::dialect::DatabaseBackend;
-use super::query::{ChangeAction, DatabaseEntity, DatabaseSchema, EntityRelations};
+use super::query::{
+    ChangeAction, DatabaseEntity, DatabaseSchema, DatabaseSearchSchema, EntityRelations,
+};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 use super::query::{DatabaseFilter, DatabaseOrderBy, EntityQuery, FromSqlRow};
 use super::{DefaultBackend, OrmBackend};
@@ -273,7 +275,7 @@ pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub struct MutationQuery<'ctx, 'tx, T, B: WriteBackend = DefaultWriteBackend>
 where
-    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync,
+    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
 {
     hook_ctx: &'ctx mut MutationContext<'tx, B>,
     query: EntityQuery<T, B>,
@@ -285,7 +287,7 @@ where
     B: WriteBackend,
     for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
         sqlx::Executor<'c, Database = B::Database> + Send,
-    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync,
+    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
 {
     fn new(hook_ctx: &'ctx mut MutationContext<'tx, B>) -> Self {
         Self {
@@ -366,7 +368,7 @@ pub struct WriteInputContext<'ctx, 'tx, B: WriteBackend = DefaultWriteBackend> {
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub struct WriteQuery<'ctx, 'write, 'tx, T, B: WriteBackend = DefaultWriteBackend>
 where
-    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync,
+    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
 {
     write_ctx: &'ctx mut WriteInputContext<'write, 'tx, B>,
     query: EntityQuery<T, B>,
@@ -456,7 +458,7 @@ where
 
     pub fn query<'a, T>(&'a mut self) -> WriteQuery<'a, 'ctx, 'write, T, B>
     where
-        T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync,
+        T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
     {
         WriteQuery {
             write_ctx: self,
@@ -471,7 +473,7 @@ where
     B: WriteBackend,
     for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
         sqlx::Executor<'c, Database = B::Database> + Send,
-    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync,
+    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
 {
     pub fn filter<F>(mut self, filter: F) -> Self
     where
@@ -722,7 +724,7 @@ where
     where
         for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
             sqlx::Executor<'c, Database = B::Database> + Send,
-        T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync,
+        T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
     {
         MutationQuery::new(self)
     }
@@ -1049,6 +1051,7 @@ pub struct ColumnDef {
     pub rust_name: &'static str,
     pub sql_type: &'static str,
     pub spatial: Option<SpatialColumnDef>,
+    pub search: Option<SearchFieldDef>,
     pub logical_type: BackupValueKind,
     pub nullable: bool,
     pub is_primary_key: bool,
@@ -1078,6 +1081,7 @@ impl ColumnDef {
             rust_name: name,
             sql_type,
             spatial: None,
+            search: None,
             logical_type: BackupValueKind::String,
             nullable: true,
             is_primary_key: false,
@@ -1139,6 +1143,11 @@ impl ColumnDef {
         self.spatial = Some(spatial);
         self
     }
+
+    pub const fn search(mut self, search: SearchFieldDef) -> Self {
+        self.search = Some(search);
+        self
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1147,6 +1156,7 @@ pub struct FieldMetadata {
     pub rust_name: &'static str,
     pub sql_type: &'static str,
     pub spatial: Option<SpatialColumnDef>,
+    pub search: Option<SearchFieldDef>,
     pub logical_type: BackupValueKind,
     pub nullable: bool,
     pub is_primary_key: bool,
@@ -1164,6 +1174,7 @@ impl From<&ColumnDef> for FieldMetadata {
             rust_name: value.rust_name,
             sql_type: value.sql_type,
             spatial: value.spatial,
+            search: value.search,
             logical_type: value.logical_type,
             nullable: value.nullable,
             is_primary_key: value.is_primary_key,
@@ -1197,6 +1208,105 @@ pub enum BackupValueKind {
     Uuid,
     Json,
     Bytes,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SearchWeight {
+    A,
+    B,
+    C,
+    D,
+}
+
+impl SearchWeight {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::A => "A",
+            Self::B => "B",
+            Self::C => "C",
+            Self::D => "D",
+        }
+    }
+
+    pub const fn score_multiplier(self) -> f64 {
+        match self {
+            Self::A => 1.0,
+            Self::B => 0.7,
+            Self::C => 0.4,
+            Self::D => 0.1,
+        }
+    }
+
+    pub const fn fallback_weight(self) -> i64 {
+        match self {
+            Self::A => 10,
+            Self::B => 7,
+            Self::C => 4,
+            Self::D => 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SearchBackendStrategy {
+    Native,
+    Fallback,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SearchIndexStrategy {
+    PostgresTsvector,
+    SqliteFts5,
+    FallbackTable,
+    MysqlFullText,
+    MssqlFullText,
+}
+
+impl SearchIndexStrategy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PostgresTsvector => "postgres_tsvector",
+            Self::SqliteFts5 => "sqlite_fts5",
+            Self::FallbackTable => "fallback_table",
+            Self::MysqlFullText => "mysql_fulltext",
+            Self::MssqlFullText => "mssql_fulltext",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchFieldDef {
+    pub field_name: &'static str,
+    pub column_name: &'static str,
+    pub weight: SearchWeight,
+    pub alias: Option<&'static str>,
+    pub policy: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchRelationFieldDef {
+    pub relation_field: &'static str,
+    pub target_type: &'static str,
+    pub fields: &'static [&'static str],
+    pub weight: SearchWeight,
+    pub max_items: usize,
+    pub policy: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchIndexDef {
+    pub entity_name: &'static str,
+    pub table_name: &'static str,
+    pub primary_key: &'static str,
+    pub index_name: &'static str,
+    pub strategy: SearchIndexStrategy,
+    pub enabled: bool,
+    pub language: &'static str,
+    pub tokenizer: &'static str,
+    pub min_token_len: usize,
+    pub fallback_enabled: bool,
+    pub fields: &'static [SearchFieldDef],
+    pub relations: &'static [SearchRelationFieldDef],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1367,6 +1477,7 @@ pub struct RelationMetadata {
     pub emit_foreign_key: bool,
     pub on_delete: DeletePolicy,
     pub propagate_change: RelationChangePropagation,
+    pub search_fields: Option<SearchRelationFieldDef>,
 }
 
 #[derive(Clone, Debug)]
@@ -1389,6 +1500,7 @@ pub struct EntityMetadata {
     pub indexes: Box<[IndexMetadata]>,
     pub composite_unique_indexes: Box<[Box<[&'static str]>]>,
     pub relations: Box<[RelationMetadata]>,
+    pub search: Option<&'static SearchIndexDef>,
 }
 
 impl EntityMetadata {
@@ -1401,7 +1513,7 @@ impl EntityMetadata {
         write_policy: Option<&'static str>,
     ) -> Self
     where
-        T: DatabaseEntity + DatabaseSchema + EntityRelations,
+        T: DatabaseEntity + DatabaseSchema + EntityRelations + DatabaseSearchSchema,
     {
         Self {
             entity_name,
@@ -1428,6 +1540,7 @@ impl EntityMetadata {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             relations: T::relation_metadata().to_vec().into_boxed_slice(),
+            search: T::search_index(),
         }
     }
 }
@@ -1453,6 +1566,40 @@ pub struct ForeignKeyModel {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct SearchFieldModel {
+    pub field_name: String,
+    pub column_name: String,
+    pub weight: SearchWeight,
+    pub alias: Option<String>,
+    pub policy: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchRelationFieldModel {
+    pub relation_field: String,
+    pub target_type: String,
+    pub fields: Vec<String>,
+    pub weight: SearchWeight,
+    pub max_items: usize,
+    pub policy: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchIndexModel {
+    pub name: String,
+    pub table_name: String,
+    pub entity_name: String,
+    pub primary_key: String,
+    pub strategy: SearchIndexStrategy,
+    pub language: String,
+    pub tokenizer: String,
+    pub min_token_len: usize,
+    pub fallback_enabled: bool,
+    pub fields: Vec<SearchFieldModel>,
+    pub relations: Vec<SearchRelationFieldModel>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct TableModel {
     pub entity_name: String,
     pub table_name: String,
@@ -1465,6 +1612,7 @@ pub struct TableModel {
     pub indexes: Vec<IndexMetadata>,
     pub composite_unique_indexes: Vec<Vec<String>>,
     pub foreign_keys: Vec<ForeignKeyModel>,
+    pub search_indexes: Vec<SearchIndexModel>,
 }
 
 impl TableModel {
@@ -1919,6 +2067,50 @@ impl From<&EntityMetadata> for TableModel {
                     on_delete: relation.on_delete.clone(),
                 })
                 .collect(),
+            search_indexes: value
+                .search
+                .filter(|index| index.enabled)
+                .map(|index| {
+                    vec![SearchIndexModel {
+                        name: index.index_name.to_string(),
+                        table_name: index.table_name.to_string(),
+                        entity_name: index.entity_name.to_string(),
+                        primary_key: index.primary_key.to_string(),
+                        strategy: index.strategy,
+                        language: index.language.to_string(),
+                        tokenizer: index.tokenizer.to_string(),
+                        min_token_len: index.min_token_len,
+                        fallback_enabled: index.fallback_enabled,
+                        fields: index
+                            .fields
+                            .iter()
+                            .map(|field| SearchFieldModel {
+                                field_name: field.field_name.to_string(),
+                                column_name: field.column_name.to_string(),
+                                weight: field.weight,
+                                alias: field.alias.map(str::to_string),
+                                policy: field.policy.map(str::to_string),
+                            })
+                            .collect(),
+                        relations: index
+                            .relations
+                            .iter()
+                            .map(|relation| SearchRelationFieldModel {
+                                relation_field: relation.relation_field.to_string(),
+                                target_type: relation.target_type.to_string(),
+                                fields: relation
+                                    .fields
+                                    .iter()
+                                    .map(|field| (*field).to_string())
+                                    .collect(),
+                                weight: relation.weight,
+                                max_items: relation.max_items,
+                                policy: relation.policy.map(str::to_string),
+                            })
+                            .collect(),
+                    }]
+                })
+                .unwrap_or_default(),
         }
     }
 }
@@ -2224,6 +2416,62 @@ pub fn stable_schema_model_hash(schema: &SchemaModel) -> String {
             canonical.push('\n');
         }
 
+        let mut search_indexes = table.search_indexes.iter().collect::<Vec<_>>();
+        search_indexes.sort_by(|left, right| left.name.cmp(&right.name));
+        for index in search_indexes {
+            canonical.push_str("search_index:");
+            canonical.push_str(&index.name);
+            canonical.push('|');
+            canonical.push_str(index.strategy.as_str());
+            canonical.push('|');
+            canonical.push_str(&index.language);
+            canonical.push('|');
+            canonical.push_str(&index.tokenizer);
+            canonical.push('|');
+            canonical.push_str(&index.min_token_len.to_string());
+            canonical.push('|');
+            canonical.push_str(if index.fallback_enabled {
+                "fallback"
+            } else {
+                "native_only"
+            });
+            canonical.push('\n');
+
+            let mut fields = index.fields.iter().collect::<Vec<_>>();
+            fields.sort_by(|left, right| left.field_name.cmp(&right.field_name));
+            for field in fields {
+                canonical.push_str("search_field:");
+                canonical.push_str(&field.field_name);
+                canonical.push('|');
+                canonical.push_str(&field.column_name);
+                canonical.push('|');
+                canonical.push_str(field.weight.as_str());
+                canonical.push('|');
+                canonical.push_str(field.alias.as_deref().unwrap_or(""));
+                canonical.push('|');
+                canonical.push_str(field.policy.as_deref().unwrap_or(""));
+                canonical.push('\n');
+            }
+
+            let mut relations = index.relations.iter().collect::<Vec<_>>();
+            relations.sort_by(|left, right| left.relation_field.cmp(&right.relation_field));
+            for relation in relations {
+                canonical.push_str("search_relation:");
+                canonical.push_str(&relation.relation_field);
+                canonical.push('|');
+                canonical.push_str(&relation.target_type);
+                canonical.push('|');
+                canonical.push_str(&relation.fields.join(","));
+                canonical.push('|');
+                canonical.push_str(relation.weight.as_str());
+                canonical.push('|');
+                canonical.push_str(&relation.max_items.to_string());
+                canonical.push('|');
+                canonical.push_str(relation.policy.as_deref().unwrap_or(""));
+                canonical.push('\n');
+            }
+        }
+
         let mut foreign_keys = table.foreign_keys.iter().collect::<Vec<_>>();
         foreign_keys.sort_by(|left, right| {
             (
@@ -2417,6 +2665,19 @@ pub enum MigrationStep {
     DropIndex {
         table_name: String,
         index_name: String,
+    },
+    CreateSearchIndex {
+        table_name: String,
+        index: SearchIndexModel,
+    },
+    DropSearchIndex {
+        table_name: String,
+        index_name: String,
+    },
+    AlterSearchIndex {
+        table_name: String,
+        before: SearchIndexModel,
+        after: SearchIndexModel,
     },
     AddForeignKey {
         table_name: String,

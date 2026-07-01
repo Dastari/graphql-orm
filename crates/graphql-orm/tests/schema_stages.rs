@@ -237,6 +237,7 @@ fn varchar_column(name: &str, primary_key: bool) -> ColumnModel {
         } else {
             "VARCHAR(255)".to_string()
         },
+        spatial: None,
         nullable: false,
         is_primary_key: primary_key,
         is_unique: false,
@@ -256,6 +257,7 @@ fn sqlite_vocabularies_v1() -> TableModel {
         indexes: vec![IndexDef::new("idx_vocabularies_slug", &["slug"])],
         composite_unique_indexes: vec![],
         foreign_keys: vec![],
+        search_indexes: vec![],
     }
 }
 
@@ -281,6 +283,7 @@ fn sqlite_vocabulary_terms_v1() -> TableModel {
             is_multiple: false,
             on_delete: DeletePolicy::Cascade,
         }],
+        search_indexes: vec![],
     }
 }
 

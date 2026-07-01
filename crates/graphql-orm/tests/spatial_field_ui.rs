@@ -7,9 +7,9 @@ fn spatial_field_requires_geojson_value() {
 
 #[test]
 #[cfg(feature = "sqlite")]
-fn sqlite_spatial_field_is_rejected() {
+fn sqlite_spatial_field_is_accepted() {
     let t = trybuild::TestCases::new();
-    t.compile_fail("tests/ui/spatial_sqlite_backend.rs");
+    t.pass("tests/ui/spatial_sqlite_backend.rs");
 }
 
 #[test]

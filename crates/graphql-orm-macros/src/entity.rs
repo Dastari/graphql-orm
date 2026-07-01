@@ -24,9 +24,31 @@ pub(crate) struct EntityMetadata {
     pub(crate) upsert: Option<Vec<String>>,
     pub(crate) unique_composite: Vec<Vec<String>>,
     pub(crate) indexes: Vec<(bool, Vec<String>)>,
+    pub(crate) search: Option<SearchEntityMetadata>,
     pub(crate) serde_rename_all: Option<String>,
     pub(crate) graphql_rename_fields: Option<String>,
     pub(crate) rls: Option<RlsMetadata>,
+}
+
+#[derive(Clone)]
+pub(crate) struct SearchEntityMetadata {
+    pub(crate) index: bool,
+    pub(crate) language: String,
+    pub(crate) tokenizer: String,
+    pub(crate) min_token_len: usize,
+    pub(crate) fallback_enabled: bool,
+}
+
+impl Default for SearchEntityMetadata {
+    fn default() -> Self {
+        Self {
+            index: true,
+            language: "english".to_string(),
+            tokenizer: "unicode61".to_string(),
+            min_token_len: 2,
+            fallback_enabled: true,
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -168,6 +190,52 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                 ));
             }
             metadata.rls = Some(parse_rls_metadata(attr)?);
+        } else if attr.path().is_ident("graphql_orm") {
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("search") {
+                    let mut search = SearchEntityMetadata::default();
+                    meta.parse_nested_meta(|search_meta| {
+                        if search_meta.path.is_ident("index") {
+                            let value = search_meta.value()?;
+                            let lit: syn::LitBool = value.parse()?;
+                            search.index = lit.value;
+                        } else if search_meta.path.is_ident("language") {
+                            let value = search_meta.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            search.language = lit.value();
+                        } else if search_meta.path.is_ident("tokenizer") {
+                            let value = search_meta.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            search.tokenizer = lit.value();
+                        } else if search_meta.path.is_ident("min_token_len") {
+                            let value = search_meta.value()?;
+                            let lit: syn::LitInt = value.parse()?;
+                            search.min_token_len = lit.base10_parse()?;
+                        } else if search_meta.path.is_ident("fallback") {
+                            let value = search_meta.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            match lit.value().as_str() {
+                                "enabled" => search.fallback_enabled = true,
+                                "disabled" => search.fallback_enabled = false,
+                                _ => {
+                                    return Err(syn::Error::new(
+                                        lit.span(),
+                                        "search fallback must be \"enabled\" or \"disabled\"",
+                                    ));
+                                }
+                            }
+                        } else {
+                            return Err(syn::Error::new(
+                                search_meta.path.span(),
+                                "unsupported search option; expected index, language, tokenizer, min_token_len, or fallback",
+                            ));
+                        }
+                        Ok(())
+                    })?;
+                    metadata.search = Some(search);
+                }
+                Ok(())
+            })?;
         } else if attr.path().is_ident("graphql") {
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("rename_fields") {
@@ -445,6 +513,8 @@ pub(crate) struct FieldMetadata {
     pub(crate) is_boolean_field: bool,
     pub(crate) is_json_field: bool,
     pub(crate) spatial: Option<SpatialFieldMetadata>,
+    pub(crate) search: Option<SearchFieldMetadata>,
+    pub(crate) search_relation: Option<SearchRelationMetadata>,
     /// Async write transform: fn(&Context, String) -> Result<String>
     /// Applied before INSERT/UPDATE to transform the value (e.g., encryption)
     pub(crate) transform_write: Option<String>,
@@ -464,6 +534,44 @@ pub(crate) struct FieldMetadata {
     pub(crate) subscribe: bool,
     pub(crate) read_policy: Option<String>,
     pub(crate) write_policy: Option<String>,
+}
+
+#[derive(Clone)]
+pub(crate) struct SearchFieldMetadata {
+    pub(crate) weight: String,
+    pub(crate) alias: Option<String>,
+    pub(crate) policy: Option<String>,
+}
+
+impl Default for SearchFieldMetadata {
+    fn default() -> Self {
+        Self {
+            weight: "D".to_string(),
+            alias: None,
+            policy: None,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct SearchRelationMetadata {
+    pub(crate) fields: Vec<String>,
+    pub(crate) weight: String,
+    pub(crate) max_items: usize,
+    pub(crate) policy: Option<String>,
+    pub(crate) propagate_change: String,
+}
+
+impl Default for SearchRelationMetadata {
+    fn default() -> Self {
+        Self {
+            fields: Vec::new(),
+            weight: "D".to_string(),
+            max_items: 100,
+            policy: None,
+            propagate_change: "up".to_string(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -513,6 +621,8 @@ impl Default for FieldMetadata {
             is_boolean_field: false,
             is_json_field: false,
             spatial: None,
+            search: None,
+            search_relation: None,
             transform_write: None,
             transform_read: None,
             default: None,
@@ -558,6 +668,48 @@ fn parse_relation_columns(input: ParseStream<'_>) -> syn::Result<Vec<String>> {
     }
 }
 
+fn parse_string_array_expr(input: ParseStream<'_>, message: &str) -> syn::Result<Vec<String>> {
+    let expr: syn::Expr = input.parse()?;
+    match expr {
+        syn::Expr::Array(array) => array
+            .elems
+            .into_iter()
+            .map(|expr| match expr {
+                syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(lit),
+                    ..
+                }) => Ok(lit.value()),
+                other => Err(syn::Error::new_spanned(other, message)),
+            })
+            .collect(),
+        other => Err(syn::Error::new_spanned(other, message)),
+    }
+}
+
+fn validate_search_weight(value: &str, span: proc_macro2::Span) -> syn::Result<()> {
+    match value {
+        "A" | "B" | "C" | "D" => Ok(()),
+        _ => Err(syn::Error::new(
+            span,
+            "search weight must be one of \"A\", \"B\", \"C\", or \"D\"",
+        )),
+    }
+}
+
+fn search_weight_tokens(
+    value: &str,
+    span: proc_macro2::Span,
+) -> syn::Result<proc_macro2::TokenStream> {
+    validate_search_weight(value, span)?;
+    Ok(match value {
+        "A" => quote! { ::graphql_orm::graphql::orm::SearchWeight::A },
+        "B" => quote! { ::graphql_orm::graphql::orm::SearchWeight::B },
+        "C" => quote! { ::graphql_orm::graphql::orm::SearchWeight::C },
+        "D" => quote! { ::graphql_orm::graphql::orm::SearchWeight::D },
+        _ => unreachable!(),
+    })
+}
+
 fn validate_spatial_geometry_type(value: &str, span: proc_macro2::Span) -> syn::Result<()> {
     match value {
         "Geometry" | "Point" | "LineString" | "Polygon" | "MultiPoint" | "MultiLineString"
@@ -569,7 +721,7 @@ fn validate_spatial_geometry_type(value: &str, span: proc_macro2::Span) -> syn::
     }
 }
 
-fn spatial_geometry_type_tokens(
+pub(crate) fn spatial_geometry_type_tokens(
     value: &str,
     span: proc_macro2::Span,
 ) -> syn::Result<proc_macro2::TokenStream> {
@@ -674,6 +826,81 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let value = nested.value()?;
                             let lit: syn::LitBool = value.parse()?;
                             meta.auto_generated = Some(lit.value);
+                        } else if nested.path.is_ident("searchable") {
+                            let mut search = SearchFieldMetadata::default();
+                            nested.parse_nested_meta(|search_meta| {
+                                if search_meta.path.is_ident("weight") {
+                                    let value = search_meta.value()?;
+                                    let lit: syn::LitStr = value.parse()?;
+                                    let weight = lit.value();
+                                    validate_search_weight(&weight, lit.span())?;
+                                    search.weight = weight;
+                                } else if search_meta.path.is_ident("alias") {
+                                    let value = search_meta.value()?;
+                                    let lit: syn::LitStr = value.parse()?;
+                                    search.alias = Some(lit.value());
+                                } else if search_meta.path.is_ident("policy") {
+                                    let value = search_meta.value()?;
+                                    let lit: syn::LitStr = value.parse()?;
+                                    search.policy = Some(lit.value());
+                                } else {
+                                    return Err(syn::Error::new(
+                                        search_meta.path.span(),
+                                        "unsupported searchable option; expected weight, alias, or policy",
+                                    ));
+                                }
+                                Ok(())
+                            })?;
+                            meta.search = Some(search);
+                        } else if nested.path.is_ident("search_relation") {
+                            let mut search_relation = SearchRelationMetadata::default();
+                            nested.parse_nested_meta(|search_meta| {
+                                if search_meta.path.is_ident("fields") {
+                                    let value = search_meta.value()?;
+                                    search_relation.fields = parse_string_array_expr(
+                                        value,
+                                        "search_relation fields must be an array of string literals",
+                                    )?;
+                                } else if search_meta.path.is_ident("weight") {
+                                    let value = search_meta.value()?;
+                                    let lit: syn::LitStr = value.parse()?;
+                                    let weight = lit.value();
+                                    validate_search_weight(&weight, lit.span())?;
+                                    search_relation.weight = weight;
+                                } else if search_meta.path.is_ident("max_items") {
+                                    let value = search_meta.value()?;
+                                    let lit: syn::LitInt = value.parse()?;
+                                    search_relation.max_items = lit.base10_parse()?;
+                                } else if search_meta.path.is_ident("policy") {
+                                    let value = search_meta.value()?;
+                                    let lit: syn::LitStr = value.parse()?;
+                                    search_relation.policy = Some(lit.value());
+                                } else if search_meta.path.is_ident("propagate_change") {
+                                    let value = search_meta.value()?;
+                                    let lit: syn::LitStr = value.parse()?;
+                                    let value = lit.value();
+                                    if value != "up" {
+                                        return Err(syn::Error::new(
+                                            lit.span(),
+                                            "search_relation propagate_change only supports \"up\"",
+                                        ));
+                                    }
+                                    search_relation.propagate_change = value;
+                                } else {
+                                    return Err(syn::Error::new(
+                                        search_meta.path.span(),
+                                        "unsupported search_relation option; expected fields, weight, max_items, policy, or propagate_change",
+                                    ));
+                                }
+                                Ok(())
+                            })?;
+                            if search_relation.fields.is_empty() {
+                                return Err(syn::Error::new(
+                                    nested.path.span(),
+                                    "search_relation requires fields = [..]",
+                                ));
+                            }
+                            meta.search_relation = Some(search_relation);
                         } else if nested.path.is_ident("spatial") {
                             let mut spatial = SpatialFieldMetadata::default();
                             nested.parse_nested_meta(|spatial_meta| {
@@ -1239,6 +1466,16 @@ fn generate_entity_impl(
     } else {
         quote! { format!("date('now', '+{} days')", days) }
     };
+    let spatial_sql_value_body = if backend == BackendKind::Sqlite {
+        quote! {
+            ::graphql_orm::graphql::orm::spatial::canonical_geojson_sql_value(value, spatial)
+                .map_err(E::from_sqlx_error)
+        }
+    } else {
+        quote! {
+            ::graphql_orm::graphql::orm::json_sql_value::<_, E>(value)
+        }
+    };
 
     let data = match &input.data {
         Data::Struct(data) => data,
@@ -1351,8 +1588,14 @@ fn generate_entity_impl(
     let mut where_input_fields = Vec::new();
     let mut order_by_fields = Vec::new();
     let mut filter_to_sql = Vec::new();
+    let mut filter_to_entity_match = Vec::new();
+    let mut filter_is_empty_checks = Vec::new();
+    let mut filter_contains_spatial_checks = Vec::new();
     let mut from_row_fields = Vec::new();
     let mut relation_metadata_defs = Vec::new();
+    let mut search_field_defs = Vec::new();
+    let mut search_relation_defs = Vec::new();
+    let mut search_document_chunks = Vec::new();
     let mut sortable_columns: Vec<(syn::Ident, String)> = Vec::new();
     let mut object_field_methods = Vec::new();
     let parsed_fields = collect_parsed_fields(fields.iter())?;
@@ -1362,6 +1605,19 @@ fn generate_entity_impl(
         let field_name = field.ident.as_ref().unwrap();
         let field_type = &field.ty;
         let field_meta = parsed_field.meta.clone();
+
+        if field_meta.search_relation.is_some() && !field_meta.is_relation {
+            return Err(syn::Error::new(
+                field.span(),
+                "graphql_orm(search_relation(...)) requires a #[relation(...)] field",
+            ));
+        }
+        if field_meta.search.is_some() && (field_meta.is_relation || field_meta.skip_db) {
+            return Err(syn::Error::new(
+                field.span(),
+                "graphql_orm(searchable(...)) requires a persisted scalar field",
+            ));
+        }
 
         // Skip relation fields for column list
         if field_meta.is_relation || field_meta.skip_db {
@@ -1442,6 +1698,41 @@ fn generate_entity_impl(
                     field_meta.relation_propagate_change.as_deref(),
                     field.span(),
                 )?;
+                let search_fields_tokens = if let Some(search_relation) =
+                    &field_meta.search_relation
+                {
+                    let search_weight =
+                        search_weight_tokens(&search_relation.weight, field.span())?;
+                    let search_fields = search_relation
+                        .fields
+                        .iter()
+                        .map(|field| syn::LitStr::new(field, field_name.span()))
+                        .collect::<Vec<_>>();
+                    let max_items = search_relation.max_items;
+                    let policy = option_lit_tokens(search_relation.policy.as_deref(), field.span());
+                    search_relation_defs.push(quote! {
+                        ::graphql_orm::graphql::orm::SearchRelationFieldDef {
+                            relation_field: #graphql_name,
+                            target_type: #target_type,
+                            fields: &[#(#search_fields),*],
+                            weight: #search_weight,
+                            max_items: #max_items,
+                            policy: #policy,
+                        }
+                    });
+                    quote! {
+                        Some(::graphql_orm::graphql::orm::SearchRelationFieldDef {
+                            relation_field: #graphql_name,
+                            target_type: #target_type,
+                            fields: &[#(#search_fields),*],
+                            weight: #search_weight,
+                            max_items: #max_items,
+                            policy: #policy,
+                        })
+                    }
+                } else {
+                    quote! { None }
+                };
 
                 relation_metadata_defs.push(quote! {
                     ::graphql_orm::graphql::orm::RelationMetadata {
@@ -1455,6 +1746,7 @@ fn generate_entity_impl(
                         emit_foreign_key: #emit_foreign_key,
                         on_delete: #on_delete,
                         propagate_change: #propagate_change,
+                        search_fields: #search_fields_tokens,
                     }
                 });
             }
@@ -1495,10 +1787,10 @@ fn generate_entity_impl(
         let logical_type = backup_value_kind_tokens(field_type, &field_meta);
         let sql_type = rust_type_to_sql_type(backend, field_type, &field_meta);
         let spatial_tokens = if let Some(spatial) = &field_meta.spatial {
-            if backend != BackendKind::Postgres {
+            if backend == BackendKind::Mssql {
                 return Err(syn::Error::new(
                     field.span(),
-                    "spatial fields are only supported for backend = \"postgres\"",
+                    "spatial fields are currently supported for backend = \"postgres\" and backend = \"sqlite\"",
                 ));
             }
             if !is_serde_json_value_or_option(field_type) {
@@ -1509,22 +1801,87 @@ fn generate_entity_impl(
             }
             let geometry_type = spatial_geometry_type_tokens(&spatial.geometry_type, field.span())?;
             let srid = spatial.srid;
-            if spatial.index {
+            if spatial.index && backend == BackendKind::Postgres {
                 let index_name = format!("idx_{}_{}_spatial", raw_table_name, db_col);
                 let col = syn::LitStr::new(&db_col, field.span());
                 index_defs.push(quote! {
                     ::graphql_orm::graphql::orm::IndexDef::spatial_gist(#index_name, &[#col])
                 });
             }
-            column_names.push(format!(
-                "ST_AsGeoJSON({}, 9, 8)::text AS {}",
-                db_col_sql, db_col_sql
-            ));
+            if backend == BackendKind::Postgres {
+                column_names.push(format!(
+                    "ST_AsGeoJSON({}, 9, 8)::text AS {}",
+                    db_col_sql, db_col_sql
+                ));
+            } else {
+                column_names.push(db_col_sql.clone());
+            }
             quote! {
                 Some(::graphql_orm::graphql::orm::SpatialColumnDef::geometry(#geometry_type, #srid))
             }
         } else {
             column_names.push(db_col_sql.clone());
+            quote! { None }
+        };
+        let search_tokens = if let Some(search) = &field_meta.search {
+            if !is_string_type(field_type) {
+                return Err(syn::Error::new(
+                    field.span(),
+                    "graphql_orm(searchable(...)) is only supported on String or Option<String> fields",
+                ));
+            }
+            if !field_meta.read {
+                return Err(syn::Error::new(
+                    field.span(),
+                    "private fields cannot be full-text searchable",
+                ));
+            }
+            if field_meta.read_policy.is_some() && search.policy.is_none() {
+                return Err(syn::Error::new(
+                    field.span(),
+                    "searchable fields with read_policy require searchable(policy = \"...\")",
+                ));
+            }
+            let weight = search_weight_tokens(&search.weight, field.span())?;
+            let alias = option_lit_tokens(search.alias.as_deref(), field.span());
+            let policy = option_lit_tokens(search.policy.as_deref(), field.span());
+            search_field_defs.push(quote! {
+                ::graphql_orm::graphql::orm::SearchFieldDef {
+                    field_name: #rust_name,
+                    column_name: #db_col,
+                    weight: #weight,
+                    alias: #alias,
+                    policy: #policy,
+                }
+            });
+            let chunk_value = if is_option_type(field_type) {
+                quote! { self.#field_name.as_deref() }
+            } else {
+                quote! { Some(self.#field_name.as_str()) }
+            };
+            search_document_chunks.push(quote! {
+                if let Some(value) = #chunk_value {
+                    if !value.trim().is_empty() {
+                        chunks.push(::graphql_orm::graphql::orm::SearchDocumentChunk {
+                            source: ::graphql_orm::graphql::orm::SearchDocumentSource::Field {
+                                field_name: #rust_name,
+                            },
+                            weight: #weight,
+                            text: value.to_string(),
+                        });
+                    }
+                }
+            });
+            quote! {
+                Some(::graphql_orm::graphql::orm::SearchFieldDef {
+                    field_name: #rust_name,
+                    column_name: #db_col,
+                    weight: #weight,
+                    alias: #alias,
+                    policy: #policy,
+                })
+            }
+        } else {
             quote! { None }
         };
         let default_val = field_meta.default.clone().or_else(|| {
@@ -1550,6 +1907,7 @@ fn generate_entity_impl(
                 rust_name: #rust_name,
                 sql_type: #sql_type,
                 spatial: #spatial_tokens,
+                search: #search_tokens,
                 logical_type: #logical_type,
                 nullable: #is_nullable,
                 is_primary_key: #is_pk,
@@ -1568,9 +1926,17 @@ fn generate_entity_impl(
         // Generate WhereInput field for filterable fields
         if field_meta.filter {
             if let Some(ref filter_type) = field_meta.filterable {
-                let (input_field, sql_gen) = generate_filter_field(
+                let (
+                    input_field,
+                    sql_gen,
+                    entity_match_gen,
+                    is_empty_check,
+                    contains_spatial_check,
+                ) = generate_filter_field(
+                    backend,
                     struct_name,
                     field_name,
+                    field_type,
                     &graphql_name,
                     &db_col_sql,
                     filter_type,
@@ -1578,6 +1944,9 @@ fn generate_entity_impl(
                 )?;
                 where_input_fields.push(input_field);
                 filter_to_sql.push(sql_gen);
+                filter_to_entity_match.push(entity_match_gen);
+                filter_is_empty_checks.push(is_empty_check);
+                filter_contains_spatial_checks.push(contains_spatial_check);
             }
         }
 
@@ -1674,6 +2043,103 @@ fn generate_entity_impl(
         .collect();
     let schema_policy_const = schema_policy_tokens(entity_meta.schema_policy.as_deref());
     let columns_array: Vec<&str> = column_names.iter().map(|s| s.as_str()).collect();
+    let has_search = !search_field_defs.is_empty() || !search_relation_defs.is_empty();
+    let search_config = entity_meta.search.clone().unwrap_or_default();
+    let search_enabled = search_config.index;
+    let search_language = search_config.language;
+    let search_tokenizer = search_config.tokenizer;
+    let search_min_token_len = search_config.min_token_len;
+    let search_fallback_enabled = search_config.fallback_enabled;
+    let search_index_name = format!("idx_gom_search_{}_vector", raw_table_name.replace('.', "_"));
+    let search_pk_field = parsed_fields
+        .iter()
+        .find(|parsed| {
+            parsed.meta.is_primary_key && !parsed.meta.is_relation && !parsed.meta.skip_db
+        })
+        .or_else(|| {
+            parsed_fields.iter().find(|parsed| {
+                parsed
+                    .field
+                    .ident
+                    .as_ref()
+                    .is_some_and(|ident| ident == "id")
+                    && !parsed.meta.is_relation
+                    && !parsed.meta.skip_db
+            })
+        })
+        .and_then(|parsed| parsed.field.ident.clone())
+        .unwrap_or_else(|| syn::Ident::new("id", struct_name.span()));
+    let search_strategy = match backend {
+        BackendKind::Postgres => {
+            quote! { ::graphql_orm::graphql::orm::SearchIndexStrategy::PostgresTsvector }
+        }
+        BackendKind::Sqlite => {
+            quote! { ::graphql_orm::graphql::orm::SearchIndexStrategy::SqliteFts5 }
+        }
+        BackendKind::Mssql => {
+            quote! { ::graphql_orm::graphql::orm::SearchIndexStrategy::MssqlFullText }
+        }
+    };
+    let search_schema_impl = if has_search {
+        quote! {
+            impl ::graphql_orm::graphql::orm::DatabaseSearchSchema for #struct_name {
+                fn search_index() -> Option<&'static ::graphql_orm::graphql::orm::SearchIndexDef> {
+                    static FIELDS: &[::graphql_orm::graphql::orm::SearchFieldDef] = &[
+                        #(#search_field_defs),*
+                    ];
+                    static RELATIONS: &[::graphql_orm::graphql::orm::SearchRelationFieldDef] = &[
+                        #(#search_relation_defs),*
+                    ];
+                    static INDEX: ::graphql_orm::graphql::orm::SearchIndexDef =
+                        ::graphql_orm::graphql::orm::SearchIndexDef {
+                            entity_name: #entity_name_lit,
+                            table_name: #table_name,
+                            primary_key: #primary_key,
+                            index_name: #search_index_name,
+                            strategy: #search_strategy,
+                            enabled: #search_enabled,
+                            language: #search_language,
+                            tokenizer: #search_tokenizer,
+                            min_token_len: #search_min_token_len,
+                            fallback_enabled: #search_fallback_enabled,
+                            fields: FIELDS,
+                            relations: RELATIONS,
+                        };
+                    Some(&INDEX)
+                }
+            }
+        }
+    } else {
+        quote! {
+            impl ::graphql_orm::graphql::orm::DatabaseSearchSchema for #struct_name {}
+        }
+    };
+    let searchable_entity_impl = if has_search {
+        quote! {
+            impl ::graphql_orm::graphql::orm::SearchableEntity for #struct_name {
+                fn search_key(&self) -> String {
+                    self.#search_pk_field.to_string()
+                }
+
+                fn search_key_json(&self) -> ::graphql_orm::serde_json::Value {
+                    ::graphql_orm::serde_json::to_value(&self.#search_pk_field)
+                        .unwrap_or_else(|_| ::graphql_orm::serde_json::Value::String(self.#search_pk_field.to_string()))
+                }
+
+                fn search_document(&self) -> ::graphql_orm::graphql::orm::SearchDocument {
+                    let mut chunks = Vec::new();
+                    #(#search_document_chunks)*
+                    ::graphql_orm::graphql::orm::SearchDocument {
+                        entity_pk: self.search_key(),
+                        entity_pk_json: self.search_key_json(),
+                        chunks,
+                    }
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
 
     // Generate type names (as strings for #[graphql(name = "...")] and as idents for struct names)
     let where_input_name_str = format!("{}WhereInput", struct_name);
@@ -1708,6 +2174,8 @@ fn generate_entity_impl(
     if schema_only {
         return Ok(quote! {
             #rls_impl
+            #search_schema_impl
+            #searchable_entity_impl
 
             impl ::graphql_orm::graphql::orm::DatabaseEntity for #struct_name {
                 const TABLE_NAME: &'static str = #table_name;
@@ -1779,6 +2247,8 @@ fn generate_entity_impl(
 
     Ok(quote! {
         #rls_impl
+        #search_schema_impl
+        #searchable_entity_impl
 
         // WhereInput for filtering
         #[derive(::graphql_orm::async_graphql::InputObject, Default, Clone, Debug)]
@@ -1861,9 +2331,110 @@ fn generate_entity_impl(
             }
 
             fn is_empty(&self) -> bool {
-                // Check if all filter fields are None/empty
-                let (conds, _) = self.to_sql_conditions();
-                conds.is_empty()
+                self.__gom_is_empty()
+            }
+
+            fn requires_in_memory_filtering(
+                &self,
+                backend: ::graphql_orm::graphql::orm::DatabaseBackend,
+            ) -> bool {
+                !backend.supports_native_spatial_predicates() && self.__gom_contains_spatial_filter()
+            }
+
+            fn matches_entity(
+                &self,
+                entity: &(dyn ::std::any::Any + Send + Sync),
+            ) -> Result<bool, ::graphql_orm::sqlx::Error> {
+                let entity = entity.downcast_ref::<#struct_name>().ok_or_else(|| {
+                    ::graphql_orm::sqlx::Error::Decode(Box::new(::std::io::Error::new(
+                        ::std::io::ErrorKind::InvalidData,
+                        concat!("in-memory filter entity type mismatch for ", stringify!(#struct_name)),
+                    )))
+                })?;
+                self.__gom_matches_entity(entity)
+            }
+        }
+
+        impl #where_input_name {
+            fn __gom_is_empty(&self) -> bool {
+                #(#filter_is_empty_checks)*
+
+                if let Some(ref and_filters) = self.and {
+                    if and_filters.iter().any(|filter| !filter.__gom_is_empty()) {
+                        return false;
+                    }
+                }
+
+                if let Some(ref or_filters) = self.or {
+                    if or_filters.iter().any(|filter| !filter.__gom_is_empty()) {
+                        return false;
+                    }
+                }
+
+                if let Some(ref not_filter) = self.not {
+                    if !not_filter.__gom_is_empty() {
+                        return false;
+                    }
+                }
+
+                true
+            }
+
+            fn __gom_contains_spatial_filter(&self) -> bool {
+                #(#filter_contains_spatial_checks)*
+
+                if let Some(ref and_filters) = self.and {
+                    if and_filters.iter().any(|filter| filter.__gom_contains_spatial_filter()) {
+                        return true;
+                    }
+                }
+
+                if let Some(ref or_filters) = self.or {
+                    if or_filters.iter().any(|filter| filter.__gom_contains_spatial_filter()) {
+                        return true;
+                    }
+                }
+
+                if let Some(ref not_filter) = self.not {
+                    if not_filter.__gom_contains_spatial_filter() {
+                        return true;
+                    }
+                }
+
+                false
+            }
+
+            fn __gom_matches_entity(&self, entity: &#struct_name) -> Result<bool, ::graphql_orm::sqlx::Error> {
+                #(#filter_to_entity_match)*
+
+                if let Some(ref and_filters) = self.and {
+                    for filter in and_filters {
+                        if !filter.__gom_matches_entity(entity)? {
+                            return Ok(false);
+                        }
+                    }
+                }
+
+                if let Some(ref or_filters) = self.or {
+                    let mut matched = false;
+                    for filter in or_filters {
+                        if filter.__gom_matches_entity(entity)? {
+                            matched = true;
+                            break;
+                        }
+                    }
+                    if !matched {
+                        return Ok(false);
+                    }
+                }
+
+                if let Some(ref not_filter) = self.not {
+                    if not_filter.__gom_matches_entity(entity)? {
+                        return Ok(false);
+                    }
+                }
+
+                Ok(true)
             }
         }
 
@@ -1921,6 +2492,21 @@ fn generate_entity_impl(
                     column,
                     geometry_expr,
                 )
+            }
+
+            pub(crate) fn __gom_supports_native_spatial_predicates() -> bool {
+                <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT
+                    .supports_native_spatial_predicates()
+            }
+
+            pub(crate) fn __gom_spatial_sql_value<E>(
+                value: &::graphql_orm::serde_json::Value,
+                spatial: ::graphql_orm::graphql::orm::SpatialColumnDef,
+            ) -> Result<::graphql_orm::graphql::orm::SqlValue, E>
+            where
+                E: ::graphql_orm::graphql::orm::OrmResultError,
+            {
+                #spatial_sql_value_body
             }
 
             pub(crate) fn __gom_bool_sql_value(value: bool) -> ::graphql_orm::graphql::orm::SqlValue {
@@ -2014,14 +2600,28 @@ fn generate_entity_impl(
 // ============================================================================
 
 fn generate_filter_field(
+    backend: BackendKind,
     struct_name: &syn::Ident,
     field_name: &syn::Ident,
+    field_type: &syn::Type,
     graphql_name: &str,
     db_col: &str,
     filter_type: &str,
     field_meta: &FieldMetadata,
-) -> syn::Result<(proc_macro2::TokenStream, proc_macro2::TokenStream)> {
+) -> syn::Result<(
+    proc_macro2::TokenStream,
+    proc_macro2::TokenStream,
+    proc_macro2::TokenStream,
+    proc_macro2::TokenStream,
+    proc_macro2::TokenStream,
+)> {
     let filter_field_name = rust_ident_from_graphql_name(graphql_name, field_name.span());
+    let is_empty_check = quote! {
+        if self.#filter_field_name.is_some() {
+            return false;
+        }
+    };
+    let no_spatial_check = quote! {};
 
     match filter_type {
         "spatial" => {
@@ -2038,85 +2638,87 @@ fn generate_filter_field(
             };
             let sql = quote! {
                 if let Some(ref f) = self.#filter_field_name {
-                    if let Some(ref v) = f.equals {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
-                        conditions.push(#struct_name::__gom_spatial_predicate(
-                            ::graphql_orm::graphql::orm::SpatialPredicate::Equals,
-                            #db_col,
-                            &geometry,
-                        ));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
-                    }
-                    if let Some(ref v) = f.disjoint {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
-                        conditions.push(#struct_name::__gom_spatial_predicate(
-                            ::graphql_orm::graphql::orm::SpatialPredicate::Disjoint,
-                            #db_col,
-                            &geometry,
-                        ));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
-                    }
-                    if let Some(ref v) = f.intersects {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
-                        conditions.push(#struct_name::__gom_spatial_predicate(
-                            ::graphql_orm::graphql::orm::SpatialPredicate::Intersects,
-                            #db_col,
-                            &geometry,
-                        ));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
-                    }
-                    if let Some(ref v) = f.touches {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
-                        conditions.push(#struct_name::__gom_spatial_predicate(
-                            ::graphql_orm::graphql::orm::SpatialPredicate::Touches,
-                            #db_col,
-                            &geometry,
-                        ));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
-                    }
-                    if let Some(ref v) = f.crosses {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
-                        conditions.push(#struct_name::__gom_spatial_predicate(
-                            ::graphql_orm::graphql::orm::SpatialPredicate::Crosses,
-                            #db_col,
-                            &geometry,
-                        ));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
-                    }
-                    if let Some(ref v) = f.within {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
-                        conditions.push(#struct_name::__gom_spatial_predicate(
-                            ::graphql_orm::graphql::orm::SpatialPredicate::Within,
-                            #db_col,
-                            &geometry,
-                        ));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
-                    }
-                    if let Some(ref v) = f.contains {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
-                        conditions.push(#struct_name::__gom_spatial_predicate(
-                            ::graphql_orm::graphql::orm::SpatialPredicate::Contains,
-                            #db_col,
-                            &geometry,
-                        ));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
-                    }
-                    if let Some(ref v) = f.overlaps {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
-                        conditions.push(#struct_name::__gom_spatial_predicate(
-                            ::graphql_orm::graphql::orm::SpatialPredicate::Overlaps,
-                            #db_col,
-                            &geometry,
-                        ));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
+                    if #struct_name::__gom_supports_native_spatial_predicates() {
+                        if let Some(ref v) = f.equals {
+                            let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                            let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
+                            conditions.push(#struct_name::__gom_spatial_predicate(
+                                ::graphql_orm::graphql::orm::SpatialPredicate::Equals,
+                                #db_col,
+                                &geometry,
+                            ));
+                            values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
+                        }
+                        if let Some(ref v) = f.disjoint {
+                            let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                            let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
+                            conditions.push(#struct_name::__gom_spatial_predicate(
+                                ::graphql_orm::graphql::orm::SpatialPredicate::Disjoint,
+                                #db_col,
+                                &geometry,
+                            ));
+                            values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
+                        }
+                        if let Some(ref v) = f.intersects {
+                            let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                            let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
+                            conditions.push(#struct_name::__gom_spatial_predicate(
+                                ::graphql_orm::graphql::orm::SpatialPredicate::Intersects,
+                                #db_col,
+                                &geometry,
+                            ));
+                            values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
+                        }
+                        if let Some(ref v) = f.touches {
+                            let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                            let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
+                            conditions.push(#struct_name::__gom_spatial_predicate(
+                                ::graphql_orm::graphql::orm::SpatialPredicate::Touches,
+                                #db_col,
+                                &geometry,
+                            ));
+                            values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
+                        }
+                        if let Some(ref v) = f.crosses {
+                            let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                            let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
+                            conditions.push(#struct_name::__gom_spatial_predicate(
+                                ::graphql_orm::graphql::orm::SpatialPredicate::Crosses,
+                                #db_col,
+                                &geometry,
+                            ));
+                            values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
+                        }
+                        if let Some(ref v) = f.within {
+                            let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                            let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
+                            conditions.push(#struct_name::__gom_spatial_predicate(
+                                ::graphql_orm::graphql::orm::SpatialPredicate::Within,
+                                #db_col,
+                                &geometry,
+                            ));
+                            values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
+                        }
+                        if let Some(ref v) = f.contains {
+                            let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                            let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
+                            conditions.push(#struct_name::__gom_spatial_predicate(
+                                ::graphql_orm::graphql::orm::SpatialPredicate::Contains,
+                                #db_col,
+                                &geometry,
+                            ));
+                            values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
+                        }
+                        if let Some(ref v) = f.overlaps {
+                            let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                            let geometry = #struct_name::__gom_spatial_geojson_expr(&placeholder, #srid);
+                            conditions.push(#struct_name::__gom_spatial_predicate(
+                                ::graphql_orm::graphql::orm::SpatialPredicate::Overlaps,
+                                #db_col,
+                                &geometry,
+                            ));
+                            values.push(::graphql_orm::graphql::orm::SqlValue::Json(v.0.clone()));
+                        }
                     }
                     if let Some(is_null) = f.is_null {
                         if is_null {
@@ -2127,7 +2729,40 @@ fn generate_filter_field(
                     }
                 }
             };
-            Ok((input, sql))
+            let value_expr = if is_option_type(field_type) {
+                quote! { entity.#field_name.as_ref() }
+            } else {
+                quote! { Some(&entity.#field_name) }
+            };
+            let geometry_type =
+                spatial_geometry_type_tokens(&spatial.geometry_type, field_name.span())?;
+            let entity_match = if backend == BackendKind::Sqlite {
+                quote! {
+                    if let Some(ref f) = self.#filter_field_name {
+                        if !::graphql_orm::graphql::orm::spatial::spatial_filter_matches_value(
+                            #value_expr,
+                            f,
+                            ::graphql_orm::graphql::orm::SpatialColumnDef::geometry(#geometry_type, #srid),
+                        )? {
+                            return Ok(false);
+                        }
+                    }
+                }
+            } else {
+                quote! {}
+            };
+            let contains_spatial_check = quote! {
+                if self.#filter_field_name.is_some() {
+                    return true;
+                }
+            };
+            Ok((
+                input,
+                sql,
+                entity_match,
+                is_empty_check,
+                contains_spatial_check,
+            ))
         }
         "string" => {
             let input = quote! {
@@ -2205,7 +2840,23 @@ fn generate_filter_field(
                     }
                 }
             };
-            Ok((input, sql))
+            let value_expr = if is_option_type(field_type) {
+                quote! { entity.#field_name.as_deref() }
+            } else {
+                quote! { Some(entity.#field_name.as_str()) }
+            };
+            let entity_match = if backend == BackendKind::Sqlite {
+                quote! {
+                    if let Some(ref f) = self.#filter_field_name {
+                        if !::graphql_orm::graphql::orm::spatial::string_filter_matches(#value_expr, f) {
+                            return Ok(false);
+                        }
+                    }
+                }
+            } else {
+                quote! {}
+            };
+            Ok((input, sql, entity_match, is_empty_check, no_spatial_check))
         }
         "number" => {
             let input = quote! {
@@ -2278,7 +2929,23 @@ fn generate_filter_field(
                     }
                 }
             };
-            Ok((input, sql))
+            let value_expr = if is_option_type(field_type) {
+                quote! { entity.#field_name.map(|value| value as i64) }
+            } else {
+                quote! { Some(entity.#field_name as i64) }
+            };
+            let entity_match = if backend == BackendKind::Sqlite {
+                quote! {
+                    if let Some(ref f) = self.#filter_field_name {
+                        if !::graphql_orm::graphql::orm::spatial::int_filter_matches(#value_expr, f) {
+                            return Ok(false);
+                        }
+                    }
+                }
+            } else {
+                quote! {}
+            };
+            Ok((input, sql, entity_match, is_empty_check, no_spatial_check))
         }
         "uuid" => {
             let input = quote! {
@@ -2330,7 +2997,23 @@ fn generate_filter_field(
                     }
                 }
             };
-            Ok((input, sql))
+            let value_expr = if is_option_type(field_type) {
+                quote! { entity.#field_name }
+            } else {
+                quote! { Some(entity.#field_name) }
+            };
+            let entity_match = if backend == BackendKind::Sqlite {
+                quote! {
+                    if let Some(ref f) = self.#filter_field_name {
+                        if !::graphql_orm::graphql::orm::spatial::uuid_filter_matches(#value_expr, f) {
+                            return Ok(false);
+                        }
+                    }
+                }
+            } else {
+                quote! {}
+            };
+            Ok((input, sql, entity_match, is_empty_check, no_spatial_check))
         }
         "boolean" | "bool" => {
             let input = quote! {
@@ -2359,7 +3042,23 @@ fn generate_filter_field(
                     }
                 }
             };
-            Ok((input, sql))
+            let value_expr = if is_option_type(field_type) {
+                quote! { entity.#field_name }
+            } else {
+                quote! { Some(entity.#field_name) }
+            };
+            let entity_match = if backend == BackendKind::Sqlite {
+                quote! {
+                    if let Some(ref f) = self.#filter_field_name {
+                        if !::graphql_orm::graphql::orm::spatial::bool_filter_matches(#value_expr, f) {
+                            return Ok(false);
+                        }
+                    }
+                }
+            } else {
+                quote! {}
+            };
+            Ok((input, sql, entity_match, is_empty_check, no_spatial_check))
         }
         "date" => {
             let input = quote! {
@@ -2455,7 +3154,30 @@ fn generate_filter_field(
                     }
                 }
             };
-            Ok((input, sql))
+            let entity_match = if backend == BackendKind::Sqlite {
+                if is_option_type(field_type) {
+                    quote! {
+                        if let Some(ref f) = self.#filter_field_name {
+                            let __gom_date_value = entity.#field_name.as_ref().map(|value| value.to_string());
+                            if !::graphql_orm::graphql::orm::spatial::date_filter_matches(__gom_date_value.as_deref(), f) {
+                                return Ok(false);
+                            }
+                        }
+                    }
+                } else {
+                    quote! {
+                        if let Some(ref f) = self.#filter_field_name {
+                            let __gom_date_value = entity.#field_name.to_string();
+                            if !::graphql_orm::graphql::orm::spatial::date_filter_matches(Some(__gom_date_value.as_str()), f) {
+                                return Ok(false);
+                            }
+                        }
+                    }
+                }
+            } else {
+                quote! {}
+            };
+            Ok((input, sql, entity_match, is_empty_check, no_spatial_check))
         }
         _ => Err(syn::Error::new(
             field_name.span(),
@@ -2810,6 +3532,14 @@ pub(crate) fn is_bool_type(ty: &syn::Type) -> bool {
     false
 }
 
+pub(crate) fn is_string_type(ty: &syn::Type) -> bool {
+    if type_path_last_ident(ty).is_some_and(|ident| ident == "String") {
+        return true;
+    }
+
+    option_inner_type(ty).is_some_and(is_string_type)
+}
+
 pub(crate) fn type_path_last_ident(ty: &syn::Type) -> Option<&syn::Ident> {
     if let syn::Type::Path(type_path) = ty {
         return type_path.path.segments.last().map(|segment| &segment.ident);
@@ -2898,7 +3628,13 @@ pub(crate) fn rust_type_to_sql_type(
 
     // Check field metadata first
     if let Some(spatial) = &meta.spatial {
-        return format!("geometry({},{})", spatial.geometry_type, spatial.srid);
+        return match backend {
+            BackendKind::Postgres => {
+                format!("geometry({},{})", spatial.geometry_type, spatial.srid)
+            }
+            BackendKind::Sqlite => "TEXT".to_string(),
+            BackendKind::Mssql => "NVARCHAR(MAX)".to_string(),
+        };
     }
     if meta.is_boolean_field {
         return match backend {

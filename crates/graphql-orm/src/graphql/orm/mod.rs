@@ -12,6 +12,9 @@ mod migrations;
 mod query;
 mod rls;
 mod schema_manager;
+mod search;
+#[cfg(feature = "sqlite")]
+pub mod spatial;
 
 pub use backend::*;
 #[cfg(any(
@@ -27,3 +30,4 @@ pub use migrations::*;
 pub use query::*;
 pub use rls::*;
 pub use schema_manager::*;
+pub use search::*;

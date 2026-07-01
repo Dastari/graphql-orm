@@ -27,6 +27,10 @@ impl DatabaseBackend {
             Self::Mssql => "mssql",
         }
     }
+
+    pub const fn supports_native_spatial_predicates(self) -> bool {
+        matches!(self, Self::Postgres)
+    }
 }
 
 pub trait SqlDialect {

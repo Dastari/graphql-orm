@@ -22,6 +22,8 @@ cargo test -p graphql-orm --test graphql_naming
 cargo test -p graphql-orm --test backend_coexistence_fixture
 cargo test -p graphql-orm --test composite_relations
 cargo test -p graphql-orm --test composite_relations_ui
+cargo test -p graphql-orm --no-default-features --features sqlite --test spatial_sqlite
+cargo test -p graphql-orm --no-default-features --features sqlite --test full_text_search
 cargo test -p graphql-orm --no-default-features --features mssql --test mssql_write_unavailable_ui
 ```
 
@@ -45,6 +47,19 @@ docker run -d --name graphql-orm-postgis-test \
 
 TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:55432/postgres \
   cargo test -p graphql-orm --no-default-features --features postgres -- --test-threads=1
+```
+
+Focused PostGIS spatial coverage can be run with:
+
+```bash
+TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:55432/postgres \
+  cargo test -p graphql-orm --no-default-features --features postgres --test spatial_fields
+```
+
+Focused Postgres full-text search DDL coverage can be run without a live server:
+
+```bash
+cargo test -p graphql-orm --no-default-features --features postgres --test full_text_search
 ```
 
 ## SQL Server Tests

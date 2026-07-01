@@ -332,6 +332,7 @@ pub(crate) fn generate_graphql_relations(
                     emit_foreign_key: #emit_foreign_key,
                     on_delete: #on_delete,
                     propagate_change: #propagate_change,
+                    search_fields: None,
                 }
             }
         })

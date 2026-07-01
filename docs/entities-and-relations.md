@@ -86,6 +86,73 @@ Runtime metadata exposes all keys through `PRIMARY_KEYS` and `Entity::metadata()
 Composite-key writes are not generated yet. SQLite/Postgres read support works, and MSSQL remains
 read-only.
 
+## Full-Text Search
+
+Mark text fields as searchable with `#[graphql_orm(searchable(...))]`. Add an entity-level
+`search(...)` attribute when you need non-default language/tokenizer options:
+
+```rust
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql_entity(table = "articles", plural = "Articles", backend = "postgres")]
+#[graphql_orm(search(index = true, language = "english"))]
+pub struct Article {
+    #[primary_key]
+    pub id: uuid::Uuid,
+
+    #[graphql_orm(searchable(weight = "A"))]
+    #[filterable(type = "string")]
+    #[sortable]
+    pub title: String,
+
+    #[graphql_orm(searchable(weight = "B"))]
+    pub body: Option<String>,
+}
+```
+
+Searchable fields must be `String` or `Option<String>`. Private fields are rejected. Fields with a
+read policy require an explicit search policy:
+
+```rust
+#[graphql_orm(read_policy = "article.body.read")]
+#[graphql_orm(searchable(weight = "B", policy = "article.body.search"))]
+pub body: Option<String>,
+```
+
+Generated GraphQL adds a per-entity search resolver:
+
+```graphql
+query {
+  articlesSearch(
+    search: { query: "melbourne park", mode: WEB }
+    where: { published: { eq: true } }
+    page: { limit: 20 }
+  ) {
+    edges {
+      score
+      node { id title }
+    }
+    pageInfo { totalCount }
+  }
+}
+```
+
+Generated Rust helpers use the same backend-neutral input:
+
+```rust
+let hits = Article::search(&pool, SearchInput {
+    query: "melbourne park".to_string(),
+    mode: Some(SearchMode::Web),
+    min_score: None,
+})
+.filter(ArticleWhereInput::default())
+.limit(20)
+.fetch_all()
+.await?;
+```
+
+Search modes are `Plain`, `Phrase`, `Web`, and `Prefix`. Results order by relevance descending, then
+the entity default sort where native SQL can apply it.
+
 ## Relations
 
 Relation fields should generally be skipped from `SimpleObject` and exposed by `GraphQLRelations`:
@@ -112,6 +179,19 @@ Single-column relation syntax remains:
 #[relation(target = "Post", from = "id", to = "author_id", multiple)]
 pub posts: Vec<Post>,
 ```
+
+Related fields can be copied into the parent search document:
+
+```rust
+#[graphql(skip)]
+#[relation(target = "City", from = "city_id", to = "id")]
+#[graphql_orm(search_relation(fields = ["name", "country"], weight = "C"))]
+pub city: Option<Box<City>>;
+```
+
+The first implementation records relation search metadata and keeps local searchable fields current
+through generated writes. For relation-heavy documents, run an explicit search rebuild after large
+related-data changes until deeper propagation is enabled.
 
 ## Composite Relation Keys
 
@@ -202,11 +282,11 @@ Typed structured fields can be persisted as JSON with `#[graphql_orm(json)]`:
 pub metadata: serde_json::Value,
 ```
 
-## PostGIS Spatial Fields
+## Spatial Fields
 
-Spatial fields are currently implemented for PostgreSQL/PostGIS only. A spatial field persists as a
-PostGIS `geometry(<type>, <srid>)` column and is exposed through Rust and GraphQL as a GeoJSON
-geometry object.
+Spatial fields are exposed through Rust and GraphQL as GeoJSON geometry objects. Postgres stores
+them as native PostGIS `geometry(<type>, <srid>)` columns. SQLite stores the same GeoJSON in `TEXT`
+columns and evaluates spatial predicates in Rust.
 
 ```rust
 #[graphql_orm(spatial(kind = "geometry", geometry_type = "Point", srid = 4326, index = true))]
@@ -219,9 +299,14 @@ Supported geometry types are `Geometry`, `Point`, `LineString`, `Polygon`, `Mult
 `geometry`; the default SRID is `4326`. Spatial Rust fields must be `serde_json::Value` or
 `Option<serde_json::Value>`.
 
-Generated queries project spatial columns as GeoJSON using `ST_AsGeoJSON`. Generated writes bind the
-GeoJSON value and wrap it with `ST_SetSRID(ST_GeomFromGeoJSON(...), srid)`. Invalid GeoJSON or invalid
-geometry is reported by PostGIS.
+On Postgres, generated queries project spatial columns as GeoJSON using `ST_AsGeoJSON`. Generated
+writes bind the GeoJSON value and wrap it with `ST_SetSRID(ST_GeomFromGeoJSON(...), srid)`. Invalid
+GeoJSON or invalid geometry is reported by PostGIS.
+
+On SQLite, generated migrations use `TEXT`, writes validate and store canonical GeoJSON, and spatial
+predicates run in memory after rows are loaded. This gives projects a portable spatial field API
+without requiring a SQLite extension, but it is not spatial-indexed and should not be treated as an
+efficient large-table geospatial query engine.
 
 Spatial filters use `SpatialFilter`:
 
@@ -235,10 +320,11 @@ places(where: {
 
 The supported predicates are `equals`, `disjoint`, `intersects`, `touches`, `crosses`, `within`,
 `contains`, and `overlaps`. Multiple predicates on one field are combined with `AND`. `isNull` emits
-`IS NULL` or `IS NOT NULL` without binding a geometry. `disjoint` renders as
-`NOT ST_Intersects(...)` so Postgres can still use spatial-index-friendly planning.
+`IS NULL` or `IS NOT NULL` without binding a geometry. On Postgres, `disjoint` renders as
+`NOT ST_Intersects(...)` so the planner can still use spatial-index-friendly planning. SQLite uses
+the same predicate names with planar GeoJSON topology checks in Rust.
 
-When `index = true`, migrations create a GiST spatial index:
+When `index = true` on Postgres, migrations create a GiST spatial index:
 
 ```sql
 CREATE INDEX idx_places_location_spatial ON places USING GIST (location)
@@ -247,3 +333,6 @@ CREATE INDEX idx_places_location_spatial ON places USING GIST (location)
 Managed migrations enable PostGIS with `CREATE EXTENSION IF NOT EXISTS postgis` when any entity uses a
 spatial column. Managed migrations do not use `CREATE INDEX CONCURRENTLY`; plan a separate operational
 migration if a production table needs a concurrent index build.
+
+On SQLite, `index = true` is accepted for cross-backend schema portability but no spatial index is
+created. Future SQLite indexing options are documented in [Backend Features](backends.md).

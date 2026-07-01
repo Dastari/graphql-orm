@@ -11,6 +11,39 @@ pub struct SimilarityInput {
     pub value: String,
 }
 
+#[derive(
+    async_graphql::Enum, serde::Serialize, serde::Deserialize, Copy, Clone, Debug, Eq, PartialEq,
+)]
+pub enum SearchMode {
+    Plain,
+    Phrase,
+    Web,
+    Prefix,
+}
+
+impl Default for SearchMode {
+    fn default() -> Self {
+        Self::Plain
+    }
+}
+
+#[derive(async_graphql::InputObject, Clone, Debug)]
+#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
+#[cfg_attr(
+    feature = "field-case-screaming-snake",
+    graphql(rename_fields = "SCREAMING_SNAKE_CASE")
+)]
+#[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
+#[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
+pub struct SearchInput {
+    pub query: String,
+    pub mode: Option<SearchMode>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "minscore"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "MINSCORE"))]
+    pub min_score: Option<f64>,
+}
+
 #[derive(async_graphql::InputObject, Clone, Debug, Default)]
 #[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
 #[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]

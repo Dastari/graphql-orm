@@ -33,6 +33,7 @@ fn text_column(name: &str, primary_key: bool, nullable: bool) -> ColumnModel {
     ColumnModel {
         name: name.to_string(),
         sql_type: "TEXT".to_string(),
+        spatial: None,
         nullable,
         is_primary_key: primary_key,
         is_unique: false,
@@ -54,6 +55,7 @@ fn users_v1(table_name: &str) -> TableModel {
         indexes: vec![],
         composite_unique_indexes: vec![],
         foreign_keys: vec![],
+        search_indexes: vec![],
     }
 }
 

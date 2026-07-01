@@ -7,7 +7,7 @@ database schema. Schema ownership and migration behavior are controlled by runti
 ## Features
 
 ```toml
-graphql-orm = { version = "0.2.11", default-features = false, features = ["sqlite"] }
+graphql-orm = { version = "0.2.13", default-features = false, features = ["sqlite"] }
 ```
 
 Available backend features:
@@ -21,9 +21,19 @@ do not select `mssql` do not build the SQL Server driver path.
 
 ## Spatial Support
 
-Spatial fields, spatial indexes, and topological `where` predicates are implemented for the
-`postgres` backend with PostGIS. The `sqlite` and `mssql` backends reject `#[graphql_orm(spatial(...))]`
-at compile time in this phase.
+Spatial fields and topological `where` predicates are supported by the `postgres` and `sqlite`
+backends with different execution models.
+
+Postgres uses native PostGIS `geometry(<type>, <srid>)` columns. When `index = true`, managed
+migrations create a GiST spatial index and predicates render to PostGIS functions.
+
+SQLite stores spatial fields as GeoJSON in `TEXT` columns. Writes validate that the value is a
+GeoJSON geometry of the declared type, and spatial predicates are evaluated in Rust after rows are
+loaded. This keeps application code portable, but it is not spatial-indexed and can be inefficient on
+large tables. `index = true` is accepted on SQLite for schema portability, but no SQLite index is
+created.
+
+The `mssql` backend still rejects `#[graphql_orm(spatial(...))]` at compile time in this phase.
 
 SQLite has several industry-standard spatial options, but they have different semantics and
 deployment costs:
@@ -35,9 +45,60 @@ deployment costs:
 - GeoPackage is an interoperable SQLite-based GIS container with geometry metadata and RTree
   conventions. It is useful for file exchange but heavier for ORM-managed application schemas.
 
-The recommended future path is an optional `spatialite` feature if exact SQLite predicates are
-required. Plain R*Tree should be reserved for explicit bounding-box APIs, not for exact
-`contains`/`within`/`overlaps` semantics.
+The recommended future path for indexed exact SQLite predicates is an optional `spatialite` feature.
+Plain R*Tree should be reserved for explicit bounding-box APIs or as a prefilter, not as the source
+of exact `contains`/`within`/`overlaps` semantics.
+
+## Full-Text Search Support
+
+Full-text search is exposed through the same generated API on supported backends:
+
+- Postgres uses a managed shadow table with `tsvector`, `tsquery`, `ts_rank_cd`, and a GIN index on
+  `document_vector`.
+- SQLite creates an FTS5 virtual table with the `unicode61` tokenizer by default. If native FTS
+  execution is unavailable at runtime and fallback is enabled, query helpers can fall back to the
+  deterministic Rust scorer over loaded entities.
+- MSSQL has metadata and diagnostics for future support, but managed execution is not implemented in
+  this pass.
+
+Search documents are denormalized per entity. Local `searchable(...)` fields are maintained by
+generated ORM writes. Writes made outside `graphql-orm` require an explicit rebuild before native
+search indexes reflect the new data.
+
+Postgres SQL shape:
+
+```sql
+CREATE TABLE __graphql_orm_search_articles (
+  entity_pk TEXT PRIMARY KEY,
+  entity_pk_json JSONB NOT NULL,
+  document_text TEXT NOT NULL,
+  document_vector TSVECTOR NOT NULL,
+  updated_at BIGINT NOT NULL
+);
+
+CREATE INDEX idx_gom_search_articles_vector
+ON __graphql_orm_search_articles
+USING GIN (document_vector);
+```
+
+SQLite SQL shape:
+
+```sql
+CREATE VIRTUAL TABLE __graphql_orm_fts_articles
+USING fts5(
+  entity_pk UNINDEXED,
+  weight_a,
+  weight_b,
+  weight_c,
+  weight_d,
+  document_text,
+  tokenize = 'unicode61'
+);
+```
+
+Future MySQL support should use `FULLTEXT` indexes for local fields and the same denormalized shadow
+table strategy when related fields are included. Future MSSQL support should target full-text
+catalogs and `CONTAINSTABLE`/`FREETEXTTABLE`; current MSSQL support remains read/query-only.
 
 ## Single-Backend Builds
 
@@ -104,7 +165,7 @@ Example:
 
 ```toml
 graphql-orm = {
-  version = "0.2.11",
+  version = "0.2.13",
   default-features = false,
   features = [
     "mssql",

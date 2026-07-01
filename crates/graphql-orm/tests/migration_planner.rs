@@ -34,6 +34,7 @@ fn users_v1() -> TableModel {
         indexes: vec![],
         composite_unique_indexes: vec![],
         foreign_keys: vec![],
+        search_indexes: vec![],
     }
 }
 
@@ -109,6 +110,7 @@ fn posts_with_fk() -> TableModel {
             is_multiple: false,
             on_delete: DeletePolicy::Restrict,
         }],
+        search_indexes: vec![],
     }
 }
 
@@ -145,6 +147,34 @@ fn places_with_spatial_index() -> TableModel {
         )],
         composite_unique_indexes: vec![],
         foreign_keys: vec![],
+        search_indexes: vec![],
+    }
+}
+
+fn sqlite_places_with_spatial_field() -> TableModel {
+    TableModel {
+        columns: vec![
+            ColumnModel {
+                name: "id".to_string(),
+                sql_type: "TEXT".to_string(),
+                spatial: None,
+                nullable: false,
+                is_primary_key: true,
+                is_unique: false,
+                default: None,
+            },
+            ColumnModel {
+                name: "location".to_string(),
+                sql_type: "TEXT".to_string(),
+                spatial: Some(SpatialColumnDef::geometry(SpatialGeometryType::Point, 4326)),
+                nullable: false,
+                is_primary_key: false,
+                is_unique: false,
+                default: None,
+            },
+        ],
+        indexes: vec![],
+        ..places_with_spatial_index()
     }
 }
 
@@ -261,6 +291,40 @@ fn postgres_plan_enables_postgis_and_renders_spatial_index() {
     assert!(plan.statements.iter().any(|statement| {
         statement == "CREATE INDEX idx_places_location_spatial ON places USING GIST (location)"
     }));
+}
+
+#[test]
+fn sqlite_plan_stores_spatial_fields_as_text_without_spatial_indexes() {
+    let current = SchemaModel {
+        extensions: Vec::new(),
+        tables: vec![],
+    };
+    let target = SchemaModel {
+        extensions: vec!["postgis".to_string()],
+        tables: vec![sqlite_places_with_spatial_field()],
+    };
+
+    let plan = build_migration_plan(DatabaseBackend::Sqlite, &current, &target);
+    assert!(
+        plan.statements
+            .iter()
+            .any(|statement| statement.contains("location TEXT NOT NULL"))
+    );
+    assert!(
+        !plan
+            .statements
+            .iter()
+            .any(|statement| statement.contains("postgis") || statement.contains("USING GIST"))
+    );
+
+    let mut introspected = sqlite_places_with_spatial_field();
+    introspected.columns[1].spatial = None;
+    let current = SchemaModel {
+        extensions: Vec::new(),
+        tables: vec![introspected],
+    };
+    let plan = build_migration_plan(DatabaseBackend::Sqlite, &current, &target);
+    assert!(plan.statements.is_empty());
 }
 
 #[test]

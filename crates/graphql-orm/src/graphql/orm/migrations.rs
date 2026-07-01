@@ -6,8 +6,11 @@ use super::core::RlsOperation;
 use super::core::SqlValue;
 use super::core::{
     ColumnModel, ForeignKeyModel, IndexMethod, MigrationPlan, MigrationRisk, MigrationStep,
-    PlannedMigrationStep, SchemaDiff, SchemaModel, TableModel,
+    PlannedMigrationStep, SchemaDiff, SchemaModel, SearchIndexModel, SearchIndexStrategy,
+    TableModel,
 };
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+use super::core::{SearchFieldModel, SearchRelationFieldModel, SearchWeight};
 #[cfg(feature = "postgres")]
 use super::core::{SpatialColumnDef, SpatialGeometryType};
 use super::dialect::DatabaseBackend;
@@ -109,7 +112,19 @@ fn render_create_table_statement_for_name(
     format!("CREATE TABLE {} ({})", table_name, parts.join(", "))
 }
 
-fn column_changed(before: &ColumnModel, after: &ColumnModel) -> bool {
+fn column_changed_for_backend(
+    backend: DatabaseBackend,
+    before: &ColumnModel,
+    after: &ColumnModel,
+) -> bool {
+    if backend == DatabaseBackend::Sqlite {
+        let mut before = before.clone();
+        let mut after = after.clone();
+        before.spatial = None;
+        after.spatial = None;
+        return before != after;
+    }
+
     before != after
 }
 
@@ -163,6 +178,14 @@ fn order_tables_by_foreign_keys<'a>(
 }
 
 pub fn diff_schema_models(current: &SchemaModel, target: &SchemaModel) -> SchemaDiff {
+    diff_schema_models_for_backend(DatabaseBackend::Postgres, current, target)
+}
+
+pub fn diff_schema_models_for_backend(
+    backend: DatabaseBackend,
+    current: &SchemaModel,
+    target: &SchemaModel,
+) -> SchemaDiff {
     let current_tables = current
         .tables
         .iter()
@@ -202,6 +225,12 @@ pub fn diff_schema_models(current: &SchemaModel, target: &SchemaModel) -> Schema
     {
         let table_name = &table.table_name;
         if !target_tables.contains_key(table_name) {
+            for search_index in &table.search_indexes {
+                steps.push(MigrationStep::DropSearchIndex {
+                    table_name: table_name.clone(),
+                    index_name: search_index.name.clone(),
+                });
+            }
             steps.push(MigrationStep::DropTable {
                 table_name: table_name.clone(),
             });
@@ -239,7 +268,7 @@ pub fn diff_schema_models(current: &SchemaModel, target: &SchemaModel) -> Schema
             }
 
             let target_column = target_columns[column_name];
-            if column_changed(column, target_column) {
+            if column_changed_for_backend(backend, column, target_column) {
                 steps.push(MigrationStep::AlterColumn {
                     table_name: table_name.clone(),
                     before: (*column).clone(),
@@ -282,6 +311,43 @@ pub fn diff_schema_models(current: &SchemaModel, target: &SchemaModel) -> Schema
         for index_name in current_indexes.keys() {
             if !target_indexes.contains_key(index_name) {
                 steps.push(MigrationStep::DropIndex {
+                    table_name: table_name.clone(),
+                    index_name: index_name.clone(),
+                });
+            }
+        }
+
+        let current_search_indexes = table
+            .search_indexes
+            .iter()
+            .map(|index| (index.name.clone(), index))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let target_search_indexes = target_table
+            .search_indexes
+            .iter()
+            .map(|index| (index.name.clone(), index))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        for (index_name, index) in &target_search_indexes {
+            if let Some(current_index) = current_search_indexes.get(index_name) {
+                if *current_index != *index {
+                    steps.push(MigrationStep::AlterSearchIndex {
+                        table_name: table_name.clone(),
+                        before: (*current_index).clone(),
+                        after: (*index).clone(),
+                    });
+                }
+            } else {
+                steps.push(MigrationStep::CreateSearchIndex {
+                    table_name: table_name.clone(),
+                    index: (*index).clone(),
+                });
+            }
+        }
+
+        for index_name in current_search_indexes.keys() {
+            if !target_search_indexes.contains_key(index_name) {
+                steps.push(MigrationStep::DropSearchIndex {
                     table_name: table_name.clone(),
                     index_name: index_name.clone(),
                 });
@@ -358,6 +424,9 @@ fn migration_step_table_name(step: &MigrationStep) -> Option<&str> {
         MigrationStep::AlterColumn { table_name, .. } => Some(table_name),
         MigrationStep::CreateIndex { table_name, .. } => Some(table_name),
         MigrationStep::DropIndex { table_name, .. } => Some(table_name),
+        MigrationStep::CreateSearchIndex { table_name, .. } => Some(table_name),
+        MigrationStep::DropSearchIndex { table_name, .. } => Some(table_name),
+        MigrationStep::AlterSearchIndex { table_name, .. } => Some(table_name),
         MigrationStep::AddForeignKey { table_name, .. } => Some(table_name),
         MigrationStep::DropForeignKey { table_name, .. } => Some(table_name),
     }
@@ -391,6 +460,329 @@ fn render_create_index_statement(
         method,
         index.columns.join(", ")
     )
+}
+
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn search_index_config_json(index: &SearchIndexModel) -> String {
+    let fields = index
+        .fields
+        .iter()
+        .map(|field| {
+            format!(
+                "{{\"field\":\"{}\",\"column\":\"{}\",\"weight\":\"{}\",\"alias\":{},\"policy\":{}}}",
+                field.field_name.replace('"', "\\\""),
+                field.column_name.replace('"', "\\\""),
+                field.weight.as_str(),
+                field
+                    .alias
+                    .as_ref()
+                    .map(|value| format!("\"{}\"", value.replace('"', "\\\"")))
+                    .unwrap_or_else(|| "null".to_string()),
+                field
+                    .policy
+                    .as_ref()
+                    .map(|value| format!("\"{}\"", value.replace('"', "\\\"")))
+                    .unwrap_or_else(|| "null".to_string())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let relations = index
+        .relations
+        .iter()
+        .map(|relation| {
+            format!(
+                "{{\"relation\":\"{}\",\"target\":\"{}\",\"fields\":[{}],\"weight\":\"{}\",\"max_items\":{},\"policy\":{}}}",
+                relation.relation_field.replace('"', "\\\""),
+                relation.target_type.replace('"', "\\\""),
+                relation
+                    .fields
+                    .iter()
+                    .map(|field| format!("\"{}\"", field.replace('"', "\\\"")))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                relation.weight.as_str(),
+                relation.max_items,
+                relation
+                    .policy
+                    .as_ref()
+                    .map(|value| format!("\"{}\"", value.replace('"', "\\\"")))
+                    .unwrap_or_else(|| "null".to_string())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"name\":\"{}\",\"table\":\"{}\",\"entity\":\"{}\",\"primary_key\":\"{}\",\"strategy\":\"{}\",\"language\":\"{}\",\"tokenizer\":\"{}\",\"min_token_len\":{},\"fallback_enabled\":{},\"fields\":[{}],\"relations\":[{}]}}",
+        index.name.replace('"', "\\\""),
+        index.table_name.replace('"', "\\\""),
+        index.entity_name.replace('"', "\\\""),
+        index.primary_key.replace('"', "\\\""),
+        index.strategy.as_str(),
+        index.language.replace('"', "\\\""),
+        index.tokenizer.replace('"', "\\\""),
+        index.min_token_len,
+        index.fallback_enabled,
+        fields,
+        relations
+    )
+}
+
+fn render_search_metadata_upsert(
+    backend: DatabaseBackend,
+    index: &SearchIndexModel,
+) -> Vec<String> {
+    let metadata_table = super::search_metadata_table_name();
+    let now_expr = match backend {
+        DatabaseBackend::Postgres => "EXTRACT(EPOCH FROM NOW())::bigint",
+        DatabaseBackend::Sqlite => "unixepoch()",
+        DatabaseBackend::Mysql => "UNIX_TIMESTAMP()",
+        DatabaseBackend::Mssql => "DATEDIFF_BIG(second, '1970-01-01', SYSUTCDATETIME())",
+    };
+    let create = match backend {
+        DatabaseBackend::Postgres => format!(
+            "CREATE TABLE IF NOT EXISTS {metadata_table} (entity_name TEXT PRIMARY KEY, table_name TEXT NOT NULL, strategy TEXT NOT NULL, config_json JSONB NOT NULL, updated_at BIGINT NOT NULL)"
+        ),
+        _ => format!(
+            "CREATE TABLE IF NOT EXISTS {metadata_table} (entity_name TEXT PRIMARY KEY, table_name TEXT NOT NULL, strategy TEXT NOT NULL, config_json TEXT NOT NULL, updated_at INTEGER NOT NULL)"
+        ),
+    };
+    let config = search_index_config_json(index);
+    let insert = match backend {
+        DatabaseBackend::Postgres => format!(
+            "INSERT INTO {metadata_table} (entity_name, table_name, strategy, config_json, updated_at) VALUES ({}, {}, {}, {}::jsonb, {now_expr}) ON CONFLICT (entity_name) DO UPDATE SET table_name = EXCLUDED.table_name, strategy = EXCLUDED.strategy, config_json = EXCLUDED.config_json, updated_at = EXCLUDED.updated_at",
+            sql_string_literal(&index.entity_name),
+            sql_string_literal(&index.table_name),
+            sql_string_literal(index.strategy.as_str()),
+            sql_string_literal(&config)
+        ),
+        DatabaseBackend::Sqlite | DatabaseBackend::Mysql | DatabaseBackend::Mssql => format!(
+            "INSERT OR REPLACE INTO {metadata_table} (entity_name, table_name, strategy, config_json, updated_at) VALUES ({}, {}, {}, {}, {now_expr})",
+            sql_string_literal(&index.entity_name),
+            sql_string_literal(&index.table_name),
+            sql_string_literal(index.strategy.as_str()),
+            sql_string_literal(&config)
+        ),
+    };
+    vec![create, insert]
+}
+
+fn render_create_search_index_statement(
+    backend: DatabaseBackend,
+    index: &SearchIndexModel,
+) -> Vec<String> {
+    let mut statements = render_search_metadata_upsert(backend, index);
+    let table = super::search_table_name(&index.table_name);
+    let fts_table = super::sqlite_fts_table_name(&index.table_name);
+    let token_table = super::search_token_table_name(&index.table_name);
+    match backend {
+        DatabaseBackend::Postgres => {
+            statements.push(format!(
+                "CREATE TABLE {table} (entity_pk TEXT PRIMARY KEY, entity_pk_json JSONB NOT NULL, document_text TEXT NOT NULL, document_vector TSVECTOR NOT NULL, updated_at BIGINT NOT NULL)"
+            ));
+            statements.push(format!(
+                "CREATE INDEX {} ON {table} USING GIN (document_vector)",
+                index.name
+            ));
+        }
+        DatabaseBackend::Sqlite => match index.strategy {
+            SearchIndexStrategy::FallbackTable => {
+                statements.push(format!(
+                    "CREATE TABLE {table} (entity_pk TEXT PRIMARY KEY, entity_pk_json TEXT NOT NULL, document_text TEXT NOT NULL, weight_a TEXT NOT NULL, weight_b TEXT NOT NULL, weight_c TEXT NOT NULL, weight_d TEXT NOT NULL, updated_at INTEGER NOT NULL)"
+                ));
+                statements.push(format!(
+                    "CREATE TABLE {token_table} (entity_pk TEXT NOT NULL, token TEXT NOT NULL, weight INTEGER NOT NULL, frequency INTEGER NOT NULL, PRIMARY KEY (entity_pk, token, weight))"
+                ));
+                statements.push(format!(
+                    "CREATE INDEX idx_gom_search_token_{} ON {token_table} (token)",
+                    super::sanitize_search_name(&index.table_name)
+                ));
+            }
+            _ => {
+                statements.push(format!(
+                    "CREATE VIRTUAL TABLE {fts_table} USING fts5(entity_pk UNINDEXED, weight_a, weight_b, weight_c, weight_d, document_text, tokenize = '{}')",
+                    index.tokenizer.replace('\'', "''")
+                ));
+            }
+        },
+        DatabaseBackend::Mysql | DatabaseBackend::Mssql => {
+            statements.push(format!(
+                "-- full-text search indexes for {} are planned but not implemented by graphql-orm yet",
+                backend.name()
+            ));
+        }
+    }
+    statements
+}
+
+fn render_drop_search_index_statement(
+    backend: DatabaseBackend,
+    table_name: &str,
+    index_name: &str,
+) -> Vec<String> {
+    let table = super::search_table_name(table_name);
+    let fts_table = super::sqlite_fts_table_name(table_name);
+    let token_table = super::search_token_table_name(table_name);
+    let metadata_table = super::search_metadata_table_name();
+    match backend {
+        DatabaseBackend::Postgres => vec![
+            format!("DROP INDEX IF EXISTS {index_name}"),
+            format!("DROP TABLE IF EXISTS {table}"),
+            format!(
+                "DELETE FROM {metadata_table} WHERE table_name = {}",
+                sql_string_literal(table_name)
+            ),
+        ],
+        DatabaseBackend::Sqlite => vec![
+            format!("DROP TABLE IF EXISTS {fts_table}"),
+            format!("DROP TABLE IF EXISTS {token_table}"),
+            format!("DROP TABLE IF EXISTS {table}"),
+            format!(
+                "DELETE FROM {metadata_table} WHERE table_name = {}",
+                sql_string_literal(table_name)
+            ),
+        ],
+        DatabaseBackend::Mysql | DatabaseBackend::Mssql => vec![format!(
+            "-- dropping full-text search index {index_name} for {} is not implemented by graphql-orm yet",
+            backend.name()
+        )],
+    }
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+fn parse_search_weight(value: &str) -> SearchWeight {
+    match value {
+        "A" => SearchWeight::A,
+        "B" => SearchWeight::B,
+        "C" => SearchWeight::C,
+        _ => SearchWeight::D,
+    }
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+fn parse_search_strategy(value: &str) -> SearchIndexStrategy {
+    match value {
+        "postgres_tsvector" => SearchIndexStrategy::PostgresTsvector,
+        "sqlite_fts5" => SearchIndexStrategy::SqliteFts5,
+        "mysql_fulltext" => SearchIndexStrategy::MysqlFullText,
+        "mssql_fulltext" => SearchIndexStrategy::MssqlFullText,
+        _ => SearchIndexStrategy::FallbackTable,
+    }
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+fn parse_search_index_config(config_json: &str) -> Option<SearchIndexModel> {
+    let value = serde_json::from_str::<serde_json::Value>(config_json).ok()?;
+    let fields = value
+        .get("fields")
+        .and_then(|value| value.as_array())
+        .map(|fields| {
+            fields
+                .iter()
+                .filter_map(|field| {
+                    Some(SearchFieldModel {
+                        field_name: field.get("field")?.as_str()?.to_string(),
+                        column_name: field.get("column")?.as_str()?.to_string(),
+                        weight: parse_search_weight(
+                            field
+                                .get("weight")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("D"),
+                        ),
+                        alias: field
+                            .get("alias")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string),
+                        policy: field
+                            .get("policy")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let relations = value
+        .get("relations")
+        .and_then(|value| value.as_array())
+        .map(|relations| {
+            relations
+                .iter()
+                .filter_map(|relation| {
+                    Some(SearchRelationFieldModel {
+                        relation_field: relation.get("relation")?.as_str()?.to_string(),
+                        target_type: relation.get("target")?.as_str()?.to_string(),
+                        fields: relation
+                            .get("fields")
+                            .and_then(|value| value.as_array())
+                            .map(|fields| {
+                                fields
+                                    .iter()
+                                    .filter_map(|field| field.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        weight: parse_search_weight(
+                            relation
+                                .get("weight")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("D"),
+                        ),
+                        max_items: relation
+                            .get("max_items")
+                            .and_then(|value| value.as_u64())
+                            .unwrap_or(100) as usize,
+                        policy: relation
+                            .get("policy")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some(SearchIndexModel {
+        name: value.get("name")?.as_str()?.to_string(),
+        table_name: value.get("table")?.as_str()?.to_string(),
+        entity_name: value.get("entity")?.as_str()?.to_string(),
+        primary_key: value.get("primary_key")?.as_str()?.to_string(),
+        strategy: parse_search_strategy(value.get("strategy")?.as_str()?),
+        language: value
+            .get("language")
+            .and_then(|value| value.as_str())
+            .unwrap_or("english")
+            .to_string(),
+        tokenizer: value
+            .get("tokenizer")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unicode61")
+            .to_string(),
+        min_token_len: value
+            .get("min_token_len")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(2) as usize,
+        fallback_enabled: value
+            .get("fallback_enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true),
+        fields,
+        relations,
+    })
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+fn attach_search_indexes(tables: &mut [TableModel], search_indexes: Vec<SearchIndexModel>) {
+    for search_index in search_indexes {
+        if let Some(table) = tables
+            .iter_mut()
+            .find(|table| table.table_name == search_index.table_name)
+        {
+            table.search_indexes.push(search_index);
+        }
+    }
 }
 
 fn render_sqlite_table_rebuild_statements(
@@ -453,6 +845,12 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
                     .indexes
                     .iter()
                     .map(|index| render_create_index_statement(backend, &table.table_name, index)),
+            );
+            statements.extend(
+                table
+                    .search_indexes
+                    .iter()
+                    .flat_map(|index| render_create_search_index_statement(backend, index)),
             );
             statements
         }
@@ -532,6 +930,24 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
                 vec![format!("DROP INDEX {} ON {}", index_name, table_name)]
             }
         },
+        MigrationStep::CreateSearchIndex {
+            table_name: _,
+            index,
+        } => render_create_search_index_statement(backend, index),
+        MigrationStep::DropSearchIndex {
+            table_name,
+            index_name,
+        } => render_drop_search_index_statement(backend, table_name, index_name),
+        MigrationStep::AlterSearchIndex {
+            table_name,
+            before,
+            after,
+        } => {
+            let mut statements =
+                render_drop_search_index_statement(backend, table_name, &before.name);
+            statements.extend(render_create_search_index_statement(backend, after));
+            statements
+        }
         MigrationStep::AddForeignKey {
             table_name,
             foreign_key,
@@ -635,6 +1051,17 @@ pub fn classify_migration_step(step: &MigrationStep) -> PlannedMigrationStep {
             "creates an index without changing row data",
         ),
         MigrationStep::DropIndex { .. } => (MigrationRisk::Risky, "drops an existing index"),
+        MigrationStep::CreateSearchIndex { .. } => (
+            MigrationRisk::Additive,
+            "creates full-text search structures without backfilling row data",
+        ),
+        MigrationStep::DropSearchIndex { .. } => {
+            (MigrationRisk::Risky, "drops full-text search structures")
+        }
+        MigrationStep::AlterSearchIndex { .. } => (
+            MigrationRisk::Risky,
+            "recreates full-text search structures and requires an explicit rebuild",
+        ),
         MigrationStep::AddForeignKey { .. } => (
             MigrationRisk::Risky,
             "adds a constraint that may reject existing rows",
@@ -661,7 +1088,11 @@ pub fn build_migration_plan(
     current: &SchemaModel,
     target: &SchemaModel,
 ) -> MigrationPlan {
-    let diff = diff_schema_models(current, target);
+    let mut target_for_backend = target.clone();
+    if backend != DatabaseBackend::Postgres {
+        target_for_backend.extensions.clear();
+    }
+    let diff = diff_schema_models_for_backend(backend, current, &target_for_backend);
     let statements = match backend {
         DatabaseBackend::Sqlite => {
             let current_tables = current
@@ -669,7 +1100,7 @@ pub fn build_migration_plan(
                 .iter()
                 .map(|table| (table.table_name.as_str(), table))
                 .collect::<std::collections::BTreeMap<_, _>>();
-            let target_tables = target
+            let target_tables = target_for_backend
                 .tables
                 .iter()
                 .map(|table| (table.table_name.as_str(), table))
@@ -891,7 +1322,31 @@ pub async fn introspect_sqlite_schema(
             indexes,
             composite_unique_indexes: Vec::new(),
             foreign_keys,
+            search_indexes: Vec::new(),
         });
+    }
+
+    let metadata_exists = sqlx::query(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '__graphql_orm_search_metadata'",
+    )
+    .fetch_optional(pool)
+    .await?
+    .is_some();
+    if metadata_exists {
+        let rows = sqlx::query(
+            "SELECT config_json FROM __graphql_orm_search_metadata ORDER BY entity_name",
+        )
+        .fetch_all(pool)
+        .await?;
+        let search_indexes = rows
+            .into_iter()
+            .filter_map(|row| {
+                row.try_get::<String, _>("config_json")
+                    .ok()
+                    .and_then(|config| parse_search_index_config(&config))
+            })
+            .collect::<Vec<_>>();
+        attach_search_indexes(&mut tables, search_indexes);
     }
 
     Ok(SchemaModel {
@@ -1151,7 +1606,31 @@ pub async fn introspect_postgres_schema(
             indexes,
             composite_unique_indexes: Vec::new(),
             foreign_keys,
+            search_indexes: Vec::new(),
         });
+    }
+
+    let metadata_exists = sqlx::query(
+        "SELECT to_regclass('public.__graphql_orm_search_metadata') IS NOT NULL AS exists",
+    )
+    .fetch_one(pool)
+    .await?
+    .try_get::<bool, _>("exists")?;
+    if metadata_exists {
+        let rows = sqlx::query(
+            "SELECT config_json::text AS config_json FROM __graphql_orm_search_metadata ORDER BY entity_name",
+        )
+        .fetch_all(pool)
+        .await?;
+        let search_indexes = rows
+            .into_iter()
+            .filter_map(|row| {
+                row.try_get::<String, _>("config_json")
+                    .ok()
+                    .and_then(|config| parse_search_index_config(&config))
+            })
+            .collect::<Vec<_>>();
+        attach_search_indexes(&mut tables, search_indexes);
     }
 
     Ok(SchemaModel { extensions, tables })
@@ -1367,6 +1846,7 @@ pub async fn introspect_mssql_schema(
             indexes: Vec::new(),
             composite_unique_indexes: Vec::new(),
             foreign_keys: Vec::new(),
+            search_indexes: Vec::new(),
         });
     }
 

@@ -43,6 +43,7 @@ pub trait OrmBackend: Copy + Clone + Send + Sync + 'static {
     }
 
     fn try_get_i64(row: &Self::Row, column: &str) -> Result<i64, sqlx::Error>;
+    fn try_get_f64(row: &Self::Row, column: &str) -> Result<f64, sqlx::Error>;
     fn try_get_string(row: &Self::Row, column: &str) -> Result<String, sqlx::Error>;
 
     fn placeholder(index: usize) -> String {
@@ -200,6 +201,10 @@ impl OrmBackend for NoDefaultBackend {
         Err(sqlx::Error::ColumnNotFound(column.to_string()))
     }
 
+    fn try_get_f64(_row: &Self::Row, column: &str) -> Result<f64, sqlx::Error> {
+        Err(sqlx::Error::ColumnNotFound(column.to_string()))
+    }
+
     fn try_get_string(_row: &Self::Row, column: &str) -> Result<String, sqlx::Error> {
         Err(sqlx::Error::ColumnNotFound(column.to_string()))
     }
@@ -228,6 +233,11 @@ impl OrmBackend for SqliteBackend {
     }
 
     fn try_get_i64(row: &Self::Row, column: &str) -> Result<i64, sqlx::Error> {
+        use sqlx::Row;
+        row.try_get(column)
+    }
+
+    fn try_get_f64(row: &Self::Row, column: &str) -> Result<f64, sqlx::Error> {
         use sqlx::Row;
         row.try_get(column)
     }
@@ -386,6 +396,11 @@ impl OrmBackend for PostgresBackend {
         row.try_get(column)
     }
 
+    fn try_get_f64(row: &Self::Row, column: &str) -> Result<f64, sqlx::Error> {
+        use sqlx::Row;
+        row.try_get(column)
+    }
+
     fn try_get_string(row: &Self::Row, column: &str) -> Result<String, sqlx::Error> {
         use sqlx::Row;
         row.try_get(column)
@@ -483,6 +498,10 @@ impl OrmBackend for MssqlBackend {
     }
 
     fn try_get_i64(row: &Self::Row, column: &str) -> Result<i64, sqlx::Error> {
+        row.try_get(column)
+    }
+
+    fn try_get_f64(row: &Self::Row, column: &str) -> Result<f64, sqlx::Error> {
         row.try_get(column)
     }
 
