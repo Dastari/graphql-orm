@@ -43,8 +43,9 @@ async fn setup_pool() -> Result<sqlx::SqlitePool, sqlx::Error> {
 
 #[cfg(feature = "postgres")]
 async fn setup_pool() -> Result<sqlx::PgPool, sqlx::Error> {
-    let database_url = std::env::var("TEST_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1:55432/postgres".to_string());
+    let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
+        "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string()
+    });
     sqlx::PgPool::connect(&database_url).await
 }
 

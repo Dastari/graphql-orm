@@ -35,24 +35,26 @@ cargo test
 
 ## PostgreSQL Tests
 
-Postgres integration tests use `TEST_DATABASE_URL` when provided.
+Postgres integration tests use `TEST_DATABASE_URL` when provided. These tests create, alter, and
+drop schemas and tables. Always point them at a dedicated throwaway database, never at a shared
+developer, staging, or application database.
 
 ```bash
 docker run -d --name graphql-orm-postgis-test \
-  -e POSTGRES_USER=postgres \
-  -e POSTGRES_PASSWORD=postgres \
-  -e POSTGRES_DB=postgres \
-  -p 55432:5432 \
-  postgis/postgis:16-3.4
+  -e POSTGRES_USER=graphql_orm \
+  -e POSTGRES_PASSWORD=graphql_orm \
+  -e POSTGRES_DB=graphql_orm_test \
+  -p 55433:5432 \
+  postgis/postgis:17-3.5
 
-TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:55432/postgres \
+TEST_DATABASE_URL=postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test \
   cargo test -p graphql-orm --no-default-features --features postgres -- --test-threads=1
 ```
 
 Focused PostGIS spatial coverage can be run with:
 
 ```bash
-TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:55432/postgres \
+TEST_DATABASE_URL=postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test \
   cargo test -p graphql-orm --no-default-features --features postgres --test spatial_fields
 ```
 

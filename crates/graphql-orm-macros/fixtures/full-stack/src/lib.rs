@@ -1116,7 +1116,7 @@ async fn connect_pool() -> Result<DbPool, sqlx::Error> {
     #[cfg(feature = "postgres")]
     {
         let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-            "postgres://postgres:postgres@127.0.0.1:55432/postgres".to_string()
+            "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string()
         });
         sqlx::PgPool::connect(&database_url).await
     }

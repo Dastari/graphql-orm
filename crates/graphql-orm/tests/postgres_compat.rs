@@ -108,8 +108,9 @@ type TestSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 #[tokio::test]
 async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn std::error::Error>>
 {
-    let database_url = std::env::var("TEST_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1:55432/postgres".to_string());
+    let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
+        "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string()
+    });
     let pool = sqlx::PgPool::connect(&database_url).await?;
 
     sqlx::query("DROP TABLE IF EXISTS posts")

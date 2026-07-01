@@ -230,7 +230,7 @@ mod tests {
 
     fn database_url() -> String {
         std::env::var("TEST_DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1:55432/postgres".to_string())
+            .unwrap_or_else(|_| "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string())
     }
 
     #[test]
