@@ -5,7 +5,9 @@ use crate::{
 use futures::{StreamExt, TryStreamExt, stream};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// Verification concurrency settings.
 pub struct VerificationOptions {
+    /// Maximum number of concurrent blob checksum reads.
     pub blob_concurrency: usize,
 }
 

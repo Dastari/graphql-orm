@@ -9,6 +9,7 @@ use bytes::Bytes;
 use crate::{BackupError, BackupRepository};
 
 #[derive(Clone, Debug)]
+/// Local filesystem implementation of [`BackupRepository`].
 pub struct LocalBackupRepository {
     root: PathBuf,
 }

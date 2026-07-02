@@ -10,27 +10,40 @@ use crate::{
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// Restore execution mode.
 pub enum RestoreMode {
+    /// Apply restore only if the target is empty.
     EmptyDatabase,
+    /// Validate and parse without applying database changes.
     DryRun,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// Restore behavior flags passed to database adapters.
 pub struct RestoreContext {
+    /// Restore mode.
     pub mode: RestoreMode,
+    /// Whether application policies should be disabled during restore.
     pub disable_policies: bool,
+    /// Whether change journaling should be disabled during restore.
     pub disable_change_journal: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// Summary returned by `restore_snapshot`.
 pub struct RestoreResult {
+    /// Number of manifests in the restored chain.
     pub manifest_chain_len: usize,
+    /// Number of full table payloads parsed.
     pub full_table_count: u64,
+    /// Number of full rows parsed.
     pub full_row_count: u64,
+    /// Number of incremental changes parsed.
     pub incremental_change_count: u64,
 }
 
 #[async_trait]
+/// Sink used by `restore_objects` to rehydrate application object stores.
 pub trait RestoreObjectSink: Send + Sync {
     /// Restores one object loaded from a backup repository.
     ///

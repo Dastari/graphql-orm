@@ -6,7 +6,9 @@ pub const DEFAULT_LOCK_STALE_AFTER_SECONDS: i64 = 3_600;
 const REPOSITORY_LOCK_KEY: &str = "locks/repository.lock";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// Advisory repository lock settings.
 pub struct RepositoryLockOptions {
+    /// Age in seconds after which a lock blob is considered stale.
     pub stale_after_seconds: i64,
 }
 
@@ -19,6 +21,7 @@ impl Default for RepositoryLockOptions {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// Acquired advisory repository lock.
 pub struct RepositoryLock {
     key: String,
 }

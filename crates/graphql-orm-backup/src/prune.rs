@@ -8,8 +8,11 @@ use crate::{
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// Retention policy for repository pruning.
 pub struct KeepPolicy {
+    /// Number of newest manifest chains to retain.
     pub keep_last: usize,
+    /// Advisory repository lock settings.
     pub lock: RepositoryLockOptions,
 }
 
@@ -23,9 +26,13 @@ impl Default for KeepPolicy {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// Summary returned by `prune`.
 pub struct PruneResult {
+    /// Number of retained snapshot manifests.
     pub retained_snapshots: usize,
+    /// Number of expired snapshot manifests.
     pub deleted_snapshots: usize,
+    /// Number of blobs deleted.
     pub deleted_blobs: usize,
 }
 

@@ -4,6 +4,7 @@ use bytes::Bytes;
 use crate::BackupError;
 
 #[async_trait]
+/// Key-addressed backup repository.
 pub trait BackupRepository: Send + Sync {
     /// Writes a blob at a repository key.
     ///

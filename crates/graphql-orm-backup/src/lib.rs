@@ -1,7 +1,69 @@
-//! Backup and restore orchestration primitives for graphql-orm applications.
+//! Backup and restore orchestration primitives for `graphql-orm` applications.
 //!
 //! This crate coordinates database export/import adapters, stored object indexes,
 //! backup repositories, snapshot manifests, verification, and restore planning.
+//!
+//! `graphql-orm-backup` does not own application authorization, scheduling,
+//! cloud credentials, or primary object metadata. Applications provide small
+//! adapter implementations and this crate handles repository layout, checksums,
+//! compressed payloads, manifest chains, restore orchestration, compaction,
+//! locking, and pruning.
+//!
+//! # Full Backup
+//!
+//! ```no_run
+//! use graphql_orm_backup::{
+//!     BackupObjectIndex, FullBackupRequest, GraphqlOrmBackupAdapter,
+//!     LocalBackupRepository, create_full_backup,
+//! };
+//! use uuid::Uuid;
+//!
+//! # async fn example(
+//! #     database: &dyn GraphqlOrmBackupAdapter,
+//! #     objects: &dyn BackupObjectIndex,
+//! # ) -> Result<(), graphql_orm_backup::BackupError> {
+//! let repository = LocalBackupRepository::new("./backups");
+//! let result = create_full_backup(
+//!     &repository,
+//!     database,
+//!     objects,
+//!     FullBackupRequest {
+//!         snapshot_id: Uuid::new_v4(),
+//!         created_at: 1_775_174_400,
+//!         app_id: "example-app".to_string(),
+//!         app_version: "0.1.0".to_string(),
+//!     },
+//! )
+//! .await?;
+//!
+//! println!("created snapshot {}", result.manifest.snapshot_id);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Restore
+//!
+//! ```no_run
+//! use graphql_orm_backup::{
+//!     BackupRepository, GraphqlOrmBackupAdapter, RestoreContext, restore_snapshot,
+//! };
+//! use uuid::Uuid;
+//!
+//! # async fn example(
+//! #     repository: &dyn BackupRepository,
+//! #     database: &dyn GraphqlOrmBackupAdapter,
+//! #     snapshot_id: Uuid,
+//! # ) -> Result<(), graphql_orm_backup::BackupError> {
+//! restore_snapshot(
+//!     repository,
+//!     database,
+//!     snapshot_id,
+//!     RestoreContext::empty_database(),
+//! )
+//! .await?;
+//! # Ok(())
+//! # }
+//! ```
 
 mod backup;
 mod database;

@@ -5,6 +5,7 @@ use uuid::Uuid;
 use crate::BackupError;
 
 #[async_trait]
+/// Application object lookup contract used by backup operations.
 pub trait BackupObjectIndex: Send + Sync {
     /// Lists all objects referenced by a full backup.
     ///
@@ -32,11 +33,17 @@ pub trait BackupObjectIndex: Send + Sync {
     async fn load_object(&self, object: &BackupObjectRef) -> Result<Bytes, BackupError>;
 }
 
+/// Object metadata returned by an application object index.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackupObjectRef {
+    /// Application object id.
     pub object_id: Uuid,
+    /// Original application storage key.
     pub storage_key: String,
+    /// Expected SHA-256 checksum of the object bytes.
     pub sha256_hex: String,
+    /// Object size in bytes.
     pub size_bytes: u64,
+    /// Optional MIME type.
     pub mime_type: Option<String>,
 }

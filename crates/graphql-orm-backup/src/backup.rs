@@ -14,11 +14,15 @@ use crate::{
 };
 
 pub const DATABASE_EXPORT_FORMAT: &str = "jsonl";
+/// Default number of concurrent object/payload operations.
 pub const DEFAULT_OBJECT_CONCURRENCY: usize = 8;
 
+/// Runtime tuning options for backup, incremental, and compaction operations.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackupExecutionOptions {
+    /// Maximum number of concurrent object writes/checks.
     pub object_concurrency: usize,
+    /// Advisory repository lock settings.
     pub lock: RepositoryLockOptions,
 }
 
@@ -31,50 +35,71 @@ impl Default for BackupExecutionOptions {
     }
 }
 
+/// Request metadata for a full backup.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FullBackupRequest {
+    /// Snapshot id to write.
     pub snapshot_id: Uuid,
     /// Snapshot creation time as UTC Unix seconds.
     pub created_at: i64,
+    /// Stable application identifier.
     pub app_id: String,
+    /// Application version that produced the snapshot.
     pub app_version: String,
 }
 
+/// Result returned after writing a full backup.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FullBackupResult {
+    /// Manifest written for the full backup.
     pub manifest: BackupSnapshotManifest,
 }
 
+/// Request metadata for an incremental backup.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IncrementalBackupRequest {
+    /// Snapshot id to write.
     pub snapshot_id: Uuid,
+    /// Parent full, synthetic-full, or incremental snapshot id.
     pub parent_snapshot_id: Uuid,
     /// Snapshot creation time as UTC Unix seconds.
     pub created_at: i64,
+    /// Stable application identifier.
     pub app_id: String,
+    /// Application version that produced the snapshot.
     pub app_version: String,
 }
 
+/// Result returned after writing an incremental backup.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IncrementalBackupResult {
+    /// Manifest written for the incremental backup.
     pub manifest: BackupSnapshotManifest,
 }
 
+/// Request metadata for synthetic-full compaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactChainRequest {
+    /// Synthetic-full snapshot id to write.
     pub snapshot_id: Uuid,
+    /// Source snapshot id whose chain should be compacted.
     pub source_snapshot_id: Uuid,
     /// Snapshot creation time as UTC Unix seconds.
     pub created_at: i64,
+    /// Stable application identifier.
     pub app_id: String,
+    /// Application version that produced the synthetic full.
     pub app_version: String,
 }
 
+/// Result returned after synthetic-full compaction.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompactChainResult {
+    /// Manifest written for the synthetic-full snapshot.
     pub manifest: BackupSnapshotManifest,
 }
 
+/// Returns the manifest key for a snapshot id.
 #[must_use]
 pub fn snapshot_manifest_key(snapshot_id: Uuid) -> String {
     format!("snapshots/{snapshot_id}/manifest.json")

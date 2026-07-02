@@ -8,75 +8,119 @@ use crate::{BackupError, BackupRepository};
 
 pub const BACKUP_FORMAT_VERSION: u32 = 1;
 
+/// Snapshot type stored in a manifest.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BackupKind {
+    /// Complete table/object snapshot.
     Full,
+    /// Changes relative to a parent snapshot.
     Incremental,
+    /// Full snapshot synthesized by compacting a chain.
     SyntheticFull,
 }
 
+/// Compression applied to database payload blobs.
 #[non_exhaustive]
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BackupCompression {
+    /// Payload is stored without compression.
     #[default]
     None,
+    /// Payload is zstd-compressed.
     Zstd,
 }
 
+/// Durable manifest describing one backup snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BackupSnapshotManifest {
+    /// Manifest format version.
     pub format_version: u32,
+    /// Snapshot id.
     pub snapshot_id: Uuid,
+    /// Parent snapshot id for incrementals.
     pub parent_snapshot_id: Option<Uuid>,
     /// Snapshot creation time as UTC Unix seconds.
     pub created_at: i64,
+    /// Stable application identifier.
     pub app_id: String,
+    /// Application version that produced the snapshot.
     pub app_version: String,
+    /// GraphQL ORM migration/schema version.
     pub graphql_orm_schema_version: String,
+    /// Stable hash of the GraphQL ORM schema snapshot.
     pub graphql_orm_schema_hash: String,
+    /// Database backend identifier.
     pub database_backend: String,
+    /// Snapshot kind.
     pub backup_kind: BackupKind,
+    /// Database payload metadata.
     pub database: DatabaseBackupManifest,
+    /// Stored object payload metadata.
     pub objects: Vec<ObjectBackupEntry>,
+    /// Delete tombstones included in the snapshot.
     pub tombstones: Vec<BackupTombstone>,
+    /// Manifest checksum. The checksum field itself is cleared while hashing.
     pub checksum: String,
 }
 
+/// Database payload metadata stored in a snapshot manifest.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DatabaseBackupManifest {
+    /// Logical payload format, currently `jsonl`.
     pub export_format: String,
+    /// Compression applied to table/change payload blobs.
     #[serde(default)]
     pub compression: BackupCompression,
+    /// Total full rows or incremental changes represented by this manifest.
     pub row_count: u64,
+    /// Number of full table exports.
     pub table_count: u64,
+    /// Full table payload entries.
     pub tables: Vec<TableBackupEntry>,
+    /// Incremental change payload entries.
     #[serde(default)]
     pub changes: Vec<TableBackupEntry>,
 }
 
+/// Metadata for a table or change payload blob.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TableBackupEntry {
+    /// Table name represented by this payload.
     pub table_name: String,
+    /// Number of rows or changes in this payload.
     pub row_count: u64,
+    /// Repository content key.
     pub content_key: String,
+    /// SHA-256 checksum of the stored payload bytes.
     pub sha256_hex: String,
 }
 
+/// Metadata for a content-addressed stored object blob.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ObjectBackupEntry {
+    /// Application object id.
     pub object_id: Uuid,
+    /// Original application storage key.
     pub storage_key: String,
+    /// Repository content key.
     pub content_key: String,
+    /// SHA-256 checksum of the object bytes.
     pub sha256_hex: String,
+    /// Object size in bytes.
     pub size_bytes: u64,
+    /// Optional MIME type.
     pub mime_type: Option<String>,
 }
 
+/// Delete tombstone emitted by incremental snapshots.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BackupTombstone {
+    /// Deleted table name, when the tombstone refers to a database row.
     pub table_name: Option<String>,
+    /// Deleted primary key, when the tombstone refers to a database row.
     pub primary_key: Option<String>,
+    /// Deleted object id, when the tombstone refers to a stored object.
     pub object_id: Option<Uuid>,
     /// Deletion time as UTC Unix seconds.
     pub deleted_at: i64,
