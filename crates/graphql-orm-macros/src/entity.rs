@@ -1867,6 +1867,7 @@ fn generate_entity_impl(
             }
             None => quote! { None },
         };
+        let is_filterable = field_meta.filter && field_meta.filterable.is_some();
 
         column_defs.push(quote! {
             ::graphql_orm::graphql::orm::ColumnDef {
@@ -1880,6 +1881,7 @@ fn generate_entity_impl(
                 is_primary_key: #is_pk,
                 is_unique: #is_unique,
                 is_generated: #is_generated,
+                is_filterable: #is_filterable,
                 backup_policy: #backup_policy,
                 default: #default_expr,
                 references: None,

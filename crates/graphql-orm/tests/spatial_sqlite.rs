@@ -209,7 +209,9 @@ async fn sqlite_spatial_fields_and_predicates_round_trip() -> Result<(), Box<dyn
             .statements
             .iter()
             .any(|statement| statement.contains("USING GIST")
-                || statement.contains("idx_orm_spatial"))
+                || statement.contains("(location)")
+                || statement.contains("(boundary)")
+                || statement.contains("(path)"))
     );
 
     database

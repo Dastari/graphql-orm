@@ -1394,6 +1394,11 @@ pub async fn introspect_postgres_schema(
     provider: &impl PoolProvider<super::PostgresBackend>,
 ) -> Result<SchemaModel, sqlx::Error> {
     let pool = provider.pool();
+    let schema_name = sqlx::query("SELECT current_schema() AS schema_name")
+        .fetch_one(pool)
+        .await?
+        .try_get::<Option<String>, _>("schema_name")?
+        .unwrap_or_else(|| "public".to_string());
     let extension_rows = sqlx::query("SELECT extname FROM pg_extension ORDER BY extname")
         .fetch_all(pool)
         .await?;
@@ -1405,9 +1410,10 @@ pub async fn introspect_postgres_schema(
     let table_rows = sqlx::query(
         "SELECT table_name
          FROM information_schema.tables
-         WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+         WHERE table_schema = $1 AND table_type = 'BASE TABLE'
          ORDER BY table_name",
     )
+    .bind(&schema_name)
     .fetch_all(pool)
     .await?;
 
@@ -1428,13 +1434,14 @@ pub async fn introspect_postgres_schema(
              LEFT JOIN pg_attrdef ad
                ON ad.adrelid = a.attrelid
               AND ad.adnum = a.attnum
-             WHERE n.nspname = 'public'
+             WHERE n.nspname = $2
                AND c.relname = $1
                AND a.attnum > 0
                AND NOT a.attisdropped
              ORDER BY a.attnum",
         )
         .bind(&table_name)
+        .bind(&schema_name)
         .fetch_all(pool)
         .await?;
 
@@ -1444,11 +1451,12 @@ pub async fn introspect_postgres_schema(
              JOIN information_schema.key_column_usage kcu
                ON tc.constraint_name = kcu.constraint_name
               AND tc.table_schema = kcu.table_schema
-             WHERE tc.table_schema = 'public'
+             WHERE tc.table_schema = $2
                AND tc.table_name = $1
                AND tc.constraint_type = 'PRIMARY KEY'",
         )
         .bind(&table_name)
+        .bind(&schema_name)
         .fetch_all(pool)
         .await?;
         let primary_key_columns = primary_key_rows
@@ -1462,11 +1470,12 @@ pub async fn introspect_postgres_schema(
              JOIN information_schema.key_column_usage kcu
                ON tc.constraint_name = kcu.constraint_name
               AND tc.table_schema = kcu.table_schema
-             WHERE tc.table_schema = 'public'
+             WHERE tc.table_schema = $2
                AND tc.table_name = $1
                AND tc.constraint_type = 'UNIQUE'",
         )
         .bind(&table_name)
+        .bind(&schema_name)
         .fetch_all(pool)
         .await?;
         let unique_columns = unique_rows
@@ -1512,12 +1521,13 @@ pub async fn introspect_postgres_schema(
              LEFT JOIN pg_attribute a
                ON a.attrelid = t.oid
               AND a.attnum = cols.attnum
-             WHERE n.nspname = 'public'
+             WHERE n.nspname = $2
                AND t.relname = $1
              GROUP BY i.relname, ix.indisunique, am.amname
              ORDER BY i.relname",
         )
         .bind(&table_name)
+        .bind(&schema_name)
         .fetch_all(pool)
         .await?;
         let mut indexes = Vec::new();
@@ -1568,15 +1578,16 @@ pub async fn introspect_postgres_schema(
               AND tc.table_schema = kcu.table_schema
              JOIN information_schema.constraint_column_usage ccu
                ON ccu.constraint_name = tc.constraint_name
-              AND ccu.table_schema = tc.table_schema
+              AND ccu.constraint_schema = tc.table_schema
              JOIN information_schema.referential_constraints rc
                ON rc.constraint_name = tc.constraint_name
               AND rc.constraint_schema = tc.table_schema
-             WHERE tc.table_schema = 'public'
+             WHERE tc.table_schema = $2
                AND tc.table_name = $1
                AND tc.constraint_type = 'FOREIGN KEY'",
         )
         .bind(&table_name)
+        .bind(&schema_name)
         .fetch_all(pool)
         .await?;
         let foreign_keys = foreign_key_rows
@@ -1611,8 +1622,16 @@ pub async fn introspect_postgres_schema(
     }
 
     let metadata_exists = sqlx::query(
-        "SELECT to_regclass('public.__graphql_orm_search_metadata') IS NOT NULL AS exists",
+        "SELECT EXISTS (
+            SELECT 1
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = $1
+              AND c.relname = $2
+        ) AS exists",
     )
+    .bind(&schema_name)
+    .bind(super::search_metadata_table_name())
     .fetch_one(pool)
     .await?
     .try_get::<bool, _>("exists")?;

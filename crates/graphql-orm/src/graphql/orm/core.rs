@@ -1057,6 +1057,7 @@ pub struct ColumnDef {
     pub is_primary_key: bool,
     pub is_unique: bool,
     pub is_generated: bool,
+    pub is_filterable: bool,
     pub backup_policy: ColumnBackupPolicy,
     pub default: Option<&'static str>,
     pub references: Option<&'static str>,
@@ -1087,6 +1088,7 @@ impl ColumnDef {
             is_primary_key: false,
             is_unique: false,
             is_generated: false,
+            is_filterable: false,
             backup_policy: ColumnBackupPolicy::Include,
             default: None,
             references: None,
@@ -1111,6 +1113,11 @@ impl ColumnDef {
 
     pub const fn generated(mut self) -> Self {
         self.is_generated = true;
+        self
+    }
+
+    pub const fn filterable(mut self) -> Self {
+        self.is_filterable = true;
         self
     }
 
@@ -1162,6 +1169,7 @@ pub struct FieldMetadata {
     pub is_primary_key: bool,
     pub is_unique: bool,
     pub is_generated: bool,
+    pub is_filterable: bool,
     pub backup_policy: ColumnBackupPolicy,
     pub default: Option<&'static str>,
     pub references: Option<&'static str>,
@@ -1180,6 +1188,7 @@ impl From<&ColumnDef> for FieldMetadata {
             is_primary_key: value.is_primary_key,
             is_unique: value.is_unique,
             is_generated: value.is_generated,
+            is_filterable: value.is_filterable,
             backup_policy: value.backup_policy,
             default: value.default,
             references: value.references,
@@ -1674,6 +1683,116 @@ impl TableModel {
     }
 }
 
+fn sanitize_generated_index_part(value: &str) -> String {
+    let mut sanitized = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            sanitized.push(ch.to_ascii_lowercase());
+        } else if ch == '_' {
+            sanitized.push('_');
+        } else if !sanitized.ends_with('_') {
+            sanitized.push('_');
+        }
+    }
+    let sanitized = sanitized.trim_matches('_');
+    if sanitized.is_empty() {
+        "column".to_string()
+    } else {
+        sanitized.to_string()
+    }
+}
+
+fn generated_index_name(table_name: &str, columns: &[&'static str]) -> String {
+    let column_part = columns
+        .iter()
+        .map(|column| sanitize_generated_index_part(column))
+        .collect::<Vec<_>>()
+        .join("_");
+    let full = format!(
+        "idx_{}_{}",
+        sanitize_generated_index_part(table_name),
+        column_part
+    );
+    if full.len() <= 63 {
+        return full;
+    }
+
+    let hash = format!("{:016x}", fnv1a64(full.as_bytes()));
+    let prefix_len = 63usize.saturating_sub(hash.len() + 1);
+    format!("{}_{}", &full[..prefix_len], hash)
+}
+
+fn static_index_name(name: String) -> &'static str {
+    Box::leak(name.into_boxed_str())
+}
+
+fn static_index_columns(columns: &[&'static str]) -> &'static [&'static str] {
+    Box::leak(columns.to_vec().into_boxed_slice())
+}
+
+fn index_columns_match(left: &[&str], right: &[&str]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right.iter())
+            .all(|(left, right)| left == right)
+}
+
+fn table_has_index_for_columns(table: &TableModel, columns: &[&'static str]) -> bool {
+    if columns.is_empty() {
+        return true;
+    }
+
+    if table.primary_keys().len() == columns.len()
+        && table
+            .primary_keys()
+            .iter()
+            .zip(columns.iter())
+            .all(|(left, right)| left == right)
+    {
+        return true;
+    }
+
+    if columns.len() == 1
+        && table
+            .columns
+            .iter()
+            .any(|column| column.name == columns[0] && (column.is_primary_key || column.is_unique))
+    {
+        return true;
+    }
+
+    if table.composite_unique_indexes.iter().any(|index| {
+        index_columns_match(
+            &index.iter().map(String::as_str).collect::<Vec<_>>(),
+            columns,
+        )
+    }) {
+        return true;
+    }
+
+    table
+        .indexes
+        .iter()
+        .any(|index| index_columns_match(index.columns, columns))
+}
+
+fn add_generated_index(table: &mut TableModel, columns: &[&'static str]) {
+    if table_has_index_for_columns(table, columns) {
+        return;
+    }
+
+    let name = generated_index_name(&table.table_name, columns);
+    if table.indexes.iter().any(|index| index.name == name) {
+        return;
+    }
+
+    table.indexes.push(IndexDef::new(
+        static_index_name(name),
+        static_index_columns(columns),
+    ));
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SchemaModel {
     pub extensions: Vec<String>,
@@ -2079,7 +2198,7 @@ impl From<&EntityMetadata> for TableModel {
             .iter()
             .map(|column| (*column).to_string())
             .collect::<Vec<_>>();
-        Self {
+        let mut table = Self {
             entity_name: value.entity_name.to_string(),
             table_name: value.table_name.to_string(),
             primary_key: value.primary_key.to_string(),
@@ -2160,7 +2279,15 @@ impl From<&EntityMetadata> for TableModel {
                     }]
                 })
                 .unwrap_or_default(),
+        };
+
+        for field in &value.fields {
+            if field.is_filterable && field.spatial.is_none() {
+                add_generated_index(&mut table, &[field.name]);
+            }
         }
+
+        table
     }
 }
 
@@ -2179,23 +2306,46 @@ impl SchemaModel {
             extensions.push("postgis".to_string());
         }
 
-        Self {
-            extensions,
-            tables: entities
-                .iter()
-                .map(|entity| {
-                    let mut table = TableModel::from(*entity);
-                    for foreign_key in &mut table.foreign_keys {
-                        if let Some(table_name) =
-                            entity_table_names.get(foreign_key.target_table.as_str())
-                        {
-                            foreign_key.target_table = (*table_name).to_string();
-                        }
+        let mut tables = entities
+            .iter()
+            .map(|entity| {
+                let mut table = TableModel::from(*entity);
+                for foreign_key in &mut table.foreign_keys {
+                    if let Some(table_name) =
+                        entity_table_names.get(foreign_key.target_table.as_str())
+                    {
+                        foreign_key.target_table = (*table_name).to_string();
                     }
-                    table
-                })
-                .collect(),
+                }
+                table
+            })
+            .collect::<Vec<_>>();
+
+        let table_positions = tables
+            .iter()
+            .enumerate()
+            .map(|(index, table)| (table.table_name.clone(), index))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        for entity in entities {
+            for relation in &entity.relations {
+                let (table_name, columns) = if relation.is_multiple {
+                    let Some(target_table) = entity_table_names.get(relation.target_type) else {
+                        continue;
+                    };
+                    (*target_table, relation.target_columns)
+                } else {
+                    (entity.table_name, relation.source_columns)
+                };
+
+                let Some(table_index) = table_positions.get(table_name) else {
+                    continue;
+                };
+                add_generated_index(&mut tables[*table_index], columns);
+            }
         }
+
+        Self { extensions, tables }
     }
 }
 

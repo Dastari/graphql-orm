@@ -3,6 +3,7 @@
 use async_graphql::{Schema, SimpleObject};
 use graphql_orm::prelude::*;
 use sqlx::Row;
+use sqlx::postgres::PgPoolOptions;
 use std::sync::OnceLock;
 
 #[derive(
@@ -79,6 +80,65 @@ pub struct Post {
     pub author: Option<User>,
 }
 
+#[derive(GraphQLSchemaEntity, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[graphql_entity(
+    table = "pg_type_probes",
+    plural = "PgTypeProbes",
+    default_sort = "created_at ASC"
+)]
+pub struct PgTypeProbe {
+    #[primary_key]
+    #[filterable(type = "uuid")]
+    pub id: graphql_orm::uuid::Uuid,
+
+    #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
+    pub details: serde_json::Value,
+
+    #[date_field]
+    pub observed_at: String,
+
+    pub created_at: i64,
+}
+
+#[derive(GraphQLSchemaEntity, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[graphql_entity(
+    table = "indexed_parents",
+    plural = "IndexedParents",
+    default_sort = "tenant_id ASC"
+)]
+pub struct IndexedParent {
+    #[primary_key]
+    pub id: String,
+
+    #[filterable(type = "string")]
+    pub tenant_id: String,
+
+    #[graphql(skip)]
+    #[relation(
+        target = "IndexedChild",
+        from = "id",
+        to = "parent_id",
+        multiple,
+        emit_fk = false
+    )]
+    pub children: Vec<IndexedChild>,
+}
+
+#[derive(GraphQLSchemaEntity, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[graphql_entity(
+    table = "indexed_children",
+    plural = "IndexedChildren",
+    default_sort = "label ASC"
+)]
+pub struct IndexedChild {
+    #[primary_key]
+    pub id: String,
+
+    pub parent_id: String,
+
+    pub label: String,
+}
+
 impl graphql_orm::graphql::loaders::BatchLoadEntity for User {
     fn batch_column() -> &'static str {
         "id"
@@ -151,6 +211,79 @@ async fn setup_pool() -> Result<sqlx::PgPool, Box<dyn std::error::Error>> {
     .await?;
 
     Ok(pool)
+}
+
+fn has_index_on(table: &graphql_orm::graphql::orm::TableModel, columns: &[&str]) -> bool {
+    table.indexes.iter().any(|index| {
+        index.columns.len() == columns.len()
+            && index
+                .columns
+                .iter()
+                .zip(columns.iter())
+                .all(|(left, right)| left == right)
+    })
+}
+
+#[test]
+fn postgres_schema_model_covers_types_and_generated_indexes() {
+    use graphql_orm::graphql::orm::{DatabaseBackend, Entity, SchemaModel, build_migration_plan};
+
+    let probe_metadata = <PgTypeProbe as Entity>::metadata();
+    let probe_fields = probe_metadata
+        .fields
+        .iter()
+        .map(|field| (field.name, field.sql_type))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(probe_fields.get("id"), Some(&"UUID"));
+    assert_eq!(probe_fields.get("details"), Some(&"JSONB"));
+    assert_eq!(probe_fields.get("observed_at"), Some(&"TIMESTAMPTZ"));
+    assert_eq!(probe_fields.get("created_at"), Some(&"BIGINT"));
+
+    let schema_model = SchemaModel::from_entities(&[
+        probe_metadata,
+        <IndexedParent as Entity>::metadata(),
+        <IndexedChild as Entity>::metadata(),
+    ]);
+    let indexed_parents = schema_model
+        .tables
+        .iter()
+        .find(|table| table.table_name == "indexed_parents")
+        .expect("indexed parent table should exist");
+    assert!(
+        has_index_on(indexed_parents, &["tenant_id"]),
+        "filterable columns should get generated indexes"
+    );
+    let indexed_children = schema_model
+        .tables
+        .iter()
+        .find(|table| table.table_name == "indexed_children")
+        .expect("indexed child table should exist");
+    assert!(
+        has_index_on(indexed_children, &["parent_id"]),
+        "has-many relation lookup columns should get generated indexes"
+    );
+
+    let plan = build_migration_plan(
+        DatabaseBackend::Postgres,
+        &SchemaModel {
+            extensions: Vec::new(),
+            tables: Vec::new(),
+        },
+        &schema_model,
+    );
+    assert!(plan.statements.iter().any(|statement| {
+        statement.contains("CREATE TABLE pg_type_probes")
+            && statement.contains("id UUID")
+            && statement.contains("details JSONB")
+            && statement.contains("observed_at TIMESTAMPTZ")
+            && statement.contains("created_at BIGINT")
+    }));
+    assert!(plan.statements.iter().any(|statement| {
+        statement == "CREATE INDEX idx_indexed_parents_tenant_id ON indexed_parents (tenant_id)"
+    }));
+    assert!(plan.statements.iter().any(|statement| {
+        statement == "CREATE INDEX idx_indexed_children_parent_id ON indexed_children (parent_id)"
+    }));
 }
 
 #[tokio::test]
@@ -417,6 +550,115 @@ async fn relation_resolvers_batch_for_pages_of_parents() -> Result<(), Box<dyn s
         graphql_orm::graphql::orm::query_count(),
         post_edges.len()
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn postgres_introspection_uses_active_schema_search_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = test_mutex().lock().await;
+    let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
+        "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string()
+    });
+    let admin_pool = sqlx::PgPool::connect(&database_url).await?;
+    let schema_name = format!(
+        "gom_active_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+    sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema_name} CASCADE"))
+        .execute(&admin_pool)
+        .await?;
+    sqlx::query(&format!("CREATE SCHEMA {schema_name}"))
+        .execute(&admin_pool)
+        .await?;
+
+    let schema_for_hook = schema_name.clone();
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(move |connection, _metadata| {
+            let schema_name = schema_for_hook.clone();
+            Box::pin(async move {
+                sqlx::query(&format!("SET search_path TO {schema_name}, public"))
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect(&database_url)
+        .await?;
+
+    sqlx::query(
+        "CREATE TABLE parents (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE children (
+            id TEXT PRIMARY KEY,
+            parent_id TEXT NOT NULL,
+            payload JSONB NOT NULL,
+            observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            FOREIGN KEY (parent_id) REFERENCES parents(id)
+        )",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("CREATE INDEX idx_children_parent_id ON children (parent_id)")
+        .execute(&pool)
+        .await?;
+
+    let active_schema = sqlx::query("SELECT current_schema() AS schema_name")
+        .fetch_one(&pool)
+        .await?
+        .try_get::<String, _>("schema_name")?;
+    assert_eq!(active_schema, schema_name);
+
+    let introspected = graphql_orm::graphql::orm::introspect_schema(&pool).await?;
+    assert!(
+        introspected
+            .tables
+            .iter()
+            .any(|table| table.table_name == "parents"),
+        "active non-public schema should be introspected"
+    );
+    assert!(
+        !introspected
+            .tables
+            .iter()
+            .any(|table| table.table_name == "users"),
+        "tables from public should not leak into active-schema introspection"
+    );
+    let children = introspected
+        .tables
+        .iter()
+        .find(|table| table.table_name == "children")
+        .expect("children table should be introspected from active schema");
+    assert!(
+        children.indexes.iter().any(|index| {
+            index.name == "idx_children_parent_id" && index.columns == ["parent_id"]
+        })
+    );
+    assert!(children.foreign_keys.iter().any(|foreign_key| {
+        foreign_key.source_column == "parent_id"
+            && foreign_key.target_table == "parents"
+            && foreign_key.target_column == "id"
+    }));
+    assert!(children.columns.iter().any(|column| {
+        column.name == "payload" && column.sql_type.eq_ignore_ascii_case("jsonb")
+    }));
+    assert!(children.columns.iter().any(|column| {
+        column.name == "observed_at" && column.sql_type == "timestamp with time zone"
+    }));
+
+    sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema_name} CASCADE"))
+        .execute(&admin_pool)
+        .await?;
 
     Ok(())
 }
