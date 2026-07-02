@@ -3,8 +3,9 @@ use std::fmt;
 use async_trait::async_trait;
 
 use crate::{
-    BlobBody, BlobMetadata, BlobStore, BlobWriteOutcome, ObjectStorage, StorageBackend,
-    StorageByteStream, StorageError, StorageObjectBody, StoredObject, unsupported_backend,
+    BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
+    ObjectStorage, StorageBackend, StorageByteStream, StorageError, StorageObjectBody,
+    StoredObject, unsupported_backend,
 };
 
 /// Configuration for a future Azure Blob Storage backend.
@@ -75,11 +76,29 @@ impl BlobStore for AzureBlobStorageBackend {
         &self,
         _key: &str,
         _body: StorageByteStream,
+        _options: BlobPutOptions,
     ) -> Result<BlobWriteOutcome, StorageError> {
         Err(unsupported_backend(StorageBackend::AzureBlob))
     }
 
+    async fn put_blob_if_not_exists(
+        &self,
+        _key: &str,
+        _body: StorageByteStream,
+        _options: BlobPutOptions,
+    ) -> Result<Option<BlobWriteOutcome>, StorageError> {
+        Err(unsupported_backend(StorageBackend::AzureBlob))
+    }
+
     async fn get_blob(&self, _key: &str) -> Result<BlobBody, StorageError> {
+        Err(unsupported_backend(StorageBackend::AzureBlob))
+    }
+
+    async fn get_blob_range(
+        &self,
+        _key: &str,
+        _range: std::ops::Range<u64>,
+    ) -> Result<BlobBody, StorageError> {
         Err(unsupported_backend(StorageBackend::AzureBlob))
     }
 
@@ -91,7 +110,16 @@ impl BlobStore for AzureBlobStorageBackend {
         Err(unsupported_backend(StorageBackend::AzureBlob))
     }
 
-    async fn list_blobs(&self, _prefix: &str) -> Result<Vec<String>, StorageError> {
+    async fn list_blobs_page(
+        &self,
+        _prefix: &str,
+        _continuation: Option<String>,
+        _limit: usize,
+    ) -> Result<BlobListPage, StorageError> {
+        Err(unsupported_backend(StorageBackend::AzureBlob))
+    }
+
+    async fn copy_blob(&self, _from: &str, _to: &str) -> Result<(), StorageError> {
         Err(unsupported_backend(StorageBackend::AzureBlob))
     }
 

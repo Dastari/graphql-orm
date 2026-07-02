@@ -5,9 +5,9 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    BlobMetadata, BlobStore, StorageBackend, StorageByteStream, StorageError, StorageObjectBody,
-    StorageObjectStream, StoragePutRequest, StoragePutStreamRequest, StoredObject,
-    build_storage_key, collect_storage_stream, file_extension,
+    BlobMetadata, BlobPutOptions, BlobStore, StorageBackend, StorageByteStream, StorageError,
+    StorageObjectBody, StorageObjectStream, StoragePutRequest, StoragePutStreamRequest,
+    StoredObject, build_storage_key, collect_storage_stream, file_extension,
 };
 
 /// Provider implementation contract for object storage backends.
@@ -86,9 +86,12 @@ impl StorageService {
         request: StoragePutStreamRequest,
     ) -> Result<StoredObject, StorageError> {
         let mut object = build_stream_stored_object(self.backend.backend(), &request);
+        let options = BlobPutOptions {
+            content_type: request.mime_type.clone(),
+        };
         let outcome = self
             .backend
-            .put_blob(&object.storage_key, request.body)
+            .put_blob(&object.storage_key, request.body, options)
             .await?;
         object.size_bytes = outcome.size_bytes;
         object.sha256_hex = outcome.sha256_hex;

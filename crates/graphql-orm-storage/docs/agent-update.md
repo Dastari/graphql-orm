@@ -1,6 +1,6 @@
 # Agent Update
 
-This update summarizes the `0.2.0` storage-provider boundary for agents working
+This update summarizes the `0.3.0` storage-provider boundary for agents working
 on `graphql-orm-storage` or downstream crates.
 
 ## What Changed
@@ -8,6 +8,10 @@ on `graphql-orm-storage` or downstream crates.
 - Added the streaming `BlobStore` trait as the low-level provider abstraction.
 - Added `StorageByteStream`, `BlobBody`, `BlobMetadata`, and
   `BlobWriteOutcome`.
+- Added `BlobPutOptions` for write metadata passthrough.
+- Added `BlobListPage` for continuation-token listing.
+- Added byte-range reads, conditional writes, and blob copy to `BlobStore`.
+- Added retryable provider error taxonomy through `StorageError`.
 - Added `validate_blob_key` for consistent provider key validation.
 - Added `StorageService::put_object_stream` and
   `StorageService::get_object_stream`.
@@ -44,7 +48,7 @@ pub struct BlobStoreBackupRepository {
 
 ## Still Pending
 
-- Real S3 `BlobStore` provider.
+- Real S3 `BlobStore` provider using the `0.3.0` trait surface.
 - Real Azure Blob `BlobStore` provider.
 - Backup adapter implementation after downstream crate alignment.
 - Any cloud SDK dependency decisions.

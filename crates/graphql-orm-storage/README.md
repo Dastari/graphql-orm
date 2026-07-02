@@ -4,7 +4,7 @@ Provider-neutral object storage primitives for applications that use `graphql-or
 
 This crate stores bytes in an object backend and returns metadata that an application can persist in its own `graphql-orm` entity. It deliberately does not define application concepts such as collections, records, accessions, tenants, users, or media workflows.
 
-Current crate version: `0.2.0`.
+Current crate version: `0.3.0`.
 
 ## Current Status
 

@@ -4,14 +4,14 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use crate::{
-    BlobBody, BlobMetadata, BlobStore, BlobWriteOutcome, ObjectStorage, StorageBackend,
-    StorageByteStream, StorageError, StorageObjectBody, StoredObject, collect_storage_stream,
-    validate_blob_key,
+    BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
+    ObjectStorage, StorageBackend, StorageByteStream, StorageError, StorageObjectBody,
+    StoredObject, collect_storage_stream, validate_blob_key,
 };
 
 /// Local filesystem object storage backend.
@@ -43,22 +43,11 @@ impl BlobStore for LocalStorageBackend {
         &self,
         key: &str,
         body: StorageByteStream,
+        _options: BlobPutOptions,
     ) -> Result<BlobWriteOutcome, StorageError> {
         let path = self.path_for(key)?;
-        let parent = path
-            .parent()
-            .ok_or_else(|| StorageError::MissingParent { path: path.clone() })?;
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|source| StorageError::io(parent, source))?;
-
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| StorageError::InvalidStorageKey {
-                key: key.to_string(),
-            })?;
-        let temp_path = path.with_file_name(format!("{file_name}.{}.uploading", Uuid::new_v4()));
+        create_parent_dir(&path).await?;
+        let temp_path = temp_path_for(&path, key)?;
 
         let write_result = write_stream_to_temp(&temp_path, body).await;
         let outcome = match write_result {
@@ -75,6 +64,40 @@ impl BlobStore for LocalStorageBackend {
         }
 
         Ok(outcome)
+    }
+
+    async fn put_blob_if_not_exists(
+        &self,
+        key: &str,
+        body: StorageByteStream,
+        _options: BlobPutOptions,
+    ) -> Result<Option<BlobWriteOutcome>, StorageError> {
+        let path = self.path_for(key)?;
+        create_parent_dir(&path).await?;
+        let temp_path = temp_path_for(&path, key)?;
+
+        let outcome = match write_stream_to_temp(&temp_path, body).await {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return Err(err);
+            }
+        };
+
+        match tokio::fs::hard_link(&temp_path, &path).await {
+            Ok(()) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                Ok(Some(outcome))
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                Ok(None)
+            }
+            Err(source) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                Err(StorageError::io(&path, source))
+            }
+        }
     }
 
     async fn get_blob(&self, key: &str) -> Result<BlobBody, StorageError> {
@@ -97,6 +120,43 @@ impl BlobStore for LocalStorageBackend {
             key: key.to_string(),
             metadata,
             body: StorageByteStream::new(Box::pin(stream)),
+        })
+    }
+
+    async fn get_blob_range(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<BlobBody, StorageError> {
+        if range.end < range.start {
+            return Err(StorageError::PreconditionFailed {
+                key: key.to_string(),
+                condition: "range end is before range start".to_string(),
+            });
+        }
+
+        let path = self.path_for(key)?;
+        let mut file = match tokio::fs::File::open(&path).await {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(StorageError::MissingBlob {
+                    key: key.to_string(),
+                });
+            }
+            Err(source) => return Err(StorageError::io(&path, source)),
+        };
+        file.seek(SeekFrom::Start(range.start))
+            .await
+            .map_err(|source| StorageError::io(&path, source))?;
+        let length = range.end - range.start;
+        let stream_path = path.clone();
+        let stream = ReaderStream::new(file.take(length))
+            .map(move |chunk| chunk.map_err(|source| StorageError::io(&stream_path, source)));
+
+        Ok(BlobBody {
+            key: key.to_string(),
+            metadata: self.head_blob(key).await?,
+            body: StorageByteStream::with_size_hint(Box::pin(stream), length),
         })
     }
 
@@ -124,7 +184,108 @@ impl BlobStore for LocalStorageBackend {
         }
     }
 
-    async fn list_blobs(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
+    async fn list_blobs_page(
+        &self,
+        prefix: &str,
+        continuation: Option<String>,
+        limit: usize,
+    ) -> Result<BlobListPage, StorageError> {
+        if limit == 0 {
+            return Err(StorageError::PreconditionFailed {
+                key: prefix.to_string(),
+                condition: "list limit must be greater than zero".to_string(),
+            });
+        }
+
+        let keys = self.collect_blob_keys(prefix).await?;
+        let total_len = keys.len();
+        let start_index = continuation
+            .as_deref()
+            .and_then(|token| keys.iter().position(|key| key == token))
+            .map_or(0, |index| index + 1);
+        let page_keys: Vec<_> = keys.into_iter().skip(start_index).take(limit).collect();
+        let next_continuation = if start_index + page_keys.len() < total_len {
+            page_keys.last().cloned()
+        } else {
+            None
+        };
+
+        Ok(BlobListPage {
+            keys: page_keys,
+            next_continuation,
+        })
+    }
+
+    async fn copy_blob(&self, from: &str, to: &str) -> Result<(), StorageError> {
+        let from_path = self.path_for(from)?;
+        let to_path = self.path_for(to)?;
+        create_parent_dir(&to_path).await?;
+        let temp_path = temp_path_for(&to_path, to)?;
+
+        match tokio::fs::copy(&from_path, &temp_path).await {
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return Err(StorageError::MissingBlob {
+                    key: from.to_string(),
+                });
+            }
+            Err(source) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return Err(StorageError::io(&from_path, source));
+            }
+        }
+
+        if let Err(source) = tokio::fs::rename(&temp_path, &to_path).await {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(StorageError::io(&to_path, source));
+        }
+
+        Ok(())
+    }
+
+    async fn delete_blob(&self, key: &str) -> Result<(), StorageError> {
+        let path = self.path_for(key)?;
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(StorageError::io(&path, source)),
+        }
+    }
+}
+
+#[async_trait]
+impl ObjectStorage for LocalStorageBackend {
+    async fn put_object(
+        &self,
+        object: StoredObject,
+        bytes: Vec<u8>,
+    ) -> Result<StoredObject, StorageError> {
+        self.put_blob(
+            &object.storage_key,
+            StorageByteStream::from_bytes(bytes),
+            BlobPutOptions::default(),
+        )
+        .await?;
+        Ok(object)
+    }
+
+    async fn get_object(&self, object: &StoredObject) -> Result<StorageObjectBody, StorageError> {
+        let body = self.get_blob(&object.storage_key).await?;
+        let bytes = collect_storage_stream(body.body).await?;
+        Ok(StorageObjectBody {
+            object: object.clone(),
+            bytes: bytes.to_vec(),
+        })
+    }
+
+    async fn delete_object(&self, object: &StoredObject) -> Result<(), StorageError> {
+        self.delete_blob(&object.storage_key).await
+    }
+}
+
+impl LocalStorageBackend {
+    async fn collect_blob_keys(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
         crate::blob::validate_blob_prefix(prefix)?;
 
         let start = if prefix.is_empty() {
@@ -168,41 +329,25 @@ impl BlobStore for LocalStorageBackend {
         result.sort();
         Ok(result)
     }
-
-    async fn delete_blob(&self, key: &str) -> Result<(), StorageError> {
-        let path = self.path_for(key)?;
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(StorageError::io(&path, source)),
-        }
-    }
 }
 
-#[async_trait]
-impl ObjectStorage for LocalStorageBackend {
-    async fn put_object(
-        &self,
-        object: StoredObject,
-        bytes: Vec<u8>,
-    ) -> Result<StoredObject, StorageError> {
-        self.put_blob(&object.storage_key, StorageByteStream::from_bytes(bytes))
-            .await?;
-        Ok(object)
-    }
+async fn create_parent_dir(path: &Path) -> Result<(), StorageError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| StorageError::MissingParent { path: path.into() })?;
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|source| StorageError::io(parent, source))
+}
 
-    async fn get_object(&self, object: &StoredObject) -> Result<StorageObjectBody, StorageError> {
-        let body = self.get_blob(&object.storage_key).await?;
-        let bytes = collect_storage_stream(body.body).await?;
-        Ok(StorageObjectBody {
-            object: object.clone(),
-            bytes: bytes.to_vec(),
-        })
-    }
-
-    async fn delete_object(&self, object: &StoredObject) -> Result<(), StorageError> {
-        self.delete_blob(&object.storage_key).await
-    }
+fn temp_path_for(path: &Path, key: &str) -> Result<PathBuf, StorageError> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| StorageError::InvalidStorageKey {
+            key: key.to_string(),
+        })?;
+    Ok(path.with_file_name(format!("{file_name}.{}.uploading", Uuid::new_v4())))
 }
 
 async fn write_stream_to_temp(

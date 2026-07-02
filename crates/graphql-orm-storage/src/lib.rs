@@ -21,8 +21,8 @@ mod service;
 pub use azure::{AzureBlobStorageBackend, AzureBlobStorageConfig};
 pub use backend::{StorageBackend, StorageNamespace, unsupported_backend};
 pub use blob::{
-    BlobBody, BlobMetadata, BlobStore, BlobWriteOutcome, BoxedStorageStream, StorageByteStream,
-    collect_storage_stream, validate_blob_key,
+    BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
+    BoxedStorageStream, StorageByteStream, collect_storage_stream, validate_blob_key,
 };
 pub use checksum::sha256_hex;
 pub use error::StorageError;

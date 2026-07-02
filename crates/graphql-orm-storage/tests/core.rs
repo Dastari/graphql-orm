@@ -92,3 +92,19 @@ fn unsupported_backend_uses_stable_backend_name() {
         StorageError::UnsupportedBackend { backend } if backend == "s3"
     ));
 }
+
+#[test]
+fn retryability_is_explicit_for_provider_and_permanent_errors() {
+    let retryable = StorageError::Provider {
+        backend: "s3".to_string(),
+        message: "timeout".to_string(),
+        retryable: true,
+    };
+    let permanent = StorageError::PreconditionFailed {
+        key: "objects/test".to_string(),
+        condition: "already exists".to_string(),
+    };
+
+    assert!(retryable.is_retryable());
+    assert!(!permanent.is_retryable());
+}

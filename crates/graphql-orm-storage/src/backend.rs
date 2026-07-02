@@ -4,6 +4,7 @@ use crate::StorageError;
 
 /// Storage provider identifiers understood by this crate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum StorageBackend {
     /// Local filesystem object storage.
     Local,
@@ -42,6 +43,7 @@ impl FromStr for StorageBackend {
 
 /// Logical storage namespace used as the first path segment of generated keys.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum StorageNamespace {
     /// Original uploaded objects.
     Originals,
