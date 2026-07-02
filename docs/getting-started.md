@@ -4,7 +4,7 @@
 
 ```toml
 [dependencies]
-graphql-orm = { version = "0.2.17", default-features = false, features = ["sqlite"] }
+graphql-orm = { version = "0.2.18", default-features = false, features = ["sqlite"] }
 ```
 
 The proc macros are re-exported by `graphql-orm`, so application code should usually import the

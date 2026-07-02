@@ -13,6 +13,25 @@
 //! - `#[derive(GraphQLOperations)]` - Generate Query/Mutation/Subscription structs
 //! - `schema_roots!` - Generate root query/mutation/subscription types for a set of entities
 //!
+//! # Schema Root Mutation Exposure
+//!
+//! `schema_roots!` accepts `generated_mutations: "all" | "none" |
+//! "allowlist" | "denylist"`. The default is `"all"`, preserving existing
+//! generated GraphQL mutations. `"none"` omits generated entity mutations from
+//! the public `MutationRoot` while keeping generated repository writes and
+//! write inputs available. `"allowlist"` uses
+//! `generated_mutation_allowlist: [Entity]`; `"denylist"` uses
+//! `generated_mutation_denylist: [Entity]`. `extra_mutation_types` are still
+//! merged in every mode.
+//!
+//! ```ignore
+//! schema_roots! {
+//!     generated_mutations: "none",
+//!     entities: [User, Record, Storage],
+//!     extra_mutation_types: [AppMutations],
+//! }
+//! ```
+//!
 //! # Backends
 //!
 //! The macro crate mirrors the runtime backend features: `sqlite`, `postgres`,

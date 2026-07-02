@@ -3,6 +3,24 @@
 This page records user-facing changes for recent `graphql-orm` releases. Version numbers refer to
 the runtime crate unless a macro crate version is called out separately.
 
+## 0.2.18
+
+Generated mutation exposure controls.
+
+- Bumped `graphql-orm` to `0.2.18`.
+- Bumped `graphql-orm-macros` to `0.3.19`.
+- Added `generated_mutations: "all" | "none" | "allowlist" | "denylist"` to
+  `schema_roots!`.
+- Added `generated_mutation_allowlist: [Entity]` and
+  `generated_mutation_denylist: [Entity]` for mixed public mutation exposure.
+- Kept generated repository writes, write inputs, mutation hooks, mutation contexts, and
+  subscriptions generated regardless of the public mutation exposure mode.
+- Kept `extra_mutation_types` available when generated mutations are hidden, so applications can
+  expose only intentional custom mutations.
+- Added compile-time validation for invalid modes, missing allow/deny lists, mismatched list modes,
+  and allow/deny entries that are not present in `entities`.
+- Allowed `query_custom_ops` to be omitted from `schema_roots!`; it now defaults to an empty list.
+
 ## 0.2.17
 
 Pagination compatibility follow-up.

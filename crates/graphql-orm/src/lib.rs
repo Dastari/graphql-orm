@@ -68,6 +68,17 @@
 //! only for trusted internal schemas or tests, and prefer smaller limits for
 //! public token surfaces when the application shape allows it.
 //!
+//! # Public Mutation Exposure
+//!
+//! `schema_roots!` can hide generated GraphQL mutation fields without disabling
+//! generated repository writes. The default is `generated_mutations: "all"`.
+//! Use `generated_mutations: "none"` when a public schema should expose only
+//! custom roots from `extra_mutation_types`, or use `"allowlist"` with
+//! `generated_mutation_allowlist: [Entity]` / `"denylist"` with
+//! `generated_mutation_denylist: [Entity]` for mixed exposure. Generated write
+//! inputs, repository helpers, mutation hooks, mutation contexts, and
+//! subscriptions remain available to application code.
+//!
 //! # Spatial Fields
 //!
 //! PostgreSQL and SQLite entities can expose spatial values as GeoJSON through
