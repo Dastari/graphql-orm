@@ -13,6 +13,10 @@ Use `StorageService` for primary object metadata workflows. Use `BlobStore` for
 low-level key-addressed blob operations that do not need generated object
 metadata.
 
+When using `LocalStorageBackend`, interrupted writes can leave temporary
+`*.uploading` files. Schedule `LocalStorageBackend::sweep_temp_files` from the
+host application if long-running processes may be interrupted.
+
 ## Dependency
 
 Default local filesystem support:

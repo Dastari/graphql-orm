@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime},
+};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -25,6 +28,45 @@ impl LocalStorageBackend {
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
+    }
+
+    /// Removes stale temporary upload files under the local storage root.
+    ///
+    /// Files are considered temporary when their filename ends with
+    /// `.uploading`. Callers should schedule this periodically if the process
+    /// may be interrupted during writes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the storage root cannot be walked or a
+    /// stale temp file cannot be removed.
+    pub async fn sweep_temp_files(&self, older_than: Duration) -> Result<usize, StorageError> {
+        let now = SystemTime::now();
+        let mut removed = 0;
+        let mut stack = vec![self.root.clone()];
+
+        while let Some(path) = stack.pop() {
+            let metadata = match tokio::fs::metadata(&path).await {
+                Ok(metadata) => metadata,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(source) => return Err(StorageError::io(&path, source)),
+            };
+
+            if metadata.is_file() {
+                if is_uploading_temp_file(&path) && is_older_than(&metadata, now, older_than) {
+                    tokio::fs::remove_file(&path)
+                        .await
+                        .map_err(|source| StorageError::io(&path, source))?;
+                    removed += 1;
+                }
+                continue;
+            }
+
+            let entries = sorted_child_paths(&path).await?;
+            stack.extend(entries);
+        }
+
+        Ok(removed)
     }
 
     fn path_for(&self, key: &str) -> Result<PathBuf, StorageError> {
@@ -197,14 +239,11 @@ impl BlobStore for LocalStorageBackend {
             });
         }
 
-        let keys = self.collect_blob_keys(prefix).await?;
-        let total_len = keys.len();
-        let start_index = continuation
-            .as_deref()
-            .and_then(|token| keys.iter().position(|key| key == token))
-            .map_or(0, |index| index + 1);
-        let page_keys: Vec<_> = keys.into_iter().skip(start_index).take(limit).collect();
-        let next_continuation = if start_index + page_keys.len() < total_len {
+        let mut page_keys = self
+            .collect_blob_page(prefix, continuation.as_deref(), limit + 1)
+            .await?;
+        let next_continuation = if page_keys.len() > limit {
+            page_keys.truncate(limit);
             page_keys.last().cloned()
         } else {
             None
@@ -285,7 +324,12 @@ impl ObjectStorage for LocalStorageBackend {
 }
 
 impl LocalStorageBackend {
-    async fn collect_blob_keys(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
+    async fn collect_blob_page(
+        &self,
+        prefix: &str,
+        continuation: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>, StorageError> {
         crate::blob::validate_blob_prefix(prefix)?;
 
         let start = if prefix.is_empty() {
@@ -294,10 +338,14 @@ impl LocalStorageBackend {
             self.root.join(prefix)
         };
 
-        let mut result = Vec::new();
+        let mut page = Vec::with_capacity(limit);
         let mut stack = vec![start];
 
         while let Some(path) = stack.pop() {
+            if page.len() == limit {
+                break;
+            }
+
             let metadata = match tokio::fs::metadata(&path).await {
                 Ok(metadata) => metadata,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
@@ -308,26 +356,26 @@ impl LocalStorageBackend {
                 if is_uploading_temp_file(&path) {
                     continue;
                 }
-                if let Ok(relative) = path.strip_prefix(&self.root) {
-                    result.push(relative.to_string_lossy().replace('\\', "/"));
+                if let Some(key) = self.key_for_path(&path) {
+                    if continuation.is_some_and(|token| key.as_str() <= token) {
+                        continue;
+                    }
+                    page.push(key);
                 }
                 continue;
             }
 
-            let mut entries = tokio::fs::read_dir(&path)
-                .await
-                .map_err(|source| StorageError::io(&path, source))?;
-            while let Some(entry) = entries
-                .next_entry()
-                .await
-                .map_err(|source| StorageError::io(&path, source))?
-            {
-                stack.push(entry.path());
-            }
+            let entries = sorted_child_paths(&path).await?;
+            stack.extend(entries.into_iter().rev());
         }
 
-        result.sort();
-        Ok(result)
+        Ok(page)
+    }
+
+    fn key_for_path(&self, path: &Path) -> Option<String> {
+        path.strip_prefix(&self.root)
+            .ok()
+            .map(|relative| relative.to_string_lossy().replace('\\', "/"))
     }
 }
 
@@ -384,4 +432,30 @@ fn is_uploading_temp_file(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.ends_with(".uploading"))
+}
+
+fn is_older_than(metadata: &std::fs::Metadata, now: SystemTime, older_than: Duration) -> bool {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|modified| now.duration_since(modified).ok())
+        .is_some_and(|age| age >= older_than)
+}
+
+async fn sorted_child_paths(path: &Path) -> Result<Vec<PathBuf>, StorageError> {
+    let mut entries = tokio::fs::read_dir(path)
+        .await
+        .map_err(|source| StorageError::io(path, source))?;
+    let mut paths = Vec::new();
+
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|source| StorageError::io(path, source))?
+    {
+        paths.push(entry.path());
+    }
+
+    paths.sort();
+    Ok(paths)
 }

@@ -3,6 +3,7 @@ use graphql_orm_storage::{
     BlobPutOptions, BlobStore, LocalStorageBackend, StorageByteStream, StorageError,
     collect_storage_stream, sha256_hex,
 };
+use std::time::Duration;
 use tempfile::TempDir;
 
 #[tokio::test]
@@ -316,6 +317,48 @@ async fn local_blob_list_blobs_ignores_uploading_temp_files() {
         .expect("write temp");
 
     assert!(backend.list_blobs("").await.expect("list all").is_empty());
+}
+
+#[tokio::test]
+async fn local_blob_sweep_temp_files_removes_stale_uploads() {
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    let temp_path = temp.path().join("snapshots/a/manifest.json.temp.uploading");
+    tokio::fs::create_dir_all(temp_path.parent().expect("temp parent"))
+        .await
+        .expect("create parent");
+    tokio::fs::write(&temp_path, b"partial")
+        .await
+        .expect("write temp");
+
+    let removed = backend
+        .sweep_temp_files(Duration::ZERO)
+        .await
+        .expect("sweep temp files");
+
+    assert_eq!(removed, 1);
+    assert!(!temp_path.exists());
+}
+
+#[tokio::test]
+async fn local_blob_sweep_temp_files_keeps_recent_uploads() {
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    let temp_path = temp.path().join("snapshots/a/manifest.json.temp.uploading");
+    tokio::fs::create_dir_all(temp_path.parent().expect("temp parent"))
+        .await
+        .expect("create parent");
+    tokio::fs::write(&temp_path, b"partial")
+        .await
+        .expect("write temp");
+
+    let removed = backend
+        .sweep_temp_files(Duration::from_secs(86_400))
+        .await
+        .expect("sweep temp files");
+
+    assert_eq!(removed, 0);
+    assert!(temp_path.exists());
 }
 
 fn assert_invalid<T>(result: Result<T, StorageError>) {

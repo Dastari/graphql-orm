@@ -73,6 +73,10 @@ It is the race-safe primitive for content-addressed deduplication.
 `copy_blob` may use provider-side copy and does not return a SHA-256 checksum.
 Callers can use `head_blob` after copying when they need backend metadata.
 
+The local provider writes through temporary `.uploading` files. Host
+applications can call `LocalStorageBackend::sweep_temp_files` periodically to
+remove stale temp files.
+
 ## Key Safety
 
 Blob keys are `/`-separated relative keys. `validate_blob_key` rejects:
