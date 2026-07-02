@@ -5,7 +5,10 @@ use std::path::PathBuf;
 pub enum StorageError {
     /// The selected provider is known but is not implemented by this build.
     #[error("unsupported storage backend: {backend}")]
-    UnsupportedBackend { backend: String },
+    UnsupportedBackend {
+        /// Stable backend name.
+        backend: String,
+    },
 
     /// A provider operation failed.
     #[error("storage provider error for {backend}: {message}")]
@@ -20,24 +23,40 @@ pub enum StorageError {
 
     /// A storage key is empty, absolute, or contains unsafe path components.
     #[error("invalid storage key: {key}")]
-    InvalidStorageKey { key: String },
+    InvalidStorageKey {
+        /// Rejected storage key.
+        key: String,
+    },
 
     /// A requested blob is missing from the storage backend.
     #[error("storage blob is missing: {key}")]
-    MissingBlob { key: String },
+    MissingBlob {
+        /// Requested storage key.
+        key: String,
+    },
 
     /// A conditional storage operation could not be applied.
     #[error("storage precondition failed for {key}: {condition}")]
-    PreconditionFailed { key: String, condition: String },
+    PreconditionFailed {
+        /// Storage key involved in the failed precondition.
+        key: String,
+        /// Human-readable precondition description.
+        condition: String,
+    },
 
     /// A local filesystem object path did not have a writable parent directory.
     #[error("local storage path has no parent: {path:?}")]
-    MissingParent { path: PathBuf },
+    MissingParent {
+        /// Local path that had no usable parent directory.
+        path: PathBuf,
+    },
 
     /// A filesystem operation failed.
     #[error("storage io error at {path:?}")]
     Io {
+        /// Local path involved in the failed filesystem operation.
         path: PathBuf,
+        /// Original filesystem error.
         #[source]
         source: std::io::Error,
     },

@@ -1,7 +1,33 @@
-//! Provider-neutral object storage primitives for applications using graphql-orm.
+#![warn(missing_docs)]
+
+//! Provider-neutral object storage primitives for applications using
+//! `graphql-orm`.
 //!
 //! This crate stores file bytes in an object backend and returns metadata that an
-//! application can persist in its own graphql-orm entity.
+//! application can persist in its own `graphql-orm` entity.
+//!
+//! # Boundaries
+//!
+//! `graphql-orm-storage` does not provide GraphQL upload/download resolvers,
+//! application authorization, database entities, MIME sniffing, derivative
+//! generation, or file bytes stored in database rows.
+//!
+//! Use [`StorageService`] for primary object workflows that need generated
+//! object metadata. Use [`BlobStore`] for lower-level key-addressed blob
+//! operations, such as backup repository adapters.
+//!
+//! # Example
+//!
+//! ```
+//! use graphql_orm_storage::{StorageByteStream, sha256_hex, validate_blob_key};
+//!
+//! validate_blob_key("objects/sha256/aa/bb/hash")?;
+//! assert_eq!(sha256_hex(b"bytes").len(), 64);
+//!
+//! let stream = StorageByteStream::from_bytes(b"bytes".to_vec());
+//! assert_eq!(stream.size_hint(), Some(5));
+//! # Ok::<(), graphql_orm_storage::StorageError>(())
+//! ```
 
 #[cfg(feature = "azure")]
 mod azure;

@@ -2,7 +2,9 @@
 
 ## Boundary
 
-`graphql-orm-storage` owns object bytes and object locators. It does not own database rows. This keeps the crate usable by any application that wants to persist storage metadata differently.
+`graphql-orm-storage` owns object bytes and object locators. It does not own
+database rows. This keeps the crate usable by any application that wants to
+persist storage metadata differently.
 
 ## BlobStore Boundary
 
@@ -21,12 +23,13 @@ a `BlobStore` adapter, not through `StorageService`.
 
 The core crate should not provide default GraphQL upload, download, delete, or metadata mutation resolvers.
 
-Reason: storage authorization is application-specific. Digitise currently combines:
+Reason: storage authorization is application-specific. Host applications often
+combine:
 
 - `graphql-orm` read/write policy names on metadata entities
 - application row-policy checks
-- collection membership checks
-- platform-admin bypass rules
+- tenant, project, or ownership checks
+- administrator bypass rules
 - route-level bearer-token validation for file download
 - route-level upload checks before bytes are accepted
 
@@ -62,7 +65,7 @@ pub trait StorageAccessPolicy<Context, Metadata>: Send + Sync {
 The host app should still own:
 
 - the `graphql-orm` storage metadata entity
-- policy names such as `storage.read` and `storage.manage`
+- application-specific policy names
 - row ownership checks
 - upload/download HTTP routes or GraphQL mutation wrappers
 - audit logging
@@ -99,6 +102,6 @@ Provider-specific code should live behind cargo features:
 - `s3`: implemented with `aws-sdk-s3`
 - `azure`: reserved placeholder
 
-Provider implementations must satisfy the same `ObjectStorage` trait.
-Provider implementations should implement `BlobStore` first, then expose
-`ObjectStorage` behavior on top of it.
+Provider implementations must satisfy the same `BlobStore` trait. High-level
+`ObjectStorage` behavior should delegate to the provider's `BlobStore`
+implementation.

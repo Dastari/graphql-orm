@@ -1,60 +1,67 @@
-# graphql-orm-storage Implementation Plan
+# Project Plan
 
-## Goal
+`graphql-orm-storage` is the reusable byte-storage companion crate for
+`graphql-orm` applications. The crate owns object and blob storage concerns
+only. Host applications remain responsible for authorization, GraphQL schema
+design, metadata entities, routing, audit behavior, and workflow-specific
+policy.
 
-Create a reusable object storage crate for applications that use `graphql-orm`. The crate owns byte storage concerns only. Applications remain responsible for authorization, domain ownership, GraphQL entities, upload routes, download routes, and workflow-specific behavior.
-
-## What This Crate Provides
+## Implemented In 0.3.0
 
 - Provider-neutral object metadata.
-- Provider-neutral streaming blob storage trait.
-- Provider-neutral object storage trait.
-- Storage service that generates object IDs, keys, sizes, hashes, and timestamps.
+- Provider-neutral `StorageBackend` and `StorageNamespace` enums.
+- Streaming `BlobStore` trait with:
+  - streaming writes and reads
+  - byte-range reads
+  - conditional writes for content-addressed deduplication
+  - provider-side copy hook
+  - paged listing
+  - existence and metadata checks
+- Buffered and streaming `StorageService` object APIs.
 - Local filesystem backend.
 - S3-compatible backend behind the `s3` feature.
-- Feature placeholder for Azure Blob.
-- Tests for key generation, checksum generation, local round trips, and path safety.
+- Azure Blob placeholder behind the `azure` feature.
+- SHA-256 checksum helpers.
+- Safe sharded storage-key generation.
+- Strict key validation for local and cloud providers.
+- Public documentation and rustdocs for the crate boundary.
 
-## What This Crate Must Not Provide
+## Crate Boundaries
 
-- Application auth or policy checks.
-- Default GraphQL upload/download resolvers.
-- Digitise collection, record, accession, media, or tenant assumptions.
-- Database entities that force one application schema.
-- File blobs in database rows.
-- Backup repository providers such as Dropbox or SMB.
+This crate must not provide:
 
-## Initial Implementation
+- application auth or policy checks
+- default GraphQL upload/download/delete resolvers
+- application-specific collection, record, media, tenant, or policy assumptions
+- database entities that force one application schema
+- file bytes stored in database rows
+- backup repository providers such as Dropbox or SMB
 
-1. Define `StorageBackend` and `StorageNamespace`.
-2. Define `StoragePutRequest`, `StoredObject`, and `StorageObjectBody`.
-3. Define `ObjectStorage`.
-4. Define `StorageService`.
-5. Implement SHA-256 checksums.
-6. Implement safe sharded object key generation.
-7. Implement `LocalStorageBackend`.
-8. Add tests for the local backend and key safety.
-9. Add `BlobStore` as the shared low-level provider abstraction.
-10. Add streaming object APIs while preserving buffered object APIs.
+Applications should persist returned `StoredObject` metadata in their own
+`graphql-orm` entities.
 
-## Integration Pattern For Applications
+## Application Integration Pattern
 
-Applications should call `StorageService::put_object`, then persist the returned `StoredObject` fields into their own `graphql-orm` entity.
+1. Validate upload requests in the host application.
+2. Apply application-specific authorization before accepting bytes.
+3. Call `StorageService::put_object` or `StorageService::put_object_stream`.
+4. Persist the returned `StoredObject` fields in the application database.
+5. If database insertion fails after storage succeeds, delete the stored object
+   or enqueue orphan cleanup in the host application.
+6. On downloads, load metadata first, authorize it, then call
+   `StorageService::get_object` or `StorageService::get_object_stream`.
 
-If database insertion fails after object storage succeeds, application code should delete the stored object or enqueue an orphan cleanup job. This crate deliberately does not know the application transaction boundary.
+## Backup Integration Pattern
 
-Applications should also own GraphQL resolvers and route handlers. A future optional GraphQL helper must be authorization-adapter driven and must not expose generic upload/download operations without host-provided access checks.
-
-## Expected Output From A Storage Agent
-
-- A compilable crate under `/home/toby/graphql-orm-storage`.
-- Public API documented in `README.md`.
-- Local backend tests passing with `cargo test`.
-- Provider roadmap documented.
-- Notes explaining what Digitise must change to consume this crate.
+`graphql-orm-backup` should adapt `BlobStore` directly instead of using
+`StorageService`. Backup repositories use manifest, table, change-payload, and
+content-addressed object keys; those keys should not be forced through primary
+object metadata or generated storage namespaces.
 
 ## Future Work
 
-- Add Azure Blob provider behind the `azure` feature, implemented as `BlobStore` first.
-- Add a `graphql-orm-backup` adapter that wraps `BlobStore` as a backup repository.
-- Add optional server-side encryption hooks if applications need provider-managed keys.
+- Implement Azure Blob as a real `BlobStore` provider.
+- Add a `graphql-orm-backup` adapter that wraps `BlobStore` as a backup
+  repository.
+- Add optional provider-managed encryption configuration if primary object
+  storage applications need it.

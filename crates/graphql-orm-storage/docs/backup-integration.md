@@ -37,10 +37,12 @@ pub struct BlobStoreBackupRepository {
 
 Mapping:
 
-- `BackupRepository::put_blob` calls `BlobStore::put_blob`
+- `BackupRepository::put_blob` calls `BlobStore::put_blob` with backup-owned
+  write options
 - `BackupRepository::get_blob` collects or streams `BlobStore::get_blob`
 - `BackupRepository::blob_exists` calls `BlobStore::blob_exists`
-- `BackupRepository::list_blobs` calls `BlobStore::list_blobs`
+- `BackupRepository::list_blobs` calls `BlobStore::list_blobs_page` or
+  `BlobStore::list_blobs`
 - `BackupRepository::delete_blob` calls `BlobStore::delete_blob`
 
 The adapter should apply and strip its configured repository prefix
@@ -48,9 +50,10 @@ consistently.
 
 ## Provider Ownership
 
-S3-compatible and Azure Blob SDK integrations should live in this crate as
-`BlobStore` implementations. `graphql-orm-backup` should adapt them instead of
-duplicating cloud SDK code.
+S3-compatible storage lives in this crate as a `BlobStore` implementation.
+Future Azure Blob SDK integration should also live in this crate.
+`graphql-orm-backup` should adapt these providers instead of duplicating cloud
+SDK code.
 
 Dropbox remains backup-specific and is not a primary object storage provider for
 this crate.
