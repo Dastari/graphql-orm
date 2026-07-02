@@ -66,6 +66,31 @@ let bytes = collect_storage_stream(loaded.body).await?;
 
 Applications can use the stream directly instead of collecting it.
 
+## Load A Range
+
+```rust
+# use std::sync::Arc;
+# use graphql_orm_storage::{
+#     LocalStorageBackend, StorageByteStream, StorageNamespace,
+#     StoragePutStreamRequest, StorageService, collect_storage_stream,
+# };
+# async fn example() -> Result<(), graphql_orm_storage::StorageError> {
+# let service = StorageService::new(Arc::new(LocalStorageBackend::new("./data/storage")));
+# let stored = service.put_object_stream(StoragePutStreamRequest {
+#     namespace: StorageNamespace::Originals,
+#     file_name: Some("artifact.bin".to_string()),
+#     mime_type: Some("application/octet-stream".to_string()),
+#     body: StorageByteStream::from_bytes(b"streamed bytes".to_vec()),
+# }).await?;
+let loaded = service.get_object_range_stream(&stored, 0..8).await?;
+let bytes = collect_storage_stream(loaded.body).await?;
+# Ok(())
+# }
+```
+
+Range reads delegate to the configured provider when it has a native ranged read
+path.
+
 ## Buffered Compatibility
 
 The original buffered APIs remain available and delegate through the streaming

@@ -89,6 +89,18 @@ async fn local_put_get_stream_round_trip_preserves_bytes_and_metadata() {
         b"streamed object".as_slice()
     );
 
+    let ranged = service
+        .get_object_range_stream(&stored, 2..10)
+        .await
+        .expect("get range stream");
+    assert_eq!(ranged.object, stored);
+    assert_eq!(
+        collect_storage_stream(ranged.body)
+            .await
+            .expect("collect range stream"),
+        b"reamed o".as_slice()
+    );
+
     service.delete_object(&stored).await.expect("delete object");
     assert!(!service.object_exists(&stored).await.expect("object exists"));
     let err = service

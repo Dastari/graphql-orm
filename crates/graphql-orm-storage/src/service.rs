@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 
 use async_trait::async_trait;
 use time::OffsetDateTime;
@@ -125,6 +125,26 @@ impl StorageService {
         object: &StoredObject,
     ) -> Result<StorageObjectStream, StorageError> {
         let body = self.backend.get_blob(&object.storage_key).await?;
+        Ok(StorageObjectStream {
+            object: object.clone(),
+            body: body.body,
+        })
+    }
+
+    /// Loads a byte range as a streaming object body for existing metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the backend cannot load the object range.
+    pub async fn get_object_range_stream(
+        &self,
+        object: &StoredObject,
+        range: Range<u64>,
+    ) -> Result<StorageObjectStream, StorageError> {
+        let body = self
+            .backend
+            .get_blob_range(&object.storage_key, range)
+            .await?;
         Ok(StorageObjectStream {
             object: object.clone(),
             body: body.body,
