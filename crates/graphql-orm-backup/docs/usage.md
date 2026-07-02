@@ -8,6 +8,8 @@ writes, restore orchestration, compaction, pruning, and verification.
 ## Core Concepts
 
 - `BackupRepository`: destination for backup blobs and manifests.
+- `BlobStoreBackupRepository`: adapter from `graphql-orm-storage::BlobStore` to
+  `BackupRepository`.
 - `LocalBackupRepository`: filesystem implementation of `BackupRepository`.
 - `GraphqlOrmBackupAdapter`: interim database export/import contract until the
   final `graphql-orm` runtime backup API lands.
@@ -233,6 +235,26 @@ locks/repository.lock
 
 Table payloads are zstd-compressed JSON Lines. Manifest table checksums cover
 the stored compressed bytes.
+
+## BlobStore Adapter
+
+Use `BlobStoreBackupRepository` when an application already has a
+`graphql-orm-storage::BlobStore` provider:
+
+```rust
+use std::sync::Arc;
+
+use graphql_orm_backup::BlobStoreBackupRepository;
+use graphql_orm_storage::BlobStore;
+
+fn backup_repository(store: Arc<dyn BlobStore>) -> BlobStoreBackupRepository {
+    BlobStoreBackupRepository::new(store)
+}
+```
+
+`LocalBackupRepository` is built on top of the storage crate's local
+`BlobStore`. S3-compatible backup repositories should also use this adapter with
+the storage crate's S3 backend rather than adding AWS SDK code here.
 
 ## Verification
 

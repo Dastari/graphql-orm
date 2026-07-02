@@ -8,17 +8,17 @@ description = "Backup and restore orchestration primitives for graphql-orm appli
 
 [features]
 default = ["local"]
-local = []
+local = ["graphql-orm-storage/local"]
 
 [dependencies]
 async-trait = "0.1"
 bytes = "1"
 futures = "0.3"
+graphql-orm-storage = { version = "0.3.0", path = "../graphql-orm-storage", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["fs"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 zstd = "0.13"
 
@@ -29,4 +29,19 @@ tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread"] }
 [[test]]
 name = "local_repository_round_trip"
 path = "tests/local_repository_round_trip.rs"
+required-features = ["local"]
+
+[[test]]
+name = "incremental_backup"
+path = "tests/incremental_backup.rs"
+required-features = ["local"]
+
+[[test]]
+name = "operational_safety"
+path = "tests/operational_safety.rs"
+required-features = ["local"]
+
+[[test]]
+name = "restore_snapshot"
+path = "tests/restore_snapshot.rs"
 required-features = ["local"]

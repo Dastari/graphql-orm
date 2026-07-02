@@ -36,6 +36,12 @@ pub enum BackupError {
         source: std::io::Error,
     },
 
+    #[error("backup storage error")]
+    Storage {
+        #[source]
+        source: graphql_orm_storage::StorageError,
+    },
+
     #[error("unsupported operation: {operation}")]
     UnsupportedOperation { operation: String },
 
@@ -54,12 +60,20 @@ impl BackupError {
     pub(crate) fn compression(source: std::io::Error) -> Self {
         Self::Compression { source }
     }
+}
 
-    #[cfg(feature = "local")]
-    pub(crate) fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
-        Self::Io {
-            path: path.into(),
-            source,
+impl From<graphql_orm_storage::StorageError> for BackupError {
+    fn from(source: graphql_orm_storage::StorageError) -> Self {
+        match source {
+            graphql_orm_storage::StorageError::UnsupportedBackend { backend } => {
+                Self::UnsupportedProvider { provider: backend }
+            }
+            graphql_orm_storage::StorageError::InvalidStorageKey { key } => {
+                Self::InvalidRepositoryKey { key }
+            }
+            graphql_orm_storage::StorageError::MissingBlob { key } => Self::MissingBlob { key },
+            graphql_orm_storage::StorageError::Io { path, source } => Self::Io { path, source },
+            source => Self::Storage { source },
         }
     }
 }

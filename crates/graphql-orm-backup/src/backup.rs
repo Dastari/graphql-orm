@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    io::Write,
+};
 
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt, stream};
@@ -180,7 +183,6 @@ async fn create_full_backup_inner(
     let mut row_count = 0_u64;
     for table in &plan.tables {
         let bytes = serialize_table_export(table)?;
-        let bytes = crate::compress_payload(&bytes)?;
         let content_key = database_table_key(request.snapshot_id, &table.table_name);
         let sha256_hex = sha256_hex(&bytes);
         repository
@@ -297,7 +299,6 @@ async fn create_incremental_backup_inner(
     let tombstones = changes_to_tombstones(&changes);
     for group in group_changes_by_table(changes) {
         let bytes = serialize_jsonl_entries(&group.changes)?;
-        let bytes = crate::compress_payload(&bytes)?;
         let content_key = database_changes_key(request.snapshot_id, &group.table_name);
         let sha256_hex = sha256_hex(&bytes);
         repository
@@ -425,7 +426,6 @@ async fn compact_chain_inner(
     for (table_name, rows) in table_rows {
         let rows = rows.into_values().collect::<Vec<_>>();
         let bytes = serialize_jsonl_entries(&rows)?;
-        let bytes = crate::compress_payload(&bytes)?;
         let content_key = database_table_key(request.snapshot_id, &table_name);
         let sha256_hex = sha256_hex(&bytes);
         repository
@@ -510,12 +510,13 @@ fn serialize_jsonl_entries<T>(entries: &[T]) -> Result<Vec<u8>, BackupError>
 where
     T: Serialize,
 {
-    let mut bytes = Vec::new();
+    let mut encoder =
+        zstd::stream::Encoder::new(Vec::new(), 0).map_err(BackupError::compression)?;
     for entry in entries {
-        serde_json::to_writer(&mut bytes, entry)?;
-        bytes.push(b'\n');
+        serde_json::to_writer(&mut encoder, entry)?;
+        encoder.write_all(b"\n").map_err(BackupError::compression)?;
     }
-    Ok(bytes)
+    encoder.finish().map_err(BackupError::compression)
 }
 
 async fn write_object_entries(
@@ -538,9 +539,7 @@ async fn write_object_entries(
                 });
             }
 
-            if !repository.blob_exists(&content_key).await? {
-                repository.put_blob(&content_key, bytes).await?;
-            }
+            repository.put_blob_if_absent(&content_key, bytes).await?;
 
             Ok((
                 index,

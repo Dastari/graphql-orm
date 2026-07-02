@@ -13,12 +13,11 @@ Acceptance criteria:
 
 ## Phase 2: S3
 
-Do not implement direct AWS SDK integration in this crate yet.
+Do not implement direct AWS SDK integration in this crate.
 
-`graphql-orm-storage` should first expose a shared lower-level streaming
-`BlobStore` abstraction. `graphql-orm-backup` should then adapt that abstraction
-to `BackupRepository` so primary object storage and backup repositories can
-share S3-compatible provider code without sharing higher-level semantics.
+`graphql-orm-backup` adapts `graphql-orm-storage::BlobStore` through
+`BlobStoreBackupRepository`, so S3-compatible provider code should live in
+`graphql-orm-storage`.
 
 Expected configuration:
 
@@ -31,9 +30,9 @@ Expected configuration:
 
 ## Phase 3: Azure Blob
 
-Do not implement direct Azure SDK integration in this crate yet. Azure Blob
-should follow the same future `graphql-orm-storage::BlobStore` adapter path as
-S3 once the shared abstraction exists.
+Do not implement direct Azure SDK integration in this crate. Azure Blob should
+follow the same `graphql-orm-storage::BlobStore` adapter path as S3 once the
+storage crate provides a real Azure Blob implementation.
 
 Expected configuration:
 

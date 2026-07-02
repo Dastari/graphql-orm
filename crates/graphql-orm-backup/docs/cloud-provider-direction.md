@@ -15,10 +15,9 @@ Backup repositories and primary object storage have different semantics:
 - backup repositories need list operations for prefixes
 - primary object storage should not inherit backup manifest semantics
 
-## Future Adapter
+## Adapter
 
-Once `graphql-orm-storage::BlobStore` exists, add an optional adapter in this
-crate:
+`graphql-orm-backup` now exposes `BlobStoreBackupRepository`:
 
 ```rust
 pub struct BlobStoreBackupRepository {
@@ -30,6 +29,7 @@ pub struct BlobStoreBackupRepository {
 Mapping:
 
 - `BackupRepository::put_blob` calls `BlobStore::put_blob`
+- `BackupRepository::put_blob_if_absent` calls `BlobStore::put_blob_if_not_exists`
 - `BackupRepository::get_blob` collects the blob stream into `bytes::Bytes`
 - `BackupRepository::blob_exists` calls `BlobStore::blob_exists`
 - `BackupRepository::list_blobs` calls `BlobStore::list_blobs`
@@ -46,5 +46,5 @@ The adapter must apply and strip its configured repository prefix consistently.
 
 ## Current Rule
 
-Do not add direct AWS or Azure SDK dependencies to this crate until the shared
-`BlobStore` path has been implemented or explicitly rejected.
+Do not add direct AWS or Azure SDK dependencies to this crate. Cloud provider SDK
+integration belongs in `graphql-orm-storage` as `BlobStore` implementations.

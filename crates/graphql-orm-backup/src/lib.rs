@@ -8,23 +8,27 @@
 //! adapter implementations and this crate handles repository layout, checksums,
 //! compressed payloads, manifest chains, restore orchestration, compaction,
 //! locking, and pruning.
+//! [`BlobStoreBackupRepository`] adapts `graphql-orm-storage`
+//! [`graphql_orm_storage::BlobStore`] implementations so local and cloud
+//! provider code can be shared without routing backup keys through primary
+//! object metadata.
 //!
 //! # Full Backup
 //!
 //! ```no_run
 //! use graphql_orm_backup::{
 //!     BackupObjectIndex, FullBackupRequest, GraphqlOrmBackupAdapter,
-//!     LocalBackupRepository, create_full_backup,
+//!     BackupRepository, create_full_backup,
 //! };
 //! use uuid::Uuid;
 //!
 //! # async fn example(
+//! #     repository: &dyn BackupRepository,
 //! #     database: &dyn GraphqlOrmBackupAdapter,
 //! #     objects: &dyn BackupObjectIndex,
 //! # ) -> Result<(), graphql_orm_backup::BackupError> {
-//! let repository = LocalBackupRepository::new("./backups");
 //! let result = create_full_backup(
-//!     &repository,
+//!     repository,
 //!     database,
 //!     objects,
 //!     FullBackupRequest {
@@ -104,7 +108,7 @@ pub use manifest::{
 pub use object_index::{BackupObjectIndex, BackupObjectRef};
 pub use planner::{FullBackupPlan, plan_full_backup};
 pub use prune::{KeepPolicy, PruneResult, prune};
-pub use repository::BackupRepository;
+pub use repository::{BackupRepository, BlobStoreBackupRepository};
 pub use restore::{
     RestoreContext, RestoreMode, RestoreObjectSink, RestoreResult, ensure_empty_restore_target,
     restore_objects, restore_snapshot,

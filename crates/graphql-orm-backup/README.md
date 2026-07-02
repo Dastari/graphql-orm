@@ -17,6 +17,7 @@ backup layout, checksums, repository writes, restore ordering, and operational s
 - zstd-compressed JSON Lines table and change payloads
 - content-addressed object blobs keyed by SHA-256
 - local filesystem repository with path traversal protection
+- `graphql-orm-storage::BlobStore` repository adapter for shared local/S3 provider code
 - mounted SMB support through local filesystem semantics and `LocalBackupRepository::open_existing`
 - bounded concurrent object writes and checksum verification
 - advisory repository writer lock for backup, compaction, and pruning operations
@@ -146,7 +147,9 @@ events, object metadata persistence, or cloud credentials.
 Full backups, restore orchestration, incremental backups, manifest-chain validation, synthetic-full
 compaction, local repository support, locking, and pruning are implemented.
 
-The remaining major integration item is the future `graphql-orm-storage::BlobStore` adapter path,
-which should replace duplicated cloud/local blob-provider code once the storage crate exposes its
-stable low-level blob trait. Client-side encryption and content-defined chunking are intentionally
-out of scope for the current crate.
+Provider code is shared through `graphql-orm-storage::BlobStore`. `LocalBackupRepository` is a thin
+wrapper over the storage crate's local blob backend, and `BlobStoreBackupRepository` can adapt any
+storage blob provider, including S3-compatible storage from `graphql-orm-storage`.
+
+Client-side encryption and content-defined chunking are intentionally out of scope for the current
+crate.
