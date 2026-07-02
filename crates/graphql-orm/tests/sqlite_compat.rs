@@ -105,6 +105,41 @@ schema_roots! {
 
 type TestSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 
+async fn setup_pool() -> Result<sqlx::SqlitePool, Box<dyn std::error::Error>> {
+    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&pool)
+        .await?;
+
+    sqlx::query(
+        "CREATE TABLE users (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            active INTEGER NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE posts (
+            id TEXT PRIMARY KEY,
+            author_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            published INTEGER NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            FOREIGN KEY (author_id) REFERENCES users(id)
+        )",
+    )
+    .execute(&pool)
+    .await?;
+
+    Ok(pool)
+}
+
 #[tokio::test]
 async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -247,6 +282,110 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
         graphql_orm::graphql::orm::current_backend(),
         graphql_orm::graphql::orm::DatabaseBackend::Sqlite
     ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn page_limit_cap_applies_to_top_level_and_nested_relation_lists()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = setup_pool().await?;
+    let database = graphql_orm::db::Database::builder(pool)
+        .max_page_limit(Some(2))
+        .build();
+    let schema: TestSchema = schema_builder(database)
+        .data("test-user".to_string())
+        .finish();
+
+    let mut user_ids = Vec::new();
+    for name in ["Alice", "Bob", "Cara"] {
+        let response = schema
+            .execute(format!(
+                "mutation {{
+                    createUser(input: {{ name: \"{name}\", active: true }}) {{
+                        user {{ id }}
+                    }}
+                }}"
+            ))
+            .await;
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let data = response.data.into_json()?;
+        user_ids.push(
+            data["createUser"]["user"]["id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+
+    for title in ["A1", "A2", "A3"] {
+        let response = schema
+            .execute(format!(
+                "mutation {{
+                    createPost(input: {{ authorId: \"{}\", title: \"{title}\", published: true }}) {{
+                        success
+                    }}
+                }}",
+                user_ids[0]
+            ))
+            .await;
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+    }
+    let response = schema
+        .execute(format!(
+            "mutation {{
+                createPost(input: {{ authorId: \"{}\", title: \"B1\", published: true }}) {{
+                    success
+                }}
+            }}",
+            user_ids[1]
+        ))
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+
+    let response = schema
+        .execute(
+            "query {
+                users(orderBy: [{ name: ASC }], page: { limit: 10 }) {
+                    edges {
+                        node {
+                            name
+                            posts(orderBy: { title: ASC }, page: { limit: 10 }) {
+                                edges { node { title } }
+                                pageInfo { totalCount hasNextPage }
+                            }
+                        }
+                    }
+                    pageInfo { totalCount hasNextPage }
+                }
+            }",
+        )
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let data = response.data.into_json()?;
+    let users = data["users"]["edges"].as_array().unwrap();
+    assert_eq!(users.len(), 2, "top-level list should be capped");
+    assert_eq!(data["users"]["pageInfo"]["totalCount"].as_i64(), Some(3));
+    assert_eq!(
+        data["users"]["pageInfo"]["hasNextPage"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(users[0]["node"]["name"].as_str(), Some("Alice"));
+
+    let alice_posts = users[0]["node"]["posts"]["edges"].as_array().unwrap();
+    assert_eq!(
+        alice_posts.len(),
+        2,
+        "nested relation list should be capped"
+    );
+    assert_eq!(
+        users[0]["node"]["posts"]["pageInfo"]["totalCount"].as_i64(),
+        Some(3)
+    );
+    assert_eq!(
+        users[0]["node"]["posts"]["pageInfo"]["hasNextPage"].as_bool(),
+        Some(true)
+    );
 
     Ok(())
 }

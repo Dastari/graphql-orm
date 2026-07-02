@@ -555,6 +555,111 @@ async fn relation_resolvers_batch_for_pages_of_parents() -> Result<(), Box<dyn s
 }
 
 #[tokio::test]
+async fn page_limit_cap_applies_to_top_level_and_nested_relation_lists()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = test_mutex().lock().await;
+    let pool = setup_pool().await?;
+    let database = graphql_orm::db::Database::builder(pool)
+        .max_page_limit(Some(2))
+        .build();
+    let schema: TestSchema = schema_builder(database)
+        .data("test-user".to_string())
+        .finish();
+
+    let mut user_ids = Vec::new();
+    for name in ["Alice", "Bob", "Cara"] {
+        let response = schema
+            .execute(format!(
+                "mutation {{
+                    createUser(input: {{ name: \"{name}\", active: true }}) {{
+                        user {{ id }}
+                    }}
+                }}"
+            ))
+            .await;
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let data = response.data.into_json()?;
+        user_ids.push(
+            data["createUser"]["user"]["id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+
+    for title in ["A1", "A2", "A3"] {
+        let response = schema
+            .execute(format!(
+                "mutation {{
+                    createPost(input: {{ authorId: \"{}\", title: \"{title}\", published: true }}) {{
+                        success
+                    }}
+                }}",
+                user_ids[0]
+            ))
+            .await;
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+    }
+    let response = schema
+        .execute(format!(
+            "mutation {{
+                createPost(input: {{ authorId: \"{}\", title: \"B1\", published: true }}) {{
+                    success
+                }}
+            }}",
+            user_ids[1]
+        ))
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+
+    let response = schema
+        .execute(
+            "query {
+                users(orderBy: [{ name: ASC }], page: { limit: 10 }) {
+                    edges {
+                        node {
+                            name
+                            posts(orderBy: { title: ASC }, page: { limit: 10 }) {
+                                edges { node { title } }
+                                pageInfo { totalCount hasNextPage }
+                            }
+                        }
+                    }
+                    pageInfo { totalCount hasNextPage }
+                }
+            }",
+        )
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let data = response.data.into_json()?;
+    let users = data["users"]["edges"].as_array().unwrap();
+    assert_eq!(users.len(), 2, "top-level list should be capped");
+    assert_eq!(data["users"]["pageInfo"]["totalCount"].as_i64(), Some(3));
+    assert_eq!(
+        data["users"]["pageInfo"]["hasNextPage"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(users[0]["node"]["name"].as_str(), Some("Alice"));
+
+    let alice_posts = users[0]["node"]["posts"]["edges"].as_array().unwrap();
+    assert_eq!(
+        alice_posts.len(),
+        2,
+        "nested relation list should be capped"
+    );
+    assert_eq!(
+        users[0]["node"]["posts"]["pageInfo"]["totalCount"].as_i64(),
+        Some(3)
+    );
+    assert_eq!(
+        users[0]["node"]["posts"]["pageInfo"]["hasNextPage"].as_bool(),
+        Some(true)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn postgres_introspection_uses_active_schema_search_path()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
