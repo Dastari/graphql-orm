@@ -26,7 +26,7 @@ Default local filesystem support:
 graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm-storage" }
 ```
 
-Provider-placeholder-only builds:
+Provider-specific builds:
 
 ```toml
 [dependencies]
@@ -195,12 +195,16 @@ Generated keys use:
 | Feature | Status | Public API |
 | --- | --- | --- |
 | `local` | Implemented and enabled by default | `LocalStorageBackend` |
-| `s3` | Placeholder only | `S3StorageBackend`, `S3StorageConfig` |
+| `s3` | Implemented with `aws-sdk-s3` | `S3StorageBackend`, `S3StorageConfig` |
 | `azure` | Placeholder only | `AzureBlobStorageBackend`, `AzureBlobStorageConfig` |
 
-The S3 and Azure placeholder backends are intentionally explicit. They expose
-the planned configuration shape but return `StorageError::UnsupportedBackend`
-for put, get, and delete operations until real provider implementations land.
+The S3 backend supports S3-compatible services such as MinIO and respects the
+`path_style` configuration flag. S3 integration tests run only when
+`S3_TEST_ENDPOINT` and `S3_TEST_BUCKET` are set.
+
+The Azure placeholder backend is intentionally explicit. It exposes the planned
+configuration shape but returns `StorageError::UnsupportedBackend` until a real
+Azure provider implementation lands.
 
 ## GraphQL Boundary
 

@@ -14,11 +14,11 @@ Acceptance criteria:
 
 ## Phase 2: S3-Compatible Storage
 
-Add behind the `s3` feature.
+Implemented behind the `s3` feature.
 
-Implement S3 as a `BlobStore` first. The high-level `ObjectStorage` behavior
-should delegate to the same S3 blob operations so backup integrations can reuse
-the provider through a future adapter.
+S3 is implemented as a `BlobStore` first. The high-level `ObjectStorage`
+behavior delegates to the same S3 blob operations so backup integrations can
+reuse the provider through a future adapter.
 
 Expected configuration:
 
@@ -31,6 +31,9 @@ Expected configuration:
 - path-style toggle
 
 The implementation must use the same `storage_key` values as local storage.
+
+Integration tests are opt-in through `S3_TEST_ENDPOINT` and `S3_TEST_BUCKET`.
+Use the optional `S3_TEST_PATH_STYLE` setting for MinIO compatibility.
 
 ## Phase 3: Azure Blob Storage
 

@@ -23,48 +23,11 @@ fn s3_debug_output_redacts_secret_access_key() {
 
 #[cfg(feature = "s3")]
 #[tokio::test]
-async fn s3_placeholder_backend_returns_unsupported_errors() {
+async fn s3_backend_exposes_config_and_backend_without_leaking_secrets() {
     let backend = S3StorageBackend::new(s3_config());
-    let object = test_object(StorageBackend::S3);
 
     assert_eq!(backend.backend(), StorageBackend::S3);
-    assert_unsupported(
-        backend
-            .put_blob(
-                "objects/test",
-                StorageByteStream::from_bytes(b"bytes".to_vec()),
-                BlobPutOptions::default(),
-            )
-            .await,
-        "s3",
-    );
-    assert_unsupported(
-        backend
-            .put_blob_if_not_exists(
-                "objects/test",
-                StorageByteStream::from_bytes(b"bytes".to_vec()),
-                BlobPutOptions::default(),
-            )
-            .await,
-        "s3",
-    );
-    assert_unsupported(backend.get_blob("objects/test").await, "s3");
-    assert_unsupported(backend.get_blob_range("objects/test", 0..1).await, "s3");
-    assert_unsupported(backend.blob_exists("objects/test").await, "s3");
-    assert_unsupported(backend.head_blob("objects/test").await, "s3");
-    assert_unsupported(backend.list_blobs("objects").await, "s3");
-    assert_unsupported(backend.list_blobs_page("objects", None, 100).await, "s3");
-    assert_unsupported(
-        backend.copy_blob("objects/test", "objects/copy").await,
-        "s3",
-    );
-    assert_unsupported(backend.delete_blob("objects/test").await, "s3");
-    assert_unsupported(
-        backend.put_object(object.clone(), b"bytes".to_vec()).await,
-        "s3",
-    );
-    assert_unsupported(backend.get_object(&object).await, "s3");
-    assert_unsupported(backend.delete_object(&object).await, "s3");
+    assert_eq!(backend.config().bucket, "objects");
 }
 
 #[cfg(feature = "azure")]

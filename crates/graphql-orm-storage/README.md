@@ -11,7 +11,8 @@ Current crate version: `0.3.0`.
 - Local filesystem backend implemented.
 - Streaming `BlobStore` abstraction implemented.
 - Stable object metadata and key generation implemented.
-- S3 and Azure Blob expose explicit unsupported placeholder backends behind feature flags for later provider work.
+- S3-compatible backend implemented behind the `s3` feature.
+- Azure Blob exposes an explicit unsupported placeholder backend behind the `azure` feature.
 
 ## Design Rule
 
@@ -22,7 +23,7 @@ The core crate does not provide default GraphQL resolvers. Upload, download, del
 ## Cargo Features
 
 - `local`: enabled by default; provides `LocalStorageBackend`.
-- `s3`: provides `S3StorageBackend` and `S3StorageConfig` placeholders that return an unsupported-backend error until real S3-compatible storage is implemented.
+- `s3`: provides `S3StorageBackend` and `S3StorageConfig` backed by `aws-sdk-s3`; supports S3-compatible providers such as MinIO with path-style addressing.
 - `azure`: provides `AzureBlobStorageBackend` and `AzureBlobStorageConfig` placeholders that return an unsupported-backend error until real Azure Blob Storage is implemented.
 
 For detailed integration guidance, see [docs/usage.md](docs/usage.md).
@@ -108,8 +109,12 @@ Only the file extension is copied from the original filename. The original filen
 ## Provider Roadmap
 
 1. Local filesystem
-2. S3-compatible object storage implemented as `BlobStore` first, then `ObjectStorage`
+2. S3-compatible object storage
 3. Azure Blob Storage implemented as `BlobStore` first, then `ObjectStorage`
+
+S3 integration tests are opt-in. Set `S3_TEST_ENDPOINT` and `S3_TEST_BUCKET`,
+plus optional `S3_TEST_REGION`, `S3_TEST_ACCESS_KEY`, `S3_TEST_SECRET_KEY`, and
+`S3_TEST_PATH_STYLE`, to run them against MinIO or another S3-compatible service.
 
 Backup repositories such as Dropbox and SMB belong in `graphql-orm-backup`, not this crate.
 

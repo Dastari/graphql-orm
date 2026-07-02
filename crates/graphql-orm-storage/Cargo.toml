@@ -9,11 +9,13 @@ description = "Provider-neutral object storage primitives for graphql-orm applic
 [features]
 default = ["local"]
 local = ["dep:tokio", "dep:tokio-util"]
-s3 = []
+s3 = ["dep:aws-credential-types", "dep:aws-sdk-s3", "dep:tokio", "dep:tokio-util"]
 azure = []
 
 [dependencies]
 async-trait = "0.1"
+aws-credential-types = { version = "1.2.14", optional = true }
+aws-sdk-s3 = { version = "1.137.0", features = ["behavior-version-latest"], optional = true }
 bytes = "1"
 futures-core = "0.3"
 futures-util = "0.3"

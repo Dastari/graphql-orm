@@ -17,7 +17,8 @@ on `graphql-orm-storage` or downstream crates.
   `StorageService::get_object_stream`.
 - Buffered object APIs still exist and delegate through the streaming layer.
 - `LocalStorageBackend` now implements `BlobStore` and `ObjectStorage`.
-- S3 and Azure Blob placeholders now implement `BlobStore` and still return
+- S3 now implements `BlobStore` and `ObjectStorage` behind the `s3` feature.
+- Azure Blob remains a placeholder that implements `BlobStore` and still returns
   `UnsupportedBackend`.
 
 ## Provider Guidance
@@ -48,8 +49,6 @@ pub struct BlobStoreBackupRepository {
 
 ## Still Pending
 
-- Real S3 `BlobStore` provider using the `0.3.0` trait surface.
 - Real Azure Blob `BlobStore` provider.
 - Backup adapter implementation after downstream crate alignment.
-- Any cloud SDK dependency decisions.
-- Provider integration tests that require external services.
+- Provider integration tests that require external services beyond opt-in S3.

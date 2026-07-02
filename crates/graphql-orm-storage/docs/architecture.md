@@ -96,8 +96,8 @@ The crate uses `StorageError` through `thiserror`. Application code can convert 
 Provider-specific code should live behind cargo features:
 
 - `local`: default, implemented now
-- `s3`: reserved
-- `azure`: reserved
+- `s3`: implemented with `aws-sdk-s3`
+- `azure`: reserved placeholder
 
 Provider implementations must satisfy the same `ObjectStorage` trait.
 Provider implementations should implement `BlobStore` first, then expose
