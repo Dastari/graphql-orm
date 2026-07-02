@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use bytes::Bytes;
+use futures::{StreamExt, TryStreamExt, stream};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -8,11 +9,27 @@ use crate::{
     BACKUP_FORMAT_VERSION, BackupChangeAction, BackupChangeExport, BackupError, BackupKind,
     BackupObjectIndex, BackupRepository, BackupRow, BackupSnapshotManifest, BackupTableExport,
     BackupTombstone, DatabaseBackupManifest, GraphqlOrmBackupAdapter, ObjectBackupEntry,
-    TableBackupEntry, load_manifest_chain, manifest::sha256_hex, plan_full_backup,
-    set_manifest_checksum, verify_manifest_and_objects,
+    RepositoryLock, RepositoryLockOptions, TableBackupEntry, load_manifest_chain,
+    manifest::sha256_hex, plan_full_backup, set_manifest_checksum, verify_manifest_and_objects,
 };
 
 pub const DATABASE_EXPORT_FORMAT: &str = "jsonl";
+pub const DEFAULT_OBJECT_CONCURRENCY: usize = 8;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BackupExecutionOptions {
+    pub object_concurrency: usize,
+    pub lock: RepositoryLockOptions,
+}
+
+impl Default for BackupExecutionOptions {
+    fn default() -> Self {
+        Self {
+            object_concurrency: DEFAULT_OBJECT_CONCURRENCY,
+            lock: RepositoryLockOptions::default(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FullBackupRequest {
@@ -96,6 +113,42 @@ pub async fn create_full_backup(
     objects: &dyn BackupObjectIndex,
     request: FullBackupRequest,
 ) -> Result<FullBackupResult, BackupError> {
+    create_full_backup_with_options(
+        repository,
+        database,
+        objects,
+        request,
+        &BackupExecutionOptions::default(),
+    )
+    .await
+}
+
+/// Creates a full snapshot with explicit execution options.
+///
+/// # Errors
+///
+/// Returns [`BackupError`] if planning fails, table serialization or
+/// compression fails, object loading/checksum validation fails, locking fails,
+/// or any repository write fails.
+pub async fn create_full_backup_with_options(
+    repository: &dyn BackupRepository,
+    database: &dyn GraphqlOrmBackupAdapter,
+    objects: &dyn BackupObjectIndex,
+    request: FullBackupRequest,
+    options: &BackupExecutionOptions,
+) -> Result<FullBackupResult, BackupError> {
+    let lock = RepositoryLock::acquire(repository, &options.lock).await?;
+    let result = create_full_backup_inner(repository, database, objects, request, options).await;
+    release_lock(repository, lock, result).await
+}
+
+async fn create_full_backup_inner(
+    repository: &dyn BackupRepository,
+    database: &dyn GraphqlOrmBackupAdapter,
+    objects: &dyn BackupObjectIndex,
+    request: FullBackupRequest,
+    options: &BackupExecutionOptions,
+) -> Result<FullBackupResult, BackupError> {
     let plan = plan_full_backup(database, objects).await?;
 
     let mut table_entries = Vec::with_capacity(plan.tables.len());
@@ -119,7 +172,13 @@ pub async fn create_full_backup(
         });
     }
 
-    let object_entries = write_object_entries(repository, objects, &plan.objects).await?;
+    let object_entries = write_object_entries(
+        repository,
+        objects,
+        &plan.objects,
+        options.object_concurrency,
+    )
+    .await?;
 
     let mut manifest = BackupSnapshotManifest {
         format_version: BACKUP_FORMAT_VERSION,
@@ -163,6 +222,43 @@ pub async fn create_incremental_backup(
     objects: &dyn BackupObjectIndex,
     request: IncrementalBackupRequest,
 ) -> Result<IncrementalBackupResult, BackupError> {
+    create_incremental_backup_with_options(
+        repository,
+        database,
+        objects,
+        request,
+        &BackupExecutionOptions::default(),
+    )
+    .await
+}
+
+/// Creates an incremental snapshot with explicit execution options.
+///
+/// # Errors
+///
+/// Returns [`BackupError`] if schema lookup, incremental export, object
+/// discovery/loading, payload serialization/compression, checksum validation,
+/// locking, or repository writes fail.
+pub async fn create_incremental_backup_with_options(
+    repository: &dyn BackupRepository,
+    database: &dyn GraphqlOrmBackupAdapter,
+    objects: &dyn BackupObjectIndex,
+    request: IncrementalBackupRequest,
+    options: &BackupExecutionOptions,
+) -> Result<IncrementalBackupResult, BackupError> {
+    let lock = RepositoryLock::acquire(repository, &options.lock).await?;
+    let result =
+        create_incremental_backup_inner(repository, database, objects, request, options).await;
+    release_lock(repository, lock, result).await
+}
+
+async fn create_incremental_backup_inner(
+    repository: &dyn BackupRepository,
+    database: &dyn GraphqlOrmBackupAdapter,
+    objects: &dyn BackupObjectIndex,
+    request: IncrementalBackupRequest,
+    options: &BackupExecutionOptions,
+) -> Result<IncrementalBackupResult, BackupError> {
     let schema = database.schema_snapshot().await?;
     let changes = database
         .export_incremental(request.parent_snapshot_id)
@@ -193,7 +289,13 @@ pub async fn create_incremental_backup(
         });
     }
 
-    let object_entries = write_object_entries(repository, objects, &object_refs).await?;
+    let object_entries = write_object_entries(
+        repository,
+        objects,
+        &object_refs,
+        options.object_concurrency,
+    )
+    .await?;
 
     let mut manifest = BackupSnapshotManifest {
         format_version: BACKUP_FORMAT_VERSION,
@@ -232,6 +334,30 @@ pub async fn create_incremental_backup(
 /// payloads cannot be parsed, or synthetic table/manifest blobs cannot be
 /// written.
 pub async fn compact_chain(
+    repository: &dyn BackupRepository,
+    request: CompactChainRequest,
+) -> Result<CompactChainResult, BackupError> {
+    compact_chain_with_options(repository, request, &BackupExecutionOptions::default()).await
+}
+
+/// Compacts a chain with explicit execution options.
+///
+/// # Errors
+///
+/// Returns [`BackupError`] if the source chain cannot be loaded or verified,
+/// locking fails, payloads cannot be parsed, or synthetic table/manifest blobs
+/// cannot be written.
+pub async fn compact_chain_with_options(
+    repository: &dyn BackupRepository,
+    request: CompactChainRequest,
+    options: &BackupExecutionOptions,
+) -> Result<CompactChainResult, BackupError> {
+    let lock = RepositoryLock::acquire(repository, &options.lock).await?;
+    let result = compact_chain_inner(repository, request).await;
+    release_lock(repository, lock, result).await
+}
+
+async fn compact_chain_inner(
     repository: &dyn BackupRepository,
     request: CompactChainRequest,
 ) -> Result<CompactChainResult, BackupError> {
@@ -371,34 +497,57 @@ async fn write_object_entries(
     repository: &dyn BackupRepository,
     objects: &dyn BackupObjectIndex,
     object_refs: &[crate::BackupObjectRef],
+    object_concurrency: usize,
 ) -> Result<Vec<ObjectBackupEntry>, BackupError> {
-    let mut object_entries = Vec::with_capacity(object_refs.len());
-    for object in object_refs {
-        let bytes = objects.load_object(object).await?;
-        let actual = sha256_hex(&bytes);
-        let content_key = object_content_key(&object.sha256_hex);
-        if actual != object.sha256_hex {
-            return Err(BackupError::ChecksumMismatch {
-                key: content_key,
-                expected: object.sha256_hex.clone(),
-                actual,
-            });
-        }
+    let concurrency = object_concurrency.max(1);
+    let mut object_entries = stream::iter(object_refs.iter().enumerate())
+        .map(|(index, object)| async move {
+            let bytes = objects.load_object(object).await?;
+            let actual = sha256_hex(&bytes);
+            let content_key = object_content_key(&object.sha256_hex);
+            if actual != object.sha256_hex {
+                return Err(BackupError::ChecksumMismatch {
+                    key: content_key,
+                    expected: object.sha256_hex.clone(),
+                    actual,
+                });
+            }
 
-        if !repository.blob_exists(&content_key).await? {
-            repository.put_blob(&content_key, bytes).await?;
-        }
+            if !repository.blob_exists(&content_key).await? {
+                repository.put_blob(&content_key, bytes).await?;
+            }
 
-        object_entries.push(ObjectBackupEntry {
-            object_id: object.object_id,
-            storage_key: object.storage_key.clone(),
-            content_key,
-            sha256_hex: object.sha256_hex.clone(),
-            size_bytes: object.size_bytes,
-            mime_type: object.mime_type.clone(),
-        });
-    }
+            Ok((
+                index,
+                ObjectBackupEntry {
+                    object_id: object.object_id,
+                    storage_key: object.storage_key.clone(),
+                    content_key,
+                    sha256_hex: object.sha256_hex.clone(),
+                    size_bytes: object.size_bytes,
+                    mime_type: object.mime_type.clone(),
+                },
+            ))
+        })
+        .buffer_unordered(concurrency)
+        .try_collect::<Vec<_>>()
+        .await?;
+    object_entries.sort_by_key(|(index, _)| *index);
+    let object_entries = object_entries.into_iter().map(|(_, entry)| entry).collect();
     Ok(object_entries)
+}
+
+async fn release_lock<T>(
+    repository: &dyn BackupRepository,
+    lock: RepositoryLock,
+    result: Result<T, BackupError>,
+) -> Result<T, BackupError> {
+    let release_result = lock.release(repository).await;
+    match (result, release_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(err), _) => Err(err),
+        (Ok(_), Err(err)) => Err(err),
+    }
 }
 
 struct ChangeGroup {

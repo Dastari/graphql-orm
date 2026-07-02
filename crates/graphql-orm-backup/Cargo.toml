@@ -13,6 +13,7 @@ local = []
 [dependencies]
 async-trait = "0.1"
 bytes = "1"
+futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

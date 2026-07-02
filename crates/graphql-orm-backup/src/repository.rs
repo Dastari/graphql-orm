@@ -13,6 +13,23 @@ pub trait BackupRepository: Send + Sync {
     /// persist the blob.
     async fn put_blob(&self, key: &str, body: Bytes) -> Result<(), BackupError>;
 
+    /// Writes a blob only when no blob exists at the key.
+    ///
+    /// Returns `true` when the blob was written and `false` when the key
+    /// already existed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError`] if the key is invalid or the backend cannot
+    /// perform the conditional write.
+    async fn put_blob_if_absent(&self, key: &str, body: Bytes) -> Result<bool, BackupError> {
+        if self.blob_exists(key).await? {
+            return Ok(false);
+        }
+        self.put_blob(key, body).await?;
+        Ok(true)
+    }
+
     /// Reads a blob from a repository key.
     ///
     /// # Errors

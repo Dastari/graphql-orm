@@ -1,4 +1,7 @@
-use std::path::{Component, Path, PathBuf};
+use std::{
+    io::Write,
+    path::{Component, Path, PathBuf},
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -62,6 +65,32 @@ impl BackupRepository for LocalBackupRepository {
             .await
             .map_err(|source| BackupError::io(&path, source))?;
         Ok(())
+    }
+
+    async fn put_blob_if_absent(&self, key: &str, body: Bytes) -> Result<bool, BackupError> {
+        let path = self.path_for(key)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| BackupError::InvalidRepositoryKey {
+                key: key.to_string(),
+            })?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|source| BackupError::io(parent, source))?;
+
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(&body)
+                    .map_err(|source| BackupError::io(&path, source))?;
+                Ok(true)
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(source) => Err(BackupError::io(&path, source)),
+        }
     }
 
     async fn get_blob(&self, key: &str) -> Result<Bytes, BackupError> {

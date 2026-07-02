@@ -177,9 +177,10 @@ async fn create_full_backup_writes_manifest_after_payloads() {
         .expect("create full backup");
 
     let writes = repository.write_order();
-    assert_eq!(writes.len(), 2);
-    assert_eq!(writes[0], database_table_key(snapshot_id(), "users"));
-    assert_eq!(writes[1], snapshot_manifest_key(snapshot_id()));
+    assert_eq!(writes.len(), 3);
+    assert_eq!(writes[0], "locks/repository.lock");
+    assert_eq!(writes[1], database_table_key(snapshot_id(), "users"));
+    assert_eq!(writes[2], snapshot_manifest_key(snapshot_id()));
 }
 
 fn backup_request() -> FullBackupRequest {

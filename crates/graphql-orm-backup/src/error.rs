@@ -27,6 +27,9 @@ pub enum BackupError {
     #[error("invalid manifest chain: {reason}")]
     InvalidManifestChain { reason: String },
 
+    #[error("backup repository is locked by {lock_key}")]
+    RepositoryLocked { lock_key: String },
+
     #[error("backup payload compression error")]
     Compression {
         #[source]
