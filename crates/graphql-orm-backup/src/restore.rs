@@ -14,6 +14,7 @@ pub struct RestoreContext {
 }
 
 impl RestoreContext {
+    /// Builds the default empty-database restore context.
     #[must_use]
     pub fn empty_database() -> Self {
         Self {
@@ -23,6 +24,7 @@ impl RestoreContext {
         }
     }
 
+    /// Builds a dry-run restore context.
     #[must_use]
     pub fn dry_run() -> Self {
         Self {
@@ -33,6 +35,12 @@ impl RestoreContext {
     }
 }
 
+/// Ensures an empty-target restore is only applied to an empty database.
+///
+/// # Errors
+///
+/// Returns [`BackupError::RestoreTargetNotEmpty`] when the context requires an
+/// empty database and the target is not empty.
 pub fn ensure_empty_restore_target(
     target_is_empty: bool,
     context: &RestoreContext,

@@ -92,6 +92,11 @@ async fn create_full_backup_deduplicates_existing_object_blob() {
 
     assert_eq!(result.manifest.objects[0].content_key, object_key);
     assert!(!repository.write_order().contains(&object_key));
+    assert_eq!(
+        repository.get_count(&object_key),
+        0,
+        "existing content-addressed object blobs must not be re-read"
+    );
 }
 
 #[tokio::test]
@@ -222,6 +227,7 @@ fn object_id() -> Uuid {
 struct RecordingRepository {
     blobs: Arc<Mutex<HashMap<String, Bytes>>>,
     writes: Arc<Mutex<Vec<String>>>,
+    gets: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl RecordingRepository {
@@ -231,6 +237,15 @@ impl RecordingRepository {
 
     fn clear_write_order(&self) {
         self.writes.lock().expect("writes lock").clear();
+    }
+
+    fn get_count(&self, key: &str) -> u64 {
+        self.gets
+            .lock()
+            .expect("gets lock")
+            .get(key)
+            .copied()
+            .unwrap_or_default()
     }
 }
 
@@ -249,6 +264,12 @@ impl BackupRepository for RecordingRepository {
     }
 
     async fn get_blob(&self, key: &str) -> Result<Bytes, BackupError> {
+        *self
+            .gets
+            .lock()
+            .expect("gets lock")
+            .entry(key.to_string())
+            .or_default() += 1;
         self.blobs
             .lock()
             .expect("blobs lock")

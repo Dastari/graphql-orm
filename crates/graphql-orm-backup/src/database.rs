@@ -6,21 +6,47 @@ use crate::{BackupError, RestoreContext};
 
 #[async_trait]
 pub trait GraphqlOrmBackupAdapter: Send + Sync {
+    /// Returns backup-relevant schema metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError`] if the adapter cannot read schema metadata.
     async fn schema_snapshot(&self) -> Result<GraphqlOrmBackupSchema, BackupError>;
 
+    /// Exports all backup-enabled tables for a full snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError`] if the adapter cannot export table rows.
     async fn export_full(&self) -> Result<Vec<BackupTableExport>, BackupError>;
 
+    /// Exports changed rows and tombstones since a parent snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError`] if incremental export is unavailable or fails.
     async fn export_incremental(
         &self,
         parent_snapshot_id: Uuid,
     ) -> Result<Vec<BackupChangeExport>, BackupError>;
 
+    /// Restores a full table export.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError`] if the adapter cannot import the rows into the
+    /// target database.
     async fn restore_full(
         &self,
         export: Vec<BackupTableExport>,
         context: RestoreContext,
     ) -> Result<(), BackupError>;
 
+    /// Restores incremental changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError`] if incremental restore is unavailable or fails.
     async fn restore_incremental(
         &self,
         changes: Vec<BackupChangeExport>,
@@ -62,5 +88,6 @@ pub struct BackupChangeExport {
     pub primary_key: String,
     pub action: BackupChangeAction,
     pub row: Option<BackupRow>,
+    /// Change time as UTC Unix seconds.
     pub changed_at: i64,
 }

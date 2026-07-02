@@ -10,6 +10,12 @@ pub struct FullBackupPlan {
     pub objects: Vec<BackupObjectRef>,
 }
 
+/// Plans a full backup by collecting schema, table exports, and object refs.
+///
+/// # Errors
+///
+/// Returns [`BackupError`] if schema export, full row export, or object listing
+/// fails.
 pub async fn plan_full_backup(
     database: &dyn GraphqlOrmBackupAdapter,
     objects: &dyn BackupObjectIndex,

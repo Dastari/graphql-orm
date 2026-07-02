@@ -11,11 +11,18 @@ pub struct LocalBackupRepository {
 }
 
 impl LocalBackupRepository {
+    /// Creates a local repository rooted at a filesystem path.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
+    /// Opens an existing local repository root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError`] if the path cannot be inspected or is not a
+    /// directory.
     pub async fn open_existing(root: impl Into<PathBuf>) -> Result<Self, BackupError> {
         let root = root.into();
         let metadata = tokio::fs::metadata(&root)

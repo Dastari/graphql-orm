@@ -9,10 +9,6 @@ description = "Backup and restore orchestration primitives for graphql-orm appli
 [features]
 default = ["local"]
 local = []
-s3 = []
-azure = []
-dropbox = []
-smb = []
 
 [dependencies]
 async-trait = "0.1"

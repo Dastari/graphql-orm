@@ -14,6 +14,7 @@ pub const DATABASE_EXPORT_FORMAT: &str = "jsonl";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FullBackupRequest {
     pub snapshot_id: Uuid,
+    /// Snapshot creation time as UTC Unix seconds.
     pub created_at: i64,
     pub app_id: String,
     pub app_version: String,
@@ -49,6 +50,13 @@ pub fn object_content_key(sha256_hex: &str) -> String {
     format!("objects/sha256/{shard_a}/{shard_b}/{sha256_hex}")
 }
 
+/// Creates a full snapshot in the repository.
+///
+/// # Errors
+///
+/// Returns [`BackupError`] if planning fails, table serialization or
+/// compression fails, object loading/checksum validation fails, or any
+/// repository write fails.
 pub async fn create_full_backup(
     repository: &dyn BackupRepository,
     database: &dyn GraphqlOrmBackupAdapter,
@@ -91,17 +99,7 @@ pub async fn create_full_backup(
             });
         }
 
-        if repository.blob_exists(&content_key).await? {
-            let existing = repository.get_blob(&content_key).await?;
-            let existing_hash = sha256_hex(&existing);
-            if existing_hash != object.sha256_hex {
-                return Err(BackupError::ChecksumMismatch {
-                    key: content_key,
-                    expected: object.sha256_hex.clone(),
-                    actual: existing_hash,
-                });
-            }
-        } else {
+        if !repository.blob_exists(&content_key).await? {
             repository.put_blob(&content_key, bytes).await?;
         }
 
@@ -143,6 +141,12 @@ pub async fn create_full_backup(
     Ok(FullBackupResult { manifest })
 }
 
+/// Writes a manifest as the final snapshot blob.
+///
+/// # Errors
+///
+/// Returns [`BackupError`] if the checksum cannot be computed, the manifest
+/// cannot be serialized, or the repository cannot write the blob.
 pub async fn write_manifest(
     repository: &dyn BackupRepository,
     manifest: &mut BackupSnapshotManifest,
