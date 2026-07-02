@@ -16,9 +16,10 @@ mod restore;
 mod verify;
 
 pub use backup::{
-    DATABASE_EXPORT_FORMAT, FullBackupRequest, FullBackupResult, bytes_sha256_hex,
-    create_full_backup, database_changes_key, database_table_key, object_content_key,
-    snapshot_manifest_key, write_manifest,
+    CompactChainRequest, CompactChainResult, DATABASE_EXPORT_FORMAT, FullBackupRequest,
+    FullBackupResult, IncrementalBackupRequest, IncrementalBackupResult, bytes_sha256_hex,
+    compact_chain, create_full_backup, create_incremental_backup, database_changes_key,
+    database_table_key, object_content_key, snapshot_manifest_key, write_manifest,
 };
 pub use database::{
     BackupChangeAction, BackupChangeExport, BackupRow, BackupTableExport, GraphqlOrmBackupAdapter,

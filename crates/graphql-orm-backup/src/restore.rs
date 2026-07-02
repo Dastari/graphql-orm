@@ -175,7 +175,7 @@ pub async fn restore_objects(
     Ok(())
 }
 
-async fn load_table_exports(
+pub(crate) async fn load_table_exports(
     repository: &dyn BackupRepository,
     manifest: &BackupSnapshotManifest,
 ) -> Result<Vec<BackupTableExport>, BackupError> {
@@ -190,7 +190,7 @@ async fn load_table_exports(
     Ok(exports)
 }
 
-async fn load_change_exports(
+pub(crate) async fn load_change_exports(
     repository: &dyn BackupRepository,
     manifest: &BackupSnapshotManifest,
 ) -> Result<Vec<BackupChangeExport>, BackupError> {
