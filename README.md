@@ -102,6 +102,12 @@ query {
 SQLite/Postgres entities also get generated mutations and repository helpers unless policy/backend
 settings make them unavailable.
 
+`schema_roots!` can hide generated GraphQL mutations without disabling generated repository
+writes. `generated_mutations` defaults to `"all"` for compatibility; use `"none"` to expose only
+custom mutation roots from `extra_mutation_types`, or use `"allowlist"` with
+`generated_mutation_allowlist: [Entity]` / `"denylist"` with
+`generated_mutation_denylist: [Entity]` for mixed public exposure.
+
 ## SQL Server Read-Only Example
 
 SQL Server support is intentionally read-only. It lets projects point the same entity/filter/query

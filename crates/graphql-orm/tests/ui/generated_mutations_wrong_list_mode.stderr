@@ -1,0 +1,5 @@
+error: `generated_mutation_allowlist` requires `generated_mutations: "allowlist"`
+  --> tests/ui/generated_mutations_wrong_list_mode.rs:18:5
+   |
+18 |     generated_mutation_allowlist: [Note],
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^

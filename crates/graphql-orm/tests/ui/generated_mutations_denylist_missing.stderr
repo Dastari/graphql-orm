@@ -1,0 +1,5 @@
+error: `generated_mutations: "denylist"` requires a non-empty `generated_mutation_denylist`
+  --> tests/ui/generated_mutations_denylist_missing.rs:17:5
+   |
+17 |     generated_mutations: "denylist",
+   |     ^^^^^^^^^^^^^^^^^^^

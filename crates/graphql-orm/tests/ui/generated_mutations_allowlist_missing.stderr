@@ -1,0 +1,5 @@
+error: `generated_mutations: "allowlist"` requires a non-empty `generated_mutation_allowlist`
+  --> tests/ui/generated_mutations_allowlist_missing.rs:17:5
+   |
+17 |     generated_mutations: "allowlist",
+   |     ^^^^^^^^^^^^^^^^^^^

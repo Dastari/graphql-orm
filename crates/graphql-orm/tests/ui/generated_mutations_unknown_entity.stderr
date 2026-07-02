@@ -1,0 +1,5 @@
+error: `generated_mutation_allowlist` entries must also be listed in `entities`
+  --> tests/ui/generated_mutations_unknown_entity.rs:18:36
+   |
+18 |     generated_mutation_allowlist: [MissingNote],
+   |                                    ^^^^^^^^^^^

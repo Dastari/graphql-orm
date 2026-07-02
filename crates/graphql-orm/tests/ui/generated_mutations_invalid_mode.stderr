@@ -1,0 +1,5 @@
+error: generated_mutations must be one of "all", "none", "allowlist", or "denylist"
+  --> tests/ui/generated_mutations_invalid_mode.rs:17:26
+   |
+17 |     generated_mutations: "sometimes",
+   |                          ^^^^^^^^^^^

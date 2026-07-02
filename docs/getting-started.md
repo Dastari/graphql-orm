@@ -66,6 +66,11 @@ async fn build_schema(pool: graphql_orm::sqlx::SqlitePool) -> AppSchema {
 The generated `schema_builder(database)` registers the database runtime and generated dataloaders.
 Applications can attach additional async-graphql data after calling it.
 
+Generated GraphQL mutation exposure is controlled at the schema root, not by disabling repository
+writes. `generated_mutations` defaults to `"all"`; set it to `"none"`, `"allowlist"`, or
+`"denylist"` to control only which generated mutations are merged into the public mutation root.
+Custom roots in `extra_mutation_types` remain available.
+
 ## Query Shape
 
 ```graphql
