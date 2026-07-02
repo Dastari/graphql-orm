@@ -1310,6 +1310,21 @@ pub struct SearchFieldDef {
     pub policy: Option<&'static str>,
 }
 
+/// Search metadata for one JSON path extracted from a local persisted JSON field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchJsonPathDef {
+    /// Rust field name on the entity.
+    pub field_name: &'static str,
+    /// Database column name used for writes and schema metadata.
+    pub column_name: &'static str,
+    /// Portable JSON path, such as `$.description.summary` or `$.tags[*].label`.
+    pub path: &'static str,
+    /// Field weight inside the search document.
+    pub weight: SearchWeight,
+    /// Optional policy key required for read-policy-protected source fields.
+    pub policy: Option<&'static str>,
+}
+
 /// Search metadata for related fields copied into a parent entity search document.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SearchRelationFieldDef {
@@ -1352,6 +1367,8 @@ pub struct SearchIndexDef {
     pub fallback_enabled: bool,
     /// Local searchable fields.
     pub fields: &'static [SearchFieldDef],
+    /// Local persisted JSON paths copied into denormalized documents.
+    pub json_paths: &'static [SearchJsonPathDef],
     /// Related fields copied into denormalized documents.
     pub relations: &'static [SearchRelationFieldDef],
 }
@@ -1632,6 +1649,15 @@ pub struct SearchFieldModel {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct SearchJsonPathModel {
+    pub field_name: String,
+    pub column_name: String,
+    pub path: String,
+    pub weight: SearchWeight,
+    pub policy: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct SearchRelationFieldModel {
     pub relation_field: String,
     pub target_type: String,
@@ -1654,6 +1680,7 @@ pub struct SearchIndexModel {
     pub min_token_len: usize,
     pub fallback_enabled: bool,
     pub fields: Vec<SearchFieldModel>,
+    pub json_paths: Vec<SearchJsonPathModel>,
     pub relations: Vec<SearchRelationFieldModel>,
 }
 
@@ -2260,6 +2287,17 @@ impl From<&EntityMetadata> for TableModel {
                                 policy: field.policy.map(str::to_string),
                             })
                             .collect(),
+                        json_paths: index
+                            .json_paths
+                            .iter()
+                            .map(|json_path| SearchJsonPathModel {
+                                field_name: json_path.field_name.to_string(),
+                                column_name: json_path.column_name.to_string(),
+                                path: json_path.path.to_string(),
+                                weight: json_path.weight,
+                                policy: json_path.policy.map(str::to_string),
+                            })
+                            .collect(),
                         relations: index
                             .relations
                             .iter()
@@ -2649,6 +2687,26 @@ pub fn stable_schema_model_hash(schema: &SchemaModel) -> String {
                 canonical.push_str(field.alias.as_deref().unwrap_or(""));
                 canonical.push('|');
                 canonical.push_str(field.policy.as_deref().unwrap_or(""));
+                canonical.push('\n');
+            }
+
+            let mut json_paths = index.json_paths.iter().collect::<Vec<_>>();
+            json_paths.sort_by(|left, right| {
+                left.field_name
+                    .cmp(&right.field_name)
+                    .then_with(|| left.path.cmp(&right.path))
+            });
+            for json_path in json_paths {
+                canonical.push_str("search_json_path:");
+                canonical.push_str(&json_path.field_name);
+                canonical.push('|');
+                canonical.push_str(&json_path.column_name);
+                canonical.push('|');
+                canonical.push_str(&json_path.path);
+                canonical.push('|');
+                canonical.push_str(json_path.weight.as_str());
+                canonical.push('|');
+                canonical.push_str(json_path.policy.as_deref().unwrap_or(""));
                 canonical.push('\n');
             }
 

@@ -10,7 +10,7 @@ use super::core::{
     TableModel,
 };
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
-use super::core::{SearchFieldModel, SearchRelationFieldModel, SearchWeight};
+use super::core::{SearchFieldModel, SearchJsonPathModel, SearchRelationFieldModel, SearchWeight};
 #[cfg(feature = "postgres")]
 use super::core::{SpatialColumnDef, SpatialGeometryType};
 use super::dialect::DatabaseBackend;
@@ -466,6 +466,16 @@ fn sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+fn json_option_string(value: Option<&String>) -> String {
+    value
+        .map(|value| json_string(value))
+        .unwrap_or_else(|| "null".to_string())
+}
+
 fn search_index_config_json(index: &SearchIndexModel) -> String {
     let fields = index
         .fields
@@ -486,6 +496,21 @@ fn search_index_config_json(index: &SearchIndexModel) -> String {
                     .as_ref()
                     .map(|value| format!("\"{}\"", value.replace('"', "\\\"")))
                     .unwrap_or_else(|| "null".to_string())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let json_paths = index
+        .json_paths
+        .iter()
+        .map(|json_path| {
+            format!(
+                "{{\"field\":\"{}\",\"column\":\"{}\",\"path\":\"{}\",\"weight\":\"{}\",\"policy\":{}}}",
+                json_path.field_name.replace('"', "\\\""),
+                json_path.column_name.replace('"', "\\\""),
+                json_path.path.replace('"', "\\\""),
+                json_path.weight.as_str(),
+                json_option_string(json_path.policy.as_ref())
             )
         })
         .collect::<Vec<_>>()
@@ -516,7 +541,7 @@ fn search_index_config_json(index: &SearchIndexModel) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "{{\"name\":\"{}\",\"table\":\"{}\",\"entity\":\"{}\",\"primary_key\":\"{}\",\"strategy\":\"{}\",\"language\":\"{}\",\"tokenizer\":\"{}\",\"min_token_len\":{},\"fallback_enabled\":{},\"fields\":[{}],\"relations\":[{}]}}",
+        "{{\"name\":\"{}\",\"table\":\"{}\",\"entity\":\"{}\",\"primary_key\":\"{}\",\"strategy\":\"{}\",\"language\":\"{}\",\"tokenizer\":\"{}\",\"min_token_len\":{},\"fallback_enabled\":{},\"fields\":[{}],\"json_paths\":[{}],\"relations\":[{}]}}",
         index.name.replace('"', "\\\""),
         index.table_name.replace('"', "\\\""),
         index.entity_name.replace('"', "\\\""),
@@ -527,6 +552,7 @@ fn search_index_config_json(index: &SearchIndexModel) -> String {
         index.min_token_len,
         index.fallback_enabled,
         fields,
+        json_paths,
         relations
     )
 }
@@ -744,6 +770,32 @@ fn parse_search_index_config(config_json: &str) -> Option<SearchIndexModel> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let json_paths = value
+        .get("json_paths")
+        .and_then(|value| value.as_array())
+        .map(|json_paths| {
+            json_paths
+                .iter()
+                .filter_map(|json_path| {
+                    Some(SearchJsonPathModel {
+                        field_name: json_path.get("field")?.as_str()?.to_string(),
+                        column_name: json_path.get("column")?.as_str()?.to_string(),
+                        path: json_path.get("path")?.as_str()?.to_string(),
+                        weight: parse_search_weight(
+                            json_path
+                                .get("weight")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("D"),
+                        ),
+                        policy: json_path
+                            .get("policy")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     Some(SearchIndexModel {
         name: value.get("name")?.as_str()?.to_string(),
         table_name: value.get("table")?.as_str()?.to_string(),
@@ -769,6 +821,7 @@ fn parse_search_index_config(config_json: &str) -> Option<SearchIndexModel> {
             .and_then(|value| value.as_bool())
             .unwrap_or(true),
         fields,
+        json_paths,
         relations,
     })
 }

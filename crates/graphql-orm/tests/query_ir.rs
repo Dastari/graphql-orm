@@ -2,7 +2,7 @@ use graphql_orm::graphql::orm::{
     AggregateFunction, AggregateQuery, DatabaseBackend, DeleteQuery, FilterExpression, PageInput,
     PaginationConfig, PaginationRequest, RenderedQuery, SchemaLimits, SelectQuery, SortExpression,
     SpatialPredicate, SqlDialect, SqlValue, contains_like_pattern, render_aggregate_query,
-    render_delete_query, render_select_query,
+    render_delete_query, render_select_query, search_json_path_text, validate_search_json_path,
 };
 
 fn sample_select() -> SelectQuery {
@@ -278,6 +278,62 @@ fn delete_renderer_uses_filter_ir() {
 
     assert_eq!(rendered.sql, "DELETE FROM users WHERE id = $1");
     assert_eq!(rendered.values, vec![SqlValue::String("u1".to_string())]);
+}
+
+#[test]
+fn search_json_path_extracts_supported_text_shapes() {
+    let value = serde_json::json!({
+        "description": { "summary": "Public description" },
+        "historical": { "summary": null },
+        "classification": {
+            "primary": { "label": "Architecture" },
+            "keywords": [
+                { "label": "heritage" },
+                { "label": "civic" },
+                { "label": 42 },
+                {}
+            ]
+        },
+        "tags": [
+            { "value": "blue" },
+            { "value": "stone" }
+        ],
+        "score": 12
+    });
+
+    assert_eq!(
+        search_json_path_text(&value, "$.description.summary"),
+        "Public description"
+    );
+    assert_eq!(
+        search_json_path_text(&value, "$.classification.primary.label"),
+        "Architecture"
+    );
+    assert_eq!(
+        search_json_path_text(&value, "$.classification.keywords[*].label"),
+        "heritage civic"
+    );
+    assert_eq!(
+        search_json_path_text(&value["tags"], "$[*].value"),
+        "blue stone"
+    );
+    assert_eq!(search_json_path_text(&value, "$.missing.summary"), "");
+    assert_eq!(search_json_path_text(&value, "$.historical.summary"), "");
+    assert_eq!(search_json_path_text(&value, "$.score"), "");
+    assert_eq!(search_json_path_text(&value, "$.tags[*].missing"), "");
+}
+
+#[test]
+fn search_json_path_validation_rejects_unsupported_syntax() {
+    assert!(validate_search_json_path("$.description.summary").is_ok());
+    assert!(validate_search_json_path("$.classification.keywords[*].label").is_ok());
+    assert!(validate_search_json_path("$[*].value").is_ok());
+
+    assert!(validate_search_json_path("description.summary").is_err());
+    assert!(validate_search_json_path("$").is_err());
+    assert!(validate_search_json_path("$..summary").is_err());
+    assert!(validate_search_json_path("$.keywords[0].label").is_err());
+    assert!(validate_search_json_path("$.keywords[*").is_err());
 }
 
 #[test]

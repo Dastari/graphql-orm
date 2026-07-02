@@ -1,0 +1,5 @@
+error: unsupported search_json path syntax; supported forms include $.field, $.nested.field, $.array[*].field, and $[*].field
+  --> tests/ui/search_json_invalid_path.rs:16:38
+   |
+16 |     #[graphql_orm(search_json(path = "$.keywords[0].label", weight = "C"))]
+   |                                      ^^^^^^^^^^^^^^^^^^^^^

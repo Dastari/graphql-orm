@@ -1,0 +1,5 @@
+error: private fields cannot use full-text search_json paths
+  --> tests/ui/search_json_private_field.rs:15:5
+   |
+15 |     #[graphql_orm(private)]
+   |     ^

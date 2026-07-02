@@ -108,13 +108,18 @@ Hooks are intended for application behavior such as audit rows, validation, down
 
 ## Search Document Maintenance
 
-Entities with `#[graphql_orm(searchable(...))]` maintain local search documents through generated ORM
-writes once the managed search structures exist.
+Entities with `#[graphql_orm(searchable(...))]` or `#[graphql_orm(search_json(...))]` maintain local
+search documents through generated ORM writes once the managed search structures exist.
 
 - create/update/upsert refresh the entity document
 - delete removes the entity document
 - `Entity::rebuild_search_index(&database)` refreshes all documents for that entity
 - `Entity::rebuild_search_document(&database, &id)` refreshes one entity
+
+JSON search paths are extracted from the Rust entity value before the backend-specific search
+document is persisted. This keeps Postgres shadow-table/`tsvector` search and SQLite FTS5 search
+backend-agnostic for application code. Missing JSON paths, null values, non-string scalars, and empty
+wildcard matches contribute empty text rather than failing a write or rebuild.
 
 Writes made outside `graphql-orm` can leave native search structures stale. Run a rebuild after
 external imports, manual SQL updates, or relation-data changes that should be reflected in a

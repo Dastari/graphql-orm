@@ -3,6 +3,23 @@
 This page records user-facing changes for recent `graphql-orm` releases. Version numbers refer to
 the runtime crate unless a macro crate version is called out separately.
 
+## 0.2.19
+
+Full-text search JSON path support.
+
+- Bumped `graphql-orm` to `0.2.19`.
+- Bumped `graphql-orm-macros` to `0.3.20`.
+- Added `#[graphql_orm(search_json(path = "...", weight = "..."))]` for persisted
+  `#[graphql_orm(json)]` fields.
+- JSON search paths are extracted in Rust into the existing denormalized `SearchDocument`, so
+  Postgres and SQLite continue to use the current managed search storage without app-specific SQL.
+- Supported portable path forms are `$.field`, `$.nested.field`, `$.array[*].field`, and
+  `$[*].field`.
+- Missing paths, nulls, non-string scalars, empty wildcard matches, and invalid runtime values
+  contribute empty text rather than failing writes or rebuilds.
+- Search schema metadata, hashes, migrations, rebuild helpers, and generated GraphQL/Rust search
+  resolvers now include configured JSON path chunks.
+
 ## 0.2.18
 
 Generated mutation exposure controls.

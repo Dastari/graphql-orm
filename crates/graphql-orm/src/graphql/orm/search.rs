@@ -22,6 +22,11 @@ pub struct SearchDocumentChunk {
 pub enum SearchDocumentSource {
     /// Text came from a local entity field.
     Field { field_name: &'static str },
+    /// Text came from a configured JSON path on a local entity field.
+    JsonPath {
+        field_name: &'static str,
+        path: &'static str,
+    },
     /// Text came from a configured relation field.
     RelationField {
         relation_field: &'static str,
@@ -170,6 +175,107 @@ pub fn tokenize_search_text(value: &str, min_token_len: usize) -> Vec<String> {
         .filter(|token| token.chars().count() >= min_token_len)
         .map(str::to_string)
         .collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SearchJsonPathSegment<'a> {
+    Field(&'a str),
+    ArrayWildcard,
+}
+
+fn parse_search_json_path(path: &str) -> Result<Vec<SearchJsonPathSegment<'_>>, String> {
+    if !path.starts_with('$') {
+        return Err("search_json path must start with `$`".to_string());
+    }
+
+    let mut segments = Vec::new();
+    let mut index = 1;
+    while index < path.len() {
+        let remainder = &path[index..];
+        if remainder.starts_with('.') {
+            index += 1;
+            let field_start = index;
+            while index < path.len() {
+                let ch = path[index..].chars().next().unwrap_or_default();
+                if ch == '.' || ch == '[' {
+                    break;
+                }
+                if !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
+                    return Err(format!(
+                        "unsupported character `{ch}` in search_json path field"
+                    ));
+                }
+                index += ch.len_utf8();
+            }
+            if field_start == index {
+                return Err("search_json path field segments cannot be empty".to_string());
+            }
+            segments.push(SearchJsonPathSegment::Field(&path[field_start..index]));
+        } else if remainder.starts_with("[*]") {
+            segments.push(SearchJsonPathSegment::ArrayWildcard);
+            index += 3;
+        } else {
+            return Err("unsupported search_json path syntax; supported forms include $.field, $.nested.field, $.array[*].field, and $[*].field".to_string());
+        }
+    }
+
+    if segments.is_empty() {
+        return Err("search_json path must select at least one field or wildcard".to_string());
+    }
+
+    Ok(segments)
+}
+
+/// Validate the portable JSON path syntax supported by `#[graphql_orm(search_json(...))]`.
+///
+/// Supported forms are intentionally small and backend-agnostic: `$.field`,
+/// `$.nested.field`, `$.array[*].field`, and `$[*].field`. Field names may
+/// contain ASCII letters, digits, underscores, and hyphens.
+pub fn validate_search_json_path(path: &str) -> Result<(), String> {
+    parse_search_json_path(path).map(|_| ())
+}
+
+/// Extract searchable text from a JSON value using the portable search JSON path syntax.
+///
+/// Missing paths, nulls, non-string scalar values, non-array wildcard inputs,
+/// and unsupported path syntax return an empty string. Multiple string matches
+/// are joined with spaces.
+pub fn search_json_path_text(value: &serde_json::Value, path: &str) -> String {
+    let Ok(segments) = parse_search_json_path(path) else {
+        return String::new();
+    };
+    let mut current = vec![value];
+    for segment in segments {
+        let mut next = Vec::new();
+        match segment {
+            SearchJsonPathSegment::Field(field) => {
+                for value in current {
+                    if let Some(child) = value.as_object().and_then(|object| object.get(field)) {
+                        next.push(child);
+                    }
+                }
+            }
+            SearchJsonPathSegment::ArrayWildcard => {
+                for value in current {
+                    if let Some(items) = value.as_array() {
+                        next.extend(items.iter());
+                    }
+                }
+            }
+        }
+        if next.is_empty() {
+            return String::new();
+        }
+        current = next;
+    }
+
+    current
+        .into_iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn query_tokens(input: &SearchInput, min_token_len: usize) -> Vec<String> {

@@ -2004,7 +2004,7 @@ pub(crate) fn generate_graphql_operations(
     let has_search = fields
         .iter()
         .filter_map(|f| parse_field_metadata(f).ok())
-        .any(|m| m.search.is_some() || m.search_relation.is_some());
+        .any(|m| m.search.is_some() || !m.search_json.is_empty() || m.search_relation.is_some());
     let relation_preload_list = if has_relations {
         quote! {
             let selection = ctx.field().selection_set().collect::<Vec<_>>();

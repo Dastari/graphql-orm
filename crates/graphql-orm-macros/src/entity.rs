@@ -509,11 +509,13 @@ pub(crate) struct FieldMetadata {
     /// Skip from generated public GraphQL Create/Update inputs only; field remains in DB,
     /// the Rust entity, and generated trusted Rust Create/Update input structs.
     pub(crate) skip_input: bool,
+    pub(crate) is_private: bool,
     pub(crate) is_date_field: bool,
     pub(crate) is_boolean_field: bool,
     pub(crate) is_json_field: bool,
     pub(crate) spatial: Option<SpatialFieldMetadata>,
     pub(crate) search: Option<SearchFieldMetadata>,
+    pub(crate) search_json: Vec<SearchJsonPathMetadata>,
     pub(crate) search_relation: Option<SearchRelationMetadata>,
     /// Async write transform: fn(&Context, String) -> Result<String>
     /// Applied before INSERT/UPDATE to transform the value (e.g., encryption)
@@ -548,6 +550,23 @@ impl Default for SearchFieldMetadata {
         Self {
             weight: "D".to_string(),
             alias: None,
+            policy: None,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct SearchJsonPathMetadata {
+    pub(crate) path: String,
+    pub(crate) weight: String,
+    pub(crate) policy: Option<String>,
+}
+
+impl Default for SearchJsonPathMetadata {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            weight: "D".to_string(),
             policy: None,
         }
     }
@@ -617,11 +636,13 @@ impl Default for FieldMetadata {
             relation_propagate_change: None,
             skip_db: false,
             skip_input: false,
+            is_private: false,
             is_date_field: false,
             is_boolean_field: false,
             is_json_field: false,
             spatial: None,
             search: None,
+            search_json: Vec::new(),
             search_relation: None,
             transform_write: None,
             transform_read: None,
@@ -694,6 +715,62 @@ fn validate_search_weight(value: &str, span: proc_macro2::Span) -> syn::Result<(
             "search weight must be one of \"A\", \"B\", \"C\", or \"D\"",
         )),
     }
+}
+
+fn validate_search_json_path(value: &str, span: proc_macro2::Span) -> syn::Result<()> {
+    if !value.starts_with('$') {
+        return Err(syn::Error::new(
+            span,
+            "search_json path must start with `$`",
+        ));
+    }
+
+    let mut saw_segment = false;
+    let mut index = 1;
+    while index < value.len() {
+        let remainder = &value[index..];
+        if remainder.starts_with('.') {
+            index += 1;
+            let field_start = index;
+            while index < value.len() {
+                let ch = value[index..].chars().next().unwrap_or_default();
+                if ch == '.' || ch == '[' {
+                    break;
+                }
+                if !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
+                    return Err(syn::Error::new(
+                        span,
+                        "unsupported search_json path field character; field names may contain ASCII letters, digits, underscores, and hyphens",
+                    ));
+                }
+                index += ch.len_utf8();
+            }
+            if field_start == index {
+                return Err(syn::Error::new(
+                    span,
+                    "search_json path field segments cannot be empty",
+                ));
+            }
+            saw_segment = true;
+        } else if remainder.starts_with("[*]") {
+            index += 3;
+            saw_segment = true;
+        } else {
+            return Err(syn::Error::new(
+                span,
+                "unsupported search_json path syntax; supported forms include $.field, $.nested.field, $.array[*].field, and $[*].field",
+            ));
+        }
+    }
+
+    if !saw_segment {
+        return Err(syn::Error::new(
+            span,
+            "search_json path must select at least one field or wildcard",
+        ));
+    }
+
+    Ok(())
 }
 
 fn search_weight_tokens(
@@ -772,6 +849,7 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                 "graphql_orm" => {
                     attr.parse_nested_meta(|nested| {
                         if nested.path.is_ident("private") {
+                            meta.is_private = true;
                             meta.read = false;
                             meta.filter = false;
                             meta.order = false;
@@ -852,6 +930,40 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                                 Ok(())
                             })?;
                             meta.search = Some(search);
+                        } else if nested.path.is_ident("search_json") {
+                            let mut search_json = SearchJsonPathMetadata::default();
+                            nested.parse_nested_meta(|search_meta| {
+                                if search_meta.path.is_ident("path") {
+                                    let value = search_meta.value()?;
+                                    let lit: syn::LitStr = value.parse()?;
+                                    let path = lit.value();
+                                    validate_search_json_path(&path, lit.span())?;
+                                    search_json.path = path;
+                                } else if search_meta.path.is_ident("weight") {
+                                    let value = search_meta.value()?;
+                                    let lit: syn::LitStr = value.parse()?;
+                                    let weight = lit.value();
+                                    validate_search_weight(&weight, lit.span())?;
+                                    search_json.weight = weight;
+                                } else if search_meta.path.is_ident("policy") {
+                                    let value = search_meta.value()?;
+                                    let lit: syn::LitStr = value.parse()?;
+                                    search_json.policy = Some(lit.value());
+                                } else {
+                                    return Err(syn::Error::new(
+                                        search_meta.path.span(),
+                                        "unsupported search_json option; expected path, weight, or policy",
+                                    ));
+                                }
+                                Ok(())
+                            })?;
+                            if search_json.path.is_empty() {
+                                return Err(syn::Error::new(
+                                    nested.path.span(),
+                                    "search_json requires path = \"...\"",
+                                ));
+                            }
+                            meta.search_json.push(search_json);
                         } else if nested.path.is_ident("search_relation") {
                             let mut search_relation = SearchRelationMetadata::default();
                             nested.parse_nested_meta(|search_meta| {
@@ -1561,6 +1673,7 @@ fn generate_entity_impl(
     let mut from_row_fields = Vec::new();
     let mut relation_metadata_defs = Vec::new();
     let mut search_field_defs = Vec::new();
+    let mut search_json_path_defs = Vec::new();
     let mut search_relation_defs = Vec::new();
     let mut search_document_chunks = Vec::new();
     let mut sortable_columns: Vec<(syn::Ident, String)> = Vec::new();
@@ -1583,6 +1696,12 @@ fn generate_entity_impl(
             return Err(syn::Error::new(
                 field.span(),
                 "graphql_orm(searchable(...)) requires a persisted scalar field",
+            ));
+        }
+        if !field_meta.search_json.is_empty() && (field_meta.is_relation || field_meta.skip_db) {
+            return Err(syn::Error::new(
+                field.span(),
+                "graphql_orm(search_json(...)) requires a persisted JSON field",
             ));
         }
 
@@ -1851,6 +1970,55 @@ fn generate_entity_impl(
         } else {
             quote! { None }
         };
+        if !field_meta.search_json.is_empty() {
+            if !field_meta.is_json_field {
+                return Err(syn::Error::new(
+                    field.span(),
+                    "graphql_orm(search_json(...)) requires a field marked #[graphql_orm(json)]",
+                ));
+            }
+            if field_meta.is_private {
+                return Err(syn::Error::new(
+                    field.span(),
+                    "private fields cannot use full-text search_json paths",
+                ));
+            }
+            for search_json in &field_meta.search_json {
+                if field_meta.read_policy.is_some() && search_json.policy.is_none() {
+                    return Err(syn::Error::new(
+                        field.span(),
+                        "search_json fields with read_policy require search_json(policy = \"...\")",
+                    ));
+                }
+                let weight = search_weight_tokens(&search_json.weight, field.span())?;
+                let path = syn::LitStr::new(&search_json.path, field.span());
+                let policy = option_lit_tokens(search_json.policy.as_deref(), field.span());
+                search_json_path_defs.push(quote! {
+                    ::graphql_orm::graphql::orm::SearchJsonPathDef {
+                        field_name: #rust_name,
+                        column_name: #db_col,
+                        path: #path,
+                        weight: #weight,
+                        policy: #policy,
+                    }
+                });
+                search_document_chunks.push(quote! {
+                    if let Ok(value) = ::graphql_orm::serde_json::to_value(&self.#field_name) {
+                        let text = ::graphql_orm::graphql::orm::search_json_path_text(&value, #path);
+                        if !text.trim().is_empty() {
+                            chunks.push(::graphql_orm::graphql::orm::SearchDocumentChunk {
+                                source: ::graphql_orm::graphql::orm::SearchDocumentSource::JsonPath {
+                                    field_name: #rust_name,
+                                    path: #path,
+                                },
+                                weight: #weight,
+                                text,
+                            });
+                        }
+                    }
+                });
+            }
+        }
         let default_val = field_meta.default.clone().or_else(|| {
             if rust_name == "created_at" || rust_name == "updated_at" {
                 Some(backend_current_epoch_expr(backend).to_string())
@@ -2012,7 +2180,9 @@ fn generate_entity_impl(
         .collect();
     let schema_policy_const = schema_policy_tokens(entity_meta.schema_policy.as_deref());
     let columns_array: Vec<&str> = column_names.iter().map(|s| s.as_str()).collect();
-    let has_search = !search_field_defs.is_empty() || !search_relation_defs.is_empty();
+    let has_search = !search_field_defs.is_empty()
+        || !search_json_path_defs.is_empty()
+        || !search_relation_defs.is_empty();
     let search_config = entity_meta.search.clone().unwrap_or_default();
     let search_enabled = search_config.index;
     let search_language = search_config.language;
@@ -2056,6 +2226,9 @@ fn generate_entity_impl(
                     static FIELDS: &[::graphql_orm::graphql::orm::SearchFieldDef] = &[
                         #(#search_field_defs),*
                     ];
+                    static JSON_PATHS: &[::graphql_orm::graphql::orm::SearchJsonPathDef] = &[
+                        #(#search_json_path_defs),*
+                    ];
                     static RELATIONS: &[::graphql_orm::graphql::orm::SearchRelationFieldDef] = &[
                         #(#search_relation_defs),*
                     ];
@@ -2072,6 +2245,7 @@ fn generate_entity_impl(
                             min_token_len: #search_min_token_len,
                             fallback_enabled: #search_fallback_enabled,
                             fields: FIELDS,
+                            json_paths: JSON_PATHS,
                             relations: RELATIONS,
                         };
                     Some(&INDEX)

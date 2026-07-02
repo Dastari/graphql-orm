@@ -118,6 +118,53 @@ read policy require an explicit search policy:
 pub body: Option<String>,
 ```
 
+Persisted JSON fields can contribute selected string paths to the same search document with
+`search_json(...)`. Extraction happens in Rust from the entity value, so Postgres and SQLite keep the
+same public API and continue to use their existing managed search storage:
+
+```rust
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql_entity(table = "records", plural = "Records", backend = "sqlite")]
+#[graphql_orm(search(index = true))]
+pub struct Record {
+    #[primary_key]
+    pub id: String,
+
+    #[graphql_orm(searchable(weight = "A"))]
+    pub display_title: String,
+
+    #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
+    #[graphql_orm(search_json(path = "$.description.summary", weight = "C"))]
+    #[graphql_orm(search_json(path = "$.historical.summary", weight = "C"))]
+    #[graphql_orm(search_json(path = "$.classification.primary.label", weight = "B"))]
+    #[graphql_orm(search_json(path = "$.classification.keywords[*].label", weight = "C"))]
+    pub content: Content,
+
+    #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
+    #[graphql_orm(search_json(path = "$[*].value", weight = "C"))]
+    pub tags: Vec<Tag>,
+}
+```
+
+Supported JSON search paths are intentionally portable: `$.field`, `$.nested.field`,
+`$.array[*].field`, and `$[*].field`. Multiple string matches are joined with spaces. Missing paths,
+nulls, non-string scalars, empty arrays, and serialization failures contribute empty text. The
+`weight` option uses the same `A`/`B`/`C`/`D` values as `searchable(...)` and defaults to `D`.
+
+`search_json(...)` is only accepted on persisted JSON fields. Private fields are rejected. JSON
+fields with a read policy require an explicit search policy:
+
+```rust
+#[graphql_orm(read_policy = "record.content.read")]
+#[graphql_orm(json)]
+#[graphql_orm(search_json(
+    path = "$.description.summary",
+    weight = "C",
+    policy = "record.content.search"
+))]
+pub content: Content,
+```
+
 Generated GraphQL adds a per-entity search resolver:
 
 ```graphql

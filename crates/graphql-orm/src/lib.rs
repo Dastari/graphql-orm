@@ -113,6 +113,11 @@
 //!
 //!     #[graphql_orm(searchable(weight = "A"))]
 //!     pub title: String,
+//!
+//!     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
+//!     #[graphql_orm(search_json(path = "$.description.summary", weight = "C"))]
+//!     #[graphql_orm(search_json(path = "$.classification.keywords[*].label", weight = "C"))]
+//!     pub content: ArticleContent,
 //! }
 //!
 //! let hits = Article::search(&pool, SearchInput {
@@ -129,6 +134,9 @@
 //! backfill existing data automatically. Run the generated
 //! `Entity::rebuild_search_index(&database)` helper after adding or changing a
 //! search index on an existing table.
+//! JSON search paths are extracted in Rust from persisted `#[graphql_orm(json)]`
+//! field values and then stored in the same backend-specific search document as
+//! ordinary text fields.
 //! Native PostgreSQL and SQLite FTS5 search paths push score, count, limit, and
 //! offset into SQL. PostgreSQL requests that carry a database auth context still
 //! use native search inside the same transaction-local context used for RLS.

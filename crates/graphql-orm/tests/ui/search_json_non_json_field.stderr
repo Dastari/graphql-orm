@@ -1,0 +1,5 @@
+error: graphql_orm(search_json(...)) requires a field marked #[graphql_orm(json)]
+  --> tests/ui/search_json_non_json_field.rs:10:5
+   |
+10 |     #[graphql_orm(search_json(path = "$.summary", weight = "C"))]
+   |     ^
