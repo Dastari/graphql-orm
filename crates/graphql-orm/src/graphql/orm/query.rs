@@ -142,6 +142,31 @@ pub struct SelectQuery {
     pub count_only: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AggregateFunction {
+    Count,
+    Max,
+    Min,
+}
+
+impl AggregateFunction {
+    pub fn as_sql(self) -> &'static str {
+        match self {
+            Self::Count => "COUNT",
+            Self::Max => "MAX",
+            Self::Min => "MIN",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AggregateQuery {
+    pub table: &'static str,
+    pub function: AggregateFunction,
+    pub column: Option<String>,
+    pub filter: Option<FilterExpression>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeleteQuery {
     pub table: &'static str,
@@ -797,6 +822,28 @@ pub fn render_select_query(dialect: DatabaseBackend, query: &SelectQuery) -> Ren
     RenderedQuery { sql, values }
 }
 
+pub fn render_aggregate_query(dialect: DatabaseBackend, query: &AggregateQuery) -> RenderedQuery {
+    let argument = query.column.as_deref().unwrap_or("*");
+    let projection = format!(
+        "{}({}) AS __gom_aggregate",
+        query.function.as_sql(),
+        argument
+    );
+    let mut sql = format!("SELECT {} FROM {}", projection, query.table);
+    let mut values = Vec::new();
+    let mut next_index = 1usize;
+
+    if let Some(filter) = &query.filter {
+        let where_sql = render_filter_expression(dialect, filter, &mut next_index, &mut values);
+        if !where_sql.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_sql);
+        }
+    }
+
+    RenderedQuery { sql, values }
+}
+
 pub fn render_delete_query(dialect: DatabaseBackend, query: &DeleteQuery) -> RenderedQuery {
     let mut sql = format!("DELETE FROM {}", query.table);
     let mut values = Vec::new();
@@ -1011,6 +1058,39 @@ where
         self.build_select_query_with_config(PaginationConfig::default(), false)
     }
 
+    fn aggregate_column_sql(column: &str) -> Result<String, sqlx::Error>
+    where
+        T: DatabaseSchema,
+    {
+        let column_def = T::columns()
+            .iter()
+            .find(|definition| definition.name == column || definition.rust_name == column)
+            .ok_or_else(|| sqlx::Error::ColumnNotFound(column.to_string()))?;
+        Ok(B::DIALECT.quote_identifier_path(column_def.name))
+    }
+
+    fn build_aggregate_query(
+        &self,
+        function: AggregateFunction,
+        column: Option<&str>,
+    ) -> Result<AggregateQuery, sqlx::Error>
+    where
+        T: DatabaseSchema,
+    {
+        if self.requires_in_memory_filtering() {
+            return Err(sqlx::Error::Protocol(
+                "aggregate queries require filters that can be rendered to SQL".to_string(),
+            ));
+        }
+        let column = column.map(Self::aggregate_column_sql).transpose()?;
+        Ok(AggregateQuery {
+            table: T::TABLE_NAME,
+            function,
+            column,
+            filter: filter_expression_from_raw_parts(&self.where_clauses, &self.values),
+        })
+    }
+
     pub(crate) fn requires_in_memory_filtering(&self) -> bool {
         !self.entity_matchers.is_empty()
     }
@@ -1172,6 +1252,94 @@ where
         B::try_get_i64(row, "count")
     }
 
+    pub async fn count_column<P>(&self, provider: &P, column: &str) -> Result<i64, sqlx::Error>
+    where
+        P: PoolProvider<B> + ?Sized,
+        T: DatabaseSchema,
+    {
+        let rendered = render_aggregate_query(
+            B::DIALECT,
+            &self.build_aggregate_query(AggregateFunction::Count, Some(column))?,
+        );
+        let rows = B::fetch_rows(provider.pool(), &rendered.sql, &rendered.values).await?;
+        let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+        B::try_get_i64(row, "__gom_aggregate")
+    }
+
+    pub async fn max_i64<P>(&self, provider: &P, column: &str) -> Result<Option<i64>, sqlx::Error>
+    where
+        P: PoolProvider<B> + ?Sized,
+        T: DatabaseSchema,
+    {
+        self.aggregate_optional_i64(provider, AggregateFunction::Max, column)
+            .await
+    }
+
+    pub async fn min_i64<P>(&self, provider: &P, column: &str) -> Result<Option<i64>, sqlx::Error>
+    where
+        P: PoolProvider<B> + ?Sized,
+        T: DatabaseSchema,
+    {
+        self.aggregate_optional_i64(provider, AggregateFunction::Min, column)
+            .await
+    }
+
+    pub async fn max_f64<P>(&self, provider: &P, column: &str) -> Result<Option<f64>, sqlx::Error>
+    where
+        P: PoolProvider<B> + ?Sized,
+        T: DatabaseSchema,
+    {
+        self.aggregate_optional_f64(provider, AggregateFunction::Max, column)
+            .await
+    }
+
+    pub async fn min_f64<P>(&self, provider: &P, column: &str) -> Result<Option<f64>, sqlx::Error>
+    where
+        P: PoolProvider<B> + ?Sized,
+        T: DatabaseSchema,
+    {
+        self.aggregate_optional_f64(provider, AggregateFunction::Min, column)
+            .await
+    }
+
+    async fn aggregate_optional_i64<P>(
+        &self,
+        provider: &P,
+        function: AggregateFunction,
+        column: &str,
+    ) -> Result<Option<i64>, sqlx::Error>
+    where
+        P: PoolProvider<B> + ?Sized,
+        T: DatabaseSchema,
+    {
+        let rendered = render_aggregate_query(
+            B::DIALECT,
+            &self.build_aggregate_query(function, Some(column))?,
+        );
+        let rows = B::fetch_rows(provider.pool(), &rendered.sql, &rendered.values).await?;
+        let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+        B::try_get_optional_i64(row, "__gom_aggregate")
+    }
+
+    async fn aggregate_optional_f64<P>(
+        &self,
+        provider: &P,
+        function: AggregateFunction,
+        column: &str,
+    ) -> Result<Option<f64>, sqlx::Error>
+    where
+        P: PoolProvider<B> + ?Sized,
+        T: DatabaseSchema,
+    {
+        let rendered = render_aggregate_query(
+            B::DIALECT,
+            &self.build_aggregate_query(function, Some(column))?,
+        );
+        let rows = B::fetch_rows(provider.pool(), &rendered.sql, &rendered.values).await?;
+        let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+        B::try_get_optional_f64(row, "__gom_aggregate")
+    }
+
     pub async fn count_with_auth<P>(
         &self,
         provider: &P,
@@ -1195,6 +1363,75 @@ where
             B::fetch_rows_with_auth(provider.pool(), &rendered.sql, &rendered.values, auth).await?;
         let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
         B::try_get_i64(row, "count")
+    }
+
+    pub async fn count_column_with_auth<P>(
+        &self,
+        provider: &P,
+        auth: Option<&DbAuthContext>,
+        column: &str,
+    ) -> Result<i64, sqlx::Error>
+    where
+        P: PoolProvider<B> + ?Sized,
+        T: DatabaseSchema,
+    {
+        let rendered = render_aggregate_query(
+            B::DIALECT,
+            &self.build_aggregate_query(AggregateFunction::Count, Some(column))?,
+        );
+        let rows =
+            B::fetch_rows_with_auth(provider.pool(), &rendered.sql, &rendered.values, auth).await?;
+        let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+        B::try_get_i64(row, "__gom_aggregate")
+    }
+
+    pub async fn max_i64_with_auth<P>(
+        &self,
+        provider: &P,
+        auth: Option<&DbAuthContext>,
+        column: &str,
+    ) -> Result<Option<i64>, sqlx::Error>
+    where
+        P: PoolProvider<B> + ?Sized,
+        T: DatabaseSchema,
+    {
+        self.aggregate_optional_i64_with_auth(provider, auth, AggregateFunction::Max, column)
+            .await
+    }
+
+    pub async fn min_i64_with_auth<P>(
+        &self,
+        provider: &P,
+        auth: Option<&DbAuthContext>,
+        column: &str,
+    ) -> Result<Option<i64>, sqlx::Error>
+    where
+        P: PoolProvider<B> + ?Sized,
+        T: DatabaseSchema,
+    {
+        self.aggregate_optional_i64_with_auth(provider, auth, AggregateFunction::Min, column)
+            .await
+    }
+
+    async fn aggregate_optional_i64_with_auth<P>(
+        &self,
+        provider: &P,
+        auth: Option<&DbAuthContext>,
+        function: AggregateFunction,
+        column: &str,
+    ) -> Result<Option<i64>, sqlx::Error>
+    where
+        P: PoolProvider<B> + ?Sized,
+        T: DatabaseSchema,
+    {
+        let rendered = render_aggregate_query(
+            B::DIALECT,
+            &self.build_aggregate_query(function, Some(column))?,
+        );
+        let rows =
+            B::fetch_rows_with_auth(provider.pool(), &rendered.sql, &rendered.values, auth).await?;
+        let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+        B::try_get_optional_i64(row, "__gom_aggregate")
     }
 
     pub async fn count_on<'e, E>(&self, executor: E) -> Result<i64, sqlx::Error>
@@ -1489,6 +1726,51 @@ where
 
     pub async fn count(self) -> Result<i64, sqlx::Error> {
         self.query.count(&PoolRef { pool: self.pool }).await
+    }
+
+    pub async fn count_column(self, column: &str) -> Result<i64, sqlx::Error>
+    where
+        T: DatabaseSchema,
+    {
+        self.query
+            .count_column(&PoolRef { pool: self.pool }, column)
+            .await
+    }
+
+    pub async fn max_i64(self, column: &str) -> Result<Option<i64>, sqlx::Error>
+    where
+        T: DatabaseSchema,
+    {
+        self.query
+            .max_i64(&PoolRef { pool: self.pool }, column)
+            .await
+    }
+
+    pub async fn min_i64(self, column: &str) -> Result<Option<i64>, sqlx::Error>
+    where
+        T: DatabaseSchema,
+    {
+        self.query
+            .min_i64(&PoolRef { pool: self.pool }, column)
+            .await
+    }
+
+    pub async fn max_f64(self, column: &str) -> Result<Option<f64>, sqlx::Error>
+    where
+        T: DatabaseSchema,
+    {
+        self.query
+            .max_f64(&PoolRef { pool: self.pool }, column)
+            .await
+    }
+
+    pub async fn min_f64(self, column: &str) -> Result<Option<f64>, sqlx::Error>
+    where
+        T: DatabaseSchema,
+    {
+        self.query
+            .min_f64(&PoolRef { pool: self.pool }, column)
+            .await
     }
 
     pub async fn count_on<'e, E>(self, executor: E) -> Result<i64, sqlx::Error>

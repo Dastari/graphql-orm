@@ -1,7 +1,8 @@
 use graphql_orm::graphql::orm::{
-    DatabaseBackend, DeleteQuery, FilterExpression, PageInput, PaginationConfig, PaginationRequest,
-    RenderedQuery, SchemaLimits, SelectQuery, SortExpression, SpatialPredicate, SqlDialect,
-    SqlValue, contains_like_pattern, render_delete_query, render_select_query,
+    AggregateFunction, AggregateQuery, DatabaseBackend, DeleteQuery, FilterExpression, PageInput,
+    PaginationConfig, PaginationRequest, RenderedQuery, SchemaLimits, SelectQuery, SortExpression,
+    SpatialPredicate, SqlDialect, SqlValue, contains_like_pattern, render_aggregate_query,
+    render_delete_query, render_select_query,
 };
 
 fn sample_select() -> SelectQuery {
@@ -277,6 +278,28 @@ fn delete_renderer_uses_filter_ir() {
 
     assert_eq!(rendered.sql, "DELETE FROM users WHERE id = $1");
     assert_eq!(rendered.values, vec![SqlValue::String("u1".to_string())]);
+}
+
+#[test]
+fn aggregate_renderer_uses_filter_ir() {
+    let rendered = render_aggregate_query(
+        DatabaseBackend::Postgres,
+        &AggregateQuery {
+            table: "accession_assets",
+            function: AggregateFunction::Max,
+            column: Some("\"sort_order\"".to_string()),
+            filter: Some(FilterExpression::Raw {
+                clause: "accession_id = ?".to_string(),
+                values: vec![SqlValue::String("a1".to_string())],
+            }),
+        },
+    );
+
+    assert_eq!(
+        rendered.sql,
+        "SELECT MAX(\"sort_order\") AS __gom_aggregate FROM accession_assets WHERE accession_id = $1"
+    );
+    assert_eq!(rendered.values, vec![SqlValue::String("a1".to_string())]);
 }
 
 #[test]

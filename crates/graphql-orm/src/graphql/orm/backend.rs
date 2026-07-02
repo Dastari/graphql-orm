@@ -45,6 +45,12 @@ pub trait OrmBackend: Copy + Clone + Send + Sync + 'static {
     fn try_get_i64(row: &Self::Row, column: &str) -> Result<i64, sqlx::Error>;
     fn try_get_f64(row: &Self::Row, column: &str) -> Result<f64, sqlx::Error>;
     fn try_get_string(row: &Self::Row, column: &str) -> Result<String, sqlx::Error>;
+    fn try_get_optional_i64(row: &Self::Row, column: &str) -> Result<Option<i64>, sqlx::Error>;
+    fn try_get_optional_f64(row: &Self::Row, column: &str) -> Result<Option<f64>, sqlx::Error>;
+    fn try_get_optional_string(
+        row: &Self::Row,
+        column: &str,
+    ) -> Result<Option<String>, sqlx::Error>;
 
     fn placeholder(index: usize) -> String {
         Self::DIALECT.placeholder(index)
@@ -208,6 +214,21 @@ impl OrmBackend for NoDefaultBackend {
     fn try_get_string(_row: &Self::Row, column: &str) -> Result<String, sqlx::Error> {
         Err(sqlx::Error::ColumnNotFound(column.to_string()))
     }
+
+    fn try_get_optional_i64(_row: &Self::Row, column: &str) -> Result<Option<i64>, sqlx::Error> {
+        Err(sqlx::Error::ColumnNotFound(column.to_string()))
+    }
+
+    fn try_get_optional_f64(_row: &Self::Row, column: &str) -> Result<Option<f64>, sqlx::Error> {
+        Err(sqlx::Error::ColumnNotFound(column.to_string()))
+    }
+
+    fn try_get_optional_string(
+        _row: &Self::Row,
+        column: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
+        Err(sqlx::Error::ColumnNotFound(column.to_string()))
+    }
 }
 
 #[cfg(feature = "sqlite")]
@@ -243,6 +264,24 @@ impl OrmBackend for SqliteBackend {
     }
 
     fn try_get_string(row: &Self::Row, column: &str) -> Result<String, sqlx::Error> {
+        use sqlx::Row;
+        row.try_get(column)
+    }
+
+    fn try_get_optional_i64(row: &Self::Row, column: &str) -> Result<Option<i64>, sqlx::Error> {
+        use sqlx::Row;
+        row.try_get(column)
+    }
+
+    fn try_get_optional_f64(row: &Self::Row, column: &str) -> Result<Option<f64>, sqlx::Error> {
+        use sqlx::Row;
+        row.try_get(column)
+    }
+
+    fn try_get_optional_string(
+        row: &Self::Row,
+        column: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
         use sqlx::Row;
         row.try_get(column)
     }
@@ -401,6 +440,24 @@ impl OrmBackend for PostgresBackend {
         use sqlx::Row;
         row.try_get(column)
     }
+
+    fn try_get_optional_i64(row: &Self::Row, column: &str) -> Result<Option<i64>, sqlx::Error> {
+        use sqlx::Row;
+        row.try_get(column)
+    }
+
+    fn try_get_optional_f64(row: &Self::Row, column: &str) -> Result<Option<f64>, sqlx::Error> {
+        use sqlx::Row;
+        row.try_get(column)
+    }
+
+    fn try_get_optional_string(
+        row: &Self::Row,
+        column: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
+        use sqlx::Row;
+        row.try_get(column)
+    }
 }
 
 #[cfg(feature = "postgres")]
@@ -503,6 +560,21 @@ impl OrmBackend for MssqlBackend {
 
     fn try_get_string(row: &Self::Row, column: &str) -> Result<String, sqlx::Error> {
         row.try_get(column)
+    }
+
+    fn try_get_optional_i64(row: &Self::Row, column: &str) -> Result<Option<i64>, sqlx::Error> {
+        <i64 as crate::db::mssql::MssqlScalar>::try_get_optional(row, column)
+    }
+
+    fn try_get_optional_f64(row: &Self::Row, column: &str) -> Result<Option<f64>, sqlx::Error> {
+        <f64 as crate::db::mssql::MssqlScalar>::try_get_optional(row, column)
+    }
+
+    fn try_get_optional_string(
+        row: &Self::Row,
+        column: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
+        <String as crate::db::mssql::MssqlScalar>::try_get_optional(row, column)
     }
 }
 

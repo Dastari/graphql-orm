@@ -121,6 +121,52 @@ async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
     Ok(pool)
 }
 
+#[cfg(feature = "sqlite")]
+async fn insert_user_row(
+    pool: &TestPool,
+    principal: &str,
+    disabled: bool,
+    created_at: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO app_helper_users (
+            id, principal, password_hash, disabled, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(graphql_orm::uuid::Uuid::new_v4().to_string())
+    .bind(principal)
+    .bind(format!("hash-{principal}"))
+    .bind(disabled)
+    .bind(created_at)
+    .bind(created_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+async fn insert_user_row(
+    pool: &TestPool,
+    principal: &str,
+    disabled: bool,
+    created_at: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO app_helper_users (
+            id, principal, password_hash, disabled, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(graphql_orm::uuid::Uuid::new_v4())
+    .bind(principal)
+    .bind(format!("hash-{principal}"))
+    .bind(disabled)
+    .bind(created_at)
+    .bind(created_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn app_side_helpers_update_delete_and_emit_side_effects()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -246,6 +292,50 @@ async fn app_side_helpers_update_delete_and_emit_side_effects()
             .filter(|event| event.action == graphql_orm::graphql::orm::ChangeAction::Deleted)
             .count(),
         4
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn filtered_repository_aggregates_run_in_sql() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = setup_pool().await?;
+    insert_user_row(&pool, "alpha", false, 10).await?;
+    insert_user_row(&pool, "beta", false, 30).await?;
+    insert_user_row(&pool, "disabled", true, 50).await?;
+
+    let active_filter = UserWhereInput {
+        disabled: Some(BoolFilter {
+            eq: Some(false),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        User::query(&pool)
+            .filter(active_filter.clone())
+            .max_i64("created_at")
+            .await?,
+        Some(30)
+    );
+    assert_eq!(
+        User::query(&pool)
+            .filter(active_filter.clone())
+            .min_i64("created_at")
+            .await?,
+        Some(10)
+    );
+    assert_eq!(
+        User::query(&pool)
+            .filter(active_filter)
+            .count_column("created_at")
+            .await?,
+        2
+    );
+    assert_eq!(
+        User::query(&pool).max_i64("missing_column").await.is_err(),
+        true
     );
 
     Ok(())
