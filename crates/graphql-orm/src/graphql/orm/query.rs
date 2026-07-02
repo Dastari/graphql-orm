@@ -241,6 +241,64 @@ pub struct PaginationRequest {
     pub offset: i64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SchemaLimits {
+    /// Maximum GraphQL query depth applied by generated `schema_builder` helpers.
+    pub max_depth: Option<usize>,
+    /// Maximum GraphQL query complexity applied by generated `schema_builder` helpers.
+    pub max_complexity: Option<usize>,
+}
+
+impl Default for SchemaLimits {
+    fn default() -> Self {
+        Self {
+            max_depth: Some(Self::DEFAULT_MAX_DEPTH),
+            max_complexity: Some(Self::DEFAULT_MAX_COMPLEXITY),
+        }
+    }
+}
+
+impl SchemaLimits {
+    /// Default GraphQL query depth cap for generated schemas.
+    pub const DEFAULT_MAX_DEPTH: usize = 16;
+    /// Default GraphQL query complexity cap for generated schemas.
+    pub const DEFAULT_MAX_COMPLEXITY: usize = 20_000;
+
+    /// Create limits with both depth and complexity checks disabled.
+    pub const fn unbounded() -> Self {
+        Self {
+            max_depth: None,
+            max_complexity: None,
+        }
+    }
+
+    /// Return a copy with a different depth cap.
+    pub const fn with_max_depth(mut self, max_depth: Option<usize>) -> Self {
+        self.max_depth = max_depth;
+        self
+    }
+
+    /// Return a copy with a different complexity cap.
+    pub const fn with_max_complexity(mut self, max_complexity: Option<usize>) -> Self {
+        self.max_complexity = max_complexity;
+        self
+    }
+
+    /// Apply these limits to an async-graphql schema builder.
+    pub fn apply<Query, Mutation, Subscription>(
+        self,
+        mut builder: async_graphql::SchemaBuilder<Query, Mutation, Subscription>,
+    ) -> async_graphql::SchemaBuilder<Query, Mutation, Subscription> {
+        if let Some(max_depth) = self.max_depth {
+            builder = builder.limit_depth(max_depth);
+        }
+        if let Some(max_complexity) = self.max_complexity {
+            builder = builder.limit_complexity(max_complexity);
+        }
+        builder
+    }
+}
+
 impl From<&PageInput> for PaginationRequest {
     fn from(value: &PageInput) -> Self {
         PaginationConfig::default().resolve_page(Some(value), false)

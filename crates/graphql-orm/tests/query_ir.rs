@@ -1,7 +1,7 @@
 use graphql_orm::graphql::orm::{
     DatabaseBackend, DeleteQuery, FilterExpression, PageInput, PaginationConfig, PaginationRequest,
-    RenderedQuery, SelectQuery, SortExpression, SpatialPredicate, SqlDialect, SqlValue,
-    contains_like_pattern, render_delete_query, render_select_query,
+    RenderedQuery, SchemaLimits, SelectQuery, SortExpression, SpatialPredicate, SqlDialect,
+    SqlValue, contains_like_pattern, render_delete_query, render_select_query,
 };
 
 fn sample_select() -> SelectQuery {
@@ -114,6 +114,33 @@ fn pagination_config_resolves_defaults_and_caps() {
     assert_eq!(
         DatabaseBackend::Mssql.render_pagination(Some(5001), 2),
         " OFFSET 2 ROWS FETCH NEXT 5001 ROWS ONLY"
+    );
+}
+
+#[test]
+fn schema_limits_have_production_defaults_and_can_be_disabled() {
+    assert_eq!(
+        SchemaLimits::default(),
+        SchemaLimits {
+            max_depth: Some(16),
+            max_complexity: Some(20_000),
+        }
+    );
+    assert_eq!(
+        SchemaLimits::unbounded(),
+        SchemaLimits {
+            max_depth: None,
+            max_complexity: None,
+        }
+    );
+    assert_eq!(
+        SchemaLimits::default()
+            .with_max_depth(Some(8))
+            .with_max_complexity(None),
+        SchemaLimits {
+            max_depth: Some(8),
+            max_complexity: None,
+        }
     );
 }
 

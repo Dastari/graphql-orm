@@ -29,6 +29,10 @@ struct Place {
     #[graphql(skip)]
     #[relation(target = "Place", from = "parent_id", to = "id")]
     pub parent_place: Option<Box<Place>>,
+
+    #[graphql(skip)]
+    #[relation(target = "Place", from = "id", to = "parent_id", multiple)]
+    pub children: Vec<Box<Place>>,
 }
 
 impl graphql_orm::graphql::loaders::BatchLoadEntity for Place {
@@ -110,6 +114,18 @@ async fn apply_schema(
     Ok(())
 }
 
+fn nested_parent_query(id: &str, levels: usize) -> String {
+    let mut query = format!("query {{ place(id: \"{id}\") {{ id");
+    for _ in 0..levels {
+        query.push_str(" parentPlace { id");
+    }
+    for _ in 0..levels {
+        query.push_str(" }");
+    }
+    query.push_str(" } }");
+    query
+}
+
 #[tokio::test]
 async fn self_referential_relations_work_with_boxed_parent_fields()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -158,6 +174,63 @@ async fn self_referential_relations_work_with_boxed_parent_fields()
         Some(root.id.as_str())
     );
     assert_eq!(json["place"]["parentPlace"]["name"].as_str(), Some("Root"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn generated_schema_builder_rejects_deep_relation_cycles_by_default()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = setup_pool().await?;
+    let database = graphql_orm::db::Database::new(pool);
+    let schema = schema_builder(database).finish();
+
+    let response = schema.execute(nested_parent_query("missing", 24)).await;
+    assert!(!response.errors.is_empty());
+    assert!(
+        response.errors.iter().any(|error| {
+            let message = error.message.to_lowercase();
+            message.contains("depth") || message.contains("deep")
+        }),
+        "{:?}",
+        response.errors
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn generated_relation_lists_have_complexity_cost() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = setup_pool().await?;
+    let database = graphql_orm::db::Database::new(pool);
+    let schema = schema_builder_with_limits(
+        database,
+        graphql_orm::graphql::orm::SchemaLimits::default()
+            .with_max_depth(Some(32))
+            .with_max_complexity(Some(10)),
+    )
+    .finish();
+
+    let response = schema
+        .execute(
+            "query {
+                place(id: \"missing\") {
+                    children {
+                        edges { node { id } }
+                    }
+                }
+            }",
+        )
+        .await;
+    assert!(!response.errors.is_empty());
+    assert!(
+        response
+            .errors
+            .iter()
+            .any(|error| error.message.to_lowercase().contains("complex")),
+        "{:?}",
+        response.errors
+    );
 
     Ok(())
 }

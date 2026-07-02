@@ -415,6 +415,8 @@ pub(crate) fn generate_graphql_relations(
         let order_by_input = syn::Ident::new(&order_by_input_str, struct_name.span());
         let connection_type = syn::Ident::new(&connection_type_str, struct_name.span());
         let edge_type = syn::Ident::new(&edge_type_str, struct_name.span());
+        let list_relation_complexity = "{ let requested = page.as_ref().and_then(|page| page.limit).unwrap_or(::graphql_orm::graphql::orm::PaginationConfig::DEFAULT_LIMIT); let capped = requested.max(0).min(::graphql_orm::graphql::orm::PaginationConfig::DEFAULT_MAX_LIMIT); 2 + (capped as usize).saturating_mul(child_complexity) }";
+        let single_relation_complexity = "2 + child_complexity";
 
         let source_binding_multiple = if source_optional.iter().any(|is_option| *is_option) {
             quote! {
@@ -569,7 +571,7 @@ pub(crate) fn generate_graphql_relations(
                 /// avoid N+1 when loading relations for multiple parent entities.
                 /// When filter/sort/pagination arguments are provided, uses direct
                 /// database query for full SQL support.
-                #[graphql(name = #graphql_name)]
+                #[graphql(name = #graphql_name, complexity = #list_relation_complexity)]
                 async fn #field_name(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
@@ -717,7 +719,7 @@ pub(crate) fn generate_graphql_relations(
             // Single relation (many-to-one) - uses DataLoader when the source key supports it
             Ok(quote! {
                 /// Get related #graphql_name
-                #[graphql(name = #graphql_name)]
+                #[graphql(name = #graphql_name, complexity = #single_relation_complexity)]
                 async fn #field_name(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,

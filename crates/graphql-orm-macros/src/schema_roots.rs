@@ -160,12 +160,23 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             pub fn schema_builder(
                 database: ::graphql_orm::db::Database<#backend_marker>,
             ) -> ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot> {
+                schema_builder_with_limits(
+                    database,
+                    ::graphql_orm::graphql::orm::SchemaLimits::default(),
+                )
+            }
+
+            pub fn schema_builder_with_limits(
+                database: ::graphql_orm::db::Database<#backend_marker>,
+                limits: ::graphql_orm::graphql::orm::SchemaLimits,
+            ) -> ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot> {
                 let builder = ::graphql_orm::async_graphql::Schema::build(
                     QueryRoot::default(),
                     ::graphql_orm::async_graphql::EmptyMutation,
                     ::graphql_orm::async_graphql::EmptySubscription,
                 )
                 .data(database.clone());
+                let builder = limits.apply(builder);
                 #(#schema_loader_data)*
                 builder
             }
@@ -260,12 +271,23 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         pub fn schema_builder(
             database: ::graphql_orm::db::Database<#backend_marker>,
         ) -> ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot> {
+            schema_builder_with_limits(
+                database,
+                ::graphql_orm::graphql::orm::SchemaLimits::default(),
+            )
+        }
+
+        pub fn schema_builder_with_limits(
+            database: ::graphql_orm::db::Database<#backend_marker>,
+            limits: ::graphql_orm::graphql::orm::SchemaLimits,
+        ) -> ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot> {
             let builder = ::graphql_orm::async_graphql::Schema::build(
                 QueryRoot::default(),
                 MutationRoot::default(),
                 SubscriptionRoot::default(),
             )
             .data(database.clone());
+            let builder = limits.apply(builder);
             #(#schema_loader_data)*
             builder
         }
