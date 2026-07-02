@@ -36,5 +36,8 @@ pub use manifest::{
 pub use object_index::{BackupObjectIndex, BackupObjectRef};
 pub use planner::{FullBackupPlan, plan_full_backup};
 pub use repository::BackupRepository;
-pub use restore::{RestoreContext, RestoreMode, ensure_empty_restore_target};
+pub use restore::{
+    RestoreContext, RestoreMode, RestoreObjectSink, RestoreResult, ensure_empty_restore_target,
+    restore_objects, restore_snapshot,
+};
 pub use verify::{verify_manifest_and_objects, verify_object_checksums};

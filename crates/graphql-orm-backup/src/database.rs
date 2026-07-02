@@ -13,6 +13,20 @@ pub trait GraphqlOrmBackupAdapter: Send + Sync {
     /// Returns [`BackupError`] if the adapter cannot read schema metadata.
     async fn schema_snapshot(&self) -> Result<GraphqlOrmBackupSchema, BackupError>;
 
+    /// Returns whether the restore target currently has no rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError`] if the adapter cannot determine target
+    /// emptiness. The default implementation returns
+    /// [`BackupError::UnsupportedOperation`] so restore adapters must opt in
+    /// explicitly.
+    async fn restore_target_is_empty(&self) -> Result<bool, BackupError> {
+        Err(BackupError::UnsupportedOperation {
+            operation: "restore target emptiness check".to_string(),
+        })
+    }
+
     /// Exports all backup-enabled tables for a full snapshot.
     ///
     /// # Errors
@@ -61,13 +75,13 @@ pub struct GraphqlOrmBackupSchema {
     pub schema_hash: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BackupTableExport {
     pub table_name: String,
     pub rows: Vec<BackupRow>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BackupRow {
     pub table_name: String,
     pub primary_key: String,
@@ -75,14 +89,14 @@ pub struct BackupRow {
     pub values: serde_json::Map<String, Value>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BackupChangeAction {
     Create,
     Update,
     Delete,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BackupChangeExport {
     pub table_name: String,
     pub primary_key: String,

@@ -126,6 +126,7 @@ fn sample_manifest() -> BackupSnapshotManifest {
                 content_key: "snapshots/snapshot/database/tables/storage.jsonl.zst".to_string(),
                 sha256_hex: table_hash,
             }],
+            changes: Vec::new(),
         },
         objects: vec![ObjectBackupEntry {
             object_id: object_id(),

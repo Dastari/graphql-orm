@@ -151,6 +151,7 @@ fn manifest_with_table_hash(table_hash: String) -> BackupSnapshotManifest {
                 content_key: "snapshots/snapshot/database/tables/users.jsonl.zst".to_string(),
                 sha256_hex: table_hash,
             }],
+            changes: Vec::new(),
         },
         objects: Vec::new(),
         tombstones: Vec::new(),

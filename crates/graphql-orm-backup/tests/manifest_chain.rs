@@ -176,6 +176,7 @@ fn sample_manifest(
             row_count: 0,
             table_count: 0,
             tables: Vec::new(),
+            changes: Vec::new(),
         },
         objects: Vec::new(),
         tombstones: Vec::new(),

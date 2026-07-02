@@ -51,6 +51,8 @@ pub struct DatabaseBackupManifest {
     pub row_count: u64,
     pub table_count: u64,
     pub tables: Vec<TableBackupEntry>,
+    #[serde(default)]
+    pub changes: Vec<TableBackupEntry>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

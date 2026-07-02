@@ -265,6 +265,7 @@ fn sample_manifest_with_object_hash(object_hash: String) -> BackupSnapshotManife
                 content_key: object_content_key(&table_hash),
                 sha256_hex: table_hash,
             }],
+            changes: Vec::new(),
         },
         objects: vec![ObjectBackupEntry {
             object_id: Uuid::parse_str("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa").expect("valid uuid"),

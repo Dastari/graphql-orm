@@ -130,6 +130,7 @@ pub async fn create_full_backup(
             row_count,
             table_count: table_entries.len() as u64,
             tables: table_entries,
+            changes: Vec::new(),
         },
         objects: object_entries,
         tombstones: Vec::new(),
