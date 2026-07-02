@@ -3,6 +3,7 @@
 use async_graphql::{Schema, SimpleObject};
 use graphql_orm::prelude::*;
 use sqlx::Row;
+use std::sync::OnceLock;
 
 #[derive(
     GraphQLEntity,
@@ -105,9 +106,12 @@ schema_roots! {
 
 type TestSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 
-#[tokio::test]
-async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn std::error::Error>>
-{
+fn test_mutex() -> &'static tokio::sync::Mutex<()> {
+    static TEST_MUTEX: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    TEST_MUTEX.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+async fn setup_pool() -> Result<sqlx::PgPool, Box<dyn std::error::Error>> {
     let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
         "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string()
     });
@@ -145,6 +149,15 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
     )
     .execute(&pool)
     .await?;
+
+    Ok(pool)
+}
+
+#[tokio::test]
+async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn std::error::Error>>
+{
+    let _guard = test_mutex().lock().await;
+    let pool = setup_pool().await?;
 
     let database = graphql_orm::db::Database::new(pool.clone());
     let schema: TestSchema = schema_builder(database)
@@ -251,6 +264,159 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
         graphql_orm::graphql::orm::current_backend(),
         graphql_orm::graphql::orm::DatabaseBackend::Postgres
     ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn relation_resolvers_batch_for_pages_of_parents() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = test_mutex().lock().await;
+    let pool = setup_pool().await?;
+    let database = graphql_orm::db::Database::new(pool);
+    let schema: TestSchema = schema_builder(database)
+        .data("test-user".to_string())
+        .finish();
+
+    let mut user_ids = Vec::new();
+    for name in ["Alice", "Bob", "Cara", "Dana"] {
+        let response = schema
+            .execute(format!(
+                "mutation {{
+                    createUser(input: {{ name: \"{name}\", active: true }}) {{
+                        user {{ id }}
+                    }}
+                }}"
+            ))
+            .await;
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let data = response.data.into_json()?;
+        user_ids.push(
+            data["createUser"]["user"]["id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+
+    for (author_id, title, published) in [
+        (user_ids[0].clone(), "A1", true),
+        (user_ids[0].clone(), "A3", true),
+        (user_ids[0].clone(), "A2", true),
+        (user_ids[1].clone(), "B1", false),
+        (user_ids[1].clone(), "B2", true),
+        (user_ids[2].clone(), "C1", true),
+        (user_ids[3].clone(), "D1", true),
+    ] {
+        let response = schema
+            .execute(format!(
+                "mutation {{
+                    createPost(input: {{ authorId: \"{author_id}\", title: \"{title}\", published: {} }}) {{
+                        success
+                    }}
+                }}",
+                if published { "true" } else { "false" }
+            ))
+            .await;
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+    }
+
+    graphql_orm::graphql::orm::reset_query_count();
+
+    let no_args = schema
+        .execute(
+            "query {
+                users(orderBy: [{ name: ASC }]) {
+                    edges {
+                        node {
+                            name
+                            posts {
+                                edges { node { title } }
+                            }
+                        }
+                    }
+                }
+            }",
+        )
+        .await;
+    assert!(no_args.errors.is_empty(), "{:?}", no_args.errors);
+    let no_args_json = no_args.data.into_json()?;
+    let edges = no_args_json["users"]["edges"].as_array().unwrap();
+    assert_eq!(edges.len(), 4);
+    assert!(
+        graphql_orm::graphql::orm::query_count() < edges.len() + 2,
+        "expected no-args has-many relation loading to stay below N+1; got {} for {} parent rows",
+        graphql_orm::graphql::orm::query_count(),
+        edges.len()
+    );
+
+    graphql_orm::graphql::orm::reset_query_count();
+
+    let arg_query = schema
+        .execute(
+            "query {
+                users(orderBy: [{ name: ASC }]) {
+                    edges {
+                        node {
+                            name
+                            posts(
+                                where: { published: { eq: true } }
+                                orderBy: { title: DESC }
+                                page: { limit: 1, offset: 0 }
+                            ) {
+                                edges { node { title } }
+                                pageInfo { totalCount hasNextPage }
+                            }
+                        }
+                    }
+                }
+            }",
+        )
+        .await;
+    assert!(arg_query.errors.is_empty(), "{:?}", arg_query.errors);
+    let arg_json = arg_query.data.into_json()?;
+    let arg_edges = arg_json["users"]["edges"].as_array().unwrap();
+    assert_eq!(arg_edges.len(), 4);
+    assert_eq!(
+        arg_edges[0]["node"]["posts"]["edges"][0]["node"]["title"].as_str(),
+        Some("A3")
+    );
+    assert_eq!(
+        arg_edges[0]["node"]["posts"]["pageInfo"]["totalCount"].as_i64(),
+        Some(3)
+    );
+    assert!(
+        graphql_orm::graphql::orm::query_count() < arg_edges.len() + 2,
+        "expected arg-aware has-many relation loading to stay below N+1; got {} for {} parent rows",
+        graphql_orm::graphql::orm::query_count(),
+        arg_edges.len()
+    );
+
+    graphql_orm::graphql::orm::reset_query_count();
+
+    let belongs_to = schema
+        .execute(
+            "query {
+                posts(orderBy: [{ title: ASC }]) {
+                    edges {
+                        node {
+                            title
+                            author { name }
+                        }
+                    }
+                }
+            }",
+        )
+        .await;
+    assert!(belongs_to.errors.is_empty(), "{:?}", belongs_to.errors);
+    let belongs_to_json = belongs_to.data.into_json()?;
+    let post_edges = belongs_to_json["posts"]["edges"].as_array().unwrap();
+    assert_eq!(post_edges.len(), 7);
+    assert!(
+        graphql_orm::graphql::orm::query_count() < post_edges.len() + 2,
+        "expected belongs-to relation loading to stay below N+1; got {} for {} parent rows",
+        graphql_orm::graphql::orm::query_count(),
+        post_edges.len()
+    );
 
     Ok(())
 }

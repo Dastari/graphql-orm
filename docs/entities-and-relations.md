@@ -237,6 +237,13 @@ Selected relation fields are loaded in batches by relation layer. A query shaped
 This applies to single-key and composite-key relations. Relation-level `where`, `orderBy`, and
 `page` arguments use the DataLoader batching path for supported scalar key parts.
 
+Generated GraphQL relation resolvers are not one query per parent row. For each relation field,
+the macro registers an async-graphql `DataLoader<RelationLoader<T, B>>` in `schema_builder`. Each
+parent resolver submits a `CompositeRelationQueryKey`; async-graphql coalesces keys observed during
+the same resolution wave, and the runtime groups compatible keys by relation, foreign-key columns,
+filter signature, sort signature, page signature, and auth context. Belongs-to relations use the
+same grouped loader with a single-row result per parent key.
+
 Paged relation connections are pushed into SQL with `ROW_NUMBER() OVER (PARTITION BY ...)` and a
 grouped count on SQLite, Postgres, and MSSQL-capable relation reads. This avoids loading every child
 row for every selected parent when a nested field asks for the first page of a large relation. When a
