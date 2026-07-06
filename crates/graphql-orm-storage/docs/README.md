@@ -6,6 +6,7 @@ repository front page.
 - [Usage guide](usage.md)
 - [BlobStore API](blob-store.md)
 - [Streaming APIs](streaming.md)
+- [Recording and large-object streams](recording-streams.md)
 - [Architecture and crate boundaries](architecture.md)
 - [Provider roadmap](provider-roadmap.md)
 - [Backup integration guidance](backup-integration.md)

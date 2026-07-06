@@ -20,11 +20,12 @@ This crate is a reusable storage companion for applications that use `graphql-or
 
 ## Current Agent Handoff
 
-- Current crate version is `0.3.0`.
+- Current crate version is `0.4.0`.
 - The storage provider boundary is now the streaming `BlobStore` trait.
 - `ObjectStorage` extends `BlobStore`; custom providers must implement `BlobStore` first.
 - `BlobStore` includes byte ranges, conditional writes, server-side copy, write options, and paged listing.
 - `StorageService` remains the high-level primary object API for generated object metadata.
+- `StreamingObjectStore` supports bucket/key large-object streaming, multipart writes, range reads, metadata, listing, and retention deletion.
 - `graphql-orm-backup` should adapt `BlobStore` directly for backup repository semantics; it should not use `StorageService`.
 - S3 is implemented behind the `s3` feature through the shared `BlobStore` provider layer.
 - Azure Blob is still a feature-gated unsupported placeholder. Do not add real Azure SDK code without implementing the shared `BlobStore` provider layer first.

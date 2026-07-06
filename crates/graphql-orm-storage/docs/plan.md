@@ -6,7 +6,7 @@ only. Host applications remain responsible for authorization, GraphQL schema
 design, metadata entities, routing, audit behavior, and workflow-specific
 policy.
 
-## Implemented In 0.3.0
+## Implemented In 0.4.0
 
 - Provider-neutral object metadata.
 - Provider-neutral `StorageBackend` and `StorageNamespace` enums.
@@ -18,6 +18,7 @@ policy.
   - paged listing
   - existence and metadata checks
 - Buffered and streaming `StorageService` object APIs.
+- Bucket/key `StreamingObjectStore` APIs for large recording-style objects.
 - Local filesystem backend.
 - S3-compatible backend behind the `s3` feature.
 - Azure Blob placeholder behind the `azure` feature.
@@ -25,6 +26,7 @@ policy.
 - Safe sharded storage-key generation.
 - Strict key validation for local and cloud providers.
 - Public documentation and rustdocs for the crate boundary.
+- Local multipart object writes with atomic completion and abort cleanup.
 
 ## Crate Boundaries
 

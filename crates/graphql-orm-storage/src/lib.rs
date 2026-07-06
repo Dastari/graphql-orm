@@ -13,7 +13,8 @@
 //! generation, or file bytes stored in database rows.
 //!
 //! Use [`StorageService`] for primary object workflows that need generated
-//! object metadata. Use [`BlobStore`] for lower-level key-addressed blob
+//! object metadata. Use [`StreamingObjectStore`] for bucket/key workloads such
+//! as large recordings. Use [`BlobStore`] for lower-level key-addressed blob
 //! operations, such as backup repository adapters.
 //!
 //! # Example
@@ -42,6 +43,7 @@ mod object;
 #[cfg(feature = "s3")]
 mod s3;
 mod service;
+mod streaming_object;
 
 #[cfg(feature = "azure")]
 pub use azure::{AzureBlobStorageBackend, AzureBlobStorageConfig};
@@ -62,3 +64,7 @@ pub use object::{
 #[cfg(feature = "s3")]
 pub use s3::{S3StorageBackend, S3StorageConfig};
 pub use service::{ObjectStorage, StorageService};
+pub use streaming_object::{
+    BoxedMultipartWriter, MultipartWriter, ObjectContentRange, ObjectInfo, ObjectMetadata,
+    ObjectRangeBody, StreamingObjectStore, validate_object_bucket,
+};

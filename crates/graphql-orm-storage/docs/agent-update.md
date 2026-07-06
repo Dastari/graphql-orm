@@ -1,6 +1,6 @@
 # Agent Update
 
-This update summarizes the `0.3.0` storage-provider boundary for agents working
+This update summarizes the `0.4.0` storage-provider boundary for agents working
 on `graphql-orm-storage` or downstream crates.
 
 ## What Changed
@@ -17,6 +17,8 @@ on `graphql-orm-storage` or downstream crates.
   `StorageService::get_object_stream`.
 - Buffered object APIs still exist and delegate through the streaming layer.
 - `LocalStorageBackend` now implements `BlobStore` and `ObjectStorage`.
+- `LocalStorageBackend` implements `StreamingObjectStore` for local large-object
+  streaming and recording-style workloads.
 - S3 now implements `BlobStore` and `ObjectStorage` behind the `s3` feature.
 - Azure Blob remains a placeholder that implements `BlobStore` and still returns
   `UnsupportedBackend`.

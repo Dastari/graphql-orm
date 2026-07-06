@@ -14,6 +14,7 @@ domain workflows.
 - high-level `StorageService` that generates object IDs, sharded keys, byte
   counts, SHA-256 checksums, and timestamps
 - buffered and streaming object APIs
+- bucket/key streaming object APIs for large recordings and HTTP range playback
 - local filesystem backend enabled by default
 - S3-compatible backend behind the `s3` feature, including MinIO-compatible
   path-style configuration
@@ -22,6 +23,7 @@ domain workflows.
 - strict key validation for path safety across providers
 - byte-range reads, conditional writes, provider-side copy hooks, and paged
   listing for cloud-provider compatibility
+- multipart local recording writes with atomic finalize and abort cleanup
 - retry-aware provider error taxonomy through `StorageError::is_retryable`
 
 ## Install
@@ -152,6 +154,7 @@ rows.
 - [Usage guide](docs/usage.md)
 - [BlobStore API](docs/blob-store.md)
 - [Streaming APIs](docs/streaming.md)
+- [Recording and large-object streams](docs/recording-streams.md)
 - [Architecture and crate boundaries](docs/architecture.md)
 - [Provider roadmap](docs/provider-roadmap.md)
 - [Backup integration guidance](docs/backup-integration.md)
@@ -160,7 +163,7 @@ rows.
 
 ## Status
 
-Current crate version: `0.3.0`.
+Current crate version: `0.4.0`.
 
 Local filesystem and S3-compatible storage are implemented. Azure Blob remains
 an explicit placeholder. Provider integration tests that require external

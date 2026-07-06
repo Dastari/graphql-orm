@@ -3,6 +3,22 @@
 This page records user-facing changes for recent `graphql-orm-storage`
 releases.
 
+## 0.4.0
+
+Large-object streaming support for recording-style workloads.
+
+- Bumped `graphql-orm-storage` to `0.4.0`.
+- Added `StreamingObjectStore` for bucket/key objects.
+- Added `ObjectInfo`, `ObjectMetadata`, `ObjectRangeBody`, and
+  `ObjectContentRange`.
+- Added `MultipartWriter` and `BoxedMultipartWriter` for incremental writes.
+- Implemented local multipart writes with temp files and atomic visibility on
+  completion.
+- Added range reads for HTTP playback use cases.
+- Added local object sidecar metadata persistence, listing, and deletion.
+- Added tests for large streamed writes, range reads, abort cleanup, metadata,
+  listing visibility, and retention deletion.
+
 ## 0.3.0
 
 Provider API stabilization and S3 implementation.

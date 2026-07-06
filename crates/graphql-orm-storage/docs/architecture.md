@@ -16,6 +16,11 @@ metadata, listing, and delete operations.
 IDs, namespaces, storage keys, byte counts, checksums, and timestamps before
 applications persist metadata in their own database rows.
 
+`StreamingObjectStore` is the bucket/key workflow for large objects such as
+recordings. It supports multipart writes, atomic visibility after completion,
+caller metadata, range reads, listing, and retention deletion without requiring
+the caller to buffer a full object in memory.
+
 `graphql-orm-backup` should reuse future cloud provider implementations through
 a `BlobStore` adapter, not through `StorageService`.
 

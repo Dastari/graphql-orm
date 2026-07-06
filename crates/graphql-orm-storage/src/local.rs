@@ -4,6 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
@@ -13,9 +14,14 @@ use uuid::Uuid;
 
 use crate::{
     BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
-    ObjectStorage, StorageBackend, StorageByteStream, StorageError, StorageObjectBody,
-    StoredObject, collect_storage_stream, validate_blob_key,
+    BoxedMultipartWriter, MultipartWriter, ObjectContentRange, ObjectInfo, ObjectMetadata,
+    ObjectRangeBody, ObjectStorage, StorageBackend, StorageByteStream, StorageError,
+    StorageObjectBody, StoredObject, StreamingObjectStore, collect_storage_stream,
+    validate_blob_key, validate_object_bucket,
 };
+
+const INTERNAL_STORAGE_DIR: &str = ".graphql-orm-storage";
+const OBJECT_METADATA_DIR: &str = "object-metadata";
 
 /// Local filesystem object storage backend.
 #[derive(Clone, Debug)]
@@ -72,6 +78,30 @@ impl LocalStorageBackend {
     fn path_for(&self, key: &str) -> Result<PathBuf, StorageError> {
         validate_blob_key(key)?;
         Ok(self.root.join(Path::new(key)))
+    }
+
+    fn object_path_for(&self, bucket: &str, key: &str) -> Result<PathBuf, StorageError> {
+        validate_object_bucket(bucket)?;
+        validate_blob_key(key)?;
+        Ok(self.root.join(bucket).join(Path::new(key)))
+    }
+
+    fn object_metadata_path_for(&self, bucket: &str, key: &str) -> Result<PathBuf, StorageError> {
+        validate_object_bucket(bucket)?;
+        validate_blob_key(key)?;
+        let path = self
+            .root
+            .join(INTERNAL_STORAGE_DIR)
+            .join(OBJECT_METADATA_DIR)
+            .join(bucket)
+            .join(Path::new(key));
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| StorageError::InvalidStorageKey {
+                key: key.to_string(),
+            })?;
+        Ok(path.with_file_name(format!("{file_name}.metadata.json")))
     }
 }
 
@@ -323,6 +353,287 @@ impl ObjectStorage for LocalStorageBackend {
     }
 }
 
+#[async_trait]
+impl StreamingObjectStore for LocalStorageBackend {
+    async fn put_object_stream(
+        &self,
+        bucket: &str,
+        key: &str,
+        content_type: Option<String>,
+        metadata: ObjectMetadata,
+        stream: StorageByteStream,
+    ) -> Result<ObjectInfo, StorageError> {
+        let mut writer = self
+            .create_multipart_object(bucket, key, content_type, metadata)
+            .await?;
+        let mut stream = stream.into_inner();
+
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    if let Err(err) = writer.write_chunk(bytes).await {
+                        let _ = writer.abort().await;
+                        return Err(err);
+                    }
+                }
+                Err(err) => {
+                    let _ = writer.abort().await;
+                    return Err(err);
+                }
+            }
+        }
+
+        writer.complete().await
+    }
+
+    async fn create_multipart_object(
+        &self,
+        bucket: &str,
+        key: &str,
+        content_type: Option<String>,
+        metadata: ObjectMetadata,
+    ) -> Result<BoxedMultipartWriter, StorageError> {
+        let object_path = self.object_path_for(bucket, key)?;
+        let metadata_path = self.object_metadata_path_for(bucket, key)?;
+        create_parent_dir(&object_path).await?;
+        create_parent_dir(&metadata_path).await?;
+        let temp_path = temp_path_for(&object_path, key)?;
+        let metadata_temp_path = temp_path_for(&metadata_path, key)?;
+        let file = tokio::fs::File::create(&temp_path)
+            .await
+            .map_err(|source| StorageError::io(&temp_path, source))?;
+
+        Ok(Box::new(LocalMultipartWriter {
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+            content_type,
+            metadata,
+            object_path,
+            temp_path,
+            metadata_path,
+            metadata_temp_path,
+            file,
+            hasher: Sha256::new(),
+            size_bytes: 0,
+        }))
+    }
+
+    async fn get_object_range(
+        &self,
+        bucket: &str,
+        key: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<ObjectRangeBody, StorageError> {
+        if range.end < range.start {
+            return Err(StorageError::PreconditionFailed {
+                key: format!("{bucket}/{key}"),
+                condition: "range end is before range start".to_string(),
+            });
+        }
+
+        let object = self.get_object_metadata(bucket, key).await?;
+        if range.start > object.size_bytes {
+            return Err(StorageError::PreconditionFailed {
+                key: format!("{bucket}/{key}"),
+                condition: "range start is beyond object size".to_string(),
+            });
+        }
+        let end = range.end.min(object.size_bytes);
+        let length = end.saturating_sub(range.start);
+        let object_path = self.object_path_for(bucket, key)?;
+        let mut file = match tokio::fs::File::open(&object_path).await {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(StorageError::MissingBlob {
+                    key: format!("{bucket}/{key}"),
+                });
+            }
+            Err(source) => return Err(StorageError::io(&object_path, source)),
+        };
+        file.seek(SeekFrom::Start(range.start))
+            .await
+            .map_err(|source| StorageError::io(&object_path, source))?;
+        let stream_path = object_path.clone();
+        let stream = ReaderStream::new(file.take(length))
+            .map(move |chunk| chunk.map_err(|source| StorageError::io(&stream_path, source)));
+
+        let total_size = object.size_bytes;
+        Ok(ObjectRangeBody {
+            object,
+            range: ObjectContentRange {
+                start: range.start,
+                end,
+                total_size,
+            },
+            content_length: length,
+            body: StorageByteStream::with_size_hint(Box::pin(stream), length),
+        })
+    }
+
+    async fn get_object_metadata(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<ObjectInfo, StorageError> {
+        let metadata_path = self.object_metadata_path_for(bucket, key)?;
+        let bytes = match tokio::fs::read(&metadata_path).await {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(StorageError::MissingBlob {
+                    key: format!("{bucket}/{key}"),
+                });
+            }
+            Err(source) => return Err(StorageError::io(&metadata_path, source)),
+        };
+        serde_json::from_slice(&bytes).map_err(|source| StorageError::Provider {
+            backend: StorageBackend::Local.as_str().to_string(),
+            message: format!("local object metadata is invalid: {source}"),
+            retryable: false,
+        })
+    }
+
+    async fn list_objects(
+        &self,
+        bucket: &str,
+        prefix: &str,
+    ) -> Result<Vec<ObjectInfo>, StorageError> {
+        validate_object_bucket(bucket)?;
+        crate::blob::validate_blob_prefix(prefix)?;
+        let start = if prefix.is_empty() {
+            self.root.join(bucket)
+        } else {
+            self.root.join(bucket).join(prefix)
+        };
+        let mut objects = Vec::new();
+        let mut stack = vec![start];
+
+        while let Some(path) = stack.pop() {
+            let metadata = match tokio::fs::metadata(&path).await {
+                Ok(metadata) => metadata,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(source) => return Err(StorageError::io(&path, source)),
+            };
+
+            if metadata.is_file() {
+                if is_uploading_temp_file(&path) {
+                    continue;
+                }
+                let Some(key) = self.key_for_bucket_path(bucket, &path) else {
+                    continue;
+                };
+                if !key.starts_with(prefix) {
+                    continue;
+                }
+                if let Ok(info) = self.get_object_metadata(bucket, &key).await {
+                    objects.push(info);
+                }
+                continue;
+            }
+
+            let entries = sorted_child_paths(&path).await?;
+            stack.extend(entries.into_iter().rev());
+        }
+
+        objects.sort_by(|left, right| left.key.cmp(&right.key));
+        Ok(objects)
+    }
+
+    async fn delete_object(&self, bucket: &str, key: &str) -> Result<(), StorageError> {
+        let object_path = self.object_path_for(bucket, key)?;
+        let metadata_path = self.object_metadata_path_for(bucket, key)?;
+
+        match tokio::fs::remove_file(&object_path).await {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(StorageError::io(&object_path, source)),
+        }
+        match tokio::fs::remove_file(&metadata_path).await {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(StorageError::io(&metadata_path, source)),
+        }
+    }
+}
+
+struct LocalMultipartWriter {
+    bucket: String,
+    key: String,
+    content_type: Option<String>,
+    metadata: ObjectMetadata,
+    object_path: PathBuf,
+    temp_path: PathBuf,
+    metadata_path: PathBuf,
+    metadata_temp_path: PathBuf,
+    file: tokio::fs::File,
+    hasher: Sha256,
+    size_bytes: u64,
+}
+
+#[async_trait]
+impl MultipartWriter for LocalMultipartWriter {
+    async fn write_chunk(&mut self, bytes: Bytes) -> Result<(), StorageError> {
+        self.size_bytes = self
+            .size_bytes
+            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        self.hasher.update(&bytes);
+        self.file
+            .write_all(&bytes)
+            .await
+            .map_err(|source| StorageError::io(&self.temp_path, source))
+    }
+
+    async fn complete(mut self: Box<Self>) -> Result<ObjectInfo, StorageError> {
+        self.file
+            .flush()
+            .await
+            .map_err(|source| StorageError::io(&self.temp_path, source))?;
+
+        let sha256_hex = format!("{:x}", self.hasher.finalize());
+        let object = ObjectInfo {
+            bucket: self.bucket.clone(),
+            key: self.key.clone(),
+            content_type: self.content_type.clone(),
+            metadata: self.metadata.clone(),
+            size_bytes: self.size_bytes,
+            sha256_hex: sha256_hex.clone(),
+            etag: Some(sha256_hex),
+            last_modified: OffsetDateTime::now_utc(),
+        };
+
+        write_object_metadata(&self.metadata_temp_path, &object).await?;
+
+        if let Err(source) = tokio::fs::rename(&self.temp_path, &self.object_path).await {
+            let _ = tokio::fs::remove_file(&self.temp_path).await;
+            let _ = tokio::fs::remove_file(&self.metadata_temp_path).await;
+            return Err(StorageError::io(&self.object_path, source));
+        }
+        if let Err(source) = tokio::fs::rename(&self.metadata_temp_path, &self.metadata_path).await
+        {
+            let _ = tokio::fs::remove_file(&self.metadata_temp_path).await;
+            return Err(StorageError::io(&self.metadata_path, source));
+        }
+
+        Ok(object)
+    }
+
+    async fn abort(self: Box<Self>) -> Result<(), StorageError> {
+        drop(self.file);
+        let temp_result = tokio::fs::remove_file(&self.temp_path).await;
+        let metadata_result = tokio::fs::remove_file(&self.metadata_temp_path).await;
+
+        match temp_result {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(StorageError::io(&self.temp_path, source)),
+        }
+        match metadata_result {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(StorageError::io(&self.metadata_temp_path, source)),
+        }
+    }
+}
+
 impl LocalStorageBackend {
     async fn collect_blob_page(
         &self,
@@ -344,6 +655,9 @@ impl LocalStorageBackend {
         while let Some(path) = stack.pop() {
             if page.len() == limit {
                 break;
+            }
+            if is_internal_storage_path(&self.root, &path) {
+                continue;
             }
 
             let metadata = match tokio::fs::metadata(&path).await {
@@ -374,6 +688,12 @@ impl LocalStorageBackend {
 
     fn key_for_path(&self, path: &Path) -> Option<String> {
         path.strip_prefix(&self.root)
+            .ok()
+            .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+    }
+
+    fn key_for_bucket_path(&self, bucket: &str, path: &Path) -> Option<String> {
+        path.strip_prefix(self.root.join(bucket))
             .ok()
             .map(|relative| relative.to_string_lossy().replace('\\', "/"))
     }
@@ -428,10 +748,28 @@ async fn write_stream_to_temp(
     })
 }
 
+async fn write_object_metadata(path: &Path, object: &ObjectInfo) -> Result<(), StorageError> {
+    let bytes = serde_json::to_vec(object).map_err(|source| StorageError::Provider {
+        backend: StorageBackend::Local.as_str().to_string(),
+        message: format!("local object metadata could not be serialized: {source}"),
+        retryable: false,
+    })?;
+    tokio::fs::write(path, bytes)
+        .await
+        .map_err(|source| StorageError::io(path, source))
+}
+
 fn is_uploading_temp_file(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.ends_with(".uploading"))
+}
+
+fn is_internal_storage_path(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .is_some_and(|component| component.as_os_str() == INTERNAL_STORAGE_DIR)
 }
 
 fn is_older_than(metadata: &std::fs::Metadata, now: SystemTime, older_than: Duration) -> bool {
