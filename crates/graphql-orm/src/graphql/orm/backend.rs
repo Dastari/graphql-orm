@@ -16,14 +16,14 @@ pub trait OrmBackend: Copy + Clone + Send + Sync + 'static {
         pool: &'a Self::Pool,
         sql: &'a str,
         values: &'a [SqlValue],
-    ) -> BoxFuture<'a, Result<Vec<Self::Row>, sqlx::Error>>;
+    ) -> BoxFuture<'a, crate::Result<Vec<Self::Row>>>;
 
     fn fetch_rows_with_auth<'a>(
         pool: &'a Self::Pool,
         sql: &'a str,
         values: &'a [SqlValue],
         _auth: Option<&'a DbAuthContext>,
-    ) -> BoxFuture<'a, Result<Vec<Self::Row>, sqlx::Error>> {
+    ) -> BoxFuture<'a, crate::Result<Vec<Self::Row>>> {
         Self::fetch_rows(pool, sql, values)
     }
 
@@ -34,7 +34,7 @@ pub trait OrmBackend: Copy + Clone + Send + Sync + 'static {
         second_sql: &'a str,
         second_values: &'a [SqlValue],
         _auth: Option<&'a DbAuthContext>,
-    ) -> BoxFuture<'a, Result<(Vec<Self::Row>, Vec<Self::Row>), sqlx::Error>> {
+    ) -> BoxFuture<'a, crate::Result<(Vec<Self::Row>, Vec<Self::Row>)>> {
         Box::pin(async move {
             let first = Self::fetch_rows(pool, first_sql, first_values).await?;
             let second = Self::fetch_rows(pool, second_sql, second_values).await?;
@@ -42,15 +42,12 @@ pub trait OrmBackend: Copy + Clone + Send + Sync + 'static {
         })
     }
 
-    fn try_get_i64(row: &Self::Row, column: &str) -> Result<i64, sqlx::Error>;
-    fn try_get_f64(row: &Self::Row, column: &str) -> Result<f64, sqlx::Error>;
-    fn try_get_string(row: &Self::Row, column: &str) -> Result<String, sqlx::Error>;
-    fn try_get_optional_i64(row: &Self::Row, column: &str) -> Result<Option<i64>, sqlx::Error>;
-    fn try_get_optional_f64(row: &Self::Row, column: &str) -> Result<Option<f64>, sqlx::Error>;
-    fn try_get_optional_string(
-        row: &Self::Row,
-        column: &str,
-    ) -> Result<Option<String>, sqlx::Error>;
+    fn try_get_i64(row: &Self::Row, column: &str) -> crate::Result<i64>;
+    fn try_get_f64(row: &Self::Row, column: &str) -> crate::Result<f64>;
+    fn try_get_string(row: &Self::Row, column: &str) -> crate::Result<String>;
+    fn try_get_optional_i64(row: &Self::Row, column: &str) -> crate::Result<Option<i64>>;
+    fn try_get_optional_f64(row: &Self::Row, column: &str) -> crate::Result<Option<f64>>;
+    fn try_get_optional_string(row: &Self::Row, column: &str) -> crate::Result<Option<String>>;
 
     fn placeholder(index: usize) -> String {
         Self::DIALECT.placeholder(index)
@@ -69,7 +66,7 @@ pub trait SqlxBackend: OrmBackend {
         executor: E,
         sql: String,
         values: Vec<SqlValue>,
-    ) -> BoxFuture<'e, Result<Vec<Self::Row>, sqlx::Error>>
+    ) -> BoxFuture<'e, crate::Result<Vec<Self::Row>>>
     where
         E: sqlx::Executor<'e, Database = Self::Database> + Send + 'e;
 
@@ -77,20 +74,20 @@ pub trait SqlxBackend: OrmBackend {
         pool: &'a Self::Pool,
         sql: &'a str,
         values: &'a [SqlValue],
-    ) -> BoxFuture<'a, Result<Self::QueryResult, sqlx::Error>>;
+    ) -> BoxFuture<'a, crate::Result<Self::QueryResult>>;
 
     fn execute_with_binds_on<'e, E>(
         executor: E,
         sql: String,
         values: Vec<SqlValue>,
-    ) -> BoxFuture<'e, Result<Self::QueryResult, sqlx::Error>>
+    ) -> BoxFuture<'e, crate::Result<Self::QueryResult>>
     where
         E: sqlx::Executor<'e, Database = Self::Database> + Send + 'e;
 
     fn apply_auth_context_to_transaction<'a>(
         _tx: &'a mut sqlx::Transaction<'_, Self::Database>,
         _auth: Option<&'a DbAuthContext>,
-    ) -> BoxFuture<'a, Result<(), sqlx::Error>> {
+    ) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async { Ok(()) })
     }
 }
@@ -103,7 +100,7 @@ pub trait WriteBackend: SqlxBackend {}
 /// database without applying schema changes.
 pub trait IntrospectionBackend: OrmBackend {
     /// Return a structured schema model for the live database.
-    async fn introspect_schema(pool: &Self::Pool) -> Result<SchemaModel, sqlx::Error>;
+    async fn introspect_schema(pool: &Self::Pool) -> crate::Result<SchemaModel>;
 }
 
 #[allow(async_fn_in_trait)]
@@ -113,7 +110,7 @@ pub trait IntrospectionBackend: OrmBackend {
 /// target validation can remain backend-generic.
 pub trait RlsIntrospectionBackend: OrmBackend {
     /// Return live table RLS flags and policies known to this backend.
-    async fn introspect_rls(_pool: &Self::Pool) -> Result<Vec<LiveRlsTable>, sqlx::Error> {
+    async fn introspect_rls(_pool: &Self::Pool) -> crate::Result<Vec<LiveRlsTable>> {
         Ok(Vec::new())
     }
 }
@@ -126,12 +123,12 @@ pub trait RlsIntrospectionBackend: OrmBackend {
 /// backend at compile time in generic APIs.
 pub trait MigrationBackend: IntrospectionBackend + WriteBackend {
     /// Prepare backend-owned migration infrastructure such as history tables.
-    async fn prepare_migration_runtime(pool: &Self::Pool) -> Result<(), sqlx::Error>;
+    async fn prepare_migration_runtime(pool: &Self::Pool) -> crate::Result<()>;
 
     /// Load applied migration records from the backend's history table.
     async fn load_applied_migrations(
         pool: &Self::Pool,
-    ) -> Result<Vec<AppliedMigrationRecord>, sqlx::Error>;
+    ) -> crate::Result<Vec<AppliedMigrationRecord>>;
 
     /// Apply rendered SQL statements transactionally and optionally record history.
     async fn apply_migration_statements_transactionally<S>(
@@ -141,7 +138,7 @@ pub trait MigrationBackend: IntrospectionBackend + WriteBackend {
         statements: &[S],
         metadata: Option<&MigrationApplicationMetadata>,
         record_history: bool,
-    ) -> Result<(), sqlx::Error>
+    ) -> crate::Result<()>
     where
         S: AsRef<str> + Send + Sync;
 }
@@ -195,7 +192,7 @@ impl OrmBackend for NoDefaultBackend {
         _pool: &'a Self::Pool,
         _sql: &'a str,
         _values: &'a [SqlValue],
-    ) -> BoxFuture<'a, Result<Vec<Self::Row>, sqlx::Error>> {
+    ) -> BoxFuture<'a, crate::Result<Vec<Self::Row>>> {
         Box::pin(async {
             Err(sqlx::Error::Protocol(
                 "graphql-orm backend is ambiguous; specify an entity/root backend".to_string(),
@@ -203,30 +200,27 @@ impl OrmBackend for NoDefaultBackend {
         })
     }
 
-    fn try_get_i64(_row: &Self::Row, column: &str) -> Result<i64, sqlx::Error> {
+    fn try_get_i64(_row: &Self::Row, column: &str) -> crate::Result<i64> {
         Err(sqlx::Error::ColumnNotFound(column.to_string()))
     }
 
-    fn try_get_f64(_row: &Self::Row, column: &str) -> Result<f64, sqlx::Error> {
+    fn try_get_f64(_row: &Self::Row, column: &str) -> crate::Result<f64> {
         Err(sqlx::Error::ColumnNotFound(column.to_string()))
     }
 
-    fn try_get_string(_row: &Self::Row, column: &str) -> Result<String, sqlx::Error> {
+    fn try_get_string(_row: &Self::Row, column: &str) -> crate::Result<String> {
         Err(sqlx::Error::ColumnNotFound(column.to_string()))
     }
 
-    fn try_get_optional_i64(_row: &Self::Row, column: &str) -> Result<Option<i64>, sqlx::Error> {
+    fn try_get_optional_i64(_row: &Self::Row, column: &str) -> crate::Result<Option<i64>> {
         Err(sqlx::Error::ColumnNotFound(column.to_string()))
     }
 
-    fn try_get_optional_f64(_row: &Self::Row, column: &str) -> Result<Option<f64>, sqlx::Error> {
+    fn try_get_optional_f64(_row: &Self::Row, column: &str) -> crate::Result<Option<f64>> {
         Err(sqlx::Error::ColumnNotFound(column.to_string()))
     }
 
-    fn try_get_optional_string(
-        _row: &Self::Row,
-        column: &str,
-    ) -> Result<Option<String>, sqlx::Error> {
+    fn try_get_optional_string(_row: &Self::Row, column: &str) -> crate::Result<Option<String>> {
         Err(sqlx::Error::ColumnNotFound(column.to_string()))
     }
 }
@@ -243,7 +237,7 @@ impl OrmBackend for SqliteBackend {
         pool: &'a Self::Pool,
         sql: &'a str,
         values: &'a [SqlValue],
-    ) -> BoxFuture<'a, Result<Vec<Self::Row>, sqlx::Error>> {
+    ) -> BoxFuture<'a, crate::Result<Vec<Self::Row>>> {
         Box::pin(async move {
             let mut query = sqlx::query(sql);
             for value in values {
@@ -253,35 +247,32 @@ impl OrmBackend for SqliteBackend {
         })
     }
 
-    fn try_get_i64(row: &Self::Row, column: &str) -> Result<i64, sqlx::Error> {
+    fn try_get_i64(row: &Self::Row, column: &str) -> crate::Result<i64> {
         use sqlx::Row;
         row.try_get(column)
     }
 
-    fn try_get_f64(row: &Self::Row, column: &str) -> Result<f64, sqlx::Error> {
+    fn try_get_f64(row: &Self::Row, column: &str) -> crate::Result<f64> {
         use sqlx::Row;
         row.try_get(column)
     }
 
-    fn try_get_string(row: &Self::Row, column: &str) -> Result<String, sqlx::Error> {
+    fn try_get_string(row: &Self::Row, column: &str) -> crate::Result<String> {
         use sqlx::Row;
         row.try_get(column)
     }
 
-    fn try_get_optional_i64(row: &Self::Row, column: &str) -> Result<Option<i64>, sqlx::Error> {
+    fn try_get_optional_i64(row: &Self::Row, column: &str) -> crate::Result<Option<i64>> {
         use sqlx::Row;
         row.try_get(column)
     }
 
-    fn try_get_optional_f64(row: &Self::Row, column: &str) -> Result<Option<f64>, sqlx::Error> {
+    fn try_get_optional_f64(row: &Self::Row, column: &str) -> crate::Result<Option<f64>> {
         use sqlx::Row;
         row.try_get(column)
     }
 
-    fn try_get_optional_string(
-        row: &Self::Row,
-        column: &str,
-    ) -> Result<Option<String>, sqlx::Error> {
+    fn try_get_optional_string(row: &Self::Row, column: &str) -> crate::Result<Option<String>> {
         use sqlx::Row;
         row.try_get(column)
     }
@@ -296,7 +287,7 @@ impl SqlxBackend for SqliteBackend {
         executor: E,
         sql: String,
         values: Vec<SqlValue>,
-    ) -> BoxFuture<'e, Result<Vec<Self::Row>, sqlx::Error>>
+    ) -> BoxFuture<'e, crate::Result<Vec<Self::Row>>>
     where
         E: sqlx::Executor<'e, Database = Self::Database> + Send + 'e,
     {
@@ -313,7 +304,7 @@ impl SqlxBackend for SqliteBackend {
         pool: &'a Self::Pool,
         sql: &'a str,
         values: &'a [SqlValue],
-    ) -> BoxFuture<'a, Result<Self::QueryResult, sqlx::Error>> {
+    ) -> BoxFuture<'a, crate::Result<Self::QueryResult>> {
         Box::pin(async move {
             let mut query = sqlx::query(sql);
             for value in values {
@@ -327,7 +318,7 @@ impl SqlxBackend for SqliteBackend {
         executor: E,
         sql: String,
         values: Vec<SqlValue>,
-    ) -> BoxFuture<'e, Result<Self::QueryResult, sqlx::Error>>
+    ) -> BoxFuture<'e, crate::Result<Self::QueryResult>>
     where
         E: sqlx::Executor<'e, Database = Self::Database> + Send + 'e,
     {
@@ -358,7 +349,7 @@ impl OrmBackend for PostgresBackend {
         pool: &'a Self::Pool,
         sql: &'a str,
         values: &'a [SqlValue],
-    ) -> BoxFuture<'a, Result<Vec<Self::Row>, sqlx::Error>> {
+    ) -> BoxFuture<'a, crate::Result<Vec<Self::Row>>> {
         Box::pin(async move {
             let sql = Self::normalize_sql(sql, 1);
             let mut query = sqlx::query(&sql);
@@ -374,7 +365,7 @@ impl OrmBackend for PostgresBackend {
         sql: &'a str,
         values: &'a [SqlValue],
         auth: Option<&'a DbAuthContext>,
-    ) -> BoxFuture<'a, Result<Vec<Self::Row>, sqlx::Error>> {
+    ) -> BoxFuture<'a, crate::Result<Vec<Self::Row>>> {
         Box::pin(async move {
             let Some(auth) = auth else {
                 return Self::fetch_rows(pool, sql, values).await;
@@ -400,7 +391,7 @@ impl OrmBackend for PostgresBackend {
         second_sql: &'a str,
         second_values: &'a [SqlValue],
         auth: Option<&'a DbAuthContext>,
-    ) -> BoxFuture<'a, Result<(Vec<Self::Row>, Vec<Self::Row>), sqlx::Error>> {
+    ) -> BoxFuture<'a, crate::Result<(Vec<Self::Row>, Vec<Self::Row>)>> {
         Box::pin(async move {
             let mut tx = pool.begin().await?;
             if let Some(auth) = auth {
@@ -426,35 +417,32 @@ impl OrmBackend for PostgresBackend {
         })
     }
 
-    fn try_get_i64(row: &Self::Row, column: &str) -> Result<i64, sqlx::Error> {
+    fn try_get_i64(row: &Self::Row, column: &str) -> crate::Result<i64> {
         use sqlx::Row;
         row.try_get(column)
     }
 
-    fn try_get_f64(row: &Self::Row, column: &str) -> Result<f64, sqlx::Error> {
+    fn try_get_f64(row: &Self::Row, column: &str) -> crate::Result<f64> {
         use sqlx::Row;
         row.try_get(column)
     }
 
-    fn try_get_string(row: &Self::Row, column: &str) -> Result<String, sqlx::Error> {
+    fn try_get_string(row: &Self::Row, column: &str) -> crate::Result<String> {
         use sqlx::Row;
         row.try_get(column)
     }
 
-    fn try_get_optional_i64(row: &Self::Row, column: &str) -> Result<Option<i64>, sqlx::Error> {
+    fn try_get_optional_i64(row: &Self::Row, column: &str) -> crate::Result<Option<i64>> {
         use sqlx::Row;
         row.try_get(column)
     }
 
-    fn try_get_optional_f64(row: &Self::Row, column: &str) -> Result<Option<f64>, sqlx::Error> {
+    fn try_get_optional_f64(row: &Self::Row, column: &str) -> crate::Result<Option<f64>> {
         use sqlx::Row;
         row.try_get(column)
     }
 
-    fn try_get_optional_string(
-        row: &Self::Row,
-        column: &str,
-    ) -> Result<Option<String>, sqlx::Error> {
+    fn try_get_optional_string(row: &Self::Row, column: &str) -> crate::Result<Option<String>> {
         use sqlx::Row;
         row.try_get(column)
     }
@@ -469,7 +457,7 @@ impl SqlxBackend for PostgresBackend {
         executor: E,
         sql: String,
         values: Vec<SqlValue>,
-    ) -> BoxFuture<'e, Result<Vec<Self::Row>, sqlx::Error>>
+    ) -> BoxFuture<'e, crate::Result<Vec<Self::Row>>>
     where
         E: sqlx::Executor<'e, Database = Self::Database> + Send + 'e,
     {
@@ -487,7 +475,7 @@ impl SqlxBackend for PostgresBackend {
         pool: &'a Self::Pool,
         sql: &'a str,
         values: &'a [SqlValue],
-    ) -> BoxFuture<'a, Result<Self::QueryResult, sqlx::Error>> {
+    ) -> BoxFuture<'a, crate::Result<Self::QueryResult>> {
         Box::pin(async move {
             let sql = Self::normalize_sql(sql, 1);
             let mut query = sqlx::query(&sql);
@@ -502,7 +490,7 @@ impl SqlxBackend for PostgresBackend {
         executor: E,
         sql: String,
         values: Vec<SqlValue>,
-    ) -> BoxFuture<'e, Result<Self::QueryResult, sqlx::Error>>
+    ) -> BoxFuture<'e, crate::Result<Self::QueryResult>>
     where
         E: sqlx::Executor<'e, Database = Self::Database> + Send + 'e,
     {
@@ -519,7 +507,7 @@ impl SqlxBackend for PostgresBackend {
     fn apply_auth_context_to_transaction<'a>(
         tx: &'a mut sqlx::Transaction<'_, Self::Database>,
         auth: Option<&'a DbAuthContext>,
-    ) -> BoxFuture<'a, Result<(), sqlx::Error>> {
+    ) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
             if let Some(auth) = auth {
                 apply_postgres_auth_context(tx, auth).await?;
@@ -546,34 +534,31 @@ impl OrmBackend for MssqlBackend {
         pool: &'a Self::Pool,
         sql: &'a str,
         values: &'a [SqlValue],
-    ) -> BoxFuture<'a, Result<Vec<Self::Row>, sqlx::Error>> {
+    ) -> BoxFuture<'a, crate::Result<Vec<Self::Row>>> {
         Box::pin(async move { pool.fetch_rows(sql, values).await })
     }
 
-    fn try_get_i64(row: &Self::Row, column: &str) -> Result<i64, sqlx::Error> {
+    fn try_get_i64(row: &Self::Row, column: &str) -> crate::Result<i64> {
         row.try_get(column)
     }
 
-    fn try_get_f64(row: &Self::Row, column: &str) -> Result<f64, sqlx::Error> {
+    fn try_get_f64(row: &Self::Row, column: &str) -> crate::Result<f64> {
         row.try_get(column)
     }
 
-    fn try_get_string(row: &Self::Row, column: &str) -> Result<String, sqlx::Error> {
+    fn try_get_string(row: &Self::Row, column: &str) -> crate::Result<String> {
         row.try_get(column)
     }
 
-    fn try_get_optional_i64(row: &Self::Row, column: &str) -> Result<Option<i64>, sqlx::Error> {
+    fn try_get_optional_i64(row: &Self::Row, column: &str) -> crate::Result<Option<i64>> {
         <i64 as crate::db::mssql::MssqlScalar>::try_get_optional(row, column)
     }
 
-    fn try_get_optional_f64(row: &Self::Row, column: &str) -> Result<Option<f64>, sqlx::Error> {
+    fn try_get_optional_f64(row: &Self::Row, column: &str) -> crate::Result<Option<f64>> {
         <f64 as crate::db::mssql::MssqlScalar>::try_get_optional(row, column)
     }
 
-    fn try_get_optional_string(
-        row: &Self::Row,
-        column: &str,
-    ) -> Result<Option<String>, sqlx::Error> {
+    fn try_get_optional_string(row: &Self::Row, column: &str) -> crate::Result<Option<String>> {
         <String as crate::db::mssql::MssqlScalar>::try_get_optional(row, column)
     }
 }
@@ -606,7 +591,7 @@ fn bind_sqlite_value<'q>(
 async fn apply_postgres_auth_context(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     auth: &DbAuthContext,
-) -> Result<(), sqlx::Error> {
+) -> crate::Result<()> {
     let settings = auth.postgres_settings()?;
     if settings.is_empty() {
         return Ok(());

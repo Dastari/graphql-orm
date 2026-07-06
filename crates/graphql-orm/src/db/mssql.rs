@@ -47,19 +47,19 @@ pub trait MssqlColumnIndex: Copy {
 }
 
 pub trait MssqlScalar: Sized {
-    fn try_get_optional<I>(row: &MssqlRow, index: I) -> Result<Option<Self>, sqlx::Error>
+    fn try_get_optional<I>(row: &MssqlRow, index: I) -> crate::Result<Option<Self>>
     where
         I: MssqlColumnIndex;
 }
 
 pub trait MssqlDecode: Sized {
-    fn try_get<I>(row: &MssqlRow, index: I) -> Result<Self, sqlx::Error>
+    fn try_get<I>(row: &MssqlRow, index: I) -> crate::Result<Self>
     where
         I: MssqlColumnIndex;
 }
 
 impl MssqlPool {
-    pub async fn connect_ado(connection_string: &str) -> Result<Self, sqlx::Error> {
+    pub async fn connect_ado(connection_string: &str) -> crate::Result<Self> {
         let mut config = Config::from_ado_string(connection_string).map_err(map_tiberius_error)?;
         config.readonly(true);
         Ok(Self::new(config))
@@ -79,11 +79,7 @@ impl MssqlPool {
         }
     }
 
-    pub async fn fetch_rows(
-        &self,
-        sql: &str,
-        values: &[SqlValue],
-    ) -> Result<Vec<MssqlRow>, sqlx::Error> {
+    pub async fn fetch_rows(&self, sql: &str, values: &[SqlValue]) -> crate::Result<Vec<MssqlRow>> {
         let (mut client, permit) = self.acquire_client().await?;
         let result = fetch_rows_with_client(&mut client, sql, values).await;
         if result.is_ok() {
@@ -93,7 +89,7 @@ impl MssqlPool {
         result
     }
 
-    async fn acquire_client(&self) -> Result<(MssqlClient, OwnedSemaphorePermit), sqlx::Error> {
+    async fn acquire_client(&self) -> crate::Result<(MssqlClient, OwnedSemaphorePermit)> {
         let permit = self
             .inner
             .permits
@@ -132,7 +128,7 @@ impl MssqlRow {
         Self { inner }
     }
 
-    pub fn try_get<T, I>(&self, index: I) -> Result<T, sqlx::Error>
+    pub fn try_get<T, I>(&self, index: I) -> crate::Result<T>
     where
         T: MssqlDecode,
         I: MssqlColumnIndex,
@@ -171,7 +167,7 @@ impl<T> MssqlDecode for T
 where
     T: MssqlScalar,
 {
-    fn try_get<I>(row: &MssqlRow, index: I) -> Result<Self, sqlx::Error>
+    fn try_get<I>(row: &MssqlRow, index: I) -> crate::Result<Self>
     where
         I: MssqlColumnIndex,
     {
@@ -186,7 +182,7 @@ impl<T> MssqlDecode for Option<T>
 where
     T: MssqlScalar,
 {
-    fn try_get<I>(row: &MssqlRow, index: I) -> Result<Self, sqlx::Error>
+    fn try_get<I>(row: &MssqlRow, index: I) -> crate::Result<Self>
     where
         I: MssqlColumnIndex,
     {
@@ -195,7 +191,7 @@ where
 }
 
 impl MssqlScalar for String {
-    fn try_get_optional<I>(row: &MssqlRow, index: I) -> Result<Option<Self>, sqlx::Error>
+    fn try_get_optional<I>(row: &MssqlRow, index: I) -> crate::Result<Option<Self>>
     where
         I: MssqlColumnIndex,
     {
@@ -223,7 +219,7 @@ impl MssqlScalar for String {
 }
 
 impl MssqlScalar for Vec<u8> {
-    fn try_get_optional<I>(row: &MssqlRow, index: I) -> Result<Option<Self>, sqlx::Error>
+    fn try_get_optional<I>(row: &MssqlRow, index: I) -> crate::Result<Option<Self>>
     where
         I: MssqlColumnIndex,
     {
@@ -235,7 +231,7 @@ impl MssqlScalar for Vec<u8> {
 }
 
 impl MssqlScalar for uuid::Uuid {
-    fn try_get_optional<I>(row: &MssqlRow, index: I) -> Result<Option<Self>, sqlx::Error>
+    fn try_get_optional<I>(row: &MssqlRow, index: I) -> crate::Result<Option<Self>>
     where
         I: MssqlColumnIndex,
     {
@@ -246,7 +242,7 @@ impl MssqlScalar for uuid::Uuid {
 }
 
 impl MssqlScalar for bool {
-    fn try_get_optional<I>(row: &MssqlRow, index: I) -> Result<Option<Self>, sqlx::Error>
+    fn try_get_optional<I>(row: &MssqlRow, index: I) -> crate::Result<Option<Self>>
     where
         I: MssqlColumnIndex,
     {
@@ -261,7 +257,7 @@ impl MssqlScalar for bool {
 }
 
 impl MssqlScalar for i32 {
-    fn try_get_optional<I>(row: &MssqlRow, index: I) -> Result<Option<Self>, sqlx::Error>
+    fn try_get_optional<I>(row: &MssqlRow, index: I) -> crate::Result<Option<Self>>
     where
         I: MssqlColumnIndex,
     {
@@ -289,7 +285,7 @@ impl MssqlScalar for i32 {
 }
 
 impl MssqlScalar for i64 {
-    fn try_get_optional<I>(row: &MssqlRow, index: I) -> Result<Option<Self>, sqlx::Error>
+    fn try_get_optional<I>(row: &MssqlRow, index: I) -> crate::Result<Option<Self>>
     where
         I: MssqlColumnIndex,
     {
@@ -312,7 +308,7 @@ impl MssqlScalar for i64 {
 macro_rules! impl_mssql_int_scalar {
     ($ty:ty) => {
         impl MssqlScalar for $ty {
-            fn try_get_optional<I>(row: &MssqlRow, index: I) -> Result<Option<Self>, sqlx::Error>
+            fn try_get_optional<I>(row: &MssqlRow, index: I) -> crate::Result<Option<Self>>
             where
                 I: MssqlColumnIndex,
             {
@@ -339,7 +335,7 @@ impl_mssql_int_scalar!(u64);
 impl_mssql_int_scalar!(usize);
 
 impl MssqlScalar for f32 {
-    fn try_get_optional<I>(row: &MssqlRow, index: I) -> Result<Option<Self>, sqlx::Error>
+    fn try_get_optional<I>(row: &MssqlRow, index: I) -> crate::Result<Option<Self>>
     where
         I: MssqlColumnIndex,
     {
@@ -350,7 +346,7 @@ impl MssqlScalar for f32 {
 }
 
 impl MssqlScalar for f64 {
-    fn try_get_optional<I>(row: &MssqlRow, index: I) -> Result<Option<Self>, sqlx::Error>
+    fn try_get_optional<I>(row: &MssqlRow, index: I) -> crate::Result<Option<Self>>
     where
         I: MssqlColumnIndex,
     {
@@ -387,7 +383,7 @@ async fn fetch_rows_with_client(
     client: &mut MssqlClient,
     sql: &str,
     values: &[SqlValue],
-) -> Result<Vec<MssqlRow>, sqlx::Error> {
+) -> crate::Result<Vec<MssqlRow>> {
     let mut query = Query::new(sql.to_string());
     for value in values.iter().map(MssqlParamValue::from) {
         query.bind(value);

@@ -91,6 +91,23 @@ Each `PlannedMigrationStep` carries a `MigrationRisk`:
 
 Rendered SQL is available as `plan.statements`, but callers should treat it as an artifact of the plan rather than the migration source of truth.
 
+When `graphql-orm` owns only a subset of tables in a shared database, plan with
+`PlanOptions::managed_tables_only()` so unrelated live tables are not treated as destructive drift:
+
+```rust
+let plan = database
+    .schema()
+    .plan_migration_to_entities_with_options(
+        "2026-07-06-add-cache",
+        "add cache tables",
+        &[CacheEntry::metadata()],
+        PlanOptions::managed_tables_only(),
+    )
+    .await?;
+```
+
+The default planning mode remains strict and will report extra live tables.
+
 Managed migrations create full-text search storage, such as Postgres shadow tables/GIN indexes and
 SQLite FTS5 virtual tables. They do not backfill existing rows automatically. Run the generated
 rebuild API after applying a migration that adds or changes search:
@@ -139,6 +156,7 @@ database
 ```rust
 ApplyOptions {
     allow_destructive: false,
+    additive_only: false,
     require_clean_schema: true,
     dry_run: false,
     expected_current_schema_hash: None,
@@ -147,6 +165,11 @@ ApplyOptions {
 ```
 
 Set `dry_run: true` to verify an application path without running statements. Destructive plans are rejected unless `allow_destructive` is explicitly enabled.
+
+Set `additive_only: true` for service startup paths that may create missing ORM-owned tables or
+indexes but must not alter, rebuild, or drop existing structures. Combine it with
+`PlanOptions::managed_tables_only()` when the database contains unrelated tables managed by other
+systems.
 
 ## ABI Schema Upgrades
 

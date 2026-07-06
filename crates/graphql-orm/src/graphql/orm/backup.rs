@@ -134,7 +134,7 @@ pub struct BackupSnapshot {
 
 #[allow(async_fn_in_trait)]
 pub trait GraphqlOrmBackupRuntime {
-    async fn begin_consistent_snapshot(&self) -> Result<BackupSnapshot, sqlx::Error>;
+    async fn begin_consistent_snapshot(&self) -> crate::Result<BackupSnapshot>;
 
     fn backup_backend_capabilities(&self) -> BackupBackendCapabilities;
 
@@ -150,14 +150,14 @@ pub trait GraphqlOrmBackupRuntime {
         &self,
         snapshot: &mut BackupSnapshot,
         entity: &EntityBackupDescriptor,
-    ) -> Result<Vec<BackupRow>, sqlx::Error>;
+    ) -> crate::Result<Vec<BackupRow>>;
 
     async fn import_table_rows(
         &self,
         entity: &EntityBackupDescriptor,
         rows: &[BackupRow],
         context: &RestoreContext,
-    ) -> Result<ImportReport, sqlx::Error>;
+    ) -> crate::Result<ImportReport>;
 
     async fn restore_backup_rows(
         &self,
@@ -165,11 +165,11 @@ pub trait GraphqlOrmBackupRuntime {
         current_snapshot: &GraphqlOrmSchemaSnapshot,
         rows_by_table: &BTreeMap<String, Vec<BackupRow>>,
         context: &RestoreContext,
-    ) -> Result<Vec<ImportReport>, sqlx::Error>;
+    ) -> crate::Result<Vec<ImportReport>>;
 }
 
 impl GraphqlOrmBackupRuntime for crate::db::Database {
-    async fn begin_consistent_snapshot(&self) -> Result<BackupSnapshot, sqlx::Error> {
+    async fn begin_consistent_snapshot(&self) -> crate::Result<BackupSnapshot> {
         begin_consistent_snapshot(self.pool()).await
     }
 
@@ -193,7 +193,7 @@ impl GraphqlOrmBackupRuntime for crate::db::Database {
         &self,
         snapshot: &mut BackupSnapshot,
         entity: &EntityBackupDescriptor,
-    ) -> Result<Vec<BackupRow>, sqlx::Error> {
+    ) -> crate::Result<Vec<BackupRow>> {
         export_table_rows(snapshot, entity).await
     }
 
@@ -202,7 +202,7 @@ impl GraphqlOrmBackupRuntime for crate::db::Database {
         entity: &EntityBackupDescriptor,
         rows: &[BackupRow],
         context: &RestoreContext,
-    ) -> Result<ImportReport, sqlx::Error> {
+    ) -> crate::Result<ImportReport> {
         import_table_rows(self.pool(), entity, rows, context).await
     }
 
@@ -212,7 +212,7 @@ impl GraphqlOrmBackupRuntime for crate::db::Database {
         current_snapshot: &GraphqlOrmSchemaSnapshot,
         rows_by_table: &BTreeMap<String, Vec<BackupRow>>,
         context: &RestoreContext,
-    ) -> Result<Vec<ImportReport>, sqlx::Error> {
+    ) -> crate::Result<Vec<ImportReport>> {
         restore_backup_rows(
             self,
             backup_snapshot,
@@ -225,7 +225,7 @@ impl GraphqlOrmBackupRuntime for crate::db::Database {
 }
 
 impl crate::db::Database {
-    pub async fn ensure_change_journal_table(&self) -> Result<(), sqlx::Error> {
+    pub async fn ensure_change_journal_table(&self) -> crate::Result<()> {
         if !cfg!(feature = "change-journal") {
             return Err(sqlx::Error::Protocol(
                 "change journal support requires the graphql-orm change-journal feature"
@@ -235,10 +235,7 @@ impl crate::db::Database {
         ensure_change_journal_table(self.pool()).await
     }
 
-    pub async fn export_changes(
-        &self,
-        window: ChangeWindow,
-    ) -> Result<Vec<BackupChange>, sqlx::Error> {
+    pub async fn export_changes(&self, window: ChangeWindow) -> crate::Result<Vec<BackupChange>> {
         if !cfg!(feature = "change-journal") {
             return Err(sqlx::Error::Protocol(
                 "incremental backup export requires the graphql-orm change-journal feature"
@@ -276,7 +273,7 @@ pub async fn restore_backup_rows(
     current_snapshot: &GraphqlOrmSchemaSnapshot,
     rows_by_table: &BTreeMap<String, Vec<BackupRow>>,
     context: &RestoreContext,
-) -> Result<Vec<ImportReport>, sqlx::Error> {
+) -> crate::Result<Vec<ImportReport>> {
     match compare_schema_snapshots(backup_snapshot, current_snapshot) {
         BackupCompatibility::Exact => {}
         BackupCompatibility::OlderSchema {
@@ -319,13 +316,13 @@ pub async fn restore_backup_rows(
 }
 
 #[cfg(feature = "sqlite")]
-async fn begin_consistent_snapshot(pool: &DbPool) -> Result<BackupSnapshot, sqlx::Error> {
+async fn begin_consistent_snapshot(pool: &DbPool) -> crate::Result<BackupSnapshot> {
     let tx = pool.begin().await?;
     Ok(BackupSnapshot { tx })
 }
 
 #[cfg(feature = "postgres")]
-async fn begin_consistent_snapshot(pool: &DbPool) -> Result<BackupSnapshot, sqlx::Error> {
+async fn begin_consistent_snapshot(pool: &DbPool) -> crate::Result<BackupSnapshot> {
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *tx)
@@ -344,7 +341,7 @@ fn backup_backend_capabilities() -> BackupBackendCapabilities {
     }
 }
 
-async fn ensure_change_journal_table(pool: &DbPool) -> Result<(), sqlx::Error> {
+async fn ensure_change_journal_table(pool: &DbPool) -> crate::Result<()> {
     #[cfg(feature = "sqlite")]
     let sql = format!(
         "CREATE TABLE IF NOT EXISTS {} (
@@ -386,7 +383,7 @@ async fn ensure_change_journal_table(pool: &DbPool) -> Result<(), sqlx::Error> {
 pub(crate) async fn record_change_journal_event<B>(
     hook_ctx: &mut super::MutationContext<'_, B>,
     event: &MutationEvent,
-) -> Result<(), sqlx::Error>
+) -> crate::Result<()>
 where
     B: super::WriteBackend,
     for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
@@ -439,10 +436,7 @@ where
     Ok(())
 }
 
-async fn export_changes(
-    pool: &DbPool,
-    window: ChangeWindow,
-) -> Result<Vec<BackupChange>, sqlx::Error> {
+async fn export_changes(pool: &DbPool, window: ChangeWindow) -> crate::Result<Vec<BackupChange>> {
     let mut conditions = vec!["changed_at <= ?".to_string()];
     let mut values = vec![SqlValue::Int(window.until)];
     if let Some(after_snapshot_id) = window.after_snapshot_id {
@@ -475,7 +469,7 @@ fn backup_backend_capabilities() -> BackupBackendCapabilities {
 async fn export_table_rows(
     snapshot: &mut BackupSnapshot,
     entity: &EntityBackupDescriptor,
-) -> Result<Vec<BackupRow>, sqlx::Error> {
+) -> crate::Result<Vec<BackupRow>> {
     let export_columns = export_columns(entity);
     let select_columns = export_columns
         .iter()
@@ -528,7 +522,7 @@ async fn import_table_rows(
     entity: &EntityBackupDescriptor,
     rows: &[BackupRow],
     context: &RestoreContext,
-) -> Result<ImportReport, sqlx::Error> {
+) -> crate::Result<ImportReport> {
     match context.mode {
         RestoreMode::ReplaceExisting => {
             return Err(sqlx::Error::Protocol(
@@ -624,10 +618,7 @@ async fn import_table_rows(
     })
 }
 
-fn validate_import_rows(
-    entity: &EntityBackupDescriptor,
-    rows: &[BackupRow],
-) -> Result<(), sqlx::Error> {
+fn validate_import_rows(entity: &EntityBackupDescriptor, rows: &[BackupRow]) -> crate::Result<()> {
     let known_columns = entity
         .columns
         .iter()
@@ -700,7 +691,7 @@ fn import_columns(entity: &EntityBackupDescriptor, rows: &[BackupRow]) -> Vec<St
 async fn table_row_count_on(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     table_name: &str,
-) -> Result<i64, sqlx::Error> {
+) -> crate::Result<i64> {
     let sql = format!(
         "SELECT COUNT(*) AS count FROM {}",
         quote_identifier(table_name)
@@ -714,7 +705,7 @@ async fn execute_import_insert(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     sql: &str,
     values: &[SqlValue],
-) -> Result<(), sqlx::Error> {
+) -> crate::Result<()> {
     execute_with_binds_on::<SqliteBackend, _>(&mut **tx, sql, values).await?;
     Ok(())
 }
@@ -723,7 +714,7 @@ async fn execute_import_insert(
 async fn table_row_count_on(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     table_name: &str,
-) -> Result<i64, sqlx::Error> {
+) -> crate::Result<i64> {
     let sql = format!(
         "SELECT COUNT(*) AS count FROM {}",
         quote_identifier(table_name)
@@ -737,7 +728,7 @@ async fn execute_import_insert(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     sql: &str,
     values: &[SqlValue],
-) -> Result<(), sqlx::Error> {
+) -> crate::Result<()> {
     execute_with_binds_on::<PostgresBackend, _>(&mut **tx, sql, values).await?;
     Ok(())
 }
@@ -746,7 +737,7 @@ async fn execute_import_insert(
 async fn fetch_snapshot_rows(
     snapshot: &mut BackupSnapshot,
     sql: &str,
-) -> Result<Vec<crate::DbRow>, sqlx::Error> {
+) -> crate::Result<Vec<crate::DbRow>> {
     sqlx::query(sql).fetch_all(&mut *snapshot.tx).await
 }
 
@@ -754,7 +745,7 @@ async fn fetch_snapshot_rows(
 async fn fetch_snapshot_rows(
     snapshot: &mut BackupSnapshot,
     sql: &str,
-) -> Result<Vec<crate::DbRow>, sqlx::Error> {
+) -> crate::Result<Vec<crate::DbRow>> {
     sqlx::query(sql).fetch_all(&mut *snapshot.tx).await
 }
 
@@ -763,7 +754,7 @@ fn decode_backup_value(
     row: &crate::DbRow,
     column: &str,
     kind: BackupValueKind,
-) -> Result<BackupValue, sqlx::Error> {
+) -> crate::Result<BackupValue> {
     match kind {
         BackupValueKind::Null => Ok(BackupValue::Null),
         BackupValueKind::Bool => row.try_get::<Option<i64>, _>(column).map(|value| {
@@ -809,7 +800,7 @@ fn decode_backup_value(
     row: &crate::DbRow,
     column: &str,
     kind: BackupValueKind,
-) -> Result<BackupValue, sqlx::Error> {
+) -> crate::Result<BackupValue> {
     match kind {
         BackupValueKind::Null => Ok(BackupValue::Null),
         BackupValueKind::Bool => row
@@ -840,7 +831,7 @@ fn decode_backup_value(
     }
 }
 
-fn backup_value_to_sql_value(value: &BackupValue) -> Result<SqlValue, sqlx::Error> {
+fn backup_value_to_sql_value(value: &BackupValue) -> crate::Result<SqlValue> {
     Ok(match value {
         BackupValue::Null => SqlValue::Null,
         BackupValue::Bool(value) => SqlValue::Bool(*value),
@@ -854,7 +845,7 @@ fn backup_value_to_sql_value(value: &BackupValue) -> Result<SqlValue, sqlx::Erro
 }
 
 #[cfg(feature = "sqlite")]
-fn decode_backup_change(row: crate::DbRow) -> Result<BackupChange, sqlx::Error> {
+fn decode_backup_change(row: crate::DbRow) -> crate::Result<BackupChange> {
     let id: String = row.try_get("id")?;
     decode_backup_change_parts(
         uuid::Uuid::parse_str(&id).map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
@@ -871,7 +862,7 @@ fn decode_backup_change(row: crate::DbRow) -> Result<BackupChange, sqlx::Error> 
 }
 
 #[cfg(feature = "postgres")]
-fn decode_backup_change(row: crate::DbRow) -> Result<BackupChange, sqlx::Error> {
+fn decode_backup_change(row: crate::DbRow) -> crate::Result<BackupChange> {
     decode_backup_change_parts(
         row.try_get("id")?,
         row.try_get("entity_name")?,
@@ -897,7 +888,7 @@ fn decode_backup_change_parts(
     row_hash: Option<String>,
     actor_id: Option<String>,
     correlation_id: Option<String>,
-) -> Result<BackupChange, sqlx::Error> {
+) -> crate::Result<BackupChange> {
     let action = match action.as_str() {
         "create" => BackupChangeAction::Create,
         "update" => BackupChangeAction::Update,

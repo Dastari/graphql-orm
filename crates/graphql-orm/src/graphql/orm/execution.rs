@@ -22,7 +22,7 @@ pub trait MigrationSource {
 
 #[allow(async_fn_in_trait)]
 pub trait MigrationRunner {
-    async fn apply_migrations(&self, migrations: &[Migration]) -> Result<(), sqlx::Error>;
+    async fn apply_migrations(&self, migrations: &[Migration]) -> crate::Result<()>;
 }
 
 #[allow(async_fn_in_trait)]
@@ -30,16 +30,16 @@ pub trait SchemaStageRunner {
     async fn plan_schema_stages(
         &self,
         stages: &[SchemaStage],
-    ) -> Result<Vec<PlannedSchemaStage>, sqlx::Error>;
+    ) -> crate::Result<Vec<PlannedSchemaStage>>;
 
-    async fn apply_schema_stages(&self, stages: &[SchemaStage]) -> Result<(), sqlx::Error>;
+    async fn apply_schema_stages(&self, stages: &[SchemaStage]) -> crate::Result<()>;
 }
 
 impl<B> MigrationRunner for crate::db::Database<B>
 where
     B: MigrationBackend,
 {
-    async fn apply_migrations(&self, migrations: &[Migration]) -> Result<(), sqlx::Error> {
+    async fn apply_migrations(&self, migrations: &[Migration]) -> crate::Result<()> {
         ensure_managed_policy(self.schema_policy(), "apply legacy migrations")?;
         B::prepare_migration_runtime(self.pool()).await?;
         let mut applied_versions = applied_version_set::<B>(self.pool()).await?;
@@ -69,7 +69,7 @@ where
     async fn plan_schema_stages(
         &self,
         stages: &[SchemaStage],
-    ) -> Result<Vec<PlannedSchemaStage>, sqlx::Error> {
+    ) -> crate::Result<Vec<PlannedSchemaStage>> {
         ensure_planning_policy(self.schema_policy(), "plan schema stages")?;
         B::prepare_migration_runtime(self.pool()).await?;
         validate_schema_stages(stages)?;
@@ -99,7 +99,7 @@ where
         Ok(planned)
     }
 
-    async fn apply_schema_stages(&self, stages: &[SchemaStage]) -> Result<(), sqlx::Error> {
+    async fn apply_schema_stages(&self, stages: &[SchemaStage]) -> crate::Result<()> {
         ensure_managed_policy(self.schema_policy(), "apply schema stages")?;
         let planned = self.plan_schema_stages(stages).await?;
         for stage in planned {
@@ -125,7 +125,7 @@ where
     }
 }
 
-pub(crate) fn ensure_managed_policy(policy: SchemaPolicy, action: &str) -> Result<(), sqlx::Error> {
+pub(crate) fn ensure_managed_policy(policy: SchemaPolicy, action: &str) -> crate::Result<()> {
     if policy.allows_application() {
         Ok(())
     } else {
@@ -135,10 +135,7 @@ pub(crate) fn ensure_managed_policy(policy: SchemaPolicy, action: &str) -> Resul
     }
 }
 
-pub(crate) fn ensure_planning_policy(
-    policy: SchemaPolicy,
-    action: &str,
-) -> Result<(), sqlx::Error> {
+pub(crate) fn ensure_planning_policy(policy: SchemaPolicy, action: &str) -> crate::Result<()> {
     if policy.allows_planning() {
         Ok(())
     } else {
@@ -148,7 +145,7 @@ pub(crate) fn ensure_planning_policy(
     }
 }
 
-pub(crate) fn validate_schema_stages(stages: &[SchemaStage]) -> Result<(), sqlx::Error> {
+pub(crate) fn validate_schema_stages(stages: &[SchemaStage]) -> crate::Result<()> {
     let mut seen = HashSet::new();
     for stage in stages {
         if stage.version.trim().is_empty() {
@@ -174,7 +171,7 @@ pub(crate) fn validate_schema_stages(stages: &[SchemaStage]) -> Result<(), sqlx:
 pub(crate) fn ensure_applied_stages_form_prefix(
     stages: &[SchemaStage],
     applied_versions: &HashSet<String>,
-) -> Result<(), sqlx::Error> {
+) -> crate::Result<()> {
     let mut seen_missing = false;
     for stage in stages {
         if applied_versions.contains(&stage.version) {
@@ -193,14 +190,14 @@ pub(crate) fn ensure_applied_stages_form_prefix(
 
 pub(crate) async fn applied_migration_records<B: MigrationBackend>(
     pool: &B::Pool,
-) -> Result<Vec<AppliedMigrationRecord>, sqlx::Error> {
+) -> crate::Result<Vec<AppliedMigrationRecord>> {
     B::prepare_migration_runtime(pool).await?;
     B::load_applied_migrations(pool).await
 }
 
 pub(crate) async fn applied_version_set<B: MigrationBackend>(
     pool: &B::Pool,
-) -> Result<HashSet<String>, sqlx::Error> {
+) -> crate::Result<HashSet<String>> {
     Ok(applied_migration_records::<B>(pool)
         .await?
         .into_iter()
@@ -210,7 +207,7 @@ pub(crate) async fn applied_version_set<B: MigrationBackend>(
 
 #[cfg(feature = "sqlite")]
 impl MigrationBackend for super::SqliteBackend {
-    async fn prepare_migration_runtime(pool: &Self::Pool) -> Result<(), sqlx::Error> {
+    async fn prepare_migration_runtime(pool: &Self::Pool) -> crate::Result<()> {
         ensure_sqlite_migration_history_table(pool).await?;
         cleanup_stale_sqlite_rewrite_tables(pool).await?;
         Ok(())
@@ -218,7 +215,7 @@ impl MigrationBackend for super::SqliteBackend {
 
     async fn load_applied_migrations(
         pool: &Self::Pool,
-    ) -> Result<Vec<AppliedMigrationRecord>, sqlx::Error> {
+    ) -> crate::Result<Vec<AppliedMigrationRecord>> {
         load_sqlite_applied_migrations(pool).await
     }
 
@@ -229,7 +226,7 @@ impl MigrationBackend for super::SqliteBackend {
         statements: &[S],
         metadata: Option<&MigrationApplicationMetadata>,
         record_history: bool,
-    ) -> Result<(), sqlx::Error>
+    ) -> crate::Result<()>
     where
         S: AsRef<str> + Send + Sync,
     {
@@ -247,13 +244,13 @@ impl MigrationBackend for super::SqliteBackend {
 
 #[cfg(feature = "postgres")]
 impl MigrationBackend for super::PostgresBackend {
-    async fn prepare_migration_runtime(pool: &Self::Pool) -> Result<(), sqlx::Error> {
+    async fn prepare_migration_runtime(pool: &Self::Pool) -> crate::Result<()> {
         ensure_postgres_migration_history_table(pool).await
     }
 
     async fn load_applied_migrations(
         pool: &Self::Pool,
-    ) -> Result<Vec<AppliedMigrationRecord>, sqlx::Error> {
+    ) -> crate::Result<Vec<AppliedMigrationRecord>> {
         load_postgres_applied_migrations(pool).await
     }
 
@@ -264,7 +261,7 @@ impl MigrationBackend for super::PostgresBackend {
         statements: &[S],
         metadata: Option<&MigrationApplicationMetadata>,
         record_history: bool,
-    ) -> Result<(), sqlx::Error>
+    ) -> crate::Result<()>
     where
         S: AsRef<str> + Send + Sync,
     {
@@ -281,7 +278,7 @@ impl MigrationBackend for super::PostgresBackend {
 }
 
 #[cfg(feature = "sqlite")]
-async fn ensure_sqlite_migration_history_table(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
+async fn ensure_sqlite_migration_history_table(pool: &sqlx::SqlitePool) -> crate::Result<()> {
     sqlx::query(&format!(
         "CREATE TABLE IF NOT EXISTS {} (
             version TEXT PRIMARY KEY,
@@ -320,7 +317,7 @@ async fn ensure_sqlite_migration_history_table(pool: &sqlx::SqlitePool) -> Resul
 }
 
 #[cfg(feature = "postgres")]
-async fn ensure_postgres_migration_history_table(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
+async fn ensure_postgres_migration_history_table(pool: &sqlx::PgPool) -> crate::Result<()> {
     sqlx::query(&format!(
         "CREATE TABLE IF NOT EXISTS {} (
             version TEXT PRIMARY KEY,
@@ -359,7 +356,7 @@ async fn ensure_postgres_migration_history_table(pool: &sqlx::PgPool) -> Result<
 #[cfg(feature = "sqlite")]
 async fn load_sqlite_applied_migrations(
     pool: &sqlx::SqlitePool,
-) -> Result<Vec<AppliedMigrationRecord>, sqlx::Error> {
+) -> crate::Result<Vec<AppliedMigrationRecord>> {
     let rows = sqlx::query(&format!(
         "SELECT version, description, applied_at, backend, graphql_orm_version,
                 source_schema_hash, target_schema_hash, plan_hash, policy
@@ -390,7 +387,7 @@ async fn load_sqlite_applied_migrations(
 #[cfg(feature = "postgres")]
 async fn load_postgres_applied_migrations(
     pool: &sqlx::PgPool,
-) -> Result<Vec<AppliedMigrationRecord>, sqlx::Error> {
+) -> crate::Result<Vec<AppliedMigrationRecord>> {
     let rows = sqlx::query(&format!(
         "SELECT version, description, applied_at::TEXT AS applied_at, backend, graphql_orm_version,
                 source_schema_hash, target_schema_hash, plan_hash, policy
@@ -419,7 +416,7 @@ async fn load_postgres_applied_migrations(
 }
 
 #[cfg(feature = "sqlite")]
-async fn cleanup_stale_sqlite_rewrite_tables(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
+async fn cleanup_stale_sqlite_rewrite_tables(pool: &sqlx::SqlitePool) -> crate::Result<()> {
     let rows = sqlx::query(
         "SELECT name
          FROM sqlite_master
@@ -449,7 +446,7 @@ async fn apply_sqlite_migration_statements_transactionally<S>(
     statements: &[S],
     metadata: Option<&MigrationApplicationMetadata>,
     record_history: bool,
-) -> Result<(), sqlx::Error>
+) -> crate::Result<()>
 where
     S: AsRef<str>,
 {
@@ -524,7 +521,7 @@ async fn insert_sqlite_history_row(
     version: &str,
     description: &str,
     metadata: Option<&MigrationApplicationMetadata>,
-) -> Result<(), sqlx::Error> {
+) -> crate::Result<()> {
     sqlx::query(&format!(
         "INSERT INTO {} (
             version, description, backend, graphql_orm_version, source_schema_hash,
@@ -553,7 +550,7 @@ async fn apply_postgres_migration_statements_transactionally<S>(
     statements: &[S],
     metadata: Option<&MigrationApplicationMetadata>,
     record_history: bool,
-) -> Result<(), sqlx::Error>
+) -> crate::Result<()>
 where
     S: AsRef<str>,
 {
@@ -580,7 +577,7 @@ async fn insert_postgres_history_row(
     version: &str,
     description: &str,
     metadata: Option<&MigrationApplicationMetadata>,
-) -> Result<(), sqlx::Error> {
+) -> crate::Result<()> {
     sqlx::query(&format!(
         "INSERT INTO {} (
             version, description, backend, graphql_orm_version, source_schema_hash,
@@ -605,7 +602,7 @@ pub async fn execute_with_binds<B: SqlxBackend>(
     sql: &str,
     values: &[SqlValue],
     pool: &B::Pool,
-) -> Result<B::QueryResult, sqlx::Error> {
+) -> crate::Result<B::QueryResult> {
     record_executed_query();
     B::execute_with_binds(pool, sql, values).await
 }
@@ -614,7 +611,7 @@ pub async fn fetch_rows<B: OrmBackend>(
     pool: &B::Pool,
     sql: &str,
     values: &[SqlValue],
-) -> Result<Vec<B::Row>, sqlx::Error> {
+) -> crate::Result<Vec<B::Row>> {
     record_executed_query();
     B::fetch_rows(pool, sql, values).await
 }
@@ -624,7 +621,7 @@ pub async fn fetch_rows_with_auth<B: OrmBackend>(
     sql: &str,
     values: &[SqlValue],
     auth: Option<&DbAuthContext>,
-) -> Result<Vec<B::Row>, sqlx::Error> {
+) -> crate::Result<Vec<B::Row>> {
     record_executed_query();
     B::fetch_rows_with_auth(pool, sql, values, auth).await
 }
@@ -636,7 +633,7 @@ pub async fn fetch_rows_pair_with_auth<B: OrmBackend>(
     second_sql: &str,
     second_values: &[SqlValue],
     auth: Option<&DbAuthContext>,
-) -> Result<(Vec<B::Row>, Vec<B::Row>), sqlx::Error> {
+) -> crate::Result<(Vec<B::Row>, Vec<B::Row>)> {
     record_executed_query();
     record_executed_query();
     B::fetch_rows_pair_with_auth(
@@ -654,7 +651,7 @@ pub async fn execute_with_binds_on<'e, B, E>(
     executor: E,
     sql: &str,
     values: &[SqlValue],
-) -> Result<B::QueryResult, sqlx::Error>
+) -> crate::Result<B::QueryResult>
 where
     B: SqlxBackend,
     E: sqlx::Executor<'e, Database = B::Database> + Send + 'e,
@@ -665,7 +662,7 @@ where
 pub async fn apply_db_auth_context_to_transaction<B: SqlxBackend>(
     tx: &mut sqlx::Transaction<'_, B::Database>,
     auth: Option<&DbAuthContext>,
-) -> Result<(), sqlx::Error> {
+) -> crate::Result<()> {
     B::apply_auth_context_to_transaction(tx, auth).await
 }
 
@@ -673,7 +670,7 @@ pub async fn fetch_rows_on<'e, B, E>(
     executor: E,
     sql: &str,
     values: &[SqlValue],
-) -> Result<Vec<B::Row>, sqlx::Error>
+) -> crate::Result<Vec<B::Row>>
 where
     B: SqlxBackend,
     E: sqlx::Executor<'e, Database = B::Database> + Send + 'e,

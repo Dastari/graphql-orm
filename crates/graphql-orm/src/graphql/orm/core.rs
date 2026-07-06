@@ -97,7 +97,7 @@ impl DbAuthContext {
     /// Render PostgreSQL setting names and values for transaction-local auth.
     ///
     /// The returned values are intended for `set_config(name, value, true)`.
-    pub fn postgres_settings(&self) -> Result<Vec<(&'static str, String)>, sqlx::Error> {
+    pub fn postgres_settings(&self) -> crate::Result<Vec<(&'static str, String)>> {
         let roles = serde_json::to_string(&self.roles)
             .map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
         let scopes = serde_json::to_string(&self.scopes)
@@ -336,22 +336,22 @@ where
         self
     }
 
-    pub async fn fetch_all(self) -> Result<Vec<T>, sqlx::Error> {
+    pub async fn fetch_all(self) -> crate::Result<Vec<T>> {
         let query = self.query;
         query.fetch_all_on(self.hook_ctx.executor()).await
     }
 
-    pub async fn fetch_one(self) -> Result<Option<T>, sqlx::Error> {
+    pub async fn fetch_one(self) -> crate::Result<Option<T>> {
         let query = self.query;
         query.fetch_one_on(self.hook_ctx.executor()).await
     }
 
-    pub async fn count(self) -> Result<i64, sqlx::Error> {
+    pub async fn count(self) -> crate::Result<i64> {
         let query = self.query;
         query.count_on(self.hook_ctx.executor()).await
     }
 
-    pub async fn exists(self) -> Result<bool, sqlx::Error> {
+    pub async fn exists(self) -> crate::Result<bool> {
         Ok(self.count().await? > 0)
     }
 }
@@ -515,7 +515,7 @@ where
         self
     }
 
-    pub async fn fetch_all(self) -> Result<Vec<T>, sqlx::Error> {
+    pub async fn fetch_all(self) -> crate::Result<Vec<T>> {
         let query = self.query;
         if let Some(hook_ctx) = self.write_ctx.mutation_ctx.as_deref_mut() {
             query.fetch_all_on(hook_ctx.executor()).await
@@ -524,7 +524,7 @@ where
         }
     }
 
-    pub async fn fetch_one(self) -> Result<Option<T>, sqlx::Error> {
+    pub async fn fetch_one(self) -> crate::Result<Option<T>> {
         let query = self.query;
         if let Some(hook_ctx) = self.write_ctx.mutation_ctx.as_deref_mut() {
             query.fetch_one_on(hook_ctx.executor()).await
@@ -533,7 +533,7 @@ where
         }
     }
 
-    pub async fn count(self) -> Result<i64, sqlx::Error> {
+    pub async fn count(self) -> crate::Result<i64> {
         let query = self.query;
         if let Some(hook_ctx) = self.write_ctx.mutation_ctx.as_deref_mut() {
             query.count_on(hook_ctx.executor()).await
@@ -542,7 +542,7 @@ where
         }
     }
 
-    pub async fn exists(self) -> Result<bool, sqlx::Error> {
+    pub async fn exists(self) -> crate::Result<bool> {
         Ok(self.count().await? > 0)
     }
 }
@@ -614,7 +614,7 @@ where
         }
     }
 
-    pub async fn commit_and_emit(self) -> Result<(), sqlx::Error> {
+    pub async fn commit_and_emit(self) -> crate::Result<()> {
         let Self {
             db,
             tx,
@@ -661,7 +661,7 @@ where
     pub async fn insert<'a, T>(
         &'a mut self,
         input: <T as MutationContextInsert<B>>::CreateInput,
-    ) -> Result<T, sqlx::Error>
+    ) -> crate::Result<T>
     where
         T: MutationContextInsert<B>,
     {
@@ -671,7 +671,7 @@ where
     pub async fn upsert<'a, T>(
         &'a mut self,
         input: <T as MutationContextUpsert<B>>::UpsertInput,
-    ) -> Result<UpsertOutcome<T>, sqlx::Error>
+    ) -> crate::Result<UpsertOutcome<T>>
     where
         T: MutationContextUpsert<B>,
     {
@@ -682,7 +682,7 @@ where
         &'a mut self,
         id: &'a <T as MutationContextUpdateById<B>>::Id,
         input: <T as MutationContextUpdateById<B>>::UpdateInput,
-    ) -> Result<Option<T>, sqlx::Error>
+    ) -> crate::Result<Option<T>>
     where
         T: MutationContextUpdateById<B>,
     {
@@ -693,7 +693,7 @@ where
         &'a mut self,
         where_input: <T as MutationContextUpdateWhere<B>>::WhereInput,
         input: <T as MutationContextUpdateWhere<B>>::UpdateInput,
-    ) -> Result<i64, sqlx::Error>
+    ) -> crate::Result<i64>
     where
         T: MutationContextUpdateWhere<B>,
     {
@@ -703,7 +703,7 @@ where
     pub async fn delete_by_id<'a, T>(
         &'a mut self,
         id: &'a <T as MutationContextDeleteById<B>>::Id,
-    ) -> Result<bool, sqlx::Error>
+    ) -> crate::Result<bool>
     where
         T: MutationContextDeleteById<B>,
     {
@@ -713,7 +713,7 @@ where
     pub async fn delete_where<'a, T>(
         &'a mut self,
         where_input: <T as MutationContextDeleteWhere<B>>::WhereInput,
-    ) -> Result<i64, sqlx::Error>
+    ) -> crate::Result<i64>
     where
         T: MutationContextDeleteWhere<B>,
     {
@@ -732,7 +732,7 @@ where
     pub async fn find_by_id<'a, T>(
         &'a mut self,
         id: &'a <T as MutationContextFindById<B>>::Id,
-    ) -> Result<Option<T>, sqlx::Error>
+    ) -> crate::Result<Option<T>>
     where
         T: MutationContextFindById<B>,
     {
@@ -757,7 +757,7 @@ pub trait MutationContextInsert<B: WriteBackend = DefaultWriteBackend>: Sized {
     fn insert_in_mutation_context<'a>(
         hook_ctx: &'a mut MutationContext<'_, B>,
         input: Self::CreateInput,
-    ) -> futures::future::BoxFuture<'a, Result<Self, sqlx::Error>>;
+    ) -> futures::future::BoxFuture<'a, crate::Result<Self>>;
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -767,7 +767,7 @@ pub trait MutationContextUpsert<B: WriteBackend = DefaultWriteBackend>: Sized {
     fn upsert_in_mutation_context<'a>(
         hook_ctx: &'a mut MutationContext<'_, B>,
         input: Self::UpsertInput,
-    ) -> futures::future::BoxFuture<'a, Result<UpsertOutcome<Self>, sqlx::Error>>;
+    ) -> futures::future::BoxFuture<'a, crate::Result<UpsertOutcome<Self>>>;
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -779,7 +779,7 @@ pub trait MutationContextUpdateById<B: WriteBackend = DefaultWriteBackend>: Size
         hook_ctx: &'a mut MutationContext<'_, B>,
         id: &'a Self::Id,
         input: Self::UpdateInput,
-    ) -> futures::future::BoxFuture<'a, Result<Option<Self>, sqlx::Error>>;
+    ) -> futures::future::BoxFuture<'a, crate::Result<Option<Self>>>;
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -791,7 +791,7 @@ pub trait MutationContextUpdateWhere<B: WriteBackend = DefaultWriteBackend>: Siz
         hook_ctx: &'a mut MutationContext<'_, B>,
         where_input: Self::WhereInput,
         input: Self::UpdateInput,
-    ) -> futures::future::BoxFuture<'a, Result<i64, sqlx::Error>>;
+    ) -> futures::future::BoxFuture<'a, crate::Result<i64>>;
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -801,7 +801,7 @@ pub trait MutationContextDeleteById<B: WriteBackend = DefaultWriteBackend>: Size
     fn delete_by_id_in_mutation_context<'a>(
         hook_ctx: &'a mut MutationContext<'_, B>,
         id: &'a Self::Id,
-    ) -> futures::future::BoxFuture<'a, Result<bool, sqlx::Error>>;
+    ) -> futures::future::BoxFuture<'a, crate::Result<bool>>;
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -811,7 +811,7 @@ pub trait MutationContextDeleteWhere<B: WriteBackend = DefaultWriteBackend>: Siz
     fn delete_where_in_mutation_context<'a>(
         hook_ctx: &'a mut MutationContext<'_, B>,
         where_input: Self::WhereInput,
-    ) -> futures::future::BoxFuture<'a, Result<i64, sqlx::Error>>;
+    ) -> futures::future::BoxFuture<'a, crate::Result<i64>>;
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -821,7 +821,7 @@ pub trait MutationContextFindById<B: WriteBackend = DefaultWriteBackend>: Sized 
     fn find_by_id_in_mutation_context<'a>(
         hook_ctx: &'a mut MutationContext<'_, B>,
         id: &'a Self::Id,
-    ) -> futures::future::BoxFuture<'a, Result<Option<Self>, sqlx::Error>>;
+    ) -> futures::future::BoxFuture<'a, crate::Result<Option<Self>>>;
 }
 
 pub trait PostCommitErrorHandler<B: OrmBackend = DefaultBackend>: Send + Sync {
@@ -1018,7 +1018,7 @@ where
     Ok(SqlValue::Json(json))
 }
 
-pub fn entity_state<T>(value: &T) -> Result<EntityState, sqlx::Error>
+pub fn entity_state<T>(value: &T) -> crate::Result<EntityState>
 where
     T: serde::Serialize + Clone + Send + Sync + 'static,
 {
@@ -2143,7 +2143,7 @@ pub struct SchemaAbi {
 }
 
 impl SchemaAbi {
-    pub fn new(stages: Vec<SchemaStage>) -> Result<Self, sqlx::Error> {
+    pub fn new(stages: Vec<SchemaStage>) -> crate::Result<Self> {
         let mut seen = std::collections::HashSet::new();
         for stage in &stages {
             if stage.version.trim().is_empty() {
@@ -2173,7 +2173,7 @@ impl SchemaAbi {
         &self,
         from_version: Option<&str>,
         to_version: &str,
-    ) -> Result<Vec<&SchemaStage>, sqlx::Error> {
+    ) -> crate::Result<Vec<&SchemaStage>> {
         let to_index = self
             .stages
             .iter()
@@ -3036,6 +3036,11 @@ impl std::str::FromStr for SchemaPolicy {
 pub struct ApplyOptions {
     /// Permit steps classified as [`MigrationRisk::Destructive`].
     pub allow_destructive: bool,
+    /// Reject any step that is not classified as [`MigrationRisk::Additive`].
+    ///
+    /// This is useful for service startup paths that may create missing ORM
+    /// tables/indexes but must not alter or rebuild existing structures.
+    pub additive_only: bool,
     /// Validate the live schema against the expected ABI baseline before upgrades.
     pub require_clean_schema: bool,
     /// Produce an application report without executing migration SQL.
@@ -3050,11 +3055,45 @@ impl Default for ApplyOptions {
     fn default() -> Self {
         Self {
             allow_destructive: false,
+            additive_only: false,
             require_clean_schema: true,
             dry_run: false,
             expected_current_schema_hash: None,
             record_history: true,
         }
+    }
+}
+
+/// Options that affect how migration plans are built.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlanOptions {
+    /// Ignore live tables that are not present in the target schema.
+    ///
+    /// Existing behavior treats extra live tables as drift and plans drops for
+    /// them. Enable this when graphql-orm owns only a subset of tables in a
+    /// shared database.
+    pub ignore_unmanaged_tables: bool,
+}
+
+impl PlanOptions {
+    /// Plan against the full current and target schemas.
+    pub const fn strict() -> Self {
+        Self {
+            ignore_unmanaged_tables: false,
+        }
+    }
+
+    /// Plan only tables present in the target schema and ignore unrelated live tables.
+    pub const fn managed_tables_only() -> Self {
+        Self {
+            ignore_unmanaged_tables: true,
+        }
+    }
+}
+
+impl Default for PlanOptions {
+    fn default() -> Self {
+        Self::strict()
     }
 }
 

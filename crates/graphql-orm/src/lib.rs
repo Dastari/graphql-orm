@@ -39,6 +39,10 @@
 //! ```ignore
 //! use graphql_orm::prelude::*;
 //!
+//! let database = Database::<SqliteBackend>::connect_sqlite("sqlite://app.db")
+//!     .await?
+//!     .with_schema_policy(SchemaPolicy::Managed);
+//!
 //! let database = Database::builder(pool)
 //!     .schema_policy(SchemaPolicy::Managed)
 //!     .build();
@@ -120,7 +124,7 @@
 //!     pub content: ArticleContent,
 //! }
 //!
-//! let hits = Article::search(&pool, SearchInput {
+//! let hits = Article::search_db(&database, SearchInput {
 //!     query: "melbourne park".to_string(),
 //!     mode: Some(SearchMode::Web),
 //!     min_score: None,
@@ -137,6 +141,7 @@
 //! JSON search paths are extracted in Rust from persisted `#[graphql_orm(json)]`
 //! field values and then stored in the same backend-specific search document as
 //! ordinary text fields.
+//!
 //! Native PostgreSQL and SQLite FTS5 search paths push score, count, limit, and
 //! offset into SQL. PostgreSQL requests that carry a database auth context still
 //! use native search inside the same transaction-local context used for RLS.
@@ -189,6 +194,18 @@ pub use tokio_stream;
 #[cfg(feature = "mssql")]
 pub use tokio_util;
 pub use uuid;
+
+/// Public ORM error type used by generated repository helpers and runtime APIs.
+///
+/// This is currently an alias for the backend SQL execution error so existing
+/// matching and `?` conversions remain source-compatible. Application crates
+/// should name `graphql_orm::Error` in public signatures instead of importing
+/// SQLX directly; the alias leaves room for a richer ORM-owned error enum in a
+/// future major release.
+pub type Error = sqlx::Error;
+
+/// Public ORM result alias used by generated repository helpers and runtime APIs.
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mssql")))]
 compile_error!("Enable at least one backend feature for graphql-orm.");

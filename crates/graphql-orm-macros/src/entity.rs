@@ -2497,7 +2497,7 @@ fn generate_entity_impl(
             fn matches_entity(
                 &self,
                 entity: &(dyn ::std::any::Any + Send + Sync),
-            ) -> Result<bool, ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<bool> {
                 let entity = entity.downcast_ref::<#struct_name>().ok_or_else(|| {
                     ::graphql_orm::sqlx::Error::Decode(Box::new(::std::io::Error::new(
                         ::std::io::ErrorKind::InvalidData,
@@ -2574,7 +2574,7 @@ fn generate_entity_impl(
                 false
             }
 
-            fn __gom_matches_entity(&self, entity: &#struct_name) -> Result<bool, ::graphql_orm::sqlx::Error> {
+            fn __gom_matches_entity(&self, entity: &#struct_name) -> ::graphql_orm::Result<bool> {
                 #(#filter_to_entity_match)*
 
                 if let Some(ref and_filters) = self.and {
@@ -2749,7 +2749,7 @@ fn generate_entity_impl(
         }
 
         impl ::graphql_orm::graphql::orm::FromSqlRow<#backend_marker> for #struct_name {
-            fn from_row(row: &#row_type) -> Result<Self, ::graphql_orm::sqlx::Error> {
+            fn from_row(row: &#row_type) -> ::graphql_orm::Result<Self> {
                 #helper_import
 
                 Ok(Self {

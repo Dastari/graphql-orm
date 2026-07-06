@@ -63,7 +63,7 @@ pub trait DatabaseRls {
 }
 
 pub trait FromSqlRow<B: OrmBackend = DefaultBackend>: Sized {
-    fn from_row(row: &B::Row) -> Result<Self, sqlx::Error>;
+    fn from_row(row: &B::Row) -> crate::Result<Self>;
 }
 
 pub trait DatabaseFilter {
@@ -93,7 +93,7 @@ pub trait DatabaseFilter {
         }
     }
 
-    fn matches_entity(&self, _entity: &(dyn Any + Send + Sync)) -> Result<bool, sqlx::Error> {
+    fn matches_entity(&self, _entity: &(dyn Any + Send + Sync)) -> crate::Result<bool> {
         Ok(true)
     }
 
@@ -507,13 +507,13 @@ pub trait RelationLoader<B: OrmBackend = DefaultBackend> {
         &mut self,
         pool: &B::Pool,
         selection: &[async_graphql::context::SelectionField<'_>],
-    ) -> Result<(), sqlx::Error>;
+    ) -> crate::Result<()>;
 
     async fn bulk_load_relations(
         entities: &mut [Self],
         pool: &B::Pool,
         selection: &[async_graphql::context::SelectionField<'_>],
-    ) -> Result<(), sqlx::Error>
+    ) -> crate::Result<()>
     where
         Self: Sized;
 
@@ -522,7 +522,7 @@ pub trait RelationLoader<B: OrmBackend = DefaultBackend> {
         pool: &B::Pool,
         selection: &[async_graphql::context::SelectionField<'_>],
         _auth: Option<&DbAuthContext>,
-    ) -> Result<(), sqlx::Error> {
+    ) -> crate::Result<()> {
         self.load_relations(pool, selection).await
     }
 
@@ -531,7 +531,7 @@ pub trait RelationLoader<B: OrmBackend = DefaultBackend> {
         pool: &B::Pool,
         selection: &[async_graphql::context::SelectionField<'_>],
         _auth: Option<&DbAuthContext>,
-    ) -> Result<(), sqlx::Error>
+    ) -> crate::Result<()>
     where
         Self: Sized,
     {
@@ -913,7 +913,7 @@ pub fn build_upsert_sql(
         update_updated_at,
     )
 }
-type EntityMatcher<T> = Arc<dyn Fn(&T) -> Result<bool, sqlx::Error> + Send + Sync>;
+type EntityMatcher<T> = Arc<dyn Fn(&T) -> crate::Result<bool> + Send + Sync>;
 
 struct PoolRef<'a, B: OrmBackend> {
     pool: &'a B::Pool,
@@ -1058,7 +1058,7 @@ where
         self.build_select_query_with_config(PaginationConfig::default(), false)
     }
 
-    fn aggregate_column_sql(column: &str) -> Result<String, sqlx::Error>
+    fn aggregate_column_sql(column: &str) -> crate::Result<String>
     where
         T: DatabaseSchema,
     {
@@ -1073,7 +1073,7 @@ where
         &self,
         function: AggregateFunction,
         column: Option<&str>,
-    ) -> Result<AggregateQuery, sqlx::Error>
+    ) -> crate::Result<AggregateQuery>
     where
         T: DatabaseSchema,
     {
@@ -1095,7 +1095,7 @@ where
         !self.entity_matchers.is_empty()
     }
 
-    fn matches_entity(&self, entity: &T) -> Result<bool, sqlx::Error> {
+    fn matches_entity(&self, entity: &T) -> crate::Result<bool> {
         self.entity_matchers
             .iter()
             .try_fold(
@@ -1111,7 +1111,7 @@ where
         rows: Vec<B::Row>,
         pagination_config: PaginationConfig,
         apply_default_limit: bool,
-    ) -> Result<Vec<T>, sqlx::Error> {
+    ) -> crate::Result<Vec<T>> {
         let mut entities = rows
             .iter()
             .map(T::from_row)
@@ -1142,7 +1142,7 @@ where
         Ok(entities)
     }
 
-    async fn fetch_unpaged_filtered<P>(&self, provider: &P) -> Result<Vec<T>, sqlx::Error>
+    async fn fetch_unpaged_filtered<P>(&self, provider: &P) -> crate::Result<Vec<T>>
     where
         P: PoolProvider<B> + ?Sized,
     {
@@ -1155,7 +1155,7 @@ where
         &self,
         provider: &P,
         auth: Option<&DbAuthContext>,
-    ) -> Result<Vec<T>, sqlx::Error>
+    ) -> crate::Result<Vec<T>>
     where
         P: PoolProvider<B> + ?Sized,
     {
@@ -1164,7 +1164,7 @@ where
         query.fetch_all_with_auth(provider, auth).await
     }
 
-    pub async fn fetch_all<P>(&self, provider: &P) -> Result<Vec<T>, sqlx::Error>
+    pub async fn fetch_all<P>(&self, provider: &P) -> crate::Result<Vec<T>>
     where
         P: PoolProvider<B> + ?Sized,
     {
@@ -1181,7 +1181,7 @@ where
         &self,
         provider: &P,
         auth: Option<&DbAuthContext>,
-    ) -> Result<Vec<T>, sqlx::Error>
+    ) -> crate::Result<Vec<T>>
     where
         P: PoolProvider<B> + ?Sized,
     {
@@ -1195,7 +1195,7 @@ where
         self.apply_in_memory_filtering(rows, pagination_config, false)
     }
 
-    pub async fn fetch_all_on<'e, E>(&self, executor: E) -> Result<Vec<T>, sqlx::Error>
+    pub async fn fetch_all_on<'e, E>(&self, executor: E) -> crate::Result<Vec<T>>
     where
         B: SqlxBackend,
         E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
@@ -1205,7 +1205,7 @@ where
         self.apply_in_memory_filtering(rows, PaginationConfig::default(), false)
     }
 
-    pub async fn fetch_one<P>(&self, provider: &P) -> Result<Option<T>, sqlx::Error>
+    pub async fn fetch_one<P>(&self, provider: &P) -> crate::Result<Option<T>>
     where
         P: PoolProvider<B> + ?Sized,
     {
@@ -1216,7 +1216,7 @@ where
         &self,
         provider: &P,
         auth: Option<&DbAuthContext>,
-    ) -> Result<Option<T>, sqlx::Error>
+    ) -> crate::Result<Option<T>>
     where
         P: PoolProvider<B> + ?Sized,
     {
@@ -1227,7 +1227,7 @@ where
             .next())
     }
 
-    pub async fn fetch_one_on<'e, E>(&self, executor: E) -> Result<Option<T>, sqlx::Error>
+    pub async fn fetch_one_on<'e, E>(&self, executor: E) -> crate::Result<Option<T>>
     where
         B: SqlxBackend,
         E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
@@ -1235,7 +1235,7 @@ where
         Ok(self.fetch_all_on(executor).await?.into_iter().next())
     }
 
-    pub async fn count<P>(&self, provider: &P) -> Result<i64, sqlx::Error>
+    pub async fn count<P>(&self, provider: &P) -> crate::Result<i64>
     where
         P: PoolProvider<B> + ?Sized,
     {
@@ -1252,7 +1252,7 @@ where
         B::try_get_i64(row, "count")
     }
 
-    pub async fn count_column<P>(&self, provider: &P, column: &str) -> Result<i64, sqlx::Error>
+    pub async fn count_column<P>(&self, provider: &P, column: &str) -> crate::Result<i64>
     where
         P: PoolProvider<B> + ?Sized,
         T: DatabaseSchema,
@@ -1266,7 +1266,7 @@ where
         B::try_get_i64(row, "__gom_aggregate")
     }
 
-    pub async fn max_i64<P>(&self, provider: &P, column: &str) -> Result<Option<i64>, sqlx::Error>
+    pub async fn max_i64<P>(&self, provider: &P, column: &str) -> crate::Result<Option<i64>>
     where
         P: PoolProvider<B> + ?Sized,
         T: DatabaseSchema,
@@ -1275,7 +1275,7 @@ where
             .await
     }
 
-    pub async fn min_i64<P>(&self, provider: &P, column: &str) -> Result<Option<i64>, sqlx::Error>
+    pub async fn min_i64<P>(&self, provider: &P, column: &str) -> crate::Result<Option<i64>>
     where
         P: PoolProvider<B> + ?Sized,
         T: DatabaseSchema,
@@ -1284,7 +1284,7 @@ where
             .await
     }
 
-    pub async fn max_f64<P>(&self, provider: &P, column: &str) -> Result<Option<f64>, sqlx::Error>
+    pub async fn max_f64<P>(&self, provider: &P, column: &str) -> crate::Result<Option<f64>>
     where
         P: PoolProvider<B> + ?Sized,
         T: DatabaseSchema,
@@ -1293,7 +1293,7 @@ where
             .await
     }
 
-    pub async fn min_f64<P>(&self, provider: &P, column: &str) -> Result<Option<f64>, sqlx::Error>
+    pub async fn min_f64<P>(&self, provider: &P, column: &str) -> crate::Result<Option<f64>>
     where
         P: PoolProvider<B> + ?Sized,
         T: DatabaseSchema,
@@ -1307,7 +1307,7 @@ where
         provider: &P,
         function: AggregateFunction,
         column: &str,
-    ) -> Result<Option<i64>, sqlx::Error>
+    ) -> crate::Result<Option<i64>>
     where
         P: PoolProvider<B> + ?Sized,
         T: DatabaseSchema,
@@ -1326,7 +1326,7 @@ where
         provider: &P,
         function: AggregateFunction,
         column: &str,
-    ) -> Result<Option<f64>, sqlx::Error>
+    ) -> crate::Result<Option<f64>>
     where
         P: PoolProvider<B> + ?Sized,
         T: DatabaseSchema,
@@ -1344,7 +1344,7 @@ where
         &self,
         provider: &P,
         auth: Option<&DbAuthContext>,
-    ) -> Result<i64, sqlx::Error>
+    ) -> crate::Result<i64>
     where
         P: PoolProvider<B> + ?Sized,
     {
@@ -1370,7 +1370,7 @@ where
         provider: &P,
         auth: Option<&DbAuthContext>,
         column: &str,
-    ) -> Result<i64, sqlx::Error>
+    ) -> crate::Result<i64>
     where
         P: PoolProvider<B> + ?Sized,
         T: DatabaseSchema,
@@ -1390,7 +1390,7 @@ where
         provider: &P,
         auth: Option<&DbAuthContext>,
         column: &str,
-    ) -> Result<Option<i64>, sqlx::Error>
+    ) -> crate::Result<Option<i64>>
     where
         P: PoolProvider<B> + ?Sized,
         T: DatabaseSchema,
@@ -1404,7 +1404,7 @@ where
         provider: &P,
         auth: Option<&DbAuthContext>,
         column: &str,
-    ) -> Result<Option<i64>, sqlx::Error>
+    ) -> crate::Result<Option<i64>>
     where
         P: PoolProvider<B> + ?Sized,
         T: DatabaseSchema,
@@ -1419,7 +1419,7 @@ where
         auth: Option<&DbAuthContext>,
         function: AggregateFunction,
         column: &str,
-    ) -> Result<Option<i64>, sqlx::Error>
+    ) -> crate::Result<Option<i64>>
     where
         P: PoolProvider<B> + ?Sized,
         T: DatabaseSchema,
@@ -1434,7 +1434,7 @@ where
         B::try_get_optional_i64(row, "__gom_aggregate")
     }
 
-    pub async fn count_on<'e, E>(&self, executor: E) -> Result<i64, sqlx::Error>
+    pub async fn count_on<'e, E>(&self, executor: E) -> crate::Result<i64>
     where
         B: SqlxBackend,
         E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
@@ -1465,7 +1465,7 @@ where
         (rendered.sql, rendered.values)
     }
 
-    pub async fn fetch_connection<P>(&self, provider: &P) -> Result<Connection<T>, sqlx::Error>
+    pub async fn fetch_connection<P>(&self, provider: &P) -> crate::Result<Connection<T>>
     where
         P: PoolProvider<B> + ?Sized,
     {
@@ -1558,7 +1558,7 @@ where
         &self,
         provider: &P,
         auth: Option<&DbAuthContext>,
-    ) -> Result<Connection<T>, sqlx::Error>
+    ) -> crate::Result<Connection<T>>
     where
         P: PoolProvider<B> + ?Sized,
     {
@@ -1700,11 +1700,11 @@ where
         self
     }
 
-    pub async fn fetch_all(self) -> Result<Vec<T>, sqlx::Error> {
+    pub async fn fetch_all(self) -> crate::Result<Vec<T>> {
         self.query.fetch_all(&PoolRef { pool: self.pool }).await
     }
 
-    pub async fn fetch_all_on<'e, E>(self, executor: E) -> Result<Vec<T>, sqlx::Error>
+    pub async fn fetch_all_on<'e, E>(self, executor: E) -> crate::Result<Vec<T>>
     where
         B: SqlxBackend,
         E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
@@ -1712,11 +1712,11 @@ where
         self.query.fetch_all_on(executor).await
     }
 
-    pub async fn fetch_one(self) -> Result<Option<T>, sqlx::Error> {
+    pub async fn fetch_one(self) -> crate::Result<Option<T>> {
         Ok(self.fetch_all().await?.into_iter().next())
     }
 
-    pub async fn fetch_one_on<'e, E>(self, executor: E) -> Result<Option<T>, sqlx::Error>
+    pub async fn fetch_one_on<'e, E>(self, executor: E) -> crate::Result<Option<T>>
     where
         B: SqlxBackend,
         E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
@@ -1724,11 +1724,11 @@ where
         self.query.fetch_one_on(executor).await
     }
 
-    pub async fn count(self) -> Result<i64, sqlx::Error> {
+    pub async fn count(self) -> crate::Result<i64> {
         self.query.count(&PoolRef { pool: self.pool }).await
     }
 
-    pub async fn count_column(self, column: &str) -> Result<i64, sqlx::Error>
+    pub async fn count_column(self, column: &str) -> crate::Result<i64>
     where
         T: DatabaseSchema,
     {
@@ -1737,7 +1737,7 @@ where
             .await
     }
 
-    pub async fn max_i64(self, column: &str) -> Result<Option<i64>, sqlx::Error>
+    pub async fn max_i64(self, column: &str) -> crate::Result<Option<i64>>
     where
         T: DatabaseSchema,
     {
@@ -1746,7 +1746,7 @@ where
             .await
     }
 
-    pub async fn min_i64(self, column: &str) -> Result<Option<i64>, sqlx::Error>
+    pub async fn min_i64(self, column: &str) -> crate::Result<Option<i64>>
     where
         T: DatabaseSchema,
     {
@@ -1755,7 +1755,7 @@ where
             .await
     }
 
-    pub async fn max_f64(self, column: &str) -> Result<Option<f64>, sqlx::Error>
+    pub async fn max_f64(self, column: &str) -> crate::Result<Option<f64>>
     where
         T: DatabaseSchema,
     {
@@ -1764,7 +1764,7 @@ where
             .await
     }
 
-    pub async fn min_f64(self, column: &str) -> Result<Option<f64>, sqlx::Error>
+    pub async fn min_f64(self, column: &str) -> crate::Result<Option<f64>>
     where
         T: DatabaseSchema,
     {
@@ -1773,7 +1773,7 @@ where
             .await
     }
 
-    pub async fn count_on<'e, E>(self, executor: E) -> Result<i64, sqlx::Error>
+    pub async fn count_on<'e, E>(self, executor: E) -> crate::Result<i64>
     where
         B: SqlxBackend,
         E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
@@ -1781,11 +1781,11 @@ where
         self.query.count_on(executor).await
     }
 
-    pub async fn exists(self) -> Result<bool, sqlx::Error> {
+    pub async fn exists(self) -> crate::Result<bool> {
         Ok(self.count().await? > 0)
     }
 
-    pub async fn exists_on<'e, E>(self, executor: E) -> Result<bool, sqlx::Error>
+    pub async fn exists_on<'e, E>(self, executor: E) -> crate::Result<bool>
     where
         B: SqlxBackend,
         E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
@@ -1822,11 +1822,11 @@ where
         self
     }
 
-    pub async fn count(self) -> Result<i64, sqlx::Error> {
+    pub async fn count(self) -> crate::Result<i64> {
         self.query.count(&PoolRef { pool: self.pool }).await
     }
 
-    pub async fn count_on<'e, E>(self, executor: E) -> Result<i64, sqlx::Error>
+    pub async fn count_on<'e, E>(self, executor: E) -> crate::Result<i64>
     where
         B: SqlxBackend,
         E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
@@ -1865,7 +1865,7 @@ where
         self
     }
 
-    pub async fn count(self) -> Result<i64, sqlx::Error> {
+    pub async fn count(self) -> crate::Result<i64> {
         let rendered = render_select_query(
             B::DIALECT,
             &SelectQuery {
@@ -1882,7 +1882,7 @@ where
         B::try_get_i64(row, "count")
     }
 
-    pub async fn count_on<'e, E>(self, executor: E) -> Result<i64, sqlx::Error>
+    pub async fn count_on<'e, E>(self, executor: E) -> crate::Result<i64>
     where
         B: SqlxBackend,
         E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,

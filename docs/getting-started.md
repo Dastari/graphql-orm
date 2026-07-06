@@ -4,7 +4,7 @@
 
 ```toml
 [dependencies]
-graphql-orm = { version = "0.2.19", default-features = false, features = ["sqlite"] }
+graphql-orm = { version = "0.2.20", default-features = false, features = ["sqlite"] }
 ```
 
 The proc macros are re-exported by `graphql-orm`, so application code should usually import the
@@ -54,17 +54,24 @@ schema_roots! {
     entities: [User],
 }
 
-async fn build_schema(pool: graphql_orm::sqlx::SqlitePool) -> AppSchema {
-    let database = graphql_orm::db::Database::new(pool);
+async fn build_schema(database_url: &str) -> graphql_orm::Result<AppSchema> {
+    let database =
+        graphql_orm::db::Database::<graphql_orm::SqliteBackend>::connect_sqlite(database_url)
+            .await?;
 
-    schema_builder(database)
+    Ok(schema_builder(database)
         .data("current-user-id".to_string())
-        .finish()
+        .finish())
 }
 ```
 
 The generated `schema_builder(database)` registers the database runtime and generated dataloaders.
 Applications can attach additional async-graphql data after calling it.
+
+Applications no longer need to import SQLX for normal setup. `connect_sqlite`, `connect_postgres`,
+and `connect_ado` create `Database` handles directly. `Database::new(pool)` and
+`Database::builder(pool)` remain available when an application intentionally owns driver-specific
+pool setup.
 
 Generated GraphQL mutation exposure is controlled at the schema root, not by disabling repository
 writes. `generated_mutations` defaults to `"all"`; set it to `"none"`, `"allowlist"`, or

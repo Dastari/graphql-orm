@@ -186,7 +186,7 @@ query {
 Generated Rust helpers use the same backend-neutral input:
 
 ```rust
-let hits = Article::search(&pool, SearchInput {
+let hits = Article::search_db(&database, SearchInput {
     query: "melbourne park".to_string(),
     mode: Some(SearchMode::Web),
     min_score: None,

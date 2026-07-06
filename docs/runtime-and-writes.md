@@ -4,7 +4,21 @@ Generated code targets the `graphql-orm` runtime. The runtime owns database hand
 
 ## Database Handle
 
-Use `Database::new(pool)` for compatibility or `Database::builder(pool)` for explicit configuration.
+Use the backend-specific `Database::connect_*` helpers for normal application setup:
+
+```rust
+let database =
+    Database::<SqliteBackend>::connect_sqlite("sqlite://app.db")
+        .await?
+        .with_schema_policy(SchemaPolicy::Managed);
+```
+
+Postgres uses `Database::<PostgresBackend>::connect_postgres(database_url)`. MSSQL uses
+`Database::<MssqlBackend>::connect_ado(connection_string)` and defaults to the read-only external
+schema policy.
+
+Use `Database::new(pool)` for compatibility or `Database::builder(pool)` when the application
+intentionally owns raw driver-specific pool setup.
 
 ```rust
 let database = Database::builder(pool)
@@ -27,7 +41,7 @@ MSSQL is read-only:
 - no generated subscription roots
 - no generated write helpers
 - no migration application
-- `MssqlPool::connect_ado` configures Tiberius as read-only
+- `Database::<MssqlBackend>::connect_ado` configures Tiberius as read-only
 
 For external databases, prefer explicit policy:
 
@@ -38,6 +52,40 @@ let database = Database::builder(pool)
 ```
 
 `ExternalReadOnly` rejects entity writes and schema application. `ExternalWritable` can allow entity writes on write-capable backends while still rejecting schema application.
+
+## Repository Helpers
+
+Generated repository helpers use `graphql_orm::Result<T>` so application crates can keep SQLX out of
+public signatures. Existing raw-pool helpers are still available for compatibility, but new service
+code should prefer `Database`-first helpers:
+
+```rust
+let database = Database::<SqliteBackend>::connect_sqlite("sqlite://app.db").await?;
+
+let users = User::find_many(
+    &database,
+    UserWhereInput {
+        active: Some(BoolFilter { eq: Some(true) }),
+        ..Default::default()
+    },
+)
+.await?;
+
+let total = User::count_all(&database).await?;
+```
+
+Write-capable entities generate:
+
+- `insert(&database, input)` and `insert_many(&database, inputs)`
+- `update_by_id(&database, id, input)` and `update_where(&database, where, input)`
+- `delete_by_id(&database, id)`, `delete_where(&database, where)`, and explicit `delete_all(&database)`
+- `replace_all(&database, inputs)` for transactional service cache replacement
+- `upsert(&database, input)` and `upsert_many(&database, inputs)` when `#[graphql_entity(upsert = "...")]` is configured
+
+`delete_where` still rejects an empty filter. Use `delete_all` when a table-wide delete is intended.
+`replace_all` deletes existing rows and inserts the provided inputs in one transaction using the
+normal ORM write path, so hooks, policies, search maintenance, subscriptions, and change events are
+preserved.
 
 ## Field Controls
 
@@ -113,6 +161,7 @@ search documents through generated ORM writes once the managed search structures
 
 - create/update/upsert refresh the entity document
 - delete removes the entity document
+- `Entity::search_db(&database, search_input)` builds a search query without exposing the raw pool type
 - `Entity::rebuild_search_index(&database)` refreshes all documents for that entity
 - `Entity::rebuild_search_document(&database, &id)` refreshes one entity
 

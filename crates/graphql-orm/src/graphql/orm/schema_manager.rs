@@ -1,8 +1,8 @@
 use super::core::{
     AppliedMigrationReport, AppliedSchemaUpgrade, ApplyOptions, EntityMetadata,
-    MigrationApplicationMetadata, MigrationRisk, PlannedMigration, PlannedMigrationStep,
-    PlannedSchemaTarget, PlannedSchemaUpgrade, SchemaAbi, SchemaDiagnostic, SchemaDiagnosticKind,
-    SchemaDiagnosticSeverity, SchemaModel, SchemaPolicy, SchemaTarget,
+    MigrationApplicationMetadata, MigrationRisk, PlanOptions, PlannedMigration,
+    PlannedMigrationStep, PlannedSchemaTarget, PlannedSchemaUpgrade, SchemaAbi, SchemaDiagnostic,
+    SchemaDiagnosticKind, SchemaDiagnosticSeverity, SchemaModel, SchemaPolicy, SchemaTarget,
     SchemaTargetValidationReport, SchemaValidationReport,
 };
 use super::execution::{applied_migration_records, ensure_managed_policy, ensure_planning_policy};
@@ -39,7 +39,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         &self,
         current: &SchemaModel,
         target: &SchemaModel,
-    ) -> Result<SchemaValidationReport, sqlx::Error> {
+    ) -> crate::Result<SchemaValidationReport> {
         if !self.policy().allows_validation() {
             return Err(sqlx::Error::Protocol(format!(
                 "graphql-orm schema policy {} does not allow schema validation",
@@ -59,7 +59,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     pub async fn validate_against_entities(
         &self,
         entities: &[&'static EntityMetadata],
-    ) -> Result<SchemaValidationReport, sqlx::Error>
+    ) -> crate::Result<SchemaValidationReport>
     where
         B: IntrospectionBackend,
     {
@@ -73,7 +73,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     pub async fn validate_target(
         &self,
         target: &SchemaTarget,
-    ) -> Result<SchemaTargetValidationReport, sqlx::Error>
+    ) -> crate::Result<SchemaTargetValidationReport>
     where
         B: IntrospectionBackend + RlsIntrospectionBackend,
     {
@@ -103,14 +103,33 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         description: impl Into<String>,
         current: &SchemaModel,
         target: &SchemaModel,
-    ) -> Result<PlannedMigration, sqlx::Error> {
+    ) -> crate::Result<PlannedMigration> {
+        self.plan_migration_with_options(
+            version,
+            description,
+            current,
+            target,
+            PlanOptions::default(),
+        )
+    }
+
+    /// Build a structured migration plan with explicit planning options.
+    pub fn plan_migration_with_options(
+        &self,
+        version: impl Into<String>,
+        description: impl Into<String>,
+        current: &SchemaModel,
+        target: &SchemaModel,
+        options: PlanOptions,
+    ) -> crate::Result<PlannedMigration> {
         ensure_planning_policy(self.policy(), "plan schema migration")?;
+        let planned_current = schema_current_for_plan(current, target, options);
         Ok(plan_migration_for_backend::<B>(
             version.into(),
             description.into(),
             Some(current.stable_hash()),
             target.stable_hash(),
-            current,
+            &planned_current,
             target,
         ))
     }
@@ -121,13 +140,34 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         version: impl Into<String>,
         description: impl Into<String>,
         entities: &[&'static EntityMetadata],
-    ) -> Result<PlannedMigration, sqlx::Error>
+    ) -> crate::Result<PlannedMigration>
+    where
+        B: IntrospectionBackend,
+    {
+        self.plan_migration_to_entities_with_options(
+            version,
+            description,
+            entities,
+            PlanOptions::default(),
+        )
+        .await
+    }
+
+    /// Introspect the live database and plan a migration to generated entity
+    /// metadata using explicit planning options.
+    pub async fn plan_migration_to_entities_with_options(
+        &self,
+        version: impl Into<String>,
+        description: impl Into<String>,
+        entities: &[&'static EntityMetadata],
+        options: PlanOptions,
+    ) -> crate::Result<PlannedMigration>
     where
         B: IntrospectionBackend,
     {
         let current = B::introspect_schema(self.database.pool()).await?;
         let target = SchemaModel::from_entities(entities);
-        self.plan_migration(version, description, &current, &target)
+        self.plan_migration_with_options(version, description, &current, &target, options)
     }
 
     /// Introspect the live database and plan a full schema target, including
@@ -137,7 +177,23 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         version: impl Into<String>,
         description: impl Into<String>,
         target: &SchemaTarget,
-    ) -> Result<PlannedSchemaTarget, sqlx::Error>
+    ) -> crate::Result<PlannedSchemaTarget>
+    where
+        B: IntrospectionBackend,
+    {
+        self.plan_schema_target_with_options(version, description, target, PlanOptions::default())
+            .await
+    }
+
+    /// Introspect the live database and plan a full schema target using explicit
+    /// planning options.
+    pub async fn plan_schema_target_with_options(
+        &self,
+        version: impl Into<String>,
+        description: impl Into<String>,
+        target: &SchemaTarget,
+        options: PlanOptions,
+    ) -> crate::Result<PlannedSchemaTarget>
     where
         B: IntrospectionBackend,
     {
@@ -145,12 +201,13 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         let version = version.into();
         let description = description.into();
         let current = B::introspect_schema(self.database.pool()).await?;
+        let planned_current = schema_current_for_plan(&current, &target.schema, options);
         let migration = plan_migration_for_backend::<B>(
             version.clone(),
             description.clone(),
             Some(current.stable_hash()),
             target.schema.stable_hash(),
-            &current,
+            &planned_current,
             &target.schema,
         );
         let rls = build_rls_policy_plan(B::DIALECT, self.policy(), &target.rls);
@@ -180,7 +237,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         &self,
         plan: &PlannedMigration,
         options: ApplyOptions,
-    ) -> Result<AppliedMigrationReport, sqlx::Error>
+    ) -> crate::Result<AppliedMigrationReport>
     where
         B: MigrationBackend,
     {
@@ -234,7 +291,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         &self,
         plan: &PlannedSchemaTarget,
         options: ApplyOptions,
-    ) -> Result<AppliedMigrationReport, sqlx::Error>
+    ) -> crate::Result<AppliedMigrationReport>
     where
         B: MigrationBackend,
     {
@@ -284,7 +341,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     }
 
     /// Return the latest version recorded in `__graphql_orm_migrations`.
-    pub async fn current_version(&self) -> Result<Option<String>, sqlx::Error>
+    pub async fn current_version(&self) -> crate::Result<Option<String>>
     where
         B: MigrationBackend,
     {
@@ -299,7 +356,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         &self,
         abi: &SchemaAbi,
         target_version: &str,
-    ) -> Result<PlannedSchemaUpgrade, sqlx::Error>
+    ) -> crate::Result<PlannedSchemaUpgrade>
     where
         B: MigrationBackend,
     {
@@ -331,7 +388,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         abi: &SchemaAbi,
         target_version: &str,
         options: ApplyOptions,
-    ) -> Result<AppliedSchemaUpgrade, sqlx::Error>
+    ) -> crate::Result<AppliedSchemaUpgrade>
     where
         B: MigrationBackend,
     {
@@ -347,7 +404,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         Ok(AppliedSchemaUpgrade { applied })
     }
 
-    async fn validate_current_baseline(&self, abi: &SchemaAbi) -> Result<(), sqlx::Error>
+    async fn validate_current_baseline(&self, abi: &SchemaAbi) -> crate::Result<()>
     where
         B: MigrationBackend,
     {
@@ -576,6 +633,27 @@ fn diagnostic(
     }
 }
 
+fn schema_current_for_plan(
+    current: &SchemaModel,
+    target: &SchemaModel,
+    options: PlanOptions,
+) -> SchemaModel {
+    if !options.ignore_unmanaged_tables {
+        return current.clone();
+    }
+
+    let target_tables = target
+        .tables
+        .iter()
+        .map(|table| table.table_name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut scoped = current.clone();
+    scoped
+        .tables
+        .retain(|table| target_tables.contains(table.table_name.as_str()));
+    scoped
+}
+
 fn plan_migration_for_backend<B: OrmBackend>(
     version: String,
     description: String,
@@ -599,10 +677,19 @@ fn plan_migration_for_backend<B: OrmBackend>(
     }
 }
 
-fn reject_disallowed_risks(
-    plan: &PlannedMigration,
-    options: &ApplyOptions,
-) -> Result<(), sqlx::Error> {
+fn reject_disallowed_risks(plan: &PlannedMigration, options: &ApplyOptions) -> crate::Result<()> {
+    if options.additive_only {
+        if let Some(step) = plan
+            .steps
+            .iter()
+            .find(|step| step.risk != MigrationRisk::Additive)
+        {
+            return Err(sqlx::Error::Protocol(format!(
+                "Migration {} contains non-additive step {:?}; disable additive_only to apply it",
+                plan.version, step.step
+            )));
+        }
+    }
     if options.allow_destructive {
         return Ok(());
     }

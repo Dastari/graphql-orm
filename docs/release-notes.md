@@ -3,6 +3,45 @@
 This page records user-facing changes for recent `graphql-orm` releases. Version numbers refer to
 the runtime crate unless a macro crate version is called out separately.
 
+## 0.2.20
+
+SQLX-free application boundary and service bulk helpers.
+
+- Bumped `graphql-orm` to `0.2.20`.
+- Bumped `graphql-orm-macros` to `0.3.21`.
+- Added public `graphql_orm::Error` and `graphql_orm::Result<T>` aliases. Generated repository
+  helpers and runtime query/search/schema APIs now use these aliases in public signatures so
+  downstream app crates do not need SQLX in normal public API types.
+- Added `Database::<SqliteBackend>::connect_sqlite(...)`,
+  `Database::<PostgresBackend>::connect_postgres(...)`, and
+  `Database::<MssqlBackend>::connect_ado(...)` constructors.
+- Added `ConnectionOptions` for ORM-owned connection helpers, currently covering `max_connections`.
+  SQLite in-memory URLs default to one connection so schema/data remain visible across ORM calls.
+- Added generated no-pool read helpers: `find_all`, `find_many`, `count_all`, and `count`.
+- Added generated transactional bulk write helpers for write-capable entities: `insert_many`,
+  explicit `delete_all`, and `replace_all`.
+- Added generated `upsert_many` for entities configured with `#[graphql_entity(upsert = "...")]`.
+- Kept `delete_where` safe by continuing to reject empty filters; table-wide deletion now requires
+  explicit `delete_all`.
+- Added `search_db(&database, SearchInput)` for searchable entities so search helpers can be used
+  without naming the raw pool type.
+- Added `PlanOptions` and `plan_*_with_options(...)` schema APIs. `PlanOptions::managed_tables_only()`
+  ignores live tables outside the target schema for shared databases where graphql-orm owns only a
+  subset of tables.
+- Added `ApplyOptions::additive_only`; when enabled, migration application rejects any non-additive
+  step even if it is not classified as destructive.
+- Documented raw SQLX pools as compatibility/advanced escape hatches rather than the default app
+  integration path.
+
+Breaking/source-facing notes:
+
+- Public generated helper return types changed from `graphql_orm::sqlx::Error` to
+  `graphql_orm::Error` via the new `graphql_orm::Result<T>` alias. The alias currently points to
+  SQLX's error type, so most `?` usage remains compatible, but downstream public signatures should
+  be updated to name `graphql_orm::Result<T>`.
+- `ApplyOptions` gained the `additive_only` field. Struct literals must add the field or use
+  `..Default::default()`.
+
 ## 0.2.19
 
 Full-text search JSON path support.

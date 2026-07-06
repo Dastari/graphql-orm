@@ -1072,7 +1072,7 @@ pub(crate) fn generate_graphql_relations(
                 &mut self,
                 pool: &#pool_type,
                 selection: &[::graphql_orm::async_graphql::context::SelectionField<'_>],
-            ) -> Result<(), ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<()> {
                 Self::bulk_load_relations_with_auth(std::slice::from_mut(self), pool, selection, None).await
             }
 
@@ -1080,7 +1080,7 @@ pub(crate) fn generate_graphql_relations(
                 entities: &mut [Self],
                 pool: &#pool_type,
                 selection: &[::graphql_orm::async_graphql::context::SelectionField<'_>],
-            ) -> Result<(), ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<()> {
                 Self::bulk_load_relations_with_auth(entities, pool, selection, None).await
             }
 
@@ -1089,7 +1089,7 @@ pub(crate) fn generate_graphql_relations(
                 pool: &#pool_type,
                 selection: &[::graphql_orm::async_graphql::context::SelectionField<'_>],
                 auth_context: Option<&::graphql_orm::graphql::orm::DbAuthContext>,
-            ) -> Result<(), ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<()> {
                 Self::bulk_load_relations_with_auth(std::slice::from_mut(self), pool, selection, auth_context).await
             }
 
@@ -1098,7 +1098,7 @@ pub(crate) fn generate_graphql_relations(
                 pool: &#pool_type,
                 selection: &[::graphql_orm::async_graphql::context::SelectionField<'_>],
                 auth_context: Option<&::graphql_orm::graphql::orm::DbAuthContext>,
-            ) -> Result<(), ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<()> {
                 #(#bulk_load_blocks)*
                 Ok(())
             }

@@ -13,7 +13,7 @@ not provide an MSSQL driver.
 For a service that only uses SQL Server, select the `mssql` backend feature:
 
 ```toml
-graphql-orm = { version = "0.2.19", default-features = false, features = ["mssql"] }
+graphql-orm = { version = "0.2.20", default-features = false, features = ["mssql"] }
 ```
 
 When exactly one of `sqlite`, `postgres`, or `mssql` is enabled, the legacy implicit backend remains
@@ -66,7 +66,8 @@ Under `mssql`, generated GraphQL schemas contain:
 - filters, order-by inputs, pagination, count/page info
 - relation loading for declared relations
 - read row/entity/field policies
-- read repository helpers: `query`, `find_by_id` for single-key entities, `find_by_key` /
+- read repository helpers: `find_all`, `find_many`, `find_by_id` for single-key entities,
+  `find_by_key`, `count_all`, `count`, and compatibility raw-pool helpers such as `query`,
   `get_by_key`, and `count_query`
 
 Under `mssql`, generated schemas do not contain:
@@ -82,27 +83,26 @@ generated. Lower-level write execution is also rejected with a clear read-only r
 
 ## Connections
 
-Create an MSSQL pool from a Tiberius ADO.NET-style connection string:
+Create a read-only MSSQL database handle from a Tiberius ADO.NET-style connection string:
 
 ```rust
-let pool = graphql_orm::db::mssql::MssqlPool::connect_ado(
+let database = graphql_orm::db::Database::<graphql_orm::MssqlBackend>::connect_ado(
     "server=tcp:127.0.0.1,1433;\
      database=LegacyDb;\
      user id=sa;\
      password=Your_strong_password123;\
      TrustServerCertificate=true",
 )
-.await?;
-
-let database = graphql_orm::db::Database::<graphql_orm::MssqlBackend>::builder(pool)
-    .schema_policy(graphql_orm::graphql::orm::SchemaPolicy::ExternalReadOnly)
-    .build();
+.await?
+    .with_schema_policy(graphql_orm::graphql::orm::SchemaPolicy::ExternalReadOnly);
 let schema = schema_builder(database)
     .data("current-user".to_string())
     .finish();
 ```
 
-The pool reuses Tiberius connections and avoids opening one connection per resolver.
+The database handle reuses Tiberius connections and avoids opening one connection per resolver.
+Advanced callers can still create `graphql_orm::db::mssql::MssqlPool` directly and pass it to
+`Database::<MssqlBackend>::builder(pool)` when they need driver-specific setup.
 
 ## Mapping Existing Tables
 

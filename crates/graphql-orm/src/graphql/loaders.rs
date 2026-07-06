@@ -47,13 +47,13 @@ pub trait BatchLoadEntity<B: OrmBackend = DefaultBackend>:
     + 'static
 {
     fn batch_column() -> &'static str;
-    fn batch_key_from_row(row: &B::Row) -> Result<String, sqlx::Error>;
+    fn batch_key_from_row(row: &B::Row) -> crate::Result<String>;
 
     fn batch_columns() -> Vec<&'static str> {
         vec![Self::batch_column()]
     }
 
-    fn batch_relation_key_from_row(row: &B::Row) -> Result<RelationKey, sqlx::Error> {
+    fn batch_relation_key_from_row(row: &B::Row) -> crate::Result<RelationKey> {
         Self::batch_key_from_row(row).map(RelationKey::single)
     }
 }

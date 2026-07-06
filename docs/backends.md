@@ -7,17 +7,34 @@ database schema. Schema ownership and migration behavior are controlled by runti
 ## Features
 
 ```toml
-graphql-orm = { version = "0.2.19", default-features = false, features = ["sqlite"] }
+graphql-orm = { version = "0.2.20", default-features = false, features = ["sqlite"] }
 ```
 
 Available backend features:
 
-- `sqlite` - SQLite read/write/query/migration support through SQLx
-- `postgres` - PostgreSQL read/write/query/migration support through SQLx
+- `sqlite` - SQLite read/write/query/migration support using SQLX internally
+- `postgres` - PostgreSQL read/write/query/migration support using SQLX internally
 - `mssql` - Microsoft SQL Server read/query-only support through Tiberius
 
 The `mssql` feature activates optional `tiberius`, `tokio-util`, and Tokio TCP support. Projects that
 do not select `mssql` do not build the SQL Server driver path.
+
+Normal application setup can stay on `graphql-orm` types:
+
+```rust
+let sqlite = graphql_orm::db::Database::<graphql_orm::SqliteBackend>::connect_sqlite(
+    "sqlite://app.db",
+)
+.await?;
+
+let postgres = graphql_orm::db::Database::<graphql_orm::PostgresBackend>::connect_postgres(
+    std::env::var("DATABASE_URL")?,
+)
+.await?;
+```
+
+`graphql_orm::sqlx` remains re-exported for compatibility and advanced pool customization, but
+generated repository helpers and runtime query APIs now return `graphql_orm::Result<T>`.
 
 ## Spatial Support
 
@@ -171,7 +188,7 @@ Example:
 
 ```toml
 graphql-orm = {
-  version = "0.2.19",
+  version = "0.2.20",
   default-features = false,
   features = [
     "mssql",

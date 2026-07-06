@@ -18,6 +18,40 @@ struct EventSenders {
 
 const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 256;
 
+/// Backend-neutral pool sizing options for ORM-owned connection helpers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConnectionOptions {
+    /// Maximum number of connections in the backend pool.
+    ///
+    /// When omitted, the backend driver's default is used except for in-memory
+    /// SQLite URLs, where graphql-orm uses one connection so schema and data
+    /// stay visible for the lifetime of the pool.
+    pub max_connections: Option<u32>,
+}
+
+impl ConnectionOptions {
+    /// Use backend defaults.
+    pub const fn new() -> Self {
+        Self {
+            max_connections: None,
+        }
+    }
+
+    /// Set a maximum pool size.
+    pub const fn max_connections(mut self, max_connections: u32) -> Self {
+        self.max_connections = Some(max_connections);
+        self
+    }
+}
+
+impl Default for ConnectionOptions {
+    fn default() -> Self {
+        Self {
+            max_connections: None,
+        }
+    }
+}
+
 /// Runtime database handle used by generated resolvers and repository helpers.
 ///
 /// `Database` stores the backend pool plus optional runtime policies, hooks,
@@ -761,6 +795,37 @@ impl Database<crate::graphql::orm::SqliteBackend> {
         Self::base(pool, Self::default_schema_policy())
     }
 
+    /// Open a SQLite database and wrap it in a [`Database`] handle.
+    ///
+    /// This is the normal app-facing constructor when callers do not need raw
+    /// SQLX pool customization. For `sqlite::memory:` and `mode=memory` URLs,
+    /// the helper uses one pooled connection so temporary schema/data are not
+    /// split across independent in-memory databases.
+    pub async fn connect_sqlite(database_url: impl AsRef<str>) -> crate::Result<Self> {
+        Self::connect_sqlite_with_options(database_url, ConnectionOptions::default()).await
+    }
+
+    /// Open a SQLite database with ORM-owned connection options.
+    pub async fn connect_sqlite_with_options(
+        database_url: impl AsRef<str>,
+        options: ConnectionOptions,
+    ) -> crate::Result<Self> {
+        let database_url = database_url.as_ref();
+        let max_connections = options.max_connections.or_else(|| {
+            if database_url == "sqlite::memory:" || database_url.contains("mode=memory") {
+                Some(1)
+            } else {
+                None
+            }
+        });
+        let mut pool_options = sqlx::sqlite::SqlitePoolOptions::new();
+        if let Some(max_connections) = max_connections {
+            pool_options = pool_options.max_connections(max_connections);
+        }
+        let pool = pool_options.connect(database_url).await?;
+        Ok(Self::new(pool))
+    }
+
     pub fn builder(
         pool: <crate::graphql::orm::SqliteBackend as OrmBackend>::Pool,
     ) -> DatabaseBuilder<crate::graphql::orm::SqliteBackend> {
@@ -776,6 +841,27 @@ impl Database<crate::graphql::orm::PostgresBackend> {
         Self::base(pool, Self::default_schema_policy())
     }
 
+    /// Open a PostgreSQL database and wrap it in a [`Database`] handle.
+    ///
+    /// This is the normal app-facing constructor when callers do not need raw
+    /// SQLX pool customization.
+    pub async fn connect_postgres(database_url: impl AsRef<str>) -> crate::Result<Self> {
+        Self::connect_postgres_with_options(database_url, ConnectionOptions::default()).await
+    }
+
+    /// Open a PostgreSQL database with ORM-owned connection options.
+    pub async fn connect_postgres_with_options(
+        database_url: impl AsRef<str>,
+        options: ConnectionOptions,
+    ) -> crate::Result<Self> {
+        let mut pool_options = sqlx::postgres::PgPoolOptions::new();
+        if let Some(max_connections) = options.max_connections {
+            pool_options = pool_options.max_connections(max_connections);
+        }
+        let pool = pool_options.connect(database_url.as_ref()).await?;
+        Ok(Self::new(pool))
+    }
+
     pub fn builder(
         pool: <crate::graphql::orm::PostgresBackend as OrmBackend>::Pool,
     ) -> DatabaseBuilder<crate::graphql::orm::PostgresBackend> {
@@ -789,6 +875,12 @@ impl Database<crate::graphql::orm::PostgresBackend> {
 impl Database<crate::graphql::orm::MssqlBackend> {
     pub fn new(pool: <crate::graphql::orm::MssqlBackend as OrmBackend>::Pool) -> Self {
         Self::base(pool, Self::default_schema_policy())
+    }
+
+    /// Open a read-only SQL Server connection pool and wrap it in a [`Database`] handle.
+    pub async fn connect_ado(connection_string: &str) -> crate::Result<Self> {
+        let pool = crate::db::mssql::MssqlPool::connect_ado(connection_string).await?;
+        Ok(Self::new(pool))
     }
 
     pub fn builder(
@@ -853,7 +945,7 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite_helpers {
-    pub fn json_from_str<T>(value: &str) -> Result<T, sqlx::Error>
+    pub fn json_from_str<T>(value: &str) -> crate::Result<T>
     where
         T: serde::de::DeserializeOwned,
     {
@@ -886,7 +978,7 @@ pub mod sqlite_helpers {
 
 #[cfg(feature = "postgres")]
 pub mod postgres_helpers {
-    pub fn json_from_value<T>(value: serde_json::Value) -> Result<T, sqlx::Error>
+    pub fn json_from_value<T>(value: serde_json::Value) -> crate::Result<T>
     where
         T: serde::de::DeserializeOwned,
     {
@@ -919,7 +1011,7 @@ pub mod postgres_helpers {
 
 #[cfg(feature = "mssql")]
 pub mod mssql_helpers {
-    pub fn json_from_str<T>(value: &str) -> Result<T, sqlx::Error>
+    pub fn json_from_str<T>(value: &str) -> crate::Result<T>
     where
         T: serde::de::DeserializeOwned,
     {

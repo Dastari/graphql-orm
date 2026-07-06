@@ -494,7 +494,7 @@ where
     async fn try_fetch_native(
         &self,
         auth: Option<&DbAuthContext>,
-    ) -> Option<Result<Vec<SearchHit<T>>, sqlx::Error>> {
+    ) -> Option<crate::Result<Vec<SearchHit<T>>>> {
         let index = T::search_index()?;
         if !index.enabled || self.query.requires_in_memory_filtering() {
             return None;
@@ -528,7 +528,7 @@ where
     async fn try_fetch_native_connection(
         &self,
         auth: Option<&DbAuthContext>,
-    ) -> Option<Result<SearchConnection<T>, sqlx::Error>> {
+    ) -> Option<crate::Result<SearchConnection<T>>> {
         let index = T::search_index()?;
         if !index.enabled || self.query.requires_in_memory_filtering() {
             return None;
@@ -582,7 +582,7 @@ where
                 let score = B::try_get_f64(row, "__gom_search_score")?;
                 Ok(SearchHit { score, entity })
             })
-            .collect::<Result<Vec<_>, sqlx::Error>>()
+            .collect::<crate::Result<Vec<_>>>()
         {
             Ok(hits) => hits
                 .into_iter()
@@ -786,7 +786,7 @@ where
     /// Native Postgres and SQLite FTS5 strategies apply any configured
     /// `limit`/`offset` in SQL. Fallback scoring loads candidates, scores them
     /// in Rust, and then slices the requested page.
-    pub async fn fetch_all(self) -> Result<Vec<SearchHit<T>>, sqlx::Error> {
+    pub async fn fetch_all(self) -> crate::Result<Vec<SearchHit<T>>> {
         if let Some(result) = self.try_fetch_native(None).await {
             return result;
         }
@@ -804,7 +804,7 @@ where
     pub async fn fetch_all_with_auth(
         self,
         auth: Option<&DbAuthContext>,
-    ) -> Result<Vec<SearchHit<T>>, sqlx::Error> {
+    ) -> crate::Result<Vec<SearchHit<T>>> {
         if let Some(result) = self.try_fetch_native(auth).await {
             return result;
         }
@@ -821,7 +821,7 @@ where
     /// Native strategies run a count query and a page query through the backend
     /// pair-fetch API. Fallback strategies score once, count the scored hits,
     /// and slice the requested page in memory.
-    pub async fn fetch_connection(self) -> Result<SearchConnection<T>, sqlx::Error> {
+    pub async fn fetch_connection(self) -> crate::Result<SearchConnection<T>> {
         if let Some(result) = self.try_fetch_native_connection(None).await {
             return result;
         }
@@ -839,7 +839,7 @@ where
     pub async fn fetch_connection_with_auth(
         self,
         auth: Option<&DbAuthContext>,
-    ) -> Result<SearchConnection<T>, sqlx::Error> {
+    ) -> crate::Result<SearchConnection<T>> {
         if let Some(result) = self.try_fetch_native_connection(auth).await {
             return result;
         }
@@ -868,7 +868,7 @@ pub async fn upsert_search_document_on<B>(
     executor: &mut <B::Database as sqlx::Database>::Connection,
     index: &SearchIndexDef,
     document: &SearchDocument,
-) -> Result<(), sqlx::Error>
+) -> crate::Result<()>
 where
     B: WriteBackend,
     for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
@@ -892,7 +892,7 @@ async fn upsert_postgres_search_document_on<B>(
     executor: &mut <B::Database as sqlx::Database>::Connection,
     index: &SearchIndexDef,
     document: &SearchDocument,
-) -> Result<(), sqlx::Error>
+) -> crate::Result<()>
 where
     B: WriteBackend,
     for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
@@ -932,7 +932,7 @@ async fn upsert_sqlite_search_document_on<B>(
     executor: &mut <B::Database as sqlx::Database>::Connection,
     index: &SearchIndexDef,
     document: &SearchDocument,
-) -> Result<(), sqlx::Error>
+) -> crate::Result<()>
 where
     B: WriteBackend,
     for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
@@ -968,7 +968,7 @@ pub async fn delete_search_document_on<B>(
     executor: &mut <B::Database as sqlx::Database>::Connection,
     index: &SearchIndexDef,
     entity_pk: &str,
-) -> Result<(), sqlx::Error>
+) -> crate::Result<()>
 where
     B: WriteBackend,
     for<'c> &'c mut <B::Database as sqlx::Database>::Connection:

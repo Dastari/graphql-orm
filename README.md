@@ -34,7 +34,7 @@ Select exactly the backend support your service needs:
 
 ```toml
 [dependencies]
-graphql-orm = { version = "0.2.19", default-features = false, features = ["sqlite"] }
+graphql-orm = { version = "0.2.20", default-features = false, features = ["sqlite"] }
 ```
 
 Available backend features:
@@ -77,12 +77,14 @@ schema_roots! {
     entities: [User],
 }
 
-async fn build_schema(pool: graphql_orm::sqlx::SqlitePool) -> AppSchema {
-    let database = graphql_orm::db::Database::new(pool);
+async fn build_schema(database_url: &str) -> graphql_orm::Result<AppSchema> {
+    let database =
+        graphql_orm::db::Database::<graphql_orm::SqliteBackend>::connect_sqlite(database_url)
+            .await?;
 
-    schema_builder(database)
+    Ok(schema_builder(database)
         .data("current-user-id".to_string())
-        .finish()
+        .finish())
 }
 ```
 
@@ -145,21 +147,18 @@ schema_roots! {
 }
 ```
 
-Create a SQL Server pool with Tiberius:
+Create a SQL Server database handle from an ADO.NET-style connection string:
 
 ```rust
-let pool = graphql_orm::db::mssql::MssqlPool::connect_ado(
+let database = graphql_orm::db::Database::<graphql_orm::MssqlBackend>::connect_ado(
     "server=tcp:127.0.0.1,1433;\
      database=LegacyDb;\
      user id=sa;\
      password=Your_strong_password123;\
      TrustServerCertificate=true",
 )
-.await?;
-
-let database = graphql_orm::db::Database::<graphql_orm::MssqlBackend>::builder(pool)
-    .schema_policy(graphql_orm::graphql::orm::SchemaPolicy::ExternalReadOnly)
-    .build();
+.await?
+    .with_schema_policy(graphql_orm::graphql::orm::SchemaPolicy::ExternalReadOnly);
 ```
 
 ## Composite Relations

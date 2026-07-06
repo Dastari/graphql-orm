@@ -2096,7 +2096,7 @@ pub(crate) fn generate_graphql_operations(
             pub async fn find_by_id(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 id: &#pk_type_ty,
-            ) -> Result<Option<Self>, ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<Option<Self>> {
                 Self::find_by_key(db, id).await
             }
         }
@@ -2105,7 +2105,7 @@ pub(crate) fn generate_graphql_operations(
         quote! {}
     } else {
         quote! {
-            pub async fn get(pool: &#pool_type, id: &#pk_type_ty) -> Result<Option<Self>, ::graphql_orm::sqlx::Error> {
+            pub async fn get(pool: &#pool_type, id: &#pk_type_ty) -> ::graphql_orm::Result<Option<Self>> {
                 Self::get_by_key(pool, id).await
             }
         }
@@ -2116,7 +2116,7 @@ pub(crate) fn generate_graphql_operations(
         pub async fn find_by_key(
             db: &::graphql_orm::db::Database<#backend_marker>,
             key: &#key_type,
-        ) -> Result<Option<Self>, ::graphql_orm::sqlx::Error> {
+        ) -> ::graphql_orm::Result<Option<Self>> {
             db.ensure_entity_access(
                 None,
                 #entity_name_lit,
@@ -2147,7 +2147,7 @@ pub(crate) fn generate_graphql_operations(
 
         #get_by_id_method
 
-        pub async fn get_by_key(pool: &#pool_type, key: &#key_type) -> Result<Option<Self>, ::graphql_orm::sqlx::Error> {
+        pub async fn get_by_key(pool: &#pool_type, key: &#key_type) -> ::graphql_orm::Result<Option<Self>> {
             ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
                 .where_values(&Self::__gom_key_where_clause(), Self::__gom_key_values(key))
                 .fetch_one(pool)
@@ -2296,7 +2296,7 @@ pub(crate) fn generate_graphql_operations(
             pub(crate) async fn __gom_fetch_by_upsert_on<'e, E>(
                 executor: E,
                 input: &#create_input,
-            ) -> Result<Option<Self>, ::graphql_orm::sqlx::Error>
+            ) -> ::graphql_orm::Result<Option<Self>>
             where
                 E: ::graphql_orm::sqlx::Executor<'e, Database = #database_type> + Send + 'e,
             {
@@ -2325,7 +2325,7 @@ pub(crate) fn generate_graphql_operations(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 input: &#create_input,
                 auth_context: Option<&::graphql_orm::graphql::orm::DbAuthContext>,
-            ) -> Result<Option<Self>, ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<Option<Self>> {
                 use ::graphql_orm::graphql::orm::FromSqlRow;
 
                 let where_clause = vec![#(#upsert_fetch_conditions),*].join(" AND ");
@@ -2355,7 +2355,7 @@ pub(crate) fn generate_graphql_operations(
             async fn __gom_upsert_with_mutation_context<'a>(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 input: #create_input,
-            ) -> Result<::graphql_orm::graphql::orm::UpsertOutcome<Self>, ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::UpsertOutcome<Self>> {
                 let db = hook_ctx.database().clone();
                 let current_entity = Self::__gom_fetch_by_upsert_on(hook_ctx.executor(), &input).await?;
                 if let Some(current_entity) = current_entity.as_ref() {
@@ -2594,7 +2594,7 @@ pub(crate) fn generate_graphql_operations(
             pub async fn upsert(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 mut input: #create_input,
-            ) -> Result<::graphql_orm::graphql::orm::UpsertOutcome<Self>, ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::UpsertOutcome<Self>> {
                 let pool = db.pool();
                 db.ensure_entity_access(
                     None,
@@ -2614,6 +2614,42 @@ pub(crate) fn generate_graphql_operations(
                 hook_ctx.commit_and_emit().await?;
                 Ok(outcome)
             }
+
+            /// Upsert multiple entity records transactionally using the configured upsert key.
+            pub async fn upsert_many<I>(
+                db: &::graphql_orm::db::Database<#backend_marker>,
+                inputs: I,
+            ) -> ::graphql_orm::Result<Vec<::graphql_orm::graphql::orm::UpsertOutcome<Self>>>
+            where
+                I: IntoIterator<Item = #create_input>,
+            {
+                db.ensure_entity_access(
+                    None,
+                    #entity_name_lit,
+                    <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                    ::graphql_orm::graphql::orm::EntityAccessKind::Write,
+                    ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+
+                let inputs: Vec<#create_input> = inputs.into_iter().collect();
+                if inputs.is_empty() {
+                    return Ok(Vec::new());
+                }
+
+                let tx = db.pool().begin().await?;
+                let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::new(db, tx);
+                let mut outcomes = Vec::with_capacity(inputs.len());
+                for input in inputs {
+                    outcomes.push(
+                        <Self as ::graphql_orm::graphql::orm::MutationContextUpsert<#backend_marker>>::upsert_in_mutation_context(
+                            &mut hook_ctx,
+                            input,
+                        ).await?
+                    );
+                }
+                hook_ctx.commit_and_emit().await?;
+                Ok(outcomes)
+            }
         }
     } else {
         quote! {}
@@ -2626,7 +2662,7 @@ pub(crate) fn generate_graphql_operations(
                 fn upsert_in_mutation_context<'a>(
                     hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     input: Self::UpsertInput,
-                ) -> ::graphql_orm::futures::future::BoxFuture<'a, Result<::graphql_orm::graphql::orm::UpsertOutcome<Self>, ::graphql_orm::sqlx::Error>> {
+                ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<::graphql_orm::graphql::orm::UpsertOutcome<Self>>> {
                     Box::pin(async move {
                         let db = hook_ctx.database().clone();
                         let mut input = input;
@@ -2795,6 +2831,15 @@ pub(crate) fn generate_graphql_operations(
             ) -> ::graphql_orm::graphql::orm::EntitySearchQuery<'a, Self, #where_input, #backend_marker> {
                 ::graphql_orm::graphql::orm::EntitySearchQuery::new(pool, search)
             }
+
+            /// Build a search query from a `Database` handle without exposing the raw pool type.
+            pub fn search_db<'a>(
+                db: &'a ::graphql_orm::db::Database<#backend_marker>,
+                search: ::graphql_orm::graphql::filters::SearchInput,
+            ) -> ::graphql_orm::graphql::orm::EntitySearchQuery<'a, Self, #where_input, #backend_marker> {
+                ::graphql_orm::graphql::orm::EntitySearchQuery::new(db.pool(), search)
+                    .pagination_config(db.pagination_config())
+            }
         }
     } else {
         quote! {}
@@ -2807,7 +2852,7 @@ pub(crate) fn generate_graphql_operations(
         quote! {
             pub async fn rebuild_search_index(
                 db: &::graphql_orm::db::Database<#backend_marker>,
-            ) -> Result<(), ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<()> {
                 let Some(index) = <Self as ::graphql_orm::graphql::orm::DatabaseSearchSchema>::search_index() else {
                     return Ok(());
                 };
@@ -2834,7 +2879,7 @@ pub(crate) fn generate_graphql_operations(
             pub async fn rebuild_search_document(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 id: &#pk_type_ty,
-            ) -> Result<(), ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<()> {
                 let Some(index) = <Self as ::graphql_orm::graphql::orm::DatabaseSearchSchema>::search_index() else {
                     return Ok(());
                 };
@@ -4023,7 +4068,7 @@ pub(crate) fn generate_graphql_operations(
                 source_id: &'a str,
                 path: Vec<String>,
                 visited: &'a mut ::std::collections::HashSet<String>,
-            ) -> ::graphql_orm::futures::future::BoxFuture<'a, Result<(), ::graphql_orm::sqlx::Error>> {
+            ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<()>> {
                 Box::pin(async move {
                     #(#propagation_blocks)*
                     Ok(())
@@ -4035,7 +4080,7 @@ pub(crate) fn generate_graphql_operations(
                 hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 action: ::graphql_orm::graphql::orm::ChangeAction,
                 entity: Option<&Self>,
-            ) -> Result<(), ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<()> {
                 if let Some(entity) = entity {
                     #search_write_maintenance
                     let source_id = entity.#pk_field.to_string();
@@ -4071,7 +4116,7 @@ pub(crate) fn generate_graphql_operations(
             #[doc(hidden)]
             fn __gom_capture_entity_state(
                 entity: &Self,
-            ) -> Result<::graphql_orm::graphql::orm::EntityState, ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::EntityState> {
                 ::graphql_orm::graphql::orm::entity_state(entity)
             }
 
@@ -4079,7 +4124,7 @@ pub(crate) fn generate_graphql_operations(
             pub(crate) async fn __gom_fetch_by_id_on<'e, E>(
                 executor: E,
                 id: &#pk_type_ty,
-            ) -> Result<Option<Self>, ::graphql_orm::sqlx::Error>
+            ) -> ::graphql_orm::Result<Option<Self>>
             where
                 E: ::graphql_orm::sqlx::Executor<'e, Database = #database_type> + Send + 'e,
             {
@@ -4105,7 +4150,7 @@ pub(crate) fn generate_graphql_operations(
             async fn __gom_insert_with_mutation_context<'a>(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 mut input: #create_input,
-            ) -> Result<Self, ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<Self> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, SqlValue};
 
                 let db = hook_ctx.database().clone();
@@ -4181,7 +4226,7 @@ pub(crate) fn generate_graphql_operations(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 id: &#pk_type_ty,
                 mut input: #update_input,
-            ) -> Result<Option<Self>, ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<Option<Self>> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
 
                 let current_entity = Self::__gom_fetch_by_id_on(hook_ctx.executor(), id).await?;
@@ -4280,7 +4325,7 @@ pub(crate) fn generate_graphql_operations(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 where_input: #where_input,
                 mut input: #update_input,
-            ) -> Result<i64, ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<i64> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow, SqlValue};
 
                 if where_input.is_empty() {
@@ -4441,7 +4486,7 @@ pub(crate) fn generate_graphql_operations(
             async fn __gom_delete_by_id_with_mutation_context<'a>(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 id: &#pk_type_ty,
-            ) -> Result<bool, ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<bool> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, SqlValue};
 
                 let entity = Self::__gom_fetch_by_id_on(hook_ctx.executor(), id).await?;
@@ -4507,7 +4552,7 @@ pub(crate) fn generate_graphql_operations(
             async fn __gom_delete_where_with_mutation_context<'a>(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 where_input: #where_input,
-            ) -> Result<i64, ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<i64> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow};
 
                 if where_input.is_empty() {
@@ -4602,7 +4647,7 @@ pub(crate) fn generate_graphql_operations(
             pub async fn insert<P>(
                 provider: &P,
                 mut input: #create_input,
-            ) -> Result<Self, ::graphql_orm::sqlx::Error>
+            ) -> ::graphql_orm::Result<Self>
             where
                 P: ::graphql_orm::graphql::orm::PoolProvider<#backend_marker> + ::std::any::Any,
             {
@@ -4645,11 +4690,62 @@ pub(crate) fn generate_graphql_operations(
                 }
             }
 
+            /// Insert multiple entity records transactionally using the generated create input.
+            pub async fn insert_many<I>(
+                db: &::graphql_orm::db::Database<#backend_marker>,
+                inputs: I,
+            ) -> ::graphql_orm::Result<Vec<Self>>
+            where
+                I: IntoIterator<Item = #create_input>,
+            {
+                db.ensure_entity_access(
+                    None,
+                    #entity_name_lit,
+                    <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                    ::graphql_orm::graphql::orm::EntityAccessKind::Write,
+                    ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+
+                let inputs: Vec<#create_input> = inputs.into_iter().collect();
+                if inputs.is_empty() {
+                    return Ok(Vec::new());
+                }
+
+                let tx = db.pool().begin().await?;
+                let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::new(db, tx);
+                let mut entities = Vec::with_capacity(inputs.len());
+                for input in inputs {
+                    entities.push(Self::__gom_insert_with_mutation_context(&mut hook_ctx, input).await?);
+                }
+                hook_ctx.commit_and_emit().await?;
+                Ok(entities)
+            }
+
             #upsert_repository_method
 
             /// Find all entities matching the given filter
             pub fn query<'a>(pool: &'a #pool_type) -> ::graphql_orm::graphql::orm::FindQuery<'a, Self, #where_input, #order_by_input, #backend_marker> {
                 ::graphql_orm::graphql::orm::FindQuery::new(pool)
+            }
+
+            /// Fetch all entities through a `Database` handle without exposing the raw pool type.
+            pub async fn find_all(
+                db: &::graphql_orm::db::Database<#backend_marker>,
+            ) -> ::graphql_orm::Result<Vec<Self>> {
+                ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
+                    .fetch_all(db)
+                    .await
+            }
+
+            /// Fetch entities matching a typed where filter through a `Database` handle.
+            pub async fn find_many(
+                db: &::graphql_orm::db::Database<#backend_marker>,
+                where_input: #where_input,
+            ) -> ::graphql_orm::Result<Vec<Self>> {
+                ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
+                    .filter_with_entity_matching(&where_input)
+                    .fetch_all(db)
+                    .await
             }
 
             #search_repository_method
@@ -4662,7 +4758,7 @@ pub(crate) fn generate_graphql_operations(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 id: &#pk_type_ty,
                 mut input: #update_input,
-            ) -> Result<Option<Self>, ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<Option<Self>> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
 
                 let pool = db.pool();
@@ -4782,7 +4878,7 @@ pub(crate) fn generate_graphql_operations(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 where_input: #where_input,
                 input: #update_input,
-            ) -> Result<i64, ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<i64> {
                 Self::__gom_update_where_with_auth(db, where_input, input, None).await
             }
 
@@ -4792,7 +4888,7 @@ pub(crate) fn generate_graphql_operations(
                 where_input: #where_input,
                 mut input: #update_input,
                 auth_context: Option<&::graphql_orm::graphql::orm::DbAuthContext>,
-            ) -> Result<i64, ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<i64> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow, SqlValue};
 
                 if where_input.is_empty() {
@@ -4974,7 +5070,7 @@ pub(crate) fn generate_graphql_operations(
             pub async fn delete_by_id(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 id: &#pk_type_ty,
-            ) -> Result<bool, ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<bool> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, SqlValue};
 
                 let pool = db.pool();
@@ -5064,8 +5160,121 @@ pub(crate) fn generate_graphql_operations(
             pub async fn delete_where(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 where_input: #where_input,
-            ) -> Result<i64, ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<i64> {
                 Self::__gom_delete_where_with_auth(db, where_input, None).await
+            }
+
+            /// Delete every row for this entity.
+            ///
+            /// This is intentionally separate from `delete_where`; empty
+            /// `delete_where` filters continue to fail so accidental table-wide
+            /// deletes remain visible in code review.
+            pub async fn delete_all(
+                db: &::graphql_orm::db::Database<#backend_marker>,
+            ) -> ::graphql_orm::Result<i64> {
+                Self::__gom_delete_matching_with_auth(db, #where_input::default(), None, true).await
+            }
+
+            /// Replace every row for this entity in one transaction.
+            ///
+            /// Existing rows are deleted, then the provided create inputs are
+            /// inserted using the normal generated ORM write path. Mutation
+            /// hooks, policies, search maintenance, and change events are
+            /// preserved.
+            pub async fn replace_all<I>(
+                db: &::graphql_orm::db::Database<#backend_marker>,
+                inputs: I,
+            ) -> ::graphql_orm::Result<Vec<Self>>
+            where
+                I: IntoIterator<Item = #create_input>,
+            {
+                use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow};
+
+                db.ensure_entity_access(
+                    None,
+                    #entity_name_lit,
+                    <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                    ::graphql_orm::graphql::orm::EntityAccessKind::Write,
+                    ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+
+                let inputs: Vec<#create_input> = inputs.into_iter().collect();
+                let existing_entities = EntityQuery::<Self, #backend_marker>::new()
+                    .fetch_all(db)
+                    .await?;
+
+                for entity in &existing_entities {
+                    db.ensure_writable_row(
+                        None,
+                        #entity_name_lit,
+                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                        ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                        entity as &(dyn ::std::any::Any + Send + Sync),
+                    ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                }
+
+                let tx = db.pool().begin().await?;
+                let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::new(db, tx);
+
+                for entity in &existing_entities {
+                    hook_ctx.run_mutation_hook(
+                        None,
+                        &::graphql_orm::graphql::orm::MutationEvent {
+                            phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
+                            action: ::graphql_orm::graphql::orm::ChangeAction::Deleted,
+                            entity_name: #entity_name_lit,
+                            table_name: #table_name,
+                            metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
+                            id: entity.#pk_field.to_string(),
+                            changes: Vec::new(),
+                            before_state: Some(Self::__gom_capture_entity_state(entity)?),
+                            after_state: None,
+                        },
+                    )
+                    .await
+                    .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                }
+
+                if !existing_entities.is_empty() {
+                    let sql = format!("DELETE FROM {}", #table_name);
+                    ::graphql_orm::graphql::orm::execute_with_binds_on::<#backend_marker, _>(
+                        hook_ctx.executor(),
+                        &sql,
+                        &[],
+                    ).await?;
+                }
+
+                for entity in &existing_entities {
+                    hook_ctx.run_mutation_hook(
+                        None,
+                        &::graphql_orm::graphql::orm::MutationEvent {
+                            phase: ::graphql_orm::graphql::orm::MutationPhase::After,
+                            action: ::graphql_orm::graphql::orm::ChangeAction::Deleted,
+                            entity_name: #entity_name_lit,
+                            table_name: #table_name,
+                            metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
+                            id: entity.#pk_field.to_string(),
+                            changes: Vec::new(),
+                            before_state: Some(Self::__gom_capture_entity_state(entity)?),
+                            after_state: None,
+                        },
+                    )
+                    .await
+                    .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                    Self::__gom_queue_changed_event(
+                        &mut hook_ctx,
+                        ::graphql_orm::graphql::orm::ChangeAction::Deleted,
+                        Some(entity),
+                    ).await?;
+                }
+
+                let mut inserted = Vec::with_capacity(inputs.len());
+                for input in inputs {
+                    inserted.push(Self::__gom_insert_with_mutation_context(&mut hook_ctx, input).await?);
+                }
+
+                hook_ctx.commit_and_emit().await?;
+                Ok(inserted)
             }
 
             #[doc(hidden)]
@@ -5073,10 +5282,21 @@ pub(crate) fn generate_graphql_operations(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 where_input: #where_input,
                 auth_context: Option<&::graphql_orm::graphql::orm::DbAuthContext>,
-            ) -> Result<i64, ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<i64> {
+                Self::__gom_delete_matching_with_auth(db, where_input, auth_context, false).await
+            }
+
+            #[doc(hidden)]
+            pub(crate) async fn __gom_delete_matching_with_auth(
+                db: &::graphql_orm::db::Database<#backend_marker>,
+                where_input: #where_input,
+                auth_context: Option<&::graphql_orm::graphql::orm::DbAuthContext>,
+                allow_empty_filter: bool,
+            ) -> ::graphql_orm::Result<i64> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow};
 
-                if where_input.is_empty() {
+                let filter_is_empty = where_input.is_empty();
+                if filter_is_empty && !allow_empty_filter {
                     return Err(Self::__gom_runtime_error("Where filter is required for bulk delete and must not be empty"));
                 }
 
@@ -5137,7 +5357,12 @@ pub(crate) fn generate_graphql_operations(
                         &where_input,
                         <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT,
                     );
-                let (sql, values) = if requires_entity_filtering {
+                let (sql, values) = if filter_is_empty {
+                    (
+                        format!("DELETE FROM {}", #table_name),
+                        Vec::new(),
+                    )
+                } else if requires_entity_filtering {
                     let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
                     let mut placeholders = Vec::new();
                     for (index, entity) in matched_entities.iter().enumerate() {
@@ -5194,6 +5419,26 @@ pub(crate) fn generate_graphql_operations(
                 ::graphql_orm::graphql::orm::EntityCountQuery::new(pool)
             }
 
+            /// Count all entities through a `Database` handle without exposing the raw pool type.
+            pub async fn count_all(
+                db: &::graphql_orm::db::Database<#backend_marker>,
+            ) -> ::graphql_orm::Result<i64> {
+                ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
+                    .count(db)
+                    .await
+            }
+
+            /// Count entities matching a typed where filter through a `Database` handle.
+            pub async fn count(
+                db: &::graphql_orm::db::Database<#backend_marker>,
+                where_input: #where_input,
+            ) -> ::graphql_orm::Result<i64> {
+                ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
+                    .filter_with_entity_matching(&where_input)
+                    .count(db)
+                    .await
+            }
+
             /// Search entities with fuzzy/similar text matching
             ///
             /// # Arguments
@@ -5232,7 +5477,7 @@ pub(crate) fn generate_graphql_operations(
                 threshold: f64,
                 filter: Option<#where_input>,
                 limit: Option<i64>,
-            ) -> Result<Vec<(Self, f64)>, ::graphql_orm::sqlx::Error> {
+            ) -> ::graphql_orm::Result<Vec<(Self, f64)>> {
                 use ::graphql_orm::graphql::orm::FuzzyMatcher;
 
                 // Fetch candidates (optionally filtered)
@@ -5273,7 +5518,7 @@ pub(crate) fn generate_graphql_operations(
             fn insert_in_mutation_context<'a>(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 input: Self::CreateInput,
-            ) -> ::graphql_orm::futures::future::BoxFuture<'a, Result<Self, ::graphql_orm::sqlx::Error>> {
+            ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<Self>> {
                 Box::pin(async move { Self::__gom_insert_with_mutation_context(hook_ctx, input).await })
             }
         }
@@ -5288,7 +5533,7 @@ pub(crate) fn generate_graphql_operations(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 id: &'a Self::Id,
                 input: Self::UpdateInput,
-            ) -> ::graphql_orm::futures::future::BoxFuture<'a, Result<Option<Self>, ::graphql_orm::sqlx::Error>> {
+            ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<Option<Self>>> {
                 Box::pin(async move { Self::__gom_update_by_id_with_mutation_context(hook_ctx, id, input).await })
             }
         }
@@ -5301,7 +5546,7 @@ pub(crate) fn generate_graphql_operations(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 where_input: Self::WhereInput,
                 input: Self::UpdateInput,
-            ) -> ::graphql_orm::futures::future::BoxFuture<'a, Result<i64, ::graphql_orm::sqlx::Error>> {
+            ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<i64>> {
                 Box::pin(async move { Self::__gom_update_where_with_mutation_context(hook_ctx, where_input, input).await })
             }
         }
@@ -5312,7 +5557,7 @@ pub(crate) fn generate_graphql_operations(
             fn delete_by_id_in_mutation_context<'a>(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 id: &'a Self::Id,
-            ) -> ::graphql_orm::futures::future::BoxFuture<'a, Result<bool, ::graphql_orm::sqlx::Error>> {
+            ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<bool>> {
                 Box::pin(async move { Self::__gom_delete_by_id_with_mutation_context(hook_ctx, id).await })
             }
         }
@@ -5323,7 +5568,7 @@ pub(crate) fn generate_graphql_operations(
             fn delete_where_in_mutation_context<'a>(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 where_input: Self::WhereInput,
-            ) -> ::graphql_orm::futures::future::BoxFuture<'a, Result<i64, ::graphql_orm::sqlx::Error>> {
+            ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<i64>> {
                 Box::pin(async move { Self::__gom_delete_where_with_mutation_context(hook_ctx, where_input).await })
             }
         }
@@ -5334,7 +5579,7 @@ pub(crate) fn generate_graphql_operations(
             fn find_by_id_in_mutation_context<'a>(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 id: &'a Self::Id,
-            ) -> ::graphql_orm::futures::future::BoxFuture<'a, Result<Option<Self>, ::graphql_orm::sqlx::Error>> {
+            ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<Option<Self>>> {
                 Box::pin(async move { Self::__gom_fetch_by_id_on(hook_ctx.executor(), id).await })
             }
         }

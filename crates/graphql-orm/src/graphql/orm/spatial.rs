@@ -35,7 +35,7 @@ fn geojson_geometry_type(value: &geojson::Geometry) -> SpatialGeometryType {
 fn ensure_geometry_type(
     geometry: &geojson::Geometry,
     spatial: SpatialColumnDef,
-) -> Result<(), sqlx::Error> {
+) -> crate::Result<()> {
     let actual = geojson_geometry_type(geometry);
     if spatial.geometry_type == SpatialGeometryType::Geometry || spatial.geometry_type == actual {
         return Ok(());
@@ -48,19 +48,17 @@ fn ensure_geometry_type(
     )))
 }
 
-fn parse_geojson_geometry(value: &serde_json::Value) -> Result<geojson::Geometry, sqlx::Error> {
+fn parse_geojson_geometry(value: &serde_json::Value) -> crate::Result<geojson::Geometry> {
     serde_json::from_value::<geojson::Geometry>(value.clone())
         .map_err(|error| decode_error(format!("invalid GeoJSON geometry: {error}")))
 }
 
-fn geometry_to_geo_types(
-    geometry: geojson::Geometry,
-) -> Result<geo_types::Geometry<f64>, sqlx::Error> {
+fn geometry_to_geo_types(geometry: geojson::Geometry) -> crate::Result<geo_types::Geometry<f64>> {
     geo_types::Geometry::<f64>::try_from(geojson::GeoJson::Geometry(geometry))
         .map_err(|error| decode_error(format!("invalid GeoJSON geometry coordinates: {error}")))
 }
 
-fn value_to_geo_types(value: &serde_json::Value) -> Result<geo_types::Geometry<f64>, sqlx::Error> {
+fn value_to_geo_types(value: &serde_json::Value) -> crate::Result<geo_types::Geometry<f64>> {
     geometry_to_geo_types(parse_geojson_geometry(value)?)
 }
 
@@ -68,7 +66,7 @@ fn value_to_geo_types(value: &serde_json::Value) -> Result<geo_types::Geometry<f
 pub fn validate_geojson_value(
     value: &serde_json::Value,
     spatial: SpatialColumnDef,
-) -> Result<(), sqlx::Error> {
+) -> crate::Result<()> {
     let geometry = parse_geojson_geometry(value)?;
     ensure_geometry_type(&geometry, spatial)
 }
@@ -77,7 +75,7 @@ pub fn validate_geojson_value(
 pub fn canonical_geojson_sql_value(
     value: &serde_json::Value,
     spatial: SpatialColumnDef,
-) -> Result<super::core::SqlValue, sqlx::Error> {
+) -> crate::Result<super::core::SqlValue> {
     validate_geojson_value(value, spatial)?;
     Ok(super::core::SqlValue::Json(value.clone()))
 }
@@ -87,7 +85,7 @@ pub fn spatial_predicate_matches(
     predicate: SpatialPredicate,
     left: &serde_json::Value,
     right: &serde_json::Value,
-) -> Result<bool, sqlx::Error> {
+) -> crate::Result<bool> {
     let left = value_to_geo_types(left)?;
     let right = value_to_geo_types(right)?;
     let relation = left.relate(&right);
@@ -108,7 +106,7 @@ fn spatial_filter_predicate(
     stored: &serde_json::Value,
     input: &async_graphql::Json<serde_json::Value>,
     predicate: SpatialPredicate,
-) -> Result<bool, sqlx::Error> {
+) -> crate::Result<bool> {
     spatial_predicate_matches(predicate, stored, &input.0)
 }
 
@@ -117,7 +115,7 @@ pub fn spatial_filter_matches_value(
     stored: Option<&serde_json::Value>,
     filter: &SpatialFilter,
     spatial: SpatialColumnDef,
-) -> Result<bool, sqlx::Error> {
+) -> crate::Result<bool> {
     if let Some(is_null) = filter.is_null {
         if stored.is_none() != is_null {
             return Ok(false);

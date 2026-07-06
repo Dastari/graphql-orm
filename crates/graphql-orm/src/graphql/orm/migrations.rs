@@ -1257,7 +1257,7 @@ pub fn write_migration_file(
     Ok(path)
 }
 
-pub async fn introspect_schema<B, P>(provider: &P) -> Result<SchemaModel, sqlx::Error>
+pub async fn introspect_schema<B, P>(provider: &P) -> crate::Result<SchemaModel>
 where
     B: IntrospectionBackend,
     P: PoolProvider<B>,
@@ -1268,7 +1268,7 @@ where
 #[cfg(feature = "sqlite")]
 pub async fn introspect_sqlite_schema(
     provider: &impl PoolProvider<super::SqliteBackend>,
-) -> Result<SchemaModel, sqlx::Error> {
+) -> crate::Result<SchemaModel> {
     let pool = provider.pool();
     let table_rows = sqlx::query(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
@@ -1303,7 +1303,7 @@ pub async fn introspect_sqlite_schema(
                     default,
                 })
             })
-            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+            .collect::<crate::Result<Vec<_>>>()?;
         let primary_keys = columns
             .iter()
             .filter(|column| column.is_primary_key)
@@ -1363,7 +1363,7 @@ pub async fn introspect_sqlite_schema(
                     },
                 })
             })
-            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+            .collect::<crate::Result<Vec<_>>>()?;
 
         tables.push(TableModel {
             entity_name: table_name.clone(),
@@ -1410,7 +1410,7 @@ pub async fn introspect_sqlite_schema(
 
 #[cfg(feature = "sqlite")]
 impl IntrospectionBackend for super::SqliteBackend {
-    async fn introspect_schema(pool: &Self::Pool) -> Result<SchemaModel, sqlx::Error> {
+    async fn introspect_schema(pool: &Self::Pool) -> crate::Result<SchemaModel> {
         introspect_sqlite_schema(pool).await
     }
 }
@@ -1445,7 +1445,7 @@ fn parse_postgres_geometry_type(sql_type: &str) -> Option<SpatialColumnDef> {
 #[cfg(feature = "postgres")]
 pub async fn introspect_postgres_schema(
     provider: &impl PoolProvider<super::PostgresBackend>,
-) -> Result<SchemaModel, sqlx::Error> {
+) -> crate::Result<SchemaModel> {
     let pool = provider.pool();
     let schema_name = sqlx::query("SELECT current_schema() AS schema_name")
         .fetch_one(pool)
@@ -1552,7 +1552,7 @@ pub async fn introspect_postgres_schema(
                     default: row.try_get::<Option<String>, _>("column_default")?,
                 })
             })
-            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+            .collect::<crate::Result<Vec<_>>>()?;
 
         let primary_key = primary_key_columns
             .first()
@@ -1658,7 +1658,7 @@ pub async fn introspect_postgres_schema(
                     },
                 })
             })
-            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+            .collect::<crate::Result<Vec<_>>>()?;
 
         tables.push(TableModel {
             entity_name: table_name.clone(),
@@ -1710,14 +1710,14 @@ pub async fn introspect_postgres_schema(
 
 #[cfg(feature = "postgres")]
 impl IntrospectionBackend for super::PostgresBackend {
-    async fn introspect_schema(pool: &Self::Pool) -> Result<SchemaModel, sqlx::Error> {
+    async fn introspect_schema(pool: &Self::Pool) -> crate::Result<SchemaModel> {
         introspect_postgres_schema(pool).await
     }
 }
 
 #[cfg(feature = "postgres")]
 impl RlsIntrospectionBackend for super::PostgresBackend {
-    async fn introspect_rls(pool: &Self::Pool) -> Result<Vec<LiveRlsTable>, sqlx::Error> {
+    async fn introspect_rls(pool: &Self::Pool) -> crate::Result<Vec<LiveRlsTable>> {
         let table_rows = sqlx::query(
             "SELECT n.nspname AS schema_name,
                     c.relname AS table_name,
@@ -1798,7 +1798,7 @@ impl RlsIntrospectionBackend for super::PostgresBackend {
 #[cfg(feature = "mssql")]
 pub async fn introspect_mssql_schema(
     provider: &impl PoolProvider<super::MssqlBackend>,
-) -> Result<SchemaModel, sqlx::Error> {
+) -> crate::Result<SchemaModel> {
     let pool = provider.pool();
     let table_rows = super::MssqlBackend::fetch_rows(
         pool,
@@ -1906,7 +1906,7 @@ pub async fn introspect_mssql_schema(
                     default: row.try_get::<Option<String>, _>("column_default")?,
                 })
             })
-            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+            .collect::<crate::Result<Vec<_>>>()?;
 
         tables.push(TableModel {
             entity_name: raw_table_name.clone(),
@@ -1930,7 +1930,7 @@ pub async fn introspect_mssql_schema(
 
 #[cfg(feature = "mssql")]
 impl IntrospectionBackend for super::MssqlBackend {
-    async fn introspect_schema(pool: &Self::Pool) -> Result<SchemaModel, sqlx::Error> {
+    async fn introspect_schema(pool: &Self::Pool) -> crate::Result<SchemaModel> {
         introspect_mssql_schema(pool).await
     }
 }
