@@ -32,6 +32,30 @@
 //! }
 //! ```
 //!
+//! # Generated Resolver Auth
+//!
+//! `schema_roots!` and `#[graphql_entity(...)]` accept
+//! `auth = "required" | "optional" | "none"`. Entity-level auth overrides the
+//! schema-root mode.
+//!
+//! ```ignore
+//! #[graphql_entity(table = "pages", plural = "Pages", auth = "none")]
+//! pub struct Page {
+//!     #[primary_key]
+//!     pub id: String,
+//! }
+//!
+//! schema_roots! {
+//!     auth: "required",
+//!     query_custom_ops: [],
+//!     entities: [User],
+//! }
+//! ```
+//!
+//! `required` calls the runtime `AuthSubject` helper before generated database
+//! work. `optional` reads auth only when present and lets policy hooks decide.
+//! `none` leaves generated resolvers public.
+//!
 //! # Backends
 //!
 //! The macro crate mirrors the runtime backend features: `sqlite`, `postgres`,

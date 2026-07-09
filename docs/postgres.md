@@ -2,7 +2,8 @@
 
 PostgreSQL support includes optional row-level security metadata for generated entities. RLS is a
 database-level defense in depth. It does not replace GraphQL authorization: generated resolvers still
-require the existing GraphQL auth data and still evaluate configured entity, row, and field policies.
+enforce their selected generated auth mode and still evaluate configured entity, row, and field
+policies.
 
 ## Entity Attribute
 
@@ -46,6 +47,9 @@ Tenant and owner values are database column names. For non-text columns or advan
 custom predicate with explicit casts. Scope checks are exact string matches unless a custom predicate
 implements different behavior. `graphql-orm` does not add a hardcoded admin or global bypass; model
 that with custom predicates or broad application scopes.
+
+PostgreSQL RLS helpers intentionally do not implement wildcard or hierarchical scope logic. Keep
+hierarchical matching in the GraphQL/application policy layer and pass only exact scopes into RLS.
 
 `#[graphql_rls]` is PostgreSQL-only. SQLite and MSSQL builds fail clearly when an entity opts into
 RLS. In multi-backend builds, RLS entities must declare `backend = "postgres"`.
@@ -121,14 +125,15 @@ Operation SQL:
 Attach `DbAuthContext` to each async-graphql request when database RLS should apply:
 
 ```rust
-let request = request.data(DbAuthContext {
-    user_id: Some(identity.user_id.to_string()),
-    subject: Some(identity.user_id.to_string()),
-    tenant_id: identity.tenant_id.clone(),
-    roles: identity.roles.clone(),
-    scopes: identity.scopes.clone(),
-    claims_json: None,
-});
+let subject = AuthSubject::from_parts(
+    identity.user_id.to_string(),
+    identity.roles.clone(),
+    identity.scopes.clone(),
+    identity.tenant_id.clone(),
+);
+let request = request
+    .data(subject.clone())
+    .data(DbAuthContext::from_subject(&subject));
 ```
 
 Generated resolvers look for this context. If it is present and the backend is PostgreSQL, list

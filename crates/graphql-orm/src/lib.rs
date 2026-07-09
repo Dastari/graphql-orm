@@ -83,6 +83,31 @@
 //! inputs, repository helpers, mutation hooks, mutation contexts, and
 //! subscriptions remain available to application code.
 //!
+//! # Generated Resolver Auth
+//!
+//! Generated resolvers understand a project-agnostic
+//! [`graphql::auth::AuthSubject`] with an id, roles, scopes, and optional
+//! tenant id. Applications can attach `AuthSubject` to async-graphql request
+//! data directly, or keep attaching the legacy `String` user id while
+//! migrating; [`graphql::auth::AuthExt::auth_subject`] upgrades legacy ids into
+//! subjects with empty roles and scopes.
+//!
+//! ```ignore
+//! schema_roots! {
+//!     auth: "required",
+//!     query_custom_ops: [],
+//!     entities: [User],
+//! }
+//!
+//! let request = request.data(AuthSubject::new("current-user-id"));
+//! ```
+//!
+//! Supported generated resolver modes are `required`, `optional`, and `none`.
+//! The compatibility default remains fail-closed, matching the older generated
+//! `ctx.auth_user()?` gate. Use `auth = "none"` for public generated schemas.
+//! [`graphql::orm::ScopeEntityPolicy`] provides exact-scope entity gates without
+//! depending on any auth crate.
+//!
 //! # Spatial Fields
 //!
 //! PostgreSQL and SQLite entities can expose spatial values as GeoJSON through

@@ -9,6 +9,7 @@ This crate provides the public runtime contract targeted by the derive macros:
 - relation loaders and nested relation batching
 - repository helpers and write hooks
 - row, field, and entity policies
+- `AuthSubject`, generated resolver auth modes, and exact-scope `ScopeEntityPolicy`
 - schema models, validation, migration planning, and explicit migration application
 - SQLite, Postgres, and read-only SQL Server runtime support
 

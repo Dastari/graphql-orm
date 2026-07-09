@@ -4,7 +4,7 @@
 
 ```toml
 [dependencies]
-graphql-orm = { version = "0.2.20", default-features = false, features = ["sqlite"] }
+graphql-orm = { version = "0.2.21", default-features = false, features = ["sqlite"] }
 ```
 
 The proc macros are re-exported by `graphql-orm`, so application code should usually import the
@@ -50,6 +50,7 @@ pub struct User {
 
 ```rust
 schema_roots! {
+    auth: "required",
     query_custom_ops: [],
     entities: [User],
 }
@@ -60,13 +61,17 @@ async fn build_schema(database_url: &str) -> graphql_orm::Result<AppSchema> {
             .await?;
 
     Ok(schema_builder(database)
-        .data("current-user-id".to_string())
+        .data(AuthSubject::new("current-user-id"))
         .finish())
 }
 ```
 
 The generated `schema_builder(database)` registers the database runtime and generated dataloaders.
 Applications can attach additional async-graphql data after calling it.
+
+`auth: "required"` makes generated resolvers require an `AuthSubject` before database access. Use
+`auth: "none"` for public schemas, or `auth: "optional"` when policy hooks decide whether an
+anonymous request may continue. The compatibility default is still fail-closed.
 
 Applications no longer need to import SQLX for normal setup. `connect_sqlite`, `connect_postgres`,
 and `connect_ado` create `Database` handles directly. `Database::new(pool)` and

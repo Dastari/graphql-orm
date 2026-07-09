@@ -13,6 +13,7 @@ pub(crate) struct EntityMetadata {
     pub(crate) plural_name: Option<String>,
     pub(crate) default_sort: Option<String>,
     pub(crate) schema_policy: Option<String>,
+    pub(crate) auth: Option<String>,
     pub(crate) schema_only: bool,
     pub(crate) backup_enabled: Option<bool>,
     pub(crate) backup_export_order: Option<i32>,
@@ -96,6 +97,12 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = lit.value();
                     validate_schema_policy(&value, lit.span())?;
                     metadata.schema_policy = Some(value);
+                } else if meta.path.is_ident("auth") {
+                    let value = meta.value()?;
+                    let lit: syn::LitStr = value.parse()?;
+                    let value = lit.value();
+                    validate_resolver_auth_mode(&value, lit.span())?;
+                    metadata.auth = Some(value);
                 } else if meta.path.is_ident("schema_only") {
                     let value = meta.value()?;
                     let lit: syn::LitBool = value.parse()?;
@@ -367,6 +374,63 @@ pub(crate) fn schema_policy_tokens(policy: Option<&str>) -> proc_macro2::TokenSt
         }
         Some("managed") => quote! { Some(::graphql_orm::graphql::orm::SchemaPolicy::Managed) },
         _ => quote! { None },
+    }
+}
+
+pub(crate) fn validate_resolver_auth_mode(value: &str, span: proc_macro2::Span) -> syn::Result<()> {
+    match value {
+        "required" | "optional" | "none" => Ok(()),
+        _ => Err(syn::Error::new(
+            span,
+            "auth must be one of \"required\", \"optional\", or \"none\"",
+        )),
+    }
+}
+
+pub(crate) fn resolver_auth_mode_tokens(
+    auth: Option<&str>,
+    span: proc_macro2::Span,
+) -> syn::Result<proc_macro2::TokenStream> {
+    match auth {
+        Some("required") => Ok(quote! {
+            Some(::graphql_orm::graphql::auth::ResolverAuthMode::Required)
+        }),
+        Some("optional") => Ok(quote! {
+            Some(::graphql_orm::graphql::auth::ResolverAuthMode::Optional)
+        }),
+        Some("none") => Ok(quote! {
+            Some(::graphql_orm::graphql::auth::ResolverAuthMode::None)
+        }),
+        None => Ok(quote! { None }),
+        Some(value) => Err(syn::Error::new(
+            span,
+            format!(
+                "unsupported auth mode `{value}`; expected \"required\", \"optional\", or \"none\""
+            ),
+        )),
+    }
+}
+
+pub(crate) fn resolver_auth_mode_value_tokens(
+    auth: &str,
+    span: proc_macro2::Span,
+) -> syn::Result<proc_macro2::TokenStream> {
+    match auth {
+        "required" => Ok(quote! {
+            ::graphql_orm::graphql::auth::ResolverAuthMode::Required
+        }),
+        "optional" => Ok(quote! {
+            ::graphql_orm::graphql::auth::ResolverAuthMode::Optional
+        }),
+        "none" => Ok(quote! {
+            ::graphql_orm::graphql::auth::ResolverAuthMode::None
+        }),
+        value => Err(syn::Error::new(
+            span,
+            format!(
+                "unsupported auth mode `{value}`; expected \"required\", \"optional\", or \"none\""
+            ),
+        )),
     }
 }
 

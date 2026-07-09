@@ -4,7 +4,7 @@ use crate::backend::{
 };
 use crate::entity::{
     collect_parsed_fields, has_graphql_complex, parse_entity_metadata,
-    relation_change_propagation_tokens, relation_delete_policy_tokens,
+    relation_change_propagation_tokens, relation_delete_policy_tokens, resolver_auth_mode_tokens,
 };
 use crate::naming::{apply_graphql_case, graphql_field_name, selected_argument_case};
 use syn::spanned::Spanned;
@@ -139,6 +139,8 @@ pub(crate) fn generate_graphql_relations(
 ) -> syn::Result<proc_macro2::TokenStream> {
     let struct_name = &input.ident;
     let entity_meta = parse_entity_metadata(&input.attrs)?;
+    let resolver_auth_mode =
+        resolver_auth_mode_tokens(entity_meta.auth.as_deref(), struct_name.span())?;
     let backend = resolve_backend(
         entity_meta.backend.as_deref(),
         struct_name.span(),
@@ -581,6 +583,7 @@ pub(crate) fn generate_graphql_relations(
                 ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, DatabaseOrderBy, EntityQuery, SqlValue};
 
+                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                     let auth_context = ctx
                         .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
@@ -726,6 +729,7 @@ pub(crate) fn generate_graphql_relations(
                 ) -> ::graphql_orm::async_graphql::Result<Option<#target_type>> {
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, SqlValue};
 
+                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                     if self.#field_name.is_some() {
                         #preloaded_single
                     }

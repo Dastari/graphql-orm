@@ -124,8 +124,66 @@ fields, a denied write policy drops that field from the generated insert so data
 can continue. Required create fields still fail when denied because generated code cannot synthesize
 a safe value. Entity-level and row-level write denials remain hard errors.
 
+## Auth Subjects And Resolver Modes
+
+`graphql-orm` understands a small project-agnostic auth shape:
+
+```rust
+let subject = AuthSubject {
+    id: user.id.to_string(),
+    roles: user.roles.clone(),
+    scopes: user.scopes.clone(),
+    tenant_id: user.tenant_id.clone(),
+};
+
+let request = request.data(subject);
+```
+
+For compatibility, applications can still attach a `String` user id. `ctx.auth_subject()` first reads
+an `AuthSubject`, then upgrades a legacy `String` into a subject with empty roles, scopes, and tenant
+id. `ctx.auth_user()` remains as a deprecated alias; use `ctx.auth_user_id()` or
+`ctx.auth_subject()` in new code.
+
+Generated resolvers use an explicit auth mode. The default preserves the older fail-closed generated
+`ctx.auth_user()?` behavior. Opt out when a schema is intentionally public:
+
+```rust
+#[graphql_entity(table = "pages", plural = "Pages", auth = "none")]
+pub struct Page {
+    // fields...
+}
+
+schema_roots! {
+    auth: "optional",
+    query_custom_ops: [],
+    entities: [Record],
+}
+```
+
+Modes are:
+
+- `required`: require an auth subject before generated resolver database work.
+- `optional`: read a subject if present, then let entity, row, and field policies decide.
+- `none`: do not read auth in generated resolvers.
+
+Entity-level `auth` overrides the schema-root mode.
+
+For scope-only entity gates, use `ScopeEntityPolicy`:
+
+```rust
+let mut database = Database::new(pool);
+database.set_entity_policy(ScopeEntityPolicy::new(
+    &["records.read"],
+    &["records.write"],
+));
+```
+
+`ScopeEntityPolicy` matches exact scope strings only. With `require_auth: true`, missing auth returns
+an unauthenticated GraphQL error. A present subject without the required scope is a normal policy
+deny.
+
 PostgreSQL RLS support is defense in depth, not a replacement for GraphQL authorization. Generated
-resolvers still call `ctx.auth_user()?` and still evaluate configured entity, row, and field
+resolvers still enforce the selected auth mode and still evaluate configured entity, row, and field
 policies. Keep root field, mutation, and subscription authorization in the GraphQL layer.
 
 When a request carries `DbAuthContext`, generated PostgreSQL resolvers run database work through
@@ -133,14 +191,15 @@ transaction-local settings so RLS policies can read the authenticated user, tena
 and claims:
 
 ```rust
-let request = request.data(DbAuthContext {
-    user_id: Some(identity.user_id.to_string()),
-    subject: Some(identity.user_id.to_string()),
-    tenant_id: identity.tenant_id.clone(),
-    roles: identity.roles.clone(),
-    scopes: identity.scopes.clone(),
-    claims_json: None,
-});
+let subject = AuthSubject::from_parts(
+    identity.user_id.to_string(),
+    identity.roles.clone(),
+    identity.scopes.clone(),
+    identity.tenant_id.clone(),
+);
+let request = request
+    .data(subject.clone())
+    .data(DbAuthContext::from_subject(&subject));
 ```
 
 If `DbAuthContext` is absent, generated resolvers use the same execution paths as before. Relation

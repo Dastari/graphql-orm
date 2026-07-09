@@ -45,6 +45,13 @@ Naming feature groups remain independent:
 
 Enable at most one feature from each group.
 
+## Generated Resolver Auth
+
+`schema_roots!` and `#[graphql_entity(...)]` accept
+`auth = "required" | "optional" | "none"`. Entity-level auth overrides the schema-root mode. The
+runtime default remains fail-closed for compatibility; use `auth = "none"` for public generated
+schemas.
+
 ## Documentation
 
 See the root [README](../../README.md), project [docs](../../docs/README.md),

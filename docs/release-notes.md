@@ -3,6 +3,46 @@
 This page records user-facing changes for recent `graphql-orm` releases. Version numbers refer to
 the runtime crate unless a macro crate version is called out separately.
 
+## 0.2.21
+
+Auth bridge release for generated resolvers and policy hooks.
+
+- Bumped `graphql-orm` to `0.2.21`.
+- Bumped `graphql-orm-macros` to `0.3.22`.
+- Added `AuthSubject { id, roles, scopes, tenant_id }` as the project-agnostic auth principal shape
+  understood by `graphql-orm`.
+- Added `AuthExt::auth_user_id()`, `AuthExt::auth_subject()`, and
+  `AuthExt::auth_subject_opt()`. `AuthExt::auth_user()` remains available as a deprecated alias for
+  source compatibility.
+- `AuthExt` now prefers an `AuthSubject` in the async-graphql context, then falls back to the legacy
+  `String` user id and upgrades it to an empty-role/empty-scope subject.
+- Added `ScopeEntityPolicy`, an exact-scope `EntityPolicy` helper with separate read and write scope
+  lists and `require_auth` handling.
+- Added `DbAuthContext::from_subject`, `DbAuthContext::from_parts`, and
+  `DbAuthContext::from_context_parts` helpers for request-local PostgreSQL RLS settings.
+- Added generated resolver auth modes:
+  - entity-level `#[graphql_entity(auth = "required" | "optional" | "none")]`
+  - schema-root-level `schema_roots! { auth: "required" | "optional" | "none", ... }`
+- Generated query, mutation, subscription, and relation resolvers now route auth through
+  `AuthSubject`-aware enforcement instead of discarding `ctx.auth_user()?`.
+- Added a reserved optional `auth-agql` feature that compiles without pulling in `agql-auth`. The
+  concrete `agql-auth` converters remain deferred until the upstream `agql-auth` 0.7 API is tagged.
+
+Compatibility notes:
+
+- Structural/source-facing: code that names `ctx.auth_user()` will compile with a deprecation warning;
+  migrate to `ctx.auth_user_id()` when only the id is needed or `ctx.auth_subject()` when roles,
+  scopes, or tenant id are needed.
+- Structural/source-facing: any downstream custom implementation of `AuthExt` must implement
+  `auth_user_id`, `auth_subject`, and `auth_subject_opt`.
+- Structural/source-facing: `schema_roots!` and `#[graphql_entity]` now validate the optional `auth`
+  mode string when present.
+- Behavioral: the generated resolver default remains fail-closed for compatibility with prior
+  generated `ctx.auth_user()?` behavior. Use `auth = "none"` for public generated resolvers, or
+  `auth = "optional"` when entity/row policies should decide without a hard auth precheck.
+- Behavioral: `ScopeEntityPolicy` uses exact string matching only. Scope hierarchies, wildcards, and
+  product-specific bypasses are intentionally outside the base ORM policy helper.
+
 ## 0.2.20
 
 SQLX-free application boundary and service bulk helpers.

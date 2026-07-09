@@ -22,6 +22,23 @@ pub struct User {
 }
 ```
 
+## Entity Auth Mode
+
+`#[graphql_entity(auth = "...")]` overrides the generated resolver auth mode for one entity:
+
+```rust
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql_entity(table = "public_pages", plural = "PublicPages", auth = "none")]
+pub struct PublicPage {
+    #[primary_key]
+    pub id: String,
+}
+```
+
+Supported modes are `required`, `optional`, and `none`. Entity-level auth overrides the
+`schema_roots! { auth: "..." }` default. See [Auth Integration](auth.md) for the request data and
+policy contract.
+
 ## Persisted Column Names
 
 Use `#[graphql_orm(db_column = "...")]` when a legacy column name differs from the Rust field name:

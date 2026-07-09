@@ -1,6 +1,9 @@
 use super::*;
 use crate::backend::{BackendKind, backend_dialect_expr, backend_marker_tokens, resolve_backend};
-use crate::entity::{schema_policy_tokens, validate_schema_policy};
+use crate::entity::{
+    resolver_auth_mode_value_tokens, schema_policy_tokens, validate_resolver_auth_mode,
+    validate_schema_policy,
+};
 
 pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let args = match syn::parse::<SchemaRootsArgs>(input) {
@@ -20,6 +23,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     };
     let backend_marker = backend_marker_tokens(backend);
     let backend_dialect = backend_dialect_expr(backend);
+    let span = proc_macro2::Span::mixed_site();
     if cfg!(any(
         all(feature = "sqlite", feature = "postgres"),
         all(feature = "sqlite", feature = "mssql"),
@@ -32,10 +36,20 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         .into();
     }
     let schema_policy_const = schema_policy_tokens(args.schema_policy.as_deref());
+    let schema_auth_data = match args.auth.as_deref() {
+        Some(auth) => match resolver_auth_mode_value_tokens(auth, span) {
+            Ok(schema_auth_mode) => quote! {
+                let builder = builder.data(::graphql_orm::graphql::auth::ResolverAuthConfig::new(
+                    #schema_auth_mode
+                ));
+            },
+            Err(err) => return err.to_compile_error().into(),
+        },
+        None => quote! {},
+    };
     let schema_policy_read_only =
         matches!(args.schema_policy.as_deref(), Some("external_read_only"));
 
-    let span = proc_macro2::Span::mixed_site();
     let custom_op_types: Vec<proc_macro2::TokenStream> = query_custom_ops
         .iter()
         .map(|entity| {
@@ -197,6 +211,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 )
                 .data(database.clone());
                 let builder = limits.apply(builder);
+                #schema_auth_data
                 #(#schema_loader_data)*
                 builder
             }
@@ -325,6 +340,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             )
             .data(database.clone());
             let builder = limits.apply(builder);
+            #schema_auth_data
             #(#schema_loader_data)*
             builder
         }
@@ -440,6 +456,7 @@ fn emit_chunked_merged_subscription(
 struct SchemaRootsArgs {
     backend: Option<String>,
     schema_policy: Option<String>,
+    auth: Option<String>,
     generated_mutations: GeneratedMutationExposure,
     query_custom_ops: Vec<Ident>,
     entities: Vec<Ident>,
@@ -493,6 +510,7 @@ impl Parse for SchemaRootsArgs {
 
         let mut backend = None;
         let mut schema_policy = None;
+        let mut auth = None;
         let mut generated_mutations = None;
         let mut query_custom_ops = None;
         let mut entities = None;
@@ -517,6 +535,12 @@ impl Parse for SchemaRootsArgs {
                 let value = lit.value();
                 validate_schema_policy(&value, lit.span())?;
                 schema_policy = Some(value);
+            } else if label == "auth" {
+                reject_duplicate(&auth, &label)?;
+                let lit: syn::LitStr = input.parse()?;
+                let value = lit.value();
+                validate_resolver_auth_mode(&value, lit.span())?;
+                auth = Some(value);
             } else if label == "generated_mutations" {
                 reject_duplicate(&generated_mutations, &label)?;
                 let lit: syn::LitStr = input.parse()?;
@@ -561,7 +585,7 @@ impl Parse for SchemaRootsArgs {
             } else {
                 return Err(syn::Error::new(
                     label.span(),
-                    "expected one of `backend`, `schema_policy`, `generated_mutations`, `query_custom_ops`, `entities`, `extra_query_types`, `extra_mutation_types`, `extra_subscription_types`, `generated_mutation_allowlist`, or `generated_mutation_denylist`",
+                    "expected one of `backend`, `schema_policy`, `auth`, `generated_mutations`, `query_custom_ops`, `entities`, `extra_query_types`, `extra_mutation_types`, `extra_subscription_types`, `generated_mutation_allowlist`, or `generated_mutation_denylist`",
                 ));
             }
 
@@ -638,6 +662,7 @@ impl Parse for SchemaRootsArgs {
         Ok(SchemaRootsArgs {
             backend,
             schema_policy,
+            auth,
             generated_mutations,
             query_custom_ops,
             entities,

@@ -26,6 +26,7 @@ It is designed for two related use cases:
 - explicit schema ownership policies for managed, external, validate-only, and plan-only schemas
 - ABI-style schema migration stages for managed SQLite/Postgres schemas
 - row, field, and entity policy hooks for application-owned access control
+- project-agnostic `AuthSubject` and exact-scope `ScopeEntityPolicy` helpers
 - opt-in PostgreSQL row-level security metadata and request-local database auth context
 
 ## Install
@@ -34,7 +35,7 @@ Select exactly the backend support your service needs:
 
 ```toml
 [dependencies]
-graphql-orm = { version = "0.2.20", default-features = false, features = ["sqlite"] }
+graphql-orm = { version = "0.2.21", default-features = false, features = ["sqlite"] }
 ```
 
 Available backend features:
@@ -42,6 +43,11 @@ Available backend features:
 - `sqlite`
 - `postgres`
 - `mssql` - read/query-only SQL Server support
+
+Optional integration features:
+
+- `auth-agql` - reserved for the agql-auth bridge; it currently compiles without adding a dependency
+  while the upstream agql-auth 0.7 API is pending
 
 Naming features are independent of backend features:
 
@@ -73,6 +79,7 @@ pub struct User {
 }
 
 schema_roots! {
+    auth: "required",
     query_custom_ops: [],
     entities: [User],
 }
@@ -83,10 +90,14 @@ async fn build_schema(database_url: &str) -> graphql_orm::Result<AppSchema> {
             .await?;
 
     Ok(schema_builder(database)
-        .data("current-user-id".to_string())
+        .data(AuthSubject::new("current-user-id"))
         .finish())
 }
 ```
+
+Generated resolver auth can be set at the schema root or entity level with
+`auth = "required" | "optional" | "none"`. The default preserves the previous fail-closed generated
+auth behavior; use `auth: "none"` for public generated schemas.
 
 Generated GraphQL includes list and single lookup queries:
 

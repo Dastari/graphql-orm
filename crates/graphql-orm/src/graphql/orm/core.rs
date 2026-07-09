@@ -7,6 +7,7 @@ use super::query::{DatabaseFilter, DatabaseOrderBy, EntityQuery, FromSqlRow};
 use super::{DefaultBackend, OrmBackend};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 use super::{DefaultWriteBackend, WriteBackend};
+use crate::graphql::auth::{AuthExt, AuthSubject};
 use std::any::Any;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -74,6 +75,60 @@ pub struct DbAuthContext {
 }
 
 impl DbAuthContext {
+    /// Build a database auth context from a request auth subject.
+    ///
+    /// The subject id is exposed as both `app.user_id` and `app.subject` for
+    /// PostgreSQL RLS compatibility. Roles, scopes, and tenant id are copied
+    /// directly.
+    pub fn from_subject(subject: &AuthSubject) -> Self {
+        Self {
+            user_id: Some(subject.id.clone()),
+            subject: Some(subject.id.clone()),
+            tenant_id: subject.tenant_id.clone(),
+            roles: subject.roles.clone(),
+            scopes: subject.scopes.clone(),
+            claims_json: None,
+        }
+    }
+
+    /// Build a database auth context from explicit parts.
+    pub fn from_parts(
+        user_id: impl Into<String>,
+        roles: Vec<String>,
+        scopes: Vec<String>,
+        tenant_id: Option<String>,
+    ) -> Self {
+        let user_id = user_id.into();
+        Self {
+            user_id: Some(user_id.clone()),
+            subject: Some(user_id),
+            tenant_id,
+            roles,
+            scopes,
+            claims_json: None,
+        }
+    }
+
+    /// Build a database auth context from explicit parts including a distinct
+    /// SQL subject and optional claims JSON.
+    pub fn from_context_parts(
+        user_id: Option<String>,
+        subject: Option<String>,
+        tenant_id: Option<String>,
+        roles: Vec<String>,
+        scopes: Vec<String>,
+        claims_json: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            user_id,
+            subject,
+            tenant_id,
+            roles,
+            scopes,
+            claims_json,
+        }
+    }
+
     /// Return a stable key for batching and cache partitioning.
     ///
     /// Roles and scopes are sorted in the key so equivalent contexts do not
@@ -449,11 +504,15 @@ where
     }
 
     pub fn auth_user(&self) -> async_graphql::Result<String> {
-        use crate::graphql::auth::AuthExt;
-
         self.graphql_ctx
             .ok_or_else(|| async_graphql::Error::new("missing GraphQL context for auth user"))?
-            .auth_user()
+            .auth_user_id()
+    }
+
+    pub fn auth_subject(&self) -> async_graphql::Result<AuthSubject> {
+        self.graphql_ctx
+            .ok_or_else(|| async_graphql::Error::new("missing GraphQL context for auth subject"))?
+            .auth_subject()
     }
 
     pub fn query<'a, T>(&'a mut self) -> WriteQuery<'a, 'ctx, 'write, T, B>
@@ -576,10 +635,16 @@ where
         &self,
         ctx: Option<&async_graphql::Context<'_>>,
     ) -> async_graphql::Result<String> {
-        use crate::graphql::auth::AuthExt;
-
         ctx.ok_or_else(|| async_graphql::Error::new("missing GraphQL context for auth user"))?
-            .auth_user()
+            .auth_user_id()
+    }
+
+    pub fn auth_subject(
+        &self,
+        ctx: Option<&async_graphql::Context<'_>>,
+    ) -> async_graphql::Result<AuthSubject> {
+        ctx.ok_or_else(|| async_graphql::Error::new("missing GraphQL context for auth subject"))?
+            .auth_subject()
     }
 
     pub fn executor(&mut self) -> &mut <B::Database as sqlx::Database>::Connection
@@ -845,6 +910,98 @@ pub enum EntityAccessSurface {
     GraphqlSubscription,
     GraphqlRelation,
     Repository,
+}
+
+/// Entity policy helper that gates generated access by exact scope strings.
+///
+/// `ScopeEntityPolicy` is intentionally backend- and auth-crate agnostic. It
+/// reads [`AuthSubject`](crate::graphql::auth::AuthSubject) from the
+/// `async-graphql` context through [`AuthExt`](crate::graphql::auth::AuthExt)
+/// and matches scopes exactly; wildcard or hierarchical semantics belong in an
+/// optional application/auth integration layer, not in database RLS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScopeEntityPolicy {
+    /// Scopes accepted for read access.
+    pub read_scopes: &'static [&'static str],
+    /// Scopes accepted for write access.
+    pub write_scopes: &'static [&'static str],
+    /// Return an unauthenticated error when no subject is present.
+    pub require_auth: bool,
+}
+
+impl ScopeEntityPolicy {
+    /// Create a policy that requires auth and exact scope matches.
+    pub const fn new(
+        read_scopes: &'static [&'static str],
+        write_scopes: &'static [&'static str],
+    ) -> Self {
+        Self {
+            read_scopes,
+            write_scopes,
+            require_auth: true,
+        }
+    }
+
+    /// Create a policy that permits any authenticated subject when no scopes
+    /// are configured for the requested access kind.
+    pub const fn authenticated() -> Self {
+        Self {
+            read_scopes: &[],
+            write_scopes: &[],
+            require_auth: true,
+        }
+    }
+
+    /// Create a policy that lets host policies decide when auth is absent.
+    pub const fn optional(
+        read_scopes: &'static [&'static str],
+        write_scopes: &'static [&'static str],
+    ) -> Self {
+        Self {
+            read_scopes,
+            write_scopes,
+            require_auth: false,
+        }
+    }
+}
+
+impl Default for ScopeEntityPolicy {
+    fn default() -> Self {
+        Self::authenticated()
+    }
+}
+
+impl<B: OrmBackend> EntityPolicy<B> for ScopeEntityPolicy {
+    fn can_access_entity<'a>(
+        &'a self,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a crate::db::Database<B>,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        kind: EntityAccessKind,
+        _surface: EntityAccessSurface,
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            let required_scopes = match kind {
+                EntityAccessKind::Read => self.read_scopes,
+                EntityAccessKind::Write => self.write_scopes,
+            };
+            let subject = ctx.and_then(AuthExt::auth_subject_opt);
+
+            let Some(subject) = subject else {
+                if self.require_auth {
+                    return Err(async_graphql::Error::new("unauthenticated"));
+                }
+                return Ok(required_scopes.is_empty());
+            };
+
+            if required_scopes.is_empty() {
+                return Ok(true);
+            }
+
+            Ok(required_scopes.iter().any(|scope| subject.has_scope(scope)))
+        })
+    }
 }
 
 pub trait EntityPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {

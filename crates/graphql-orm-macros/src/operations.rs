@@ -6,8 +6,8 @@ use crate::backend::{
 use crate::entity::{
     FieldMetadata, is_bool_type, is_byte_vec_type, is_option_type, is_serde_json_value_or_option,
     is_uuid_type, is_vec_type, maybe_wrap_write_transform, option_inner_type,
-    parse_entity_metadata, parse_field_metadata, spatial_geometry_type_tokens,
-    type_path_last_ident,
+    parse_entity_metadata, parse_field_metadata, resolver_auth_mode_tokens,
+    spatial_geometry_type_tokens, type_path_last_ident,
 };
 use crate::naming::{
     apply_graphql_case, graphql_field_name, selected_argument_case, selected_field_case,
@@ -485,6 +485,8 @@ pub(crate) fn generate_graphql_operations(
     let struct_name = &input.ident;
     let struct_name_str = struct_name.to_string();
     let entity_meta = parse_entity_metadata(&input.attrs)?;
+    let resolver_auth_mode =
+        resolver_auth_mode_tokens(entity_meta.auth.as_deref(), struct_name.span())?;
     let backend = resolve_backend(
         entity_meta.backend.as_deref(),
         struct_name.span(),
@@ -2449,9 +2451,7 @@ pub(crate) fn generate_graphql_operations(
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #[graphql(name = #input_arg_name)] input: #graphql_create_input,
             ) -> ::graphql_orm::async_graphql::Result<#upsert_result_type> {
-                use ::graphql_orm::graphql::auth::AuthExt;
-
-                let _user = ctx.auth_user()?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let pool = db.pool();
                 let auth_context = ctx
@@ -2728,9 +2728,7 @@ pub(crate) fn generate_graphql_operations(
                 #[graphql(name = #where_arg_name)] where_input: Option<#where_input>,
                 #[graphql(name = #page_arg_name)] page: Option<::graphql_orm::graphql::orm::PageInput>,
             ) -> ::graphql_orm::async_graphql::Result<#search_connection_type> {
-                use ::graphql_orm::graphql::auth::AuthExt;
-
-                let _user = ctx.auth_user()?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let pool = db.pool();
                 let auth_context = ctx
@@ -2995,10 +2993,9 @@ pub(crate) fn generate_graphql_operations(
                     #[graphql(name = #order_by_arg_name)] order_by: Option<Vec<#order_by_input>>,
                     #[graphql(name = #page_arg_name)] page: Option<::graphql_orm::graphql::orm::PageInput>,
                 ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
-                    use ::graphql_orm::graphql::auth::AuthExt;
                     use ::graphql_orm::graphql::orm::{DatabaseOrderBy, EntityQuery};
 
-                    let _user = ctx.auth_user()?;
+                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                     let pool = db.pool();
                     let auth_context = ctx
@@ -3112,11 +3109,10 @@ pub(crate) fn generate_graphql_operations(
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
                     #(#single_query_args)*
                 ) -> ::graphql_orm::async_graphql::Result<Option<#struct_name>> {
-                    use ::graphql_orm::graphql::auth::AuthExt;
                     use ::graphql_orm::graphql::orm::EntityQuery;
 
                     #single_query_key_init
-                    let _user = ctx.auth_user()?;
+                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                     let pool = db.pool();
                     let auth_context = ctx
@@ -3368,9 +3364,7 @@ pub(crate) fn generate_graphql_operations(
                 #[graphql(name = #page_arg_name)] page: Option<::graphql_orm::graphql::orm::PageInput>,
             ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, DatabaseOrderBy, EntityQuery, FromSqlRow};
-                use ::graphql_orm::graphql::auth::AuthExt;
-
-                let _user = ctx.auth_user()?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let pool = db.pool();
                 let auth_context = ctx
@@ -3486,10 +3480,8 @@ pub(crate) fn generate_graphql_operations(
                 #(#single_query_args)*
             ) -> ::graphql_orm::async_graphql::Result<Option<#struct_name>> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow};
-                use ::graphql_orm::graphql::auth::AuthExt;
-
                 #single_query_key_init
-                let _user = ctx.auth_user()?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let pool = db.pool();
                 let auth_context = ctx
@@ -3544,10 +3536,9 @@ pub(crate) fn generate_graphql_operations(
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #[graphql(name = #input_arg_name)] input: #graphql_create_input,
             ) -> ::graphql_orm::async_graphql::Result<#result_type> {
-                use ::graphql_orm::graphql::auth::AuthExt;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
 
-                let _user = ctx.auth_user()?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let pool = db.pool();
                 let auth_context = ctx
@@ -3648,10 +3639,9 @@ pub(crate) fn generate_graphql_operations(
                 #[graphql(name = #id_arg_name)] id: #pk_type,
                 #[graphql(name = #input_arg_name)] input: #graphql_update_input,
             ) -> ::graphql_orm::async_graphql::Result<#result_type> {
-                use ::graphql_orm::graphql::auth::AuthExt;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
 
-                let _user = ctx.auth_user()?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let pool = db.pool();
                 let auth_context = ctx
@@ -3800,10 +3790,9 @@ pub(crate) fn generate_graphql_operations(
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #[graphql(name = #id_arg_name)] id: #pk_type,
             ) -> ::graphql_orm::async_graphql::Result<#result_type> {
-                use ::graphql_orm::graphql::auth::AuthExt;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, SqlValue};
 
-                let _user = ctx.auth_user()?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let pool = db.pool();
                 let auth_context = ctx
@@ -3915,10 +3904,9 @@ pub(crate) fn generate_graphql_operations(
                 #[graphql(name = #where_arg_name)] where_input: Option<#where_input>,
                 #[graphql(name = #input_arg_name)] input: #graphql_update_input,
             ) -> ::graphql_orm::async_graphql::Result<#update_many_result_type> {
-                use ::graphql_orm::graphql::auth::AuthExt;
                 use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
 
-                let _user = ctx.auth_user()?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let auth_context = ctx
                     .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
@@ -3950,10 +3938,9 @@ pub(crate) fn generate_graphql_operations(
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #[graphql(name = #where_arg_name)] where_input: Option<#where_input>,
             ) -> ::graphql_orm::async_graphql::Result<#delete_many_result_type> {
-                use ::graphql_orm::graphql::auth::AuthExt;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow};
 
-                let _user = ctx.auth_user()?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let auth_context = ctx
                     .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
@@ -3996,9 +3983,7 @@ pub(crate) fn generate_graphql_operations(
                 #[graphql(name = #filter_arg_name)] _filter: Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>,
             ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = #changed_event>> {
                 use ::graphql_orm::futures::StreamExt;
-                use ::graphql_orm::graphql::auth::AuthExt;
-
-                let _user = ctx.auth_user()?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                 let db = ctx.data::<::graphql_orm::db::Database<#backend_marker>>().map_err(|_| {
                     ::graphql_orm::async_graphql::Error::new(
                         "graphql-orm Database runtime not registered; build the schema with schema_builder(database) or add Database to schema data",

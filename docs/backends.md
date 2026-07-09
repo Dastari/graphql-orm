@@ -7,7 +7,7 @@ database schema. Schema ownership and migration behavior are controlled by runti
 ## Features
 
 ```toml
-graphql-orm = { version = "0.2.20", default-features = false, features = ["sqlite"] }
+graphql-orm = { version = "0.2.21", default-features = false, features = ["sqlite"] }
 ```
 
 Available backend features:
@@ -15,6 +15,11 @@ Available backend features:
 - `sqlite` - SQLite read/write/query/migration support using SQLX internally
 - `postgres` - PostgreSQL read/write/query/migration support using SQLX internally
 - `mssql` - Microsoft SQL Server read/query-only support through Tiberius
+
+Optional non-backend features:
+
+- `auth-agql` - reserved for the agql-auth bridge. It currently compiles without adding a dependency;
+  concrete converters will be added after the upstream agql-auth 0.7 API is tagged.
 
 The `mssql` feature activates optional `tiberius`, `tokio-util`, and Tokio TCP support. Projects that
 do not select `mssql` do not build the SQL Server driver path.
@@ -188,7 +193,7 @@ Example:
 
 ```toml
 graphql-orm = {
-  version = "0.2.20",
+  version = "0.2.21",
   default-features = false,
   features = [
     "mssql",
