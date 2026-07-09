@@ -18,8 +18,9 @@ Available backend features:
 
 Optional non-backend features:
 
-- `auth-agql` - reserved for the agql-auth bridge. It currently compiles without adding a dependency;
-  concrete converters will be added after the upstream agql-auth 0.7 API is tagged.
+- `auth-agql` - optional one-way bridge from upstream `agql-auth` 0.7
+  (`git` rev `5e7f230b96350f55496477c11f8a0505e6438779`) into `AuthSubject` /
+  `DbAuthContext`.
 
 The `mssql` feature activates optional `tiberius`, `tokio-util`, and Tokio TCP support. Projects that
 do not select `mssql` do not build the SQL Server driver path.

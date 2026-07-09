@@ -7,7 +7,12 @@
 
 ```toml
 graphql-orm = { version = "0.3", features = ["sqlite", "auth-agql"] }
-agql-auth = "0.7"
+# Host applications may depend on agql-auth directly as well. The optional
+# graphql-orm auth-agql feature pins the exact upstream release:
+# git = "https://github.com/Dastari/agql-auth.git"
+# rev = "5e7f230b96350f55496477c11f8a0505e6438779"
+# version = "0.7.0"
+agql-auth = "0.7.0"
 ```
 
 ## Conversion

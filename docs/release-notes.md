@@ -18,7 +18,9 @@ Security hardening release for multi-tenant, authorization-sensitive services.
 - Added `OrmPublicError` / `OrmErrorCode` safe public error contract.
 - Added structural tenant/owner helpers (`structural_auth`).
 - Added `FilterExpression::TrustedFragment`.
-- Enabled optional `auth-agql` bridge against `agql-auth` 0.7.
+- Enabled optional `auth-agql` bridge against upstream `agql-auth` 0.7.0
+  (`rev = 5e7f230b96350f55496477c11f8a0505e6438779`, tag `v0.7.0`) without path
+  or `[patch]` overrides.
 - Changed pagination defaults from 1000/1000 to 50/100; restore with
   `PaginationConfig::legacy()`.
 - Event sender locks no longer panic on poisoning.

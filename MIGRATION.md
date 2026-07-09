@@ -75,6 +75,10 @@ Default limit: `1000` → `50`. Max limit: `1000` → `100`.
 graphql-orm = { version = "0.3", features = ["sqlite", "auth-agql"] }
 ```
 
+The optional feature depends on upstream `agql-auth` 0.7.0 via git revision
+`5e7f230b96350f55496477c11f8a0505e6438779` (tag `v0.7.0`). It does not use a
+local path, sibling checkout, or Cargo `[patch]`.
+
 ```rust
 use graphql_orm::graphql::auth_agql::auth_bundle_from_principal;
 let (subject, db_auth) = auth_bundle_from_principal(&principal);

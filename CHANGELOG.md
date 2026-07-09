@@ -21,7 +21,9 @@ User-facing release notes live in [docs/release-notes.md](docs/release-notes.md)
 - Added structural tenant/owner authorization helpers for backend-independent
   predicates.
 - Added optional `auth-agql` bridge mapping `agql_auth::AuthPrincipal` →
-  `AuthSubject` / `DbAuthContext`.
+  `AuthSubject` / `DbAuthContext`, pinned to upstream
+  `agql-auth` 0.7.0 (`rev = 5e7f230b96350f55496477c11f8a0505e6438779`) with no
+  path/`[patch]` overrides.
 
 ### Fixed
 
