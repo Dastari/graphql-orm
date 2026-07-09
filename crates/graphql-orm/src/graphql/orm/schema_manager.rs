@@ -5,7 +5,9 @@ use super::core::{
     SchemaDiagnosticKind, SchemaDiagnosticSeverity, SchemaModel, SchemaPolicy, SchemaTarget,
     SchemaTargetValidationReport, SchemaValidationReport,
 };
-use super::execution::{applied_migration_records, ensure_managed_policy, ensure_planning_policy};
+use super::execution::{
+    applied_migration_records, applied_version_set, ensure_managed_policy, ensure_planning_policy,
+};
 use super::migrations::{build_migration_plan, classify_migration_steps};
 use super::rls::{build_rls_policy_plan, validate_rls_models};
 use super::{IntrospectionBackend, MigrationBackend, OrmBackend, RlsIntrospectionBackend};
@@ -233,6 +235,13 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     ///
     /// This method is only available for backends that implement
     /// [`MigrationBackend`].
+    ///
+    /// # Idempotency
+    ///
+    /// If `plan.version` is already recorded in `__graphql_orm_migrations`, the
+    /// call succeeds as a no-op and does not re-insert a history row. This makes
+    /// restart paths safe when replan produces an empty statement list for a
+    /// version that was applied on a previous process start.
     pub async fn apply_migration(
         &self,
         plan: &PlannedMigration,
@@ -257,6 +266,17 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
                 version: plan.version.clone(),
                 dry_run: true,
                 statements_applied: 0,
+                already_applied: false,
+            });
+        }
+
+        B::prepare_migration_runtime(self.database.pool()).await?;
+        if version_already_applied::<B>(self.database.pool(), &plan.version).await? {
+            return Ok(AppliedMigrationReport {
+                version: plan.version.clone(),
+                dry_run: false,
+                statements_applied: 0,
+                already_applied: true,
             });
         }
 
@@ -268,7 +288,6 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             plan_hash: plan.plan_hash.clone(),
             policy: self.policy(),
         };
-        B::prepare_migration_runtime(self.database.pool()).await?;
         B::apply_migration_statements_transactionally(
             self.database.pool(),
             &plan.version,
@@ -283,10 +302,13 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             version: plan.version.clone(),
             dry_run: false,
             statements_applied: plan.statements.len(),
+            already_applied: false,
         })
     }
 
     /// Apply a planned full schema target transactionally.
+    ///
+    /// Idempotent for already-recorded versions; see [`Self::apply_migration`].
     pub async fn apply_schema_target(
         &self,
         plan: &PlannedSchemaTarget,
@@ -311,6 +333,17 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
                 version: plan.version.clone(),
                 dry_run: true,
                 statements_applied: 0,
+                already_applied: false,
+            });
+        }
+
+        B::prepare_migration_runtime(self.database.pool()).await?;
+        if version_already_applied::<B>(self.database.pool(), &plan.version).await? {
+            return Ok(AppliedMigrationReport {
+                version: plan.version.clone(),
+                dry_run: false,
+                statements_applied: 0,
+                already_applied: true,
             });
         }
 
@@ -322,7 +355,6 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             plan_hash: plan.plan_hash.clone(),
             policy: self.policy(),
         };
-        B::prepare_migration_runtime(self.database.pool()).await?;
         B::apply_migration_statements_transactionally(
             self.database.pool(),
             &plan.version,
@@ -337,6 +369,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             version: plan.version.clone(),
             dry_run: false,
             statements_applied: plan.statements.len(),
+            already_applied: false,
         })
     }
 
@@ -652,6 +685,13 @@ fn schema_current_for_plan(
         .tables
         .retain(|table| target_tables.contains(table.table_name.as_str()));
     scoped
+}
+
+async fn version_already_applied<B: MigrationBackend>(
+    pool: &B::Pool,
+    version: &str,
+) -> crate::Result<bool> {
+    Ok(applied_version_set::<B>(pool).await?.contains(version))
 }
 
 fn plan_migration_for_backend<B: OrmBackend>(

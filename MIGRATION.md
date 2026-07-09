@@ -112,6 +112,17 @@ metadata previously declared `(unixepoch())`.
 `ApplyOptions::additive_only` behavior is unchanged for real non-additive steps
 such as altering a default from `unixepoch()` to `date('now')`.
 
+### Empty Migration History Idempotency
+
+`SchemaManager::apply_migration` is idempotent for a version already present in
+`__graphql_orm_migrations`. Restart code that re-plans and re-applies the same
+version when the schema is already current receives
+`AppliedMigrationReport { already_applied: true, statements_applied: 0, .. }`
+instead of a unique-constraint failure.
+
+Callers that pattern-match `AppliedMigrationReport` must accept the new
+`already_applied` field.
+
 ## 0.2.21 Auth Bridge
 
 ### Structural Changes

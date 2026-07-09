@@ -241,6 +241,44 @@ async fn file_backed_reopen_and_replan_is_idempotent() -> Result<(), Box<dyn std
         );
     }
 
+    // Re-applying the original version with an empty plan must be idempotent
+    // (no UNIQUE failure on __graphql_orm_migrations.version).
+    let empty_replan = database.schema().plan_migration(
+        "20260710_timed_notes",
+        "create timed notes",
+        &live,
+        &target_paren,
+    )?;
+    assert!(
+        empty_replan.statements.is_empty(),
+        "restart replan for same schema should have zero statements"
+    );
+    let reapply = database
+        .schema()
+        .apply_migration(
+            &empty_replan,
+            ApplyOptions {
+                additive_only: true,
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(reapply.already_applied);
+    assert_eq!(reapply.statements_applied, 0);
+
+    let history_count: i64 = {
+        let row =
+            sqlx::query("SELECT COUNT(*) AS count FROM __graphql_orm_migrations WHERE version = ?")
+                .bind("20260710_timed_notes")
+                .fetch_one(database.pool())
+                .await?;
+        sqlx::Row::try_get(&row, "count")?
+    };
+    assert_eq!(
+        history_count, 1,
+        "empty re-apply must not insert a second history row"
+    );
+
     // Additive-only must still reject a real non-additive change.
     let changed = timed_notes_schema("date('now')", "unixepoch()");
     let changed_plan = database.schema().plan_migration(
@@ -276,6 +314,62 @@ async fn file_backed_reopen_and_replan_is_idempotent() -> Result<(), Box<dyn std
         message.contains("non-additive") || message.contains("AlterColumn"),
         "unexpected rejection message: {message}"
     );
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[tokio::test]
+async fn empty_migration_reapply_is_idempotent_for_recorded_version()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = temp_db_path("empty-reapply");
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    let version = "20260710_empty_idempotent";
+    let target = timed_notes_schema("unixepoch()", "unixepoch()");
+
+    let database = Database::<SqliteBackend>::connect_sqlite(&url)
+        .await?
+        .with_schema_policy(SchemaPolicy::Managed);
+    let empty = SchemaModel {
+        extensions: Vec::new(),
+        tables: vec![],
+    };
+    let first = database
+        .schema()
+        .plan_migration(version, "create", &empty, &target)?;
+    assert!(!first.statements.is_empty());
+    let first_report = database
+        .schema()
+        .apply_migration(&first, ApplyOptions::default())
+        .await?;
+    assert!(!first_report.already_applied);
+    assert!(first_report.statements_applied > 0);
+
+    let live = introspect_sqlite_schema(&database).await?;
+    let second = database
+        .schema()
+        .plan_migration(version, "create", &live, &target)?;
+    assert!(second.statements.is_empty());
+    assert!(second.steps.is_empty());
+
+    // Twice more: must stay idempotent and leave a single history row.
+    for _ in 0..2 {
+        let report = database
+            .schema()
+            .apply_migration(&second, ApplyOptions::default())
+            .await?;
+        assert!(report.already_applied);
+        assert_eq!(report.statements_applied, 0);
+    }
+
+    let count: i64 = sqlx::Row::try_get(
+        &sqlx::query("SELECT COUNT(*) AS count FROM __graphql_orm_migrations WHERE version = ?")
+            .bind(version)
+            .fetch_one(database.pool())
+            .await?,
+        "count",
+    )?;
+    assert_eq!(count, 1);
 
     let _ = std::fs::remove_file(&path);
     Ok(())

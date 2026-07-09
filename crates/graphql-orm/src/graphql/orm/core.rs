@@ -3424,6 +3424,9 @@ pub struct AppliedMigrationReport {
     pub version: String,
     pub dry_run: bool,
     pub statements_applied: usize,
+    /// True when the version was already present in migration history and no
+    /// statements were re-executed. Restart/idempotent apply paths set this.
+    pub already_applied: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

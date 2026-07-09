@@ -37,6 +37,11 @@ generation and runtime expression alignment; patch release for compatibility).
   step that breaks `ApplyOptions::additive_only` restarts. Canonicalization is
   general for balanced outer parentheses and SQL keyword/boolean defaults; it
   does not weaken additive-only validation for real changes.
+- **Empty migration re-apply:** `SchemaManager::apply_migration` (and
+  `apply_schema_target`) now treat an already-recorded version as a no-op.
+  Restart paths that replan an empty statement list for the same version no
+  longer insert a second `__graphql_orm_migrations` row and no longer fail with
+  `UNIQUE constraint failed: __graphql_orm_migrations.version`.
 
 ### Added
 

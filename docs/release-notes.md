@@ -31,6 +31,10 @@ Security hardening release for multi-tenant, authorization-sensitive services.
   defaults: `unixepoch()` and `(unixepoch())` (and similar redundant outer
   parentheses) compare equal after file reopen, so `additive_only` startups no
   longer fail with a false `AlterColumn` on `created_at`/`updated_at`.
+- Fixed empty migration re-apply: applying a planned migration whose version is
+  already recorded is a no-op (`already_applied: true`) instead of re-inserting
+  history and failing with a unique constraint on
+  `__graphql_orm_migrations.version`.
 
 Compatibility notes:
 
