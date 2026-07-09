@@ -114,11 +114,19 @@ such as altering a default from `unixepoch()` to `date('now')`.
 
 ### Empty Migration History Idempotency
 
-`SchemaManager::apply_migration` is idempotent for a version already present in
-`__graphql_orm_migrations`. Restart code that re-plans and re-applies the same
-version when the schema is already current receives
-`AppliedMigrationReport { already_applied: true, statements_applied: 0, .. }`
-instead of a unique-constraint failure.
+`SchemaManager::apply_migration` is idempotent **only** when:
+
+1. the version is already present in `__graphql_orm_migrations`; and
+2. the plan has no remaining steps or statements.
+
+Restart code that re-plans and re-applies the same version when the schema is
+already current receives
+`AppliedMigrationReport { already_applied: true, statements_applied: 0, .. }`.
+
+If the version is recorded but the plan still has work, apply fails with an
+explicit protocol error. That is intentional: it surfaces schema drift or
+unsafe reuse of a migration version rather than silently treating the plan as
+done.
 
 Callers that pattern-match `AppliedMigrationReport` must accept the new
 `already_applied` field.

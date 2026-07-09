@@ -375,6 +375,66 @@ async fn empty_migration_reapply_is_idempotent_for_recorded_version()
     Ok(())
 }
 
+#[tokio::test]
+async fn recorded_version_with_remaining_work_fails_closed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = temp_db_path("recorded-drift");
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    let version = "20260710_recorded_drift";
+    let target = timed_notes_schema("unixepoch()", "unixepoch()");
+
+    let database = Database::<SqliteBackend>::connect_sqlite(&url)
+        .await?
+        .with_schema_policy(SchemaPolicy::Managed);
+    let empty = SchemaModel {
+        extensions: Vec::new(),
+        tables: vec![],
+    };
+    let first = database
+        .schema()
+        .plan_migration(version, "create", &empty, &target)?;
+    database
+        .schema()
+        .apply_migration(&first, ApplyOptions::default())
+        .await?;
+
+    // Simulate unsafe version reuse / drift: same version, non-empty plan.
+    let drifted = timed_notes_schema("date('now')", "unixepoch()");
+    let live = introspect_sqlite_schema(&database).await?;
+    let bad_plan =
+        database
+            .schema()
+            .plan_migration(version, "reuse version with work", &live, &drifted)?;
+    assert!(
+        !bad_plan.statements.is_empty() || !bad_plan.steps.is_empty(),
+        "expected remaining work for drifted schema"
+    );
+
+    let err = database
+        .schema()
+        .apply_migration(&bad_plan, ApplyOptions::default())
+        .await
+        .expect_err("recorded version with remaining work must fail closed");
+    let message = err.to_string();
+    assert!(
+        message.contains("already recorded") && message.contains("still has"),
+        "unexpected error: {message}"
+    );
+
+    // History must still contain exactly one row for the original version.
+    let count: i64 = sqlx::Row::try_get(
+        &sqlx::query("SELECT COUNT(*) AS count FROM __graphql_orm_migrations WHERE version = ?")
+            .bind(version)
+            .fetch_one(database.pool())
+            .await?,
+        "count",
+    )?;
+    assert_eq!(count, 1);
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
 #[test]
 fn additive_only_classifies_alter_column_as_non_additive() {
     let live = timed_notes_schema("unixepoch()", "unixepoch()");

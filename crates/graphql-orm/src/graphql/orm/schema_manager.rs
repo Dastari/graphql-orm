@@ -238,10 +238,14 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     ///
     /// # Idempotency
     ///
-    /// If `plan.version` is already recorded in `__graphql_orm_migrations`, the
-    /// call succeeds as a no-op and does not re-insert a history row. This makes
-    /// restart paths safe when replan produces an empty statement list for a
-    /// version that was applied on a previous process start.
+    /// A version already recorded in `__graphql_orm_migrations` is a no-op
+    /// **only** when the plan has no remaining work (empty steps and
+    /// statements). That covers restart paths that replan the same version
+    /// against an already-current schema.
+    ///
+    /// If the version is already recorded **and** the plan still contains steps
+    /// or statements, apply fails closed. That indicates schema drift or unsafe
+    /// version reuse, not a successful prior application of this plan.
     pub async fn apply_migration(
         &self,
         plan: &PlannedMigration,
@@ -271,13 +275,10 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         }
 
         B::prepare_migration_runtime(self.database.pool()).await?;
-        if version_already_applied::<B>(self.database.pool(), &plan.version).await? {
-            return Ok(AppliedMigrationReport {
-                version: plan.version.clone(),
-                dry_run: false,
-                statements_applied: 0,
-                already_applied: true,
-            });
+        if let Some(report) =
+            resolve_recorded_version_apply::<B>(self.database.pool(), plan).await?
+        {
+            return Ok(report);
         }
 
         let metadata = MigrationApplicationMetadata {
@@ -308,7 +309,9 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
 
     /// Apply a planned full schema target transactionally.
     ///
-    /// Idempotent for already-recorded versions; see [`Self::apply_migration`].
+    /// Idempotency rules match [`Self::apply_migration`]: empty plans for an
+    /// already-recorded version are no-ops; non-empty plans for a recorded
+    /// version fail closed.
     pub async fn apply_schema_target(
         &self,
         plan: &PlannedSchemaTarget,
@@ -338,13 +341,10 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         }
 
         B::prepare_migration_runtime(self.database.pool()).await?;
-        if version_already_applied::<B>(self.database.pool(), &plan.version).await? {
-            return Ok(AppliedMigrationReport {
-                version: plan.version.clone(),
-                dry_run: false,
-                statements_applied: 0,
-                already_applied: true,
-            });
+        if let Some(report) =
+            resolve_recorded_version_apply::<B>(self.database.pool(), &plan.migration).await?
+        {
+            return Ok(report);
         }
 
         let metadata = MigrationApplicationMetadata {
@@ -687,11 +687,44 @@ fn schema_current_for_plan(
     scoped
 }
 
-async fn version_already_applied<B: MigrationBackend>(
+fn plan_has_remaining_work(plan: &PlannedMigration) -> bool {
+    !plan.steps.is_empty() || !plan.statements.is_empty()
+}
+
+/// Decide how to treat a plan whose version may already be in history.
+///
+/// - Not recorded → `Ok(None)` (caller should apply).
+/// - Recorded + empty plan → `Ok(Some(already_applied report))`.
+/// - Recorded + non-empty plan → `Err` (fail closed; do not pretend success).
+async fn resolve_recorded_version_apply<B: MigrationBackend>(
     pool: &B::Pool,
-    version: &str,
-) -> crate::Result<bool> {
-    Ok(applied_version_set::<B>(pool).await?.contains(version))
+    plan: &PlannedMigration,
+) -> crate::Result<Option<AppliedMigrationReport>> {
+    if !applied_version_set::<B>(pool)
+        .await?
+        .contains(&plan.version)
+    {
+        return Ok(None);
+    }
+
+    if plan_has_remaining_work(plan) {
+        return Err(sqlx::Error::Protocol(format!(
+            "Migration version {} is already recorded in {}, but the plan still has {} step(s) and {} statement(s). \
+This usually means schema drift after the version was applied, or unsafe reuse of a migration version. \
+Refuse to treat the plan as already applied.",
+            plan.version,
+            super::execution::MIGRATION_HISTORY_TABLE,
+            plan.steps.len(),
+            plan.statements.len()
+        )));
+    }
+
+    Ok(Some(AppliedMigrationReport {
+        version: plan.version.clone(),
+        dry_run: false,
+        statements_applied: 0,
+        already_applied: true,
+    }))
 }
 
 fn plan_migration_for_backend<B: OrmBackend>(
