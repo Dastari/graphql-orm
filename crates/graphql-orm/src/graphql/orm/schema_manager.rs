@@ -275,8 +275,12 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         }
 
         B::prepare_migration_runtime(self.database.pool()).await?;
-        if let Some(report) =
-            resolve_recorded_version_apply::<B>(self.database.pool(), plan).await?
+        if let Some(report) = resolve_recorded_version_apply::<B>(
+            self.database.pool(),
+            &plan.version,
+            migration_remaining_work(plan),
+        )
+        .await?
         {
             return Ok(report);
         }
@@ -309,9 +313,11 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
 
     /// Apply a planned full schema target transactionally.
     ///
-    /// Idempotency rules match [`Self::apply_migration`]: empty plans for an
-    /// already-recorded version are no-ops; non-empty plans for a recorded
-    /// version fail closed.
+    /// Idempotency is evaluated against the **full** schema-target plan
+    /// (table migration steps/statements, RLS statements, and the combined
+    /// `plan.statements` that will actually execute)—not only
+    /// `plan.migration`. An empty nested migration with remaining RLS (or other
+    /// combined) statements is **not** treated as already applied.
     pub async fn apply_schema_target(
         &self,
         plan: &PlannedSchemaTarget,
@@ -341,8 +347,12 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         }
 
         B::prepare_migration_runtime(self.database.pool()).await?;
-        if let Some(report) =
-            resolve_recorded_version_apply::<B>(self.database.pool(), &plan.migration).await?
+        if let Some(report) = resolve_recorded_version_apply::<B>(
+            self.database.pool(),
+            &plan.version,
+            schema_target_remaining_work(plan),
+        )
+        .await?
         {
             return Ok(report);
         }
@@ -687,8 +697,41 @@ fn schema_current_for_plan(
     scoped
 }
 
-fn plan_has_remaining_work(plan: &PlannedMigration) -> bool {
-    !plan.steps.is_empty() || !plan.statements.is_empty()
+/// Summary of remaining work used for recorded-version apply decisions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RemainingPlanWork {
+    migration_steps: usize,
+    migration_statements: usize,
+    rls_statements: usize,
+    combined_statements: usize,
+}
+
+impl RemainingPlanWork {
+    fn has_remaining_work(self) -> bool {
+        self.migration_steps > 0
+            || self.migration_statements > 0
+            || self.rls_statements > 0
+            || self.combined_statements > 0
+    }
+}
+
+fn migration_remaining_work(plan: &PlannedMigration) -> RemainingPlanWork {
+    RemainingPlanWork {
+        migration_steps: plan.steps.len(),
+        migration_statements: plan.statements.len(),
+        rls_statements: 0,
+        combined_statements: plan.statements.len(),
+    }
+}
+
+fn schema_target_remaining_work(plan: &PlannedSchemaTarget) -> RemainingPlanWork {
+    RemainingPlanWork {
+        migration_steps: plan.migration.steps.len(),
+        migration_statements: plan.migration.statements.len(),
+        rls_statements: plan.rls.statements.len(),
+        // Combined statements are what apply_schema_target actually executes.
+        combined_statements: plan.statements.len(),
+    }
 }
 
 /// Decide how to treat a plan whose version may already be in history.
@@ -698,29 +741,30 @@ fn plan_has_remaining_work(plan: &PlannedMigration) -> bool {
 /// - Recorded + non-empty plan → `Err` (fail closed; do not pretend success).
 async fn resolve_recorded_version_apply<B: MigrationBackend>(
     pool: &B::Pool,
-    plan: &PlannedMigration,
+    version: &str,
+    work: RemainingPlanWork,
 ) -> crate::Result<Option<AppliedMigrationReport>> {
-    if !applied_version_set::<B>(pool)
-        .await?
-        .contains(&plan.version)
-    {
+    if !applied_version_set::<B>(pool).await?.contains(version) {
         return Ok(None);
     }
 
-    if plan_has_remaining_work(plan) {
+    if work.has_remaining_work() {
         return Err(sqlx::Error::Protocol(format!(
-            "Migration version {} is already recorded in {}, but the plan still has {} step(s) and {} statement(s). \
-This usually means schema drift after the version was applied, or unsafe reuse of a migration version. \
+            "Migration version {version} is already recorded in {}, but the plan still has remaining work \
+(migration_steps={}, migration_statements={}, rls_statements={}, combined_statements={}). \
+This usually means schema drift after the version was applied, unsafe reuse of a migration version, \
+or unapplied RLS/schema-target statements that were not part of the nested table migration alone. \
 Refuse to treat the plan as already applied.",
-            plan.version,
             super::execution::MIGRATION_HISTORY_TABLE,
-            plan.steps.len(),
-            plan.statements.len()
+            work.migration_steps,
+            work.migration_statements,
+            work.rls_statements,
+            work.combined_statements,
         )));
     }
 
     Ok(Some(AppliedMigrationReport {
-        version: plan.version.clone(),
+        version: version.to_string(),
         dry_run: false,
         statements_applied: 0,
         already_applied: true,

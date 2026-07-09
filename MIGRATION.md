@@ -128,6 +128,10 @@ explicit protocol error. That is intentional: it surfaces schema drift or
 unsafe reuse of a migration version rather than silently treating the plan as
 done.
 
+For `apply_schema_target`, “remaining work” includes nested migration
+steps/statements, RLS statements, and the combined executable `plan.statements`.
+An empty nested table migration with remaining RLS work is **not** a no-op.
+
 Callers that pattern-match `AppliedMigrationReport` must accept the new
 `already_applied` field.
 

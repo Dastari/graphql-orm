@@ -44,6 +44,10 @@ generation and runtime expression alignment; patch release for compatibility).
   row. If the version is already recorded but the plan still has work, apply
   fails closed (schema drift / unsafe version reuse) instead of silently
   reporting success.
+- **Schema-target remaining work:** `apply_schema_target` evaluates remaining
+  work from the full plan (nested migration steps/statements, RLS statements,
+  and combined executable statements). An empty nested `plan.migration` with
+  remaining RLS/combined statements is no longer treated as already applied.
 
 ### Added
 

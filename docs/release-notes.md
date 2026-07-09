@@ -35,6 +35,9 @@ Security hardening release for multi-tenant, authorization-sensitive services.
   already recorded is a no-op (`already_applied: true`) **only when the plan is
   empty**. Non-empty plans for a recorded version fail closed (drift / version
   reuse) instead of pretending the work was already applied.
+- Fixed `apply_schema_target` to judge remaining work from the full schema-target
+  plan (including RLS and combined statements), not only the nested table
+  migration.
 
 Compatibility notes:
 

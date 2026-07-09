@@ -7,9 +7,9 @@
 //! does not reject a no-op restart.
 
 use graphql_orm::graphql::orm::{
-    ApplyOptions, ColumnModel, DatabaseBackend, MigrationRisk, MigrationStep, SchemaModel,
-    SchemaPolicy, TableModel, build_migration_plan, canonicalize_column_default_expression,
-    introspect_sqlite_schema,
+    ApplyOptions, ColumnModel, DatabaseBackend, MigrationRisk, MigrationStep, PlannedMigration,
+    PlannedSchemaTarget, RlsPolicyPlan, SchemaModel, SchemaPolicy, TableModel,
+    build_migration_plan, canonicalize_column_default_expression, introspect_sqlite_schema,
 };
 use graphql_orm::prelude::*;
 use std::path::PathBuf;
@@ -448,4 +448,143 @@ fn additive_only_classifies_alter_column_as_non_additive() {
                 && matches!(step.step, MigrationStep::AlterColumn { .. })),
         "AlterColumn must not be additive; got {classified:?}"
     );
+}
+
+fn empty_migration_plan(version: &str, description: &str) -> PlannedMigration {
+    PlannedMigration {
+        version: version.to_string(),
+        description: description.to_string(),
+        backend: "sqlite",
+        source_schema_hash: None,
+        target_schema_hash: "target".to_string(),
+        plan_hash: "plan".to_string(),
+        steps: Vec::new(),
+        statements: Vec::new(),
+    }
+}
+
+fn schema_target_with_extra_statements(
+    version: &str,
+    migration: PlannedMigration,
+    rls_statements: Vec<String>,
+    combined_statements: Vec<String>,
+) -> PlannedSchemaTarget {
+    PlannedSchemaTarget {
+        version: version.to_string(),
+        description: "schema target".to_string(),
+        backend: "sqlite",
+        source_schema_hash: None,
+        target_schema_hash: migration.target_schema_hash.clone(),
+        target_hash: "full-target".to_string(),
+        plan_hash: "full-plan".to_string(),
+        migration,
+        rls: RlsPolicyPlan {
+            backend: "sqlite",
+            target_rls_hash: "rls".to_string(),
+            statements: rls_statements,
+        },
+        statements: combined_statements,
+    }
+}
+
+#[tokio::test]
+async fn apply_schema_target_does_not_noop_when_only_rls_work_remains()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = temp_db_path("schema-target-rls-work");
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    let version = "20260710_schema_target_rls";
+    let target = timed_notes_schema("unixepoch()", "unixepoch()");
+
+    let database = Database::<SqliteBackend>::connect_sqlite(&url)
+        .await?
+        .with_schema_policy(SchemaPolicy::Managed);
+    let empty = SchemaModel {
+        extensions: Vec::new(),
+        tables: vec![],
+    };
+    // Record the version via a normal migration apply first.
+    let first = database
+        .schema()
+        .plan_migration(version, "create tables", &empty, &target)?;
+    database
+        .schema()
+        .apply_migration(&first, ApplyOptions::default())
+        .await?;
+
+    // Nested table migration is empty (tables current), but combined/RLS work remains.
+    // This is the defect: checking only plan.migration would wrongly no-op.
+    let schema_target = schema_target_with_extra_statements(
+        version,
+        empty_migration_plan(version, "create tables"),
+        vec!["-- synthetic RLS statement".to_string()],
+        vec!["-- synthetic combined statement".to_string()],
+    );
+    assert!(schema_target.migration.steps.is_empty());
+    assert!(schema_target.migration.statements.is_empty());
+    assert!(!schema_target.rls.statements.is_empty());
+    assert!(!schema_target.statements.is_empty());
+
+    let err = database
+        .schema()
+        .apply_schema_target(&schema_target, ApplyOptions::default())
+        .await
+        .expect_err("recorded version with remaining RLS/combined work must fail closed");
+    let message = err.to_string();
+    assert!(
+        message.contains("already recorded")
+            && (message.contains("rls_statements") || message.contains("combined_statements")),
+        "unexpected error: {message}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[tokio::test]
+async fn apply_schema_target_empty_full_plan_is_idempotent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = temp_db_path("schema-target-empty");
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    let version = "20260710_schema_target_empty";
+    let target = timed_notes_schema("unixepoch()", "unixepoch()");
+
+    let database = Database::<SqliteBackend>::connect_sqlite(&url)
+        .await?
+        .with_schema_policy(SchemaPolicy::Managed);
+    let empty = SchemaModel {
+        extensions: Vec::new(),
+        tables: vec![],
+    };
+    let first = database
+        .schema()
+        .plan_migration(version, "create tables", &empty, &target)?;
+    database
+        .schema()
+        .apply_migration(&first, ApplyOptions::default())
+        .await?;
+
+    let schema_target = schema_target_with_extra_statements(
+        version,
+        empty_migration_plan(version, "create tables"),
+        Vec::new(),
+        Vec::new(),
+    );
+    let report = database
+        .schema()
+        .apply_schema_target(&schema_target, ApplyOptions::default())
+        .await?;
+    assert!(report.already_applied);
+    assert_eq!(report.statements_applied, 0);
+
+    let count: i64 = sqlx::Row::try_get(
+        &sqlx::query("SELECT COUNT(*) AS count FROM __graphql_orm_migrations WHERE version = ?")
+            .bind(version)
+            .fetch_one(database.pool())
+            .await?,
+        "count",
+    )?;
+    assert_eq!(count, 1);
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
 }
