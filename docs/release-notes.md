@@ -8,6 +8,9 @@ the runtime crate unless a macro crate version is called out separately.
 Security hardening release for multi-tenant, authorization-sensitive services.
 
 - Bumped `graphql-orm` to `0.3.0`.
+- Bumped `graphql-orm-macros` to `0.3.23` for aligned SQLite/Postgres epoch
+  default generation and runtime expression helpers (backward-compatible
+  correctness fix; do not continue shipping macros as `0.3.22`).
 - Added `AuthorizationMode` (`LegacyPermissive`, `DeclaredPoliciesRequired`,
   `ExplicitPolicyForAllExposedOperations`) on `Database`.
 - Expanded `AuthSubject` with optional `user_id`, `claims`, `token_id`,

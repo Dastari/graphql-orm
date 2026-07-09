@@ -4,6 +4,9 @@ User-facing release notes live in [docs/release-notes.md](docs/release-notes.md)
 
 ## 0.3.0
 
+Companion macros crate: `graphql-orm-macros` **0.3.23** (epoch-default
+generation and runtime expression alignment; patch release for compatibility).
+
 ### Security
 
 - Added `AuthorizationMode` with fail-closed `DeclaredPoliciesRequired` and
