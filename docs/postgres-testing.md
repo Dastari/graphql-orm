@@ -4,25 +4,28 @@ Postgres is the primary compatibility target for generated schema management.
 Run the Postgres tests against a disposable Postgres or PostGIS database, not
 against application data.
 
-Digitise includes a local PostGIS compose file that is suitable for consumer
-verification:
+For PostGIS-compatible coverage, start a throwaway local database:
 
 ```sh
-cd /home/toby/digitse
-docker compose -f compose.postgis.yml up -d digitise-postgres
+docker run -d --name graphql-orm-postgis-test \
+  -e POSTGRES_USER=graphql_orm \
+  -e POSTGRES_PASSWORD=graphql_orm \
+  -e POSTGRES_DB=graphql_orm_test \
+  -p 55433:5432 \
+  postgis/postgis:17-3.5
 ```
 
-That compose service exposes:
+That database exposes:
 
 ```sh
-postgres://digitise:digitise@127.0.0.1:55432/digitise
+postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test
 ```
 
-For this workspace, point `TEST_DATABASE_URL` at a throwaway database and run
-Postgres tests serially when sharing one database across integration tests:
+From the repository root, point `TEST_DATABASE_URL` at the throwaway database
+and run Postgres tests serially when sharing one database across integration
+tests:
 
 ```sh
-cd /home/toby/graphql-orm
 TEST_DATABASE_URL=postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test \
   cargo test -p graphql-orm --no-default-features --features postgres -- --test-threads=1
 ```

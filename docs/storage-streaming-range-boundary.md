@@ -5,9 +5,9 @@ database values. It only handles byte columns as ordinary SQL values
 (`BLOB`, `BYTEA`, or the selected backend equivalent). It should not grow
 object storage backends or HTTP download helpers.
 
-Object bytes live in the sibling `graphql-orm-storage` repository. The local
-checkout reviewed for this note already exposes streaming primitives and
-byte-range reads:
+Object bytes live outside this crate, such as in the companion
+`graphql-orm-storage` crate. Storage integrations should expose streaming
+primitives and byte-range reads:
 
 - `StorageByteStream` and `BoxedStorageStream` for chunked byte bodies.
 - `StorageService::put_object_stream` for streaming writes.
@@ -21,10 +21,10 @@ The buffered APIs (`StorageService::put_object`, `StorageService::get_object`,
 Large media serving code should not use them, because they collect the whole
 object into memory.
 
-## Digitise Consumption Contract
+## Consumer Storage Contract
 
-Digitise should persist storage metadata in application-owned database rows,
-using generated `graphql-orm` entities only for that metadata:
+Consumer applications should persist storage metadata in application-owned
+database rows, using generated `graphql-orm` entities only for that metadata:
 
 - backend identifier
 - provider-neutral `storage_key`
@@ -32,12 +32,12 @@ using generated `graphql-orm` entities only for that metadata:
 - checksum
 - MIME type and filename metadata, when needed
 
-For full HTTP responses, Digitise can call
+For full HTTP responses, a consumer application can call
 `StorageService::get_object_stream(&stored_object)` or
 `BlobStore::get_blob(&storage_key)` and stream the returned
 `StorageByteStream` into the response body.
 
-For HTTP `Range` responses, Digitise should:
+For HTTP `Range` responses, a consumer application should:
 
 1. Use `BlobStore::head_blob(&storage_key)` or the persisted byte length to
    validate the requested range.
@@ -48,7 +48,7 @@ For HTTP `Range` responses, Digitise should:
 5. Return `416 Range Not Satisfiable` without reading the object when the
    requested range is outside the known size.
 
-Digitise should avoid `StorageService::get_object` and
+Consumer applications should avoid `StorageService::get_object` and
 `collect_storage_stream` in media routes unless it intentionally needs a small
 in-memory buffer.
 

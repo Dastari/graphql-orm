@@ -9,11 +9,11 @@ fn storage_streaming_range_boundary_records_external_api_contract() {
     );
     assert!(
         range_boundary.contains("StorageService::get_object_stream"),
-        "Digitise needs the existing full-object streaming API documented"
+        "consumer applications need the existing full-object streaming API documented"
     );
     assert!(
         range_boundary.contains("BlobStore::get_blob_range"),
-        "Digitise needs the existing byte-range API documented"
+        "consumer applications need the existing byte-range API documented"
     );
     assert!(
         range_boundary.contains("StorageService::get_object_range"),
