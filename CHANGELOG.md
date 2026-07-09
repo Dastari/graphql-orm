@@ -48,6 +48,11 @@ generation and runtime expression alignment; patch release for compatibility).
   work from the full plan (nested migration steps/statements, RLS statements,
   and combined executable statements). An empty nested `plan.migration` with
   remaining RLS/combined statements is no longer treated as already applied.
+- **SQLite UNIQUE introspection:** inline `UNIQUE` column constraints (and
+  multi-column `UNIQUE (...)` constraints) are recovered from
+  `sqlite_autoindex_*` entries with origin `u`. Generated `#[unique]` fields
+  no longer cause false `AlterColumn` plans after reopening a file-backed
+  database.
 
 ### Added
 

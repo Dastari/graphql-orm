@@ -1307,7 +1307,7 @@ pub async fn introspect_sqlite_schema(
 
         let pragma_table_info = format!("PRAGMA table_info({})", table_name);
         let column_rows = sqlx::query(&pragma_table_info).fetch_all(pool).await?;
-        let columns = column_rows
+        let mut columns = column_rows
             .into_iter()
             .map(|row| {
                 let name: String = row.try_get("name")?;
@@ -1323,6 +1323,7 @@ pub async fn introspect_sqlite_schema(
                     spatial: None,
                     nullable,
                     is_primary_key,
+                    // Populated below from UNIQUE constraint autoindexes.
                     is_unique: false,
                     default,
                 })
@@ -1341,18 +1342,58 @@ pub async fn introspect_sqlite_schema(
         let pragma_index_list = format!("PRAGMA index_list({})", table_name);
         let index_rows = sqlx::query(&pragma_index_list).fetch_all(pool).await?;
         let mut indexes = Vec::new();
+        let mut composite_unique_indexes = Vec::new();
         for row in index_rows {
             let index_name: String = row.try_get("name")?;
-            if index_name.starts_with("sqlite_autoindex_") {
-                continue;
-            }
             let unique = row.try_get::<i64, _>("unique")? != 0;
+            // SQLite 3.16+: origin is "c" (CREATE INDEX), "u" (UNIQUE constraint),
+            // or "pk" (PRIMARY KEY). Older builds omit the column; treat missing as "c".
+            let origin = row
+                .try_get::<String, _>("origin")
+                .unwrap_or_else(|_| "c".to_string());
+
             let pragma_index_info = format!("PRAGMA index_info({})", index_name);
             let index_info_rows = sqlx::query(&pragma_index_info).fetch_all(pool).await?;
-            let column_names = index_info_rows
+            let mut column_names = index_info_rows
                 .into_iter()
-                .map(|index_row| index_row.try_get::<String, _>("name"))
-                .collect::<Result<Vec<_>, _>>()?;
+                .map(|index_row| {
+                    // seqno order is reliable for composite UNIQUE constraints.
+                    let seqno: i64 = index_row.try_get("seqno").unwrap_or(0);
+                    let name: String = index_row.try_get("name")?;
+                    Ok((seqno, name))
+                })
+                .collect::<Result<Vec<_>, sqlx::Error>>()?;
+            column_names.sort_by_key(|(seqno, _)| *seqno);
+            let column_names = column_names
+                .into_iter()
+                .map(|(_, name)| name)
+                .collect::<Vec<_>>();
+
+            // Inline UNIQUE / PRIMARY KEY constraints become sqlite_autoindex_*
+            // entries. Named CREATE INDEX / CREATE UNIQUE INDEX keep their names.
+            if index_name.starts_with("sqlite_autoindex_") || origin == "u" || origin == "pk" {
+                // Map UNIQUE constraints back onto column / composite metadata so
+                // #[unique] fields replan as no-ops after file reopen. PRIMARY KEY
+                // autoindexes (origin pk) do not set is_unique.
+                if unique && origin == "u" {
+                    if column_names.len() == 1 {
+                        if let Some(column) = columns
+                            .iter_mut()
+                            .find(|column| column.name == column_names[0])
+                        {
+                            // Keep primary-key identity separate; generated
+                            // schemas mark PK via is_primary_key, not is_unique.
+                            if !column.is_primary_key {
+                                column.is_unique = true;
+                            }
+                        }
+                    } else if column_names.len() > 1 {
+                        composite_unique_indexes.push(column_names);
+                    }
+                }
+                continue;
+            }
+
             let leaked_name: &'static str = Box::leak(index_name.into_boxed_str());
             let leaked_columns: &'static [&'static str] = Box::leak(
                 column_names
@@ -1397,7 +1438,7 @@ pub async fn introspect_sqlite_schema(
             default_sort: primary_key.clone(),
             columns,
             indexes,
-            composite_unique_indexes: Vec::new(),
+            composite_unique_indexes,
             foreign_keys,
             search_indexes: Vec::new(),
         });

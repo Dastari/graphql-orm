@@ -26,13 +26,17 @@ fn temp_db_path(name: &str) -> PathBuf {
 }
 
 fn text_column(name: &str, primary_key: bool) -> ColumnModel {
+    text_column_with_unique(name, primary_key, false)
+}
+
+fn text_column_with_unique(name: &str, primary_key: bool, is_unique: bool) -> ColumnModel {
     ColumnModel {
         name: name.to_string(),
         sql_type: "TEXT".to_string(),
         spatial: None,
         nullable: false,
         is_primary_key: primary_key,
-        is_unique: false,
+        is_unique,
         default: None,
     }
 }
@@ -50,6 +54,21 @@ fn epoch_column(name: &str, default: &str) -> ColumnModel {
 }
 
 fn timed_notes_schema(created_default: &str, updated_default: &str) -> SchemaModel {
+    timed_notes_schema_with_serial(created_default, updated_default, false)
+}
+
+fn timed_notes_schema_with_serial(
+    created_default: &str,
+    updated_default: &str,
+    unique_serial: bool,
+) -> SchemaModel {
+    let mut columns = vec![text_column("id", true), text_column("title", false)];
+    if unique_serial {
+        columns.push(text_column_with_unique("serial", false, true));
+    }
+    columns.push(epoch_column("created_at", created_default));
+    columns.push(epoch_column("updated_at", updated_default));
+
     SchemaModel {
         extensions: Vec::new(),
         tables: vec![TableModel {
@@ -58,12 +77,7 @@ fn timed_notes_schema(created_default: &str, updated_default: &str) -> SchemaMod
             primary_key: "id".to_string(),
             primary_keys: vec!["id".to_string()],
             default_sort: "created_at ASC".to_string(),
-            columns: vec![
-                text_column("id", true),
-                text_column("title", false),
-                epoch_column("created_at", created_default),
-                epoch_column("updated_at", updated_default),
-            ],
+            columns,
             indexes: vec![],
             composite_unique_indexes: vec![],
             foreign_keys: vec![],
@@ -430,6 +444,133 @@ async fn recorded_version_with_remaining_work_fails_closed()
         "count",
     )?;
     assert_eq!(count, 1);
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[tokio::test]
+async fn sqlite_inline_unique_column_replan_is_idempotent() -> Result<(), Box<dyn std::error::Error>>
+{
+    let path = temp_db_path("unique-serial");
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    let version = "20260710_unique_serial";
+    // Mirrors generated #[unique] pub serial: String — rendered as inline UNIQUE,
+    // which SQLite stores as sqlite_autoindex_* with origin "u".
+    let target = timed_notes_schema_with_serial("unixepoch()", "unixepoch()", true);
+
+    {
+        let database = Database::<SqliteBackend>::connect_sqlite(&url)
+            .await?
+            .with_schema_policy(SchemaPolicy::Managed);
+        let empty = SchemaModel {
+            extensions: Vec::new(),
+            tables: vec![],
+        };
+        let plan = database.schema().plan_migration(
+            version,
+            "create with unique serial",
+            &empty,
+            &target,
+        )?;
+        assert!(
+            plan.statements.iter().any(|sql| sql.contains("UNIQUE")),
+            "create SQL should include UNIQUE for serial: {:?}",
+            plan.statements
+        );
+        database
+            .schema()
+            .apply_migration(&plan, ApplyOptions::default())
+            .await?;
+    }
+
+    let database = Database::<SqliteBackend>::connect_sqlite(&url)
+        .await?
+        .with_schema_policy(SchemaPolicy::Managed);
+    let live = introspect_sqlite_schema(&database).await?;
+    let serial = live
+        .tables
+        .iter()
+        .find(|table| table.table_name == "timed_notes")
+        .and_then(|table| table.columns.iter().find(|column| column.name == "serial"))
+        .expect("serial column");
+    assert!(
+        serial.is_unique,
+        "live SQLite introspection must surface inline UNIQUE as column.is_unique"
+    );
+
+    let replan = build_migration_plan(DatabaseBackend::Sqlite, &live, &target);
+    assert!(
+        !replan
+            .steps
+            .iter()
+            .any(|step| matches!(step, MigrationStep::AlterColumn { .. })),
+        "unique serial must not force AlterColumn after reopen; steps={:?}",
+        replan.steps
+    );
+    assert!(
+        replan.steps.is_empty() && replan.statements.is_empty(),
+        "identical schema with #[unique] column must replan empty; steps={:?} statements={:?}",
+        replan.steps,
+        replan.statements
+    );
+
+    let high_level =
+        database
+            .schema()
+            .plan_migration(version, "create with unique serial", &live, &target)?;
+    assert!(high_level.steps.is_empty());
+    let reapply = database
+        .schema()
+        .apply_migration(&high_level, ApplyOptions::default())
+        .await?;
+    assert!(reapply.already_applied);
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[tokio::test]
+async fn sqlite_composite_unique_autoindex_is_introspected()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = temp_db_path("composite-unique");
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    let database = Database::<SqliteBackend>::connect_sqlite(&url)
+        .await?
+        .with_schema_policy(SchemaPolicy::Managed);
+
+    sqlx::query(
+        "CREATE TABLE composite_unique_notes (
+            id TEXT PRIMARY KEY NOT NULL,
+            left_key TEXT NOT NULL,
+            right_key TEXT NOT NULL,
+            UNIQUE (left_key, right_key)
+        )",
+    )
+    .execute(database.pool())
+    .await?;
+
+    let live = introspect_sqlite_schema(&database).await?;
+    let table = live
+        .tables
+        .iter()
+        .find(|table| table.table_name == "composite_unique_notes")
+        .expect("table");
+    assert!(
+        table
+            .composite_unique_indexes
+            .iter()
+            .any(|cols| cols == &["left_key".to_string(), "right_key".to_string()]),
+        "composite UNIQUE must be introspected; got {:?}",
+        table.composite_unique_indexes
+    );
+    // Columns should not each be marked unique for a multi-column constraint.
+    assert!(
+        !table
+            .columns
+            .iter()
+            .any(|column| column.name == "left_key" && column.is_unique)
+    );
 
     let _ = std::fs::remove_file(&path);
     Ok(())

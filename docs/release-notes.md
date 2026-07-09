@@ -38,6 +38,9 @@ Security hardening release for multi-tenant, authorization-sensitive services.
 - Fixed `apply_schema_target` to judge remaining work from the full schema-target
   plan (including RLS and combined statements), not only the nested table
   migration.
+- Fixed SQLite introspection of inline `UNIQUE` constraints so `#[unique]`
+  columns replan as no-ops after file-backed reopen (no false `AlterColumn` on
+  `is_unique`).
 
 Compatibility notes:
 
