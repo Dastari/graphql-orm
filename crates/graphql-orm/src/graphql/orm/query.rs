@@ -111,14 +111,58 @@ pub trait DatabaseOrderBy {
     }
 }
 
+/// SQL filter expression tree used by generated and host-authored queries.
+///
+/// Prefer typed filter inputs and [`FilterExpression::trusted_fragment`] for
+/// host-owned predicates. [`FilterExpression::Raw`] remains for generated
+/// compatibility but is a deliberate trusted-SQL surface: never pass
+/// unvalidated user input as the clause text.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FilterExpression {
+    /// Legacy trusted raw fragment.
+    ///
+    /// Prefer [`Self::TrustedFragment`]. The clause must be host- or
+    /// macro-generated SQL with placeholders only; values are bound parameters.
     Raw {
         clause: String,
         values: Vec<SqlValue>,
     },
+    /// Explicit trusted SQL fragment constructed by host or ORM internals.
+    ///
+    /// Construction is deliberate: callers must not interpolate user input into
+    /// `clause`. Bind all values through `values`.
+    TrustedFragment {
+        clause: String,
+        values: Vec<SqlValue>,
+    },
+    /// Logical conjunction of child filters.
     And(Vec<FilterExpression>),
+    /// Logical disjunction of child filters.
     Or(Vec<FilterExpression>),
+}
+
+impl FilterExpression {
+    /// Construct an explicitly trusted parameterized SQL fragment.
+    ///
+    /// # Safety contract
+    ///
+    /// `clause` must not contain unvalidated user input. Identifiers must be
+    /// validated/quoted by the caller or dialect helpers before construction.
+    pub fn trusted_fragment(clause: impl Into<String>, values: Vec<SqlValue>) -> Self {
+        Self::TrustedFragment {
+            clause: clause.into(),
+            values,
+        }
+    }
+
+    /// Compatibility constructor for generated raw fragments.
+    #[doc(hidden)]
+    pub fn raw(clause: impl Into<String>, values: Vec<SqlValue>) -> Self {
+        Self::Raw {
+            clause: clause.into(),
+            values,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -191,16 +235,51 @@ impl Default for PaginationConfig {
 }
 
 impl PaginationConfig {
+    /// Secure recommended default connection limit.
+    pub const SECURE_DEFAULT_LIMIT: i64 = 50;
+    /// Secure recommended maximum connection limit.
+    pub const SECURE_MAX_LIMIT: i64 = 100;
+    /// Legacy default connection limit retained for migration.
+    pub const LEGACY_DEFAULT_LIMIT: i64 = 1000;
+    /// Legacy maximum connection limit retained for migration.
+    pub const LEGACY_MAX_LIMIT: i64 = 1000;
+
     /// Default connection limit used when a request omits `PageInput.limit`.
-    pub const DEFAULT_LIMIT: i64 = 1000;
+    ///
+    /// **Current default:** [`Self::SECURE_DEFAULT_LIMIT`] (`50`).
+    /// **Previous default:** [`Self::LEGACY_DEFAULT_LIMIT`] (`1000`).
+    /// **Secure recommended:** [`Self::SECURE_DEFAULT_LIMIT`].
+    /// Use [`Self::legacy`] to restore the previous behavior during migration.
+    pub const DEFAULT_LIMIT: i64 = Self::SECURE_DEFAULT_LIMIT;
     /// Default cap applied to explicit and default limits.
-    pub const DEFAULT_MAX_LIMIT: i64 = 1000;
+    ///
+    /// **Current default:** [`Self::SECURE_MAX_LIMIT`] (`100`).
+    /// **Previous default:** [`Self::LEGACY_MAX_LIMIT`] (`1000`).
+    pub const DEFAULT_MAX_LIMIT: i64 = Self::SECURE_MAX_LIMIT;
 
     /// Create a config that does not add a default limit and does not cap limits.
+    ///
+    /// Use only for trusted internal jobs. GraphQL surfaces should keep bounds.
     pub const fn unbounded() -> Self {
         Self {
             default_limit: None,
             max_limit: None,
+        }
+    }
+
+    /// Restore the pre-0.3 connection limits (`1000` / `1000`).
+    pub const fn legacy() -> Self {
+        Self {
+            default_limit: Some(Self::LEGACY_DEFAULT_LIMIT),
+            max_limit: Some(Self::LEGACY_MAX_LIMIT),
+        }
+    }
+
+    /// Secure recommended limits (`50` / `100`).
+    pub const fn secure() -> Self {
+        Self {
+            default_limit: Some(Self::SECURE_DEFAULT_LIMIT),
+            max_limit: Some(Self::SECURE_MAX_LIMIT),
         }
     }
 
@@ -405,7 +484,11 @@ pub struct SubscriptionFilterInput {
 ///
 /// Generated connection resolvers combine this request input with
 /// [`PaginationConfig`] from the runtime `Database`. The default config applies
-/// a limit of `1000` when this input or its `limit` field is omitted.
+/// a limit of [`PaginationConfig::DEFAULT_LIMIT`] (`50`) when this input or its
+/// `limit` field is omitted, and clamps explicit limits to
+/// [`PaginationConfig::DEFAULT_MAX_LIMIT`] (`100`). Use
+/// [`PaginationConfig::legacy`] on `Database` for the previous 1000/1000 caps
+/// during migration.
 pub struct PageInput {
     /// Requested page size. Explicit limits are clamped by the runtime
     /// [`PaginationConfig`] before SQL rendering.
@@ -757,7 +840,8 @@ pub fn render_filter_expression(
     bind_values: &mut Vec<SqlValue>,
 ) -> String {
     match filter {
-        FilterExpression::Raw { clause, values } => {
+        FilterExpression::Raw { clause, values }
+        | FilterExpression::TrustedFragment { clause, values } => {
             let rendered = dialect.normalize_sql(clause, *next_index);
             *next_index += values.len();
             bind_values.extend(values.iter().cloned());

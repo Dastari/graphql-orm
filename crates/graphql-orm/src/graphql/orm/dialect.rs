@@ -33,6 +33,155 @@ impl DatabaseBackend {
     }
 }
 
+/// Canonicalize a column default expression for schema comparison and hashing.
+///
+/// SQLite stores `DEFAULT (unixepoch())` as `dflt_value = unixepoch()`, while
+/// generated entity metadata may historically use either `unixepoch()` or
+/// `(unixepoch())`. Semantically equivalent defaults must not produce false
+/// `AlterColumn` steps when a managed schema is replaned after reopening a
+/// file-backed database.
+///
+/// Rules (intentionally conservative):
+/// - trim surrounding whitespace
+/// - strip balanced outer parentheses that wrap the entire expression
+/// - normalize SQL keyword defaults (`CURRENT_TIMESTAMP`, `NULL`, booleans)
+/// - leave string/blob literals and non-keyword identifiers untouched
+///
+/// Does **not** rewrite operators, function names, or argument order, so
+/// genuinely different expressions remain distinct.
+pub fn canonicalize_column_default_expression(default: &str) -> String {
+    let mut value = default.trim().to_string();
+    while is_fully_parenthesized(&value) {
+        value = value[1..value.len() - 1].trim().to_string();
+    }
+
+    let uppercase = value.to_ascii_uppercase();
+    match uppercase.as_str() {
+        "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "CURRENT_TIME" | "NULL" => uppercase,
+        "TRUE" | "FALSE" => value.to_ascii_lowercase(),
+        _ => value,
+    }
+}
+
+/// Return true when `value` is wrapped by a single pair of parentheses that
+/// enclose the whole expression (depth never returns to zero before the end).
+fn is_fully_parenthesized(value: &str) -> bool {
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() < 2 || chars[0] != '(' || chars[chars.len() - 1] != ')' {
+        return false;
+    }
+
+    let mut depth = 0i32;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = 0usize;
+    while i < chars.len() {
+        let ch = chars[i];
+        if in_single {
+            if ch == '\'' {
+                if i + 1 < chars.len() && chars[i + 1] == '\'' {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_double {
+            if ch == '"' {
+                if i + 1 < chars.len() && chars[i + 1] == '"' {
+                    i += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+        match ch {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 && i != chars.len() - 1 {
+                    return false;
+                }
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    depth == 0
+}
+
+#[cfg(test)]
+mod default_canonicalization_tests {
+    use super::canonicalize_column_default_expression;
+
+    #[test]
+    fn strips_redundant_outer_parens_for_epoch_defaults() {
+        assert_eq!(
+            canonicalize_column_default_expression("(unixepoch())"),
+            "unixepoch()"
+        );
+        assert_eq!(
+            canonicalize_column_default_expression("unixepoch()"),
+            "unixepoch()"
+        );
+        assert_eq!(
+            canonicalize_column_default_expression("((unixepoch()))"),
+            "unixepoch()"
+        );
+        assert_eq!(
+            canonicalize_column_default_expression("  ( date('now') )  "),
+            "date('now')"
+        );
+    }
+
+    #[test]
+    fn preserves_meaningful_structure_and_literals() {
+        assert_eq!(canonicalize_column_default_expression("1+2"), "1+2");
+        assert_eq!(canonicalize_column_default_expression("(1+2)"), "1+2");
+        assert_eq!(
+            canonicalize_column_default_expression("date('now', '-1 days')"),
+            "date('now', '-1 days')"
+        );
+        assert_eq!(
+            canonicalize_column_default_expression("'hello (world)'"),
+            "'hello (world)'"
+        );
+        // Parentheses that do not wrap the entire expression stay put.
+        assert_eq!(canonicalize_column_default_expression("(1+2)*3"), "(1+2)*3");
+    }
+
+    #[test]
+    fn normalizes_keywords_and_booleans() {
+        assert_eq!(
+            canonicalize_column_default_expression("current_timestamp"),
+            "CURRENT_TIMESTAMP"
+        );
+        assert_eq!(canonicalize_column_default_expression("TRUE"), "true");
+        assert_eq!(canonicalize_column_default_expression("null"), "NULL");
+    }
+
+    #[test]
+    fn different_functions_remain_distinct() {
+        assert_ne!(
+            canonicalize_column_default_expression("unixepoch()"),
+            canonicalize_column_default_expression("date('now')")
+        );
+        assert_ne!(
+            canonicalize_column_default_expression("(unixepoch())"),
+            canonicalize_column_default_expression("(date('now'))")
+        );
+    }
+}
+
 fn normalize_sql_placeholders(backend: DatabaseBackend, sql: &str, start_index: usize) -> String {
     if !matches!(backend, DatabaseBackend::Postgres | DatabaseBackend::Mssql) {
         return sql.to_string();

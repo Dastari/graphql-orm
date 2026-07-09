@@ -1,3 +1,5 @@
+use crate::graphql::auth::AuthorizationMode;
+use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 use crate::graphql::orm::WriteBackend;
 use crate::graphql::orm::{
@@ -69,6 +71,7 @@ pub struct Database<B: OrmBackend = DefaultBackend> {
     change_journal_enabled: bool,
     schema_policy: SchemaPolicy,
     pagination_config: PaginationConfig,
+    authorization_mode: AuthorizationMode,
     event_senders: Arc<EventSenders>,
     _backend: PhantomData<B>,
 }
@@ -86,6 +89,7 @@ impl<B: OrmBackend> Clone for Database<B> {
             change_journal_enabled: self.change_journal_enabled,
             schema_policy: self.schema_policy,
             pagination_config: self.pagination_config,
+            authorization_mode: self.authorization_mode,
             event_senders: self.event_senders.clone(),
             _backend: PhantomData,
         }
@@ -98,6 +102,7 @@ impl<B: OrmBackend> std::fmt::Debug for Database<B> {
         debug.field("pool", &"DbPool");
         debug.field("schema_policy", &self.schema_policy);
         debug.field("pagination_config", &self.pagination_config);
+        debug.field("authorization_mode", &self.authorization_mode);
         debug.field("has_mutation_hook", &self.mutation_hook.is_some());
         debug
             .field("has_field_policy", &self.field_policy.is_some())
@@ -126,6 +131,7 @@ impl<B: OrmBackend> Database<B> {
             change_journal_enabled: false,
             schema_policy,
             pagination_config: PaginationConfig::default(),
+            authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             _backend: PhantomData,
         }
@@ -149,6 +155,7 @@ impl<B: OrmBackend> Database<B> {
             change_journal_enabled: false,
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
+            authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             _backend: PhantomData,
         }
@@ -169,6 +176,7 @@ impl<B: OrmBackend> Database<B> {
             change_journal_enabled: false,
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
+            authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             _backend: PhantomData,
         }
@@ -189,6 +197,7 @@ impl<B: OrmBackend> Database<B> {
             change_journal_enabled: false,
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
+            authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             _backend: PhantomData,
         }
@@ -209,6 +218,7 @@ impl<B: OrmBackend> Database<B> {
             change_journal_enabled: false,
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
+            authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             _backend: PhantomData,
         }
@@ -232,6 +242,7 @@ impl<B: OrmBackend> Database<B> {
             change_journal_enabled: false,
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
+            authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             _backend: PhantomData,
         }
@@ -262,6 +273,7 @@ impl<B: OrmBackend> Database<B> {
             change_journal_enabled: false,
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
+            authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             _backend: PhantomData,
         }
@@ -301,6 +313,22 @@ impl<B: OrmBackend> Database<B> {
     /// Return a copy of this handle with different pagination defaults and caps.
     pub fn with_pagination_config(mut self, pagination_config: PaginationConfig) -> Self {
         self.pagination_config = pagination_config;
+        self
+    }
+
+    /// Return the authorization policy enforcement mode.
+    pub fn authorization_mode(&self) -> AuthorizationMode {
+        self.authorization_mode
+    }
+
+    /// Update the authorization policy enforcement mode in place.
+    pub fn set_authorization_mode(&mut self, authorization_mode: AuthorizationMode) {
+        self.authorization_mode = authorization_mode;
+    }
+
+    /// Return a copy of this handle with a different authorization mode.
+    pub fn with_authorization_mode(mut self, authorization_mode: AuthorizationMode) -> Self {
+        self.authorization_mode = authorization_mode;
         self
     }
 
@@ -423,11 +451,11 @@ impl<B: OrmBackend> Database<B> {
     where
         T: Clone + Send + Sync + 'static,
     {
-        self.event_senders
-            .senders
-            .write()
-            .expect("event sender lock poisoned")
-            .insert(TypeId::of::<T>(), Box::new(sender));
+        let mut senders = match self.event_senders.senders.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        senders.insert(TypeId::of::<T>(), Box::new(sender));
     }
 
     pub fn ensure_event_sender<T>(&self) -> tokio::sync::broadcast::Sender<T>
@@ -438,11 +466,10 @@ impl<B: OrmBackend> Database<B> {
             return sender;
         }
 
-        let mut senders = self
-            .event_senders
-            .senders
-            .write()
-            .expect("event sender lock poisoned");
+        let mut senders = match self.event_senders.senders.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
 
         if let Some(sender) = senders
             .get(&TypeId::of::<T>())
@@ -460,10 +487,11 @@ impl<B: OrmBackend> Database<B> {
     where
         T: Clone + Send + Sync + 'static,
     {
-        self.event_senders
-            .senders
-            .read()
-            .expect("event sender lock poisoned")
+        let senders = match self.event_senders.senders.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        senders
             .get(&TypeId::of::<T>())
             .and_then(|sender| sender.downcast_ref::<tokio::sync::broadcast::Sender<T>>())
             .cloned()
@@ -502,12 +530,46 @@ impl<B: OrmBackend> Database<B> {
         {
             return Ok(false);
         }
-        if let Some(policy) = &self.entity_policy {
-            policy
-                .can_access_entity(ctx, self, entity_name, policy_key, kind, surface)
-                .await
-        } else {
-            Ok(true)
+
+        match self.authorization_mode {
+            AuthorizationMode::LegacyPermissive => {
+                if let Some(policy) = &self.entity_policy {
+                    policy
+                        .can_access_entity(ctx, self, entity_name, policy_key, kind, surface)
+                        .await
+                } else {
+                    Ok(true)
+                }
+            }
+            AuthorizationMode::DeclaredPoliciesRequired => {
+                if policy_key.is_some() && self.entity_policy.is_none() {
+                    return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
+                        .with_internal(format!(
+                            "entity {entity_name} declares a policy key but no entity policy provider is registered"
+                        ))
+                        .into_graphql_error());
+                }
+                if let Some(policy) = &self.entity_policy {
+                    policy
+                        .can_access_entity(ctx, self, entity_name, policy_key, kind, surface)
+                        .await
+                } else {
+                    Ok(true)
+                }
+            }
+            AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
+                if surface == crate::graphql::orm::EntityAccessSurface::GraphqlSubscription
+                    && self.entity_policy.is_none()
+                {
+                    return Ok(false);
+                }
+                let Some(policy) = &self.entity_policy else {
+                    return Ok(false);
+                };
+                policy
+                    .can_access_entity(ctx, self, entity_name, policy_key, kind, surface)
+                    .await
+            }
         }
     }
 
@@ -525,10 +587,7 @@ impl<B: OrmBackend> Database<B> {
         {
             Ok(())
         } else {
-            Err(async_graphql::Error::new(format!(
-                "Access denied for {} {:?} on {:?}",
-                entity_name, kind, surface
-            )))
+            Err(OrmPublicError::forbidden().into_graphql_error())
         }
     }
 
@@ -540,12 +599,52 @@ impl<B: OrmBackend> Database<B> {
         policy_key: Option<&'static str>,
         record: Option<&(dyn Any + Send + Sync)>,
     ) -> async_graphql::Result<bool> {
-        if let Some(policy) = &self.field_policy {
-            policy
-                .can_read_field(ctx, self, entity_name, field_name, policy_key, record)
-                .await
-        } else {
-            Ok(true)
+        match self.authorization_mode {
+            AuthorizationMode::LegacyPermissive => {
+                if let Some(policy) = &self.field_policy {
+                    policy
+                        .can_read_field(ctx, self, entity_name, field_name, policy_key, record)
+                        .await
+                } else {
+                    Ok(true)
+                }
+            }
+            AuthorizationMode::DeclaredPoliciesRequired => {
+                if policy_key.is_some() && self.field_policy.is_none() {
+                    return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
+                        .with_internal(format!(
+                            "field {entity_name}.{field_name} declares a policy key but no field policy provider is registered"
+                        ))
+                        .into_graphql_error());
+                }
+                if let Some(policy) = &self.field_policy {
+                    policy
+                        .can_read_field(ctx, self, entity_name, field_name, policy_key, record)
+                        .await
+                } else {
+                    Ok(true)
+                }
+            }
+            AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
+                if policy_key.is_none() {
+                    // Fields without an explicit policy remain readable only when
+                    // a field policy provider is present and allows the default
+                    // key-less decision. Without a provider, deny sensitive
+                    // field exposure under the strictest mode.
+                    if self.field_policy.is_none() {
+                        return Ok(true);
+                    }
+                }
+                if let Some(policy) = &self.field_policy {
+                    policy
+                        .can_read_field(ctx, self, entity_name, field_name, policy_key, record)
+                        .await
+                } else if policy_key.is_some() {
+                    Ok(false)
+                } else {
+                    Ok(true)
+                }
+            }
         }
     }
 
@@ -561,20 +660,67 @@ impl<B: OrmBackend> Database<B> {
         if !self.schema_policy.allows_entity_writes() {
             return Ok(false);
         }
-        if let Some(policy) = &self.field_policy {
-            policy
-                .can_write_field(
-                    ctx,
-                    self,
-                    entity_name,
-                    field_name,
-                    policy_key,
-                    record,
-                    value,
-                )
-                .await
-        } else {
-            Ok(true)
+        match self.authorization_mode {
+            AuthorizationMode::LegacyPermissive => {
+                if let Some(policy) = &self.field_policy {
+                    policy
+                        .can_write_field(
+                            ctx,
+                            self,
+                            entity_name,
+                            field_name,
+                            policy_key,
+                            record,
+                            value,
+                        )
+                        .await
+                } else {
+                    Ok(true)
+                }
+            }
+            AuthorizationMode::DeclaredPoliciesRequired => {
+                if policy_key.is_some() && self.field_policy.is_none() {
+                    return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
+                        .with_internal(format!(
+                            "field {entity_name}.{field_name} declares a write policy key but no field policy provider is registered"
+                        ))
+                        .into_graphql_error());
+                }
+                if let Some(policy) = &self.field_policy {
+                    policy
+                        .can_write_field(
+                            ctx,
+                            self,
+                            entity_name,
+                            field_name,
+                            policy_key,
+                            record,
+                            value,
+                        )
+                        .await
+                } else {
+                    Ok(true)
+                }
+            }
+            AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
+                if let Some(policy) = &self.field_policy {
+                    policy
+                        .can_write_field(
+                            ctx,
+                            self,
+                            entity_name,
+                            field_name,
+                            policy_key,
+                            record,
+                            value,
+                        )
+                        .await
+                } else if policy_key.is_some() {
+                    Ok(false)
+                } else {
+                    Ok(true)
+                }
+            }
         }
     }
 
@@ -592,10 +738,7 @@ impl<B: OrmBackend> Database<B> {
         {
             Ok(())
         } else {
-            Err(async_graphql::Error::new(format!(
-                "Access denied for field {}.{}",
-                entity_name, field_name
-            )))
+            Err(OrmPublicError::forbidden().into_graphql_error())
         }
     }
 
@@ -614,10 +757,7 @@ impl<B: OrmBackend> Database<B> {
         {
             Ok(())
         } else {
-            Err(async_graphql::Error::new(format!(
-                "Write denied for field {}.{}",
-                entity_name, field_name
-            )))
+            Err(OrmPublicError::forbidden().into_graphql_error())
         }
     }
 
@@ -629,12 +769,43 @@ impl<B: OrmBackend> Database<B> {
         surface: crate::graphql::orm::EntityAccessSurface,
         row: &(dyn Any + Send + Sync),
     ) -> async_graphql::Result<bool> {
-        if let Some(policy) = &self.row_policy {
-            policy
-                .can_read_row(ctx, self, entity_name, policy_key, surface, row)
-                .await
-        } else {
-            Ok(true)
+        match self.authorization_mode {
+            AuthorizationMode::LegacyPermissive => {
+                if let Some(policy) = &self.row_policy {
+                    policy
+                        .can_read_row(ctx, self, entity_name, policy_key, surface, row)
+                        .await
+                } else {
+                    Ok(true)
+                }
+            }
+            AuthorizationMode::DeclaredPoliciesRequired => {
+                if policy_key.is_some() && self.row_policy.is_none() {
+                    return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
+                        .with_internal(format!(
+                            "entity {entity_name} declares a row policy key but no row policy provider is registered"
+                        ))
+                        .into_graphql_error());
+                }
+                if let Some(policy) = &self.row_policy {
+                    policy
+                        .can_read_row(ctx, self, entity_name, policy_key, surface, row)
+                        .await
+                } else {
+                    Ok(true)
+                }
+            }
+            AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
+                if let Some(policy) = &self.row_policy {
+                    policy
+                        .can_read_row(ctx, self, entity_name, policy_key, surface, row)
+                        .await
+                } else if policy_key.is_some() {
+                    Ok(false)
+                } else {
+                    Ok(true)
+                }
+            }
         }
     }
 
@@ -649,12 +820,43 @@ impl<B: OrmBackend> Database<B> {
         if !self.schema_policy.allows_entity_writes() {
             return Ok(false);
         }
-        if let Some(policy) = &self.row_policy {
-            policy
-                .can_write_row(ctx, self, entity_name, policy_key, surface, row)
-                .await
-        } else {
-            Ok(true)
+        match self.authorization_mode {
+            AuthorizationMode::LegacyPermissive => {
+                if let Some(policy) = &self.row_policy {
+                    policy
+                        .can_write_row(ctx, self, entity_name, policy_key, surface, row)
+                        .await
+                } else {
+                    Ok(true)
+                }
+            }
+            AuthorizationMode::DeclaredPoliciesRequired => {
+                if policy_key.is_some() && self.row_policy.is_none() {
+                    return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
+                        .with_internal(format!(
+                            "entity {entity_name} declares a row write policy key but no row policy provider is registered"
+                        ))
+                        .into_graphql_error());
+                }
+                if let Some(policy) = &self.row_policy {
+                    policy
+                        .can_write_row(ctx, self, entity_name, policy_key, surface, row)
+                        .await
+                } else {
+                    Ok(true)
+                }
+            }
+            AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
+                if let Some(policy) = &self.row_policy {
+                    policy
+                        .can_write_row(ctx, self, entity_name, policy_key, surface, row)
+                        .await
+                } else if policy_key.is_some() {
+                    Ok(false)
+                } else {
+                    Ok(true)
+                }
+            }
         }
     }
 
@@ -672,10 +874,7 @@ impl<B: OrmBackend> Database<B> {
         {
             Ok(())
         } else {
-            Err(async_graphql::Error::new(format!(
-                "Write denied for row {} on {:?}",
-                entity_name, surface
-            )))
+            Err(OrmPublicError::forbidden().into_graphql_error())
         }
     }
 
@@ -934,6 +1133,12 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     /// Disable both the default connection limit and max-limit cap.
     pub fn unbounded_pagination(mut self) -> Self {
         self.database.pagination_config = PaginationConfig::unbounded();
+        self
+    }
+
+    /// Set the authorization policy enforcement mode.
+    pub fn authorization_mode(mut self, authorization_mode: AuthorizationMode) -> Self {
+        self.database.authorization_mode = authorization_mode;
         self
     }
 

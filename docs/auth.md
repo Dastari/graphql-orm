@@ -95,7 +95,31 @@ GraphQL/application policies.
 
 ## agql-auth Feature
 
-The `auth-agql` feature is reserved and compiles without adding a dependency. Concrete converters
-such as `DbAuthContext::from_auth_principal` will be added after the upstream `agql-auth` 0.7 API is
-tagged. Until then, applications that use `agql-auth` should convert their principal into
-`AuthSubject` in host code.
+Enable `auth-agql` for optional converters. See [agql-auth-bridge.md](agql-auth-bridge.md).
+
+```rust
+use graphql_orm::graphql::auth_agql::auth_bundle_from_principal;
+let (subject, db_auth) = auth_bundle_from_principal(&principal);
+```
+
+
+## Authorization Modes
+
+See [strict-authorization.md](strict-authorization.md).
+
+```rust
+let database = Database::new(pool)
+    .with_authorization_mode(AuthorizationMode::DeclaredPoliciesRequired);
+```
+
+Current default: `LegacyPermissive`. Secure recommended: `DeclaredPoliciesRequired`.
+
+## Expanded AuthSubject
+
+`AuthSubject` now includes optional `user_id`, `claims`, `token_id`, `session_id`,
+and `actor_id`. `Debug` redacts claim bodies. Scope comparison is case-sensitive.
+
+## Safe Errors
+
+Missing auth returns `UNAUTHENTICATED` via `OrmPublicError`. See
+[error-codes.md](error-codes.md).

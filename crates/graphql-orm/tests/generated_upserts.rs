@@ -342,7 +342,8 @@ async fn generated_upserts_work_for_graphql_and_repository_paths()
         .await;
     assert!(!denied.errors.is_empty());
     assert!(
-        denied.errors[0].message.contains("Write denied"),
+        denied.errors[0].message.contains("Write denied")
+            || denied.errors[0].message == "forbidden",
         "{:?}",
         denied.errors
     );

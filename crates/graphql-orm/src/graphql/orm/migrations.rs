@@ -28,16 +28,25 @@ fn is_internal_graphql_orm_table(table_name: &str) -> bool {
     table_name.starts_with("__graphql_orm_") || table_name == "spatial_ref_sys"
 }
 
+fn defaults_equivalent(before: &Option<String>, after: &Option<String>) -> bool {
+    match (before, after) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            super::dialect::canonicalize_column_default_expression(left)
+                == super::dialect::canonicalize_column_default_expression(right)
+        }
+        _ => false,
+    }
+}
+
 fn render_default_clause(backend: DatabaseBackend, default: &str) -> String {
     if backend != DatabaseBackend::Sqlite {
         return default.to_string();
     }
 
-    let trimmed = default.trim();
-    if trimmed.starts_with('(') && trimmed.ends_with(')') {
-        return trimmed.to_string();
-    }
-
+    // Render from the canonical form so DDL is stable regardless of whether the
+    // metadata stored optional outer parentheses.
+    let trimmed = super::dialect::canonicalize_column_default_expression(default);
     let uppercase = trimmed.to_ascii_uppercase();
     let is_keyword_default = matches!(
         uppercase.as_str(),
@@ -46,11 +55,14 @@ fn render_default_clause(backend: DatabaseBackend, default: &str) -> String {
     let is_numeric_literal = trimmed
         .chars()
         .next()
-        .is_some_and(|c| c.is_ascii_digit() || c == '-' || c == '+');
+        .is_some_and(|c| c.is_ascii_digit() || c == '-' || c == '+')
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '-' || c == '+' || c == '.');
     let is_string_literal = trimmed.starts_with('\'') || uppercase.starts_with("X'");
 
     if is_keyword_default || is_numeric_literal || is_string_literal {
-        trimmed.to_string()
+        trimmed
     } else {
         format!("({trimmed})")
     }
@@ -117,15 +129,25 @@ fn column_changed_for_backend(
     before: &ColumnModel,
     after: &ColumnModel,
 ) -> bool {
+    let mut before = before.clone();
+    let mut after = after.clone();
     if backend == DatabaseBackend::Sqlite {
-        let mut before = before.clone();
-        let mut after = after.clone();
+        // Spatial metadata is not represented in SQLite DDL the same way as Postgres.
         before.spatial = None;
         after.spatial = None;
-        return before != after;
     }
 
-    before != after
+    if before.name != after.name
+        || before.sql_type != after.sql_type
+        || before.nullable != after.nullable
+        || before.is_primary_key != after.is_primary_key
+        || before.is_unique != after.is_unique
+        || before.spatial != after.spatial
+    {
+        return true;
+    }
+
+    !defaults_equivalent(&before.default, &after.default)
 }
 
 fn order_tables_by_foreign_keys<'a>(
@@ -1291,7 +1313,9 @@ pub async fn introspect_sqlite_schema(
                 let name: String = row.try_get("name")?;
                 let sql_type: String = row.try_get("type")?;
                 let nullable = row.try_get::<i64, _>("notnull")? == 0;
-                let default = row.try_get::<Option<String>, _>("dflt_value")?;
+                let default = row
+                    .try_get::<Option<String>, _>("dflt_value")?
+                    .map(|value| super::dialect::canonicalize_column_default_expression(&value));
                 let is_primary_key = row.try_get::<i64, _>("pk")? > 0;
                 Ok(ColumnModel {
                     name,

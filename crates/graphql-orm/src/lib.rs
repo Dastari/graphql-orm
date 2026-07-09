@@ -86,11 +86,20 @@
 //! # Generated Resolver Auth
 //!
 //! Generated resolvers understand a project-agnostic
-//! [`graphql::auth::AuthSubject`] with an id, roles, scopes, and optional
-//! tenant id. Applications can attach `AuthSubject` to async-graphql request
-//! data directly, or keep attaching the legacy `String` user id while
-//! migrating; [`graphql::auth::AuthExt::auth_subject`] upgrades legacy ids into
-//! subjects with empty roles and scopes.
+//! [`graphql::auth::AuthSubject`] with an id, optional user id, roles, scopes,
+//! tenant id, token/session references, and safe claims. Applications can
+//! attach `AuthSubject` to async-graphql request data directly, or keep
+//! attaching the legacy `String` user id while migrating;
+//! [`graphql::auth::AuthExt::auth_subject`] upgrades legacy ids into subjects
+//! with empty roles and scopes.
+//!
+//! Authorization policy enforcement is controlled by
+//! [`graphql::auth::AuthorizationMode`]. The current default is
+//! `LegacyPermissive` (missing providers allow). Production services should set
+//! `DeclaredPoliciesRequired` so declared policy keys never fail open.
+//!
+//! Public GraphQL errors use [`graphql::errors::OrmPublicError`] so SQL and
+//! configuration details stay server-side.
 //!
 //! ```ignore
 //! schema_roots! {
@@ -176,13 +185,12 @@
 //! Generated connections use offset-style cursors. [`crate::graphql::orm::PageInput`]
 //! clamps negative offsets to `0`. [`crate::graphql::orm::PaginationConfig`]
 //! controls generated connection defaults and caps; the default configuration
-//! applies a limit of `1000` when `page.limit` is omitted and clamps explicit
-//! limits to `1000`. Configure it on [`crate::db::Database::builder`] for
-//! services that need smaller pages, larger sync/export pages, or intentionally
-//! unbounded generated connections. Repository-style `fetch_all` helpers remain
-//! unbounded unless the caller supplies pagination. Host code that inspects
-//! [`crate::graphql::orm::PageInput`] directly should use
-//! [`crate::graphql::orm::PageInput::limit_with_config`] or
+//! applies a limit of `50` when `page.limit` is omitted and clamps explicit
+//! limits to `100`. Use [`crate::graphql::orm::PaginationConfig::legacy`] for
+//! the previous 1000/1000 behavior during migration. Repository-style
+//! `fetch_all` helpers remain unbounded unless the caller supplies pagination.
+//! Host code that inspects [`crate::graphql::orm::PageInput`] directly should
+//! use [`crate::graphql::orm::PageInput::limit_with_config`] or
 //! [`crate::graphql::orm::PaginationConfig::resolve_page`]; the legacy
 //! `PageInput::limit()` helper is deprecated because it can only use the default
 //! cap. Paged relation batches use backend window functions where available so

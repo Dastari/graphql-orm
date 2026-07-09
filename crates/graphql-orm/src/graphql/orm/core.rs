@@ -52,13 +52,17 @@ pub enum SqlValue {
     Null,
 }
 
-/// Request-local database authorization context for PostgreSQL RLS.
+/// Request-local database authorization context for PostgreSQL RLS and
+/// structural multi-tenant predicates.
 ///
 /// Attach this value to an `async-graphql` request with `request.data(...)`.
 /// Generated PostgreSQL resolvers read it from the GraphQL context and apply it
-/// as transaction-local `app.*` settings before executing database work. When it
-/// is absent, generated resolvers use the existing non-RLS-aware execution path.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// as transaction-local `app.*` settings before executing database work.
+///
+/// Under [`crate::graphql::auth::AuthorizationMode::DeclaredPoliciesRequired`]
+/// (and stricter modes), entities that declare tenant/RLS metadata fail closed
+/// when this context is missing.
+#[derive(Clone, PartialEq, Eq)]
 pub struct DbAuthContext {
     /// Application user identifier exposed as `app.user_id`.
     pub user_id: Option<String>,
@@ -71,7 +75,38 @@ pub struct DbAuthContext {
     /// Application scopes serialized to `app.scopes`.
     pub scopes: Vec<String>,
     /// Optional JSON claims serialized to `app.claims`.
+    ///
+    /// Never store raw tokens here. Claim bodies are redacted in [`Debug`] and
+    /// contribute only a fingerprint to cache partition keys.
     pub claims_json: Option<serde_json::Value>,
+    /// Optional token reference (`jti` / token id), never a raw secret.
+    pub token_id: Option<String>,
+    /// Optional session reference.
+    pub session_id: Option<String>,
+    /// Optional actor/on-behalf-of identity.
+    pub actor_id: Option<String>,
+    /// Optional policy-version stamp for cache invalidation.
+    pub policy_version: Option<String>,
+}
+
+impl std::fmt::Debug for DbAuthContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DbAuthContext")
+            .field("user_id", &self.user_id)
+            .field("subject", &self.subject)
+            .field("tenant_id", &self.tenant_id)
+            .field("roles_len", &self.roles.len())
+            .field("scopes_len", &self.scopes.len())
+            .field(
+                "claims_json",
+                &self.claims_json.as_ref().map(|_| "[redacted]"),
+            )
+            .field("token_id", &self.token_id)
+            .field("session_id", &self.session_id)
+            .field("actor_id", &self.actor_id)
+            .field("policy_version", &self.policy_version)
+            .finish()
+    }
 }
 
 impl DbAuthContext {
@@ -82,12 +117,16 @@ impl DbAuthContext {
     /// directly.
     pub fn from_subject(subject: &AuthSubject) -> Self {
         Self {
-            user_id: Some(subject.id.clone()),
+            user_id: subject.user_id.clone().or_else(|| Some(subject.id.clone())),
             subject: Some(subject.id.clone()),
             tenant_id: subject.tenant_id.clone(),
             roles: subject.roles.clone(),
             scopes: subject.scopes.clone(),
-            claims_json: None,
+            claims_json: subject.claims.clone(),
+            token_id: subject.token_id.clone(),
+            session_id: subject.session_id.clone(),
+            actor_id: subject.actor_id.clone(),
+            policy_version: None,
         }
     }
 
@@ -106,6 +145,10 @@ impl DbAuthContext {
             roles,
             scopes,
             claims_json: None,
+            token_id: None,
+            session_id: None,
+            actor_id: None,
+            policy_version: None,
         }
     }
 
@@ -126,27 +169,55 @@ impl DbAuthContext {
             roles,
             scopes,
             claims_json,
+            token_id: None,
+            session_id: None,
+            actor_id: None,
+            policy_version: None,
         }
+    }
+
+    /// Attach a policy-version stamp used for DataLoader cache partitioning.
+    pub fn with_policy_version(mut self, policy_version: impl Into<String>) -> Self {
+        self.policy_version = Some(policy_version.into());
+        self
     }
 
     /// Return a stable key for batching and cache partitioning.
     ///
-    /// Roles and scopes are sorted in the key so equivalent contexts do not
-    /// batch separately due only to caller ordering.
+    /// Roles and scopes are sorted so equivalent contexts do not batch
+    /// separately due only to caller ordering. Claim JSON is fingerprinted
+    /// rather than embedded so cache keys do not retain sensitive claim bodies.
     pub fn canonical_key(&self) -> String {
         let mut roles = self.roles.clone();
         roles.sort();
         let mut scopes = self.scopes.clone();
         scopes.sort();
-        serde_json::json!({
-            "user_id": self.user_id,
-            "subject": self.subject,
-            "tenant_id": self.tenant_id,
-            "roles": roles,
-            "scopes": scopes,
-            "claims_json": self.claims_json,
-        })
-        .to_string()
+        let claims_fp = self
+            .claims_json
+            .as_ref()
+            .map(|value| {
+                let encoded = value.to_string();
+                let mut hash: u64 = 0xcbf29ce484222325;
+                for byte in encoded.as_bytes() {
+                    hash ^= u64::from(*byte);
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+                format!("{hash:016x}")
+            })
+            .unwrap_or_default();
+        format!(
+            "user={}|subject={}|tenant={}|roles={}|scopes={}|token={}|session={}|actor={}|policy={}|claims_fp={}",
+            self.user_id.as_deref().unwrap_or(""),
+            self.subject.as_deref().unwrap_or(""),
+            self.tenant_id.as_deref().unwrap_or(""),
+            roles.join(","),
+            scopes.join(","),
+            self.token_id.as_deref().unwrap_or(""),
+            self.session_id.as_deref().unwrap_or(""),
+            self.actor_id.as_deref().unwrap_or(""),
+            self.policy_version.as_deref().unwrap_or(""),
+            claims_fp,
+        )
     }
 
     /// Render PostgreSQL setting names and values for transaction-local auth.
@@ -990,7 +1061,8 @@ impl<B: OrmBackend> EntityPolicy<B> for ScopeEntityPolicy {
 
             let Some(subject) = subject else {
                 if self.require_auth {
-                    return Err(async_graphql::Error::new("unauthenticated"));
+                    return Err(crate::graphql::errors::OrmPublicError::unauthenticated()
+                        .into_graphql_error());
                 }
                 return Ok(required_scopes.is_empty());
             };
@@ -2398,7 +2470,9 @@ impl From<&EntityMetadata> for TableModel {
                     nullable: field.nullable,
                     is_primary_key: field.is_primary_key,
                     is_unique: field.is_unique,
-                    default: field.default.map(str::to_string),
+                    default: field
+                        .default
+                        .map(super::dialect::canonicalize_column_default_expression),
                 })
                 .collect(),
             indexes: value.indexes.iter().cloned().collect(),
@@ -2775,7 +2849,13 @@ pub fn stable_schema_model_hash(schema: &SchemaModel) -> String {
                 "not_unique"
             });
             canonical.push('|');
-            canonical.push_str(column.default.as_deref().unwrap_or(""));
+            canonical.push_str(
+                &column
+                    .default
+                    .as_deref()
+                    .map(super::dialect::canonicalize_column_default_expression)
+                    .unwrap_or_default(),
+            );
             canonical.push('|');
             if let Some(spatial) = column.spatial {
                 canonical.push_str(spatial.kind.as_sql());

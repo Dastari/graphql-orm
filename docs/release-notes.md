@@ -3,6 +3,41 @@
 This page records user-facing changes for recent `graphql-orm` releases. Version numbers refer to
 the runtime crate unless a macro crate version is called out separately.
 
+## 0.3.0
+
+Security hardening release for multi-tenant, authorization-sensitive services.
+
+- Bumped `graphql-orm` to `0.3.0`.
+- Added `AuthorizationMode` (`LegacyPermissive`, `DeclaredPoliciesRequired`,
+  `ExplicitPolicyForAllExposedOperations`) on `Database`.
+- Expanded `AuthSubject` with optional `user_id`, `claims`, `token_id`,
+  `session_id`, and `actor_id`; redacted `Debug`.
+- Expanded `DbAuthContext` with token/session/actor/policy-version fields and
+  claim-fingerprint cache keys.
+- Added `AccessContext` / `SystemAccess`.
+- Added `OrmPublicError` / `OrmErrorCode` safe public error contract.
+- Added structural tenant/owner helpers (`structural_auth`).
+- Added `FilterExpression::TrustedFragment`.
+- Enabled optional `auth-agql` bridge against `agql-auth` 0.7.
+- Changed pagination defaults from 1000/1000 to 50/100; restore with
+  `PaginationConfig::legacy()`.
+- Event sender locks no longer panic on poisoning.
+- Fixed SQLite managed-schema replan idempotency for generated timestamp
+  defaults: `unixepoch()` and `(unixepoch())` (and similar redundant outer
+  parentheses) compare equal after file reopen, so `additive_only` startups no
+  longer fail with a false `AlterColumn` on `created_at`/`updated_at`.
+
+Compatibility notes:
+
+- Behavioral/security: GraphQL auth/policy denials expose stable codes and safe
+  messages. Callers that parsed raw SQL/error strings must migrate.
+- Behavioral/security: pagination defaults are smaller. Use `legacy()` if a
+  service still needs 1000-row pages.
+- Behavioral: authorization mode default remains permissive for migration;
+  production should set `DeclaredPoliciesRequired`.
+- Structural: `DbAuthContext` struct literals need new optional fields (or use
+  constructors).
+
 ## 0.2.21
 
 Auth bridge release for generated resolvers and policy hooks.

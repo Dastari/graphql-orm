@@ -1,5 +1,9 @@
 pub mod auth;
+#[cfg(feature = "auth-agql")]
+pub mod auth_agql;
+pub mod errors;
 pub mod filters;
 pub mod loaders;
 pub mod orm;
 pub mod pagination;
+pub mod structural_auth;

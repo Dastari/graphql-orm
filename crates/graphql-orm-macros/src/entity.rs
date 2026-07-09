@@ -1581,12 +1581,12 @@ fn generate_entity_impl(
     } else {
         quote! { ::graphql_orm::graphql::orm::SqlValue::Int(if value { 1 } else { 0 }) }
     };
-    let current_epoch_runtime = if backend == BackendKind::Postgres {
-        quote! { "EXTRACT(EPOCH FROM NOW())::bigint" }
-    } else if backend == BackendKind::Mssql {
-        quote! { "DATEDIFF_BIG(second, '1970-01-01', SYSUTCDATETIME())" }
-    } else {
-        quote! { "unixepoch()" }
+    // Keep in lockstep with `backend_current_epoch_expr` so runtime helpers and
+    // generated column defaults use the same canonical form.
+    let current_epoch_expr = backend_current_epoch_expr(backend);
+    let current_epoch_runtime = {
+        let lit = syn::LitStr::new(current_epoch_expr, proc_macro2::Span::call_site());
+        quote! { #lit }
     };
     let current_date_runtime = if backend == BackendKind::Postgres {
         quote! { "CURRENT_DATE" }

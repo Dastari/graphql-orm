@@ -141,10 +141,14 @@ pub(crate) fn backend_helper_import_tokens(backend: BackendKind) -> proc_macro2:
 }
 
 pub(crate) fn backend_current_epoch_expr(backend: BackendKind) -> &'static str {
+    // Store defaults without redundant outer parentheses. SQLite DDL rendering
+    // re-wraps non-literal defaults as `DEFAULT (expr)`, and PRAGMA table_info
+    // returns the unwrapped form (`unixepoch()`). Keeping metadata unwrapped
+    // avoids false AlterColumn plans after reopening a file-backed database.
     match backend {
-        BackendKind::Postgres => "(EXTRACT(EPOCH FROM NOW())::bigint)",
+        BackendKind::Postgres => "EXTRACT(EPOCH FROM NOW())::bigint",
         BackendKind::Mssql => "DATEDIFF_BIG(second, '1970-01-01', SYSUTCDATETIME())",
-        BackendKind::Sqlite => "(unixepoch())",
+        BackendKind::Sqlite => "unixepoch()",
     }
 }
 

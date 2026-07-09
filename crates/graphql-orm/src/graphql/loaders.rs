@@ -237,10 +237,10 @@ pub fn relation_key_filter(
         let placeholders = std::iter::repeat_n("?", values.len())
             .collect::<Vec<_>>()
             .join(", ");
-        return FilterExpression::Raw {
-            clause: format!("{} IN ({})", columns[0], placeholders),
+        return FilterExpression::trusted_fragment(
+            format!("{} IN ({})", columns[0], placeholders),
             values,
-        };
+        );
     }
 
     let mut values = Vec::new();
@@ -258,10 +258,7 @@ pub fn relation_key_filter(
         .collect::<Vec<_>>()
         .join(" OR ");
 
-    FilterExpression::Raw {
-        clause: clauses,
-        values,
-    }
+    FilterExpression::trusted_fragment(clauses, values)
 }
 
 fn relation_key_alias(index: usize) -> String {

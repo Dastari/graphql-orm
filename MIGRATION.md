@@ -1,5 +1,113 @@
 # Migration Guide
 
+## 0.3.0 Security Hardening
+
+### SemVer Recommendation
+
+Release as **0.3.0** (minor with documented breaking security defaults for pagination
+and public error messages). A future major can flip `AuthorizationMode` default to
+`DeclaredPoliciesRequired`.
+
+### Authorization Mode
+
+```rust
+// Before (implicit fail-open when no policy provider)
+let database = Database::new(pool);
+
+// After (recommended production setting)
+let database = Database::new(pool)
+    .with_authorization_mode(AuthorizationMode::DeclaredPoliciesRequired);
+database.set_entity_policy(MyEntityPolicy);
+```
+
+| Mode | Current default | Secure recommended | Future default |
+| --- | --- | --- | --- |
+| `LegacyPermissive` | yes | no | removed as default |
+| `DeclaredPoliciesRequired` | no | yes | planned default |
+| `ExplicitPolicyForAllExposedOperations` | no | for high-assurance APIs | optional |
+
+### AuthSubject Expansion
+
+```rust
+// Before
+AuthSubject::from_parts(id, roles, scopes, tenant_id)
+
+// After (compatible) — same helper still works
+// Prefer builder for new fields:
+AuthSubject::builder(id)
+    .user_id(user_id)
+    .roles(roles)
+    .scopes(scopes)
+    .tenant_id(tenant)
+    .token_id(jti)
+    .session_id(session)
+    .actor_id(actor)
+    .build()
+```
+
+`Debug` no longer prints claim JSON bodies.
+
+### Public Errors
+
+```rust
+// Before
+Err(async_graphql::Error::new(error.to_string()))
+
+// After
+Err(OrmPublicError::from_sqlx(&error).into_graphql_error())
+```
+
+Missing auth messages changed from `"missing auth"` to `"unauthenticated"` with
+`extensions.code = "UNAUTHENTICATED"`.
+
+### Pagination Defaults
+
+```rust
+// Restore 0.2.x limits
+Database::new(pool).with_pagination_config(PaginationConfig::legacy())
+```
+
+Default limit: `1000` → `50`. Max limit: `1000` → `100`.
+
+### agql-auth Bridge
+
+```toml
+graphql-orm = { version = "0.3", features = ["sqlite", "auth-agql"] }
+```
+
+```rust
+use graphql_orm::graphql::auth_agql::auth_bundle_from_principal;
+let (subject, db_auth) = auth_bundle_from_principal(&principal);
+```
+
+### Structural Tenant Helpers
+
+```rust
+let resolution = resolve_structural_auth(
+    StructuralAuthMetadata::new(Some("tenant_id"), None, StructuralAuthorization::Required),
+    &StructuralAuthValues::from_subject(&subject),
+);
+```
+
+Macro-generated wiring of structural predicates on every operation path remains a
+follow-up; helpers are available for host and incremental macro integration.
+
+### Trusted SQL Fragments
+
+Prefer `FilterExpression::trusted_fragment(clause, values)` for host-authored
+predicates. `FilterExpression::Raw` remains for generated compatibility and is
+documented as a trusted surface.
+
+### SQLite Default Expression Idempotency
+
+No application migration is required. After upgrading, reopening a file-backed
+SQLite database and replanning the same managed schema should produce an empty
+plan even when live `PRAGMA table_info` returns `unixepoch()` while generated
+metadata previously declared `(unixepoch())`.
+
+`ApplyOptions::additive_only` behavior is unchanged for real non-additive steps
+such as altering a default from `unixepoch()` to `date('now')`.
+
 ## 0.2.21 Auth Bridge
 
 ### Structural Changes
@@ -18,7 +126,7 @@ let subject = ctx.auth_subject()?;
 ```
 
 Applications can keep injecting the legacy `String` user id while migrating. `graphql-orm` upgrades it
-to `AuthSubject { id, roles: [], scopes: [], tenant_id: None }`. New code should inject
+to `AuthSubject { id, roles: [], scopes: [], tenant_id: None, ... }`. New code should inject
 `AuthSubject` directly.
 
 If a downstream crate implemented `AuthExt` itself, add implementations for `auth_user_id`,
@@ -28,9 +136,14 @@ If a downstream crate implemented `AuthExt` itself, add implementations for `aut
 ```rust
 let request = request.data(AuthSubject {
     id: user.id.to_string(),
+    user_id: None,
     roles: user.roles.clone(),
     scopes: user.scopes.clone(),
     tenant_id: user.tenant_id.clone(),
+    claims: None,
+    token_id: None,
+    session_id: None,
+    actor_id: None,
 });
 ```
 
@@ -100,5 +213,4 @@ access path.
 
 - No JWT, OIDC, cookie, wildcard, or product-specific scope logic was added to `graphql-orm`.
 - PostgreSQL RLS helper functions still use exact scope matching.
-- The `auth-agql` feature is currently a reserved compile-time feature. The concrete agql-auth
-  conversion helpers will be added after the upstream agql-auth 0.7 API is tagged.
+- The `auth-agql` feature is available against `agql-auth` 0.7.

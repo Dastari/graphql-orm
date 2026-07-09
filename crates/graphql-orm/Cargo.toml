@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm"
-version = "0.2.21"
+version = "0.3.0"
 edition = "2024"
 description = "Runtime support crate for graphql-orm-macros"
 license = "MIT"
@@ -17,7 +17,7 @@ mssql = [
   "tokio/net",
 ]
 change-journal = []
-auth-agql = []
+auth-agql = ["dep:agql-auth"]
 resolver-case-pascal = ["graphql-orm-macros/resolver-case-pascal"]
 resolver-case-snake = ["graphql-orm-macros/resolver-case-snake"]
 resolver-case-screaming-snake = ["graphql-orm-macros/resolver-case-screaming-snake"]
@@ -35,6 +35,7 @@ field-case-lower = ["graphql-orm-macros/field-case-lower"]
 field-case-upper = ["graphql-orm-macros/field-case-upper"]
 
 [dependencies]
+agql-auth = { path = "../../../agql-auth", version = "0.7", optional = true }
 async-graphql = { version = "7", features = ["dataloader", "uuid"] }
 futures = "0.3"
 geo = { version = "0.33", optional = true, default-features = false }

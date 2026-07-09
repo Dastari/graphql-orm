@@ -35,7 +35,7 @@ Select exactly the backend support your service needs:
 
 ```toml
 [dependencies]
-graphql-orm = { version = "0.2.21", default-features = false, features = ["sqlite"] }
+graphql-orm = { version = "0.3.0", default-features = false, features = ["sqlite"] }
 ```
 
 Available backend features:
@@ -46,8 +46,8 @@ Available backend features:
 
 Optional integration features:
 
-- `auth-agql` - reserved for the agql-auth bridge; it currently compiles without adding a dependency
-  while the upstream agql-auth 0.7 API is pending
+- `auth-agql` - optional one-way bridge from `agql-auth` 0.7 principals into
+  `AuthSubject` / `DbAuthContext`
 
 Naming features are independent of backend features:
 

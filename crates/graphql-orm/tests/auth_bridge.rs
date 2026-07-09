@@ -37,7 +37,12 @@ async fn auth_ext_reports_missing_auth() {
 
     let response = schema.execute("{ subjectId }").await;
     assert_eq!(response.errors.len(), 1);
-    assert!(response.errors[0].message.contains("missing auth"));
+    assert_eq!(response.errors[0].message, "unauthenticated");
+    let extensions = response.errors[0].extensions.as_ref().expect("extensions");
+    assert_eq!(
+        extensions.get("code").map(|value| value.to_string()),
+        Some("\"UNAUTHENTICATED\"".to_string())
+    );
 }
 
 #[tokio::test]
@@ -318,7 +323,7 @@ mod sqlite_auth {
             .execute("{ privateNotes { edges { node { title } } } }")
             .await;
         assert_eq!(private_response.errors.len(), 1);
-        assert!(private_response.errors[0].message.contains("missing auth"));
+        assert_eq!(private_response.errors[0].message, "unauthenticated");
 
         let authed_schema = schema_builder(database)
             .data(AuthSubject::new("subject-1"))
