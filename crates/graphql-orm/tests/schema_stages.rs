@@ -259,6 +259,8 @@ fn sqlite_vocabularies_v1() -> TableModel {
         composite_unique_indexes: vec![],
         foreign_keys: vec![],
         search_indexes: vec![],
+        append_only: false,
+        check_constraints: vec![],
     }
 }
 
@@ -285,6 +287,8 @@ fn sqlite_vocabulary_terms_v1() -> TableModel {
             on_delete: DeletePolicy::Cascade,
         }],
         search_indexes: vec![],
+        append_only: false,
+        check_constraints: vec![],
     }
 }
 

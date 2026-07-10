@@ -3,6 +3,30 @@
 This page records user-facing changes for recent `graphql-orm` releases. Version numbers refer to
 the runtime crate unless a macro crate version is called out separately.
 
+## Distribution policy
+
+`graphql-orm` and `graphql-orm-macros` are distributed only from GitHub using reviewed full commit
+revision pins. Both manifests set `publish = false`; crates.io publication is neither supported nor
+required. The optional `auth-agql` bridge intentionally pins `agql-auth` at
+`5e7f230b96350f55496477c11f8a0505e6438779`. Consequently `cargo package -p graphql-orm` cannot
+resolve that Git-only optional dependency through the crates.io packaging model; this is expected.
+
+## 0.4.0
+
+Portable persistence primitives release. Runtime and macros are both `0.4.0`.
+
+- Added ORM-managed transactions with SQLite `BEGIN IMMEDIATE`, PostgreSQL `SERIALIZABLE`, safe
+  retry classification, auth propagation, and post-commit side-effect guarantees.
+- Added typed version/status CAS, append-only managed entities, portable named checks, and bounded
+  composite keyset connections.
+- Append-only and keyset behavior is opt-in. Legacy mutable CRUD and offset connections remain
+  available.
+- PostgreSQL owners must run the disposable-database matrix documented in `docs/development.md`
+  before tagging a release; schema tests create and drop objects.
+
+Full examples and backend semantics are in
+[Portable Persistence Primitives](portable-persistence.md).
+
 ## 0.3.0
 
 Security hardening release for multi-tenant, authorization-sensitive services.

@@ -2,6 +2,38 @@
 
 User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
 
+## 0.4.0
+
+Companion macros crate: `graphql-orm-macros` **0.4.0**.
+
+### Added
+
+- SQLx-free `Database::transaction` / `transaction_with_auth`, transaction-bound reads and writes,
+  state-machine isolation, safe retry classification, nested-call rejection, and cancellation-safe
+  rollback.
+- Opt-in `#[graphql_orm(version)]` atomic compare-and-swap with typed expected filters,
+  database-side monotonic increments, and explicit not-found/conflict/updated outcomes.
+- Opt-in `append_only = true` generated surfaces and managed SQLite/PostgreSQL trigger enforcement
+  with stable metadata, introspection, and drift planning.
+- Portable numeric, length, closed-set, and cross-field constraints generated as named managed
+  checks and mapped to safe constraint errors.
+- Opt-in composite keyset pagination for repository, transaction, and GraphQL paths with bounded
+  look-ahead queries and strict versioned opaque cursors.
+
+### Compatibility
+
+- Both crates are GitHub-only and set `publish = false`. Consumers must pin the reviewed full
+  `graphql-orm` commit SHA; the optional bridge retains its exact full-SHA `agql-auth` dependency.
+- Existing offset connections and mutable entity APIs remain unchanged unless the new attributes
+  are selected. Append-only entities intentionally omit mutation APIs.
+- `WriteBackend` was not extended; the public transaction runner uses the additive
+  `TransactionBackend` capability.
+- Stored numeric offset cursors are not accepted by keyset fields. Clients must begin keyset
+  traversal without a cursor after switching fields.
+
+See [MIGRATION.md](MIGRATION.md) and
+[portable persistence primitives](docs/portable-persistence.md).
+
 ## 0.3.0
 
 Companion macros crate: `graphql-orm-macros` **0.3.23** (epoch-default

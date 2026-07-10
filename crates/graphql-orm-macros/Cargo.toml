@@ -1,15 +1,19 @@
 [package]
 name = "graphql-orm-macros"
-version = "0.3.23"
+version = "0.4.0"
 edition = "2024"
 authors = ["Toby Martin"]
 description = "Procedural macros for async-graphql and ORM-backed entities, relations, and CRUD operations."
 readme = "README.md"
 repository = "https://github.com/Dastari/graphql-orm"
 homepage = "https://github.com/Dastari/graphql-orm/tree/main/crates/graphql-orm-macros"
-documentation = "https://docs.rs/graphql-orm-macros"
+documentation = "https://github.com/Dastari/graphql-orm/tree/main/crates/graphql-orm-macros"
+publish = false
 keywords = ["graphql", "proc-macro", "async-graphql", "sqlx", "orm"]
 categories = ["development-tools::procedural-macro-helpers", "database", "web-programming"]
+
+[package.metadata.distribution]
+method = "git-full-revision"
 
 [lib]
 proc-macro = true

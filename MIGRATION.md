@@ -1,5 +1,28 @@
 # Migration Guide
 
+`graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
+neither the runtime nor macros crate is published to crates.io.
+
+## 0.4.0 Portable Persistence
+
+This is an additive migration for existing entities. Upgrade both crates together to `0.4.0`.
+
+1. Replace host-owned pool transactions with `Database::transaction`; use `StateMachine` for
+   security-sensitive read/decide/write flows and retry the whole callback when classified
+   retryable.
+2. Add `#[graphql_orm(version, default = "0")]` to an `i64` field, apply the planned column
+   migration, then move guarded updates to `compare_and_swap`.
+3. Add `append_only = true` only after removing update/delete/upsert callers. Review and apply the
+   trigger plan with the schema-owner migration role; remove UPDATE/DELETE grants from ordinary
+   PostgreSQL roles as defense in depth.
+4. Add portable constraint attributes, validate existing data, and apply the planned SQLite table
+   rebuild or PostgreSQL named checks. New checks may reject historical invalid rows during rebuild.
+5. Add a deterministic `keyset = "..., id asc"` order and migrate clients to the generated keyset
+   field. Discard legacy numeric cursors; they intentionally fail strict keyset decoding.
+
+Managed startup should validate after every step. Missing append-only triggers or named checks are
+schema drift and must not be ignored or repaired with a reused migration version.
+
 ## 0.3.0 Security Hardening
 
 ### SemVer Recommendation
@@ -72,7 +95,7 @@ Default limit: `1000` → `50`. Max limit: `1000` → `100`.
 ### agql-auth Bridge
 
 ```toml
-graphql-orm = { version = "0.3", features = ["sqlite", "auth-agql"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.4.0", features = ["sqlite", "auth-agql"] }
 ```
 
 The optional feature depends on upstream `agql-auth` 0.7.0 via git revision

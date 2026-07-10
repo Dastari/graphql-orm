@@ -32,6 +32,9 @@ pub trait DatabaseSchema {
     fn columns() -> &'static [ColumnDef];
     fn indexes() -> &'static [IndexDef];
     fn composite_unique_indexes() -> &'static [&'static [&'static str]];
+    fn check_constraints() -> &'static [super::core::CheckConstraintDef] {
+        &[]
+    }
 }
 
 pub trait EntityRelations {
@@ -495,6 +498,140 @@ pub struct PageInput {
     pub limit: Option<i64>,
     /// Requested offset. Negative offsets are treated as `0`.
     pub offset: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeysetDirection {
+    Asc,
+    Desc,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeysetNulls {
+    First,
+    Last,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeysetOrderColumn {
+    pub column: &'static str,
+    pub direction: KeysetDirection,
+    pub nulls: KeysetNulls,
+}
+
+impl KeysetOrderColumn {
+    pub const fn asc(column: &'static str) -> Self {
+        Self {
+            column,
+            direction: KeysetDirection::Asc,
+            nulls: KeysetNulls::Last,
+        }
+    }
+
+    pub const fn desc(column: &'static str) -> Self {
+        Self {
+            column,
+            direction: KeysetDirection::Desc,
+            nulls: KeysetNulls::Last,
+        }
+    }
+
+    pub const fn nulls_first(mut self) -> Self {
+        self.nulls = KeysetNulls::First;
+        self
+    }
+
+    pub fn order_sql(self) -> String {
+        let direction = match self.direction {
+            KeysetDirection::Asc => "ASC",
+            KeysetDirection::Desc => "DESC",
+        };
+        let null_rank = match self.nulls {
+            KeysetNulls::First => 0,
+            KeysetNulls::Last => 1,
+        };
+        let nonnull_rank = 1 - null_rank;
+        format!(
+            "CASE WHEN {} IS NULL THEN {} ELSE {} END ASC, {} {}",
+            self.column, null_rank, nonnull_rank, self.column, direction
+        )
+    }
+}
+
+fn keyset_sql_value(value: &crate::graphql::pagination::KeysetValue) -> Option<SqlValue> {
+    use crate::graphql::pagination::KeysetValue;
+    match value {
+        KeysetValue::Null => None,
+        KeysetValue::String(value) => Some(SqlValue::String(value.clone())),
+        KeysetValue::Int(value) => Some(SqlValue::Int(*value)),
+        KeysetValue::Float(value) => Some(SqlValue::Float(*value)),
+        KeysetValue::Bool(value) => Some(SqlValue::Bool(*value)),
+        KeysetValue::Uuid(value) => uuid::Uuid::parse_str(value).ok().map(SqlValue::Uuid),
+    }
+}
+
+/// Render the lexicographic `after` predicate with explicit nullable ordering.
+pub fn render_keyset_after(
+    backend: DatabaseBackend,
+    columns: &[KeysetOrderColumn],
+    cursor: &[crate::graphql::pagination::KeysetValue],
+    start_index: usize,
+) -> Result<(String, Vec<SqlValue>), crate::graphql::errors::OrmPublicError> {
+    use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
+    use crate::graphql::pagination::KeysetValue;
+    if columns.len() != cursor.len() || columns.is_empty() {
+        return Err(OrmPublicError::new(OrmErrorCode::CursorInvalid));
+    }
+    let mut branches = Vec::new();
+    let mut values = Vec::new();
+    for index in 0..columns.len() {
+        let mut terms = Vec::new();
+        for prior in 0..index {
+            let column = columns[prior];
+            match &cursor[prior] {
+                KeysetValue::Null => terms.push(format!("{} IS NULL", column.column)),
+                value => {
+                    let value = keyset_sql_value(value)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::CursorInvalid))?;
+                    terms.push(format!(
+                        "{} = {}",
+                        column.column,
+                        backend.placeholder(start_index + values.len())
+                    ));
+                    values.push(value);
+                }
+            }
+        }
+        let column = columns[index];
+        let comparison = match &cursor[index] {
+            KeysetValue::Null => match column.nulls {
+                KeysetNulls::First => format!("{} IS NOT NULL", column.column),
+                KeysetNulls::Last => "1 = 0".to_string(),
+            },
+            value => {
+                let value = keyset_sql_value(value)
+                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::CursorInvalid))?;
+                let operator = match column.direction {
+                    KeysetDirection::Asc => ">",
+                    KeysetDirection::Desc => "<",
+                };
+                let scalar = format!(
+                    "{} {} {}",
+                    column.column,
+                    operator,
+                    backend.placeholder(start_index + values.len())
+                );
+                values.push(value);
+                match column.nulls {
+                    KeysetNulls::First => format!("({} IS NOT NULL AND {scalar})", column.column),
+                    KeysetNulls::Last => format!("({} IS NULL OR {scalar})", column.column),
+                }
+            }
+        };
+        terms.push(comparison);
+        branches.push(format!("({})", terms.join(" AND ")));
+    }
+    Ok((branches.join(" OR "), values))
 }
 
 impl PageInput {

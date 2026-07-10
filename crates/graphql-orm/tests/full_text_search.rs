@@ -420,15 +420,19 @@ async fn sqlite_managed_fts_is_maintained_by_orm_writes() -> Result<(), Box<dyn 
 
     let db = graphql_orm::db::Database::<graphql_orm::SqliteBackend>::new(pool.clone());
 
-    let created = SearchArticle::insert(
-        &db,
-        CreateSearchArticleInput {
-            title: "Melbourne Park".to_string(),
-            body: Some("A venue for tennis finals".to_string()),
-            published: true,
-        },
-    )
-    .await?;
+    let created = db
+        .transaction(TransactionMode::Default, |tx| {
+            Box::pin(async move {
+                tx.insert::<SearchArticle>(CreateSearchArticleInput {
+                    title: "Melbourne Park".to_string(),
+                    body: Some("A venue for tennis finals".to_string()),
+                    published: true,
+                })
+                .await
+                .map_err(Into::into)
+            })
+        })
+        .await?;
     SearchArticle::insert(
         &db,
         CreateSearchArticleInput {

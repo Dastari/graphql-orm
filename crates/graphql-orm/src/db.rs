@@ -1,10 +1,10 @@
 use crate::graphql::auth::AuthorizationMode;
 use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
-use crate::graphql::orm::WriteBackend;
 use crate::graphql::orm::{
     DefaultBackend, OrmBackend, PaginationConfig, SchemaManager, SchemaPolicy,
 };
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+use crate::graphql::orm::{TransactionBackend, WriteBackend};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -19,6 +19,11 @@ struct EventSenders {
 }
 
 const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 256;
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+tokio::task_local! {
+    static ORM_TRANSACTION_ACTIVE: bool;
+}
 
 /// Backend-neutral pool sizing options for ORM-owned connection helpers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -985,6 +990,110 @@ impl<B: OrmBackend> Database<B> {
         } else {
             Ok(())
         }
+    }
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+impl<B> Database<B>
+where
+    B: TransactionBackend,
+{
+    /// Run ORM reads and mutations atomically without exposing a driver transaction.
+    ///
+    /// The callback must be boxed because its future borrows the transaction-bound
+    /// [`MutationContext`](crate::graphql::orm::MutationContext). On callback error it is rolled back; on cancellation the
+    /// transaction guard rolls back when dropped. Deferred events and actions run
+    /// only after a successful commit.
+    pub async fn transaction<T, F>(
+        &self,
+        mode: crate::graphql::orm::TransactionMode,
+        callback: F,
+    ) -> Result<T, crate::graphql::orm::TransactionError>
+    where
+        F: for<'tx> FnOnce(
+            &'tx mut crate::graphql::orm::MutationContext<'_, B>,
+        ) -> futures::future::BoxFuture<
+            'tx,
+            Result<T, crate::graphql::errors::OrmPublicError>,
+        >,
+    {
+        self.transaction_with_auth(mode, None, callback).await
+    }
+
+    /// Run an ORM transaction with backend-neutral transaction-local auth state.
+    ///
+    /// PostgreSQL installs `auth` with transaction-local settings before the
+    /// callback runs, preserving generated RLS behavior without exposing a raw
+    /// connection. SQLite accepts the same portable API and applies no driver
+    /// settings. Calling either transaction runner from inside another runner
+    /// on the same Tokio task is rejected; independent nested transactions are
+    /// never opened implicitly.
+    pub async fn transaction_with_auth<T, F>(
+        &self,
+        mode: crate::graphql::orm::TransactionMode,
+        auth: Option<&crate::graphql::orm::DbAuthContext>,
+        callback: F,
+    ) -> Result<T, crate::graphql::orm::TransactionError>
+    where
+        F: for<'tx> FnOnce(
+            &'tx mut crate::graphql::orm::MutationContext<'_, B>,
+        ) -> futures::future::BoxFuture<
+            'tx,
+            Result<T, crate::graphql::errors::OrmPublicError>,
+        >,
+    {
+        if ORM_TRANSACTION_ACTIVE
+            .try_with(|active| *active)
+            .unwrap_or(false)
+        {
+            return Err(crate::graphql::orm::TransactionError::Rejected(
+                OrmPublicError::with_message(
+                    OrmErrorCode::Conflict,
+                    "nested ORM transactions are not supported",
+                ),
+            ));
+        }
+
+        ORM_TRANSACTION_ACTIVE
+            .scope(true, async move {
+                let mut tx = B::begin_orm_transaction(self.pool(), mode)
+                    .await
+                    .map_err(classify_transaction_error::<B>)?;
+                B::apply_auth_context_to_transaction(&mut tx, auth)
+                    .await
+                    .map_err(classify_transaction_error::<B>)?;
+                let mut context = crate::graphql::orm::MutationContext::new(self, tx);
+                let value = callback(&mut context).await.map_err(|error| {
+                    if error.is_retryable() {
+                        crate::graphql::orm::TransactionError::Retryable(error)
+                    } else {
+                        crate::graphql::orm::TransactionError::Rejected(error)
+                    }
+                })?;
+                context
+                    .commit_and_emit()
+                    .await
+                    .map_err(classify_transaction_error::<B>)?;
+                Ok(value)
+            })
+            .await
+    }
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+fn classify_transaction_error<B: TransactionBackend>(
+    error: sqlx::Error,
+) -> crate::graphql::orm::TransactionError {
+    use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
+    let internal = error.to_string();
+    if B::is_retryable_transaction_error(&error) {
+        crate::graphql::orm::TransactionError::Retryable(
+            OrmPublicError::new(OrmErrorCode::ServiceUnavailable).with_internal(internal),
+        )
+    } else {
+        crate::graphql::orm::TransactionError::Failed(
+            OrmPublicError::new(OrmErrorCode::InternalError).with_internal(internal),
+        )
     }
 }
 

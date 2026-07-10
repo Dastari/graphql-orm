@@ -426,7 +426,6 @@ async fn postgis_spatial_fields_indexes_and_predicates_round_trip()
         &created_place.id,
         UpdatePlaceInput {
             location: Some(point_value(2.0, 2.0)),
-            ..Default::default()
         },
     )
     .await?

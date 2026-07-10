@@ -15,6 +15,8 @@ pub(crate) struct EntityMetadata {
     pub(crate) schema_policy: Option<String>,
     pub(crate) auth: Option<String>,
     pub(crate) schema_only: bool,
+    pub(crate) append_only: bool,
+    pub(crate) keyset: Option<String>,
     pub(crate) backup_enabled: Option<bool>,
     pub(crate) backup_export_order: Option<i32>,
     pub(crate) backup_restore_order: Option<i32>,
@@ -107,6 +109,14 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitBool = value.parse()?;
                     metadata.schema_only = lit.value;
+                } else if meta.path.is_ident("append_only") {
+                    let value = meta.value()?;
+                    let lit: syn::LitBool = value.parse()?;
+                    metadata.append_only = lit.value;
+                } else if meta.path.is_ident("keyset") {
+                    let value = meta.value()?;
+                    let lit: syn::LitStr = value.parse()?;
+                    metadata.keyset = Some(lit.value());
                 } else if meta.path.is_ident("backup") {
                     let value = meta.value()?;
                     let lit: syn::LitBool = value.parse()?;
@@ -262,6 +272,24 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                 Ok(())
             })?;
         }
+    }
+
+    if metadata.append_only && metadata.upsert.is_some() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "append_only entities cannot declare upsert",
+        ));
+    }
+    if metadata.append_only
+        && metadata
+            .rls
+            .as_ref()
+            .is_some_and(|rls| rls.update.is_some() || rls.delete.is_some())
+    {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "append_only entities cannot declare UPDATE or DELETE RLS policies",
+        ));
     }
 
     Ok(metadata)
@@ -559,6 +587,14 @@ pub(crate) struct FieldMetadata {
     pub(crate) sortable: bool,
     pub(crate) unique: bool,
     pub(crate) is_primary_key: bool,
+    pub(crate) is_version: bool,
+    pub(crate) minimum: Option<String>,
+    pub(crate) maximum: Option<String>,
+    pub(crate) non_negative: bool,
+    pub(crate) min_length: Option<usize>,
+    pub(crate) max_length: Option<usize>,
+    pub(crate) one_of: Vec<String>,
+    pub(crate) gte_field: Option<String>,
     pub(crate) is_relation: bool,
     pub(crate) relation_target: Option<String>,
     pub(crate) relation_from: Option<String>,
@@ -688,6 +724,14 @@ impl Default for FieldMetadata {
             sortable: false,
             unique: false,
             is_primary_key: false,
+            is_version: false,
+            minimum: None,
+            maximum: None,
+            non_negative: false,
+            min_length: None,
+            max_length: None,
+            one_of: Vec::new(),
+            gte_field: None,
             is_relation: false,
             relation_target: None,
             relation_from: None,
@@ -919,6 +963,46 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             meta.order = false;
                             meta.subscribe = false;
                             meta.skip_input = true;
+                        } else if nested.path.is_ident("version") {
+                            meta.is_version = true;
+                            meta.skip_input = true;
+                            meta.write = false;
+                        } else if nested.path.is_ident("min") {
+                            let value = nested.value()?;
+                            let lit: syn::Lit = value.parse()?;
+                            meta.minimum = Some(match lit {
+                                syn::Lit::Int(value) => value.base10_digits().to_string(),
+                                syn::Lit::Float(value) => value.base10_digits().to_string(),
+                                _ => return Err(syn::Error::new(lit.span(), "min must be numeric")),
+                            });
+                        } else if nested.path.is_ident("max") {
+                            let value = nested.value()?;
+                            let lit: syn::Lit = value.parse()?;
+                            meta.maximum = Some(match lit {
+                                syn::Lit::Int(value) => value.base10_digits().to_string(),
+                                syn::Lit::Float(value) => value.base10_digits().to_string(),
+                                _ => return Err(syn::Error::new(lit.span(), "max must be numeric")),
+                            });
+                        } else if nested.path.is_ident("non_negative") {
+                            meta.non_negative = true;
+                        } else if nested.path.is_ident("min_length") {
+                            let value = nested.value()?;
+                            let lit: syn::LitInt = value.parse()?;
+                            meta.min_length = Some(lit.base10_parse()?);
+                        } else if nested.path.is_ident("max_length") {
+                            let value = nested.value()?;
+                            let lit: syn::LitInt = value.parse()?;
+                            meta.max_length = Some(lit.base10_parse()?);
+                        } else if nested.path.is_ident("one_of") {
+                            let value = nested.value()?;
+                            meta.one_of = parse_string_array_expr(
+                                value,
+                                "one_of must be an array of string literals",
+                            )?;
+                        } else if nested.path.is_ident("gte_field") {
+                            let value = nested.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            meta.gte_field = Some(lit.value());
                         } else if nested.path.is_ident("skip_input") {
                             meta.skip_input = true;
                         } else if nested.path.is_ident("json") {
@@ -1643,6 +1727,7 @@ fn generate_entity_impl(
     let schema_only = schema_only_override || entity_meta.schema_only;
     let entity_name_lit = struct_name.to_string();
     let backup_enabled = entity_meta.backup_enabled.unwrap_or(true);
+    let append_only = entity_meta.append_only;
     let backup_export_order = entity_meta
         .backup_export_order
         .map(|order| quote! { Some(#order) })
@@ -1727,6 +1812,7 @@ fn generate_entity_impl(
     // Collect field info
     let mut column_names: Vec<String> = Vec::new();
     let mut column_defs: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut constraint_defs: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut primary_key_cols: Vec<String> = Vec::new();
     let mut where_input_fields = Vec::new();
     let mut order_by_fields = Vec::new();
@@ -1924,6 +2010,175 @@ fn generate_entity_impl(
             .clone()
             .unwrap_or_else(|| rust_name.clone());
         let db_col_sql = backend_quote_identifier_path(backend, &db_col);
+        let constraint_type = option_inner_type(field_type).unwrap_or(field_type);
+        let constraint_type_name = quote! { #constraint_type }.to_string().replace(' ', "");
+        let numeric_constraint_type = matches!(
+            constraint_type_name.as_str(),
+            "i8" | "i16"
+                | "i32"
+                | "i64"
+                | "isize"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "u64"
+                | "usize"
+                | "f32"
+                | "f64"
+        );
+        if (field_meta.non_negative || field_meta.minimum.is_some() || field_meta.maximum.is_some())
+            && !numeric_constraint_type
+        {
+            return Err(syn::Error::new(
+                field.span(),
+                "numeric constraints require a numeric scalar field",
+            ));
+        }
+        if (field_meta.min_length.is_some() || field_meta.max_length.is_some())
+            && !is_string_type(constraint_type)
+            && !is_byte_vec_type(constraint_type)
+        {
+            return Err(syn::Error::new(
+                field.span(),
+                "length constraints require String or Vec<u8>",
+            ));
+        }
+        if !field_meta.one_of.is_empty() && !is_string_type(constraint_type) {
+            return Err(syn::Error::new(
+                field.span(),
+                "one_of currently requires String or Option<String>",
+            ));
+        }
+        if let (Some(minimum), Some(maximum)) = (&field_meta.minimum, &field_meta.maximum) {
+            if minimum
+                .parse::<f64>()
+                .ok()
+                .zip(maximum.parse::<f64>().ok())
+                .is_some_and(|(minimum, maximum)| minimum > maximum)
+            {
+                return Err(syn::Error::new(field.span(), "min must not exceed max"));
+            }
+        }
+        if field_meta
+            .min_length
+            .zip(field_meta.max_length)
+            .is_some_and(|(minimum, maximum)| minimum > maximum)
+        {
+            return Err(syn::Error::new(
+                field.span(),
+                "min_length must not exceed max_length",
+            ));
+        }
+        let constraint_prefix = format!(
+            "graphql_orm_check_{}_{}",
+            raw_table_name
+                .chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() {
+                    ch.to_ascii_lowercase()
+                } else {
+                    '_'
+                })
+                .collect::<String>(),
+            db_col
+                .chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() {
+                    ch.to_ascii_lowercase()
+                } else {
+                    '_'
+                })
+                .collect::<String>(),
+        );
+        let mut push_constraint = |suffix: &str, expression: String| {
+            let mut name = format!("{constraint_prefix}_{suffix}");
+            if name.len() > 63 {
+                let mut hash = 0xcbf29ce484222325u64;
+                for byte in name.as_bytes() {
+                    hash ^= u64::from(*byte);
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+                name = format!("{}_{}", &name[..46], format_args!("{hash:016x}"));
+            }
+            constraint_defs.push(quote! {
+                ::graphql_orm::graphql::orm::CheckConstraintDef {
+                    name: #name,
+                    expression: #expression,
+                }
+            });
+        };
+        if field_meta.non_negative {
+            push_constraint("non_negative", format!("{db_col_sql} >= 0"));
+        }
+        if let Some(minimum) = &field_meta.minimum {
+            push_constraint("min", format!("{db_col_sql} >= {minimum}"));
+        }
+        if let Some(maximum) = &field_meta.maximum {
+            push_constraint("max", format!("{db_col_sql} <= {maximum}"));
+        }
+        let length_function = if backend == BackendKind::Postgres && is_byte_vec_type(field_type) {
+            "octet_length"
+        } else {
+            "length"
+        };
+        if let Some(minimum) = field_meta.min_length {
+            push_constraint(
+                "min_length",
+                format!("{length_function}({db_col_sql}) >= {minimum}"),
+            );
+        }
+        if let Some(maximum) = field_meta.max_length {
+            push_constraint(
+                "max_length",
+                format!("{length_function}({db_col_sql}) <= {maximum}"),
+            );
+        }
+        if !field_meta.one_of.is_empty() {
+            let values = field_meta
+                .one_of
+                .iter()
+                .map(|value| format!("'{}'", value.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            push_constraint("one_of", format!("{db_col_sql} IN ({values})"));
+        }
+        if let Some(other_rust_field) = &field_meta.gte_field {
+            let other = parsed_fields
+                .iter()
+                .find(|parsed| {
+                    parsed
+                        .field
+                        .ident
+                        .as_ref()
+                        .is_some_and(|ident| ident == other_rust_field)
+                })
+                .ok_or_else(|| {
+                    syn::Error::new(
+                        field.span(),
+                        format!("gte_field references unknown field `{other_rust_field}`"),
+                    )
+                })?;
+            if other.meta.is_relation || other.meta.skip_db {
+                return Err(syn::Error::new(
+                    field.span(),
+                    "gte_field must reference a persisted scalar field",
+                ));
+            }
+            let other_type = option_inner_type(&other.field.ty).unwrap_or(&other.field.ty);
+            if quote! { #constraint_type }.to_string().replace(' ', "")
+                != quote! { #other_type }.to_string().replace(' ', "")
+            {
+                return Err(syn::Error::new(
+                    field.span(),
+                    "gte_field requires fields with the same scalar type",
+                ));
+            }
+            let other_column = other
+                .meta
+                .db_column
+                .clone()
+                .unwrap_or_else(|| other_rust_field.clone());
+            let other_column = backend_quote_identifier_path(backend, &other_column);
+            push_constraint("gte_field", format!("{db_col_sql} >= {other_column}"));
+        }
 
         // Determine SQL type and nullability
         let is_nullable = is_option_type(field_type);
@@ -2418,6 +2673,13 @@ fn generate_entity_impl(
                     ];
                     UNIQUE_INDEXES
                 }
+
+                fn check_constraints() -> &'static [::graphql_orm::graphql::orm::CheckConstraintDef] {
+                    static CONSTRAINTS: &[::graphql_orm::graphql::orm::CheckConstraintDef] = &[
+                        #(#constraint_defs),*
+                    ];
+                    CONSTRAINTS
+                }
             }
 
             impl ::graphql_orm::graphql::orm::EntityRelations for #struct_name {
@@ -2445,6 +2707,7 @@ fn generate_entity_impl(
                             #backup_restore_order,
                             #read_policy,
                             #write_policy,
+                            #append_only,
                         )
                     })
                 }
@@ -2780,6 +3043,13 @@ fn generate_entity_impl(
                 ];
                 UNIQUE_INDEXES
             }
+
+            fn check_constraints() -> &'static [::graphql_orm::graphql::orm::CheckConstraintDef] {
+                static CONSTRAINTS: &[::graphql_orm::graphql::orm::CheckConstraintDef] = &[
+                    #(#constraint_defs),*
+                ];
+                CONSTRAINTS
+            }
         }
 
         impl ::graphql_orm::graphql::orm::EntityRelations for #struct_name {
@@ -2807,6 +3077,7 @@ fn generate_entity_impl(
                         #backup_restore_order,
                         #read_policy,
                         #write_policy,
+                        #append_only,
                     )
                 })
             }
@@ -2828,6 +3099,7 @@ fn generate_entity_impl(
 // Filter Field Generation
 // ============================================================================
 
+#[allow(clippy::too_many_arguments)]
 fn generate_filter_field(
     backend: BackendKind,
     struct_name: &syn::Ident,

@@ -250,3 +250,43 @@ async fn host_declared_entity_policy_gates_generated_surfaces()
 
     Ok(())
 }
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn orm_transaction_preserves_generated_entity_policy()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = setup_pool().await?;
+    let policy = RecordingEntityPolicy::default();
+    let mut database = graphql_orm::db::Database::new(pool);
+    database.set_entity_policy(policy.clone());
+
+    let denied = database
+        .transaction(TransactionMode::Default, |tx| {
+            Box::pin(async move {
+                tx.insert::<Collection>(CreateCollectionInput {
+                    name: "denied".to_string(),
+                })
+                .await
+                .map_err(Into::into)
+            })
+        })
+        .await;
+    assert!(denied.is_err());
+    policy.allow_write("collection.write");
+    let created = database
+        .transaction(TransactionMode::Default, |tx| {
+            Box::pin(async move {
+                tx.insert::<Collection>(CreateCollectionInput {
+                    name: "allowed".to_string(),
+                })
+                .await
+                .map_err(Into::into)
+            })
+        })
+        .await?;
+    assert_eq!(created.name, "allowed");
+    assert!(policy.calls().iter().any(|call| {
+        call.kind == EntityAccessKind::Write && call.surface == EntityAccessSurface::Repository
+    }));
+    Ok(())
+}

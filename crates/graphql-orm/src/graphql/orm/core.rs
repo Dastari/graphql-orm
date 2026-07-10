@@ -3,7 +3,7 @@ use super::query::{
     ChangeAction, DatabaseEntity, DatabaseSchema, DatabaseSearchSchema, EntityRelations,
 };
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
-use super::query::{DatabaseFilter, DatabaseOrderBy, EntityQuery, FromSqlRow};
+use super::query::{DatabaseFilter, DatabaseOrderBy, Entity, EntityQuery, FromSqlRow};
 use super::{DefaultBackend, OrmBackend};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 use super::{DefaultWriteBackend, WriteBackend};
@@ -260,6 +260,61 @@ pub enum WriteOrigin {
     InternalMutationHook,
 }
 
+/// Isolation intent for an ORM-managed transaction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TransactionMode {
+    /// Backend default isolation, suitable when decisions do not race writers.
+    #[default]
+    Default,
+    /// Serialize state-machine decisions against concurrent writers.
+    ///
+    /// This uses serializable isolation on PostgreSQL and eagerly acquires the
+    /// SQLite write lock before the callback can perform its first read.
+    StateMachine,
+}
+
+/// Safe classification of an ORM-managed transaction failure.
+#[derive(Clone, Debug)]
+pub enum TransactionError {
+    /// The callback rejected the operation. The transaction was rolled back.
+    Rejected(crate::graphql::errors::OrmPublicError),
+    /// The whole callback may be retried from the beginning.
+    Retryable(crate::graphql::errors::OrmPublicError),
+    /// A non-retryable database or commit failure.
+    Failed(crate::graphql::errors::OrmPublicError),
+}
+
+/// Result of a single-statement typed conditional update.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConditionalUpdateOutcome<T> {
+    /// No row with the supplied primary key exists (or is visible).
+    NotFound,
+    /// The row exists but one or more expected predicates did not match.
+    Conflict,
+    /// Exactly one row was updated and returned.
+    Updated(T),
+}
+
+impl TransactionError {
+    pub fn public_error(&self) -> &crate::graphql::errors::OrmPublicError {
+        match self {
+            Self::Rejected(error) | Self::Retryable(error) | Self::Failed(error) => error,
+        }
+    }
+
+    pub const fn is_retryable(&self) -> bool {
+        matches!(self, Self::Retryable(_))
+    }
+}
+
+impl std::fmt::Display for TransactionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.public_error().fmt(formatter)
+    }
+}
+
+impl std::error::Error for TransactionError {}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MutationFieldValue {
     pub field: String,
@@ -401,7 +456,7 @@ pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub struct MutationQuery<'ctx, 'tx, T, B: WriteBackend = DefaultWriteBackend>
 where
-    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+    T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
 {
     hook_ctx: &'ctx mut MutationContext<'tx, B>,
     query: EntityQuery<T, B>,
@@ -413,7 +468,7 @@ where
     B: WriteBackend,
     for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
         sqlx::Executor<'c, Database = B::Database> + Send,
-    T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+    T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
 {
     fn new(hook_ctx: &'ctx mut MutationContext<'tx, B>) -> Self {
         Self {
@@ -463,16 +518,52 @@ where
     }
 
     pub async fn fetch_all(self) -> crate::Result<Vec<T>> {
+        let metadata = T::metadata();
+        self.hook_ctx
+            .database()
+            .ensure_entity_access(
+                None,
+                metadata.entity_name,
+                metadata.read_policy,
+                EntityAccessKind::Read,
+                EntityAccessSurface::Repository,
+            )
+            .await
+            .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
         let query = self.query;
         query.fetch_all_on(self.hook_ctx.executor()).await
     }
 
     pub async fn fetch_one(self) -> crate::Result<Option<T>> {
+        let metadata = T::metadata();
+        self.hook_ctx
+            .database()
+            .ensure_entity_access(
+                None,
+                metadata.entity_name,
+                metadata.read_policy,
+                EntityAccessKind::Read,
+                EntityAccessSurface::Repository,
+            )
+            .await
+            .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
         let query = self.query;
         query.fetch_one_on(self.hook_ctx.executor()).await
     }
 
     pub async fn count(self) -> crate::Result<i64> {
+        let metadata = T::metadata();
+        self.hook_ctx
+            .database()
+            .ensure_entity_access(
+                None,
+                metadata.entity_name,
+                metadata.read_policy,
+                EntityAccessKind::Read,
+                EntityAccessSurface::Repository,
+            )
+            .await
+            .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
         let query = self.query;
         query.count_on(self.hook_ctx.executor()).await
     }
@@ -799,8 +890,9 @@ where
         input: <T as MutationContextInsert<B>>::CreateInput,
     ) -> crate::Result<T>
     where
-        T: MutationContextInsert<B>,
+        T: MutationContextInsert<B> + Entity,
     {
+        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
         T::insert_in_mutation_context(self, input).await
     }
 
@@ -809,8 +901,9 @@ where
         input: <T as MutationContextUpsert<B>>::UpsertInput,
     ) -> crate::Result<UpsertOutcome<T>>
     where
-        T: MutationContextUpsert<B>,
+        T: MutationContextUpsert<B> + Entity,
     {
+        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
         T::upsert_in_mutation_context(self, input).await
     }
 
@@ -820,8 +913,9 @@ where
         input: <T as MutationContextUpdateById<B>>::UpdateInput,
     ) -> crate::Result<Option<T>>
     where
-        T: MutationContextUpdateById<B>,
+        T: MutationContextUpdateById<B> + Entity,
     {
+        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
         T::update_by_id_in_mutation_context(self, id, input).await
     }
 
@@ -831,9 +925,26 @@ where
         input: <T as MutationContextUpdateWhere<B>>::UpdateInput,
     ) -> crate::Result<i64>
     where
-        T: MutationContextUpdateWhere<B>,
+        T: MutationContextUpdateWhere<B> + Entity,
     {
+        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
         T::update_where_in_mutation_context(self, where_input, input).await
+    }
+
+    /// Atomically update one versioned entity when its version and typed
+    /// expected predicates match.
+    pub async fn compare_and_swap<'a, T>(
+        &'a mut self,
+        id: &'a <T as MutationContextCompareAndSwap<B>>::Id,
+        expected_version: i64,
+        expected: <T as MutationContextCompareAndSwap<B>>::Expected,
+        input: <T as MutationContextCompareAndSwap<B>>::UpdateInput,
+    ) -> crate::Result<ConditionalUpdateOutcome<T>>
+    where
+        T: MutationContextCompareAndSwap<B> + Entity,
+    {
+        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        T::compare_and_swap_in_mutation_context(self, id, expected_version, expected, input).await
     }
 
     pub async fn delete_by_id<'a, T>(
@@ -841,8 +952,9 @@ where
         id: &'a <T as MutationContextDeleteById<B>>::Id,
     ) -> crate::Result<bool>
     where
-        T: MutationContextDeleteById<B>,
+        T: MutationContextDeleteById<B> + Entity,
     {
+        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
         T::delete_by_id_in_mutation_context(self, id).await
     }
 
@@ -851,8 +963,9 @@ where
         where_input: <T as MutationContextDeleteWhere<B>>::WhereInput,
     ) -> crate::Result<i64>
     where
-        T: MutationContextDeleteWhere<B>,
+        T: MutationContextDeleteWhere<B> + Entity,
     {
+        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
         T::delete_where_in_mutation_context(self, where_input).await
     }
 
@@ -860,7 +973,7 @@ where
     where
         for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
             sqlx::Executor<'c, Database = B::Database> + Send,
-        T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+        T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
     {
         MutationQuery::new(self)
     }
@@ -870,10 +983,61 @@ where
         id: &'a <T as MutationContextFindById<B>>::Id,
     ) -> crate::Result<Option<T>>
     where
-        T: MutationContextFindById<B>,
+        T: MutationContextFindById<B> + Entity,
     {
+        let metadata = T::metadata();
+        self.db
+            .ensure_entity_access(
+                None,
+                metadata.entity_name,
+                metadata.read_policy,
+                EntityAccessKind::Read,
+                EntityAccessSurface::Repository,
+            )
+            .await
+            .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
         T::find_by_id_in_mutation_context(self, id).await
     }
+
+    pub async fn keyset_page<'a, T>(
+        &'a mut self,
+        filter: <T as MutationContextKeysetPage<B>>::Filter,
+        page: crate::graphql::pagination::KeysetPageInput,
+    ) -> Result<crate::graphql::pagination::Connection<T>, crate::graphql::errors::OrmPublicError>
+    where
+        T: MutationContextKeysetPage<B> + Entity,
+    {
+        let metadata = T::metadata();
+        self.db
+            .ensure_entity_access(
+                None,
+                metadata.entity_name,
+                metadata.read_policy,
+                EntityAccessKind::Read,
+                EntityAccessSurface::Repository,
+            )
+            .await
+            .map_err(|error| {
+                crate::graphql::errors::OrmPublicError::internal(format!("{error:?}"))
+            })?;
+        T::keyset_page_in_mutation_context(self, filter, page).await
+    }
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+async fn ensure_transaction_entity_write_access<T: Entity, B: WriteBackend>(
+    db: &crate::db::Database<B>,
+) -> crate::Result<()> {
+    let metadata = T::metadata();
+    db.ensure_entity_access(
+        None,
+        metadata.entity_name,
+        metadata.write_policy,
+        EntityAccessKind::Write,
+        EntityAccessSurface::Repository,
+    )
+    .await
+    .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -931,6 +1095,21 @@ pub trait MutationContextUpdateWhere<B: WriteBackend = DefaultWriteBackend>: Siz
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub trait MutationContextCompareAndSwap<B: WriteBackend = DefaultWriteBackend>: Sized {
+    type Id;
+    type Expected;
+    type UpdateInput;
+
+    fn compare_and_swap_in_mutation_context<'a>(
+        hook_ctx: &'a mut MutationContext<'_, B>,
+        id: &'a Self::Id,
+        expected_version: i64,
+        expected: Self::Expected,
+        input: Self::UpdateInput,
+    ) -> futures::future::BoxFuture<'a, crate::Result<ConditionalUpdateOutcome<Self>>>;
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub trait MutationContextDeleteById<B: WriteBackend = DefaultWriteBackend>: Sized {
     type Id;
 
@@ -958,6 +1137,23 @@ pub trait MutationContextFindById<B: WriteBackend = DefaultWriteBackend>: Sized 
         hook_ctx: &'a mut MutationContext<'_, B>,
         id: &'a Self::Id,
     ) -> futures::future::BoxFuture<'a, crate::Result<Option<Self>>>;
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub trait MutationContextKeysetPage<B: WriteBackend = DefaultWriteBackend>: Sized {
+    type Filter;
+
+    fn keyset_page_in_mutation_context<'a>(
+        hook_ctx: &'a mut MutationContext<'_, B>,
+        filter: Self::Filter,
+        page: crate::graphql::pagination::KeysetPageInput,
+    ) -> futures::future::BoxFuture<
+        'a,
+        Result<
+            crate::graphql::pagination::Connection<Self>,
+            crate::graphql::errors::OrmPublicError,
+        >,
+    >;
 }
 
 pub trait PostCommitErrorHandler<B: OrmBackend = DefaultBackend>: Send + Sync {
@@ -1799,6 +1995,8 @@ pub struct EntityMetadata {
     pub backup_restore_order: Option<i32>,
     pub read_policy: Option<&'static str>,
     pub write_policy: Option<&'static str>,
+    pub append_only: bool,
+    pub check_constraints: Box<[CheckConstraintDef]>,
     pub fields: Box<[FieldMetadata]>,
     pub indexes: Box<[IndexMetadata]>,
     pub composite_unique_indexes: Box<[Box<[&'static str]>]>,
@@ -1814,6 +2012,7 @@ impl EntityMetadata {
         backup_restore_order: Option<i32>,
         read_policy: Option<&'static str>,
         write_policy: Option<&'static str>,
+        append_only: bool,
     ) -> Self
     where
         T: DatabaseEntity + DatabaseSchema + EntityRelations + DatabaseSearchSchema,
@@ -1831,6 +2030,8 @@ impl EntityMetadata {
             backup_restore_order,
             read_policy,
             write_policy,
+            append_only,
+            check_constraints: T::check_constraints().to_vec().into_boxed_slice(),
             fields: T::columns()
                 .iter()
                 .map(FieldMetadata::from)
@@ -1927,6 +2128,20 @@ pub struct TableModel {
     pub composite_unique_indexes: Vec<Vec<String>>,
     pub foreign_keys: Vec<ForeignKeyModel>,
     pub search_indexes: Vec<SearchIndexModel>,
+    pub append_only: bool,
+    pub check_constraints: Vec<CheckConstraintModel>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CheckConstraintDef {
+    pub name: &'static str,
+    pub expression: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CheckConstraintModel {
+    pub name: String,
+    pub expression: String,
 }
 
 impl TableModel {
@@ -2548,7 +2763,17 @@ impl From<&EntityMetadata> for TableModel {
                     }]
                 })
                 .unwrap_or_default(),
+            append_only: value.append_only,
+            check_constraints: value
+                .check_constraints
+                .iter()
+                .map(|constraint| CheckConstraintModel {
+                    name: constraint.name.to_string(),
+                    expression: constraint.expression.to_string(),
+                })
+                .collect(),
         };
+        table.check_constraints.sort();
 
         for field in &value.fields {
             if field.is_filterable && field.spatial.is_none() {
@@ -2821,7 +3046,23 @@ pub fn stable_schema_model_hash(schema: &SchemaModel) -> String {
         canonical.push_str(&table.primary_keys().join(","));
         canonical.push('|');
         canonical.push_str(&table.default_sort);
+        canonical.push('|');
+        canonical.push_str(if table.append_only {
+            "append_only"
+        } else {
+            "mutable"
+        });
         canonical.push('\n');
+
+        let mut constraints = table.check_constraints.iter().collect::<Vec<_>>();
+        constraints.sort();
+        for constraint in constraints {
+            canonical.push_str("check:");
+            canonical.push_str(&constraint.name);
+            canonical.push('|');
+            canonical.push_str(&constraint.expression);
+            canonical.push('\n');
+        }
 
         let mut columns = table.columns.iter().collect::<Vec<_>>();
         columns.sort_by(|left, right| left.name.cmp(&right.name));
@@ -3180,6 +3421,15 @@ pub enum MigrationStep {
     DropForeignKey {
         table_name: String,
         foreign_key: ForeignKeyModel,
+    },
+    SetAppendOnly {
+        table_name: String,
+        enabled: bool,
+    },
+    SetCheckConstraints {
+        table_name: String,
+        before: Vec<CheckConstraintModel>,
+        after: Vec<CheckConstraintModel>,
     },
 }
 

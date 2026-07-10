@@ -4,8 +4,11 @@
 
 ```toml
 [dependencies]
-graphql-orm = { version = "0.2.21", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.4.0", default-features = false, features = ["sqlite"] }
 ```
+
+Exact full-revision Git dependencies are the supported installation method; the crates are not
+published to crates.io.
 
 The proc macros are re-exported by `graphql-orm`, so application code should usually import the
 prelude:

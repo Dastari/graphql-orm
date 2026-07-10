@@ -33,6 +33,9 @@ let database = Database::builder(pool)
 
 ## Write Support
 
+For atomic multi-entity state machines, versioned CAS, and immutable ledgers, see
+[Portable Persistence Primitives](portable-persistence.md).
+
 SQLite and Postgres support generated write helpers when the entity and root derive allow them.
 
 MSSQL is read-only:

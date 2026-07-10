@@ -82,6 +82,8 @@ fn timed_notes_schema_with_serial(
             composite_unique_indexes: vec![],
             foreign_keys: vec![],
             search_indexes: vec![],
+            append_only: false,
+            check_constraints: vec![],
         }],
     }
 }
@@ -323,7 +325,7 @@ async fn file_backed_reopen_and_replan_is_idempotent() -> Result<(), Box<dyn std
         apply_err.is_err(),
         "additive_only must reject real AlterColumn plans"
     );
-    let message = apply_err.err().expect("error").to_string();
+    let message = apply_err.expect_err("error").to_string();
     assert!(
         message.contains("non-additive") || message.contains("AlterColumn"),
         "unexpected rejection message: {message}"

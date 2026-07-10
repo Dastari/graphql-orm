@@ -1,3 +1,5 @@
+#![allow(clippy::vec_box, clippy::question_mark)]
+
 use async_graphql::SimpleObject;
 use graphql_orm::prelude::*;
 use sqlx::Row;

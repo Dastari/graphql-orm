@@ -35,6 +35,8 @@ fn users_v1() -> TableModel {
         composite_unique_indexes: vec![],
         foreign_keys: vec![],
         search_indexes: vec![],
+        append_only: false,
+        check_constraints: vec![],
     }
 }
 
@@ -111,6 +113,8 @@ fn posts_with_fk() -> TableModel {
             on_delete: DeletePolicy::Restrict,
         }],
         search_indexes: vec![],
+        append_only: false,
+        check_constraints: vec![],
     }
 }
 
@@ -148,6 +152,8 @@ fn places_with_spatial_index() -> TableModel {
         composite_unique_indexes: vec![],
         foreign_keys: vec![],
         search_indexes: vec![],
+        append_only: false,
+        check_constraints: vec![],
     }
 }
 

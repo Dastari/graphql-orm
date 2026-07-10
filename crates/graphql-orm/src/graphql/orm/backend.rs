@@ -93,6 +93,16 @@ pub trait SqlxBackend: OrmBackend {
 }
 
 pub trait WriteBackend: SqlxBackend {}
+
+/// Backend capability used by the public ORM-managed transaction runner.
+pub trait TransactionBackend: WriteBackend {
+    fn begin_orm_transaction<'a>(
+        pool: &'a Self::Pool,
+        mode: super::core::TransactionMode,
+    ) -> BoxFuture<'a, crate::Result<sqlx::Transaction<'a, Self::Database>>>;
+
+    fn is_retryable_transaction_error(error: &sqlx::Error) -> bool;
+}
 #[allow(async_fn_in_trait)]
 /// Backend capability for read-only live schema inspection.
 ///
@@ -335,6 +345,29 @@ impl SqlxBackend for SqliteBackend {
 #[cfg(feature = "sqlite")]
 impl WriteBackend for SqliteBackend {}
 #[cfg(feature = "sqlite")]
+impl TransactionBackend for SqliteBackend {
+    fn begin_orm_transaction<'a>(
+        pool: &'a Self::Pool,
+        mode: super::core::TransactionMode,
+    ) -> BoxFuture<'a, crate::Result<sqlx::Transaction<'a, Self::Database>>> {
+        Box::pin(async move {
+            match mode {
+                super::core::TransactionMode::Default => pool.begin().await,
+                super::core::TransactionMode::StateMachine => {
+                    pool.begin_with("BEGIN IMMEDIATE").await
+                }
+            }
+        })
+    }
+
+    fn is_retryable_transaction_error(error: &sqlx::Error) -> bool {
+        error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .is_some_and(|code| matches!(code.as_ref(), "5" | "6" | "261" | "262" | "517"))
+    }
+}
+#[cfg(feature = "sqlite")]
 impl SubscriptionBackend for SqliteBackend {}
 
 #[cfg(feature = "postgres")]
@@ -519,6 +552,30 @@ impl SqlxBackend for PostgresBackend {
 
 #[cfg(feature = "postgres")]
 impl WriteBackend for PostgresBackend {}
+#[cfg(feature = "postgres")]
+impl TransactionBackend for PostgresBackend {
+    fn begin_orm_transaction<'a>(
+        pool: &'a Self::Pool,
+        mode: super::core::TransactionMode,
+    ) -> BoxFuture<'a, crate::Result<sqlx::Transaction<'a, Self::Database>>> {
+        Box::pin(async move {
+            let mut tx = pool.begin().await?;
+            if mode == super::core::TransactionMode::StateMachine {
+                sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+                    .execute(tx.as_mut())
+                    .await?;
+            }
+            Ok(tx)
+        })
+    }
+
+    fn is_retryable_transaction_error(error: &sqlx::Error) -> bool {
+        error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .is_some_and(|code| matches!(code.as_ref(), "40001" | "40P01" | "55P03"))
+    }
+}
 #[cfg(feature = "postgres")]
 impl SubscriptionBackend for PostgresBackend {}
 

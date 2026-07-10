@@ -333,10 +333,7 @@ async fn filtered_repository_aggregates_run_in_sql() -> Result<(), Box<dyn std::
             .await?,
         2
     );
-    assert_eq!(
-        User::query(&pool).max_i64("missing_column").await.is_err(),
-        true
-    );
+    assert!(User::query(&pool).max_i64("missing_column").await.is_err());
 
     Ok(())
 }

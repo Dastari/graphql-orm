@@ -87,6 +87,7 @@ pub struct OrmPublicError {
     pub correlation_id: Option<String>,
     /// Internal diagnostic text never exposed by default GraphQL extensions.
     pub(crate) internal: Option<String>,
+    pub(crate) retryable: bool,
 }
 
 impl fmt::Debug for OrmPublicError {
@@ -96,6 +97,7 @@ impl fmt::Debug for OrmPublicError {
             .field("message", &self.message)
             .field("correlation_id", &self.correlation_id)
             .field("internal", &self.internal.as_ref().map(|_| "[redacted]"))
+            .field("retryable", &self.retryable)
             .finish()
     }
 }
@@ -108,6 +110,12 @@ impl fmt::Display for OrmPublicError {
 
 impl std::error::Error for OrmPublicError {}
 
+impl From<sqlx::Error> for OrmPublicError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::from_sqlx(&error)
+    }
+}
+
 impl OrmPublicError {
     /// Create a public error with the default safe message for `code`.
     pub fn new(code: OrmErrorCode) -> Self {
@@ -116,6 +124,7 @@ impl OrmPublicError {
             message: code.default_message().to_string(),
             correlation_id: None,
             internal: None,
+            retryable: false,
         }
     }
 
@@ -126,6 +135,7 @@ impl OrmPublicError {
             message: message.into(),
             correlation_id: None,
             internal: None,
+            retryable: false,
         }
     }
 
@@ -139,6 +149,11 @@ impl OrmPublicError {
     pub fn with_correlation_id(mut self, correlation_id: impl Into<String>) -> Self {
         self.correlation_id = Some(correlation_id.into());
         self
+    }
+
+    /// Whether retrying the complete transaction is safe and recommended.
+    pub const fn is_retryable(&self) -> bool {
+        self.retryable
     }
 
     /// Convenience constructors.
@@ -163,10 +178,27 @@ impl OrmPublicError {
 
     /// Map a backend SQL error into a public error without leaking SQL text.
     pub fn from_sqlx(error: &sqlx::Error) -> Self {
+        let retryable = error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .is_some_and(|code| {
+                matches!(
+                    code.as_ref(),
+                    "5" | "6" | "261" | "262" | "517" | "40001" | "40P01" | "55P03"
+                )
+            });
+        if retryable {
+            return Self {
+                retryable: true,
+                ..Self::new(OrmErrorCode::ServiceUnavailable).with_internal(error.to_string())
+            };
+        }
         match error {
             sqlx::Error::RowNotFound => Self::not_found(),
             sqlx::Error::Database(db)
-                if db.is_unique_violation() || db.is_foreign_key_violation() =>
+                if db.is_unique_violation()
+                    || db.is_foreign_key_violation()
+                    || db.is_check_violation() =>
             {
                 Self::new(OrmErrorCode::ConstraintViolation).with_internal(error.to_string())
             }

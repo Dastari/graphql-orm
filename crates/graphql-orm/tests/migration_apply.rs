@@ -107,6 +107,8 @@ async fn sqlite_migration_runner_applies_rebuild_plan() -> Result<(), Box<dyn st
             composite_unique_indexes: vec![],
             foreign_keys: vec![],
             search_indexes: vec![],
+            append_only: false,
+            check_constraints: vec![],
         }],
     };
     let target = SchemaModel {
@@ -150,6 +152,8 @@ async fn sqlite_migration_runner_applies_rebuild_plan() -> Result<(), Box<dyn st
             composite_unique_indexes: vec![],
             foreign_keys: vec![],
             search_indexes: vec![],
+            append_only: false,
+            check_constraints: vec![],
         }],
     };
 
@@ -315,6 +319,8 @@ async fn postgres_migration_runner_applies_plan() -> Result<(), Box<dyn std::err
             composite_unique_indexes: vec![],
             foreign_keys: vec![],
             search_indexes: vec![],
+            append_only: false,
+            check_constraints: vec![],
         }],
     };
 
@@ -432,6 +438,8 @@ fn users_v1_like() -> TableModel {
         composite_unique_indexes: vec![],
         foreign_keys: vec![],
         search_indexes: vec![],
+        append_only: false,
+        check_constraints: vec![],
     }
 }
 
@@ -532,6 +540,8 @@ fn sqlite_table(
         composite_unique_indexes: vec![],
         foreign_keys,
         search_indexes: vec![],
+        append_only: false,
+        check_constraints: vec![],
     }
 }
 

@@ -6,14 +6,18 @@
 ## Dependency
 
 ```toml
-graphql-orm = { version = "0.3", features = ["sqlite", "auth-agql"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.4.0", features = ["sqlite", "auth-agql"] }
 # Host applications may depend on agql-auth directly as well. The optional
 # graphql-orm auth-agql feature pins the exact upstream release:
 # git = "https://github.com/Dastari/agql-auth.git"
 # rev = "5e7f230b96350f55496477c11f8a0505e6438779"
 # version = "0.7.0"
-agql-auth = "0.7.0"
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "5e7f230b96350f55496477c11f8a0505e6438779", version = "0.7.0" }
 ```
+
+Both projects are intentionally Git-only. Cargo's crates.io packaging flow cannot package
+`graphql-orm` because the optional `agql-auth` dependency is Git-sourced; this is expected and is
+not a supported release path.
 
 ## Conversion
 

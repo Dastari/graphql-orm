@@ -332,3 +332,34 @@ async fn lifecycle_hooks_expose_before_after_and_roll_back_on_failure()
 
     Ok(())
 }
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn public_transaction_runs_hooks_and_emits_changes_after_commit()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = setup_pool().await?;
+    let hook = RecordingLifecycleHook::default();
+    let db = graphql_orm::db::Database::with_mutation_hook(pool, hook.clone());
+    let mut changes = db
+        .ensure_event_sender::<LifecycleRecordChangedEvent>()
+        .subscribe();
+    let created = db
+        .transaction(TransactionMode::Default, |tx| {
+            Box::pin(async move {
+                tx.insert::<LifecycleRecord>(CreateLifecycleRecordInput {
+                    title: "transaction".to_string(),
+                    archived: false,
+                })
+                .await
+                .map_err(Into::into)
+            })
+        })
+        .await?;
+    assert_eq!(created.title, "transaction");
+    let events = hook.snapshot();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].phase, MutationPhase::Before);
+    assert_eq!(events[1].phase, MutationPhase::After);
+    assert_eq!(changes.recv().await?.id, created.id);
+    Ok(())
+}

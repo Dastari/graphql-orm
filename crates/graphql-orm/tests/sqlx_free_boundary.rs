@@ -159,3 +159,54 @@ async fn managed_table_planning_can_ignore_unmanaged_live_tables() -> graphql_or
 
     Ok(())
 }
+
+#[tokio::test]
+async fn public_transaction_boundary_needs_no_sqlx_names() -> graphql_orm::Result<()> {
+    let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+        .await?
+        .with_schema_policy(SchemaPolicy::Managed);
+    let plan = database
+        .schema()
+        .plan_migration_to_entities(
+            "transaction-boundary-init",
+            "init",
+            &[SqlxBoundaryItem::metadata()],
+        )
+        .await?;
+    database
+        .schema()
+        .apply_migration(&plan, ApplyOptions::default())
+        .await?;
+
+    let inserted = database
+        .transaction(TransactionMode::StateMachine, |tx| {
+            Box::pin(async move {
+                let item = tx
+                    .insert::<SqlxBoundaryItem>(input("atomic", "Atomic"))
+                    .await?;
+                let visible = tx.find_by_id::<SqlxBoundaryItem>(&item.id).await?;
+                assert!(visible.is_some());
+                Ok(item)
+            })
+        })
+        .await
+        .expect("transaction commits");
+    assert_eq!(inserted.code, "atomic");
+
+    let rejected = database
+        .transaction(TransactionMode::Default, |tx| {
+            Box::pin(async move {
+                tx.insert::<SqlxBoundaryItem>(input("rolled-back", "Nope"))
+                    .await?;
+                Err::<(), _>(OrmPublicError::with_message(
+                    OrmErrorCode::Conflict,
+                    "state changed",
+                ))
+            })
+        })
+        .await
+        .expect_err("callback error rolls back");
+    assert_eq!(rejected.public_error().code, OrmErrorCode::Conflict);
+    assert_eq!(SqlxBoundaryItem::count_all(&database).await?, 1);
+    Ok(())
+}

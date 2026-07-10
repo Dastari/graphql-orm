@@ -1,10 +1,14 @@
 [package]
 name = "graphql-orm"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "Runtime support crate for graphql-orm-macros"
 license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm"
+publish = false
+
+[package.metadata.distribution]
+method = "git-full-revision"
 
 [features]
 default = ["sqlite"]
@@ -41,7 +45,7 @@ futures = "0.3"
 geo = { version = "0.33", optional = true, default-features = false }
 geo-types = { version = "0.7", optional = true }
 geojson = { version = "1", optional = true, default-features = true }
-graphql-orm-macros = { path = "../graphql-orm-macros", version = "0.3.23", default-features = false }
+graphql-orm-macros = { path = "../graphql-orm-macros", version = "0.4.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "uuid"] }

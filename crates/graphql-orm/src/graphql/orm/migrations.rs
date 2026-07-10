@@ -39,6 +39,51 @@ fn defaults_equivalent(before: &Option<String>, after: &Option<String>) -> bool 
     }
 }
 
+#[cfg(feature = "sqlite")]
+fn parse_generated_check_constraints(create_sql: &str) -> Vec<super::core::CheckConstraintModel> {
+    let mut constraints = Vec::new();
+    let mut rest = create_sql;
+    const PREFIX: &str = "CONSTRAINT graphql_orm_check_";
+    while let Some(start) = rest.find(PREFIX) {
+        rest = &rest[start + "CONSTRAINT ".len()..];
+        let Some(name_end) = rest.find(char::is_whitespace) else {
+            break;
+        };
+        let name = &rest[..name_end];
+        let after_name = rest[name_end..].trim_start();
+        let Some(check) = after_name.strip_prefix("CHECK") else {
+            rest = after_name;
+            continue;
+        };
+        let Some(open) = check.find('(') else {
+            break;
+        };
+        let mut depth = 0usize;
+        let mut close = None;
+        for (index, ch) in check[open..].char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else { break };
+        constraints.push(super::core::CheckConstraintModel {
+            name: name.to_string(),
+            expression: check[open + 1..close].trim().to_string(),
+        });
+        rest = &check[close + 1..];
+    }
+    constraints.sort();
+    constraints
+}
+
 fn render_default_clause(backend: DatabaseBackend, default: &str) -> String {
     if backend != DatabaseBackend::Sqlite {
         return default.to_string();
@@ -121,7 +166,118 @@ fn render_create_table_statement_for_name(
             foreign_key.on_delete.as_sql(),
         )
     }));
+    parts.extend(table.check_constraints.iter().map(|constraint| {
+        format!(
+            "CONSTRAINT {} CHECK ({})",
+            constraint.name, constraint.expression
+        )
+    }));
     format!("CREATE TABLE {} ({})", table_name, parts.join(", "))
+}
+
+fn append_only_name(table_name: &str) -> String {
+    let sanitized = table_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let full = format!("graphql_orm_append_only_{sanitized}");
+    if full.len() <= 56 {
+        return full;
+    }
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in full.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{}_{}", &full[..39], format_args!("{hash:016x}"))
+}
+
+fn render_append_only_statements(
+    backend: DatabaseBackend,
+    table_name: &str,
+    enabled: bool,
+) -> Vec<String> {
+    let name = append_only_name(table_name);
+    match (backend, enabled) {
+        (DatabaseBackend::Sqlite, true) => vec![
+            format!(
+                "CREATE TRIGGER {name}_update BEFORE UPDATE ON {table_name} BEGIN SELECT RAISE(ABORT, 'append-only entity'); END"
+            ),
+            format!(
+                "CREATE TRIGGER {name}_delete BEFORE DELETE ON {table_name} BEGIN SELECT RAISE(ABORT, 'append-only entity'); END"
+            ),
+        ],
+        (DatabaseBackend::Sqlite, false) => vec![
+            format!("DROP TRIGGER IF EXISTS {name}_update"),
+            format!("DROP TRIGGER IF EXISTS {name}_delete"),
+        ],
+        (DatabaseBackend::Postgres, true) => vec![
+            format!(
+                "CREATE OR REPLACE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$ BEGIN RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'append-only entity'; END $$"
+            ),
+            format!("REVOKE ALL ON FUNCTION {name}() FROM PUBLIC"),
+            format!(
+                "CREATE TRIGGER {name} BEFORE UPDATE OR DELETE ON {table_name} FOR EACH ROW EXECUTE FUNCTION {name}()"
+            ),
+            format!(
+                "DO $graphql_orm$ DECLARE target_owner name; BEGIN SELECT pg_get_userbyid(relowner) INTO target_owner FROM pg_class WHERE oid = '{table_name}'::regclass; EXECUTE format('ALTER FUNCTION {name}() OWNER TO %I', target_owner); END $graphql_orm$"
+            ),
+        ],
+        (DatabaseBackend::Postgres, false) => vec![
+            format!("DROP TRIGGER IF EXISTS {name} ON {table_name}"),
+            format!("DROP FUNCTION IF EXISTS {name}()"),
+        ],
+        (DatabaseBackend::Mysql | DatabaseBackend::Mssql, _) => vec![format!(
+            "-- append-only enforcement is not supported on {}",
+            backend.name()
+        )],
+    }
+}
+
+fn constraint_comment(expression: &str) -> String {
+    let hex = expression
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("graphql-orm:{hex}")
+}
+
+#[cfg(feature = "postgres")]
+fn decode_constraint_comment(comment: &str) -> Option<String> {
+    let hex = comment.strip_prefix("graphql-orm:")?;
+    if !hex.len().is_multiple_of(2) || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).ok())
+        .collect::<Option<Vec<_>>>()?;
+    String::from_utf8(bytes).ok()
+}
+
+fn render_constraint_comments(backend: DatabaseBackend, table: &TableModel) -> Vec<String> {
+    if backend != DatabaseBackend::Postgres {
+        return Vec::new();
+    }
+    table
+        .check_constraints
+        .iter()
+        .map(|constraint| {
+            format!(
+                "COMMENT ON CONSTRAINT {} ON {} IS '{}'",
+                constraint.name,
+                table.table_name,
+                constraint_comment(&constraint.expression)
+            )
+        })
+        .collect()
 }
 
 fn column_changed_for_backend(
@@ -424,6 +580,19 @@ pub fn diff_schema_models_for_backend(
                 });
             }
         }
+        if table.append_only != target_table.append_only {
+            steps.push(MigrationStep::SetAppendOnly {
+                table_name: table_name.clone(),
+                enabled: target_table.append_only,
+            });
+        }
+        if table.check_constraints != target_table.check_constraints {
+            steps.push(MigrationStep::SetCheckConstraints {
+                table_name: table_name.clone(),
+                before: table.check_constraints.clone(),
+                after: target_table.check_constraints.clone(),
+            });
+        }
     }
 
     SchemaDiff { steps }
@@ -451,6 +620,8 @@ fn migration_step_table_name(step: &MigrationStep) -> Option<&str> {
         MigrationStep::AlterSearchIndex { table_name, .. } => Some(table_name),
         MigrationStep::AddForeignKey { table_name, .. } => Some(table_name),
         MigrationStep::DropForeignKey { table_name, .. } => Some(table_name),
+        MigrationStep::SetAppendOnly { table_name, .. } => Some(table_name),
+        MigrationStep::SetCheckConstraints { table_name, .. } => Some(table_name),
     }
 }
 
@@ -461,6 +632,7 @@ fn sqlite_requires_table_rebuild(step: &MigrationStep) -> bool {
             | MigrationStep::AlterColumn { .. }
             | MigrationStep::AddForeignKey { .. }
             | MigrationStep::DropForeignKey { .. }
+            | MigrationStep::SetCheckConstraints { .. }
     )
 }
 
@@ -898,6 +1070,13 @@ fn render_sqlite_table_rebuild_statements(
     statements.extend(target_table.indexes.iter().map(|index| {
         render_create_index_statement(DatabaseBackend::Sqlite, &target_table.table_name, index)
     }));
+    if target_table.append_only {
+        statements.extend(render_append_only_statements(
+            DatabaseBackend::Sqlite,
+            &target_table.table_name,
+            true,
+        ));
+    }
     statements
 }
 
@@ -927,6 +1106,14 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
                     .iter()
                     .flat_map(|index| render_create_search_index_statement(backend, index)),
             );
+            if table.append_only {
+                statements.extend(render_append_only_statements(
+                    backend,
+                    &table.table_name,
+                    true,
+                ));
+            }
+            statements.extend(render_constraint_comments(backend, table));
             statements
         }
         MigrationStep::DropTable { table_name } => {
@@ -1077,6 +1264,49 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
                 )],
             }
         }
+        MigrationStep::SetAppendOnly {
+            table_name,
+            enabled,
+        } => render_append_only_statements(backend, table_name, *enabled),
+        MigrationStep::SetCheckConstraints {
+            table_name,
+            before,
+            after,
+        } => match backend {
+            DatabaseBackend::Postgres => {
+                let mut statements = before
+                    .iter()
+                    .map(|constraint| {
+                        format!(
+                            "ALTER TABLE {table_name} DROP CONSTRAINT IF EXISTS {}",
+                            constraint.name
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                statements.extend(after.iter().map(|constraint| {
+                    format!(
+                        "ALTER TABLE {table_name} ADD CONSTRAINT {} CHECK ({})",
+                        constraint.name, constraint.expression
+                    )
+                }));
+                statements.extend(after.iter().map(|constraint| {
+                    format!(
+                        "COMMENT ON CONSTRAINT {} ON {} IS '{}'",
+                        constraint.name,
+                        table_name,
+                        constraint_comment(&constraint.expression)
+                    )
+                }));
+                statements
+            }
+            DatabaseBackend::Sqlite => vec![format!(
+                "-- sqlite rebuild required for portable constraints on {table_name}"
+            )],
+            DatabaseBackend::Mysql | DatabaseBackend::Mssql => vec![format!(
+                "-- portable constraints are not supported on {}",
+                backend.name()
+            )],
+        },
     }
 }
 
@@ -1144,6 +1374,18 @@ pub fn classify_migration_step(step: &MigrationStep) -> PlannedMigrationStep {
         MigrationStep::DropForeignKey { .. } => (
             MigrationRisk::Risky,
             "drops an existing referential constraint",
+        ),
+        MigrationStep::SetAppendOnly { enabled: true, .. } => (
+            MigrationRisk::Additive,
+            "adds database enforcement that prevents row mutation",
+        ),
+        MigrationStep::SetAppendOnly { enabled: false, .. } => (
+            MigrationRisk::Risky,
+            "removes append-only database enforcement",
+        ),
+        MigrationStep::SetCheckConstraints { .. } => (
+            MigrationRisk::Risky,
+            "adds, removes, or changes same-row check constraints",
         ),
     };
 
@@ -1293,7 +1535,7 @@ pub async fn introspect_sqlite_schema(
 ) -> crate::Result<SchemaModel> {
     let pool = provider.pool();
     let table_rows = sqlx::query(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     )
     .fetch_all(pool)
     .await?;
@@ -1301,6 +1543,7 @@ pub async fn introspect_sqlite_schema(
     let mut tables = Vec::new();
     for row in table_rows {
         let table_name: String = row.try_get("name")?;
+        let create_sql: String = row.try_get::<Option<String>, _>("sql")?.unwrap_or_default();
         if is_internal_graphql_orm_table(&table_name) {
             continue;
         }
@@ -1429,6 +1672,14 @@ pub async fn introspect_sqlite_schema(
                 })
             })
             .collect::<crate::Result<Vec<_>>>()?;
+        let append_name = append_only_name(&table_name);
+        let append_trigger_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN (?, ?)",
+        )
+        .bind(format!("{append_name}_update"))
+        .bind(format!("{append_name}_delete"))
+        .fetch_one(pool)
+        .await?;
 
         tables.push(TableModel {
             entity_name: table_name.clone(),
@@ -1441,6 +1692,8 @@ pub async fn introspect_sqlite_schema(
             composite_unique_indexes,
             foreign_keys,
             search_indexes: Vec::new(),
+            append_only: append_trigger_count == 2,
+            check_constraints: parse_generated_check_constraints(&create_sql),
         });
     }
 
@@ -1724,6 +1977,71 @@ pub async fn introspect_postgres_schema(
                 })
             })
             .collect::<crate::Result<Vec<_>>>()?;
+        let append_trigger_name = append_only_name(&table_name);
+        let append_only: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM pg_trigger tr
+                JOIN pg_class c ON c.oid = tr.tgrelid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                JOIN pg_proc p ON p.oid = tr.tgfoid
+                WHERE n.nspname = $2 AND c.relname = $1
+                  AND tr.tgname = $3 AND NOT tr.tgisinternal
+                  AND (
+                      pg_get_triggerdef(tr.oid) LIKE '%BEFORE UPDATE OR DELETE%'
+                      OR pg_get_triggerdef(tr.oid) LIKE '%BEFORE DELETE OR UPDATE%'
+                  )
+                  AND p.proname = $3
+                  AND p.prosecdef
+                  AND p.proowner = c.relowner
+                  AND 'search_path=pg_catalog' = ANY(p.proconfig)
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
+                      WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+                  )
+            )",
+        )
+        .bind(&table_name)
+        .bind(&schema_name)
+        .bind(&append_trigger_name)
+        .fetch_one(pool)
+        .await?;
+        let check_rows = sqlx::query(
+            "SELECT con.conname AS name, pg_get_constraintdef(con.oid, false) AS definition,
+                    obj_description(con.oid, 'pg_constraint') AS comment
+             FROM pg_constraint con
+             JOIN pg_class c ON c.oid = con.conrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = $2 AND c.relname = $1
+               AND con.contype = 'c' AND con.conname LIKE 'graphql_orm_check_%'
+             ORDER BY con.conname",
+        )
+        .bind(&table_name)
+        .bind(&schema_name)
+        .fetch_all(pool)
+        .await?;
+        let check_constraints = check_rows
+            .into_iter()
+            .map(|row| {
+                let definition: String = row.try_get("definition")?;
+                let expression = row
+                    .try_get::<Option<String>, _>("comment")?
+                    .as_deref()
+                    .and_then(decode_constraint_comment)
+                    .unwrap_or_else(|| {
+                        definition
+                            .strip_prefix("CHECK (")
+                            .and_then(|value| value.strip_suffix(')'))
+                            .unwrap_or(&definition)
+                            .trim()
+                            .to_string()
+                    });
+                Ok(super::core::CheckConstraintModel {
+                    name: row.try_get("name")?,
+                    expression,
+                })
+            })
+            .collect::<crate::Result<Vec<_>>>()?;
 
         tables.push(TableModel {
             entity_name: table_name.clone(),
@@ -1736,6 +2054,8 @@ pub async fn introspect_postgres_schema(
             composite_unique_indexes: Vec::new(),
             foreign_keys,
             search_indexes: Vec::new(),
+            append_only,
+            check_constraints,
         });
     }
 
@@ -1984,6 +2304,8 @@ pub async fn introspect_mssql_schema(
             composite_unique_indexes: Vec::new(),
             foreign_keys: Vec::new(),
             search_indexes: Vec::new(),
+            append_only: false,
+            check_constraints: Vec::new(),
         });
     }
 

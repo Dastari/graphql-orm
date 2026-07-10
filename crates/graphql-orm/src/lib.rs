@@ -3,7 +3,15 @@
     clippy::iter_cloned_collect,
     clippy::needless_lifetimes,
     clippy::new_without_default,
-    clippy::too_many_arguments
+    clippy::too_many_arguments,
+    clippy::derivable_impls,
+    clippy::type_complexity,
+    clippy::if_same_then_else,
+    clippy::unnecessary_filter_map,
+    clippy::unnecessary_sort_by,
+    clippy::large_enum_variant,
+    clippy::items_after_test_module,
+    clippy::manual_contains
 )]
 
 //! Runtime crate for `graphql-orm`.

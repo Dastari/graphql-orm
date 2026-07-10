@@ -1,11 +1,11 @@
 use super::*;
 use crate::backend::{
     BackendKind, backend_database_type_tokens, backend_marker_tokens, backend_pool_type_tokens,
-    resolve_backend,
+    backend_quote_identifier_path, resolve_backend,
 };
 use crate::entity::{
     FieldMetadata, is_bool_type, is_byte_vec_type, is_option_type, is_serde_json_value_or_option,
-    is_uuid_type, is_vec_type, maybe_wrap_write_transform, option_inner_type,
+    is_string_type, is_uuid_type, is_vec_type, maybe_wrap_write_transform, option_inner_type,
     parse_entity_metadata, parse_field_metadata, resolver_auth_mode_tokens,
     spatial_geometry_type_tokens, type_path_last_ident,
 };
@@ -579,6 +579,114 @@ pub(crate) fn generate_graphql_operations(
         .meta
         .auto_generated
         .unwrap_or_else(|| pk_field == syn::Ident::new("id", pk_field.span()));
+    let version_fields = fields
+        .iter()
+        .filter_map(|field| {
+            parse_field_metadata(field)
+                .ok()
+                .filter(|meta| meta.is_version)
+                .map(|meta| (field, meta))
+        })
+        .collect::<Vec<_>>();
+    if version_fields.len() > 1 {
+        return Err(syn::Error::new_spanned(
+            struct_name,
+            "only one #[graphql_orm(version)] field is allowed per entity",
+        ));
+    }
+    let version_field = version_fields.first().map(|(field, meta)| {
+        let ident = field.ident.clone().expect("named entity field");
+        let rust_name = ident.to_string();
+        let column = meta.db_column.clone().unwrap_or(rust_name);
+        (ident, field.ty.clone(), column)
+    });
+    if let Some((_, ty, _)) = &version_field {
+        if !matches!(ty, syn::Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == "i64"))
+        {
+            return Err(syn::Error::new_spanned(
+                ty,
+                "#[graphql_orm(version)] currently requires an i64 field",
+            ));
+        }
+    }
+    let keyset_parts = if let Some(config) = entity_meta.keyset.as_deref() {
+        if has_composite_primary_key {
+            return Err(syn::Error::new_spanned(
+                struct_name,
+                "keyset pagination currently requires a single-column primary key",
+            ));
+        }
+        let mut parts = Vec::new();
+        for raw in config.split(',') {
+            let tokens = raw.split_whitespace().collect::<Vec<_>>();
+            if tokens.len() < 2
+                || !matches!(tokens[1].to_ascii_lowercase().as_str(), "asc" | "desc")
+            {
+                return Err(syn::Error::new_spanned(
+                    struct_name,
+                    "keyset entries must use `field asc|desc [nulls first|last]`",
+                ));
+            }
+            let field = fields
+                .iter()
+                .find(|field| field.ident.as_ref().is_some_and(|ident| ident == tokens[0]))
+                .ok_or_else(|| {
+                    syn::Error::new_spanned(
+                        struct_name,
+                        format!("keyset references unknown field `{}`", tokens[0]),
+                    )
+                })?;
+            let meta = parse_field_metadata(field)?;
+            if meta.is_relation || meta.skip_db {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "keyset fields must be persisted scalar fields",
+                ));
+            }
+            let nulls_first = match tokens.get(2..4) {
+                Some([nulls, first])
+                    if nulls.eq_ignore_ascii_case("nulls")
+                        && first.eq_ignore_ascii_case("first") =>
+                {
+                    true
+                }
+                Some([nulls, last])
+                    if nulls.eq_ignore_ascii_case("nulls") && last.eq_ignore_ascii_case("last") =>
+                {
+                    false
+                }
+                Some([]) | None => false,
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        field,
+                        "keyset null ordering must be `nulls first` or `nulls last`",
+                    ));
+                }
+            };
+            parts.push((
+                field.ident.clone().expect("named field"),
+                field.ty.clone(),
+                meta.db_column
+                    .clone()
+                    .unwrap_or_else(|| tokens[0].to_string()),
+                tokens[1].eq_ignore_ascii_case("asc"),
+                nulls_first,
+            ));
+        }
+        if parts.is_empty()
+            || parts
+                .last()
+                .is_none_or(|(field, _, _, _, _)| field != &pk_field)
+        {
+            return Err(syn::Error::new_spanned(
+                struct_name,
+                "keyset order must end with the primary key as a unique tiebreaker",
+            ));
+        }
+        Some(parts)
+    } else {
+        None
+    };
     let upsert_config = resolve_upsert_config(
         struct_name,
         fields,
@@ -2683,6 +2791,401 @@ pub(crate) fn generate_graphql_operations(
         quote! {}
     };
 
+    let (cas_helper_methods, cas_trait_impl) = if let Some((_version_ident, _, version_column)) =
+        &version_field
+    {
+        let version_column = version_column.clone();
+        (
+            quote! {
+                #[doc(hidden)]
+                async fn __gom_compare_and_swap_with_mutation_context<'a>(
+                    hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    id: &#pk_type_ty,
+                    expected_version: i64,
+                    expected: #where_input,
+                    mut input: #update_input,
+                ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::ConditionalUpdateOutcome<Self>> {
+                    use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow, SqlValue};
+
+                    ::graphql_orm::graphql::orm::execute_with_binds_on::<#backend_marker, _>(
+                        hook_ctx.executor(),
+                        "SAVEPOINT graphql_orm_cas",
+                        &[],
+                    ).await?;
+
+                    let current_entity = Self::__gom_fetch_by_id_on(hook_ctx.executor(), id).await?;
+                    let db = hook_ctx.database().clone();
+                    if let Some(ref current) = current_entity {
+                        db.ensure_writable_row(
+                            None,
+                            #entity_name_lit,
+                            <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                            ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                            current as &(dyn ::std::any::Any + Send + Sync),
+                        ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                    }
+                    let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(
+                        #entity_name_lit,
+                        hook_ctx,
+                    );
+                    db.run_before_update_with_context(
+                        &mut write_ctx,
+                        current_entity.as_ref().map(|entity| entity as &(dyn ::std::any::Any + Send + Sync)),
+                        &mut input as &mut (dyn ::std::any::Any + Send + Sync),
+                    ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+
+                    let mut set_clauses = vec![format!("{} = {} + 1", #version_column, #version_column)];
+                    let mut changed_fields = vec![#version_column];
+                    let mut values: Vec<SqlValue> = Vec::new();
+                    #(#update_field_checks_repo)*
+                    if #has_updated_at_column {
+                        set_clauses.push(format!("updated_at = {}", Self::__gom_current_epoch_expr()));
+                    }
+                    let before_state = current_entity
+                        .as_ref()
+                        .map(Self::__gom_capture_entity_state)
+                        .transpose()?;
+                    let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
+                    let expected_clause = if expected.is_empty() {
+                        None
+                    } else {
+                        let query = EntityQuery::<Self, #backend_marker>::new().filter(&expected);
+                        let (delete_sql, expected_values) = query.build_delete_sql();
+                        let clause = delete_sql.split_once(" WHERE ")
+                            .map(|(_, clause)| clause.to_string())
+                            .ok_or_else(|| Self::__gom_runtime_error("expected predicates produced empty SQL"))?;
+                        Some((clause, expected_values))
+                    };
+                    let pk_placeholder = Self::__gom_placeholder(values.len() + 1);
+                    values.push(#pk_bind_value_ref);
+                    let version_placeholder = Self::__gom_placeholder(values.len() + 1);
+                    values.push(SqlValue::Int(expected_version));
+                    let mut predicates = vec![
+                        format!("{} = {}", Self::PRIMARY_KEY, pk_placeholder),
+                        format!("{} = {}", #version_column, version_placeholder),
+                        format!("{} < {}", #version_column, i64::MAX),
+                    ];
+                    if let Some((clause, expected_values)) = expected_clause {
+                        predicates.push(Self::__gom_rebind_sql(&clause, values.len() + 1));
+                        values.extend(expected_values);
+                    }
+                    let sql = format!(
+                        "UPDATE {} SET {} WHERE {} RETURNING {}",
+                        #table_name,
+                        set_clauses.join(", "),
+                        predicates.join(" AND "),
+                        <Self as DatabaseEntity>::column_names().join(", "),
+                    );
+                    let rows = ::graphql_orm::graphql::orm::fetch_rows_on::<#backend_marker, _>(
+                        hook_ctx.executor(),
+                        &sql,
+                        &values,
+                    ).await?;
+                    if rows.len() > 1 {
+                        return Err(Self::__gom_runtime_error("conditional update affected more than one row"));
+                    }
+                    let Some(row) = rows.first() else {
+                        ::graphql_orm::graphql::orm::execute_with_binds_on::<#backend_marker, _>(
+                            hook_ctx.executor(),
+                            "ROLLBACK TO SAVEPOINT graphql_orm_cas",
+                            &[],
+                        ).await?;
+                        ::graphql_orm::graphql::orm::execute_with_binds_on::<#backend_marker, _>(
+                            hook_ctx.executor(),
+                            "RELEASE SAVEPOINT graphql_orm_cas",
+                            &[],
+                        ).await?;
+                        return if Self::__gom_fetch_by_id_on(hook_ctx.executor(), id).await?.is_some() {
+                            Ok(::graphql_orm::graphql::orm::ConditionalUpdateOutcome::Conflict)
+                        } else {
+                            Ok(::graphql_orm::graphql::orm::ConditionalUpdateOutcome::NotFound)
+                        };
+                    };
+                    let entity = <Self as FromSqlRow<#backend_marker>>::from_row(row)?;
+                    hook_ctx.run_mutation_hook(
+                        None,
+                        &::graphql_orm::graphql::orm::MutationEvent {
+                            phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
+                            action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
+                            entity_name: #entity_name_lit,
+                            table_name: #table_name,
+                            metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
+                            id: entity.#pk_field.to_string(),
+                            changes: mutation_changes.clone(),
+                            before_state: before_state.clone(),
+                            after_state: None,
+                        },
+                    ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                    hook_ctx.run_mutation_hook(
+                        None,
+                        &::graphql_orm::graphql::orm::MutationEvent {
+                            phase: ::graphql_orm::graphql::orm::MutationPhase::After,
+                            action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
+                            entity_name: #entity_name_lit,
+                            table_name: #table_name,
+                            metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
+                            id: entity.#pk_field.to_string(),
+                            changes: mutation_changes,
+                            before_state,
+                            after_state: Some(Self::__gom_capture_entity_state(&entity)?),
+                        },
+                    ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                    Self::__gom_queue_changed_event(
+                        hook_ctx,
+                        ::graphql_orm::graphql::orm::ChangeAction::Updated,
+                        Some(&entity),
+                    ).await?;
+                    ::graphql_orm::graphql::orm::execute_with_binds_on::<#backend_marker, _>(
+                        hook_ctx.executor(),
+                        "RELEASE SAVEPOINT graphql_orm_cas",
+                        &[],
+                    ).await?;
+                    Ok(::graphql_orm::graphql::orm::ConditionalUpdateOutcome::Updated(entity))
+                }
+
+                /// Atomically update this versioned entity when all typed expectations match.
+                pub async fn compare_and_swap(
+                    db: &::graphql_orm::db::Database<#backend_marker>,
+                    id: &#pk_type_ty,
+                    expected_version: i64,
+                    expected: #where_input,
+                    input: #update_input,
+                ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::ConditionalUpdateOutcome<Self>> {
+                    db.ensure_entity_access(
+                        None,
+                        #entity_name_lit,
+                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                        ::graphql_orm::graphql::orm::EntityAccessKind::Write,
+                        ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                    ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                    let tx = db.pool().begin().await?;
+                    let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::new(db, tx);
+                    let outcome = Self::__gom_compare_and_swap_with_mutation_context(
+                        &mut hook_ctx, id, expected_version, expected, input,
+                    ).await?;
+                    hook_ctx.commit_and_emit().await?;
+                    Ok(outcome)
+                }
+            },
+            quote! {
+                impl ::graphql_orm::graphql::orm::MutationContextCompareAndSwap<#backend_marker> for #struct_name {
+                    type Id = #pk_type_ty;
+                    type Expected = #where_input;
+                    type UpdateInput = #update_input;
+
+                    fn compare_and_swap_in_mutation_context<'a>(
+                        hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                        id: &'a Self::Id,
+                        expected_version: i64,
+                        expected: Self::Expected,
+                        input: Self::UpdateInput,
+                    ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<::graphql_orm::graphql::orm::ConditionalUpdateOutcome<Self>>> {
+                        Box::pin(async move {
+                            Self::__gom_compare_and_swap_with_mutation_context(
+                                hook_ctx, id, expected_version, expected, input,
+                            ).await
+                        })
+                    }
+                }
+            },
+        )
+    } else {
+        (quote! {}, quote! {})
+    };
+
+    let (keyset_repository_methods, keyset_trait_impl) = if let Some(parts) = &keyset_parts {
+        let mut order_tokens = Vec::new();
+        let mut cursor_tokens = Vec::new();
+        let mut fingerprint_parts = Vec::new();
+        for (field, ty, column, ascending, nulls_first) in parts {
+            let quoted_column = backend_quote_identifier_path(backend, column);
+            let direction = if *ascending {
+                quote! { ::graphql_orm::graphql::orm::KeysetOrderColumn::asc(#quoted_column) }
+            } else {
+                quote! { ::graphql_orm::graphql::orm::KeysetOrderColumn::desc(#quoted_column) }
+            };
+            let order = if *nulls_first {
+                quote! { #direction.nulls_first() }
+            } else {
+                direction
+            };
+            order_tokens.push(order);
+            fingerprint_parts.push(format!(
+                "{}:{}:{}",
+                column,
+                if *ascending { "asc" } else { "desc" },
+                if *nulls_first {
+                    "nulls_first"
+                } else {
+                    "nulls_last"
+                }
+            ));
+            let (inner, optional) = option_inner_type(ty)
+                .map(|inner| (inner, true))
+                .unwrap_or((ty, false));
+            let type_name = quote! { #inner }.to_string().replace(' ', "");
+            let value = if is_string_type(inner) {
+                quote! { ::graphql_orm::graphql::pagination::KeysetValue::String(value.clone()) }
+            } else if is_uuid_type(inner) {
+                quote! { ::graphql_orm::graphql::pagination::KeysetValue::Uuid(value.to_string()) }
+            } else if is_bool_type(inner) {
+                quote! { ::graphql_orm::graphql::pagination::KeysetValue::Bool(*value) }
+            } else if matches!(type_name.as_str(), "f32" | "f64") {
+                quote! { ::graphql_orm::graphql::pagination::KeysetValue::Float(*value as f64) }
+            } else if matches!(
+                type_name.as_str(),
+                "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32"
+            ) {
+                quote! { ::graphql_orm::graphql::pagination::KeysetValue::Int(*value as i64) }
+            } else {
+                return Err(syn::Error::new_spanned(
+                    ty,
+                    "keyset fields support String, UUID, bool, integer, and float scalar types",
+                ));
+            };
+            cursor_tokens.push(if optional {
+                quote! {
+                    match entity.#field.as_ref() {
+                        Some(value) => #value,
+                        None => ::graphql_orm::graphql::pagination::KeysetValue::Null,
+                    }
+                }
+            } else {
+                quote! {{ let value = &entity.#field; #value }}
+            });
+        }
+        let fingerprint = format!("v1:{}", fingerprint_parts.join(","));
+        (
+            quote! {
+                /// Fetch a bounded, stable keyset page using the entity's configured order.
+                pub async fn keyset_page(
+                    db: &::graphql_orm::db::Database<#backend_marker>,
+                    filter: #where_input,
+                    page: ::graphql_orm::graphql::pagination::KeysetPageInput,
+                ) -> Result<::graphql_orm::graphql::pagination::Connection<Self>, ::graphql_orm::graphql::errors::OrmPublicError> {
+                    db.transaction(::graphql_orm::graphql::orm::TransactionMode::Default, move |tx| {
+                        Box::pin(async move { tx.keyset_page::<Self>(filter, page).await })
+                    }).await.map_err(|error| error.public_error().clone())
+                }
+            },
+            quote! {
+                impl ::graphql_orm::graphql::orm::MutationContextKeysetPage<#backend_marker> for #struct_name {
+                    type Filter = #where_input;
+
+                    fn keyset_page_in_mutation_context<'a>(
+                        hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                        filter: Self::Filter,
+                        page: ::graphql_orm::graphql::pagination::KeysetPageInput,
+                    ) -> ::graphql_orm::futures::future::BoxFuture<'a, Result<::graphql_orm::graphql::pagination::Connection<Self>, ::graphql_orm::graphql::errors::OrmPublicError>> {
+                        Box::pin(async move {
+                            use ::graphql_orm::graphql::orm::DatabaseFilter;
+                            const ORDER: &[::graphql_orm::graphql::orm::KeysetOrderColumn] = &[
+                                #(#order_tokens),*
+                            ];
+                            const FINGERPRINT: &str = #fingerprint;
+                            if filter.requires_in_memory_filtering(<#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT) {
+                                return Err(::graphql_orm::graphql::errors::OrmPublicError::new(
+                                    ::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput,
+                                ));
+                            }
+                            let config = hook_ctx.database().pagination_config();
+                            let resolved = config.resolve_page(
+                                Some(&::graphql_orm::graphql::orm::PageInput { limit: page.limit, offset: Some(0) }),
+                                true,
+                            );
+                            let limit = resolved.limit.unwrap_or(::graphql_orm::graphql::orm::PaginationConfig::DEFAULT_LIMIT).max(0);
+                            let mut query = ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new().filter(&filter);
+                            let total_count = if page.include_total_count {
+                                Some(query.clone().count_on(hook_ctx.executor()).await.map_err(::graphql_orm::graphql::errors::OrmPublicError::from)?)
+                            } else {
+                                None
+                            };
+                            if let Some(cursor) = page.after.as_deref() {
+                                let values = ::graphql_orm::graphql::pagination::decode_keyset_cursor(cursor, FINGERPRINT, ORDER.len())?;
+                                let (predicate, binds) = ::graphql_orm::graphql::orm::render_keyset_after(
+                                    <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT,
+                                    ORDER,
+                                    &values,
+                                    query.values.len() + 1,
+                                )?;
+                                query = query.where_values(&predicate, binds);
+                            }
+                            query.order_clauses = ORDER.iter().map(|column| column.order_sql()).collect();
+                            query = query.paginate(&::graphql_orm::graphql::orm::PageInput {
+                                limit: Some(limit.saturating_add(1)),
+                                offset: Some(0),
+                            });
+                            let mut entities = query.fetch_all_on(hook_ctx.executor()).await.map_err(::graphql_orm::graphql::errors::OrmPublicError::from)?;
+                            let has_next_page = entities.len() > limit as usize;
+                            if has_next_page { entities.truncate(limit as usize); }
+                            let edges = entities
+                                .into_iter()
+                                .map(|entity| {
+                                    let values = vec![#(#cursor_tokens),*];
+                                    ::graphql_orm::graphql::pagination::Edge {
+                                        cursor: ::graphql_orm::graphql::pagination::encode_keyset_cursor(FINGERPRINT, values),
+                                        node: entity,
+                                    }
+                                })
+                                .collect::<Vec<_>>();
+                            Ok(::graphql_orm::graphql::pagination::Connection {
+                                page_info: ::graphql_orm::graphql::pagination::PageInfo {
+                                    has_next_page,
+                                    has_previous_page: page.after.is_some(),
+                                    start_cursor: edges.first().map(|edge| edge.cursor.clone()),
+                                    end_cursor: edges.last().map(|edge| edge.cursor.clone()),
+                                    total_count,
+                                },
+                                edges,
+                            })
+                        })
+                    }
+                }
+            },
+        )
+    } else {
+        (quote! {}, quote! {})
+    };
+    let keyset_graphql_method = if keyset_parts.is_some() {
+        let keyset_query_name =
+            apply_graphql_case(&format!("{}Keyset", plural_name), resolver_case);
+        quote! {
+            #[graphql(name = #keyset_query_name)]
+            async fn keyset(
+                &self,
+                ctx: &::graphql_orm::async_graphql::Context<'_>,
+                #[graphql(name = #where_arg_name)] where_input: Option<#where_input>,
+                #[graphql(name = #page_arg_name)] page: ::graphql_orm::graphql::pagination::KeysetPageInput,
+            ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                db.ensure_entity_access(
+                    Some(ctx),
+                    #entity_name_lit,
+                    <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                    ::graphql_orm::graphql::orm::EntityAccessKind::Read,
+                    ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
+                ).await?;
+                if db.row_policy().is_some() {
+                    return Err(::graphql_orm::graphql::errors::OrmPublicError::with_message(
+                        ::graphql_orm::graphql::errors::OrmErrorCode::AuthorizationMisconfigured,
+                        "keyset pagination requires database-visible row policy predicates",
+                    ).into_graphql_error());
+                }
+                let auth = ctx.data_opt::<::graphql_orm::graphql::orm::DbAuthContext>().cloned();
+                let filter = where_input.unwrap_or_default();
+                let connection = db.transaction_with_auth(
+                    ::graphql_orm::graphql::orm::TransactionMode::Default,
+                    auth.as_ref(),
+                    move |tx| Box::pin(async move { tx.keyset_page::<#struct_name>(filter, page).await }),
+                ).await.map_err(|error| error.public_error().clone().into_graphql_error())?;
+                Ok(#connection_type::from_generic(connection))
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let search_connection_definitions = if has_search {
         quote! {
             #[derive(::graphql_orm::async_graphql::SimpleObject, Debug, Clone)]
@@ -2932,7 +3435,226 @@ pub(crate) fn generate_graphql_operations(
         quote! {}
     };
 
-    if backend == BackendKind::Mssql || schema_policy_read_only || has_composite_primary_key {
+    let append_only_surface = if entity_meta.append_only {
+        quote! {
+            #[derive(Clone, Debug)]
+            pub struct #create_input { #(#create_input_fields)* }
+
+            #[derive(::graphql_orm::async_graphql::InputObject, Clone, Debug)]
+            #[graphql(name = #create_input_str, rename_fields = #field_case_rule)]
+            struct #graphql_create_input { #(#graphql_create_input_fields)* }
+
+            impl From<#graphql_create_input> for #create_input {
+                fn from(input: #graphql_create_input) -> Self {
+                    Self { #(#create_input_from_graphql_fields)* }
+                }
+            }
+
+            #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject)]
+            #[graphql(name = #result_type_str, rename_fields = #field_case_rule)]
+            pub struct #result_type {
+                pub success: bool,
+                pub error: Option<String>,
+                #[graphql(name = #entity_result_field_name)]
+                pub entity: Option<#struct_name>,
+            }
+
+            #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject, serde::Serialize, serde::Deserialize)]
+            #[graphql(name = #changed_event_str, rename_fields = #field_case_rule)]
+            pub struct #changed_event {
+                pub action: ::graphql_orm::graphql::orm::ChangeAction,
+                #[graphql(name = #change_kind_field_name)]
+                pub change_kind: ::graphql_orm::graphql::orm::ChangeKind,
+                pub id: #pk_type,
+                #[graphql(name = #source_entity_field_name)]
+                pub source_entity: Option<String>,
+                #[graphql(name = #source_id_field_name)]
+                pub source_id: Option<String>,
+                pub path: Vec<String>,
+                #[graphql(name = #entity_result_field_name)]
+                pub entity: Option<#struct_name>,
+            }
+
+            #[derive(Default)]
+            pub struct #mutations_struct;
+
+            #[::graphql_orm::async_graphql::Object]
+            impl #mutations_struct {
+                #[graphql(name = #create_mutation_name)]
+                async fn create(
+                    &self,
+                    ctx: &::graphql_orm::async_graphql::Context<'_>,
+                    #[graphql(name = #input_arg_name)] input: #graphql_create_input,
+                ) -> ::graphql_orm::async_graphql::Result<#result_type> {
+                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                    let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                    db.ensure_entity_access(
+                        Some(ctx), #entity_name_lit,
+                        <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                        ::graphql_orm::graphql::orm::EntityAccessKind::Write,
+                        ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
+                    ).await?;
+                    let auth = ctx.data_opt::<::graphql_orm::graphql::orm::DbAuthContext>().cloned();
+                    let input: #create_input = input.into();
+                    match db.transaction_with_auth(
+                        ::graphql_orm::graphql::orm::TransactionMode::Default,
+                        auth.as_ref(),
+                        move |tx| Box::pin(async move { tx.insert::<#struct_name>(input).await.map_err(Into::into) }),
+                    ).await {
+                        Ok(entity) => Ok(#result_type { success: true, error: None, entity: Some(entity) }),
+                        Err(error) => Ok(#result_type { success: false, error: Some(error.to_string()), entity: None }),
+                    }
+                }
+            }
+
+            #[derive(Default)]
+            pub struct #subscriptions_struct;
+
+            #[::graphql_orm::async_graphql::Subscription]
+            impl #subscriptions_struct {
+                #[graphql(name = #subscription_name)]
+                async fn on_changed(
+                    &self,
+                    ctx: &::graphql_orm::async_graphql::Context<'_>,
+                    #[graphql(name = #filter_arg_name)] _filter: Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>,
+                ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = #changed_event>> {
+                    use ::graphql_orm::futures::StreamExt;
+                    let db = ctx.data::<::graphql_orm::db::Database<#backend_marker>>()?;
+                    let rx = db.ensure_event_sender::<#changed_event>().subscribe();
+                    Ok(::graphql_orm::tokio_stream::wrappers::BroadcastStream::new(rx)
+                        .filter_map(|result| async move { result.ok() }))
+                }
+            }
+
+            impl #struct_name {
+                #[doc(hidden)]
+                fn __gom_runtime_error(message: impl Into<String>) -> ::graphql_orm::sqlx::Error {
+                    ::graphql_orm::sqlx::Error::Protocol(message.into())
+                }
+
+                #[doc(hidden)]
+                pub(crate) fn __gom_propagate_changed_event<'a>(
+                    hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    action: ::graphql_orm::graphql::orm::ChangeAction,
+                    entity: &'a Self,
+                    source_entity: &'a str,
+                    source_id: &'a str,
+                    path: Vec<String>,
+                    visited: &'a mut ::std::collections::HashSet<String>,
+                ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<()>> {
+                    Box::pin(async move { #(#propagation_blocks)* Ok(()) })
+                }
+
+                #[doc(hidden)]
+                async fn __gom_queue_changed_event(
+                    hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    action: ::graphql_orm::graphql::orm::ChangeAction,
+                    entity: &Self,
+                ) -> ::graphql_orm::Result<()> {
+                    #search_write_maintenance
+                    let source_id = entity.#pk_field.to_string();
+                    hook_ctx.queue_event(#changed_event {
+                        action,
+                        change_kind: ::graphql_orm::graphql::orm::ChangeKind::Direct,
+                        id: entity.#pk_field.clone(),
+                        source_entity: None, source_id: None, path: Vec::new(), entity: Some(entity.clone()),
+                    });
+                    let mut visited = ::std::collections::HashSet::from([format!(
+                        "{}:{}:{}:{}", #entity_name_lit, source_id, #entity_name_lit, source_id
+                    )]);
+                    Self::__gom_propagate_changed_event(
+                        hook_ctx, action, entity, #entity_name_lit, &source_id, Vec::new(), &mut visited,
+                    ).await
+                }
+
+                #[doc(hidden)]
+                async fn __gom_insert_with_mutation_context<'a>(
+                    hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    mut input: #create_input,
+                ) -> ::graphql_orm::Result<Self> {
+                    use ::graphql_orm::graphql::orm::{DatabaseEntity, SqlValue};
+                    let db = hook_ctx.database().clone();
+                    let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(#entity_name_lit, hook_ctx);
+                    db.run_before_create_with_context(&mut write_ctx, &mut input as &mut (dyn ::std::any::Any + Send + Sync))
+                        .await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                    #created_pk_init
+                    let sql = Self::__gom_rebind_sql(#insert_sql, 1);
+                    let mut bind_values: Vec<SqlValue> = Vec::new();
+                    #prepend_pk_bind
+                    #(#insert_binds_repo)*
+                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                        phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
+                        action: ::graphql_orm::graphql::orm::ChangeAction::Created,
+                        entity_name: #entity_name_lit,
+                        table_name: #table_name,
+                        metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
+                        id: #created_pk_id_string,
+                        changes: ::graphql_orm::graphql::orm::mutation_changes(&[#(#create_mutation_field_literals),*], &bind_values),
+                        before_state: None,
+                        after_state: None,
+                    }).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                    ::graphql_orm::graphql::orm::execute_with_binds_on::<#backend_marker, _>(hook_ctx.executor(), &sql, &bind_values).await?;
+                    let entity = Self::__gom_fetch_by_id_on(hook_ctx.executor(), &created_pk).await?
+                        .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
+                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                        phase: ::graphql_orm::graphql::orm::MutationPhase::After,
+                        action: ::graphql_orm::graphql::orm::ChangeAction::Created,
+                        entity_name: #entity_name_lit,
+                        table_name: #table_name,
+                        metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
+                        id: entity.#pk_field.to_string(),
+                        changes: ::graphql_orm::graphql::orm::mutation_changes(&[#(#create_mutation_field_literals),*], &bind_values),
+                        before_state: None,
+                        after_state: Some(::graphql_orm::graphql::orm::entity_state(&entity)?),
+                    }).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                    Self::__gom_queue_changed_event(
+                        hook_ctx,
+                        ::graphql_orm::graphql::orm::ChangeAction::Created,
+                        &entity,
+                    ).await?;
+                    Ok(entity)
+                }
+
+                #[doc(hidden)]
+                async fn __gom_fetch_by_id_on<'e, E>(executor: E, id: &#pk_type_ty) -> ::graphql_orm::Result<Option<Self>>
+                where E: ::graphql_orm::sqlx::Executor<'e, Database = #database_type> + Send + 'e {
+                    use ::graphql_orm::graphql::orm::{DatabaseEntity, FromSqlRow};
+                    let sql = Self::__gom_rebind_sql(&format!("SELECT {} FROM {} WHERE {} = ?", Self::column_names().join(", "), #table_name, Self::PRIMARY_KEY), 1);
+                    let rows = ::graphql_orm::graphql::orm::fetch_rows_on::<#backend_marker, _>(executor, &sql, &[#pk_bind_value_ref]).await?;
+                    rows.first().map(<Self as FromSqlRow<#backend_marker>>::from_row).transpose()
+                }
+
+                pub async fn insert(db: &::graphql_orm::db::Database<#backend_marker>, input: #create_input) -> ::graphql_orm::Result<Self> {
+                    let tx = db.pool().begin().await?;
+                    let mut context = ::graphql_orm::graphql::orm::MutationContext::new(db, tx);
+                    let entity = context.insert::<Self>(input).await?;
+                    context.commit_and_emit().await?;
+                    Ok(entity)
+                }
+
+            }
+
+            impl ::graphql_orm::graphql::orm::MutationContextInsert<#backend_marker> for #struct_name {
+                type CreateInput = #create_input;
+                fn insert_in_mutation_context<'a>(
+                    hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    input: Self::CreateInput,
+                ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<Self>> {
+                    Box::pin(async move { Self::__gom_insert_with_mutation_context(hook_ctx, input).await })
+                }
+            }
+
+            #keyset_trait_impl
+        }
+    } else {
+        quote! {}
+    };
+
+    if backend == BackendKind::Mssql
+        || schema_policy_read_only
+        || has_composite_primary_key
+        || entity_meta.append_only
+    {
         return Ok(quote! {
             // ============================================================================
             // Connection/Edge Types (for pagination)
@@ -3102,6 +3824,7 @@ pub(crate) fn generate_graphql_operations(
                 }
 
                 #search_query_method
+                #keyset_graphql_method
 
                 #[graphql(name = #single_query_name)]
                 async fn get_by_id(
@@ -3158,6 +3881,7 @@ pub(crate) fn generate_graphql_operations(
                 }
 
                 #search_repository_method
+                #keyset_repository_methods
                 #search_rebuild_methods
 
                 #read_repository_key_methods
@@ -3167,6 +3891,7 @@ pub(crate) fn generate_graphql_operations(
                 }
             }
 
+            #append_only_surface
             #composite_write_stubs
         });
     }
@@ -3471,6 +4196,7 @@ pub(crate) fn generate_graphql_operations(
             }
 
             #search_query_method
+            #keyset_graphql_method
 
             /// Get a single #struct_name_str by ID
             #[graphql(name = #single_query_name)]
@@ -4205,6 +4931,7 @@ pub(crate) fn generate_graphql_operations(
             }
 
             #upsert_helper_methods
+            #cas_helper_methods
 
             #[doc(hidden)]
             async fn __gom_update_by_id_with_mutation_context<'a>(
@@ -4734,6 +5461,7 @@ pub(crate) fn generate_graphql_operations(
             }
 
             #search_repository_method
+            #keyset_repository_methods
             #search_rebuild_methods
 
             #read_repository_key_methods
@@ -5509,6 +6237,8 @@ pub(crate) fn generate_graphql_operations(
         }
 
         #upsert_trait_impl
+        #cas_trait_impl
+        #keyset_trait_impl
 
         impl ::graphql_orm::graphql::orm::MutationContextUpdateById<#backend_marker> for #struct_name {
             type Id = #pk_type_ty;

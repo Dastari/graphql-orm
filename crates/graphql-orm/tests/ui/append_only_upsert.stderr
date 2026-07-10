@@ -1,0 +1,15 @@
+error: append_only entities cannot declare upsert
+ --> tests/ui/append_only_upsert.rs:3:10
+  |
+3 | #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
+  |          ^^^^^^^^^^^^^
+  |
+  = note: this error originates in the derive macro `GraphQLEntity` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: append_only entities cannot declare upsert
+ --> tests/ui/append_only_upsert.rs:3:25
+  |
+3 | #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
+  |                         ^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the derive macro `GraphQLOperations` (in Nightly builds, run with -Z macro-backtrace for more info)

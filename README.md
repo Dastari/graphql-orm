@@ -35,8 +35,13 @@ Select exactly the backend support your service needs:
 
 ```toml
 [dependencies]
-graphql-orm = { version = "0.3.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.4.0", default-features = false, features = ["sqlite"] }
 ```
+
+GitHub with an exact full revision is the only supported distribution method. Neither crate is
+published to crates.io. Replace the placeholder with the reviewed release commit (the `v0.4.0` tag
+is an identity aid, not a substitute for `rev`). The optional `auth-agql` bridge likewise resolves
+the exact upstream revision `5e7f230b96350f55496477c11f8a0505e6438779`.
 
 Available backend features:
 
@@ -200,6 +205,7 @@ batched relation query per relation layer, not N+1 or nested N*N queries.
 - [SQL Server read-only backend](docs/mssql.md)
 - [Schema ownership, validation, planning, and ABI migrations](docs/schema-management.md)
 - [Writes, repository helpers, hooks, subscriptions, and policies](docs/runtime-and-writes.md)
+- [Portable transactions, CAS, append-only entities, constraints, and keysets](docs/portable-persistence.md)
 - [Backup runtime API](docs/backup.md)
 - [Release notes](docs/release-notes.md)
 - [Development and test commands](docs/development.md)
