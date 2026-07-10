@@ -1,0 +1,5 @@
+error: conditional_index references unknown field `missing`
+  --> tests/ui/conditional_index_unknown_field.rs:11:8
+   |
+11 | struct BadConditionalUnknown {
+   |        ^^^^^^^^^^^^^^^^^^^^^

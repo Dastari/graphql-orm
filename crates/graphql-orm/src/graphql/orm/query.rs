@@ -567,6 +567,7 @@ fn keyset_sql_value(value: &crate::graphql::pagination::KeysetValue) -> Option<S
         KeysetValue::Float(value) => Some(SqlValue::Float(*value)),
         KeysetValue::Bool(value) => Some(SqlValue::Bool(*value)),
         KeysetValue::Uuid(value) => uuid::Uuid::parse_str(value).ok().map(SqlValue::Uuid),
+        KeysetValue::Bytes(value) => Some(SqlValue::Bytes(value.clone())),
     }
 }
 

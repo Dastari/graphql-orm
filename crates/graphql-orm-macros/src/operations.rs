@@ -74,7 +74,6 @@ struct ResolvedUpsertField {
     field_type: syn::Type,
     meta: FieldMetadata,
     rust_name: String,
-    graphql_name: String,
     db_column: String,
     graphql_create_visible: bool,
 }
@@ -164,8 +163,6 @@ fn resolve_upsert_config(
     fields: &syn::punctuated::Punctuated<Field, syn::token::Comma>,
     entity_meta: &crate::entity::EntityMetadata,
     backend: BackendKind,
-    graphql_rename_fields: Option<&str>,
-    serde_rename_all: Option<&str>,
     auto_generated_pk: bool,
 ) -> syn::Result<Option<ResolvedUpsertConfig>> {
     let Some(requested_targets) = entity_meta.upsert.as_ref() else {
@@ -188,8 +185,6 @@ fn resolve_upsert_config(
             let field_name = field.ident.clone().expect("named field");
             let meta = parse_field_metadata(field)?;
             let rust_name = field_name.to_string();
-            let graphql_name =
-                graphql_field_name(&meta, &rust_name, graphql_rename_fields, serde_rename_all);
             let db_column = meta.db_column.clone().unwrap_or_else(|| rust_name.clone());
             field_columns.insert(rust_name.clone(), db_column.clone());
             field_columns.insert(db_column.clone(), db_column.clone());
@@ -198,7 +193,6 @@ fn resolve_upsert_config(
                 field_type: field.ty.clone(),
                 meta,
                 rust_name,
-                graphql_name,
                 db_column,
                 graphql_create_visible: false,
             });
@@ -692,37 +686,76 @@ pub(crate) fn generate_graphql_operations(
         fields,
         &entity_meta,
         backend,
-        graphql_rename_fields,
-        serde_rename_all,
         auto_generated_pk,
     )?;
+    let graphql_upsert_enabled = upsert_config.as_ref().is_some_and(|config| {
+        config
+            .fields
+            .iter()
+            .all(|field| field.graphql_create_visible)
+    });
     let pk_is_uuid = is_uuid_type(&pk_type_ty);
+    let pk_is_bytes = is_byte_vec_type(&pk_type_ty);
     let pk_bind_value = if pk_is_uuid {
         quote! { ::graphql_orm::graphql::orm::SqlValue::Uuid(id) }
+    } else if pk_is_bytes {
+        quote! { ::graphql_orm::graphql::orm::SqlValue::Bytes(id.clone()) }
     } else {
         quote! { ::graphql_orm::graphql::orm::SqlValue::String(id.to_string()) }
     };
     let pk_bind_value_ref = if pk_is_uuid {
         quote! { ::graphql_orm::graphql::orm::SqlValue::Uuid(*id) }
+    } else if pk_is_bytes {
+        quote! { ::graphql_orm::graphql::orm::SqlValue::Bytes(id.clone()) }
     } else {
         quote! { ::graphql_orm::graphql::orm::SqlValue::String(id.to_string()) }
     };
     let pk_bind_value_for_entity = if pk_is_uuid {
         quote! { ::graphql_orm::graphql::orm::SqlValue::Uuid(entity.#pk_field) }
+    } else if pk_is_bytes {
+        quote! { ::graphql_orm::graphql::orm::SqlValue::Bytes(entity.#pk_field.clone()) }
     } else {
         quote! { ::graphql_orm::graphql::orm::SqlValue::String(entity.#pk_field.to_string()) }
     };
     let pk_bind_value_for_previous = if pk_is_uuid {
         quote! { ::graphql_orm::graphql::orm::SqlValue::Uuid(previous.#pk_field) }
+    } else if pk_is_bytes {
+        quote! { ::graphql_orm::graphql::orm::SqlValue::Bytes(previous.#pk_field.clone()) }
     } else {
         quote! { ::graphql_orm::graphql::orm::SqlValue::String(previous.#pk_field.to_string()) }
     };
     let created_pk_value = if pk_is_uuid {
         quote! { ::graphql_orm::graphql::orm::SqlValue::Uuid(created_pk) }
+    } else if pk_is_bytes {
+        quote! { ::graphql_orm::graphql::orm::SqlValue::Bytes(created_pk.clone()) }
     } else {
         quote! { ::graphql_orm::graphql::orm::SqlValue::String(created_pk.clone()) }
     };
-    let created_pk_id_string = quote! { created_pk.to_string() };
+    let created_pk_id_string = if pk_is_bytes {
+        quote! { ::graphql_orm::graphql::orm::binary_key_id(&created_pk) }
+    } else {
+        quote! { created_pk.to_string() }
+    };
+    let pk_id_for_entity = if pk_is_bytes {
+        quote! { ::graphql_orm::graphql::orm::binary_key_id(&entity.#pk_field) }
+    } else {
+        quote! { entity.#pk_field.to_string() }
+    };
+    let pk_id_for_previous = if pk_is_bytes {
+        quote! { ::graphql_orm::graphql::orm::binary_key_id(&previous.#pk_field) }
+    } else {
+        quote! { previous.#pk_field.to_string() }
+    };
+    let pk_id_for_current = if pk_is_bytes {
+        quote! { ::graphql_orm::graphql::orm::binary_key_id(&current_entity.#pk_field) }
+    } else {
+        quote! { current_entity.#pk_field.to_string() }
+    };
+    let pk_id_for_id = if pk_is_bytes {
+        quote! { ::graphql_orm::graphql::orm::binary_key_id(&id) }
+    } else {
+        quote! { id.to_string() }
+    };
 
     let mut propagated_relations: Vec<PropagatedRelation> = Vec::new();
     for field in fields {
@@ -1952,19 +1985,7 @@ pub(crate) fn generate_graphql_operations(
             .is_some_and(|col| col == "updated_at")
     });
 
-    if let Some(config) = &upsert_config {
-        for field in &config.fields {
-            if !field.graphql_create_visible {
-                return Err(syn::Error::new(
-                    struct_name.span(),
-                    format!(
-                        "graphql_entity upsert target '{}' must be present in the public GraphQL create input",
-                        field.graphql_name
-                    ),
-                ));
-            }
-        }
-
+    if upsert_config.is_some() {
         if upsert_update_columns.is_empty() && !has_updated_at_column {
             return Err(syn::Error::new(
                 struct_name.span(),
@@ -2203,6 +2224,7 @@ pub(crate) fn generate_graphql_operations(
         quote! {}
     } else {
         quote! {
+            #[allow(clippy::ptr_arg)]
             pub async fn find_by_id(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 id: &#pk_type_ty,
@@ -2491,7 +2513,7 @@ pub(crate) fn generate_graphql_operations(
                     .transpose()?;
                 let event_id = current_entity
                     .as_ref()
-                    .map(|entity| entity.#pk_field.to_string())
+                    .map(|entity| #pk_id_for_entity)
                     .unwrap_or_else(|| #created_pk_id_string);
                 let lookup_input = input.clone();
                 let change_input = input.clone();
@@ -2536,7 +2558,7 @@ pub(crate) fn generate_graphql_operations(
                         entity_name: #entity_name_lit,
                         table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                        id: entity.#pk_field.to_string(),
+                        id: #pk_id_for_entity,
                         changes: mutation_changes.clone(),
                         before_state,
                         after_state,
@@ -2551,7 +2573,7 @@ pub(crate) fn generate_graphql_operations(
     } else {
         quote! {}
     };
-    let upsert_graphql_method = if upsert_config.is_some() {
+    let upsert_graphql_method = if graphql_upsert_enabled {
         quote! {
             #[graphql(name = #upsert_mutation_name)]
             async fn upsert(
@@ -2606,7 +2628,7 @@ pub(crate) fn generate_graphql_operations(
                     .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
                 let event_id = current_entity
                     .as_ref()
-                    .map(|entity| entity.#pk_field.to_string())
+                    .map(|entity| #pk_id_for_entity)
                     .unwrap_or_else(|| #created_pk_id_string);
                 let lookup_input = input.clone();
                 let change_input = input.clone();
@@ -2666,7 +2688,7 @@ pub(crate) fn generate_graphql_operations(
                         entity_name: #entity_name_lit,
                         table_name: #table_name,
                         metadata: <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                        id: entity.#pk_field.to_string(),
+                        id: #pk_id_for_entity,
                         changes: mutation_changes.clone(),
                         before_state,
                         after_state,
@@ -2910,7 +2932,7 @@ pub(crate) fn generate_graphql_operations(
                             entity_name: #entity_name_lit,
                             table_name: #table_name,
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                            id: entity.#pk_field.to_string(),
+                            id: #pk_id_for_entity,
                             changes: mutation_changes.clone(),
                             before_state: before_state.clone(),
                             after_state: None,
@@ -2924,7 +2946,7 @@ pub(crate) fn generate_graphql_operations(
                             entity_name: #entity_name_lit,
                             table_name: #table_name,
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                            id: entity.#pk_field.to_string(),
+                            id: #pk_id_for_entity,
                             changes: mutation_changes,
                             before_state,
                             after_state: Some(Self::__gom_capture_entity_state(&entity)?),
@@ -2944,6 +2966,7 @@ pub(crate) fn generate_graphql_operations(
                 }
 
                 /// Atomically update this versioned entity when all typed expectations match.
+                #[allow(clippy::ptr_arg)]
                 pub async fn compare_and_swap(
                     db: &::graphql_orm::db::Database<#backend_marker>,
                     id: &#pk_type_ty,
@@ -3026,6 +3049,8 @@ pub(crate) fn generate_graphql_operations(
             let type_name = quote! { #inner }.to_string().replace(' ', "");
             let value = if is_string_type(inner) {
                 quote! { ::graphql_orm::graphql::pagination::KeysetValue::String(value.clone()) }
+            } else if is_byte_vec_type(inner) {
+                quote! { ::graphql_orm::graphql::pagination::KeysetValue::Bytes(value.clone()) }
             } else if is_uuid_type(inner) {
                 quote! { ::graphql_orm::graphql::pagination::KeysetValue::Uuid(value.to_string()) }
             } else if is_bool_type(inner) {
@@ -3040,7 +3065,7 @@ pub(crate) fn generate_graphql_operations(
             } else {
                 return Err(syn::Error::new_spanned(
                     ty,
-                    "keyset fields support String, UUID, bool, integer, and float scalar types",
+                    "keyset fields support String, bytes, UUID, bool, integer, and float scalar types",
                 ));
             };
             cursor_tokens.push(if optional {
@@ -3552,7 +3577,7 @@ pub(crate) fn generate_graphql_operations(
                     entity: &Self,
                 ) -> ::graphql_orm::Result<()> {
                     #search_write_maintenance
-                    let source_id = entity.#pk_field.to_string();
+                    let source_id = #pk_id_for_entity;
                     hook_ctx.queue_event(#changed_event {
                         action,
                         change_kind: ::graphql_orm::graphql::orm::ChangeKind::Direct,
@@ -3602,7 +3627,7 @@ pub(crate) fn generate_graphql_operations(
                         entity_name: #entity_name_lit,
                         table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                        id: entity.#pk_field.to_string(),
+                        id: #pk_id_for_entity,
                         changes: ::graphql_orm::graphql::orm::mutation_changes(&[#(#create_mutation_field_literals),*], &bind_values),
                         before_state: None,
                         after_state: Some(::graphql_orm::graphql::orm::entity_state(&entity)?),
@@ -3616,6 +3641,7 @@ pub(crate) fn generate_graphql_operations(
                 }
 
                 #[doc(hidden)]
+                #[allow(clippy::ptr_arg)]
                 async fn __gom_fetch_by_id_on<'e, E>(executor: E, id: &#pk_type_ty) -> ::graphql_orm::Result<Option<Self>>
                 where E: ::graphql_orm::sqlx::Executor<'e, Database = #database_type> + Send + 'e {
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, FromSqlRow};
@@ -4338,7 +4364,7 @@ pub(crate) fn generate_graphql_operations(
                         entity_name: #entity_name_lit,
                         table_name: #table_name,
                         metadata: <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                        id: entity.#pk_field.to_string(),
+                        id: #pk_id_for_entity,
                         changes: mutation_changes.clone(),
                         before_state: None,
                         after_state,
@@ -4443,7 +4469,7 @@ pub(crate) fn generate_graphql_operations(
                         entity_name: #entity_name_lit,
                         table_name: #table_name,
                         metadata: <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                        id: id.to_string(),
+                        id: #pk_id_for_id,
                         changes: mutation_changes.clone(),
                         before_state: Some(before_state.clone()),
                         after_state: None,
@@ -4483,7 +4509,7 @@ pub(crate) fn generate_graphql_operations(
                                         entity_name: #entity_name_lit,
                                         table_name: #table_name,
                                         metadata: <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                                        id: entity.#pk_field.to_string(),
+                                        id: #pk_id_for_entity,
                                         changes: mutation_changes.clone(),
                                         before_state: Some(before_state),
                                         after_state,
@@ -4571,7 +4597,7 @@ pub(crate) fn generate_graphql_operations(
                         entity_name: #entity_name_lit,
                         table_name: #table_name,
                         metadata: <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                        id: entity.#pk_field.to_string(),
+                        id: #pk_id_for_entity,
                         changes: Vec::new(),
                         before_state: Some(before_state.clone()),
                         after_state: None,
@@ -4595,7 +4621,7 @@ pub(crate) fn generate_graphql_operations(
                                 entity_name: #entity_name_lit,
                                 table_name: #table_name,
                                 metadata: <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                                id: entity.#pk_field.to_string(),
+                                id: #pk_id_for_entity,
                                 changes: Vec::new(),
                                 before_state: Some(before_state),
                                 after_state: None,
@@ -4794,7 +4820,7 @@ pub(crate) fn generate_graphql_operations(
             ) -> ::graphql_orm::Result<()> {
                 if let Some(entity) = entity {
                     #search_write_maintenance
-                    let source_id = entity.#pk_field.to_string();
+                    let source_id = #pk_id_for_entity;
                     hook_ctx.queue_event(#changed_event {
                         action,
                         change_kind: ::graphql_orm::graphql::orm::ChangeKind::Direct,
@@ -4832,6 +4858,7 @@ pub(crate) fn generate_graphql_operations(
             }
 
             #[doc(hidden)]
+            #[allow(clippy::ptr_arg)]
             pub(crate) async fn __gom_fetch_by_id_on<'e, E>(
                 executor: E,
                 id: &#pk_type_ty,
@@ -4912,7 +4939,7 @@ pub(crate) fn generate_graphql_operations(
                             entity_name: #entity_name_lit,
                             table_name: #table_name,
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                            id: entity.#pk_field.to_string(),
+                            id: #pk_id_for_entity,
                             changes: ::graphql_orm::graphql::orm::mutation_changes(&[#(#create_mutation_field_literals),*], &bind_values),
                             before_state: None,
                             after_state,
@@ -4980,7 +5007,7 @@ pub(crate) fn generate_graphql_operations(
                         entity_name: #entity_name_lit,
                         table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                        id: current_entity.#pk_field.to_string(),
+                        id: #pk_id_for_current,
                         changes: mutation_changes.clone(),
                         before_state: Some(before_state.clone()),
                         after_state: None,
@@ -5014,7 +5041,7 @@ pub(crate) fn generate_graphql_operations(
                         entity_name: #entity_name_lit,
                         table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                        id: entity.#pk_field.to_string(),
+                        id: #pk_id_for_entity,
                         changes: mutation_changes,
                         before_state: Some(before_state),
                         after_state,
@@ -5089,7 +5116,7 @@ pub(crate) fn generate_graphql_operations(
                             entity_name: #entity_name_lit,
                             table_name: #table_name,
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                            id: entity.#pk_field.to_string(),
+                            id: #pk_id_for_entity,
                             changes: mutation_changes.clone(),
                             before_state: Some(Self::__gom_capture_entity_state(entity)?),
                             after_state: None,
@@ -5162,11 +5189,11 @@ pub(crate) fn generate_graphql_operations(
                     .map(<Self as ::graphql_orm::graphql::orm::FromSqlRow<#backend_marker>>::from_row)
                     .collect::<Result<Vec<_>, _>>()?
                     .into_iter()
-                    .map(|entity| (entity.#pk_field.to_string(), entity))
+                    .map(|entity| (#pk_id_for_entity, entity))
                     .collect::<::std::collections::HashMap<_, _>>();
 
                 for previous in matched_entities {
-                    if let Some(entity) = after_entities.remove(&previous.#pk_field.to_string()) {
+                    if let Some(entity) = after_entities.remove(&#pk_id_for_previous) {
                         hook_ctx.run_mutation_hook(
                             None,
                             &::graphql_orm::graphql::orm::MutationEvent {
@@ -5175,7 +5202,7 @@ pub(crate) fn generate_graphql_operations(
                                 entity_name: #entity_name_lit,
                                 table_name: #table_name,
                                 metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                                id: entity.#pk_field.to_string(),
+                                id: #pk_id_for_entity,
                                 changes: mutation_changes.clone(),
                                 before_state: Some(Self::__gom_capture_entity_state(&previous)?),
                                 after_state: Some(Self::__gom_capture_entity_state(&entity)?),
@@ -5215,7 +5242,7 @@ pub(crate) fn generate_graphql_operations(
                         entity_name: #entity_name_lit,
                         table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                        id: entity.#pk_field.to_string(),
+                        id: #pk_id_for_entity,
                         changes: Vec::new(),
                         before_state: Some(before_state.clone()),
                         after_state: None,
@@ -5242,7 +5269,7 @@ pub(crate) fn generate_graphql_operations(
                         entity_name: #entity_name_lit,
                         table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                        id: entity.#pk_field.to_string(),
+                        id: #pk_id_for_entity,
                         changes: Vec::new(),
                         before_state: Some(before_state),
                         after_state: None,
@@ -5289,7 +5316,7 @@ pub(crate) fn generate_graphql_operations(
                             entity_name: #entity_name_lit,
                             table_name: #table_name,
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                            id: entity.#pk_field.to_string(),
+                            id: #pk_id_for_entity,
                             changes: Vec::new(),
                             before_state: Some(Self::__gom_capture_entity_state(entity)?),
                             after_state: None,
@@ -5337,7 +5364,7 @@ pub(crate) fn generate_graphql_operations(
                             entity_name: #entity_name_lit,
                             table_name: #table_name,
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                            id: entity.#pk_field.to_string(),
+                            id: #pk_id_for_entity,
                             changes: Vec::new(),
                             before_state: Some(Self::__gom_capture_entity_state(&entity)?),
                             after_state: None,
@@ -5467,6 +5494,7 @@ pub(crate) fn generate_graphql_operations(
             #read_repository_key_methods
 
             /// Update a single entity by primary key using the generated update input.
+            #[allow(clippy::ptr_arg)]
             pub async fn update_by_id(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 id: &#pk_type_ty,
@@ -5533,7 +5561,7 @@ pub(crate) fn generate_graphql_operations(
                         entity_name: #entity_name_lit,
                         table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                        id: current_entity.#pk_field.to_string(),
+                        id: #pk_id_for_current,
                         changes: mutation_changes.clone(),
                         before_state: Some(before_state.clone()),
                         after_state: None,
@@ -5568,7 +5596,7 @@ pub(crate) fn generate_graphql_operations(
                         entity_name: #entity_name_lit,
                         table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                        id: entity.#pk_field.to_string(),
+                        id: #pk_id_for_entity,
                         changes: mutation_changes,
                         before_state: Some(before_state),
                         after_state,
@@ -5673,7 +5701,7 @@ pub(crate) fn generate_graphql_operations(
                             entity_name: #entity_name_lit,
                             table_name: #table_name,
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                            id: entity.#pk_field.to_string(),
+                            id: #pk_id_for_entity,
                             changes: mutation_changes.clone(),
                             before_state: Some(Self::__gom_capture_entity_state(entity)?),
                             after_state: None,
@@ -5746,11 +5774,11 @@ pub(crate) fn generate_graphql_operations(
                     .map(<Self as ::graphql_orm::graphql::orm::FromSqlRow<#backend_marker>>::from_row)
                     .collect::<Result<Vec<_>, _>>()?
                     .into_iter()
-                    .map(|entity| (entity.#pk_field.to_string(), entity))
+                    .map(|entity| (#pk_id_for_entity, entity))
                     .collect::<::std::collections::HashMap<_, _>>();
 
                 for previous in matched_entities {
-                    if let Some(entity) = after_entities.remove(&previous.#pk_field.to_string()) {
+                    if let Some(entity) = after_entities.remove(&#pk_id_for_previous) {
                         hook_ctx.run_mutation_hook(
                             None,
                             &::graphql_orm::graphql::orm::MutationEvent {
@@ -5759,7 +5787,7 @@ pub(crate) fn generate_graphql_operations(
                                 entity_name: #entity_name_lit,
                                 table_name: #table_name,
                                 metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                                id: entity.#pk_field.to_string(),
+                                id: #pk_id_for_entity,
                                 changes: mutation_changes.clone(),
                                 before_state: Some(Self::__gom_capture_entity_state(&previous)?),
                                 after_state: Some(Self::__gom_capture_entity_state(&entity)?),
@@ -5780,6 +5808,7 @@ pub(crate) fn generate_graphql_operations(
             }
 
             /// Delete a single entity by primary key.
+            #[allow(clippy::ptr_arg)]
             pub async fn delete_by_id(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 id: &#pk_type_ty,
@@ -5824,7 +5853,7 @@ pub(crate) fn generate_graphql_operations(
                         entity_name: #entity_name_lit,
                         table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                        id: entity.#pk_field.to_string(),
+                        id: #pk_id_for_entity,
                         changes: Vec::new(),
                         before_state: Some(before_state.clone()),
                         after_state: None,
@@ -5851,7 +5880,7 @@ pub(crate) fn generate_graphql_operations(
                         entity_name: #entity_name_lit,
                         table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                        id: entity.#pk_field.to_string(),
+                        id: #pk_id_for_entity,
                         changes: Vec::new(),
                         before_state: Some(before_state),
                         after_state: None,
@@ -5938,7 +5967,7 @@ pub(crate) fn generate_graphql_operations(
                             entity_name: #entity_name_lit,
                             table_name: #table_name,
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                            id: entity.#pk_field.to_string(),
+                            id: #pk_id_for_entity,
                             changes: Vec::new(),
                             before_state: Some(Self::__gom_capture_entity_state(entity)?),
                             after_state: None,
@@ -5966,7 +5995,7 @@ pub(crate) fn generate_graphql_operations(
                             entity_name: #entity_name_lit,
                             table_name: #table_name,
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                            id: entity.#pk_field.to_string(),
+                            id: #pk_id_for_entity,
                             changes: Vec::new(),
                             before_state: Some(Self::__gom_capture_entity_state(entity)?),
                             after_state: None,
@@ -6055,7 +6084,7 @@ pub(crate) fn generate_graphql_operations(
                             entity_name: #entity_name_lit,
                             table_name: #table_name,
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                            id: entity.#pk_field.to_string(),
+                            id: #pk_id_for_entity,
                             changes: Vec::new(),
                             before_state: Some(Self::__gom_capture_entity_state(entity)?),
                             after_state: None,
@@ -6108,7 +6137,7 @@ pub(crate) fn generate_graphql_operations(
                             entity_name: #entity_name_lit,
                             table_name: #table_name,
                             metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                            id: entity.#pk_field.to_string(),
+                            id: #pk_id_for_entity,
                             changes: Vec::new(),
                             before_state: Some(Self::__gom_capture_entity_state(entity)?),
                             after_state: None,

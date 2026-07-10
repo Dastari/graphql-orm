@@ -51,6 +51,7 @@ pub enum KeysetValue {
     Float(f64),
     Bool(bool),
     Uuid(String),
+    Bytes(Vec<u8>),
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]

@@ -13,9 +13,7 @@ use super::core::{
 use super::core::{SearchFieldModel, SearchJsonPathModel, SearchRelationFieldModel, SearchWeight};
 #[cfg(feature = "postgres")]
 use super::core::{SpatialColumnDef, SpatialGeometryType};
-use super::dialect::DatabaseBackend;
-#[cfg(feature = "mssql")]
-use super::dialect::SqlDialect;
+use super::dialect::{DatabaseBackend, SqlDialect};
 use super::query::PoolProvider;
 #[cfg(feature = "postgres")]
 use super::rls::{LiveRlsPolicy, LiveRlsTable};
@@ -293,8 +291,14 @@ fn column_changed_for_backend(
         after.spatial = None;
     }
 
+    let sql_type_changed = if matches!(backend, DatabaseBackend::Postgres | DatabaseBackend::Mssql)
+    {
+        !before.sql_type.eq_ignore_ascii_case(&after.sql_type)
+    } else {
+        before.sql_type != after.sql_type
+    };
     if before.name != after.name
-        || before.sql_type != after.sql_type
+        || sql_type_changed
         || before.nullable != after.nullable
         || before.is_primary_key != after.is_primary_key
         || before.is_unique != after.is_unique
@@ -646,18 +650,90 @@ fn render_create_index_statement(
         (DatabaseBackend::Postgres, IndexMethod::Gist) => " USING GIST",
         _ => "",
     };
+    let columns = index
+        .columns
+        .iter()
+        .map(|column| backend.quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let predicate = index
+        .predicate
+        .as_ref()
+        .map_or_else(String::new, |predicate| {
+            let values = predicate
+                .values
+                .iter()
+                .map(|value| sql_string_literal(value))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                " WHERE {} IN ({values})",
+                backend.quote_identifier(predicate.column)
+            )
+        });
     format!(
-        "CREATE {}INDEX {} ON {}{} ({})",
+        "CREATE {}INDEX {} ON {}{} ({}){}",
         unique,
-        index.name,
-        table_name,
+        backend.quote_identifier(index.name),
+        backend.quote_identifier_path(table_name),
         method,
-        index.columns.join(", ")
+        columns,
+        predicate,
     )
 }
 
 fn sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+fn parse_closed_set_index_predicate(expression: &str) -> Option<super::core::IndexPredicateDef> {
+    let upper = expression.to_ascii_uppercase();
+    let operator = upper.find(" IN ").or_else(|| upper.find(" = ANY"))?;
+    let column = expression[..operator]
+        .trim()
+        .trim_matches(|character: char| matches!(character, '(' | ')' | '"' | ' '))
+        .rsplit('.')
+        .next()?
+        .trim_matches('"')
+        .to_string();
+    if column.is_empty() {
+        return None;
+    }
+
+    let mut values = Vec::new();
+    let mut chars = expression[operator..].chars().peekable();
+    while let Some(character) = chars.next() {
+        if character != '\'' {
+            continue;
+        }
+        let mut value = String::new();
+        while let Some(character) = chars.next() {
+            if character == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    chars.next();
+                    value.push('\'');
+                    continue;
+                }
+                break;
+            }
+            value.push(character);
+        }
+        values.push(value);
+    }
+    if values.is_empty() {
+        return None;
+    }
+    values.sort();
+    values.dedup();
+    let column = Box::leak(column.into_boxed_str()) as &'static str;
+    let values = Box::leak(
+        values
+            .into_iter()
+            .map(|value| Box::leak(value.into_boxed_str()) as &'static str)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    );
+    Some(super::core::IndexPredicateDef { column, values })
 }
 
 fn json_string(value: &str) -> String {
@@ -1180,16 +1256,26 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
             index_name,
         } => match backend {
             DatabaseBackend::Sqlite => {
-                vec![format!("DROP INDEX {}", index_name)]
+                vec![format!(
+                    "DROP INDEX {}",
+                    backend.quote_identifier(index_name)
+                )]
             }
             DatabaseBackend::Postgres => {
-                vec![format!("DROP INDEX {}", index_name)]
+                vec![format!(
+                    "DROP INDEX {}",
+                    backend.quote_identifier(index_name)
+                )]
             }
             DatabaseBackend::Mysql => {
                 vec![format!("DROP INDEX {} ON {}", index_name, table_name)]
             }
             DatabaseBackend::Mssql => {
-                vec![format!("DROP INDEX {} ON {}", index_name, table_name)]
+                vec![format!(
+                    "DROP INDEX {} ON {}",
+                    backend.quote_identifier(index_name),
+                    backend.quote_identifier_path(table_name)
+                )]
             }
         },
         MigrationStep::CreateSearchIndex {
@@ -1637,6 +1723,20 @@ pub async fn introspect_sqlite_schema(
                 continue;
             }
 
+            let index_sql: Option<String> = sqlx::query_scalar(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+            )
+            .bind(&index_name)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+            let predicate = index_sql.as_deref().and_then(|sql| {
+                let upper = sql.to_ascii_uppercase();
+                upper
+                    .find(" WHERE ")
+                    .and_then(|offset| parse_closed_set_index_predicate(&sql[offset + 7..]))
+            });
+
             let leaked_name: &'static str = Box::leak(index_name.into_boxed_str());
             let leaked_columns: &'static [&'static str] = Box::leak(
                 column_names
@@ -1651,6 +1751,7 @@ pub async fn introspect_sqlite_schema(
                 is_unique: unique,
                 method: IndexMethod::Default,
                 is_spatial: false,
+                predicate,
             });
         }
 
@@ -1881,6 +1982,7 @@ pub async fn introspect_postgres_schema(
             "SELECT i.relname AS indexname,
                     ix.indisunique AS is_unique,
                     am.amname AS method,
+                    pg_get_expr(ix.indpred, ix.indrelid) AS predicate,
                     array_remove(array_agg(a.attname ORDER BY cols.ordinality), NULL) AS columns
              FROM pg_class t
              JOIN pg_namespace n ON n.oid = t.relnamespace
@@ -1894,7 +1996,7 @@ pub async fn introspect_postgres_schema(
               AND a.attnum = cols.attnum
              WHERE n.nspname = $2
                AND t.relname = $1
-             GROUP BY i.relname, ix.indisunique, am.amname
+             GROUP BY i.relname, ix.indisunique, am.amname, ix.indpred, ix.indrelid
              ORDER BY i.relname",
         )
         .bind(&table_name)
@@ -1908,6 +2010,10 @@ pub async fn introspect_postgres_schema(
                 continue;
             }
             let unique: bool = row.try_get("is_unique")?;
+            let predicate_expression: Option<String> = row.try_get("predicate")?;
+            let predicate = predicate_expression
+                .as_deref()
+                .and_then(parse_closed_set_index_predicate);
             let method_name: String = row.try_get("method")?;
             let method = match method_name.to_ascii_lowercase().as_str() {
                 "gist" => IndexMethod::Gist,
@@ -1934,6 +2040,7 @@ pub async fn introspect_postgres_schema(
                 is_unique: unique,
                 method,
                 is_spatial,
+                predicate,
             });
         }
 

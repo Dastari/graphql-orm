@@ -27,10 +27,20 @@ pub(crate) struct EntityMetadata {
     pub(crate) upsert: Option<Vec<String>>,
     pub(crate) unique_composite: Vec<Vec<String>>,
     pub(crate) indexes: Vec<(bool, Vec<String>)>,
+    pub(crate) conditional_indexes: Vec<ConditionalIndexMetadata>,
     pub(crate) search: Option<SearchEntityMetadata>,
     pub(crate) serde_rename_all: Option<String>,
     pub(crate) graphql_rename_fields: Option<String>,
     pub(crate) rls: Option<RlsMetadata>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ConditionalIndexMetadata {
+    pub(crate) name: Option<String>,
+    pub(crate) columns: Vec<String>,
+    pub(crate) unique: bool,
+    pub(crate) predicate_field: Option<String>,
+    pub(crate) predicate_values: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -250,6 +260,51 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                         Ok(())
                     })?;
                     metadata.search = Some(search);
+                } else if meta.path.is_ident("conditional_index") {
+                    let mut index = ConditionalIndexMetadata::default();
+                    meta.parse_nested_meta(|option| {
+                        if option.path.is_ident("name") {
+                            let value = option.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            index.name = Some(lit.value());
+                        } else if option.path.is_ident("columns") {
+                            let value = option.value()?;
+                            index.columns = parse_string_array_expr(
+                                value,
+                                "conditional_index columns must be an array of field names",
+                            )?;
+                        } else if option.path.is_ident("unique") {
+                            let value = option.value()?;
+                            let lit: syn::LitBool = value.parse()?;
+                            index.unique = lit.value;
+                        } else if option.path.is_ident("predicate_field") {
+                            let value = option.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            index.predicate_field = Some(lit.value());
+                        } else if option.path.is_ident("predicate_values") {
+                            let value = option.value()?;
+                            index.predicate_values = parse_string_array_expr(
+                                value,
+                                "conditional_index predicate_values must be an array of string literals",
+                            )?;
+                        } else {
+                            return Err(syn::Error::new(
+                                option.path.span(),
+                                "unsupported conditional_index option",
+                            ));
+                        }
+                        Ok(())
+                    })?;
+                    if index.columns.is_empty()
+                        || index.predicate_field.is_none()
+                        || index.predicate_values.is_empty()
+                    {
+                        return Err(syn::Error::new(
+                            meta.path.span(),
+                            "conditional_index requires columns, predicate_field, and predicate_values",
+                        ));
+                    }
+                    metadata.conditional_indexes.push(index);
                 }
                 Ok(())
             })?;
@@ -595,6 +650,9 @@ pub(crate) struct FieldMetadata {
     pub(crate) max_length: Option<usize>,
     pub(crate) one_of: Vec<String>,
     pub(crate) gte_field: Option<String>,
+    pub(crate) gt_field: Option<String>,
+    pub(crate) lte_field: Option<String>,
+    pub(crate) lt_field: Option<String>,
     pub(crate) is_relation: bool,
     pub(crate) relation_target: Option<String>,
     pub(crate) relation_from: Option<String>,
@@ -732,6 +790,9 @@ impl Default for FieldMetadata {
             max_length: None,
             one_of: Vec::new(),
             gte_field: None,
+            gt_field: None,
+            lte_field: None,
+            lt_field: None,
             is_relation: false,
             relation_target: None,
             relation_from: None,
@@ -1003,6 +1064,18 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             meta.gte_field = Some(lit.value());
+                        } else if nested.path.is_ident("gt_field") {
+                            let value = nested.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            meta.gt_field = Some(lit.value());
+                        } else if nested.path.is_ident("lte_field") {
+                            let value = nested.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            meta.lte_field = Some(lit.value());
+                        } else if nested.path.is_ident("lt_field") {
+                            let value = nested.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            meta.lt_field = Some(lit.value());
                         } else if nested.path.is_ident("skip_input") {
                             meta.skip_input = true;
                         } else if nested.path.is_ident("json") {
@@ -1809,6 +1882,98 @@ fn generate_entity_impl(
         })
         .collect::<Vec<_>>();
 
+    for conditional in &entity_meta.conditional_indexes {
+        if backend == BackendKind::Mssql {
+            return Err(syn::Error::new_spanned(
+                struct_name,
+                "conditional indexes are supported only for sqlite and postgres",
+            ));
+        }
+        let mut db_columns = Vec::new();
+        for requested in &conditional.columns {
+            let field = fields
+                .iter()
+                .find(|field| field.ident.as_ref().is_some_and(|ident| ident == requested))
+                .ok_or_else(|| {
+                    syn::Error::new_spanned(
+                        struct_name,
+                        format!("conditional_index references unknown field `{requested}`"),
+                    )
+                })?;
+            let meta = parse_field_metadata(field)?;
+            if meta.is_relation || meta.skip_db {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "conditional_index columns must be persisted scalar fields",
+                ));
+            }
+            db_columns.push(meta.db_column.unwrap_or_else(|| requested.clone()));
+        }
+        let predicate_rust_field = conditional
+            .predicate_field
+            .as_deref()
+            .expect("validated conditional predicate field");
+        let predicate_field = fields
+            .iter()
+            .find(|field| {
+                field
+                    .ident
+                    .as_ref()
+                    .is_some_and(|ident| ident == predicate_rust_field)
+            })
+            .ok_or_else(|| {
+                syn::Error::new_spanned(
+                    struct_name,
+                    format!(
+                        "conditional_index references unknown predicate field `{predicate_rust_field}`"
+                    ),
+                )
+            })?;
+        let predicate_meta = parse_field_metadata(predicate_field)?;
+        let predicate_type = option_inner_type(&predicate_field.ty).unwrap_or(&predicate_field.ty);
+        if predicate_meta.is_relation || predicate_meta.skip_db || !is_string_type(predicate_type) {
+            return Err(syn::Error::new_spanned(
+                predicate_field,
+                "conditional_index predicate_field must be a persisted String or Option<String>",
+            ));
+        }
+        let predicate_column = predicate_meta
+            .db_column
+            .unwrap_or_else(|| predicate_rust_field.to_string());
+        let mut values = conditional.predicate_values.clone();
+        values.sort();
+        values.dedup();
+        if values.iter().any(String::is_empty) {
+            return Err(syn::Error::new_spanned(
+                predicate_field,
+                "conditional_index predicate values cannot be empty",
+            ));
+        }
+        let name = conditional.name.clone().unwrap_or_else(|| {
+            format!(
+                "{}_{}_{}_where_{}",
+                if conditional.unique { "uidx" } else { "idx" },
+                raw_table_name.replace('.', "_"),
+                db_columns.join("_"),
+                predicate_column
+            )
+        });
+        let columns = db_columns
+            .iter()
+            .map(|column| syn::LitStr::new(column, struct_name.span()))
+            .collect::<Vec<_>>();
+        let values = values
+            .iter()
+            .map(|value| syn::LitStr::new(value, struct_name.span()))
+            .collect::<Vec<_>>();
+        let base = if conditional.unique {
+            quote! { ::graphql_orm::graphql::orm::IndexDef::new(#name, &[#(#columns),*]).unique() }
+        } else {
+            quote! { ::graphql_orm::graphql::orm::IndexDef::new(#name, &[#(#columns),*]) }
+        };
+        index_defs.push(quote! { #base.where_in(#predicate_column, &[#(#values),*]) });
+    }
+
     // Collect field info
     let mut column_names: Vec<String> = Vec::new();
     let mut column_defs: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -2140,7 +2305,15 @@ fn generate_entity_impl(
                 .join(", ");
             push_constraint("one_of", format!("{db_col_sql} IN ({values})"));
         }
-        if let Some(other_rust_field) = &field_meta.gte_field {
+        for (constraint_name, operator, comparison_field) in [
+            ("gte_field", ">=", &field_meta.gte_field),
+            ("gt_field", ">", &field_meta.gt_field),
+            ("lte_field", "<=", &field_meta.lte_field),
+            ("lt_field", "<", &field_meta.lt_field),
+        ] {
+            let Some(other_rust_field) = comparison_field else {
+                continue;
+            };
             let other = parsed_fields
                 .iter()
                 .find(|parsed| {
@@ -2153,13 +2326,13 @@ fn generate_entity_impl(
                 .ok_or_else(|| {
                     syn::Error::new(
                         field.span(),
-                        format!("gte_field references unknown field `{other_rust_field}`"),
+                        format!("{constraint_name} references unknown field `{other_rust_field}`"),
                     )
                 })?;
             if other.meta.is_relation || other.meta.skip_db {
                 return Err(syn::Error::new(
                     field.span(),
-                    "gte_field must reference a persisted scalar field",
+                    format!("{constraint_name} must reference a persisted scalar field"),
                 ));
             }
             let other_type = option_inner_type(&other.field.ty).unwrap_or(&other.field.ty);
@@ -2168,7 +2341,7 @@ fn generate_entity_impl(
             {
                 return Err(syn::Error::new(
                     field.span(),
-                    "gte_field requires fields with the same scalar type",
+                    format!("{constraint_name} requires fields with the same scalar type"),
                 ));
             }
             let other_column = other
@@ -2177,7 +2350,10 @@ fn generate_entity_impl(
                 .clone()
                 .unwrap_or_else(|| other_rust_field.clone());
             let other_column = backend_quote_identifier_path(backend, &other_column);
-            push_constraint("gte_field", format!("{db_col_sql} >= {other_column}"));
+            push_constraint(
+                constraint_name,
+                format!("{db_col_sql} {operator} {other_column}"),
+            );
         }
 
         // Determine SQL type and nullability
@@ -2509,7 +2685,7 @@ fn generate_entity_impl(
     let search_min_token_len = search_config.min_token_len;
     let search_fallback_enabled = search_config.fallback_enabled;
     let search_index_name = format!("idx_gom_search_{}_vector", raw_table_name.replace('.', "_"));
-    let search_pk_field = parsed_fields
+    let search_pk = parsed_fields
         .iter()
         .find(|parsed| {
             parsed.meta.is_primary_key && !parsed.meta.is_relation && !parsed.meta.skip_db
@@ -2524,9 +2700,11 @@ fn generate_entity_impl(
                     && !parsed.meta.is_relation
                     && !parsed.meta.skip_db
             })
-        })
+        });
+    let search_pk_field = search_pk
         .and_then(|parsed| parsed.field.ident.clone())
         .unwrap_or_else(|| syn::Ident::new("id", struct_name.span()));
+    let search_pk_is_bytes = search_pk.is_some_and(|parsed| is_byte_vec_type(&parsed.field.ty));
     let search_strategy = match backend {
         BackendKind::Postgres => {
             quote! { ::graphql_orm::graphql::orm::SearchIndexStrategy::PostgresTsvector }
@@ -2577,15 +2755,21 @@ fn generate_entity_impl(
         }
     };
     let searchable_entity_impl = if has_search {
+        let search_key = if search_pk_is_bytes {
+            quote! { ::graphql_orm::graphql::orm::binary_key_id(&self.#search_pk_field) }
+        } else {
+            quote! { self.#search_pk_field.to_string() }
+        };
+        let search_key_json_fallback = search_key.clone();
         quote! {
             impl ::graphql_orm::graphql::orm::SearchableEntity for #struct_name {
                 fn search_key(&self) -> String {
-                    self.#search_pk_field.to_string()
+                    #search_key
                 }
 
                 fn search_key_json(&self) -> ::graphql_orm::serde_json::Value {
                     ::graphql_orm::serde_json::to_value(&self.#search_pk_field)
-                        .unwrap_or_else(|_| ::graphql_orm::serde_json::Value::String(self.#search_pk_field.to_string()))
+                        .unwrap_or_else(|_| ::graphql_orm::serde_json::Value::String(#search_key_json_fallback))
                 }
 
                 fn search_document(&self) -> ::graphql_orm::graphql::orm::SearchDocument {
@@ -3269,6 +3453,82 @@ fn generate_filter_field(
                 is_empty_check,
                 contains_spatial_check,
             ))
+        }
+        "bytes" => {
+            let input = quote! {
+                #[graphql(name = #graphql_name)]
+                pub #filter_field_name: Option<::graphql_orm::graphql::filters::BytesFilter>,
+            };
+            let sql = quote! {
+                if let Some(ref f) = self.#filter_field_name {
+                    if let Some(ref value) = f.eq {
+                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                        conditions.push(format!("{} = {}", #db_col, placeholder));
+                        values.push(::graphql_orm::graphql::orm::SqlValue::Bytes(value.clone()));
+                    }
+                    if let Some(ref value) = f.ne {
+                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                        conditions.push(format!("{} != {}", #db_col, placeholder));
+                        values.push(::graphql_orm::graphql::orm::SqlValue::Bytes(value.clone()));
+                    }
+                    for (list, negated) in [(&f.in_list, false), (&f.not_in, true)] {
+                        if let Some(list) = list {
+                            if !list.is_empty() {
+                                let base = values.len() + 1;
+                                let placeholders = (0..list.len())
+                                    .map(|offset| #struct_name::__gom_placeholder(base + offset))
+                                    .collect::<Vec<_>>();
+                                conditions.push(format!(
+                                    "{} {}IN ({})",
+                                    #db_col,
+                                    if negated { "NOT " } else { "" },
+                                    placeholders.join(", ")
+                                ));
+                                values.extend(list.iter().cloned().map(
+                                    ::graphql_orm::graphql::orm::SqlValue::Bytes
+                                ));
+                            }
+                        }
+                    }
+                    if let Some(is_null) = f.is_null {
+                        conditions.push(format!(
+                            "{} IS {}NULL",
+                            #db_col,
+                            if is_null { "" } else { "NOT " }
+                        ));
+                    }
+                }
+            };
+            let entity_match = if is_option_type(field_type) {
+                quote! {
+                    if let Some(ref filter) = self.#filter_field_name {
+                        let value = entity.#field_name.as_ref();
+                        if filter.eq.as_ref().is_some_and(|expected| value != Some(expected))
+                            || filter.ne.as_ref().is_some_and(|expected| value == Some(expected))
+                            || filter.in_list.as_ref().is_some_and(|list| value.is_none_or(|value| !list.contains(value)))
+                            || filter.not_in.as_ref().is_some_and(|list| value.is_some_and(|value| list.contains(value)))
+                            || filter.is_null.is_some_and(|expected| expected != value.is_none())
+                        {
+                            return Ok(false);
+                        }
+                    }
+                }
+            } else {
+                quote! {
+                    if let Some(ref filter) = self.#filter_field_name {
+                        let value = &entity.#field_name;
+                        if filter.eq.as_ref().is_some_and(|expected| value != expected)
+                            || filter.ne.as_ref().is_some_and(|expected| value == expected)
+                            || filter.in_list.as_ref().is_some_and(|list| !list.contains(value))
+                            || filter.not_in.as_ref().is_some_and(|list| list.contains(value))
+                            || filter.is_null == Some(true)
+                        {
+                            return Ok(false);
+                        }
+                    }
+                }
+            };
+            Ok((input, sql, entity_match, is_empty_check, no_spatial_check))
         }
         "string" => {
             let input = quote! {

@@ -1,0 +1,5 @@
+error: conditional_index predicate_field must be a persisted String or Option<String>
+  --> tests/ui/conditional_index_non_string_predicate.rs:15:5
+   |
+15 |     status: i64,
+   |     ^^^^^^^^^^^

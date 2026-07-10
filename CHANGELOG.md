@@ -2,6 +2,19 @@
 
 User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
 
+## 0.4.1
+
+Companion macros crate: `graphql-orm-macros` **0.4.1**.
+
+- Added raw `Vec<u8>` primary-key support across repository/transaction CRUD, CAS, exact filters,
+  hooks, row policies, and keyset cursors on SQLite `BLOB` and PostgreSQL `BYTEA`.
+- Repository and `MutationContext` upserts may now target host-supplied private keys. When the
+  conflict target is absent from the public create input, the GraphQL upsert field is omitted.
+- Added structural `conditional_index(...)` metadata for portable closed-set partial indexes,
+  including stable hashes, quoted DDL, SQLite/PostgreSQL introspection, and drift recreation.
+- Added `gt_field`, `lte_field`, and `lt_field` portable comparisons alongside `gte_field`.
+- PostgreSQL managed-schema comparison now canonicalizes harmless SQL type-name case differences.
+
 ## 0.4.0
 
 Companion macros crate: `graphql-orm-macros` **0.4.0**.

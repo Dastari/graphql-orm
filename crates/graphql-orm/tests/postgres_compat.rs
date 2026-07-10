@@ -279,10 +279,10 @@ fn postgres_schema_model_covers_types_and_generated_indexes() {
             && statement.contains("created_at BIGINT")
     }));
     assert!(plan.statements.iter().any(|statement| {
-        statement == "CREATE INDEX idx_indexed_parents_tenant_id ON indexed_parents (tenant_id)"
+        statement == "CREATE INDEX \"idx_indexed_parents_tenant_id\" ON \"indexed_parents\" (\"tenant_id\")"
     }));
     assert!(plan.statements.iter().any(|statement| {
-        statement == "CREATE INDEX idx_indexed_children_parent_id ON indexed_children (parent_id)"
+        statement == "CREATE INDEX \"idx_indexed_children_parent_id\" ON \"indexed_children\" (\"parent_id\")"
     }));
 }
 

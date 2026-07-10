@@ -76,6 +76,16 @@ pub struct UuidFilter {
     pub is_null: Option<bool>,
 }
 
+/// Exact-match predicates for binary columns. Values remain raw bytes.
+#[derive(async_graphql::InputObject, Clone, Debug, Default)]
+pub struct BytesFilter {
+    pub eq: Option<Vec<u8>>,
+    pub ne: Option<Vec<u8>>,
+    pub in_list: Option<Vec<Vec<u8>>>,
+    pub not_in: Option<Vec<Vec<u8>>>,
+    pub is_null: Option<bool>,
+}
+
 #[derive(async_graphql::InputObject, Clone, Debug, Default)]
 #[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
 #[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]

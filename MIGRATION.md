@@ -3,6 +3,23 @@
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.4.1 Binary Keys and Conditional Indexes
+
+This is a compatible Git-pin update. Move both crates to the reviewed `v0.4.1` commit.
+
+- Binary `Vec<u8>` keys require no host encoding. Mark host-assigned keys
+  `#[graphql_orm(auto_generated = false)]`; use `private`, `skip_input`, or `#[graphql(skip)]` when
+  they must not appear in public GraphQL inputs. Add `min_length` and `max_length` before migration
+  when fixed digest width is an invariant.
+- Existing repository upsert entities with hidden conflict targets now compile. Their repository and
+  transaction helpers remain available, while the unsafe GraphQL upsert field is absent.
+- Before adding a unique conditional index, validate that rows inside the selected predicate set
+  contain no duplicate indexed keys. Apply the generated create-index plan under a new migration
+  version.
+- Adding `gt_field`, `gte_field`, `lte_field`, or `lt_field` creates managed checks. SQL check
+  predicates evaluate to UNKNOWN when either nullable operand is NULL, so NULL rows pass unless a
+  separate non-null constraint applies.
+
 ## 0.4.0 Portable Persistence
 
 This is an additive migration for existing entities. Upgrade both crates together to `0.4.0`.
@@ -95,7 +112,7 @@ Default limit: `1000` → `50`. Max limit: `1000` → `100`.
 ### agql-auth Bridge
 
 ```toml
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.4.0", features = ["sqlite", "auth-agql"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.4.1", features = ["sqlite", "auth-agql"] }
 ```
 
 The optional feature depends on upstream `agql-auth` 0.7.0 via git revision

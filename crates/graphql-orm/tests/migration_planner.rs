@@ -269,7 +269,7 @@ fn postgres_plan_renders_backend_specific_statements() {
     assert!(
         plan.statements
             .iter()
-            .any(|statement| statement == "CREATE INDEX idx_users_name ON users (name)")
+            .any(|statement| statement == "CREATE INDEX \"idx_users_name\" ON \"users\" (\"name\")")
     );
 }
 
@@ -295,7 +295,7 @@ fn postgres_plan_enables_postgis_and_renders_spatial_index() {
             .any(|statement| statement.contains("location geometry(Point,4326) NOT NULL"))
     );
     assert!(plan.statements.iter().any(|statement| {
-        statement == "CREATE INDEX idx_places_location_spatial ON places USING GIST (location)"
+        statement == "CREATE INDEX \"idx_places_location_spatial\" ON \"places\" USING GIST (\"location\")"
     }));
 }
 
@@ -405,7 +405,7 @@ fn sqlite_plan_rebuilds_tables_for_column_alterations() {
     assert!(
         plan.statements
             .iter()
-            .any(|statement| statement == "CREATE INDEX idx_users_name ON users (name)")
+            .any(|statement| statement == "CREATE INDEX \"idx_users_name\" ON \"users\" (\"name\")")
     );
     assert!(
         plan.statements

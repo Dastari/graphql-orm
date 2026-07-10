@@ -267,7 +267,7 @@ async fn postgis_spatial_fields_indexes_and_predicates_round_trip()
             .any(|statement| statement == "CREATE EXTENSION IF NOT EXISTS postgis")
     );
     assert!(plan.statements.iter().any(|statement| {
-        statement == "CREATE INDEX idx_spatial_places_location_spatial ON spatial_places USING GIST (location)"
+        statement == "CREATE INDEX \"idx_spatial_places_location_spatial\" ON \"spatial_places\" USING GIST (\"location\")"
     }));
 
     let version = format!(

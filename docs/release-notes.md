@@ -11,6 +11,19 @@ required. The optional `auth-agql` bridge intentionally pins `agql-auth` at
 `5e7f230b96350f55496477c11f8a0505e6438779`. Consequently `cargo package -p graphql-orm` cannot
 resolve that Git-only optional dependency through the crates.io packaging model; this is expected.
 
+## 0.4.1
+
+Compatible Git-only follow-up for binary keys and portable conditional indexes. Runtime and macros
+are both `0.4.1`.
+
+- Generated operations bind binary primary keys as bytes for SQLite `BLOB` and PostgreSQL `BYTEA`;
+  no application hex/base64 adapter is required.
+- Private repository upsert targets no longer force public GraphQL input exposure. Unsafe GraphQL
+  upsert fields are omitted while repository and transaction helpers remain available.
+- `#[graphql_orm(conditional_index(...))]` describes a quoted, structurally introspected closed-set
+  partial index for managed SQLite/PostgreSQL schemas.
+- Portable same-row checks now include `gt_field`, `lte_field`, and `lt_field`.
+
 ## 0.4.0
 
 Portable persistence primitives release. Runtime and macros are both `0.4.0`.

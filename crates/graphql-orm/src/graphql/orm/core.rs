@@ -52,6 +52,21 @@ pub enum SqlValue {
     Null,
 }
 
+/// Produce a stable internal event/search identifier for a binary entity key.
+///
+/// SQL bindings always retain the original bytes; this encoding is used only
+/// where existing hook/event contracts require a textual identifier.
+#[doc(hidden)]
+pub fn binary_key_id(value: &[u8]) -> String {
+    let mut encoded = String::with_capacity(4 + value.len() * 2);
+    encoded.push_str("bin:");
+    for byte in value {
+        use std::fmt::Write as _;
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
 /// Request-local database authorization context for PostgreSQL RLS and
 /// structural multi-tenant predicates.
 ///
@@ -1910,6 +1925,14 @@ pub struct IndexDef {
     pub is_unique: bool,
     pub method: IndexMethod,
     pub is_spatial: bool,
+    /// Optional portable closed-set predicate for a partial index.
+    pub predicate: Option<IndexPredicateDef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexPredicateDef {
+    pub column: &'static str,
+    pub values: &'static [&'static str],
 }
 
 impl IndexDef {
@@ -1920,11 +1943,17 @@ impl IndexDef {
             is_unique: false,
             method: IndexMethod::Default,
             is_spatial: false,
+            predicate: None,
         }
     }
 
     pub const fn unique(mut self) -> Self {
         self.is_unique = true;
+        self
+    }
+
+    pub const fn where_in(mut self, column: &'static str, values: &'static [&'static str]) -> Self {
+        self.predicate = Some(IndexPredicateDef { column, values });
         self
     }
 
@@ -1935,6 +1964,7 @@ impl IndexDef {
             is_unique: false,
             method: IndexMethod::Gist,
             is_spatial: true,
+            predicate: None,
         }
     }
 }
@@ -3128,6 +3158,15 @@ pub fn stable_schema_model_hash(schema: &SchemaModel) -> String {
             } else {
                 "not_spatial"
             });
+            canonical.push('|');
+            if let Some(predicate) = &index.predicate {
+                canonical.push_str("where_in:");
+                canonical.push_str(predicate.column);
+                canonical.push(':');
+                canonical.push_str(&predicate.values.join(","));
+            } else {
+                canonical.push_str("no_predicate");
+            }
             canonical.push('\n');
         }
 

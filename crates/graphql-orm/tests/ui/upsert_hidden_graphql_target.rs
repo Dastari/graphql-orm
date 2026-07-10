@@ -1,6 +1,13 @@
 use graphql_orm::prelude::*;
 
-#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
+#[derive(
+    GraphQLEntity,
+    GraphQLOperations,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 #[graphql_entity(
     table = "upsert_hidden_target_examples",
     plural = "UpsertHiddenTargetExamples",
@@ -14,6 +21,8 @@ struct UpsertHiddenTargetExample {
     #[graphql_orm(skip_input)]
     pub mac: String,
 
+    #[filterable(type = "string")]
+    #[sortable]
     pub title: String,
 }
 
