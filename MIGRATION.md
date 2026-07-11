@@ -3,6 +3,21 @@
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.5.0 Typed Read Projections
+
+This additive release is source-compatible with 0.4.3. Pin both crates to the reviewed `v0.5.0`
+commit. Projection declarations change generated Rust APIs only and require no database migration.
+
+Add `#[graphql_orm(projection(name = "...", fields = [id, field_name], private = true))]` to a
+`GraphQLEntity`, then replace least-privilege full-entity reads with the generated projection's
+repository or transaction methods. Mark secrets `#[graphql_orm(private, sensitive)]`; existing
+`#[backup(redact)]` also drives projection `Debug` redaction.
+
+If the database registers an application `RowPolicy`, projection reads now return a fail-closed
+error rather than fetching a full entity to evaluate it. Move projection-compatible tenant or
+soft-delete enforcement to generated typed filters or PostgreSQL RLS before migrating that caller.
+No GraphQL query or DTO is added. See [Typed Read Projections](docs/read-projections.md).
+
 ## 0.4.3 Structural Introspection Hardening
 
 This compatible patch needs no application API change. Pin both crates to the reviewed `v0.4.3`
@@ -152,7 +167,7 @@ Default limit: `1000` → `50`. Max limit: `1000` → `100`.
 ### agql-auth Bridge
 
 ```toml
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.4.3", features = ["sqlite", "auth-agql"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.5.0", features = ["sqlite", "auth-agql"] }
 ```
 
 The optional feature depends on upstream `agql-auth` 0.7.0 via git revision

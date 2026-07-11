@@ -993,6 +993,17 @@ where
         MutationQuery::new(self)
     }
 
+    /// Start a transaction-bound read of a macro-generated typed projection.
+    /// Only the projection's declared columns are selected and decoded.
+    pub fn project<'a, P>(&'a mut self) -> super::query::TransactionProjectionQuery<'a, 'tx, P, B>
+    where
+        for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
+            sqlx::Executor<'c, Database = B::Database> + Send,
+        P: super::query::ReadProjection<B>,
+    {
+        super::query::TransactionProjectionQuery::new(self)
+    }
+
     pub async fn find_by_id<'a, T>(
         &'a mut self,
         id: &'a <T as MutationContextFindById<B>>::Id,

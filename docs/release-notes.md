@@ -11,6 +11,20 @@ required. The optional `auth-agql` bridge intentionally pins `agql-auth` at
 `5e7f230b96350f55496477c11f8a0505e6438779`. Consequently `cargo package -p graphql-orm` cannot
 resolve that Git-only optional dependency through the crates.io packaging model; this is expected.
 
+## 0.5.0
+
+Additive Git-only typed read-projection release. Runtime and macros are both `0.5.0`.
+
+- `#[graphql_orm(projection(name = "...", fields = [id, field_name], private = true))]` generates an exact
+  repository DTO from persisted entity fields without selecting the remaining columns.
+- Generated projection builders use the entity's typed filters/order inputs, secure pagination
+  bounds, deterministic primary-key tiebreakers, primary/unique lookup helpers, and optional auth.
+- `MutationContext::project` and generated `_in` lookups provide transaction-bound reads and observe
+  earlier transaction writes.
+- Entity authorization and PostgreSQL RLS remain active. Application row policies or residual
+  in-memory filters fail closed instead of forcing a full-entity decode.
+- Projection DTOs remain outside GraphQL. Sensitive/redacted fields have redacting `Debug` output.
+
 ## 0.4.3
 
 Compatible Git-only security hardening. Runtime and macros are both `0.4.3`.

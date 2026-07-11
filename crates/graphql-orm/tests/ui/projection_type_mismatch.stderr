@@ -1,0 +1,12 @@
+error[E0308]: mismatched types
+  --> tests/ui/projection_type_mismatch.rs:15:21
+   |
+15 |     let _: String = value.issued_at;
+   |            ------   ^^^^^^^^^^^^^^^ expected `String`, found `i64`
+   |            |
+   |            expected due to this
+   |
+help: try using a conversion method
+   |
+15 |     let _: String = value.issued_at.to_string();
+   |                                    ++++++++++++

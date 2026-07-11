@@ -1,0 +1,5 @@
+error: projection requires at least one field
+ --> tests/ui/projection_empty.rs:5:15
+  |
+5 | #[graphql_orm(projection(name = "EmptyProjection", fields = []))]
+  |               ^^^^^^^^^^

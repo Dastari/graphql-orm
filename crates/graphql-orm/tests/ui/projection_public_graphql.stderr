@@ -1,0 +1,5 @@
+error: public GraphQL projections are not supported; use private = true
+ --> tests/ui/projection_public_graphql.rs:5:15
+  |
+5 | #[graphql_orm(projection(name = "PublicProjection", fields = [id], private = false))]
+  |               ^^^^^^^^^^

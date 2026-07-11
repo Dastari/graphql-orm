@@ -1,0 +1,5 @@
+error: projection fields must contain Rust field identifiers, not strings or paths
+ --> tests/ui/projection_string_field.rs:5:63
+  |
+5 | #[graphql_orm(projection(name = "StringProjection", fields = ["id"]))]
+  |                                                               ^^^^

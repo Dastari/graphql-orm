@@ -1,0 +1,17 @@
+error[E0425]: cannot find type `ItemProjection` in this scope
+  --> tests/ui/projection_not_generated.rs:12:33
+   |
+12 |       let _ = std::mem::size_of::<ItemProjection>();
+   |                                   ^^^^^^^^^^^^^^
+   |
+  ::: src/graphql/orm/query.rs
+   |
+   | / pub trait ReadProjection<B: OrmBackend = DefaultBackend>:
+   | |     FromSqlRow<B> + Clone + Send + Sync + 'static
+   | |_________________________________________________- similarly named trait `ReadProjection` defined here
+   |
+help: a trait with a similar name exists
+   |
+12 -     let _ = std::mem::size_of::<ItemProjection>();
+12 +     let _ = std::mem::size_of::<ReadProjection>();
+   |

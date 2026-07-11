@@ -28,10 +28,18 @@ pub(crate) struct EntityMetadata {
     pub(crate) unique_composite: Vec<Vec<String>>,
     pub(crate) indexes: Vec<(bool, Vec<String>)>,
     pub(crate) conditional_indexes: Vec<ConditionalIndexMetadata>,
+    pub(crate) projections: Vec<ProjectionMetadata>,
     pub(crate) search: Option<SearchEntityMetadata>,
     pub(crate) serde_rename_all: Option<String>,
     pub(crate) graphql_rename_fields: Option<String>,
     pub(crate) rls: Option<RlsMetadata>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ProjectionMetadata {
+    pub(crate) name: Option<String>,
+    pub(crate) fields: Vec<String>,
+    pub(crate) private: bool,
 }
 
 #[derive(Clone, Default)]
@@ -305,6 +313,52 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                         ));
                     }
                     metadata.conditional_indexes.push(index);
+                } else if meta.path.is_ident("projection") {
+                    let mut projection = ProjectionMetadata {
+                        private: true,
+                        ..ProjectionMetadata::default()
+                    };
+                    meta.parse_nested_meta(|option| {
+                        if option.path.is_ident("name") {
+                            let value = option.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            projection.name = Some(lit.value());
+                        } else if option.path.is_ident("fields") {
+                            let value = option.value()?;
+                            projection.fields = parse_projection_field_array(
+                                value,
+                            )?;
+                        } else if option.path.is_ident("private") {
+                            let value = option.value()?;
+                            let lit: syn::LitBool = value.parse()?;
+                            projection.private = lit.value;
+                        } else {
+                            return Err(syn::Error::new(
+                                option.path.span(),
+                                "unsupported projection option; expected name, fields, or private",
+                            ));
+                        }
+                        Ok(())
+                    })?;
+                    if projection.name.is_none() {
+                        return Err(syn::Error::new(
+                            meta.path.span(),
+                            "projection requires name = \"TypeName\"",
+                        ));
+                    }
+                    if projection.fields.is_empty() {
+                        return Err(syn::Error::new(
+                            meta.path.span(),
+                            "projection requires at least one field",
+                        ));
+                    }
+                    if !projection.private {
+                        return Err(syn::Error::new(
+                            meta.path.span(),
+                            "public GraphQL projections are not supported; use private = true",
+                        ));
+                    }
+                    metadata.projections.push(projection);
                 }
                 Ok(())
             })?;
@@ -668,6 +722,7 @@ pub(crate) struct FieldMetadata {
     /// the Rust entity, and generated trusted Rust Create/Update input structs.
     pub(crate) skip_input: bool,
     pub(crate) is_private: bool,
+    pub(crate) sensitive: bool,
     pub(crate) is_date_field: bool,
     pub(crate) is_boolean_field: bool,
     pub(crate) is_json_field: bool,
@@ -806,6 +861,7 @@ impl Default for FieldMetadata {
             skip_db: false,
             skip_input: false,
             is_private: false,
+            sensitive: false,
             is_date_field: false,
             is_boolean_field: false,
             is_json_field: false,
@@ -874,6 +930,29 @@ fn parse_string_array_expr(input: ParseStream<'_>, message: &str) -> syn::Result
             .collect(),
         other => Err(syn::Error::new_spanned(other, message)),
     }
+}
+
+fn parse_projection_field_array(input: ParseStream<'_>) -> syn::Result<Vec<String>> {
+    let expr: syn::Expr = input.parse()?;
+    let syn::Expr::Array(array) = expr else {
+        return Err(syn::Error::new_spanned(
+            expr,
+            "projection fields must be an array of Rust field identifiers",
+        ));
+    };
+    array
+        .elems
+        .into_iter()
+        .map(|expr| match expr {
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
+                Ok(path.path.segments[0].ident.to_string())
+            }
+            other => Err(syn::Error::new_spanned(
+                other,
+                "projection fields must contain Rust field identifiers, not strings or paths",
+            )),
+        })
+        .collect()
 }
 
 fn validate_search_weight(value: &str, span: proc_macro2::Span) -> syn::Result<()> {
@@ -1024,6 +1103,8 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             meta.order = false;
                             meta.subscribe = false;
                             meta.skip_input = true;
+                        } else if nested.path.is_ident("sensitive") {
+                            meta.sensitive = true;
                         } else if nested.path.is_ident("version") {
                             meta.is_version = true;
                             meta.skip_input = true;
@@ -1798,6 +1879,18 @@ fn generate_entity_impl(
     };
 
     let schema_only = schema_only_override || entity_meta.schema_only;
+    if schema_only && !entity_meta.projections.is_empty() {
+        return Err(syn::Error::new_spanned(
+            input,
+            "typed projections require GraphQLEntity; schema-only entities do not generate read APIs",
+        ));
+    }
+    if backend == BackendKind::Mssql && !entity_meta.projections.is_empty() {
+        return Err(syn::Error::new_spanned(
+            input,
+            "typed projections are generated only for sqlite and postgres backends",
+        ));
+    }
     let entity_name_lit = struct_name.to_string();
     let backup_enabled = entity_meta.backup_enabled.unwrap_or(true);
     let append_only = entity_meta.append_only;
@@ -2793,6 +2886,18 @@ fn generate_entity_impl(
     let where_input_name = syn::Ident::new(&where_input_name_str, struct_name.span());
     let order_by_name = syn::Ident::new(&order_by_name_str, struct_name.span());
     let struct_name_str = struct_name.to_string();
+    let projection_definitions = generate_projection_definitions(
+        backend,
+        struct_name,
+        &entity_meta,
+        &parsed_fields,
+        &where_input_name,
+        &order_by_name,
+        &backend_marker,
+        &row_type,
+        &helper_import,
+        &input.vis,
+    )?;
 
     // Generate order_by to_sql_order implementation
     let order_by_match_arms: Vec<_> = sortable_columns
@@ -2903,6 +3008,7 @@ fn generate_entity_impl(
         #rls_impl
         #search_schema_impl
         #searchable_entity_impl
+        #projection_definitions
 
         // WhereInput for filtering
         #[derive(::graphql_orm::async_graphql::InputObject, Default, Clone, Debug)]
@@ -3277,6 +3383,353 @@ fn generate_entity_impl(
             }
         }
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_projection_definitions(
+    backend: BackendKind,
+    entity: &syn::Ident,
+    entity_meta: &EntityMetadata,
+    fields: &[ParsedField],
+    where_input: &syn::Ident,
+    order_input: &syn::Ident,
+    backend_marker: &proc_macro2::TokenStream,
+    row_type: &proc_macro2::TokenStream,
+    helper_import: &proc_macro2::TokenStream,
+    visibility: &syn::Visibility,
+) -> syn::Result<proc_macro2::TokenStream> {
+    if entity_meta.projections.is_empty() {
+        return Ok(quote! {});
+    }
+
+    let mut projection_names = std::collections::HashSet::new();
+    let primary_keys = fields
+        .iter()
+        .filter(|field| field.meta.is_primary_key)
+        .collect::<Vec<_>>();
+    let primary_keys = if primary_keys.is_empty() {
+        fields
+            .iter()
+            .filter(|field| {
+                field
+                    .field
+                    .ident
+                    .as_ref()
+                    .is_some_and(|ident| ident == "id")
+            })
+            .collect::<Vec<_>>()
+    } else {
+        primary_keys
+    };
+
+    let mut definitions = Vec::new();
+    for projection in &entity_meta.projections {
+        let name = projection
+            .name
+            .as_deref()
+            .expect("validated projection name");
+        let projection_name: syn::Ident = syn::parse_str(name).map_err(|_| {
+            syn::Error::new(
+                entity.span(),
+                format!("projection name `{name}` must be a valid Rust type identifier"),
+            )
+        })?;
+        if !projection_names.insert(name.to_string()) {
+            return Err(syn::Error::new(
+                entity.span(),
+                format!("duplicate projection name `{name}`"),
+            ));
+        }
+
+        let mut requested = std::collections::HashSet::new();
+        let mut selected = Vec::new();
+        for requested_name in &projection.fields {
+            if !requested.insert(requested_name.clone()) {
+                return Err(syn::Error::new(
+                    entity.span(),
+                    format!("projection `{name}` contains duplicate field `{requested_name}`"),
+                ));
+            }
+            let field = fields
+                .iter()
+                .find(|field| {
+                    field
+                        .field
+                        .ident
+                        .as_ref()
+                        .is_some_and(|ident| ident == requested_name)
+                })
+                .ok_or_else(|| {
+                    syn::Error::new(
+                        entity.span(),
+                        format!(
+                            "projection `{name}` references unknown field `{requested_name}` on `{entity}`"
+                        ),
+                    )
+                })?;
+            if field.meta.is_relation || field.meta.skip_db {
+                return Err(syn::Error::new(
+                    field.field.span(),
+                    format!(
+                        "projection `{name}` field `{requested_name}` must be a persisted scalar field"
+                    ),
+                ));
+            }
+            selected.push(field);
+        }
+
+        let dto_fields = selected.iter().map(|selected| {
+            let ident = selected.field.ident.as_ref().expect("named field");
+            let ty = &selected.field.ty;
+            quote! { pub #ident: #ty, }
+        });
+        let row_fields = selected
+            .iter()
+            .map(|selected| {
+                let ident = selected.field.ident.as_ref().expect("named field");
+                let db_column = selected
+                    .meta
+                    .db_column
+                    .clone()
+                    .unwrap_or_else(|| ident.to_string());
+                generate_row_field_assignment(
+                    backend,
+                    ident,
+                    &selected.field.ty,
+                    &db_column,
+                    &selected.meta,
+                )
+            })
+            .collect::<syn::Result<Vec<_>>>()?;
+        let selected_columns = selected
+            .iter()
+            .map(|selected| {
+                let ident = selected.field.ident.as_ref().expect("named field");
+                let db_column = selected
+                    .meta
+                    .db_column
+                    .clone()
+                    .unwrap_or_else(|| ident.to_string());
+                backend_quote_identifier_path(backend, &db_column)
+            })
+            .collect::<Vec<_>>();
+        let debug_fields = selected.iter().map(|selected| {
+            let ident = selected.field.ident.as_ref().expect("named field");
+            let label = ident.to_string();
+            let redact =
+                selected.meta.sensitive || selected.meta.backup_policy.as_deref() == Some("redact");
+            if redact {
+                quote! { debug.field(#label, &"[redacted]"); }
+            } else {
+                quote! { debug.field(#label, &self.#ident); }
+            }
+        });
+
+        let key_methods = if primary_keys.is_empty() {
+            quote! {}
+        } else {
+            let key_arguments = primary_keys.iter().map(|key| {
+                let ident = key.field.ident.as_ref().expect("named field");
+                let ty = option_inner_type(&key.field.ty).unwrap_or(&key.field.ty);
+                quote! { #ident: &#ty }
+            });
+            let key_values = primary_keys
+                .iter()
+                .map(|key| projection_lookup_sql_value(key, key.field.ident.as_ref().unwrap()));
+            let transaction_key_arguments = primary_keys.iter().map(|key| {
+                let ident = key.field.ident.as_ref().expect("named field");
+                let ty = option_inner_type(&key.field.ty).unwrap_or(&key.field.ty);
+                quote! { #ident: &#ty }
+            });
+            let transaction_key_values = primary_keys
+                .iter()
+                .map(|key| projection_lookup_sql_value(key, key.field.ident.as_ref().unwrap()));
+            let single_id_alias = if primary_keys.len() == 1 {
+                let key = primary_keys[0];
+                let ty = option_inner_type(&key.field.ty).unwrap_or(&key.field.ty);
+                quote! {
+                    pub async fn find_by_id(
+                        db: &::graphql_orm::db::Database<#backend_marker>,
+                        id: &#ty,
+                    ) -> ::graphql_orm::Result<Option<Self>> {
+                        Self::find_by_key(db, id).await
+                    }
+
+                    pub async fn find_by_id_in(
+                        transaction: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                        id: &#ty,
+                    ) -> ::graphql_orm::Result<Option<Self>> {
+                        Self::find_by_key_in(transaction, id).await
+                    }
+                }
+            } else {
+                quote! {}
+            };
+            quote! {
+                pub async fn find_by_key(
+                    db: &::graphql_orm::db::Database<#backend_marker>,
+                    #(#key_arguments),*
+                ) -> ::graphql_orm::Result<Option<Self>> {
+                    let values = vec![#(#key_values),*];
+                    Self::query(db).__where_primary_key(values).fetch_optional_one().await
+                }
+
+                pub async fn find_by_key_in(
+                    transaction: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    #(#transaction_key_arguments),*
+                ) -> ::graphql_orm::Result<Option<Self>> {
+                    let values = vec![#(#transaction_key_values),*];
+                    transaction.project::<Self>()
+                        .__where_primary_key(values)
+                        .fetch_optional_one()
+                        .await
+                }
+
+                #single_id_alias
+            }
+        };
+
+        let unique_methods = fields
+            .iter()
+            .filter(|field| {
+                field.meta.unique
+                    && !field.meta.is_primary_key
+                    && !field.meta.is_relation
+                    && !field.meta.skip_db
+            })
+            .enumerate()
+            .map(|(unique_index, field)| {
+                let ident = field.field.ident.as_ref().expect("named field");
+                let method = syn::Ident::new(&format!("find_by_{ident}"), ident.span());
+                let transaction_method =
+                    syn::Ident::new(&format!("find_by_{ident}_in"), ident.span());
+                let ty = option_inner_type(&field.field.ty).unwrap_or(&field.field.ty);
+                let value = projection_lookup_sql_value(field, ident);
+                let transaction_value = projection_lookup_sql_value(field, ident);
+                quote! {
+                    pub async fn #method(
+                        db: &::graphql_orm::db::Database<#backend_marker>,
+                        #ident: &#ty,
+                    ) -> ::graphql_orm::Result<Option<Self>> {
+                        Self::query(db)
+                            .__where_unique(#unique_index, #value)
+                            .fetch_optional_one()
+                            .await
+                    }
+
+                    pub async fn #transaction_method(
+                        transaction: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                        #ident: &#ty,
+                    ) -> ::graphql_orm::Result<Option<Self>> {
+                        transaction.project::<Self>()
+                            .__where_unique(#unique_index, #transaction_value)
+                            .fetch_optional_one()
+                            .await
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let unique_columns = fields
+            .iter()
+            .filter(|field| {
+                field.meta.unique
+                    && !field.meta.is_primary_key
+                    && !field.meta.is_relation
+                    && !field.meta.skip_db
+            })
+            .map(|field| {
+                let ident = field.field.ident.as_ref().expect("named field");
+                field
+                    .meta
+                    .db_column
+                    .clone()
+                    .unwrap_or_else(|| ident.to_string())
+            });
+
+        definitions.push(quote! {
+            #[derive(Clone, PartialEq)]
+            #visibility struct #projection_name {
+                #(#dto_fields)*
+            }
+
+            impl ::std::fmt::Debug for #projection_name {
+                fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                    let mut debug = formatter.debug_struct(#name);
+                    #(#debug_fields)*
+                    debug.finish()
+                }
+            }
+
+            impl ::graphql_orm::graphql::orm::FromSqlRow<#backend_marker> for #projection_name {
+                fn from_row(row: &#row_type) -> ::graphql_orm::Result<Self> {
+                    #helper_import
+                    Ok(Self {
+                        #(#row_fields)*
+                    })
+                }
+            }
+
+            impl ::graphql_orm::graphql::orm::ReadProjection<#backend_marker> for #projection_name {
+                type Entity = #entity;
+                type Filter = #where_input;
+                type Order = #order_input;
+                const COLUMNS: &'static [&'static str] = &[#(#selected_columns),*];
+                const UNIQUE_COLUMNS: &'static [&'static str] = &[#(#unique_columns),*];
+            }
+
+            #[allow(clippy::ptr_arg)]
+            impl #projection_name {
+                pub fn query(
+                    db: &::graphql_orm::db::Database<#backend_marker>,
+                ) -> ::graphql_orm::graphql::orm::ProjectionQuery<'_, Self, #backend_marker> {
+                    ::graphql_orm::graphql::orm::ProjectionQuery::new(db)
+                }
+
+                pub fn query_with_auth<'a>(
+                    db: &'a ::graphql_orm::db::Database<#backend_marker>,
+                    auth: Option<&::graphql_orm::graphql::orm::DbAuthContext>,
+                ) -> ::graphql_orm::graphql::orm::ProjectionQuery<'a, Self, #backend_marker> {
+                    ::graphql_orm::graphql::orm::ProjectionQuery::new(db).with_auth(auth)
+                }
+
+                #key_methods
+                #(#unique_methods)*
+            }
+        });
+    }
+
+    Ok(quote! { #(#definitions)* })
+}
+
+fn projection_lookup_sql_value(
+    field: &ParsedField,
+    argument: &syn::Ident,
+) -> proc_macro2::TokenStream {
+    let ty = option_inner_type(&field.field.ty).unwrap_or(&field.field.ty);
+    if is_byte_vec_type(ty) {
+        quote! { ::graphql_orm::graphql::orm::SqlValue::Bytes(#argument.clone()) }
+    } else if is_uuid_type(ty) {
+        quote! { ::graphql_orm::graphql::orm::SqlValue::Uuid(*#argument) }
+    } else if is_bool_type(ty) {
+        quote! { ::graphql_orm::graphql::orm::SqlValue::Bool(*#argument) }
+    } else {
+        let type_name = quote! { #ty }.to_string().replace(' ', "");
+        match type_name.as_str() {
+            "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => {
+                quote! { ::graphql_orm::graphql::orm::SqlValue::Int(*#argument as i64) }
+            }
+            "f32" | "f64" => {
+                quote! { ::graphql_orm::graphql::orm::SqlValue::Float(*#argument as f64) }
+            }
+            "String" => {
+                quote! { ::graphql_orm::graphql::orm::SqlValue::String(#argument.clone()) }
+            }
+            _ => quote! {
+                ::graphql_orm::graphql::orm::SqlValue::String(#argument.to_string())
+            },
+        }
+    }
 }
 
 // ============================================================================

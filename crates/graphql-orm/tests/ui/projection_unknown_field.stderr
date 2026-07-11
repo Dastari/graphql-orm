@@ -1,0 +1,5 @@
+error: projection `UnknownProjection` references unknown field `other_entity_field` on `Item`
+ --> tests/ui/projection_unknown_field.rs:6:8
+  |
+6 | struct Item {
+  |        ^^^^

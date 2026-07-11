@@ -1,0 +1,5 @@
+error: projection `DuplicateProjection` contains duplicate field `id`
+ --> tests/ui/projection_duplicate_field.rs:6:8
+  |
+6 | struct Item {
+  |        ^^^^

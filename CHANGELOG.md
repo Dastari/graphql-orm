@@ -2,6 +2,19 @@
 
 User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
 
+## 0.5.0
+
+Companion macros crate: `graphql-orm-macros` **0.5.0**.
+
+- Added private entity-level identifier-based `projection(...)` declarations that generate exact typed DTOs and
+  select only their declared columns on SQLite and PostgreSQL.
+- Added bounded typed repository queries, primary/unique lookup helpers, auth-aware reads, and
+  transaction-bound `MutationContext::project` queries with own-write visibility.
+- Projection reads preserve entity authorization and PostgreSQL RLS. Application row policies and
+  residual in-memory filters fail closed because evaluating them would require a full entity.
+- Added `sensitive` field metadata and redacting projection `Debug` implementations. Projections are
+  never exposed through GraphQL.
+
 ## 0.4.3
 
 Companion macros crate: `graphql-orm-macros` **0.4.3**.

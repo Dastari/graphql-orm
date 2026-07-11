@@ -1,0 +1,10 @@
+error: typed projections require GraphQLEntity; schema-only entities do not generate read APIs
+ --> tests/ui/projection_schema_only.rs:4:1
+  |
+4 | / #[graphql_entity(table = "projection_schema_only", plural = "ProjectionSchemaOnly")]
+5 | | #[graphql_orm(projection(name = "SchemaOnlyProjection", fields = [id]))]
+6 | | struct Item {
+7 | |     #[primary_key]
+8 | |     id: String,
+9 | | }
+  | |_^

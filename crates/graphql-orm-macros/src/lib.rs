@@ -108,6 +108,26 @@
 //! Searchable fields must be persisted `String` or `Option<String>` fields.
 //! Private fields cannot be searchable, and read-policy-protected fields need
 //! an explicit `searchable(policy = "...")` opt-in.
+//!
+//! # Typed Read Projections
+//!
+//! Repository-only projections select and decode an exact subset of persisted
+//! fields. They are never added to GraphQL:
+//!
+//! ```ignore
+//! #[graphql_orm(projection(
+//!     name = "PublicCertificate",
+//!     fields = [id, serial, pem],
+//!     private = true
+//! ))]
+//! struct Certificate {
+//!     id: uuid::Uuid,
+//!     serial: String,
+//!     pem: String,
+//!     #[graphql_orm(private, sensitive)]
+//!     private_key_enc: String,
+//! }
+//! ```
 
 use convert_case::{Case, Casing};
 use proc_macro::TokenStream;

@@ -1,0 +1,5 @@
+error: graphql-orm backend `postgres` was requested for graphql_entity, but the `postgres` feature is not enabled
+ --> tests/ui/projection_wrong_backend.rs:6:8
+  |
+6 | struct Item {
+  |        ^^^^
