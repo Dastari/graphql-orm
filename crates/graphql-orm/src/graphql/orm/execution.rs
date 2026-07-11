@@ -7,6 +7,21 @@ use super::{MigrationBackend, OrmBackend, SqlxBackend};
 use std::collections::HashSet;
 
 pub const MIGRATION_HISTORY_TABLE: &str = "__graphql_orm_migrations";
+const MIGRATION_METADATA_COLUMNS: [(&str, &str); 6] = [
+    ("backend", "TEXT"),
+    ("graphql_orm_version", "TEXT"),
+    ("source_schema_hash", "TEXT"),
+    ("target_schema_hash", "TEXT"),
+    ("plan_hash", "TEXT"),
+    ("policy", "TEXT"),
+];
+
+fn invalid_migration_history(message: impl Into<String>) -> sqlx::Error {
+    sqlx::Error::Configuration(Box::new(std::io::Error::other(format!(
+        "unsafe {MIGRATION_HISTORY_TABLE} schema: {}",
+        message.into()
+    ))))
+}
 
 pub struct Migration {
     pub version: &'static str,
@@ -279,47 +294,212 @@ impl MigrationBackend for super::PostgresBackend {
 
 #[cfg(feature = "sqlite")]
 async fn ensure_sqlite_migration_history_table(pool: &sqlx::SqlitePool) -> crate::Result<()> {
-    sqlx::query(&format!(
-        "CREATE TABLE IF NOT EXISTS {} (
+    let mut transaction = pool.begin().await?;
+    let exists: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?")
+            .bind(MIGRATION_HISTORY_TABLE)
+            .fetch_one(&mut *transaction)
+            .await?;
+    if exists == 0 {
+        sqlx::query(&format!(
+            "CREATE TABLE IF NOT EXISTS {} (
             version TEXT PRIMARY KEY,
             description TEXT NOT NULL,
-            applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            backend TEXT,
+            graphql_orm_version TEXT,
+            source_schema_hash TEXT,
+            target_schema_hash TEXT,
+            plan_hash TEXT,
+            policy TEXT
         )",
+            MIGRATION_HISTORY_TABLE
+        ))
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        return Ok(());
+    }
+
+    let rows = sqlx::query(&format!("PRAGMA table_info({})", MIGRATION_HISTORY_TABLE))
+        .fetch_all(&mut *transaction)
+        .await?;
+    let allowed = ["version", "description", "applied_at"]
+        .into_iter()
+        .chain(MIGRATION_METADATA_COLUMNS.iter().map(|(name, _)| *name))
+        .collect::<HashSet<_>>();
+    let mut columns = std::collections::HashMap::new();
+    for row in rows {
+        let name: String = sqlx::Row::try_get(&row, "name")?;
+        if !allowed.contains(name.as_str()) {
+            return Err(invalid_migration_history(format!(
+                "unrecognized column `{name}`"
+            )));
+        }
+        columns.insert(
+            name,
+            (
+                sqlx::Row::try_get::<String, _>(&row, "type")?,
+                sqlx::Row::try_get::<i64, _>(&row, "notnull")? != 0,
+                sqlx::Row::try_get::<i64, _>(&row, "pk")?,
+            ),
+        );
+    }
+    let Some((version_type, _, version_pk)) = columns.get("version") else {
+        return Err(invalid_migration_history(
+            "missing required `version` column",
+        ));
+    };
+    let Some((applied_type, applied_not_null, applied_pk)) = columns.get("applied_at") else {
+        return Err(invalid_migration_history(
+            "missing required `applied_at` column",
+        ));
+    };
+    if !version_type.eq_ignore_ascii_case("TEXT") || *version_pk != 1 {
+        return Err(invalid_migration_history(
+            "`version` must be the sole textual primary-key identity",
+        ));
+    }
+    if !applied_type.eq_ignore_ascii_case("TEXT") || !applied_not_null || *applied_pk != 0 {
+        return Err(invalid_migration_history(
+            "`applied_at` must be a non-null textual timestamp",
+        ));
+    }
+    if columns.values().filter(|(_, _, pk)| *pk > 0).count() != 1 {
+        return Err(invalid_migration_history(
+            "migration history must have exactly one primary-key column",
+        ));
+    }
+    for (column, _) in MIGRATION_METADATA_COLUMNS {
+        if let Some((kind, _, pk)) = columns.get(column) {
+            if !kind.eq_ignore_ascii_case("TEXT") || *pk != 0 {
+                return Err(invalid_migration_history(format!(
+                    "`{column}` metadata must be text"
+                )));
+            }
+        }
+    }
+    let invalid_rows: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM {} WHERE version IS NULL OR version = ''
+         OR typeof(version) != 'text' OR applied_at IS NULL OR typeof(applied_at) != 'text'",
         MIGRATION_HISTORY_TABLE
     ))
-    .execute(pool)
+    .fetch_one(&mut *transaction)
     .await?;
+    if invalid_rows != 0 {
+        return Err(invalid_migration_history(
+            "legacy rows contain an invalid version identity or timestamp",
+        ));
+    }
 
-    let existing = sqlx::query(&format!("PRAGMA table_info({})", MIGRATION_HISTORY_TABLE))
-        .fetch_all(pool)
-        .await?
-        .into_iter()
-        .map(|row| sqlx::Row::try_get::<String, _>(&row, "name"))
-        .collect::<Result<HashSet<_>, _>>()?;
-    for (column, sql_type) in [
-        ("backend", "TEXT"),
-        ("graphql_orm_version", "TEXT"),
-        ("source_schema_hash", "TEXT"),
-        ("target_schema_hash", "TEXT"),
-        ("plan_hash", "TEXT"),
-        ("policy", "TEXT"),
-    ] {
-        if !existing.contains(column) {
+    if let Some((description_type, description_not_null, description_pk)) =
+        columns.get("description")
+    {
+        if !description_type.eq_ignore_ascii_case("TEXT")
+            || !description_not_null
+            || *description_pk != 0
+        {
+            return Err(invalid_migration_history(
+                "`description` must be non-null text",
+            ));
+        }
+        let invalid_descriptions: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM {} WHERE description IS NULL OR typeof(description) != 'text'",
+            MIGRATION_HISTORY_TABLE
+        ))
+        .fetch_one(&mut *transaction)
+        .await?;
+        if invalid_descriptions != 0 {
+            return Err(invalid_migration_history(
+                "current-format rows contain an invalid description",
+            ));
+        }
+    } else {
+        let upgrade_table = "__graphql_orm_migrations_legacy_upgrade";
+        sqlx::query(&format!(
+            "CREATE TABLE {} (
+                version TEXT PRIMARY KEY,
+                description TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                backend TEXT,
+                graphql_orm_version TEXT,
+                source_schema_hash TEXT,
+                target_schema_hash TEXT,
+                plan_hash TEXT,
+                policy TEXT
+            )",
+            upgrade_table
+        ))
+        .execute(&mut *transaction)
+        .await?;
+        let metadata_select = MIGRATION_METADATA_COLUMNS
+            .iter()
+            .map(|(name, _)| {
+                if columns.contains_key(*name) {
+                    (*name).to_string()
+                } else {
+                    "NULL".to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        sqlx::query(&format!(
+            "INSERT INTO {upgrade_table}
+             (version, description, applied_at, backend, graphql_orm_version,
+              source_schema_hash, target_schema_hash, plan_hash, policy)
+             SELECT version, 'Legacy migration ' || version, applied_at, {metadata_select}
+             FROM {MIGRATION_HISTORY_TABLE}"
+        ))
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(&format!("DROP TABLE {MIGRATION_HISTORY_TABLE}"))
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(&format!(
+            "ALTER TABLE {upgrade_table} RENAME TO {MIGRATION_HISTORY_TABLE}"
+        ))
+        .execute(&mut *transaction)
+        .await?;
+        columns.extend(
+            MIGRATION_METADATA_COLUMNS
+                .iter()
+                .map(|(name, sql_type)| ((*name).to_string(), ((*sql_type).to_string(), false, 0))),
+        );
+    }
+
+    for (column, sql_type) in MIGRATION_METADATA_COLUMNS {
+        if !columns.contains_key(column) {
             sqlx::query(&format!(
                 "ALTER TABLE {} ADD COLUMN {} {}",
                 MIGRATION_HISTORY_TABLE, column, sql_type
             ))
-            .execute(pool)
+            .execute(&mut *transaction)
             .await?;
         }
     }
+    transaction.commit().await?;
     Ok(())
 }
 
 #[cfg(feature = "postgres")]
 async fn ensure_postgres_migration_history_table(pool: &sqlx::PgPool) -> crate::Result<()> {
-    sqlx::query(&format!(
-        "CREATE TABLE IF NOT EXISTS {} (
+    let mut transaction = pool.begin().await?;
+    let schema_name: String = sqlx::query_scalar("SELECT current_schema()")
+        .fetch_one(&mut *transaction)
+        .await?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = $1 AND table_name = $2
+        )",
+    )
+    .bind(&schema_name)
+    .bind(MIGRATION_HISTORY_TABLE)
+    .fetch_one(&mut *transaction)
+    .await?;
+    if !exists {
+        sqlx::query(&format!(
+            "CREATE TABLE IF NOT EXISTS {} (
             version TEXT PRIMARY KEY,
             description TEXT NOT NULL,
             applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -330,26 +510,142 @@ async fn ensure_postgres_migration_history_table(pool: &sqlx::PgPool) -> crate::
             plan_hash TEXT,
             policy TEXT
         )",
+            MIGRATION_HISTORY_TABLE
+        ))
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        return Ok(());
+    }
+
+    sqlx::query(&format!(
+        "LOCK TABLE {} IN ACCESS EXCLUSIVE MODE",
         MIGRATION_HISTORY_TABLE
     ))
-    .execute(pool)
+    .execute(&mut *transaction)
+    .await?;
+    let rows = sqlx::query(
+        "SELECT column_name, data_type, is_nullable
+         FROM information_schema.columns
+         WHERE table_schema = $1 AND table_name = $2",
+    )
+    .bind(&schema_name)
+    .bind(MIGRATION_HISTORY_TABLE)
+    .fetch_all(&mut *transaction)
+    .await?;
+    let allowed = ["version", "description", "applied_at"]
+        .into_iter()
+        .chain(MIGRATION_METADATA_COLUMNS.iter().map(|(name, _)| *name))
+        .collect::<HashSet<_>>();
+    let mut columns = std::collections::HashMap::new();
+    for row in rows {
+        let name: String = sqlx::Row::try_get(&row, "column_name")?;
+        if !allowed.contains(name.as_str()) {
+            return Err(invalid_migration_history(format!(
+                "unrecognized column `{name}`"
+            )));
+        }
+        columns.insert(
+            name,
+            (
+                sqlx::Row::try_get::<String, _>(&row, "data_type")?,
+                sqlx::Row::try_get::<String, _>(&row, "is_nullable")? == "NO",
+            ),
+        );
+    }
+    let primary_keys: Vec<String> = sqlx::query_scalar(
+        "SELECT a.attname
+         FROM pg_index i
+         JOIN pg_class t ON t.oid = i.indrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+         JOIN LATERAL unnest(i.indkey) AS key(attnum) ON true
+         JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = key.attnum
+         WHERE n.nspname = $1 AND t.relname = $2 AND i.indisprimary",
+    )
+    .bind(&schema_name)
+    .bind(MIGRATION_HISTORY_TABLE)
+    .fetch_all(&mut *transaction)
+    .await?;
+    if primary_keys != ["version"] {
+        return Err(invalid_migration_history(
+            "`version` must be the sole primary-key identity",
+        ));
+    }
+    if !matches!(columns.get("version"), Some((kind, true)) if kind == "text") {
+        return Err(invalid_migration_history("`version` must be non-null text"));
+    }
+    if !matches!(columns.get("applied_at"), Some((kind, true)) if kind == "timestamp with time zone")
+    {
+        return Err(invalid_migration_history(
+            "`applied_at` must be a non-null timestamp with time zone",
+        ));
+    }
+    for (column, _) in MIGRATION_METADATA_COLUMNS {
+        if let Some((kind, _)) = columns.get(column) {
+            if kind != "text" {
+                return Err(invalid_migration_history(format!(
+                    "`{column}` metadata must be text"
+                )));
+            }
+        }
+    }
+    let invalid_versions: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM {} WHERE version = ''",
+        MIGRATION_HISTORY_TABLE
+    ))
+    .fetch_one(&mut *transaction)
+    .await?;
+    if invalid_versions != 0 {
+        return Err(invalid_migration_history(
+            "`version` values must be non-empty text",
+        ));
+    }
+    if let Some((kind, not_null)) = columns.get("description") {
+        if kind != "text" || !not_null {
+            return Err(invalid_migration_history(
+                "`description` must be non-null text",
+            ));
+        }
+    } else {
+        sqlx::query(&format!(
+            "ALTER TABLE {} ADD COLUMN description TEXT",
+            MIGRATION_HISTORY_TABLE
+        ))
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(&format!(
+            "UPDATE {} SET description = 'Legacy migration ' || version",
+            MIGRATION_HISTORY_TABLE
+        ))
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(&format!(
+            "ALTER TABLE {} ALTER COLUMN description SET NOT NULL",
+            MIGRATION_HISTORY_TABLE
+        ))
+        .execute(&mut *transaction)
+        .await?;
+    }
+
+    // Legacy PostgreSQL helpers did not always install the default used when
+    // graphql-orm records a subsequently applied managed migration. Existing
+    // timestamps remain untouched; this only governs future history rows.
+    sqlx::query(&format!(
+        "ALTER TABLE {} ALTER COLUMN applied_at SET DEFAULT CURRENT_TIMESTAMP",
+        MIGRATION_HISTORY_TABLE
+    ))
+    .execute(&mut *transaction)
     .await?;
 
-    for column in [
-        "backend",
-        "graphql_orm_version",
-        "source_schema_hash",
-        "target_schema_hash",
-        "plan_hash",
-        "policy",
-    ] {
+    for (column, _) in MIGRATION_METADATA_COLUMNS {
         sqlx::query(&format!(
             "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} TEXT",
             MIGRATION_HISTORY_TABLE, column
         ))
-        .execute(pool)
+        .execute(&mut *transaction)
         .await?;
     }
+    transaction.commit().await?;
     Ok(())
 }
 

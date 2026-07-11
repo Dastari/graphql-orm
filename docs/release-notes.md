@@ -11,6 +11,17 @@ required. The optional `auth-agql` bridge intentionally pins `agql-auth` at
 `5e7f230b96350f55496477c11f8a0505e6438779`. Consequently `cargo package -p graphql-orm` cannot
 resolve that Git-only optional dependency through the crates.io packaging model; this is expected.
 
+## 0.4.2
+
+Compatible Git-only migration-runtime fix. Runtime and macros are both `0.4.2`.
+
+- Recognized legacy migration-history tables are upgraded transactionally before history is read.
+- Existing versions and timestamps are preserved exactly; missing descriptions use
+  `Legacy migration <version>` and unknown current metadata stays null.
+- Preparation is idempotent and malformed or ambiguous history schemas fail closed. PostgreSQL
+  accepts its native `TIMESTAMPTZ` history timestamps rather than guessing how to convert text.
+- No public API changed; all 0.4.1 persistence and authorization behavior is retained.
+
 ## 0.4.1
 
 Compatible Git-only follow-up for binary keys and portable conditional indexes. Runtime and macros

@@ -2,6 +2,16 @@
 
 User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
 
+## 0.4.2
+
+Companion macros crate: `graphql-orm-macros` **0.4.2**.
+
+- Migration-history preparation now transactionally adopts the recognized legacy
+  `(version, applied_at)` table on SQLite and PostgreSQL.
+- Legacy rows retain their version and timestamp and receive the deterministic description
+  `Legacy migration <version>`; current optional metadata remains unknown (`NULL`).
+- Existing tables with ambiguous columns, types, nullability, or primary-key identity fail closed.
+
 ## 0.4.1
 
 Companion macros crate: `graphql-orm-macros` **0.4.1**.

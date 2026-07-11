@@ -3,9 +3,31 @@
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.4.2 Legacy Migration-History Adoption
+
+This compatible patch needs no application API change. Move both crates to the reviewed `v0.4.2`
+commit before adopting a database created by an older migration helper.
+
+At managed-schema preparation, a history table containing exactly `version` as a non-null textual
+sole primary key and a non-null textual/timestamp `applied_at` is upgraded in one transaction.
+Every existing version and timestamp is preserved. Missing descriptions are set to
+`Legacy migration <version>`, and missing current metadata columns are added as nullable text. No
+historical migration is re-executed. Repeated preparation is idempotent.
+
+SQLite rebuilds the recognized legacy table to install the complete current schema while preserving
+rows verbatim. PostgreSQL requires `applied_at TIMESTAMPTZ NOT NULL`; arbitrary legacy text is not
+converted because doing so could change timestamp meaning. PostgreSQL restores the
+`CURRENT_TIMESTAMP` default for future rows without changing existing values. Unknown columns,
+incorrect types or nullability, an empty version, or any other primary-key identity are rejected.
+Recorded-version reuse and remaining-plan drift checks still run after adoption and still fail
+closed.
+
+Back up the database before first preparation. If a legacy table is rejected, inspect and migrate it
+explicitly rather than renaming columns until it happens to pass validation.
+
 ## 0.4.1 Binary Keys and Conditional Indexes
 
-This is a compatible Git-pin update. Move both crates to the reviewed `v0.4.1` commit.
+This is a compatible Git-pin update. Move both crates to the reviewed `v0.4.2` commit.
 
 - Binary `Vec<u8>` keys require no host encoding. Mark host-assigned keys
   `#[graphql_orm(auto_generated = false)]`; use `private`, `skip_input`, or `#[graphql(skip)]` when
@@ -112,7 +134,7 @@ Default limit: `1000` → `50`. Max limit: `1000` → `100`.
 ### agql-auth Bridge
 
 ```toml
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.4.1", features = ["sqlite", "auth-agql"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.4.2", features = ["sqlite", "auth-agql"] }
 ```
 
 The optional feature depends on upstream `agql-auth` 0.7.0 via git revision
