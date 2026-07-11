@@ -560,9 +560,70 @@ pub(crate) fn generate_graphql_operations(
     };
     let entity_name_lit = struct_name_str.clone();
 
+    if entity_meta.repository_mutations {
+        let declared_keys = fields
+            .iter()
+            .filter_map(|field| {
+                parse_field_metadata(field)
+                    .ok()
+                    .filter(|metadata| metadata.is_primary_key)
+                    .map(|metadata| (field, metadata))
+            })
+            .collect::<Vec<_>>();
+        if declared_keys.len() < 2 {
+            return Err(syn::Error::new_spanned(
+                struct_name,
+                "repository_mutations requires a complete declared composite primary key",
+            ));
+        }
+        for (field, metadata) in declared_keys {
+            if metadata.is_relation || metadata.skip_db {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "repository mutation primary-key fields must be persisted scalar fields, not relations or skipped fields",
+                ));
+            }
+        }
+    }
     let primary_key_fields =
         collect_primary_key_fields(struct_name, fields, graphql_rename_fields, serde_rename_all)?;
     let has_composite_primary_key = primary_key_fields.len() > 1;
+    let composite_repository_mutations =
+        has_composite_primary_key && entity_meta.repository_mutations;
+    if entity_meta.repository_mutations && !has_composite_primary_key {
+        return Err(syn::Error::new_spanned(
+            struct_name,
+            "repository_mutations is only needed for composite-primary-key entities",
+        ));
+    }
+    if composite_repository_mutations {
+        if backend == BackendKind::Mssql {
+            return Err(syn::Error::new_spanned(
+                struct_name,
+                "repository_mutations are not available for the read-only MSSQL backend",
+            ));
+        }
+        if schema_policy_read_only || entity_meta.append_only {
+            return Err(syn::Error::new_spanned(
+                struct_name,
+                "repository_mutations conflict with read-only or append-only entity mode",
+            ));
+        }
+        for key in &primary_key_fields {
+            if is_option_type(&key.field_type) {
+                return Err(syn::Error::new_spanned(
+                    &key.field_type,
+                    "repository mutation primary-key fields must be non-nullable",
+                ));
+            }
+            if !key.meta.write || key.meta.auto_generated == Some(true) {
+                return Err(syn::Error::new_spanned(
+                    &key.field_name,
+                    "repository mutation primary-key fields must be host-supplied writable fields",
+                ));
+            }
+        }
+    }
     let first_primary_key = primary_key_fields
         .first()
         .expect("primary key collection includes fallback id");
@@ -573,6 +634,12 @@ pub(crate) fn generate_graphql_operations(
         .meta
         .auto_generated
         .unwrap_or_else(|| pk_field == syn::Ident::new("id", pk_field.span()));
+    if composite_repository_mutations && auto_generated_pk {
+        return Err(syn::Error::new_spanned(
+            &first_primary_key.field_name,
+            "repository mutation composite keys cannot contain an auto-generated primary field; set auto_generated = false",
+        ));
+    }
     let version_fields = fields
         .iter()
         .filter_map(|field| {
@@ -950,11 +1017,17 @@ pub(crate) fn generate_graphql_operations(
     let key_condition_method = quote! {
         #[doc(hidden)]
         pub fn __gom_key_where_clause() -> String {
+            use ::graphql_orm::graphql::orm::{OrmBackend, SqlDialect};
+            let dialect = <#backend_marker as OrmBackend>::DIALECT;
             <Self as ::graphql_orm::graphql::orm::DatabaseEntity>::PRIMARY_KEYS
                 .iter()
                 .enumerate()
                 .map(|(index, column)| {
-                    format!("{} = {}", column, Self::__gom_placeholder(index + 1))
+                    format!(
+                        "{} = {}",
+                        dialect.quote_identifier_path(column),
+                        dialect.placeholder(index + 1),
+                    )
                 })
                 .collect::<Vec<_>>()
                 .join(" AND ")
@@ -2383,7 +2456,14 @@ pub(crate) fn generate_graphql_operations(
                 .map(|(index, field)| {
                     let db_column = &field.db_column;
                     let bind_index = index + 1;
-                    quote! { format!("{} = {}", #db_column, Self::__gom_placeholder(#bind_index)) }
+                    quote! {
+                        format!(
+                            "{} = {}",
+                            <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT
+                                .quote_identifier_path(#db_column),
+                            Self::__gom_placeholder(#bind_index),
+                        )
+                    }
                 })
                 .collect::<Vec<_>>()
         })
@@ -2422,6 +2502,11 @@ pub(crate) fn generate_graphql_operations(
     } else {
         quote! { String::new() }
     };
+    let composite_upsert_policy_guard = if composite_repository_mutations {
+        quote! { Self::__gom_require_repository_write_policy(&db)?; }
+    } else {
+        quote! {}
+    };
     let upsert_helper_methods = if upsert_config.is_some() {
         quote! {
             #[doc(hidden)]
@@ -2432,7 +2517,7 @@ pub(crate) fn generate_graphql_operations(
             where
                 E: ::graphql_orm::sqlx::Executor<'e, Database = #database_type> + Send + 'e,
             {
-                use ::graphql_orm::graphql::orm::FromSqlRow;
+                use ::graphql_orm::graphql::orm::{FromSqlRow, SqlDialect};
 
                 let where_clause = vec![#(#upsert_fetch_conditions),*].join(" AND ");
                 let sql = Self::__gom_rebind_sql(
@@ -2458,7 +2543,7 @@ pub(crate) fn generate_graphql_operations(
                 input: &#create_input,
                 auth_context: Option<&::graphql_orm::graphql::orm::DbAuthContext>,
             ) -> ::graphql_orm::Result<Option<Self>> {
-                use ::graphql_orm::graphql::orm::FromSqlRow;
+                use ::graphql_orm::graphql::orm::{FromSqlRow, SqlDialect};
 
                 let where_clause = vec![#(#upsert_fetch_conditions),*].join(" AND ");
                 let sql = Self::__gom_rebind_sql(
@@ -2489,6 +2574,7 @@ pub(crate) fn generate_graphql_operations(
                 input: #create_input,
             ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::UpsertOutcome<Self>> {
                 let db = hook_ctx.database().clone();
+                #composite_upsert_policy_guard
                 let current_entity = Self::__gom_fetch_by_upsert_on(hook_ctx.executor(), &input).await?;
                 if let Some(current_entity) = current_entity.as_ref() {
                     db.ensure_writable_row(
@@ -3676,6 +3762,925 @@ pub(crate) fn generate_graphql_operations(
         quote! {}
     };
 
+    let composite_mutation_surface = if composite_repository_mutations {
+        let key_from_entity = primary_key_fields
+            .iter()
+            .map(|key| {
+                let field = &key.field_name;
+                quote! { #field: entity.#field.clone(), }
+            })
+            .collect::<Vec<_>>();
+        let key_from_input = primary_key_fields
+            .iter()
+            .map(|key| {
+                let field = &key.field_name;
+                quote! { #field: input.#field.clone(), }
+            })
+            .collect::<Vec<_>>();
+        let insert_if_absent_conflicts = if let Some(config) = &upsert_config {
+            config
+                .fields
+                .iter()
+                .map(|field| field.db_column.clone())
+                .collect::<Vec<_>>()
+        } else {
+            primary_key_fields
+                .iter()
+                .map(|key| {
+                    key.meta
+                        .db_column
+                        .clone()
+                        .unwrap_or_else(|| key.rust_name.clone())
+                })
+                .collect::<Vec<_>>()
+        };
+        let insert_if_absent_conflict_literals = insert_if_absent_conflicts
+            .iter()
+            .map(|column| syn::LitStr::new(column, struct_name.span()))
+            .collect::<Vec<_>>();
+        let fetch_existing_after_conflict = if upsert_config.is_some() {
+            quote! { Self::__gom_fetch_by_upsert_on(hook_ctx.executor(), &lookup_input).await? }
+        } else {
+            quote! { Self::__gom_fetch_by_key_on(hook_ctx.executor(), &key).await? }
+        };
+
+        quote! {
+            #[derive(Clone, Debug)]
+            pub struct #create_input { #(#create_input_fields)* }
+
+            #[derive(Clone, Debug, Default)]
+            pub struct #update_input { #(#update_input_fields)* }
+
+            #[derive(Clone, Debug)]
+            pub struct #changed_event {
+                pub action: ::graphql_orm::graphql::orm::ChangeAction,
+                pub key: #key_type,
+                pub entity: Option<#struct_name>,
+            }
+
+            impl #struct_name {
+                #[doc(hidden)]
+                fn __gom_runtime_error(message: impl Into<String>) -> ::graphql_orm::sqlx::Error {
+                    ::graphql_orm::sqlx::Error::Protocol(message.into())
+                }
+
+                #[doc(hidden)]
+                fn __gom_require_repository_write_policy(
+                    db: &::graphql_orm::db::Database<#backend_marker>,
+                ) -> ::graphql_orm::Result<()> {
+                    if db.entity_policy().is_none() {
+                        return Err(Self::__gom_runtime_error(
+                            "composite repository mutations require an explicit entity policy provider",
+                        ));
+                    }
+                    Ok(())
+                }
+
+                #[doc(hidden)]
+                fn __gom_entity_key(entity: &Self) -> #key_type {
+                    #key_type { #(#key_from_entity)* }
+                }
+
+                #[doc(hidden)]
+                fn __gom_key_where_clause_at(start: usize) -> String {
+                    use ::graphql_orm::graphql::orm::{OrmBackend, SqlDialect};
+                    let dialect = <#backend_marker as OrmBackend>::DIALECT;
+                    <Self as ::graphql_orm::graphql::orm::DatabaseEntity>::PRIMARY_KEYS
+                        .iter()
+                        .enumerate()
+                        .map(|(index, column)| format!(
+                            "{} = {}",
+                            dialect.quote_identifier_path(column),
+                            dialect.placeholder(start + index),
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(" AND ")
+                }
+
+                #[doc(hidden)]
+                fn __gom_event_id(key: &#key_type) -> String {
+                    ::graphql_orm::graphql::orm::composite_key_id(&Self::__gom_key_values(key))
+                }
+
+                #[doc(hidden)]
+                async fn __gom_fetch_by_key_on<'e, E>(executor: E, key: &#key_type) -> ::graphql_orm::Result<Option<Self>>
+                where E: ::graphql_orm::sqlx::Executor<'e, Database = #database_type> + Send + 'e {
+                    use ::graphql_orm::graphql::orm::{DatabaseEntity, FromSqlRow, OrmBackend, SqlDialect};
+                    let dialect = <#backend_marker as OrmBackend>::DIALECT;
+                    let columns = Self::column_names().iter()
+                        .map(|column| dialect.quote_identifier_path(column))
+                        .collect::<Vec<_>>().join(", ");
+                    let sql = format!(
+                        "SELECT {columns} FROM {} WHERE {}",
+                        dialect.quote_identifier_path(#table_name),
+                        Self::__gom_key_where_clause_at(1),
+                    );
+                    let rows = ::graphql_orm::graphql::orm::fetch_rows_on::<#backend_marker, _>(
+                        executor, &sql, &Self::__gom_key_values(key),
+                    ).await?;
+                    if rows.len() > 1 {
+                        return Err(Self::__gom_runtime_error("complete composite key matched more than one row"));
+                    }
+                    rows.first().map(<Self as FromSqlRow<#backend_marker>>::from_row).transpose()
+                }
+
+                #[doc(hidden)]
+                async fn __gom_queue_changed_event(
+                    hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    action: ::graphql_orm::graphql::orm::ChangeAction,
+                    entity: Option<&Self>,
+                ) -> ::graphql_orm::Result<()> {
+                    if let Some(entity) = entity {
+                        #search_write_maintenance
+                        hook_ctx.queue_event(#changed_event {
+                            action,
+                            key: Self::__gom_entity_key(entity),
+                            entity: Some(entity.clone()),
+                        });
+                    }
+                    Ok(())
+                }
+
+                #[doc(hidden)]
+                fn __gom_capture_entity_state(entity: &Self) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::EntityState> {
+                    ::graphql_orm::graphql::orm::entity_state(entity)
+                }
+
+                #[doc(hidden)]
+                async fn __gom_insert_with_mutation_context(
+                    hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    mut input: #create_input,
+                ) -> ::graphql_orm::Result<Self> {
+                    use ::graphql_orm::graphql::orm::SqlValue;
+                    let db = hook_ctx.database().clone();
+                    Self::__gom_require_repository_write_policy(&db)?;
+                    let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(#entity_name_lit, hook_ctx);
+                    db.run_before_create_with_context(&mut write_ctx, &mut input as &mut (dyn ::std::any::Any + Send + Sync))
+                        .await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    let key = #key_type { #(#key_from_input)* };
+                    let sql = Self::__gom_rebind_sql(&::graphql_orm::graphql::orm::build_insert_sql(
+                        #table_name,
+                        &[#(#upsert_insert_column_literals),*],
+                        &[#(#upsert_insert_value_literals),*],
+                    ), 1);
+                    let mut bind_values: Vec<SqlValue> = Vec::new();
+                    #(#insert_binds_repo)*
+                    let changes = ::graphql_orm::graphql::orm::mutation_changes(&[#(#create_mutation_field_literals),*], &bind_values);
+                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                        phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
+                        action: ::graphql_orm::graphql::orm::ChangeAction::Created,
+                        entity_name: #entity_name_lit, table_name: #table_name,
+                        metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
+                        id: Self::__gom_event_id(&key), changes: changes.clone(),
+                        before_state: None, after_state: None,
+                    }).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    let result = ::graphql_orm::graphql::orm::execute_with_binds_on::<#backend_marker, _>(
+                        hook_ctx.executor(), &sql, &bind_values,
+                    ).await?;
+                    if result.rows_affected() != 1 {
+                        return Err(Self::__gom_runtime_error("composite-key insert did not affect exactly one row"));
+                    }
+                    let entity = Self::__gom_fetch_by_key_on(hook_ctx.executor(), &key).await?
+                        .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
+                    db.ensure_writable_row(None, #entity_name_lit,
+                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                        ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                        &entity as &(dyn ::std::any::Any + Send + Sync),
+                    ).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                        phase: ::graphql_orm::graphql::orm::MutationPhase::After,
+                        action: ::graphql_orm::graphql::orm::ChangeAction::Created,
+                        entity_name: #entity_name_lit, table_name: #table_name,
+                        metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
+                        id: Self::__gom_event_id(&key), changes,
+                        before_state: None, after_state: Some(Self::__gom_capture_entity_state(&entity)?),
+                    }).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    Self::__gom_queue_changed_event(hook_ctx, ::graphql_orm::graphql::orm::ChangeAction::Created, Some(&entity)).await?;
+                    Ok(entity)
+                }
+
+                #[doc(hidden)]
+                async fn __gom_insert_if_absent_with_mutation_context(
+                    hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    mut input: #create_input,
+                ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::InsertIfAbsentOutcome<Self>> {
+                    use ::graphql_orm::graphql::orm::SqlValue;
+                    let db = hook_ctx.database().clone();
+                    Self::__gom_require_repository_write_policy(&db)?;
+                    let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(#entity_name_lit, hook_ctx);
+                    db.run_before_create_with_context(&mut write_ctx, &mut input as &mut (dyn ::std::any::Any + Send + Sync))
+                        .await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    let key = #key_type { #(#key_from_input)* };
+                    let lookup_input = input.clone();
+                    let sql = Self::__gom_rebind_sql(&::graphql_orm::graphql::orm::build_insert_if_absent_sql(
+                        #table_name,
+                        &[#(#upsert_insert_column_literals),*],
+                        &[#(#upsert_insert_value_literals),*],
+                        &[#(#insert_if_absent_conflict_literals),*],
+                    ), 1);
+                    let mut bind_values: Vec<SqlValue> = Vec::new();
+                    #(#insert_binds_repo)*
+                    let changes = ::graphql_orm::graphql::orm::mutation_changes(&[#(#create_mutation_field_literals),*], &bind_values);
+                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                        phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
+                        action: ::graphql_orm::graphql::orm::ChangeAction::Created,
+                        entity_name: #entity_name_lit, table_name: #table_name,
+                        metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
+                        id: Self::__gom_event_id(&key), changes: changes.clone(),
+                        before_state: None, after_state: None,
+                    }).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    let result = ::graphql_orm::graphql::orm::execute_with_binds_on::<#backend_marker, _>(
+                        hook_ctx.executor(), &sql, &bind_values,
+                    ).await?;
+                    match result.rows_affected() {
+                        0 => {
+                            let existing = #fetch_existing_after_conflict
+                                .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
+                            db.ensure_writable_row(None, #entity_name_lit,
+                                <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                                ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                                &existing as &(dyn ::std::any::Any + Send + Sync),
+                            ).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                            return Ok(::graphql_orm::graphql::orm::InsertIfAbsentOutcome::AlreadyPresent(existing));
+                        }
+                        1 => {}
+                        _ => return Err(Self::__gom_runtime_error("insert-if-absent affected more than one row")),
+                    }
+                    let entity = Self::__gom_fetch_by_key_on(hook_ctx.executor(), &key).await?
+                        .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
+                    db.ensure_writable_row(None, #entity_name_lit,
+                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                        ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                        &entity as &(dyn ::std::any::Any + Send + Sync),
+                    ).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                        phase: ::graphql_orm::graphql::orm::MutationPhase::After,
+                        action: ::graphql_orm::graphql::orm::ChangeAction::Created,
+                        entity_name: #entity_name_lit, table_name: #table_name,
+                        metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
+                        id: Self::__gom_event_id(&key), changes,
+                        before_state: None, after_state: Some(Self::__gom_capture_entity_state(&entity)?),
+                    }).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    Self::__gom_queue_changed_event(hook_ctx, ::graphql_orm::graphql::orm::ChangeAction::Created, Some(&entity)).await?;
+                    Ok(::graphql_orm::graphql::orm::InsertIfAbsentOutcome::Inserted(entity))
+                }
+
+                #[doc(hidden)]
+                async fn __gom_update_by_key_with_mutation_context(
+                    hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    key: &#key_type,
+                    mut input: #update_input,
+                ) -> ::graphql_orm::Result<Option<Self>> {
+                    use ::graphql_orm::graphql::orm::{OrmBackend, SqlDialect};
+                    let db = hook_ctx.database().clone();
+                    Self::__gom_require_repository_write_policy(&db)?;
+                    let Some(current_entity) = Self::__gom_fetch_by_key_on(hook_ctx.executor(), key).await? else {
+                        return Ok(None);
+                    };
+                    db.ensure_writable_row(None, #entity_name_lit,
+                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                        ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                        &current_entity as &(dyn ::std::any::Any + Send + Sync),
+                    ).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(#entity_name_lit, hook_ctx);
+                    db.run_before_update_with_context(
+                        &mut write_ctx,
+                        Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
+                        &mut input as &mut (dyn ::std::any::Any + Send + Sync),
+                    ).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    let mut set_clauses: Vec<String> = Vec::new();
+                    let mut changed_fields: Vec<&str> = Vec::new();
+                    let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                    #(#update_field_checks_repo)*
+                    let dialect = <#backend_marker as OrmBackend>::DIALECT;
+                    for (clause, column) in set_clauses.iter_mut().zip(changed_fields.iter()) {
+                        let rhs = clause.split_once('=').map(|(_, rhs)| rhs.trim()).unwrap_or("?");
+                        *clause = format!("{} = {rhs}", dialect.quote_identifier_path(column));
+                    }
+                    if #has_updated_at_column {
+                        set_clauses.push(format!(
+                            "{} = {}",
+                            dialect.quote_identifier("updated_at"),
+                            Self::__gom_current_epoch_expr(),
+                        ));
+                    }
+                    if set_clauses.is_empty() {
+                        return Err(Self::__gom_runtime_error("No fields to update"));
+                    }
+                    let before_state = Self::__gom_capture_entity_state(&current_entity)?;
+                    let changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
+                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                        phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
+                        action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
+                        entity_name: #entity_name_lit, table_name: #table_name,
+                        metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
+                        id: Self::__gom_event_id(key), changes: changes.clone(),
+                        before_state: Some(before_state.clone()), after_state: None,
+                    }).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    let key_start = values.len() + 1;
+                    let sql = format!(
+                        "UPDATE {} SET {} WHERE {}",
+                        dialect.quote_identifier_path(#table_name),
+                        set_clauses.join(", "),
+                        Self::__gom_key_where_clause_at(key_start),
+                    );
+                    values.extend(Self::__gom_key_values(key));
+                    let result = ::graphql_orm::graphql::orm::execute_with_binds_on::<#backend_marker, _>(
+                        hook_ctx.executor(), &sql, &values,
+                    ).await?;
+                    match result.rows_affected() {
+                        0 => return Ok(None),
+                        1 => {}
+                        _ => return Err(Self::__gom_runtime_error("complete composite key updated more than one row")),
+                    }
+                    let entity = Self::__gom_fetch_by_key_on(hook_ctx.executor(), key).await?
+                        .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
+                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                        phase: ::graphql_orm::graphql::orm::MutationPhase::After,
+                        action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
+                        entity_name: #entity_name_lit, table_name: #table_name,
+                        metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
+                        id: Self::__gom_event_id(key), changes,
+                        before_state: Some(before_state), after_state: Some(Self::__gom_capture_entity_state(&entity)?),
+                    }).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    Self::__gom_queue_changed_event(hook_ctx, ::graphql_orm::graphql::orm::ChangeAction::Updated, Some(&entity)).await?;
+                    Ok(Some(entity))
+                }
+
+                #[doc(hidden)]
+                async fn __gom_delete_by_key_with_mutation_context(
+                    hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    key: &#key_type,
+                ) -> ::graphql_orm::Result<bool> {
+                    use ::graphql_orm::graphql::orm::{OrmBackend, SqlDialect};
+                    let db = hook_ctx.database().clone();
+                    Self::__gom_require_repository_write_policy(&db)?;
+                    let Some(entity) = Self::__gom_fetch_by_key_on(hook_ctx.executor(), key).await? else {
+                        return Ok(false);
+                    };
+                    db.ensure_writable_row(None, #entity_name_lit,
+                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                        ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                        &entity as &(dyn ::std::any::Any + Send + Sync),
+                    ).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    let before_state = Self::__gom_capture_entity_state(&entity)?;
+                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                        phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
+                        action: ::graphql_orm::graphql::orm::ChangeAction::Deleted,
+                        entity_name: #entity_name_lit, table_name: #table_name,
+                        metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
+                        id: Self::__gom_event_id(key), changes: Vec::new(),
+                        before_state: Some(before_state.clone()), after_state: None,
+                    }).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    let dialect = <#backend_marker as OrmBackend>::DIALECT;
+                    let sql = format!(
+                        "DELETE FROM {} WHERE {}",
+                        dialect.quote_identifier_path(#table_name),
+                        Self::__gom_key_where_clause_at(1),
+                    );
+                    let result = ::graphql_orm::graphql::orm::execute_with_binds_on::<#backend_marker, _>(
+                        hook_ctx.executor(), &sql, &Self::__gom_key_values(key),
+                    ).await?;
+                    match result.rows_affected() {
+                        0 => return Ok(false),
+                        1 => {}
+                        _ => return Err(Self::__gom_runtime_error("complete composite key deleted more than one row")),
+                    }
+                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                        phase: ::graphql_orm::graphql::orm::MutationPhase::After,
+                        action: ::graphql_orm::graphql::orm::ChangeAction::Deleted,
+                        entity_name: #entity_name_lit, table_name: #table_name,
+                        metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
+                        id: Self::__gom_event_id(key), changes: Vec::new(),
+                        before_state: Some(before_state), after_state: None,
+                    }).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    Self::__gom_queue_changed_event(hook_ctx, ::graphql_orm::graphql::orm::ChangeAction::Deleted, Some(&entity)).await?;
+                    Ok(true)
+                }
+
+                #[doc(hidden)]
+                async fn __gom_update_where_bounded_with_mutation_context(
+                    hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    where_input: #where_input,
+                    input: #update_input,
+                    limit: ::graphql_orm::graphql::orm::MutationLimit,
+                ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome> {
+                    use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
+                    let db = hook_ctx.database().clone();
+                    Self::__gom_require_repository_write_policy(&db)?;
+                    if where_input.is_empty() {
+                        return Err(Self::__gom_runtime_error("bounded update requires a non-empty typed filter"));
+                    }
+                    let rows = EntityQuery::<Self, #backend_marker>::new()
+                        .filter_with_entity_matching(&where_input)
+                        .paginate(&::graphql_orm::graphql::orm::PageInput {
+                            limit: Some(i64::from(limit.get()) + 1),
+                            offset: None,
+                        })
+                        .fetch_all_on(hook_ctx.executor())
+                        .await?;
+                    if rows.len() > limit.get() as usize {
+                        return Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::LimitExceeded {
+                            maximum: limit.get(),
+                        });
+                    }
+                    for row in &rows {
+                        db.ensure_writable_row(None, #entity_name_lit,
+                            <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                            ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                            row as &(dyn ::std::any::Any + Send + Sync),
+                        ).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    }
+                    let keys = rows.iter().map(Self::__gom_entity_key).collect::<Vec<_>>();
+                    let mut affected = 0u32;
+                    for key in keys {
+                        if Self::__gom_update_by_key_with_mutation_context(hook_ctx, &key, input.clone()).await?.is_some() {
+                            affected += 1;
+                        }
+                    }
+                    Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::Applied { affected })
+                }
+
+                #[doc(hidden)]
+                async fn __gom_delete_where_bounded_with_mutation_context(
+                    hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    where_input: #where_input,
+                    limit: ::graphql_orm::graphql::orm::MutationLimit,
+                ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome> {
+                    use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
+                    let db = hook_ctx.database().clone();
+                    Self::__gom_require_repository_write_policy(&db)?;
+                    if where_input.is_empty() {
+                        return Err(Self::__gom_runtime_error("bounded delete requires a non-empty typed filter"));
+                    }
+                    let rows = EntityQuery::<Self, #backend_marker>::new()
+                        .filter_with_entity_matching(&where_input)
+                        .paginate(&::graphql_orm::graphql::orm::PageInput {
+                            limit: Some(i64::from(limit.get()) + 1),
+                            offset: None,
+                        })
+                        .fetch_all_on(hook_ctx.executor())
+                        .await?;
+                    if rows.len() > limit.get() as usize {
+                        return Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::LimitExceeded {
+                            maximum: limit.get(),
+                        });
+                    }
+                    for row in &rows {
+                        db.ensure_writable_row(None, #entity_name_lit,
+                            <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                            ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                            row as &(dyn ::std::any::Any + Send + Sync),
+                        ).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    }
+                    let keys = rows.iter().map(Self::__gom_entity_key).collect::<Vec<_>>();
+                    let mut affected = 0u32;
+                    for key in keys {
+                        if Self::__gom_delete_by_key_with_mutation_context(hook_ctx, &key).await? {
+                            affected += 1;
+                        }
+                    }
+                    Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::Applied { affected })
+                }
+
+                #[doc(hidden)]
+                async fn __gom_update_if_with_mutation_context(
+                    hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    key: &#key_type,
+                    expected: #where_input,
+                    mut input: #update_input,
+                ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::PredicateUpdateOutcome<Self>> {
+                    use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery, OrmBackend, SqlDialect};
+                    let db = hook_ctx.database().clone();
+                    Self::__gom_require_repository_write_policy(&db)?;
+                    if expected.is_empty() {
+                        return Err(Self::__gom_runtime_error("conditional update requires a non-empty typed expected predicate"));
+                    }
+                    if expected.requires_in_memory_filtering(<#backend_marker as OrmBackend>::DIALECT) {
+                        return Err(Self::__gom_runtime_error("conditional update predicate must be fully database-renderable"));
+                    }
+                    let Some(current_entity) = Self::__gom_fetch_by_key_on(hook_ctx.executor(), key).await? else {
+                        return Ok(::graphql_orm::graphql::orm::PredicateUpdateOutcome::NotFound);
+                    };
+                    db.ensure_writable_row(None, #entity_name_lit,
+                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                        ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                        &current_entity as &(dyn ::std::any::Any + Send + Sync),
+                    ).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(#entity_name_lit, hook_ctx);
+                    db.run_before_update_with_context(
+                        &mut write_ctx,
+                        Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
+                        &mut input as &mut (dyn ::std::any::Any + Send + Sync),
+                    ).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    let mut set_clauses: Vec<String> = Vec::new();
+                    let mut changed_fields: Vec<&str> = Vec::new();
+                    let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                    #(#update_field_checks_repo)*
+                    let dialect = <#backend_marker as OrmBackend>::DIALECT;
+                    for (clause, column) in set_clauses.iter_mut().zip(changed_fields.iter()) {
+                        let rhs = clause.split_once('=').map(|(_, rhs)| rhs.trim()).unwrap_or("?");
+                        *clause = format!("{} = {rhs}", dialect.quote_identifier_path(column));
+                    }
+                    if #has_updated_at_column {
+                        set_clauses.push(format!(
+                            "{} = {}",
+                            dialect.quote_identifier("updated_at"),
+                            Self::__gom_current_epoch_expr(),
+                        ));
+                    }
+                    if set_clauses.is_empty() {
+                        return Err(Self::__gom_runtime_error("No fields to update"));
+                    }
+                    let expected_query = EntityQuery::<Self, #backend_marker>::new().filter(&expected);
+                    let (delete_sql, expected_values) = expected_query.build_delete_sql();
+                    let expected_clause = delete_sql.split_once(" WHERE ")
+                        .map(|(_, clause)| clause)
+                        .ok_or_else(|| Self::__gom_runtime_error("conditional predicate rendered empty SQL"))?;
+                    let before_state = Self::__gom_capture_entity_state(&current_entity)?;
+                    let changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
+                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                        phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
+                        action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
+                        entity_name: #entity_name_lit, table_name: #table_name,
+                        metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
+                        id: Self::__gom_event_id(key), changes: changes.clone(),
+                        before_state: Some(before_state.clone()), after_state: None,
+                    }).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    let key_start = values.len() + 1;
+                    let expected_start = key_start + <Self as ::graphql_orm::graphql::orm::DatabaseEntity>::PRIMARY_KEYS.len();
+                    let expected_clause = Self::__gom_rebind_sql(expected_clause, expected_start);
+                    let sql = format!(
+                        "UPDATE {} SET {} WHERE {} AND ({expected_clause})",
+                        dialect.quote_identifier_path(#table_name),
+                        set_clauses.join(", "),
+                        Self::__gom_key_where_clause_at(key_start),
+                    );
+                    values.extend(Self::__gom_key_values(key));
+                    values.extend(expected_values);
+                    let result = ::graphql_orm::graphql::orm::execute_with_binds_on::<#backend_marker, _>(
+                        hook_ctx.executor(), &sql, &values,
+                    ).await?;
+                    match result.rows_affected() {
+                        0 => {
+                            return if Self::__gom_fetch_by_key_on(hook_ctx.executor(), key).await?.is_some() {
+                                Ok(::graphql_orm::graphql::orm::PredicateUpdateOutcome::PredicateConflict)
+                            } else {
+                                Ok(::graphql_orm::graphql::orm::PredicateUpdateOutcome::NotFound)
+                            };
+                        }
+                        1 => {}
+                        _ => return Err(Self::__gom_runtime_error("conditional complete-key update affected more than one row")),
+                    }
+                    let entity = Self::__gom_fetch_by_key_on(hook_ctx.executor(), key).await?
+                        .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
+                    hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
+                        phase: ::graphql_orm::graphql::orm::MutationPhase::After,
+                        action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
+                        entity_name: #entity_name_lit, table_name: #table_name,
+                        metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
+                        id: Self::__gom_event_id(key), changes,
+                        before_state: Some(before_state), after_state: Some(Self::__gom_capture_entity_state(&entity)?),
+                    }).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    Self::__gom_queue_changed_event(hook_ctx, ::graphql_orm::graphql::orm::ChangeAction::Updated, Some(&entity)).await?;
+                    Ok(::graphql_orm::graphql::orm::PredicateUpdateOutcome::Updated(entity))
+                }
+
+                #upsert_helper_methods
+
+                pub async fn insert(db: &::graphql_orm::db::Database<#backend_marker>, input: #create_input) -> ::graphql_orm::Result<Self> {
+                    let tx = db.pool().begin().await?;
+                    let mut context = ::graphql_orm::graphql::orm::MutationContext::new(db, tx);
+                    let entity = context.insert::<Self>(input).await?;
+                    context.commit_and_emit().await?;
+                    Ok(entity)
+                }
+
+                pub async fn insert_if_absent(
+                    db: &::graphql_orm::db::Database<#backend_marker>, input: #create_input,
+                ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::InsertIfAbsentOutcome<Self>> {
+                    let tx = db.pool().begin().await?;
+                    let mut context = ::graphql_orm::graphql::orm::MutationContext::new(db, tx);
+                    let outcome = context.insert_if_absent::<Self>(input).await?;
+                    context.commit_and_emit().await?;
+                    Ok(outcome)
+                }
+
+                pub async fn update_by_key(
+                    db: &::graphql_orm::db::Database<#backend_marker>, key: &#key_type, input: #update_input,
+                ) -> ::graphql_orm::Result<Option<Self>> {
+                    let tx = db.pool().begin().await?;
+                    let mut context = ::graphql_orm::graphql::orm::MutationContext::new(db, tx);
+                    let entity = context.update_by_key::<Self>(key, input).await?;
+                    context.commit_and_emit().await?;
+                    Ok(entity)
+                }
+
+                pub async fn delete_by_key(
+                    db: &::graphql_orm::db::Database<#backend_marker>, key: &#key_type,
+                ) -> ::graphql_orm::Result<bool> {
+                    let tx = db.pool().begin().await?;
+                    let mut context = ::graphql_orm::graphql::orm::MutationContext::new(db, tx);
+                    let deleted = context.delete_by_key::<Self>(key).await?;
+                    context.commit_and_emit().await?;
+                    Ok(deleted)
+                }
+
+                pub async fn update_where_bounded(
+                    db: &::graphql_orm::db::Database<#backend_marker>,
+                    where_input: #where_input,
+                    input: #update_input,
+                    limit: ::graphql_orm::graphql::orm::MutationLimit,
+                ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome> {
+                    let tx = db.pool().begin().await?;
+                    let mut context = ::graphql_orm::graphql::orm::MutationContext::new(db, tx);
+                    let outcome = context.update_where_bounded::<Self>(where_input, input, limit).await?;
+                    context.commit_and_emit().await?;
+                    Ok(outcome)
+                }
+
+                pub async fn delete_where_bounded(
+                    db: &::graphql_orm::db::Database<#backend_marker>,
+                    where_input: #where_input,
+                    limit: ::graphql_orm::graphql::orm::MutationLimit,
+                ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome> {
+                    let tx = db.pool().begin().await?;
+                    let mut context = ::graphql_orm::graphql::orm::MutationContext::new(db, tx);
+                    let outcome = context.delete_where_bounded::<Self>(where_input, limit).await?;
+                    context.commit_and_emit().await?;
+                    Ok(outcome)
+                }
+
+                pub async fn update_if(
+                    db: &::graphql_orm::db::Database<#backend_marker>,
+                    key: &#key_type,
+                    expected: #where_input,
+                    input: #update_input,
+                ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::PredicateUpdateOutcome<Self>> {
+                    let tx = db.pool().begin().await?;
+                    let mut context = ::graphql_orm::graphql::orm::MutationContext::new(db, tx);
+                    let outcome = context.update_if::<Self>(key, expected, input).await?;
+                    context.commit_and_emit().await?;
+                    Ok(outcome)
+                }
+
+                #upsert_repository_method
+            }
+
+            impl ::graphql_orm::graphql::orm::MutationContextInsert<#backend_marker> for #struct_name {
+                type CreateInput = #create_input;
+                fn insert_in_mutation_context<'a>(
+                    context: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>, input: Self::CreateInput,
+                ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<Self>> {
+                    Box::pin(async move { Self::__gom_insert_with_mutation_context(context, input).await })
+                }
+            }
+
+            impl ::graphql_orm::graphql::orm::MutationContextInsertIfAbsent<#backend_marker> for #struct_name {
+                type CreateInput = #create_input;
+                fn insert_if_absent_in_mutation_context<'a>(
+                    context: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    input: Self::CreateInput,
+                ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<::graphql_orm::graphql::orm::InsertIfAbsentOutcome<Self>>> {
+                    Box::pin(async move { Self::__gom_insert_if_absent_with_mutation_context(context, input).await })
+                }
+            }
+
+            impl ::graphql_orm::graphql::orm::MutationContextFindByKey<#backend_marker> for #struct_name {
+                type Key = #key_type;
+                fn find_by_key_in_mutation_context<'a>(
+                    context: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>, key: &'a Self::Key,
+                ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<Option<Self>>> {
+                    Box::pin(async move {
+                        let entity = Self::__gom_fetch_by_key_on(context.executor(), key).await?;
+                        if let Some(entity) = entity.as_ref() {
+                            if !context.database().can_read_row(None, #entity_name_lit,
+                                <Self as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                                ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                                entity as &(dyn ::std::any::Any + Send + Sync),
+                            ).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))? {
+                                return Ok(None);
+                            }
+                        }
+                        Ok(entity)
+                    })
+                }
+            }
+
+            impl ::graphql_orm::graphql::orm::MutationContextUpdateByKey<#backend_marker> for #struct_name {
+                type Key = #key_type;
+                type UpdateInput = #update_input;
+                fn update_by_key_in_mutation_context<'a>(
+                    context: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    key: &'a Self::Key,
+                    input: Self::UpdateInput,
+                ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<Option<Self>>> {
+                    Box::pin(async move { Self::__gom_update_by_key_with_mutation_context(context, key, input).await })
+                }
+            }
+
+            impl ::graphql_orm::graphql::orm::MutationContextDeleteByKey<#backend_marker> for #struct_name {
+                type Key = #key_type;
+                fn delete_by_key_in_mutation_context<'a>(
+                    context: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    key: &'a Self::Key,
+                ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<bool>> {
+                    Box::pin(async move { Self::__gom_delete_by_key_with_mutation_context(context, key).await })
+                }
+            }
+
+            impl ::graphql_orm::graphql::orm::MutationContextBoundedUpdateWhere<#backend_marker> for #struct_name {
+                type WhereInput = #where_input;
+                type UpdateInput = #update_input;
+                fn update_where_bounded_in_mutation_context<'a>(
+                    context: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    where_input: Self::WhereInput,
+                    input: Self::UpdateInput,
+                    limit: ::graphql_orm::graphql::orm::MutationLimit,
+                ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome>> {
+                    Box::pin(async move { Self::__gom_update_where_bounded_with_mutation_context(context, where_input, input, limit).await })
+                }
+            }
+
+            impl ::graphql_orm::graphql::orm::MutationContextBoundedDeleteWhere<#backend_marker> for #struct_name {
+                type WhereInput = #where_input;
+                fn delete_where_bounded_in_mutation_context<'a>(
+                    context: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    where_input: Self::WhereInput,
+                    limit: ::graphql_orm::graphql::orm::MutationLimit,
+                ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome>> {
+                    Box::pin(async move { Self::__gom_delete_where_bounded_with_mutation_context(context, where_input, limit).await })
+                }
+            }
+
+            impl ::graphql_orm::graphql::orm::MutationContextPredicateUpdate<#backend_marker> for #struct_name {
+                type Key = #key_type;
+                type Expected = #where_input;
+                type UpdateInput = #update_input;
+                fn update_if_in_mutation_context<'a>(
+                    context: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    key: &'a Self::Key,
+                    expected: Self::Expected,
+                    input: Self::UpdateInput,
+                ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<::graphql_orm::graphql::orm::PredicateUpdateOutcome<Self>>> {
+                    Box::pin(async move { Self::__gom_update_if_with_mutation_context(context, key, expected, input).await })
+                }
+            }
+
+            #upsert_trait_impl
+        }
+    } else {
+        quote! {}
+    };
+
+    let single_bounded_helper_methods = if !has_composite_primary_key
+        && !schema_policy_read_only
+        && !entity_meta.append_only
+        && backend != BackendKind::Mssql
+    {
+        quote! {
+            #[doc(hidden)]
+            async fn __gom_update_where_bounded_with_mutation_context(
+                hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                where_input: #where_input,
+                input: #update_input,
+                limit: ::graphql_orm::graphql::orm::MutationLimit,
+            ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome> {
+                use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
+                if where_input.is_empty() {
+                    return Err(Self::__gom_runtime_error("bounded update requires a non-empty typed filter"));
+                }
+                let rows = EntityQuery::<Self, #backend_marker>::new()
+                    .filter_with_entity_matching(&where_input)
+                    .paginate(&::graphql_orm::graphql::orm::PageInput {
+                        limit: Some(i64::from(limit.get()) + 1), offset: None,
+                    })
+                    .fetch_all_on(hook_ctx.executor()).await?;
+                if rows.len() > limit.get() as usize {
+                    return Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::LimitExceeded { maximum: limit.get() });
+                }
+                let db = hook_ctx.database().clone();
+                for row in &rows {
+                    db.ensure_writable_row(None, #entity_name_lit,
+                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                        ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                        row as &(dyn ::std::any::Any + Send + Sync),
+                    ).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                }
+                let ids = rows.iter().map(|row| row.#pk_field.clone()).collect::<Vec<_>>();
+                let mut affected = 0u32;
+                for id in ids {
+                    if Self::__gom_update_by_id_with_mutation_context(hook_ctx, &id, input.clone()).await?.is_some() {
+                        affected += 1;
+                    }
+                }
+                Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::Applied { affected })
+            }
+
+            #[doc(hidden)]
+            async fn __gom_delete_where_bounded_with_mutation_context(
+                hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                where_input: #where_input,
+                limit: ::graphql_orm::graphql::orm::MutationLimit,
+            ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome> {
+                use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
+                if where_input.is_empty() {
+                    return Err(Self::__gom_runtime_error("bounded delete requires a non-empty typed filter"));
+                }
+                let rows = EntityQuery::<Self, #backend_marker>::new()
+                    .filter_with_entity_matching(&where_input)
+                    .paginate(&::graphql_orm::graphql::orm::PageInput {
+                        limit: Some(i64::from(limit.get()) + 1), offset: None,
+                    })
+                    .fetch_all_on(hook_ctx.executor()).await?;
+                if rows.len() > limit.get() as usize {
+                    return Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::LimitExceeded { maximum: limit.get() });
+                }
+                let db = hook_ctx.database().clone();
+                for row in &rows {
+                    db.ensure_writable_row(None, #entity_name_lit,
+                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                        ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                        row as &(dyn ::std::any::Any + Send + Sync),
+                    ).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                }
+                let ids = rows.iter().map(|row| row.#pk_field.clone()).collect::<Vec<_>>();
+                let mut affected = 0u32;
+                for id in ids {
+                    if Self::__gom_delete_by_id_with_mutation_context(hook_ctx, &id).await? {
+                        affected += 1;
+                    }
+                }
+                Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::Applied { affected })
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let single_bounded_repository_methods = if !has_composite_primary_key
+        && !schema_policy_read_only
+        && !entity_meta.append_only
+        && backend != BackendKind::Mssql
+    {
+        quote! {
+            pub async fn update_where_bounded(
+                db: &::graphql_orm::db::Database<#backend_marker>, where_input: #where_input,
+                input: #update_input, limit: ::graphql_orm::graphql::orm::MutationLimit,
+            ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome> {
+                let tx = db.pool().begin().await?;
+                let mut context = ::graphql_orm::graphql::orm::MutationContext::new(db, tx);
+                let outcome = context.update_where_bounded::<Self>(where_input, input, limit).await?;
+                context.commit_and_emit().await?;
+                Ok(outcome)
+            }
+
+            pub async fn delete_where_bounded(
+                db: &::graphql_orm::db::Database<#backend_marker>, where_input: #where_input,
+                limit: ::graphql_orm::graphql::orm::MutationLimit,
+            ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome> {
+                let tx = db.pool().begin().await?;
+                let mut context = ::graphql_orm::graphql::orm::MutationContext::new(db, tx);
+                let outcome = context.delete_where_bounded::<Self>(where_input, limit).await?;
+                context.commit_and_emit().await?;
+                Ok(outcome)
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let single_bounded_trait_impls = if !has_composite_primary_key
+        && !schema_policy_read_only
+        && !entity_meta.append_only
+        && backend != BackendKind::Mssql
+    {
+        quote! {
+            impl ::graphql_orm::graphql::orm::MutationContextBoundedUpdateWhere<#backend_marker> for #struct_name {
+                type WhereInput = #where_input;
+                type UpdateInput = #update_input;
+                fn update_where_bounded_in_mutation_context<'a>(
+                    context: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    where_input: Self::WhereInput, input: Self::UpdateInput,
+                    limit: ::graphql_orm::graphql::orm::MutationLimit,
+                ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome>> {
+                    Box::pin(async move { Self::__gom_update_where_bounded_with_mutation_context(context, where_input, input, limit).await })
+                }
+            }
+            impl ::graphql_orm::graphql::orm::MutationContextBoundedDeleteWhere<#backend_marker> for #struct_name {
+                type WhereInput = #where_input;
+                fn delete_where_bounded_in_mutation_context<'a>(
+                    context: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    where_input: Self::WhereInput, limit: ::graphql_orm::graphql::orm::MutationLimit,
+                ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome>> {
+                    Box::pin(async move { Self::__gom_delete_where_bounded_with_mutation_context(context, where_input, limit).await })
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     if backend == BackendKind::Mssql
         || schema_policy_read_only
         || has_composite_primary_key
@@ -3918,6 +4923,7 @@ pub(crate) fn generate_graphql_operations(
             }
 
             #append_only_surface
+            #composite_mutation_surface
             #composite_write_stubs
         });
     }
@@ -4959,6 +5965,7 @@ pub(crate) fn generate_graphql_operations(
 
             #upsert_helper_methods
             #cas_helper_methods
+            #single_bounded_helper_methods
 
             #[doc(hidden)]
             async fn __gom_update_by_id_with_mutation_context<'a>(
@@ -5461,6 +6468,7 @@ pub(crate) fn generate_graphql_operations(
             }
 
             #upsert_repository_method
+            #single_bounded_repository_methods
 
             /// Find all entities matching the given filter
             pub fn query<'a>(pool: &'a #pool_type) -> ::graphql_orm::graphql::orm::FindQuery<'a, Self, #where_input, #order_by_input, #backend_marker> {
@@ -6266,6 +7274,7 @@ pub(crate) fn generate_graphql_operations(
         }
 
         #upsert_trait_impl
+        #single_bounded_trait_impls
         #cas_trait_impl
         #keyset_trait_impl
 

@@ -16,6 +16,7 @@ pub(crate) struct EntityMetadata {
     pub(crate) auth: Option<String>,
     pub(crate) schema_only: bool,
     pub(crate) append_only: bool,
+    pub(crate) repository_mutations: bool,
     pub(crate) keyset: Option<String>,
     pub(crate) backup_enabled: Option<bool>,
     pub(crate) backup_export_order: Option<i32>,
@@ -131,6 +132,10 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitBool = value.parse()?;
                     metadata.append_only = lit.value;
+                } else if meta.path.is_ident("repository_mutations") {
+                    let value = meta.value()?;
+                    let lit: syn::LitBool = value.parse()?;
+                    metadata.repository_mutations = lit.value;
                 } else if meta.path.is_ident("keyset") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;

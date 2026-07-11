@@ -130,7 +130,7 @@ mod sqlite_fixture {
 
         assert_eq!(
             JimLabourEntry::__gom_key_where_clause(),
-            "JimObjectType = ? AND RefNo = ? AND LineNum = ?"
+            "\"JimObjectType\" = ? AND \"RefNo\" = ? AND \"LineNum\" = ?"
         );
         assert_eq!(
             JimLabourEntry::__gom_key_values(&key),
@@ -199,7 +199,7 @@ mod postgres_fixture {
 
         assert_eq!(
             JimLabourEntry::__gom_key_where_clause(),
-            "JimObjectType = $1 AND RefNo = $2 AND LineNum = $3"
+            "\"JimObjectType\" = $1 AND \"RefNo\" = $2 AND \"LineNum\" = $3"
         );
         assert_eq!(
             JimLabourEntry::__gom_key_values(&key),

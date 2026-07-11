@@ -8,8 +8,26 @@ the runtime crate unless a macro crate version is called out separately.
 `graphql-orm` and `graphql-orm-macros` are distributed only from GitHub using reviewed full commit
 revision pins. Both manifests set `publish = false`; crates.io publication is neither supported nor
 required. The optional `auth-agql` bridge intentionally pins `agql-auth` at
-`5e7f230b96350f55496477c11f8a0505e6438779`. Consequently `cargo package -p graphql-orm` cannot
+`be4e0a213ce9c9b9fbe9fe985602743a584e019b`. Consequently `cargo package -p graphql-orm` cannot
 resolve that Git-only optional dependency through the crates.io packaging model; this is expected.
+
+## 0.6.0
+
+Git-only typed composite-mutation and auth-assurance release. Runtime and macros are both `0.6.0`.
+
+- The optional bridge resolves exactly `agql-auth` 0.8.0 at revision
+  `be4e0a213ce9c9b9fbe9fe985602743a584e019b` and retains authoritative session assurance plus safe
+  tenant, organization, actor, correlation, active-scope, and policy metadata.
+- `repository_mutations = true` generates repository-only write inputs and complete ordered key
+  operations for natural composite primary keys on SQLite and PostgreSQL.
+- Insert-if-absent and private upsert use declared primary/unique targets without GraphQL exposure.
+- `PredicateUpdateOutcome` represents atomic key-plus-typed-predicate transitions, including
+  nullable `IS NULL` expectations.
+- `MutationLimit` and `BoundedMutationOutcome` provide no-partial-write ceilings for typed bulk
+  update/delete on single and composite key entities.
+- Generated mutation paths preserve authorization, RLS/auth context, transforms, hooks, search,
+  deferred events, exact affected-row validation, and ORM transaction rollback behavior.
+- Composite mutation opt-ins require a registered entity-policy provider even under legacy mode.
 
 ## 0.5.0
 

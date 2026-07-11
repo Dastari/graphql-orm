@@ -298,6 +298,65 @@ async fn app_side_helpers_update_delete_and_emit_side_effects()
 }
 
 #[tokio::test]
+async fn single_key_bulk_mutations_require_and_enforce_explicit_bounds()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = setup_pool().await?;
+    let db = graphql_orm::db::Database::new(pool.clone());
+    insert_user_row(&pool, "bounded-a", false, 1).await?;
+    insert_user_row(&pool, "bounded-b", false, 2).await?;
+    let filter = || UserWhereInput {
+        disabled: Some(BoolFilter {
+            eq: Some(false),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let overflow = User::update_where_bounded(
+        &db,
+        filter(),
+        UpdateUserInput {
+            disabled: Some(true),
+            ..Default::default()
+        },
+        MutationLimit::new(1)?,
+    )
+    .await?;
+    assert_eq!(
+        overflow,
+        BoundedMutationOutcome::LimitExceeded { maximum: 1 }
+    );
+    assert_eq!(User::count_query(&pool).filter(&filter()).count().await?, 2);
+
+    let applied = User::update_where_bounded(
+        &db,
+        filter(),
+        UpdateUserInput {
+            disabled: Some(true),
+            ..Default::default()
+        },
+        MutationLimit::new(2)?,
+    )
+    .await?;
+    assert_eq!(applied, BoundedMutationOutcome::Applied { affected: 2 });
+
+    let deleted = User::delete_where_bounded(
+        &db,
+        UserWhereInput {
+            disabled: Some(BoolFilter {
+                eq: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        MutationLimit::new(2)?,
+    )
+    .await?;
+    assert_eq!(deleted, BoundedMutationOutcome::Applied { affected: 2 });
+    Ok(())
+}
+
+#[tokio::test]
 async fn filtered_repository_aggregates_run_in_sql() -> Result<(), Box<dyn std::error::Error>> {
     let pool = setup_pool().await?;
     insert_user_row(&pool, "alpha", false, 10).await?;

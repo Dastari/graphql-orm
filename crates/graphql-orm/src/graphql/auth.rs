@@ -2,6 +2,24 @@
 
 use std::fmt;
 
+/// Backend-neutral authentication assurance accepted by the host application.
+///
+/// This deliberately contains no token material. Optional bridge integrations
+/// copy only validated, session-bound assurance facts into this value.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AuthAssurance {
+    /// Unix timestamp of the authentication or step-up event.
+    pub authenticated_at: i64,
+    /// Normalized authentication method references.
+    pub methods: Vec<String>,
+    /// Optional authentication context class reference.
+    pub acr: Option<String>,
+    /// Optional host/provider policy namespace.
+    pub context: Option<String>,
+    /// Whether the host accepted these facts as satisfying MFA policy.
+    pub mfa_satisfied: bool,
+}
+
 /// Project-agnostic request principal understood by `graphql-orm`.
 ///
 /// Applications inject this value into an `async-graphql` request with
@@ -32,6 +50,12 @@ pub struct AuthSubject {
     pub session_id: Option<String>,
     /// Optional actor/on-behalf-of identity for delegation.
     pub actor_id: Option<String>,
+    /// Optional organization identifier when distinct from tenant.
+    pub organization_id: Option<String>,
+    /// Optional authorization/audit correlation identifier.
+    pub correlation_id: Option<String>,
+    /// Optional host-accepted, session-bound authentication assurance.
+    pub assurance: Option<AuthAssurance>,
 }
 
 impl fmt::Debug for AuthSubject {
@@ -46,6 +70,9 @@ impl fmt::Debug for AuthSubject {
             .field("token_id", &self.token_id)
             .field("session_id", &self.session_id)
             .field("actor_id", &self.actor_id)
+            .field("organization_id", &self.organization_id)
+            .field("correlation_id", &self.correlation_id)
+            .field("assurance", &self.assurance)
             .finish()
     }
 }
@@ -63,6 +90,9 @@ impl AuthSubject {
             token_id: None,
             session_id: None,
             actor_id: None,
+            organization_id: None,
+            correlation_id: None,
+            assurance: None,
         }
     }
 
@@ -85,6 +115,9 @@ impl AuthSubject {
             token_id: None,
             session_id: None,
             actor_id: None,
+            organization_id: None,
+            correlation_id: None,
+            assurance: None,
         }
     }
 
@@ -129,15 +162,18 @@ impl AuthSubject {
         scopes.sort();
         let claims_fp = self.claims.as_ref().map(fingerprint_json);
         format!(
-            "id={}|user={}|tenant={}|roles={}|scopes={}|token={}|session={}|actor={}|claims_fp={}",
+            "id={}|user={}|tenant={}|organization={}|roles={}|scopes={}|token={}|session={}|actor={}|correlation={}|assurance={:?}|claims_fp={}",
             self.id,
             self.user_id.as_deref().unwrap_or(""),
             self.tenant_id.as_deref().unwrap_or(""),
+            self.organization_id.as_deref().unwrap_or(""),
             roles.join(","),
             scopes.join(","),
             self.token_id.as_deref().unwrap_or(""),
             self.session_id.as_deref().unwrap_or(""),
             self.actor_id.as_deref().unwrap_or(""),
+            self.correlation_id.as_deref().unwrap_or(""),
+            self.assurance,
             claims_fp.unwrap_or_default(),
         )
     }
@@ -195,6 +231,24 @@ impl AuthSubjectBuilder {
     /// Set an actor/on-behalf-of identity.
     pub fn actor_id(mut self, actor_id: impl Into<String>) -> Self {
         self.subject.actor_id = Some(actor_id.into());
+        self
+    }
+
+    /// Set an organization identifier distinct from the tenant identifier.
+    pub fn organization_id(mut self, organization_id: impl Into<String>) -> Self {
+        self.subject.organization_id = Some(organization_id.into());
+        self
+    }
+
+    /// Set an authorization/audit correlation identifier.
+    pub fn correlation_id(mut self, correlation_id: impl Into<String>) -> Self {
+        self.subject.correlation_id = Some(correlation_id.into());
+        self
+    }
+
+    /// Attach validated, session-bound authentication assurance.
+    pub fn assurance(mut self, assurance: AuthAssurance) -> Self {
+        self.subject.assurance = Some(assurance);
         self
     }
 

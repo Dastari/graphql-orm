@@ -67,6 +67,42 @@ pub fn binary_key_id(value: &[u8]) -> String {
     encoded
 }
 
+/// Produce an unambiguous textual event identifier for an ordered composite key.
+#[doc(hidden)]
+pub fn composite_key_id(values: &[SqlValue]) -> String {
+    fn component(value: &SqlValue) -> String {
+        match value {
+            SqlValue::String(value) => format!("s{}:{value}", value.len()),
+            SqlValue::Bytes(value) => binary_key_id(value),
+            SqlValue::Uuid(value) => format!("u:{value}"),
+            SqlValue::Int(value) => format!("i:{value}"),
+            SqlValue::Float(value) => format!("f:{:016x}", value.to_bits()),
+            SqlValue::Bool(value) => format!("b:{value}"),
+            SqlValue::Json(value) => {
+                let encoded = serde_json::to_string(value).unwrap_or_default();
+                format!("j{}:{encoded}", encoded.len())
+            }
+            SqlValue::StringNull
+            | SqlValue::BytesNull
+            | SqlValue::JsonNull
+            | SqlValue::UuidNull
+            | SqlValue::IntNull
+            | SqlValue::FloatNull
+            | SqlValue::BoolNull
+            | SqlValue::Null => "n".to_string(),
+        }
+    }
+
+    let mut id = String::from("key:");
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            id.push('|');
+        }
+        id.push_str(&component(value));
+    }
+    id
+}
+
 /// Request-local database authorization context for PostgreSQL RLS and
 /// structural multi-tenant predicates.
 ///
@@ -77,7 +113,7 @@ pub fn binary_key_id(value: &[u8]) -> String {
 /// Under [`crate::graphql::auth::AuthorizationMode::DeclaredPoliciesRequired`]
 /// (and stricter modes), entities that declare tenant/RLS metadata fail closed
 /// when this context is missing.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct DbAuthContext {
     /// Application user identifier exposed as `app.user_id`.
     pub user_id: Option<String>,
@@ -100,6 +136,12 @@ pub struct DbAuthContext {
     pub session_id: Option<String>,
     /// Optional actor/on-behalf-of identity.
     pub actor_id: Option<String>,
+    /// Optional organization identifier when distinct from tenant.
+    pub organization_id: Option<String>,
+    /// Optional authorization/audit correlation identifier.
+    pub correlation_id: Option<String>,
+    /// Optional host-accepted, session-bound authentication assurance.
+    pub assurance: Option<crate::graphql::auth::AuthAssurance>,
     /// Optional policy-version stamp for cache invalidation.
     pub policy_version: Option<String>,
 }
@@ -119,6 +161,9 @@ impl std::fmt::Debug for DbAuthContext {
             .field("token_id", &self.token_id)
             .field("session_id", &self.session_id)
             .field("actor_id", &self.actor_id)
+            .field("organization_id", &self.organization_id)
+            .field("correlation_id", &self.correlation_id)
+            .field("assurance", &self.assurance)
             .field("policy_version", &self.policy_version)
             .finish()
     }
@@ -141,6 +186,9 @@ impl DbAuthContext {
             token_id: subject.token_id.clone(),
             session_id: subject.session_id.clone(),
             actor_id: subject.actor_id.clone(),
+            organization_id: subject.organization_id.clone(),
+            correlation_id: subject.correlation_id.clone(),
+            assurance: subject.assurance.clone(),
             policy_version: None,
         }
     }
@@ -163,6 +211,9 @@ impl DbAuthContext {
             token_id: None,
             session_id: None,
             actor_id: None,
+            organization_id: None,
+            correlation_id: None,
+            assurance: None,
             policy_version: None,
         }
     }
@@ -187,6 +238,9 @@ impl DbAuthContext {
             token_id: None,
             session_id: None,
             actor_id: None,
+            organization_id: None,
+            correlation_id: None,
+            assurance: None,
             policy_version: None,
         }
     }
@@ -221,15 +275,18 @@ impl DbAuthContext {
             })
             .unwrap_or_default();
         format!(
-            "user={}|subject={}|tenant={}|roles={}|scopes={}|token={}|session={}|actor={}|policy={}|claims_fp={}",
+            "user={}|subject={}|tenant={}|organization={}|roles={}|scopes={}|token={}|session={}|actor={}|correlation={}|assurance={:?}|policy={}|claims_fp={}",
             self.user_id.as_deref().unwrap_or(""),
             self.subject.as_deref().unwrap_or(""),
             self.tenant_id.as_deref().unwrap_or(""),
+            self.organization_id.as_deref().unwrap_or(""),
             roles.join(","),
             scopes.join(","),
             self.token_id.as_deref().unwrap_or(""),
             self.session_id.as_deref().unwrap_or(""),
             self.actor_id.as_deref().unwrap_or(""),
+            self.correlation_id.as_deref().unwrap_or(""),
+            self.assurance,
             self.policy_version.as_deref().unwrap_or(""),
             claims_fp,
         )
@@ -250,6 +307,13 @@ impl DbAuthContext {
             .transpose()
             .map_err(|error| sqlx::Error::Encode(Box::new(error)))?
             .unwrap_or_default();
+        let assurance = self
+            .assurance
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| sqlx::Error::Encode(Box::new(error)))?
+            .unwrap_or_default();
 
         Ok(vec![
             ("app.user_id", self.user_id.clone().unwrap_or_default()),
@@ -258,6 +322,19 @@ impl DbAuthContext {
             ("app.roles", roles),
             ("app.scopes", scopes),
             ("app.claims", claims),
+            (
+                "app.organization_id",
+                self.organization_id.clone().unwrap_or_default(),
+            ),
+            (
+                "app.correlation_id",
+                self.correlation_id.clone().unwrap_or_default(),
+            ),
+            ("app.assurance", assurance),
+            (
+                "app.policy_version",
+                self.policy_version.clone().unwrap_or_default(),
+            ),
         ])
     }
 }
@@ -308,6 +385,56 @@ pub enum ConditionalUpdateOutcome<T> {
     Conflict,
     /// Exactly one row was updated and returned.
     Updated(T),
+}
+
+/// Result of an atomic key-plus-typed-predicate update.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PredicateUpdateOutcome<T> {
+    /// No row with the complete key exists or is visible.
+    NotFound,
+    /// The key exists, but the additional typed predicate did not match.
+    PredicateConflict,
+    /// Exactly one row was updated and returned.
+    Updated(T),
+}
+
+/// Result of an insert that uses a declared primary/unique conflict target.
+#[derive(Clone, Debug, PartialEq)]
+pub enum InsertIfAbsentOutcome<T> {
+    /// The row was inserted by this operation.
+    Inserted(T),
+    /// A row with the declared conflict target was already present.
+    AlreadyPresent(T),
+}
+
+/// Explicit upper bound for one typed bulk mutation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MutationLimit(u32);
+
+impl MutationLimit {
+    /// Construct a non-zero affected-row ceiling.
+    pub fn new(maximum: u32) -> Result<Self, crate::graphql::errors::OrmPublicError> {
+        if maximum == 0 {
+            return Err(crate::graphql::errors::OrmPublicError::new(
+                crate::graphql::errors::OrmErrorCode::InvalidInput,
+            )
+            .with_internal("bulk mutation maximum must be greater than zero"));
+        }
+        Ok(Self(maximum))
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// Outcome of a bounded typed bulk mutation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BoundedMutationOutcome {
+    /// The mutation completed without crossing its explicit ceiling.
+    Applied { affected: u32 },
+    /// More rows matched than the caller authorized; no rows were changed.
+    LimitExceeded { maximum: u32 },
 }
 
 impl TransactionError {
@@ -1025,6 +1152,106 @@ where
         T::find_by_id_in_mutation_context(self, id).await
     }
 
+    /// Find one entity by its complete generated primary-key value.
+    pub async fn find_by_key<'a, T>(
+        &'a mut self,
+        key: &'a <T as MutationContextFindByKey<B>>::Key,
+    ) -> crate::Result<Option<T>>
+    where
+        T: MutationContextFindByKey<B> + Entity,
+    {
+        let metadata = T::metadata();
+        self.db
+            .ensure_entity_access(
+                None,
+                metadata.entity_name,
+                metadata.read_policy,
+                EntityAccessKind::Read,
+                EntityAccessSurface::Repository,
+            )
+            .await
+            .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
+        T::find_by_key_in_mutation_context(self, key).await
+    }
+
+    /// Update one entity selected by its complete generated key.
+    pub async fn update_by_key<'a, T>(
+        &'a mut self,
+        key: &'a <T as MutationContextUpdateByKey<B>>::Key,
+        input: <T as MutationContextUpdateByKey<B>>::UpdateInput,
+    ) -> crate::Result<Option<T>>
+    where
+        T: MutationContextUpdateByKey<B> + Entity,
+    {
+        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        T::update_by_key_in_mutation_context(self, key, input).await
+    }
+
+    /// Delete one entity selected by its complete generated key.
+    pub async fn delete_by_key<'a, T>(
+        &'a mut self,
+        key: &'a <T as MutationContextDeleteByKey<B>>::Key,
+    ) -> crate::Result<bool>
+    where
+        T: MutationContextDeleteByKey<B> + Entity,
+    {
+        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        T::delete_by_key_in_mutation_context(self, key).await
+    }
+
+    /// Insert unless the declared primary/unique target is already present.
+    pub async fn insert_if_absent<T>(
+        &mut self,
+        input: <T as MutationContextInsertIfAbsent<B>>::CreateInput,
+    ) -> crate::Result<InsertIfAbsentOutcome<T>>
+    where
+        T: MutationContextInsertIfAbsent<B> + Entity,
+    {
+        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        T::insert_if_absent_in_mutation_context(self, input).await
+    }
+
+    /// Update a typed match set only when it fits within an explicit ceiling.
+    pub async fn update_where_bounded<T>(
+        &mut self,
+        where_input: <T as MutationContextBoundedUpdateWhere<B>>::WhereInput,
+        input: <T as MutationContextBoundedUpdateWhere<B>>::UpdateInput,
+        limit: MutationLimit,
+    ) -> crate::Result<BoundedMutationOutcome>
+    where
+        T: MutationContextBoundedUpdateWhere<B> + Entity,
+    {
+        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        T::update_where_bounded_in_mutation_context(self, where_input, input, limit).await
+    }
+
+    /// Delete a typed match set only when it fits within an explicit ceiling.
+    pub async fn delete_where_bounded<T>(
+        &mut self,
+        where_input: <T as MutationContextBoundedDeleteWhere<B>>::WhereInput,
+        limit: MutationLimit,
+    ) -> crate::Result<BoundedMutationOutcome>
+    where
+        T: MutationContextBoundedDeleteWhere<B> + Entity,
+    {
+        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        T::delete_where_bounded_in_mutation_context(self, where_input, limit).await
+    }
+
+    /// Atomically update a complete key plus an additional typed predicate.
+    pub async fn update_if<T>(
+        &mut self,
+        key: &<T as MutationContextPredicateUpdate<B>>::Key,
+        expected: <T as MutationContextPredicateUpdate<B>>::Expected,
+        input: <T as MutationContextPredicateUpdate<B>>::UpdateInput,
+    ) -> crate::Result<PredicateUpdateOutcome<T>>
+    where
+        T: MutationContextPredicateUpdate<B> + Entity,
+    {
+        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        T::update_if_in_mutation_context(self, key, expected, input).await
+    }
+
     pub async fn keyset_page<'a, T>(
         &'a mut self,
         filter: <T as MutationContextKeysetPage<B>>::Filter,
@@ -1163,6 +1390,86 @@ pub trait MutationContextFindById<B: WriteBackend = DefaultWriteBackend>: Sized 
         hook_ctx: &'a mut MutationContext<'_, B>,
         id: &'a Self::Id,
     ) -> futures::future::BoxFuture<'a, crate::Result<Option<Self>>>;
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub trait MutationContextFindByKey<B: WriteBackend = DefaultWriteBackend>: Sized {
+    type Key;
+
+    fn find_by_key_in_mutation_context<'a>(
+        hook_ctx: &'a mut MutationContext<'_, B>,
+        key: &'a Self::Key,
+    ) -> futures::future::BoxFuture<'a, crate::Result<Option<Self>>>;
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub trait MutationContextUpdateByKey<B: WriteBackend = DefaultWriteBackend>: Sized {
+    type Key;
+    type UpdateInput;
+
+    fn update_by_key_in_mutation_context<'a>(
+        hook_ctx: &'a mut MutationContext<'_, B>,
+        key: &'a Self::Key,
+        input: Self::UpdateInput,
+    ) -> futures::future::BoxFuture<'a, crate::Result<Option<Self>>>;
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub trait MutationContextDeleteByKey<B: WriteBackend = DefaultWriteBackend>: Sized {
+    type Key;
+
+    fn delete_by_key_in_mutation_context<'a>(
+        hook_ctx: &'a mut MutationContext<'_, B>,
+        key: &'a Self::Key,
+    ) -> futures::future::BoxFuture<'a, crate::Result<bool>>;
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub trait MutationContextInsertIfAbsent<B: WriteBackend = DefaultWriteBackend>: Sized {
+    type CreateInput;
+
+    fn insert_if_absent_in_mutation_context<'a>(
+        hook_ctx: &'a mut MutationContext<'_, B>,
+        input: Self::CreateInput,
+    ) -> futures::future::BoxFuture<'a, crate::Result<InsertIfAbsentOutcome<Self>>>;
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub trait MutationContextBoundedUpdateWhere<B: WriteBackend = DefaultWriteBackend>: Sized {
+    type WhereInput;
+    type UpdateInput;
+
+    fn update_where_bounded_in_mutation_context<'a>(
+        hook_ctx: &'a mut MutationContext<'_, B>,
+        where_input: Self::WhereInput,
+        input: Self::UpdateInput,
+        limit: MutationLimit,
+    ) -> futures::future::BoxFuture<'a, crate::Result<BoundedMutationOutcome>>;
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub trait MutationContextBoundedDeleteWhere<B: WriteBackend = DefaultWriteBackend>: Sized {
+    type WhereInput;
+
+    fn delete_where_bounded_in_mutation_context<'a>(
+        hook_ctx: &'a mut MutationContext<'_, B>,
+        where_input: Self::WhereInput,
+        limit: MutationLimit,
+    ) -> futures::future::BoxFuture<'a, crate::Result<BoundedMutationOutcome>>;
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub trait MutationContextPredicateUpdate<B: WriteBackend = DefaultWriteBackend>: Sized {
+    type Key;
+    type Expected;
+    type UpdateInput;
+
+    fn update_if_in_mutation_context<'a>(
+        hook_ctx: &'a mut MutationContext<'_, B>,
+        key: &'a Self::Key,
+        expected: Self::Expected,
+        input: Self::UpdateInput,
+    ) -> futures::future::BoxFuture<'a, crate::Result<PredicateUpdateOutcome<Self>>>;
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]

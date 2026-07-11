@@ -2,6 +2,24 @@
 
 User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
 
+## 0.6.0
+
+Companion macros crate: `graphql-orm-macros` **0.6.0**.
+
+- Updated the optional Git-only `auth-agql` bridge to `agql-auth` 0.8.0 at exact revision
+  `be4e0a213ce9c9b9fbe9fe985602743a584e019b` and preserved authoritative session assurance,
+  organization, correlation, actor, active-scope, and policy metadata.
+- Added opt-in repository-only composite-key mutations with generated ordered key/create/update
+  types, complete-key CRUD, insert-if-absent, private upsert, and transaction-bound equivalents.
+- Added atomic complete-key plus typed-predicate updates with distinct not-found, predicate-conflict,
+  and updated outcomes.
+- Added explicit `MutationLimit` and no-partial-write bounded update/delete outcomes for single and
+  composite key entities.
+- New composite mutation SQL dialect-quotes identifiers, binds values, validates exact affected-row
+  counts, and preserves policies, transforms, hooks, search, events, rollback, and PostgreSQL RLS.
+- Opted-in composite writes require an explicit `EntityPolicy` provider even in legacy mode; the
+  new mutation surface is never default-allow.
+
 ## 0.5.0
 
 Companion macros crate: `graphql-orm-macros` **0.5.0**.

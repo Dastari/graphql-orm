@@ -3,6 +3,37 @@
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.6.0 Auth Assurance and Typed Composite Mutations
+
+Pin both crates to the reviewed `v0.6.0` commit. This release keeps existing single-key and 0.5
+projection APIs, but adding assurance/organization/correlation fields to the public `AuthSubject`
+and `DbAuthContext` structs is a source change for direct struct literals. Prefer
+`AuthSubject::builder` and `DbAuthContext { ..Default::default() }`.
+
+The optional `auth-agql` bridge now requires Git-only `agql-auth` 0.8.0 revision
+`be4e0a213ce9c9b9fbe9fe985602743a584e019b`. It retains session assurance and safe policy/audit
+metadata. Remove any direct 0.7 pin so Cargo resolves exactly one `agql-auth` version.
+
+Natural composite-key writes are opt-in:
+
+```rust
+#[graphql_entity(
+    repository_mutations = true,
+    upsert = "tenant_id,natural_id",
+    unique_composite = "tenant_id,natural_id"
+)]
+```
+
+Mark every key field `#[primary_key]` and host-assigned with
+`#[graphql_orm(auto_generated = false)]`. Use the generated `EntityKey`, `CreateEntityInput`, and
+`UpdateEntityInput` with `find_by_key`, `insert`, `insert_if_absent`, `upsert`, `update_by_key`,
+`delete_by_key`, `update_if`, and bounded typed filter mutations. These APIs add no GraphQL mutation
+fields. See [Typed Composite-Key and Bounded Mutations](docs/composite-mutations.md).
+
+`MutationLimit::new` is required by bounded operations; an overflow returns `LimitExceeded` without
+changing rows. Legacy `update_where`/`delete_where` remain available for source compatibility and
+should be migrated when the caller needs a reviewable hard ceiling.
+
 ## 0.5.0 Typed Read Projections
 
 This additive release is source-compatible with 0.4.3. Pin both crates to the reviewed `v0.5.0`
@@ -167,11 +198,11 @@ Default limit: `1000` → `50`. Max limit: `1000` → `100`.
 ### agql-auth Bridge
 
 ```toml
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.5.0", features = ["sqlite", "auth-agql"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.0", features = ["sqlite", "auth-agql"] }
 ```
 
-The optional feature depends on upstream `agql-auth` 0.7.0 via git revision
-`5e7f230b96350f55496477c11f8a0505e6438779` (tag `v0.7.0`). It does not use a
+The optional feature depends on upstream `agql-auth` 0.8.0 via git revision
+`be4e0a213ce9c9b9fbe9fe985602743a584e019b` (tag `v0.8.0`). It does not use a
 local path, sibling checkout, or Cargo `[patch]`.
 
 ```rust
@@ -335,4 +366,4 @@ access path.
 
 - No JWT, OIDC, cookie, wildcard, or product-specific scope logic was added to `graphql-orm`.
 - PostgreSQL RLS helper functions still use exact scope matching.
-- The `auth-agql` feature is available against `agql-auth` 0.7.
+- The `auth-agql` feature is available against `agql-auth` 0.8.

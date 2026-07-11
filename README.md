@@ -29,6 +29,7 @@ It is designed for two related use cases:
 - project-agnostic `AuthSubject` and exact-scope `ScopeEntityPolicy` helpers
 - opt-in PostgreSQL row-level security metadata and request-local database auth context
 - backend-neutral typed read projections that omit sensitive columns from SQL and process memory
+- typed composite-key, insert-if-absent, conditional, and bounded mutation APIs
 
 ## Install
 
@@ -36,13 +37,13 @@ Select exactly the backend support your service needs:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.5.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.0", default-features = false, features = ["sqlite"] }
 ```
 
 GitHub with an exact full revision is the only supported distribution method. Neither crate is
-published to crates.io. Replace the placeholder with the reviewed release commit (the `v0.4.0` tag
+published to crates.io. Replace the placeholder with the reviewed release commit (the version tag
 is an identity aid, not a substitute for `rev`). The optional `auth-agql` bridge likewise resolves
-the exact upstream revision `5e7f230b96350f55496477c11f8a0505e6438779`.
+the exact upstream revision `be4e0a213ce9c9b9fbe9fe985602743a584e019b`.
 
 Available backend features:
 
@@ -52,7 +53,7 @@ Available backend features:
 
 Optional integration features:
 
-- `auth-agql` - optional one-way bridge from `agql-auth` 0.7 principals into
+- `auth-agql` - optional one-way bridge from `agql-auth` 0.8 principals into
   `AuthSubject` / `DbAuthContext`
 
 Naming features are independent of backend features:
@@ -209,6 +210,7 @@ batched relation query per relation layer, not N+1 or nested N*N queries.
 - [Portable transactions, CAS, append-only entities, constraints, and keysets](docs/portable-persistence.md)
 - [Binary keys, private repository upserts, and conditional indexes](docs/binary-keys-and-indexes.md)
 - [Typed least-privilege read projections](docs/read-projections.md)
+- [Typed composite-key and bounded mutations](docs/composite-mutations.md)
 - [Backup runtime API](docs/backup.md)
 - [Release notes](docs/release-notes.md)
 - [Development and test commands](docs/development.md)

@@ -501,10 +501,7 @@ async fn postgres_transaction_auth_and_rls_filter_projection_rows()
         roles: Vec::new(),
         scopes: Vec::new(),
         claims_json: None,
-        token_id: None,
-        session_id: None,
-        actor_id: None,
-        policy_version: None,
+        ..Default::default()
     };
     let visible = reader
         .transaction_with_auth(TransactionMode::Default, Some(&auth), |transaction| {

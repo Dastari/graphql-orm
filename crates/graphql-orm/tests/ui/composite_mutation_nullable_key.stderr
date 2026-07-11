@@ -1,0 +1,5 @@
+error: repository mutation primary-key fields must be non-nullable
+  --> tests/ui/composite_mutation_nullable_key.rs:19:15
+   |
+19 |     local_id: Option<String>,
+   |               ^^^^^^^^^^^^^^

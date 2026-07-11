@@ -96,10 +96,7 @@ fn auth_context(tenant_id: &str, scopes: &[&str]) -> DbAuthContext {
         roles: vec!["member".to_string()],
         scopes: scopes.iter().map(|scope| (*scope).to_string()).collect(),
         claims_json: Some(serde_json::json!({"tenant": tenant_id})),
-        token_id: None,
-        session_id: None,
-        actor_id: None,
-        policy_version: None,
+        ..Default::default()
     }
 }
 
@@ -131,10 +128,7 @@ fn db_auth_context_serializes_deterministically() {
         roles: vec!["writer".to_string(), "reader".to_string()],
         scopes: vec!["notes.write".to_string(), "notes.read".to_string()],
         claims_json: Some(serde_json::json!({"b": 2, "a": 1})),
-        token_id: None,
-        session_id: None,
-        actor_id: None,
-        policy_version: None,
+        ..Default::default()
     };
     let right = DbAuthContext {
         roles: vec!["reader".to_string(), "writer".to_string()],

@@ -6,13 +6,13 @@
 ## Dependency
 
 ```toml
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.5.0", features = ["sqlite", "auth-agql"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.0", features = ["sqlite", "auth-agql"] }
 # Host applications may depend on agql-auth directly as well. The optional
 # graphql-orm auth-agql feature pins the exact upstream release:
 # git = "https://github.com/Dastari/agql-auth.git"
-# rev = "5e7f230b96350f55496477c11f8a0505e6438779"
-# version = "0.7.0"
-agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "5e7f230b96350f55496477c11f8a0505e6438779", version = "0.7.0" }
+# rev = "be4e0a213ce9c9b9fbe9fe985602743a584e019b"
+# version = "0.8.0"
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "be4e0a213ce9c9b9fbe9fe985602743a584e019b", version = "0.8.0" }
 ```
 
 Both projects are intentionally Git-only. Cargo's crates.io packaging flow cannot package
@@ -44,8 +44,25 @@ Mapped fields:
 | `token_claims.jti` / API token id | token reference |
 | session id | session reference |
 | actor (`token_claims.actor.sub`) | `actor_id` |
+| organization / correlation id | typed subject/database fields and redacted claims |
+| authoritative `session.assurance` | `AuthAssurance` and `DbAuthContext.assurance` |
+| assurance context and custom policy metadata | redacted `claims` / `app.claims` |
+| custom `policy_version` string | `DbAuthContext.policy_version` |
 
 Raw JWTs, API tokens, cookies, and authorization headers are never copied.
+
+The database context also installs transaction-local `app.organization_id`,
+`app.correlation_id`, `app.assurance`, and `app.policy_version` settings on PostgreSQL. Assurance
+contains only the accepted authentication timestamp, normalized methods, ACR, policy context, and
+MFA decision.
+
+## Migrating from 0.7
+
+Update any direct `agql-auth` dependency to the exact 0.8 revision above. `AuthSubject` and
+`DbAuthContext` gained organization, correlation, and assurance fields; applications constructing
+either with struct literals must add the fields or use their builders/`Default` update syntax.
+The bridge now preserves 0.8 session assurance, active scope, correlation, actor, token metadata,
+and custom policy metadata instead of retaining only the older role/scope/tenant subset.
 
 ## Policy Decisions Stay Host-Owned
 

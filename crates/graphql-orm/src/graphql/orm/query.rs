@@ -1110,21 +1110,99 @@ pub fn render_upsert_sql(
     update_columns: &[&str],
     update_updated_at: bool,
 ) -> String {
+    let quoted_table = dialect.quote_identifier_path(table);
+    let quoted_insert_columns = insert_columns
+        .iter()
+        .map(|column| dialect.quote_identifier_path(column))
+        .collect::<Vec<_>>();
+    let quoted_conflict_columns = conflict_columns
+        .iter()
+        .map(|column| dialect.quote_identifier_path(column))
+        .collect::<Vec<_>>();
     let mut set_clauses = update_columns
         .iter()
-        .map(|column| format!("{column} = EXCLUDED.{column}"))
+        .map(|column| {
+            let quoted = dialect.quote_identifier_path(column);
+            format!("{quoted} = EXCLUDED.{quoted}")
+        })
         .collect::<Vec<_>>();
     if update_updated_at {
-        set_clauses.push(format!("updated_at = {}", dialect.current_epoch_expr()));
+        set_clauses.push(format!(
+            "{} = {}",
+            dialect.quote_identifier("updated_at"),
+            dialect.current_epoch_expr()
+        ));
     }
 
     format!(
         "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}",
-        table,
-        insert_columns.join(", "),
+        quoted_table,
+        quoted_insert_columns.join(", "),
         insert_values.join(", "),
-        conflict_columns.join(", "),
+        quoted_conflict_columns.join(", "),
         set_clauses.join(", ")
+    )
+}
+
+/// Render a bound insert that ignores one declared primary/unique conflict.
+pub fn render_insert_if_absent_sql(
+    dialect: DatabaseBackend,
+    table: &str,
+    insert_columns: &[&str],
+    insert_values: &[&str],
+    conflict_columns: &[&str],
+) -> String {
+    let table = dialect.quote_identifier_path(table);
+    let columns = insert_columns
+        .iter()
+        .map(|column| dialect.quote_identifier_path(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let conflicts = conflict_columns
+        .iter()
+        .map(|column| dialect.quote_identifier_path(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "INSERT INTO {table} ({columns}) VALUES ({}) ON CONFLICT ({conflicts}) DO NOTHING",
+        insert_values.join(", ")
+    )
+}
+
+pub fn render_insert_sql(
+    dialect: DatabaseBackend,
+    table: &str,
+    insert_columns: &[&str],
+    insert_values: &[&str],
+) -> String {
+    let table = dialect.quote_identifier_path(table);
+    let columns = insert_columns
+        .iter()
+        .map(|column| dialect.quote_identifier_path(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "INSERT INTO {table} ({columns}) VALUES ({})",
+        insert_values.join(", ")
+    )
+}
+
+pub fn build_insert_sql(table: &str, insert_columns: &[&str], insert_values: &[&str]) -> String {
+    render_insert_sql(current_backend(), table, insert_columns, insert_values)
+}
+
+pub fn build_insert_if_absent_sql(
+    table: &str,
+    insert_columns: &[&str],
+    insert_values: &[&str],
+    conflict_columns: &[&str],
+) -> String {
+    render_insert_if_absent_sql(
+        current_backend(),
+        table,
+        insert_columns,
+        insert_values,
+        conflict_columns,
     )
 }
 

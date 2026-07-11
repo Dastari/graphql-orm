@@ -1,0 +1,5 @@
+error: repository_mutations are not available for the read-only MSSQL backend
+  --> tests/ui/mssql_composite_mutation_unavailable.rs:11:8
+   |
+11 | struct PrivateGrant {
+   |        ^^^^^^^^^^^^
