@@ -1,6 +1,6 @@
 use crate::{
     BackupError, BackupRepository, BackupSnapshotManifest, DEFAULT_OBJECT_CONCURRENCY,
-    ObjectBackupEntry, TableBackupEntry, manifest::sha256_hex, verify_manifest_checksum,
+    manifest::sha256_hex, verify_manifest_checksum,
 };
 use futures::{StreamExt, TryStreamExt, stream};
 
@@ -75,54 +75,49 @@ pub async fn verify_object_checksums_with_options(
 ) -> Result<(), BackupError> {
     let concurrency = options.blob_concurrency.max(1);
 
-    stream::iter(&manifest.objects)
-        .map(|object| verify_object_checksum(repository, object))
+    // Owned (key, checksum) pairs keep the streams free of higher-ranked
+    // borrows, which otherwise break `Send` future inference in async
+    // resolvers that await this function.
+    let mut object_checks = Vec::with_capacity(manifest.objects.len());
+    for object in &manifest.objects {
+        object_checks.push((object.content_key.clone(), object.sha256_hex.clone()));
+    }
+    stream::iter(object_checks)
+        .map(|(content_key, sha256)| verify_blob_checksum(repository, content_key, sha256))
         .buffer_unordered(concurrency)
         .try_collect::<Vec<_>>()
         .await?;
 
-    stream::iter(
-        manifest
-            .database
-            .tables
-            .iter()
-            .chain(manifest.database.changes.iter()),
-    )
-    .map(|entry| verify_entry_checksum(repository, entry))
-    .buffer_unordered(concurrency)
-    .try_collect::<Vec<_>>()
-    .await?;
-
-    Ok(())
-}
-
-async fn verify_object_checksum(
-    repository: &dyn BackupRepository,
-    object: &ObjectBackupEntry,
-) -> Result<(), BackupError> {
-    let bytes = repository.get_blob(&object.content_key).await?;
-    let actual = sha256_hex(&bytes);
-    if actual != object.sha256_hex {
-        return Err(BackupError::ChecksumMismatch {
-            key: object.content_key.clone(),
-            expected: object.sha256_hex.clone(),
-            actual,
-        });
+    let mut entry_checks =
+        Vec::with_capacity(manifest.database.tables.len() + manifest.database.changes.len());
+    for entry in manifest
+        .database
+        .tables
+        .iter()
+        .chain(manifest.database.changes.iter())
+    {
+        entry_checks.push((entry.content_key.clone(), entry.sha256_hex.clone()));
     }
+    stream::iter(entry_checks)
+        .map(|(content_key, sha256)| verify_blob_checksum(repository, content_key, sha256))
+        .buffer_unordered(concurrency)
+        .try_collect::<Vec<_>>()
+        .await?;
 
     Ok(())
 }
 
-async fn verify_entry_checksum(
+async fn verify_blob_checksum(
     repository: &dyn BackupRepository,
-    entry: &TableBackupEntry,
+    content_key: String,
+    expected_sha256_hex: String,
 ) -> Result<(), BackupError> {
-    let bytes = repository.get_blob(&entry.content_key).await?;
+    let bytes = repository.get_blob(&content_key).await?;
     let actual = sha256_hex(&bytes);
-    if actual != entry.sha256_hex {
+    if actual != expected_sha256_hex {
         return Err(BackupError::ChecksumMismatch {
-            key: entry.content_key.clone(),
-            expected: entry.sha256_hex.clone(),
+            key: content_key,
+            expected: expected_sha256_hex,
             actual,
         });
     }

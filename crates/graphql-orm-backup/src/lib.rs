@@ -77,6 +77,8 @@ mod local_repository;
 mod lock;
 mod manifest;
 mod object_index;
+#[cfg(feature = "orm")]
+mod orm;
 mod planner;
 mod prune;
 mod repository;
@@ -106,12 +108,14 @@ pub use manifest::{
     set_manifest_checksum, validate_manifest_chain, verify_manifest_checksum,
 };
 pub use object_index::{BackupObjectIndex, BackupObjectRef};
+#[cfg(feature = "orm")]
+pub use orm::{OrmBackupAdapter, OrmBackupObjectIndex, OrmObjectIndexColumns};
 pub use planner::{FullBackupPlan, plan_full_backup};
-pub use prune::{KeepPolicy, PruneResult, prune};
+pub use prune::{DeleteSnapshotResult, KeepPolicy, PruneResult, delete_snapshot, prune};
 pub use repository::{BackupRepository, BlobStoreBackupRepository};
 pub use restore::{
-    RestoreContext, RestoreMode, RestoreObjectSink, RestoreResult, ensure_empty_restore_target,
-    restore_objects, restore_snapshot,
+    BlobStoreRestoreObjectSink, RestoreContext, RestoreMode, RestoreObjectSink, RestoreResult,
+    ensure_empty_restore_target, restore_objects, restore_snapshot,
 };
 pub use verify::{
     VerificationOptions, verify_manifest_and_objects, verify_manifest_and_objects_with_options,

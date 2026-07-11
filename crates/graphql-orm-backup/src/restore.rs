@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use bytes::Bytes;
+use graphql_orm_storage::{BlobPutOptions, BlobStore, StorageByteStream};
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
@@ -56,6 +59,41 @@ pub trait RestoreObjectSink: Send + Sync {
         object: BackupObjectRef,
         bytes: Bytes,
     ) -> Result<(), BackupError>;
+}
+
+/// [`RestoreObjectSink`] that writes object bytes back to a
+/// `graphql-orm-storage` [`BlobStore`] at each object's original storage key.
+#[derive(Clone)]
+pub struct BlobStoreRestoreObjectSink {
+    store: Arc<dyn BlobStore>,
+}
+
+impl BlobStoreRestoreObjectSink {
+    /// Creates a sink over the application's primary object blob store.
+    #[must_use]
+    pub fn new(store: Arc<dyn BlobStore>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl RestoreObjectSink for BlobStoreRestoreObjectSink {
+    async fn restore_object(
+        &self,
+        object: BackupObjectRef,
+        bytes: Bytes,
+    ) -> Result<(), BackupError> {
+        self.store
+            .put_blob(
+                &object.storage_key,
+                StorageByteStream::from_bytes(bytes),
+                BlobPutOptions {
+                    content_type: object.mime_type.clone(),
+                },
+            )
+            .await?;
+        Ok(())
+    }
 }
 
 impl RestoreContext {

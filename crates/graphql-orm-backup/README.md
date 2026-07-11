@@ -13,6 +13,10 @@ backup layout, checksums, repository writes, restore ordering, and operational s
 - incremental snapshot creation through `create_incremental_backup`
 - restore orchestration through `restore_snapshot`
 - object rehydration through caller-supplied `RestoreObjectSink`
+- `BlobStoreRestoreObjectSink` for rehydrating a `graphql-orm-storage` blob store in place
+- optional `orm` feature with ready-made `graphql-orm` runtime adapters
+  (`OrmBackupAdapter`, `OrmBackupObjectIndex`) including replace-existing
+  restore-target clearing
 - manifest-chain loading and validation
 - zstd-compressed JSON Lines table and change payloads
 - content-addressed object blobs keyed by SHA-256
@@ -23,6 +27,7 @@ backup layout, checksums, repository writes, restore ordering, and operational s
 - advisory repository writer lock for backup, compaction, and pruning operations
 - synthetic-full compaction through `compact_chain`
 - retention pruning through `prune`
+- single-snapshot deletion with object garbage collection through `delete_snapshot`
 
 ## Install
 
@@ -42,6 +47,10 @@ graphql-orm-backup = {
 ```
 
 Use `default-features = false` when providing only custom repository implementations.
+
+Enable the `orm` feature for the ready-made `graphql-orm` runtime adapters. The
+host application must also enable exactly one `graphql-orm` backend feature
+(`sqlite` or `postgres`).
 
 ## Snapshot Layout
 
@@ -145,7 +154,9 @@ events, object metadata persistence, or cloud credentials.
 ## Status
 
 Full backups, restore orchestration, incremental backups, manifest-chain validation, synthetic-full
-compaction, local repository support, locking, and pruning are implemented.
+compaction, local repository support, locking, pruning, and single-snapshot deletion are
+implemented. The optional `orm` feature ships ready-made `graphql-orm` runtime adapters so hosts
+only supply entity metadata and object-table column names.
 
 Provider code is shared through `graphql-orm-storage::BlobStore`. `LocalBackupRepository` is a thin
 wrapper over the storage crate's local blob backend, and `BlobStoreBackupRepository` can adapt any

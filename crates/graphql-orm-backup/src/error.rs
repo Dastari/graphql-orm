@@ -45,6 +45,9 @@ pub enum BackupError {
     #[error("unsupported operation: {operation}")]
     UnsupportedOperation { operation: String },
 
+    #[error("database adapter error: {message}")]
+    Database { message: String },
+
     #[error("serialization error")]
     Serialization(#[from] serde_json::Error),
 

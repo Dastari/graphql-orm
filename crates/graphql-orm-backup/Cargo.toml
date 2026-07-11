@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-backup"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm-backup"
@@ -9,12 +9,16 @@ description = "Backup and restore orchestration primitives for graphql-orm appli
 [features]
 default = ["local"]
 local = ["graphql-orm-storage/local"]
+# Requires the host application to enable exactly one graphql-orm backend
+# feature (sqlite or postgres).
+orm = ["dep:graphql-orm"]
 
 [dependencies]
 async-trait = "0.1"
 bytes = "1"
 futures = "0.3"
-graphql-orm-storage = { version = "0.3.0", path = "../graphql-orm-storage", default-features = false }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm", optional = true, default-features = false }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm-storage", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

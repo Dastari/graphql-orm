@@ -3,8 +3,8 @@ use bytes::Bytes;
 use graphql_orm_backup::{
     BackupChangeExport, BackupError, BackupObjectIndex, BackupObjectRef, BackupRepository,
     BackupTableExport, FullBackupRequest, GraphqlOrmBackupAdapter, GraphqlOrmBackupSchema,
-    KeepPolicy, LocalBackupRepository, RestoreContext, bytes_sha256_hex, create_full_backup,
-    object_content_key, prune, snapshot_manifest_key,
+    KeepPolicy, LocalBackupRepository, RepositoryLockOptions, RestoreContext, bytes_sha256_hex,
+    create_full_backup, delete_snapshot, object_content_key, prune, snapshot_manifest_key,
 };
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -101,6 +101,73 @@ async fn prune_deletes_expired_snapshots_and_unreferenced_objects() {
             .await
             .expect("second object exists check")
     );
+}
+
+#[tokio::test]
+async fn delete_snapshot_removes_snapshot_and_unreferenced_objects() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = LocalBackupRepository::new(temp.path());
+    let database = MockDatabase;
+
+    let first_object = Bytes::from_static(b"first object");
+    let first_hash = bytes_sha256_hex(&first_object);
+    let first_objects = MockObjectIndex::new(first_hash.clone(), first_object);
+    create_full_backup(
+        &repository,
+        &database,
+        &first_objects,
+        backup_request(first_id(), 1),
+    )
+    .await
+    .expect("first backup");
+
+    let second_object = Bytes::from_static(b"second object");
+    let second_hash = bytes_sha256_hex(&second_object);
+    let second_objects = MockObjectIndex::new(second_hash.clone(), second_object);
+    create_full_backup(
+        &repository,
+        &database,
+        &second_objects,
+        backup_request(second_id(), 2),
+    )
+    .await
+    .expect("second backup");
+
+    let result = delete_snapshot(&repository, first_id(), &RepositoryLockOptions::default())
+        .await
+        .expect("delete first snapshot");
+    assert_eq!(result.retained_snapshots, 1);
+    assert!(result.deleted_blobs >= 2);
+
+    assert!(
+        !repository
+            .blob_exists(&snapshot_manifest_key(first_id()))
+            .await
+            .expect("first manifest exists check")
+    );
+    assert!(
+        repository
+            .blob_exists(&snapshot_manifest_key(second_id()))
+            .await
+            .expect("second manifest exists check")
+    );
+    assert!(
+        !repository
+            .blob_exists(&object_content_key(&first_hash))
+            .await
+            .expect("first object exists check")
+    );
+    assert!(
+        repository
+            .blob_exists(&object_content_key(&second_hash))
+            .await
+            .expect("second object exists check")
+    );
+
+    let missing = delete_snapshot(&repository, first_id(), &RepositoryLockOptions::default())
+        .await
+        .expect_err("deleting a missing snapshot fails");
+    assert!(matches!(missing, BackupError::MissingBlob { .. }));
 }
 
 fn backup_request(snapshot_id: Uuid, created_at: i64) -> FullBackupRequest {

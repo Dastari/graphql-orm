@@ -101,6 +101,56 @@ For full backups, implement:
 `create_full_backup` verifies the loaded bytes against the declared SHA-256
 before the object is referenced in the manifest.
 
+## graphql-orm Runtime Adapters (`orm` feature)
+
+The optional `orm` feature ships adapters over the `GraphqlOrmBackupRuntime`
+implementation on `graphql_orm::db::Database`, so hosts only supply entity
+metadata and object-table column names:
+
+```rust
+use std::sync::Arc;
+
+use graphql_orm::db::Database;
+use graphql_orm::graphql::orm::EntityMetadata;
+use graphql_orm_backup::{OrmBackupAdapter, OrmBackupObjectIndex, OrmObjectIndexColumns};
+use graphql_orm_storage::BlobStore;
+
+fn adapters(
+    database: Arc<Database>,
+    entities: Vec<&'static EntityMetadata>,
+    store: Arc<dyn BlobStore>,
+) -> (OrmBackupAdapter, OrmBackupObjectIndex) {
+    let adapter = OrmBackupAdapter::new(database.clone(), entities.clone());
+    let objects = OrmBackupObjectIndex::new(
+        database,
+        entities,
+        OrmObjectIndexColumns {
+            table_name: "stored_objects".to_string(),
+            object_id_column: "object_id".to_string(),
+            storage_key_column: "storage_key".to_string(),
+            sha256_hex_column: "sha256_hex".to_string(),
+            size_bytes_column: "size_bytes".to_string(),
+            mime_type_column: Some("mime_type".to_string()),
+        },
+        store,
+    );
+    (adapter, objects)
+}
+```
+
+The entity list must match the list used for migrations so exports and restores
+cover every application-owned table.
+
+`OrmBackupAdapter::current_schema_snapshot` exposes the current schema hash for
+manifest compatibility checks, and `OrmBackupAdapter::clear_restore_target`
+empties every backup-enabled table so a replace-existing restore can run
+through the standard empty-database path. Incremental export and restore return
+`UnsupportedOperation` until a change-journal integration lands.
+
+`BlobStoreRestoreObjectSink` (available without the `orm` feature) writes
+restored object bytes back to a `graphql-orm-storage` `BlobStore` at each
+object's original storage key.
+
 ## Incremental Backup
 
 `create_incremental_backup` writes compressed change files and an incremental
@@ -220,6 +270,25 @@ async fn compact(
 
 `prune` retains the newest manifest chains selected by `KeepPolicy` and deletes
 expired snapshot blobs plus unreferenced content-addressed object blobs.
+
+`delete_snapshot` removes one snapshot under the repository writer lock. It
+refuses to delete a snapshot that is the parent of another manifest and
+garbage-collects object blobs no remaining snapshot references:
+
+```rust
+use graphql_orm_backup::{BackupRepository, RepositoryLockOptions, delete_snapshot};
+use uuid::Uuid;
+
+async fn delete(
+    repository: &dyn BackupRepository,
+    snapshot_id: Uuid,
+) -> Result<(), graphql_orm_backup::BackupError> {
+    let result =
+        delete_snapshot(repository, snapshot_id, &RepositoryLockOptions::default()).await?;
+    println!("deleted {} blobs", result.deleted_blobs);
+    Ok(())
+}
+```
 
 ## Repository Layout
 

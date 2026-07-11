@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::{
     BackupError, BackupRepository, BackupSnapshotManifest, RepositoryLock, RepositoryLockOptions,
-    load_manifest, load_manifest_chain,
+    load_manifest, load_manifest_chain, snapshot_manifest_key,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -115,6 +115,93 @@ async fn prune_inner(
         retained_snapshots: retained_ids.len(),
         deleted_snapshots: expired_ids.len(),
         deleted_blobs,
+    })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+/// Summary returned by `delete_snapshot`.
+pub struct DeleteSnapshotResult {
+    /// Number of blobs deleted, including unreferenced object blobs.
+    pub deleted_blobs: usize,
+    /// Number of snapshot manifests remaining after deletion.
+    pub retained_snapshots: usize,
+}
+
+/// Deletes one snapshot and any object blobs no other snapshot references.
+///
+/// Snapshots that are the parent of another manifest cannot be deleted;
+/// dependent snapshots must be deleted or compacted first.
+///
+/// # Errors
+///
+/// Returns [`BackupError`] if the snapshot is missing, another manifest depends
+/// on it, or repository listing, locking, or blob deletion fails.
+pub async fn delete_snapshot(
+    repository: &dyn BackupRepository,
+    snapshot_id: Uuid,
+    lock_options: &RepositoryLockOptions,
+) -> Result<DeleteSnapshotResult, BackupError> {
+    let lock = RepositoryLock::acquire(repository, lock_options).await?;
+    let result = delete_snapshot_inner(repository, snapshot_id).await;
+    let release_result = lock.release(repository).await;
+    match (result, release_result) {
+        (Ok(result), Ok(())) => Ok(result),
+        (Err(err), _) => Err(err),
+        (Ok(_), Err(err)) => Err(err),
+    }
+}
+
+async fn delete_snapshot_inner(
+    repository: &dyn BackupRepository,
+    snapshot_id: Uuid,
+) -> Result<DeleteSnapshotResult, BackupError> {
+    let manifests = load_all_manifests(repository).await?;
+    if !manifests
+        .iter()
+        .any(|manifest| manifest.snapshot_id == snapshot_id)
+    {
+        return Err(BackupError::MissingBlob {
+            key: snapshot_manifest_key(snapshot_id),
+        });
+    }
+    if let Some(child) = manifests
+        .iter()
+        .find(|manifest| manifest.parent_snapshot_id == Some(snapshot_id))
+    {
+        return Err(BackupError::InvalidManifestChain {
+            reason: format!(
+                "snapshot {snapshot_id} is the parent of snapshot {}; delete or compact dependent snapshots first",
+                child.snapshot_id
+            ),
+        });
+    }
+
+    let mut deleted_blobs = 0_usize;
+    for key in repository
+        .list_blobs(&format!("snapshots/{snapshot_id}"))
+        .await?
+    {
+        repository.delete_blob(&key).await?;
+        deleted_blobs += 1;
+    }
+
+    let mut reachable_content_keys = HashSet::new();
+    for manifest in manifests
+        .iter()
+        .filter(|manifest| manifest.snapshot_id != snapshot_id)
+    {
+        collect_reachable_keys(manifest, &mut reachable_content_keys);
+    }
+    for key in repository.list_blobs("objects/sha256").await? {
+        if !reachable_content_keys.contains(&key) {
+            repository.delete_blob(&key).await?;
+            deleted_blobs += 1;
+        }
+    }
+
+    Ok(DeleteSnapshotResult {
+        deleted_blobs,
+        retained_snapshots: manifests.len() - 1,
     })
 }
 

@@ -1,0 +1,43 @@
+# Changelog
+
+## 0.3.0
+
+- Added the optional `orm` feature with a generic [`OrmBackupAdapter`] that
+  bridges the `graphql-orm` `GraphqlOrmBackupRuntime` implementation on
+  `Database` to this crate's `GraphqlOrmBackupAdapter` contract: schema
+  snapshots, consistent full export, empty-target detection, and full restore.
+  Incremental export/restore report `UnsupportedOperation` until a
+  change-journal integration lands.
+- Added `OrmBackupAdapter::clear_restore_target` so hosts can replace an
+  existing database before an empty-database restore. PostgreSQL clears with
+  one `TRUNCATE ... CASCADE`; SQLite suspends `PRAGMA foreign_keys` on a
+  dedicated connection around a child-first delete transaction because
+  `RESTRICT` foreign keys are enforced immediately on both backends.
+- Added `OrmBackupObjectIndex` (also behind `orm`), a `BackupObjectIndex` over
+  one backup-enabled object metadata table plus the application's primary
+  `BlobStore`. Hosts supply table and column names; rows without a valid
+  recorded SHA-256 are hashed from the loaded blob bytes at listing time.
+- Added `BlobStoreRestoreObjectSink`, a `RestoreObjectSink` that writes object
+  bytes back to a `graphql-orm-storage` `BlobStore` at each object's original
+  storage key.
+- Added `delete_snapshot` and `DeleteSnapshotResult`: deletes one snapshot
+  under the repository writer lock, refuses when another manifest depends on
+  it, and removes object blobs no remaining snapshot references.
+- Added `BackupError::Database` for database adapter failures with an
+  operation-context message.
+- Manifest and object verification plus backup object writes now iterate owned
+  key/checksum pairs so the returned futures stay fully `Send`-generalizable
+  inside async GraphQL resolvers.
+
+## 0.2.0
+
+- Replaced the crate-local filesystem repository internals with
+  `graphql-orm-storage` blob stores; added `BlobStoreBackupRepository` so any
+  storage blob provider can back a repository.
+- Expanded crate documentation.
+
+## 0.1.0
+
+- Initial release: full backups, compressed snapshots and manifest chains,
+  restore orchestration, incremental backups and synthetic-full compaction,
+  repository locking, and retention pruning.

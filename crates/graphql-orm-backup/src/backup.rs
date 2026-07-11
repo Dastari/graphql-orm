@@ -526,9 +526,13 @@ async fn write_object_entries(
     object_concurrency: usize,
 ) -> Result<Vec<ObjectBackupEntry>, BackupError> {
     let concurrency = object_concurrency.max(1);
-    let mut object_entries = stream::iter(object_refs.iter().enumerate())
+    // Owned refs keep the stream free of higher-ranked borrows, which
+    // otherwise break `Send` future inference in async resolvers that await
+    // backup creation.
+    let owned_refs = object_refs.to_vec();
+    let mut object_entries = stream::iter(owned_refs.into_iter().enumerate())
         .map(|(index, object)| async move {
-            let bytes = objects.load_object(object).await?;
+            let bytes = objects.load_object(&object).await?;
             let actual = sha256_hex(&bytes);
             let content_key = object_content_key(&object.sha256_hex);
             if actual != object.sha256_hex {
