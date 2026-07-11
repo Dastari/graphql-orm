@@ -2,6 +2,19 @@
 
 User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
 
+## 0.4.3
+
+Companion macros crate: `graphql-orm-macros` **0.4.3**.
+
+- Conditional-index introspection now accepts only the complete portable closed-set grammar;
+  leading/trailing boolean expressions, comments, functions, casts outside PostgreSQL's generated
+  text literals, and other tokens are drift.
+- SQLite append-only introspection validates both complete generated trigger definitions rather
+  than trusting managed names.
+- PostgreSQL append-only introspection validates the exact trigger event/timing/enablement,
+  unconditional function body, ownership, language, security-definer, search-path, and privilege
+  posture.
+
 ## 0.4.2
 
 Companion macros crate: `graphql-orm-macros` **0.4.2**.

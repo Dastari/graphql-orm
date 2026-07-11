@@ -3,6 +3,24 @@
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.4.3 Structural Introspection Hardening
+
+This compatible patch needs no application API change. Pin both crates to the reviewed `v0.4.3`
+commit and run managed validation with a new migration version.
+
+Conditional indexes created by graphql-orm remain restart-idempotent. A same-name live index is now
+accepted only when the entire stored predicate parses as the supported `field IN (closed set)` form
+or PostgreSQL's equivalent `field = ANY (ARRAY[...])` representation. Extra boolean expressions,
+comments that SQLite persists, functions, and unsupported casts are drift. PostgreSQL discards SQL
+comments when storing index expressions, so comment-only spelling has no persistent structural
+meaning on that backend.
+
+Append-only validation now checks complete SQLite trigger definitions and PostgreSQL trigger and
+function catalog contracts, including unconditional enforcement and privilege/search-path posture.
+If an older deployment contains a recognizable managed name with hand-edited SQL, planning will
+produce repair work. Reusing an already recorded migration version then fails closed; review and
+apply that work under a fresh version with the schema-owner migration role.
+
 ## 0.4.2 Legacy Migration-History Adoption
 
 This compatible patch needs no application API change. Move both crates to the reviewed `v0.4.2`
@@ -27,7 +45,7 @@ explicitly rather than renaming columns until it happens to pass validation.
 
 ## 0.4.1 Binary Keys and Conditional Indexes
 
-This is a compatible Git-pin update. Move both crates to the reviewed `v0.4.2` commit.
+This is a compatible Git-pin update. Move both crates to the reviewed `v0.4.1` commit.
 
 - Binary `Vec<u8>` keys require no host encoding. Mark host-assigned keys
   `#[graphql_orm(auto_generated = false)]`; use `private`, `skip_input`, or `#[graphql(skip)]` when
@@ -134,7 +152,7 @@ Default limit: `1000` → `50`. Max limit: `1000` → `100`.
 ### agql-auth Bridge
 
 ```toml
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.4.2", features = ["sqlite", "auth-agql"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.4.3", features = ["sqlite", "auth-agql"] }
 ```
 
 The optional feature depends on upstream `agql-auth` 0.7.0 via git revision

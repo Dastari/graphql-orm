@@ -105,7 +105,7 @@ async fn postgres_live_portable_primitives_enforce_and_introspect()
     let plan = database
         .schema()
         .plan_migration_to_entities_with_options(
-            migration_version,
+            &migration_version,
             "portable primitives",
             &entities,
             PlanOptions::managed_tables_only(),
@@ -172,27 +172,151 @@ async fn postgres_live_portable_primitives_enforce_and_introspect()
         live_checks.check_constraints,
         target_checks.check_constraints
     );
-
-    graphql_orm::sqlx::query("ALTER FUNCTION graphql_orm_append_only_pg_events() SECURITY INVOKER")
-        .execute(database.pool())
-        .await?;
-    let weakened = introspect_postgres_schema(&database).await?;
+    let clean = database
+        .schema()
+        .plan_migration("portable-pg-clean", "clean", &live, &target)?;
     assert!(
-        !weakened
+        clean
+            .steps
+            .iter()
+            .all(|step| !matches!(step.step, MigrationStep::SetAppendOnly { .. }))
+    );
+
+    let exact_function = "CREATE OR REPLACE FUNCTION graphql_orm_append_only_pg_events()
+        RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
+        AS $$ BEGIN RAISE EXCEPTION USING ERRCODE = '23514',
+        MESSAGE = 'append-only entity'; END $$";
+    let exact_trigger = "CREATE TRIGGER graphql_orm_append_only_pg_events
+        BEFORE UPDATE OR DELETE ON pg_events FOR EACH ROW
+        EXECUTE FUNCTION graphql_orm_append_only_pg_events()";
+    let tamper_cases: [(&str, &[&str], &[&str]); 5] = [
+        (
+            "inert function body",
+            &[
+                "CREATE OR REPLACE FUNCTION graphql_orm_append_only_pg_events()
+                RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
+                AS $$ BEGIN RETURN OLD; END $$",
+            ],
+            &[exact_function],
+        ),
+        (
+            "security invoker",
+            &["ALTER FUNCTION graphql_orm_append_only_pg_events() SECURITY INVOKER"],
+            &["ALTER FUNCTION graphql_orm_append_only_pg_events() SECURITY DEFINER"],
+        ),
+        (
+            "disabled trigger",
+            &["ALTER TABLE pg_events DISABLE TRIGGER graphql_orm_append_only_pg_events"],
+            &["ALTER TABLE pg_events ENABLE TRIGGER graphql_orm_append_only_pg_events"],
+        ),
+        (
+            "wrong trigger operation",
+            &[
+                "DROP TRIGGER graphql_orm_append_only_pg_events ON pg_events",
+                "CREATE TRIGGER graphql_orm_append_only_pg_events BEFORE UPDATE ON pg_events
+                 FOR EACH ROW EXECUTE FUNCTION graphql_orm_append_only_pg_events()",
+            ],
+            &[
+                "DROP TRIGGER graphql_orm_append_only_pg_events ON pg_events",
+                exact_trigger,
+            ],
+        ),
+        (
+            "conditional exception path",
+            &[
+                "DROP TRIGGER graphql_orm_append_only_pg_events ON pg_events",
+                "CREATE TRIGGER graphql_orm_append_only_pg_events BEFORE UPDATE OR DELETE
+                 ON pg_events FOR EACH ROW WHEN (false)
+                 EXECUTE FUNCTION graphql_orm_append_only_pg_events()",
+            ],
+            &[
+                "DROP TRIGGER graphql_orm_append_only_pg_events ON pg_events",
+                exact_trigger,
+            ],
+        ),
+    ];
+    let mut last_repair = None;
+    for (label, tamper, restore) in tamper_cases {
+        for statement in tamper {
+            graphql_orm::sqlx::query(statement)
+                .execute(database.pool())
+                .await?;
+        }
+        let weakened = introspect_postgres_schema(&database).await?;
+        assert!(
+            !weakened
+                .tables
+                .iter()
+                .find(|table| table.table_name == "pg_events")
+                .unwrap()
+                .append_only,
+            "PostgreSQL append-only tamper must be drift: {label}"
+        );
+        let repair = database.schema().plan_migration(
+            &migration_version,
+            "recorded portable version must fail",
+            &weakened,
+            &target,
+        )?;
+        assert!(repair.steps.iter().any(|step| matches!(
+            step.step,
+            MigrationStep::SetAppendOnly { enabled: true, .. }
+        )));
+        last_repair = Some(repair);
+        for statement in restore {
+            graphql_orm::sqlx::query(statement)
+                .execute(database.pool())
+                .await?;
+        }
+    }
+    database
+        .schema()
+        .apply_migration(
+            &last_repair.expect("at least one PostgreSQL tamper case"),
+            ApplyOptions::default(),
+        )
+        .await
+        .expect_err("recorded version with PostgreSQL enforcement drift must fail closed");
+
+    graphql_orm::sqlx::query(
+        "CREATE OR REPLACE FUNCTION graphql_orm_append_only_pg_events()
+         RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
+         AS $$ BEGIN RETURN OLD; END $$",
+    )
+    .execute(database.pool())
+    .await?;
+    let repair_live = introspect_postgres_schema(&database).await?;
+    let repair_version = format!("portable-pg-repair-{}", uuid::Uuid::new_v4());
+    assert!(
+        !repair_live
             .tables
             .iter()
             .find(|table| table.table_name == "pg_events")
-            .unwrap()
+            .expect("tampered PostgreSQL event table")
             .append_only
     );
-    let repair =
-        database
-            .schema()
-            .plan_migration("portable-pg-repair", "repair", &weakened, &target)?;
-    assert!(repair.steps.iter().any(|step| matches!(
-        step.step,
-        MigrationStep::SetAppendOnly { enabled: true, .. }
-    )));
+    let repair = database
+        .schema()
+        .plan_migration_to_entities_with_options(
+            repair_version,
+            "replace same-name tampered append-only objects",
+            &entities,
+            PlanOptions::managed_tables_only(),
+        )
+        .await?;
+    database
+        .schema()
+        .apply_migration(&repair, ApplyOptions::default())
+        .await?;
+    let repaired = introspect_postgres_schema(&database).await?;
+    assert!(
+        repaired
+            .tables
+            .iter()
+            .find(|table| table.table_name == "pg_events")
+            .expect("repaired PostgreSQL event table")
+            .append_only
+    );
 
     let state = PgStateRow::insert(
         &database,

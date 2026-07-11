@@ -204,6 +204,8 @@ fn render_append_only_statements(
     let name = append_only_name(table_name);
     match (backend, enabled) {
         (DatabaseBackend::Sqlite, true) => vec![
+            format!("DROP TRIGGER IF EXISTS {name}_update"),
+            format!("DROP TRIGGER IF EXISTS {name}_delete"),
             format!(
                 "CREATE TRIGGER {name}_update BEFORE UPDATE ON {table_name} BEGIN SELECT RAISE(ABORT, 'append-only entity'); END"
             ),
@@ -216,6 +218,8 @@ fn render_append_only_statements(
             format!("DROP TRIGGER IF EXISTS {name}_delete"),
         ],
         (DatabaseBackend::Postgres, true) => vec![
+            format!("DROP TRIGGER IF EXISTS {name} ON {table_name}"),
+            format!("DROP FUNCTION IF EXISTS {name}()"),
             format!(
                 "CREATE OR REPLACE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$ BEGIN RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'append-only entity'; END $$"
             ),
@@ -686,46 +690,204 @@ fn sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StructuralSqlToken {
+    Ident(String),
+    String(String),
+    LeftParen,
+    RightParen,
+    LeftBracket,
+    RightBracket,
+    Comma,
+    Equals,
+    DoubleColon,
+    Semicolon,
+}
+
+fn tokenize_structural_sql(sql: &str) -> Option<Vec<StructuralSqlToken>> {
+    let mut chars = sql.char_indices().peekable();
+    let mut tokens = Vec::new();
+    while let Some((_, character)) = chars.next() {
+        if character.is_whitespace() {
+            continue;
+        }
+        let token = match character {
+            '(' => StructuralSqlToken::LeftParen,
+            ')' => StructuralSqlToken::RightParen,
+            '[' => StructuralSqlToken::LeftBracket,
+            ']' => StructuralSqlToken::RightBracket,
+            ',' => StructuralSqlToken::Comma,
+            '=' => StructuralSqlToken::Equals,
+            ';' => StructuralSqlToken::Semicolon,
+            ':' => {
+                chars.next_if(|(_, next)| *next == ':')?;
+                StructuralSqlToken::DoubleColon
+            }
+            '\'' => {
+                let mut value = String::new();
+                loop {
+                    let (_, next) = chars.next()?;
+                    if next == '\'' {
+                        if chars.next_if(|(_, escaped)| *escaped == '\'').is_some() {
+                            value.push('\'');
+                        } else {
+                            break;
+                        }
+                    } else {
+                        value.push(next);
+                    }
+                }
+                StructuralSqlToken::String(value)
+            }
+            '"' => {
+                let mut value = String::new();
+                loop {
+                    let (_, next) = chars.next()?;
+                    if next == '"' {
+                        if chars.next_if(|(_, escaped)| *escaped == '"').is_some() {
+                            value.push('"');
+                        } else {
+                            break;
+                        }
+                    } else {
+                        value.push(next);
+                    }
+                }
+                StructuralSqlToken::Ident(value)
+            }
+            first if first.is_ascii_alphabetic() || first == '_' => {
+                let mut value = first.to_string();
+                while let Some((_, next)) = chars.peek() {
+                    if next.is_ascii_alphanumeric() || *next == '_' {
+                        value.push(*next);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                StructuralSqlToken::Ident(value)
+            }
+            _ => return None,
+        };
+        tokens.push(token);
+    }
+    Some(tokens)
+}
+
+fn structural_ident(token: Option<&StructuralSqlToken>, expected: &str) -> bool {
+    matches!(token, Some(StructuralSqlToken::Ident(value)) if value.eq_ignore_ascii_case(expected))
+}
+
+fn strip_redundant_outer_parentheses(mut tokens: &[StructuralSqlToken]) -> &[StructuralSqlToken] {
+    loop {
+        if tokens.first() != Some(&StructuralSqlToken::LeftParen)
+            || tokens.last() != Some(&StructuralSqlToken::RightParen)
+        {
+            return tokens;
+        }
+        let mut depth = 0usize;
+        let mut encloses_all = true;
+        for (index, token) in tokens.iter().enumerate() {
+            match token {
+                StructuralSqlToken::LeftParen => depth += 1,
+                StructuralSqlToken::RightParen => {
+                    depth = depth.checked_sub(1).unwrap_or(usize::MAX);
+                    if depth == 0 && index + 1 != tokens.len() {
+                        encloses_all = false;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !encloses_all || depth != 0 {
+            return tokens;
+        }
+        tokens = &tokens[1..tokens.len() - 1];
+    }
+}
+
+fn parse_structural_string_value(
+    tokens: &[StructuralSqlToken],
+    offset: &mut usize,
+) -> Option<String> {
+    let StructuralSqlToken::String(value) = tokens.get(*offset)? else {
+        return None;
+    };
+    *offset += 1;
+    if tokens.get(*offset) == Some(&StructuralSqlToken::DoubleColon) {
+        *offset += 1;
+        if !structural_ident(tokens.get(*offset), "text") {
+            return None;
+        }
+        *offset += 1;
+    }
+    Some(value.clone())
+}
+
 fn parse_closed_set_index_predicate(expression: &str) -> Option<super::core::IndexPredicateDef> {
-    let upper = expression.to_ascii_uppercase();
-    let operator = upper.find(" IN ").or_else(|| upper.find(" = ANY"))?;
-    let column = expression[..operator]
-        .trim()
-        .trim_matches(|character: char| matches!(character, '(' | ')' | '"' | ' '))
-        .rsplit('.')
-        .next()?
-        .trim_matches('"')
-        .to_string();
+    let tokens = tokenize_structural_sql(expression)?;
+    let tokens = strip_redundant_outer_parentheses(&tokens);
+    let StructuralSqlToken::Ident(column) = tokens.first()? else {
+        return None;
+    };
     if column.is_empty() {
         return None;
     }
-
+    let mut offset = 1;
+    let is_in = structural_ident(tokens.get(offset), "in");
+    if is_in {
+        offset += 1;
+    } else {
+        if tokens.get(offset) != Some(&StructuralSqlToken::Equals)
+            || !structural_ident(tokens.get(offset + 1), "any")
+        {
+            return None;
+        }
+        offset += 2;
+    }
+    if tokens.get(offset) != Some(&StructuralSqlToken::LeftParen) {
+        return None;
+    }
+    offset += 1;
+    let is_array = !is_in && structural_ident(tokens.get(offset), "array");
+    if !is_in {
+        if !is_array || tokens.get(offset + 1) != Some(&StructuralSqlToken::LeftBracket) {
+            return None;
+        }
+        offset += 2;
+    }
     let mut values = Vec::new();
-    let mut chars = expression[operator..].chars().peekable();
-    while let Some(character) = chars.next() {
-        if character != '\'' {
+    loop {
+        values.push(parse_structural_string_value(tokens, &mut offset)?);
+        if tokens.get(offset) == Some(&StructuralSqlToken::Comma) {
+            offset += 1;
             continue;
         }
-        let mut value = String::new();
-        while let Some(character) = chars.next() {
-            if character == '\'' {
-                if chars.peek() == Some(&'\'') {
-                    chars.next();
-                    value.push('\'');
-                    continue;
-                }
-                break;
-            }
-            value.push(character);
-        }
-        values.push(value);
+        break;
     }
-    if values.is_empty() {
+    if is_array {
+        if tokens.get(offset) != Some(&StructuralSqlToken::RightBracket) {
+            return None;
+        }
+        offset += 1;
+        if tokens.get(offset) == Some(&StructuralSqlToken::DoubleColon) {
+            offset += 1;
+            if !structural_ident(tokens.get(offset), "text")
+                || tokens.get(offset + 1) != Some(&StructuralSqlToken::LeftBracket)
+                || tokens.get(offset + 2) != Some(&StructuralSqlToken::RightBracket)
+            {
+                return None;
+            }
+            offset += 3;
+        }
+    }
+    if tokens.get(offset) != Some(&StructuralSqlToken::RightParen) || offset + 1 != tokens.len() {
         return None;
     }
     values.sort();
     values.dedup();
-    let column = Box::leak(column.into_boxed_str()) as &'static str;
+    let column = Box::leak(column.clone().into_boxed_str()) as &'static str;
     let values = Box::leak(
         values
             .into_iter()
@@ -734,6 +896,71 @@ fn parse_closed_set_index_predicate(expression: &str) -> Option<super::core::Ind
             .into_boxed_slice(),
     );
     Some(super::core::IndexPredicateDef { column, values })
+}
+
+#[cfg(feature = "sqlite")]
+fn sqlite_append_only_trigger_matches(
+    sql: &str,
+    expected_name: &str,
+    expected_table: &str,
+    expected_event: &str,
+) -> bool {
+    let Some(tokens) = tokenize_structural_sql(sql) else {
+        return false;
+    };
+    if !(tokens.len() == 17 || tokens.len() == 18)
+        || ![
+            (0, "create"),
+            (1, "trigger"),
+            (3, "before"),
+            (4, expected_event),
+            (5, "on"),
+            (7, "begin"),
+            (8, "select"),
+            (9, "raise"),
+            (11, "abort"),
+            (16, "end"),
+        ]
+        .into_iter()
+        .all(|(offset, expected)| structural_ident(tokens.get(offset), expected))
+        || !structural_ident(tokens.get(2), expected_name)
+        || !structural_ident(tokens.get(6), expected_table)
+        || tokens.get(10) != Some(&StructuralSqlToken::LeftParen)
+        || tokens.get(12) != Some(&StructuralSqlToken::Comma)
+        || tokens.get(14) != Some(&StructuralSqlToken::RightParen)
+        || tokens.get(15) != Some(&StructuralSqlToken::Semicolon)
+        || (tokens.len() == 18 && tokens.get(17) != Some(&StructuralSqlToken::Semicolon))
+    {
+        return false;
+    }
+    matches!(tokens.get(13), Some(StructuralSqlToken::String(message)) if message == "append-only entity")
+}
+
+#[cfg(feature = "postgres")]
+fn postgres_append_only_function_body_matches(body: &str) -> bool {
+    let Some(tokens) = tokenize_structural_sql(body) else {
+        return false;
+    };
+    if !(tokens.len() == 13 || tokens.len() == 14) {
+        return false;
+    }
+    structural_ident(tokens.first(), "begin")
+        && structural_ident(tokens.get(1), "raise")
+        && structural_ident(tokens.get(2), "exception")
+        && structural_ident(tokens.get(3), "using")
+        && structural_ident(tokens.get(4), "errcode")
+        && tokens.get(5) == Some(&StructuralSqlToken::Equals)
+        && tokens.get(6) == Some(&StructuralSqlToken::String("23514".to_string()))
+        && tokens.get(7) == Some(&StructuralSqlToken::Comma)
+        && structural_ident(tokens.get(8), "message")
+        && tokens.get(9) == Some(&StructuralSqlToken::Equals)
+        && tokens.get(10)
+            == Some(&StructuralSqlToken::String(
+                "append-only entity".to_string(),
+            ))
+        && tokens.get(11) == Some(&StructuralSqlToken::Semicolon)
+        && structural_ident(tokens.get(12), "end")
+        && (tokens.len() == 13 || tokens.get(13) == Some(&StructuralSqlToken::Semicolon))
 }
 
 fn json_string(value: &str) -> String {
@@ -1774,13 +2001,38 @@ pub async fn introspect_sqlite_schema(
             })
             .collect::<crate::Result<Vec<_>>>()?;
         let append_name = append_only_name(&table_name);
-        let append_trigger_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN (?, ?)",
+        let append_trigger_rows = sqlx::query(
+            "SELECT name, sql FROM sqlite_master
+             WHERE type = 'trigger' AND name IN (?, ?)",
         )
         .bind(format!("{append_name}_update"))
         .bind(format!("{append_name}_delete"))
-        .fetch_one(pool)
+        .fetch_all(pool)
         .await?;
+        let mut valid_update = false;
+        let mut valid_delete = false;
+        for row in append_trigger_rows {
+            let trigger_name: String = row.try_get("name")?;
+            let trigger_sql: Option<String> = row.try_get("sql")?;
+            let Some(trigger_sql) = trigger_sql else {
+                continue;
+            };
+            if trigger_name == format!("{append_name}_update") {
+                valid_update = sqlite_append_only_trigger_matches(
+                    &trigger_sql,
+                    &trigger_name,
+                    &table_name,
+                    "update",
+                );
+            } else if trigger_name == format!("{append_name}_delete") {
+                valid_delete = sqlite_append_only_trigger_matches(
+                    &trigger_sql,
+                    &trigger_name,
+                    &table_name,
+                    "delete",
+                );
+            }
+        }
 
         tables.push(TableModel {
             entity_name: table_name.clone(),
@@ -1793,7 +2045,7 @@ pub async fn introspect_sqlite_schema(
             composite_unique_indexes,
             foreign_keys,
             search_indexes: Vec::new(),
-            append_only: append_trigger_count == 2,
+            append_only: valid_update && valid_delete,
             check_constraints: parse_generated_check_constraints(&create_sql),
         });
     }
@@ -2085,34 +2337,49 @@ pub async fn introspect_postgres_schema(
             })
             .collect::<crate::Result<Vec<_>>>()?;
         let append_trigger_name = append_only_name(&table_name);
-        let append_only: bool = sqlx::query_scalar(
-            "SELECT EXISTS (
-                SELECT 1 FROM pg_trigger tr
+        let append_function_body: Option<String> = sqlx::query_scalar(
+            "SELECT p.prosrc FROM pg_trigger tr
                 JOIN pg_class c ON c.oid = tr.tgrelid
                 JOIN pg_namespace n ON n.oid = c.relnamespace
                 JOIN pg_proc p ON p.oid = tr.tgfoid
+                JOIN pg_namespace pn ON pn.oid = p.pronamespace
+                JOIN pg_language lang ON lang.oid = p.prolang
                 WHERE n.nspname = $2 AND c.relname = $1
                   AND tr.tgname = $3 AND NOT tr.tgisinternal
-                  AND (
-                      pg_get_triggerdef(tr.oid) LIKE '%BEFORE UPDATE OR DELETE%'
-                      OR pg_get_triggerdef(tr.oid) LIKE '%BEFORE DELETE OR UPDATE%'
-                  )
+                  AND tr.tgenabled = 'O'
+                  AND tr.tgtype = 27
+                  AND tr.tgqual IS NULL
+                  AND tr.tgnargs = 0
+                  AND tr.tgconstraint = 0
+                  AND NOT tr.tgdeferrable
                   AND p.proname = $3
+                  AND pn.nspname = $2
+                  AND lang.lanname = 'plpgsql'
+                  AND p.prorettype = 'trigger'::regtype
+                  AND p.pronargs = 0
+                  AND p.prokind = 'f'
                   AND p.prosecdef
                   AND p.proowner = c.relowner
-                  AND 'search_path=pg_catalog' = ANY(p.proconfig)
+                  AND p.proconfig = ARRAY['search_path=pg_catalog']::TEXT[]
+                  AND p.provolatile = 'v'
+                  AND p.proparallel = 'u'
+                  AND NOT p.proleakproof
+                  AND NOT p.proisstrict
                   AND NOT EXISTS (
                       SELECT 1
                       FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
-                      WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
-                  )
-            )",
+                      WHERE acl.privilege_type = 'EXECUTE'
+                        AND acl.grantee <> p.proowner
+                  )",
         )
         .bind(&table_name)
         .bind(&schema_name)
         .bind(&append_trigger_name)
-        .fetch_one(pool)
+        .fetch_optional(pool)
         .await?;
+        let append_only = append_function_body
+            .as_deref()
+            .is_some_and(postgres_append_only_function_body_matches);
         let check_rows = sqlx::query(
             "SELECT con.conname AS name, pg_get_constraintdef(con.oid, false) AS definition,
                     obj_description(con.oid, 'pg_constraint') AS comment

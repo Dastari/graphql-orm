@@ -206,32 +206,77 @@ async fn conditional_unique_index_is_idempotent_and_detects_predicate_tampering(
     graphql_orm::sqlx::query("DROP INDEX uidx_conditional_digest_active")
         .execute(database.pool())
         .await?;
-    #[cfg(feature = "sqlite")]
     graphql_orm::sqlx::query(
         "CREATE UNIQUE INDEX uidx_conditional_digest_active
-         ON conditional_index_records (digest) WHERE status IN ('PENDING')",
+         ON conditional_index_records (\"digest\")
+         WHERE ((\"status\" IN ('PENDING', 'APPROVED', 'PENDING')))",
     )
     .execute(database.pool())
     .await?;
-    #[cfg(feature = "postgres")]
-    graphql_orm::sqlx::query(
-        "CREATE UNIQUE INDEX uidx_conditional_digest_active
-         ON conditional_index_records (digest) WHERE status IN ('PENDING')",
-    )
-    .execute(database.pool())
-    .await?;
-
-    let tampered = introspect(&database).await?;
-    let repair = database.schema().plan_migration(
-        &version,
-        "recorded version must fail",
-        &tampered,
+    let harmless_live = introspect(&database).await?;
+    let harmless = database.schema().plan_migration(
+        "conditional-harmless-canonicalization",
+        "quoted, parenthesized, reordered and deduplicated",
+        &harmless_live,
         &target,
     )?;
-    assert!(repair.steps.iter().any(|step| matches!(
-        step.step,
-        MigrationStep::DropIndex { .. } | MigrationStep::CreateIndex { .. }
-    )));
+    assert!(
+        harmless.steps.iter().all(|step| !matches!(
+            step.step,
+            MigrationStep::DropIndex { .. } | MigrationStep::CreateIndex { .. }
+        )),
+        "documented harmless predicate differences remain equivalent: {:?}",
+        harmless.steps
+    );
+
+    graphql_orm::sqlx::query("DELETE FROM conditional_index_records WHERE status <> 'PENDING'")
+        .execute(database.pool())
+        .await?;
+    #[cfg(feature = "sqlite")]
+    let tampered_predicates = [
+        "status IN ('PENDING')",
+        "status IN ('APPROVED', 'PENDING') OR status IS NOT NULL",
+        "status IN ('APPROVED', 'PENDING') AND status IS NOT NULL",
+        "status IN ('APPROVED', 'PENDING') /* trailing managed-looking comment */",
+    ];
+    // PostgreSQL deliberately removes comments while storing an index expression,
+    // so a comment-only spelling cannot be distinguished through pg_get_expr.
+    #[cfg(feature = "postgres")]
+    let tampered_predicates = [
+        "status IN ('PENDING')",
+        "status IN ('APPROVED', 'PENDING') OR status IS NOT NULL",
+        "status IN ('APPROVED', 'PENDING') AND status IS NOT NULL",
+        "lower(status) IN ('approved', 'pending')",
+    ];
+    let mut last_repair = None;
+    for predicate in tampered_predicates {
+        graphql_orm::sqlx::query("DROP INDEX uidx_conditional_digest_active")
+            .execute(database.pool())
+            .await?;
+        graphql_orm::sqlx::query(&format!(
+            "CREATE UNIQUE INDEX uidx_conditional_digest_active
+             ON conditional_index_records (digest) WHERE {predicate}"
+        ))
+        .execute(database.pool())
+        .await?;
+
+        let tampered = introspect(&database).await?;
+        let repair = database.schema().plan_migration(
+            &version,
+            "recorded version must fail",
+            &tampered,
+            &target,
+        )?;
+        assert!(
+            repair.steps.iter().any(|step| matches!(
+                step.step,
+                MigrationStep::DropIndex { .. } | MigrationStep::CreateIndex { .. }
+            )),
+            "unsupported or partial predicate must be drift: {predicate}"
+        );
+        last_repair = Some(repair);
+    }
+    let repair = last_repair.expect("at least one tampered predicate");
     database
         .schema()
         .apply_migration(&repair, ApplyOptions::default())

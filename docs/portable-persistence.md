@@ -87,6 +87,14 @@ Roles with schema-owner DDL authority can remove enforcement, so applications sh
 that authority. Live introspection records the triggers and managed validation fails closed when
 either is missing or weakened.
 
+Introspection does not trust generated names alone. SQLite requires the complete unconditional
+`BEFORE UPDATE` and `BEFORE DELETE` abort-trigger grammar. PostgreSQL checks the exact row-level
+event/timing catalog structure and the generated function's exception body, ownership,
+`SECURITY DEFINER`, fixed search path, language, enablement, and execute-privilege posture. A
+same-name inert body, conditional `WHEN`, extra statement, or disabled/wrong-operation trigger is
+reported as drift. An approved fresh-version repair drops only the expected managed object names
+before recreating them, so stale bodies and PostgreSQL function grants cannot survive repair.
+
 ## Portable constraints
 
 ```rust

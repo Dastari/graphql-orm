@@ -11,6 +11,18 @@ required. The optional `auth-agql` bridge intentionally pins `agql-auth` at
 `5e7f230b96350f55496477c11f8a0505e6438779`. Consequently `cargo package -p graphql-orm` cannot
 resolve that Git-only optional dependency through the crates.io packaging model; this is expected.
 
+## 0.4.3
+
+Compatible Git-only security hardening. Runtime and macros are both `0.4.3`.
+
+- Portable conditional-index predicates are parsed as a complete narrow grammar. Unsupported
+  leading or trailing SQL is drift rather than partially canonicalized as the target predicate.
+- SQLite validates the full generated UPDATE and DELETE abort triggers, including target table,
+  timing, event, body, and absence of a weakening `WHEN` clause.
+- PostgreSQL validates exact trigger catalog structure and the generated function's unconditional
+  exception body, owner, language, security mode, fixed search path, and execute privileges.
+- No public API changed. Untampered 0.4.2 schemas remain restart-idempotent.
+
 ## 0.4.2
 
 Compatible Git-only migration-runtime fix. Runtime and macros are both `0.4.2`.
