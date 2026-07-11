@@ -8,6 +8,11 @@
   snapshots, consistent full export, empty-target detection, and full restore.
   Incremental export/restore report `UnsupportedOperation` until a
   change-journal integration lands.
+- Added `OrmBackupAdapter::with_column_backup_policy` so hosts can exclude or
+  redact columns whose database types the export cannot round-trip yet (for
+  example PostGIS geometry) without editing entity metadata, which would
+  change migration-planning inputs. `ColumnBackupPolicy` is re-exported behind
+  the `orm` feature.
 - Added `OrmBackupAdapter::clear_restore_target` so hosts can replace an
   existing database before an empty-database restore. PostgreSQL clears with
   one `TRUNCATE ... CASCADE`; SQLite suspends `PRAGMA foreign_keys` on a

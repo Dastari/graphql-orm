@@ -98,6 +98,8 @@ pub use database::{
     GraphqlOrmBackupSchema,
 };
 pub use error::BackupError;
+#[cfg(feature = "orm")]
+pub use graphql_orm::graphql::orm::ColumnBackupPolicy;
 #[cfg(feature = "local")]
 pub use local_repository::LocalBackupRepository;
 pub use lock::{DEFAULT_LOCK_STALE_AFTER_SECONDS, RepositoryLock, RepositoryLockOptions};

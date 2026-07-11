@@ -17,9 +17,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::orm::{
-    BackupRow as OrmBackupRow, BackupValue, EntityBackupDescriptor, EntityMetadata,
-    GraphqlOrmBackupRuntime, GraphqlOrmSchemaSnapshot, RestoreContext as OrmRestoreContext,
-    RestoreMode as OrmRestoreMode,
+    BackupRow as OrmBackupRow, BackupValue, ColumnBackupPolicy, EntityBackupDescriptor,
+    EntityMetadata, GraphqlOrmBackupRuntime, GraphqlOrmSchemaSnapshot,
+    RestoreContext as OrmRestoreContext, RestoreMode as OrmRestoreMode,
 };
 use graphql_orm::sqlx::Row as _;
 use graphql_orm_storage::{BlobStore, collect_storage_stream};
@@ -40,6 +40,13 @@ pub struct OrmBackupAdapter {
     database: Arc<Database>,
     entities: Vec<&'static EntityMetadata>,
     migration_version: Option<String>,
+    column_policy_overrides: Vec<ColumnPolicyOverride>,
+}
+
+struct ColumnPolicyOverride {
+    table_name: String,
+    column_name: String,
+    policy: ColumnBackupPolicy,
 }
 
 impl OrmBackupAdapter {
@@ -53,6 +60,7 @@ impl OrmBackupAdapter {
             database,
             entities,
             migration_version: None,
+            column_policy_overrides: Vec::new(),
         }
     }
 
@@ -66,8 +74,33 @@ impl OrmBackupAdapter {
         self
     }
 
+    /// Overrides one column's backup policy at the adapter level.
+    ///
+    /// Use this to exclude or redact columns whose database types the
+    /// `graphql-orm` export cannot round-trip yet (for example PostGIS
+    /// geometry) without editing entity metadata, which would change
+    /// migration-planning inputs. Overrides apply to export, restore
+    /// validation, and restore imports; the schema hash keeps using the
+    /// unmodified entity metadata, so the same overrides must be configured
+    /// when a snapshot is created and when it is restored.
+    #[must_use]
+    pub fn with_column_backup_policy(
+        mut self,
+        table_name: impl Into<String>,
+        column_name: impl Into<String>,
+        policy: ColumnBackupPolicy,
+    ) -> Self {
+        self.column_policy_overrides.push(ColumnPolicyOverride {
+            table_name: table_name.into(),
+            column_name: column_name.into(),
+            policy,
+        });
+        self
+    }
+
     /// Returns the current `graphql-orm` schema snapshot for the configured
-    /// entities.
+    /// entities, with column policy overrides applied to its entity
+    /// descriptors.
     ///
     /// Hosts should compare a manifest's schema hash against this snapshot
     /// before destructive restore steps.
@@ -77,11 +110,30 @@ impl OrmBackupAdapter {
     /// Returns [`BackupError`] if the migration version cannot be read.
     pub async fn current_schema_snapshot(&self) -> Result<GraphqlOrmSchemaSnapshot, BackupError> {
         let migration_version = self.resolve_migration_version().await?;
-        Ok(GraphqlOrmBackupRuntime::schema_snapshot(
+        let mut snapshot = GraphqlOrmBackupRuntime::schema_snapshot(
             self.database.as_ref(),
             migration_version,
             &self.entities,
-        ))
+        );
+        self.apply_column_policy_overrides(&mut snapshot.entities);
+        Ok(snapshot)
+    }
+
+    fn apply_column_policy_overrides(&self, descriptors: &mut [EntityBackupDescriptor]) {
+        for policy_override in &self.column_policy_overrides {
+            for descriptor in descriptors
+                .iter_mut()
+                .filter(|descriptor| descriptor.table_name == policy_override.table_name)
+            {
+                for column in descriptor
+                    .columns
+                    .iter_mut()
+                    .filter(|column| column.column_name == policy_override.column_name)
+                {
+                    column.backup_policy = policy_override.policy;
+                }
+            }
+        }
     }
 
     /// Deletes all rows from every backup-enabled table so an
@@ -178,7 +230,9 @@ impl OrmBackupAdapter {
     }
 
     fn descriptors(&self) -> Vec<EntityBackupDescriptor> {
-        self.database.list_backup_entities(&self.entities)
+        let mut descriptors = self.database.list_backup_entities(&self.entities);
+        self.apply_column_policy_overrides(&mut descriptors);
+        descriptors
     }
 
     async fn resolve_migration_version(&self) -> Result<String, BackupError> {
