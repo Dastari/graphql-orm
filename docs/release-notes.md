@@ -11,6 +11,19 @@ required. The optional `auth-agql` bridge intentionally pins `agql-auth` at
 `be4e0a213ce9c9b9fbe9fe985602743a584e019b`. Consequently `cargo package -p graphql-orm` cannot
 resolve that Git-only optional dependency through the crates.io packaging model; this is expected.
 
+## 0.6.1
+
+Compatible Git-only logical-backup restore fix. The runtime is `0.6.1`; the companion macros crate
+remains `0.6.0`.
+
+- PostgreSQL restore imports preserve typed nulls from entity backup metadata. Nullable JSONB,
+  UUID, byte, integer, float, and boolean columns no longer bind as text.
+- Restore imports topologically order rows for same-table foreign keys, allowing self-referential
+  parent/derivative data to restore regardless of primary-key export order.
+- Missing self-reference targets and cycles fail explicitly within the table transaction.
+- PostgreSQL round-trip tests cover nullable JSONB, and unit coverage exercises child-first backup
+  input for self-referential rows.
+
 ## 0.6.0
 
 Git-only typed composite-mutation and auth-assurance release. Runtime and macros are both `0.6.0`.

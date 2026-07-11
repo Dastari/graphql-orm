@@ -34,6 +34,7 @@ async fn change_journal_records_generated_repository_writes()
                 display_name: "Journal".to_string(),
                 flags: vec![],
             },
+            preferences: None,
             avatar: vec![9, 8, 7],
             nickname: None,
         },
@@ -83,6 +84,9 @@ struct BackupRtAccount {
 
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
     pub profile: BackupProfile,
+
+    #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
+    pub preferences: Option<BackupProfile>,
 
     pub avatar: Vec<u8>,
 
@@ -236,6 +240,7 @@ async fn full_logical_backup_restores_into_empty_database() -> Result<(), Box<dy
                 display_name: "Ada".to_string(),
                 flags: vec!["admin".to_string(), "research".to_string()],
             },
+            preferences: None,
             avatar: vec![0, 1, 2, 3, 255],
             nickname: Some("countess".to_string()),
         },
@@ -304,6 +309,7 @@ async fn full_logical_backup_restores_into_empty_database() -> Result<(), Box<dy
     assert_eq!(restored_account.password_hash, "[graphql-orm:redacted]");
     assert_eq!(restored_account.reset_token, None);
     assert_eq!(restored_account.profile, account.profile);
+    assert_eq!(restored_account.preferences, None);
     assert_eq!(restored_account.avatar, account.avatar);
     assert_eq!(restored_account.nickname, account.nickname);
     assert_eq!(restored_account.created_at, account.created_at);

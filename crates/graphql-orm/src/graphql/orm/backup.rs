@@ -553,7 +553,7 @@ async fn import_table_rows(
     let import_columns = import_columns(entity, rows);
     let column_sql = import_columns
         .iter()
-        .map(|column| quote_identifier(column))
+        .map(|column| quote_identifier(&column.column_name))
         .collect::<Vec<_>>()
         .join(", ");
     let placeholder_sql = (0..import_columns.len())
@@ -567,16 +567,19 @@ async fn import_table_rows(
         placeholder_sql
     );
 
-    for row in rows {
+    for row in import_row_order(entity, rows)? {
         let values = import_columns
             .iter()
             .map(|column| {
-                backup_value_to_sql_value(row.values.get(column).ok_or_else(|| {
-                    sqlx::Error::Protocol(format!(
-                        "backup row {} for table {} is missing import column {}",
-                        row.primary_key, entity.table_name, column
-                    ))
-                })?)
+                backup_value_to_sql_value(
+                    row.values.get(&column.column_name).ok_or_else(|| {
+                        sqlx::Error::Protocol(format!(
+                            "backup row {} for table {} is missing import column {}",
+                            row.primary_key, entity.table_name, column.column_name
+                        ))
+                    })?,
+                    column.logical_type,
+                )
             })
             .collect::<Result<Vec<_>, _>>()?;
         execute_import_insert(&mut tx, &insert_sql, &values).await?;
@@ -671,7 +674,10 @@ fn export_columns(entity: &EntityBackupDescriptor) -> Vec<&super::ColumnBackupDe
         .collect()
 }
 
-fn import_columns(entity: &EntityBackupDescriptor, rows: &[BackupRow]) -> Vec<String> {
+fn import_columns<'a>(
+    entity: &'a EntityBackupDescriptor,
+    rows: &[BackupRow],
+) -> Vec<&'a super::ColumnBackupDescriptor> {
     entity
         .columns
         .iter()
@@ -683,8 +689,86 @@ fn import_columns(entity: &EntityBackupDescriptor, rows: &[BackupRow]) -> Vec<St
                 .map(|row| row.values.contains_key(&column.column_name))
                 .unwrap_or(true)
         })
-        .map(|column| column.column_name.clone())
         .collect()
+}
+
+fn import_row_order<'a>(
+    entity: &EntityBackupDescriptor,
+    rows: &'a [BackupRow],
+) -> crate::Result<Vec<&'a BackupRow>> {
+    let self_dependencies = entity
+        .dependencies
+        .iter()
+        .filter(|dependency| {
+            dependency.table_name == entity.table_name
+                && dependency.target_column == entity.primary_key_column
+                && dependency.source_column != entity.primary_key_column
+        })
+        .collect::<Vec<_>>();
+    if self_dependencies.is_empty() || rows.len() < 2 {
+        return Ok(rows.iter().collect());
+    }
+
+    let row_indexes = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (row.primary_key.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    let mut children = vec![Vec::new(); rows.len()];
+    let mut indegrees = vec![0_usize; rows.len()];
+
+    for (child_index, row) in rows.iter().enumerate() {
+        let mut parents = std::collections::BTreeSet::new();
+        for dependency in &self_dependencies {
+            let Some(value) = row.values.get(&dependency.source_column) else {
+                return Err(sqlx::Error::Protocol(format!(
+                    "backup row {} for table {} is missing self-reference column {}",
+                    row.primary_key, entity.table_name, dependency.source_column
+                )));
+            };
+            if matches!(value, BackupValue::Null) {
+                continue;
+            }
+            let parent_key = value.primary_key_string();
+            let Some(&parent_index) = row_indexes.get(parent_key.as_str()) else {
+                return Err(sqlx::Error::Protocol(format!(
+                    "backup row {} for table {} references missing row {} through {}",
+                    row.primary_key, entity.table_name, parent_key, dependency.source_column
+                )));
+            };
+            if parent_index != child_index {
+                parents.insert(parent_index);
+            }
+        }
+        for parent_index in parents {
+            children[parent_index].push(child_index);
+            indegrees[child_index] += 1;
+        }
+    }
+
+    let mut ready = indegrees
+        .iter()
+        .enumerate()
+        .filter_map(|(index, indegree)| (*indegree == 0).then_some(index))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut ordered = Vec::with_capacity(rows.len());
+    while let Some(index) = ready.pop_first() {
+        ordered.push(&rows[index]);
+        for child_index in &children[index] {
+            indegrees[*child_index] -= 1;
+            if indegrees[*child_index] == 0 {
+                ready.insert(*child_index);
+            }
+        }
+    }
+
+    if ordered.len() != rows.len() {
+        return Err(sqlx::Error::Protocol(format!(
+            "backup rows for table {} contain a self-reference cycle",
+            entity.table_name
+        )));
+    }
+    Ok(ordered)
 }
 
 #[cfg(feature = "sqlite")]
@@ -831,9 +915,20 @@ fn decode_backup_value(
     }
 }
 
-fn backup_value_to_sql_value(value: &BackupValue) -> crate::Result<SqlValue> {
+fn backup_value_to_sql_value(
+    value: &BackupValue,
+    logical_type: BackupValueKind,
+) -> crate::Result<SqlValue> {
     Ok(match value {
-        BackupValue::Null => SqlValue::Null,
+        BackupValue::Null => match logical_type {
+            BackupValueKind::Null | BackupValueKind::String => SqlValue::StringNull,
+            BackupValueKind::Bool => SqlValue::BoolNull,
+            BackupValueKind::Integer => SqlValue::IntNull,
+            BackupValueKind::Float => SqlValue::FloatNull,
+            BackupValueKind::Uuid => SqlValue::UuidNull,
+            BackupValueKind::Json => SqlValue::JsonNull,
+            BackupValueKind::Bytes => SqlValue::BytesNull,
+        },
         BackupValue::Bool(value) => SqlValue::Bool(*value),
         BackupValue::Integer(value) => SqlValue::Int(*value),
         BackupValue::Float(value) => SqlValue::Float(*value),
@@ -989,4 +1084,54 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graphql::orm::{DeletePolicy, EntityDependencyDescriptor};
+
+    #[test]
+    fn self_referential_rows_are_ordered_parent_first() {
+        let parent_id = uuid::Uuid::new_v4();
+        let child_id = uuid::Uuid::new_v4();
+        let row = |id, parent_id: Option<uuid::Uuid>| {
+            let mut values = BTreeMap::new();
+            values.insert("id".to_string(), BackupValue::Uuid(id));
+            values.insert(
+                "parent_id".to_string(),
+                parent_id
+                    .map(BackupValue::Uuid)
+                    .unwrap_or(BackupValue::Null),
+            );
+            BackupRow {
+                table_name: "items".to_string(),
+                primary_key: id.to_string(),
+                row_hash: String::new(),
+                values,
+            }
+        };
+        let rows = vec![row(child_id, Some(parent_id)), row(parent_id, None)];
+        let entity = EntityBackupDescriptor {
+            entity_name: "Item".to_string(),
+            table_name: "items".to_string(),
+            primary_key_column: "id".to_string(),
+            export_order: 0,
+            restore_order: 0,
+            columns: Vec::new(),
+            dependencies: vec![EntityDependencyDescriptor {
+                entity_name: "Item".to_string(),
+                table_name: "items".to_string(),
+                source_column: "parent_id".to_string(),
+                target_column: "id".to_string(),
+                nullable: true,
+                on_delete: DeletePolicy::Restrict,
+            }],
+        };
+
+        let ordered = import_row_order(&entity, &rows).expect("rows should order");
+
+        assert_eq!(ordered[0].primary_key, parent_id.to_string());
+        assert_eq!(ordered[1].primary_key, child_id.to_string());
+    }
 }

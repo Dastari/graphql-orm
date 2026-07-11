@@ -2,6 +2,19 @@
 
 User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
 
+## 0.6.1
+
+Companion macros crate: `graphql-orm-macros` remains **0.6.0**.
+
+- Fixed PostgreSQL logical-backup restores so null values bind with the column's declared type,
+  including JSONB, UUID, byte, numeric, and boolean columns, instead of falling back to text.
+- Added dependency-aware ordering for rows with self-referential foreign keys so parent rows are
+  inserted before their children during empty-database restores.
+- Self-reference cycles and references to rows missing from the backup now fail with explicit
+  protocol errors before the table transaction commits.
+- Added PostgreSQL nullable-JSON round-trip coverage and focused child-before-parent restore-order
+  coverage.
+
 ## 0.6.0
 
 Companion macros crate: `graphql-orm-macros` **0.6.0**.
