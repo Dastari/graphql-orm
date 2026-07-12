@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.1
+
+- Pinned `graphql-orm` 0.6.1 and `graphql-orm-storage` 0.4.0 to reviewed full
+  Git commit revisions so downstream builds do not advance when either
+  repository's default branch changes.
+- Standardized dependency URLs on the canonical `.git` form so applications
+  can use the same source identities and avoid duplicate crate instances.
+- This release changes no public Rust API, backup format, snapshot layout, or
+  restore behavior.
+
 ## 0.3.0
 
 - Added the optional `orm` feature with a generic [`OrmBackupAdapter`] that

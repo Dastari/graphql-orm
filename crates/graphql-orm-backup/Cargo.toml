@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-backup"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm-backup"
@@ -17,8 +17,8 @@ orm = ["dep:graphql-orm"]
 async-trait = "0.1"
 bytes = "1"
 futures = "0.3"
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm", optional = true, default-features = false }
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm-storage", default-features = false }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "510cd85d9fbc9ae60c7117a752370c590564949e", version = "0.6.1", optional = true, default-features = false }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm-storage.git", rev = "3c92c96bdb9f4d7b48481f2a5038c7ba73dde81c", version = "0.4.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

@@ -709,8 +709,8 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.6.0"
-source = "git+https://github.com/Dastari/graphql-orm#25e5aaf2f051e9c955d243e51a8e05a574e495a6"
+version = "0.6.1"
+source = "git+https://github.com/Dastari/graphql-orm.git?rev=510cd85d9fbc9ae60c7117a752370c590564949e#510cd85d9fbc9ae60c7117a752370c590564949e"
 dependencies = [
  "async-graphql",
  "futures",
@@ -725,7 +725,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-backup"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -745,7 +745,7 @@ dependencies = [
 [[package]]
 name = "graphql-orm-macros"
 version = "0.6.0"
-source = "git+https://github.com/Dastari/graphql-orm#25e5aaf2f051e9c955d243e51a8e05a574e495a6"
+source = "git+https://github.com/Dastari/graphql-orm.git?rev=510cd85d9fbc9ae60c7117a752370c590564949e#510cd85d9fbc9ae60c7117a752370c590564949e"
 dependencies = [
  "convert_case",
  "proc-macro2",
@@ -756,7 +756,7 @@ dependencies = [
 [[package]]
 name = "graphql-orm-storage"
 version = "0.4.0"
-source = "git+https://github.com/Dastari/graphql-orm-storage#3c92c96bdb9f4d7b48481f2a5038c7ba73dde81c"
+source = "git+https://github.com/Dastari/graphql-orm-storage.git?rev=3c92c96bdb9f4d7b48481f2a5038c7ba73dde81c#3c92c96bdb9f4d7b48481f2a5038c7ba73dde81c"
 dependencies = [
  "async-trait",
  "bytes",

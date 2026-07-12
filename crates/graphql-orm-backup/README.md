@@ -33,15 +33,26 @@ backup layout, checksums, repository writes, restore ordering, and operational s
 
 ```toml
 [dependencies]
-graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm-backup" }
+graphql-orm-backup = {
+    git = "https://github.com/Dastari/graphql-orm-backup.git",
+    rev = "<reviewed-full-40-character-commit-sha>",
+    version = "0.3.1"
+}
 ```
+
+GitHub with an exact reviewed revision is the supported distribution method.
+Do not depend on a moving branch. Applications that also depend directly on
+`graphql-orm` or `graphql-orm-storage` must use the same canonical Git URLs and
+revisions as this crate so Cargo resolves one instance of each shared type.
 
 The default `local` feature enables `LocalBackupRepository`.
 
 ```toml
 [dependencies]
 graphql-orm-backup = {
-    git = "https://github.com/Dastari/graphql-orm-backup",
+    git = "https://github.com/Dastari/graphql-orm-backup.git",
+    rev = "<reviewed-full-40-character-commit-sha>",
+    version = "0.3.1",
     default-features = false
 }
 ```
