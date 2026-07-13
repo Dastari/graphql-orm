@@ -30,6 +30,7 @@ It is designed for two related use cases:
 - opt-in PostgreSQL row-level security metadata and request-local database auth context
 - backend-neutral typed read projections that omit sensitive columns from SQL and process memory
 - typed composite-key, insert-if-absent, conditional, and bounded mutation APIs
+- federation-composable conventional GraphQL operation roots with stable Rust root names
 
 ## Install
 
@@ -37,7 +38,7 @@ Select exactly the backend support your service needs:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.2", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.3", default-features = false, features = ["sqlite"] }
 ```
 
 GitHub with an exact full revision is the only supported distribution method. Neither crate is

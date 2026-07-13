@@ -7,6 +7,7 @@ use super::{MigrationBackend, OrmBackend, SqlxBackend};
 use std::collections::HashSet;
 
 pub const MIGRATION_HISTORY_TABLE: &str = "__graphql_orm_migrations";
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 const MIGRATION_METADATA_COLUMNS: [(&str, &str); 6] = [
     ("backend", "TEXT"),
     ("graphql_orm_version", "TEXT"),
@@ -16,6 +17,7 @@ const MIGRATION_METADATA_COLUMNS: [(&str, &str); 6] = [
     ("policy", "TEXT"),
 ];
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 fn invalid_migration_history(message: impl Into<String>) -> sqlx::Error {
     sqlx::Error::Configuration(Box::new(std::io::Error::other(format!(
         "unsafe {MIGRATION_HISTORY_TABLE} schema: {}",

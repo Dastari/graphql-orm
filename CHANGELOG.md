@@ -2,6 +2,19 @@
 
 User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
 
+## 0.6.3
+
+Companion macros crate: `graphql-orm-macros` **0.6.1**.
+
+- `schema_roots!` retains the public Rust root names while exporting their GraphQL object names as
+  the conventional `Query`, `Mutation`, and `Subscription`, making async-graphql federation SDL
+  unambiguously composable without downstream rewriting.
+- Schemas with no subscription contributors now use `EmptySubscription`; they do not emit a fake
+  empty object or a dangling operation root.
+- Added parsed federation-SDL coverage for complete, zero-subscription, read-only MSSQL, and
+  multi-chunk query schemas, including PascalCase resolver naming.
+- No repository, authorization, transaction, backup, migration, or database behavior changed.
+
 ## 0.6.2
 
 Companion macros crate: `graphql-orm-macros` remains **0.6.0**.

@@ -1,3 +1,7 @@
+#[path = "support/federation_sdl.rs"]
+mod federation_sdl;
+
+use federation_sdl::ParsedFederationSchema;
 use graphql_orm::prelude::*;
 
 #[derive(
@@ -87,6 +91,7 @@ async fn setup_pool() -> Result<sqlx::PgPool, sqlx::Error> {
     sqlx::PgPool::connect(&database_url).await
 }
 
+#[allow(dead_code)]
 fn assert_has(sdl: &str, expected: &str) {
     assert!(sdl.contains(expected), "SDL missing:\n{expected}\n\n{sdl}");
 }
@@ -94,8 +99,23 @@ fn assert_has(sdl: &str, expected: &str) {
 #[tokio::test]
 async fn generated_schema_respects_crate_wide_case_features() {
     let pool = setup_pool().await.expect("test pool");
-    let schema = schema_builder(graphql_orm::db::Database::new(pool)).finish();
+    let schema = schema_builder(graphql_orm::db::Database::new(pool))
+        .enable_subscription_in_federation()
+        .finish();
     let sdl = schema.sdl();
+    assert!(!sdl.is_empty());
+    let federation_sdl =
+        schema.sdl_with_options(graphql_orm::async_graphql::SDLExportOptions::new().federation());
+    let federation = ParsedFederationSchema::parse(&federation_sdl);
+
+    assert_eq!(federation.query, "Query");
+    assert_eq!(federation.mutation.as_deref(), Some("Mutation"));
+    assert_eq!(federation.subscription.as_deref(), Some("Subscription"));
+    assert!(!federation.query_fields().is_empty());
+    assert!(!federation.objects.contains_key("QueryRoot"));
+
+    #[cfg(feature = "resolver-case-pascal")]
+    assert!(federation.query_fields().contains("CaseCollections"));
 
     #[cfg(not(any(
         feature = "resolver-case-pascal",

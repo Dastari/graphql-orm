@@ -3,6 +3,20 @@
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.6.3 Federation Operation Roots
+
+Update the runtime to 0.6.3 and the companion macros crate to 0.6.1 at the same reviewed Git
+revision. No Rust call-site or database migration is required: `QueryRoot`, `MutationRoot`, and
+`SubscriptionRoot` remain the generated Rust names.
+
+The generated GraphQL object names change to `Query`, `Mutation`, and `Subscription`. This makes
+federation SDL valid when the exporter relies on GraphQL's conventional implicit operation roots.
+If schema tooling explicitly matched the old GraphQL type names, update those matches. Empty
+mutation and subscription roots remain absent rather than becoming fieldless objects.
+
+Regenerate provider SDL, parse or validate it, and run the federation composition check described
+in [Federation operation roots](docs/federation.md) before promotion.
+
 ## 0.6.2 agql-auth Bridge Alignment
 
 Update `graphql-orm` to the reviewed `v0.6.2` commit and align any direct `agql-auth` dependency to

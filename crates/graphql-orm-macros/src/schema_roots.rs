@@ -276,11 +276,29 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             },
         )
     };
-    let subscription_root = emit_chunked_merged_subscription(
-        "Subscription",
-        subscription_custom_ops,
-        &subscription_types,
-    );
+    let subscription_root_is_empty =
+        subscription_custom_ops.is_none() && subscription_types.is_empty();
+    let (subscription_root, subscription_root_value) = if subscription_root_is_empty {
+        (
+            quote! {
+                pub type SubscriptionRoot = ::graphql_orm::async_graphql::EmptySubscription;
+            },
+            quote! {
+                ::graphql_orm::async_graphql::EmptySubscription
+            },
+        )
+    } else {
+        (
+            emit_chunked_merged_subscription(
+                "Subscription",
+                subscription_custom_ops,
+                &subscription_types,
+            ),
+            quote! {
+                SubscriptionRoot::default()
+            },
+        )
+    };
     let schema_loader_data: Vec<proc_macro2::TokenStream> = entities
         .iter()
         .map(|entity| {
@@ -336,7 +354,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             let builder = ::graphql_orm::async_graphql::Schema::build(
                 QueryRoot::default(),
                 #mutation_root_value,
-                SubscriptionRoot::default(),
+                #subscription_root_value,
             )
             .data(database.clone());
             let builder = limits.apply(builder);
@@ -431,8 +449,10 @@ fn emit_chunked_merged(
     }
 
     let root_name = syn::Ident::new(&format!("{}Root", name), proc_macro2::Span::mixed_site());
+    let graphql_name = name;
     let root_def = quote! {
         #[derive(#derive_macro, Default)]
+        #[graphql(name = #graphql_name)]
         pub struct #root_name(
             #(#root_chunk_idents),*
         );

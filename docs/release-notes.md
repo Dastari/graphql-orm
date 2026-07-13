@@ -11,6 +11,23 @@ required. The optional `auth-agql` bridge intentionally pins `agql-auth` at
 `f1fb5fe8c42d29806821d5f1a9032b007dee63e4`. Consequently `cargo package -p graphql-orm` cannot
 resolve that Git-only optional dependency through the crates.io packaging model; this is expected.
 
+## 0.6.3
+
+Compatible Git-only federation operation-root fix. The runtime is `0.6.3`; the companion macros
+crate is `0.6.1` because `schema_roots!` generated GraphQL metadata changed.
+
+- Public Rust symbols remain `QueryRoot`, `MutationRoot`, and `SubscriptionRoot`.
+- Their nonempty GraphQL operation-object names are now the conventional `Query`, `Mutation`, and
+  `Subscription`. This supplies the implicit operation mapping required when async-graphql's
+  federation exporter omits an explicit schema definition.
+- Empty mutation and subscription aliases remain absent from federation SDL. An empty generated
+  subscription set now selects `EmptySubscription` instead of generating a fieldless object.
+- Actual generated SDL is parsed and structurally validated across SQLite, MSSQL, multi-chunk, and
+  PascalCase naming tests. A provider field named `NinjaDevices` is verified directly on `Query`.
+- Application code that explicitly refers to the old GraphQL type names in SDL tooling must move
+  from `QueryRoot` / `MutationRoot` / `SubscriptionRoot` to the conventional names. Rust code does
+  not change.
+
 ## 0.6.2
 
 Compatible Git-only authentication dependency alignment. The runtime is `0.6.2`; the companion

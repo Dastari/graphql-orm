@@ -104,7 +104,7 @@ impl MssqlPool {
 
         let tcp = TcpStream::connect(self.inner.config.get_addr())
             .await
-            .map_err(|error| sqlx::Error::Io(error))?;
+            .map_err(sqlx::Error::Io)?;
         tcp.set_nodelay(true).map_err(sqlx::Error::Io)?;
         let client = tiberius::Client::connect(self.inner.config.clone(), tcp.compat_write())
             .await

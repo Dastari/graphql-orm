@@ -14,7 +14,9 @@ use graphql_orm::prelude::*;
 - `#[derive(GraphQLSchemaEntity)]`: schema metadata without GraphQL operation generation.
 - `#[derive(GraphQLRelations)]`: single-key and composite-key relation resolvers with batching support.
 - `#[derive(GraphQLOperations)]`: generated query, mutation, and subscription operation types.
-- `schema_roots!`: generated root query/mutation/subscription aliases for a set of entities.
+- `schema_roots!`: generated root query/mutation/subscription aliases for a set of entities. Rust
+  names remain `QueryRoot`, `MutationRoot`, and `SubscriptionRoot`; nonempty GraphQL operation
+  objects use the conventional federation-composable names `Query`, `Mutation`, and `Subscription`.
 - `mutation_result!`: GraphQL mutation result object generation.
 
 ## Backend Selection

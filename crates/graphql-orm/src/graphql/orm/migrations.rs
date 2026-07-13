@@ -691,6 +691,7 @@ fn sql_string_literal(value: &str) -> String {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 enum StructuralSqlToken {
     Ident(String),
     String(String),
@@ -704,6 +705,7 @@ enum StructuralSqlToken {
     Semicolon,
 }
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 fn tokenize_structural_sql(sql: &str) -> Option<Vec<StructuralSqlToken>> {
     let mut chars = sql.char_indices().peekable();
     let mut tokens = Vec::new();
@@ -774,10 +776,12 @@ fn tokenize_structural_sql(sql: &str) -> Option<Vec<StructuralSqlToken>> {
     Some(tokens)
 }
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 fn structural_ident(token: Option<&StructuralSqlToken>, expected: &str) -> bool {
     matches!(token, Some(StructuralSqlToken::Ident(value)) if value.eq_ignore_ascii_case(expected))
 }
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 fn strip_redundant_outer_parentheses(mut tokens: &[StructuralSqlToken]) -> &[StructuralSqlToken] {
     loop {
         if tokens.first() != Some(&StructuralSqlToken::LeftParen)
@@ -807,6 +811,7 @@ fn strip_redundant_outer_parentheses(mut tokens: &[StructuralSqlToken]) -> &[Str
     }
 }
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 fn parse_structural_string_value(
     tokens: &[StructuralSqlToken],
     offset: &mut usize,
@@ -825,6 +830,7 @@ fn parse_structural_string_value(
     Some(value.clone())
 }
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 fn parse_closed_set_index_predicate(expression: &str) -> Option<super::core::IndexPredicateDef> {
     let tokens = tokenize_structural_sql(expression)?;
     let tokens = strip_redundant_outer_parentheses(&tokens);

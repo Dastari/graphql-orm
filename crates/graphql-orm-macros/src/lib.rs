@@ -13,6 +13,12 @@
 //! - `#[derive(GraphQLOperations)]` - Generate Query/Mutation/Subscription structs
 //! - `schema_roots!` - Generate root query/mutation/subscription types for a set of entities
 //!
+//! The generated Rust names remain `QueryRoot`, `MutationRoot`, and
+//! `SubscriptionRoot`. Their nonempty GraphQL object names are the conventional
+//! `Query`, `Mutation`, and `Subscription`, so federation SDL has unambiguous
+//! implicit operation roots. Empty mutation and subscription aliases do not
+//! create fieldless GraphQL objects.
+//!
 //! # Schema Root Mutation Exposure
 //!
 //! `schema_roots!` accepts `generated_mutations: "all" | "none" |

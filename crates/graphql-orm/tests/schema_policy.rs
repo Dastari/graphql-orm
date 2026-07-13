@@ -94,7 +94,7 @@ async fn external_read_only_schema_omits_generated_mutations()
     let schema = schema_builder(database).finish();
     let sdl = schema.sdl();
 
-    assert!(sdl.contains("type QueryRoot"));
+    assert!(sdl.contains("type Query"));
     assert!(!sdl.contains("createReadOnlyNote"));
     assert!(!sdl.contains("updateReadOnlyNote"));
     assert!(!sdl.contains("deleteReadOnlyNote"));

@@ -13,6 +13,7 @@ This directory contains the project documentation that is too detailed for the r
 - [Pagination migration](pagination-migration.md)
 - [PostgreSQL RLS and auth-aware execution](postgres.md)
 - [Microsoft SQL Server read-only backend](mssql.md)
+- [Federation operation roots](federation.md)
 - [Schema ownership, validation, planning, and ABI migrations](schema-management.md)
 - [Runtime writes, hooks, subscriptions, and policies](runtime-and-writes.md)
 - [Backup runtime API](backup.md)
