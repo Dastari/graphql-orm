@@ -2,6 +2,15 @@
 
 User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
 
+## 0.6.2
+
+Companion macros crate: `graphql-orm-macros` remains **0.6.0**.
+
+- Aligned the optional Git-only `auth-agql` bridge with `agql-auth` 0.8.1 at exact revision
+  `f1fb5fe8c42d29806821d5f1a9032b007dee63e4`, so hosts using the bridge and a direct dependency
+  resolve one `agql-auth` type universe.
+- No bridge API, authorization behavior, persistence behavior, or generated code changed.
+
 ## 0.6.1
 
 Companion macros crate: `graphql-orm-macros` remains **0.6.0**.

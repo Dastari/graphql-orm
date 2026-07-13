@@ -37,13 +37,13 @@ Select exactly the backend support your service needs:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.2", default-features = false, features = ["sqlite"] }
 ```
 
 GitHub with an exact full revision is the only supported distribution method. Neither crate is
 published to crates.io. Replace the placeholder with the reviewed release commit (the version tag
 is an identity aid, not a substitute for `rev`). The optional `auth-agql` bridge likewise resolves
-the exact upstream revision `be4e0a213ce9c9b9fbe9fe985602743a584e019b`.
+the exact upstream revision `f1fb5fe8c42d29806821d5f1a9032b007dee63e4`.
 
 Available backend features:
 

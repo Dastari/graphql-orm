@@ -10,8 +10,8 @@ checksum = "fe438c63458706e03479442743baae6c88256498e6431708f6dfc520a26515d3"
 
 [[package]]
 name = "agql-auth"
-version = "0.8.0"
-source = "git+https://github.com/Dastari/agql-auth.git?rev=be4e0a213ce9c9b9fbe9fe985602743a584e019b#be4e0a213ce9c9b9fbe9fe985602743a584e019b"
+version = "0.8.1"
+source = "git+https://github.com/Dastari/agql-auth.git?rev=f1fb5fe8c42d29806821d5f1a9032b007dee63e4#f1fb5fe8c42d29806821d5f1a9032b007dee63e4"
 dependencies = [
  "argon2",
  "async-graphql",
@@ -1082,7 +1082,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "graphql-orm"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -2842,7 +2842,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

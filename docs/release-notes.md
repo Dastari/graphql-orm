@@ -8,8 +8,19 @@ the runtime crate unless a macro crate version is called out separately.
 `graphql-orm` and `graphql-orm-macros` are distributed only from GitHub using reviewed full commit
 revision pins. Both manifests set `publish = false`; crates.io publication is neither supported nor
 required. The optional `auth-agql` bridge intentionally pins `agql-auth` at
-`be4e0a213ce9c9b9fbe9fe985602743a584e019b`. Consequently `cargo package -p graphql-orm` cannot
+`f1fb5fe8c42d29806821d5f1a9032b007dee63e4`. Consequently `cargo package -p graphql-orm` cannot
 resolve that Git-only optional dependency through the crates.io packaging model; this is expected.
+
+## 0.6.2
+
+Compatible Git-only authentication dependency alignment. The runtime is `0.6.2`; the companion
+macros crate remains `0.6.0`.
+
+- The optional `auth-agql` bridge now resolves exactly `agql-auth` 0.8.1 at revision
+  `f1fb5fe8c42d29806821d5f1a9032b007dee63e4`.
+- Hosts with a matching direct dependency resolve a single `agql-auth` package and type universe.
+- The bridge API and its tenant, actor, correlation, assurance, policy, strict-authorization, and
+  transaction-local database-auth behavior are unchanged.
 
 ## 0.6.1
 

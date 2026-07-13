@@ -3,6 +3,14 @@
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.6.2 agql-auth Bridge Alignment
+
+Update `graphql-orm` to the reviewed `v0.6.2` commit and align any direct `agql-auth` dependency to
+version 0.8.1 at exact revision `f1fb5fe8c42d29806821d5f1a9032b007dee63e4`. This ensures Cargo
+resolves one `agql-auth` package and one set of public types. No bridge API, authorization behavior,
+database migration, or generated-code change is required. The companion macros crate remains
+0.6.0.
+
 ## 0.6.0 Auth Assurance and Typed Composite Mutations
 
 Pin both crates to the reviewed `v0.6.0` commit. This release keeps existing single-key and 0.5
