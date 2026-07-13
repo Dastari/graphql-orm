@@ -6,13 +6,13 @@
 ## Dependency
 
 ```toml
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.3", features = ["sqlite", "auth-agql"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.0", features = ["sqlite", "auth-agql"] }
 # Host applications may depend on agql-auth directly as well. The optional
 # graphql-orm auth-agql feature pins the exact upstream release:
 # git = "https://github.com/Dastari/agql-auth.git"
-# rev = "f1fb5fe8c42d29806821d5f1a9032b007dee63e4"
-# version = "0.8.1"
-agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "f1fb5fe8c42d29806821d5f1a9032b007dee63e4", version = "0.8.1" }
+# rev = "2ab5dc1f963dad401a3393fd3af1392c2bb51e50"
+# version = "0.9.0"
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "2ab5dc1f963dad401a3393fd3af1392c2bb51e50", version = "0.9.0" }
 ```
 
 Both projects are intentionally Git-only. Cargo's crates.io packaging flow cannot package
@@ -58,7 +58,7 @@ MFA decision.
 
 ## Migrating from 0.7
 
-Update any direct `agql-auth` dependency to the exact 0.8 revision above. `AuthSubject` and
+Update any direct `agql-auth` dependency to the exact 0.9 revision above. `AuthSubject` and
 `DbAuthContext` gained organization, correlation, and assurance fields; applications constructing
 either with struct literals must add the fields or use their builders/`Default` update syntax.
 The bridge now preserves 0.8 session assurance, active scope, correlation, actor, token metadata,
@@ -66,7 +66,7 @@ and custom policy metadata instead of retaining only the older role/scope/tenant
 
 ## Migrating from 0.8.0
 
-Update any direct `agql-auth` dependency to the exact 0.8.1 revision above at the same time as
+Update any direct `agql-auth` dependency to the exact 0.9.0 revision above at the same time as
 updating `graphql-orm`. This prevents Cargo from resolving separate 0.8.0 and 0.8.1 package/type
 universes. The bridge API and mapped authorization data are unchanged.
 

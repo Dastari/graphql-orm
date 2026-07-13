@@ -31,6 +31,9 @@ It is designed for two related use cases:
 - backend-neutral typed read projections that omit sensitive columns from SQL and process memory
 - typed composite-key, insert-if-absent, conditional, and bounded mutation APIs
 - federation-composable conventional GraphQL operation roots with stable Rust root names
+- dependency-owned schema modules with stable migration, backup, and restore metadata
+- backend-neutral fenced lease transitions for durable workers
+- bounded forward and backward repository keyset windows for large timelines
 
 ## Install
 
@@ -38,13 +41,13 @@ Select exactly the backend support your service needs:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.3", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.0", default-features = false, features = ["sqlite"] }
 ```
 
 GitHub with an exact full revision is the only supported distribution method. Neither crate is
 published to crates.io. Replace the placeholder with the reviewed release commit (the version tag
 is an identity aid, not a substitute for `rev`). The optional `auth-agql` bridge likewise resolves
-the exact upstream revision `f1fb5fe8c42d29806821d5f1a9032b007dee63e4`.
+the exact upstream revision `2ab5dc1f963dad401a3393fd3af1392c2bb51e50`.
 
 Available backend features:
 
@@ -54,7 +57,7 @@ Available backend features:
 
 Optional integration features:
 
-- `auth-agql` - optional one-way bridge from `agql-auth` 0.8 principals into
+- `auth-agql` - optional one-way bridge from `agql-auth` 0.9 principals into
   `AuthSubject` / `DbAuthContext`
 
 Naming features are independent of backend features:
@@ -213,6 +216,7 @@ batched relation query per relation layer, not N+1 or nested N*N queries.
 - [Typed least-privilege read projections](docs/read-projections.md)
 - [Typed composite-key and bounded mutations](docs/composite-mutations.md)
 - [Backup runtime API](docs/backup.md)
+- [Schema modules and fenced leases](docs/schema-modules-and-leases.md)
 - [Release notes](docs/release-notes.md)
 - [Development and test commands](docs/development.md)
 

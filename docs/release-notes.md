@@ -8,8 +8,25 @@ the runtime crate unless a macro crate version is called out separately.
 `graphql-orm` and `graphql-orm-macros` are distributed only from GitHub using reviewed full commit
 revision pins. Both manifests set `publish = false`; crates.io publication is neither supported nor
 required. The optional `auth-agql` bridge intentionally pins `agql-auth` at
-`f1fb5fe8c42d29806821d5f1a9032b007dee63e4`. Consequently `cargo package -p graphql-orm` cannot
+`2ab5dc1f963dad401a3393fd3af1392c2bb51e50`. Consequently `cargo package -p graphql-orm` cannot
 resolve that Git-only optional dependency through the crates.io packaging model; this is expected.
+
+## 0.7.0
+
+Additive Git-only durable-runtime primitives release. Runtime and macros are
+both `0.7.0`.
+
+- Dependency crates can own internal entity namespaces through validated
+  `OrmSchemaModule` catalogs without exporting generic CRUD roots.
+- Module snapshots bind semantic module versions, schema fingerprints, backup
+  descriptors, and ordered restore-phase declarations.
+- `FencedLeaseState` models claim, heartbeat, fenced write, reclaim, and release
+  transitions with monotonic generations and CAS row versions. Persistence
+  implementations must enforce the complete predicate atomically.
+- Configured keyset entities gain bounded forward/backward repository windows,
+  including tail reads and canonical-order results for `last`/`before`.
+- The optional auth bridge is aligned with `agql-auth` 0.9.0. Existing schemas,
+  generated GraphQL fields, and database contents require no migration.
 
 ## 0.6.3
 

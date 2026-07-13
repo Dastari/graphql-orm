@@ -3,6 +3,36 @@
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.7.0 Schema Modules, Fenced Leases, and Bidirectional Keysets
+
+Update both `graphql-orm` and `graphql-orm-macros` to 0.7.0 at the same reviewed
+Git revision. If `auth-agql` is enabled or the host directly uses `agql-auth`,
+align it to version 0.9.0 at revision
+`2ab5dc1f963dad401a3393fd3af1392c2bb51e50` so Cargo resolves one public type
+universe.
+
+Existing entities, generated GraphQL SDL, mutations, offset connections, and
+stored cursors remain valid. No automatic database or data migration is
+required.
+
+Dependency crates that own private tables may implement `OrmSchemaModule` and
+compose a `SchemaModuleCatalog`. Applying the resulting schema target remains a
+host-controlled migration operation and must use a fresh host migration/module
+version whenever an owned entity, index, constraint, or persistent semantic
+changes. Backup and restore code should persist `SchemaModulesSnapshot` and run
+the declared restore phases through the owning dependency.
+
+`FencedLeaseState` is a backend-neutral transition contract, not a replacement
+for an atomic database predicate. Claims, heartbeats, child writes, and release
+must compare resource, owner, attempt, fencing token, unexpired deadline, and
+CAS row version in the same persistence operation.
+
+Entities with configured keyset ordering gain the additive repository method
+`keyset_connection_page`. Use `first` with optional `after` for forward reads,
+or `last` with optional `before` for backward/tail reads. Limits remain bounded
+by the database pagination configuration. Existing generated GraphQL keyset and
+offset fields are unchanged.
+
 ## 0.6.3 Federation Operation Roots
 
 Update the runtime to 0.6.3 and the companion macros crate to 0.6.1 at the same reviewed Git
@@ -388,4 +418,4 @@ access path.
 
 - No JWT, OIDC, cookie, wildcard, or product-specific scope logic was added to `graphql-orm`.
 - PostgreSQL RLS helper functions still use exact scope matching.
-- The `auth-agql` feature is available against `agql-auth` 0.8.
+- The `auth-agql` feature is available against `agql-auth` 0.9.

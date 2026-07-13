@@ -560,6 +560,19 @@ impl KeysetOrderColumn {
         self
     }
 
+    /// Reverses direction and null placement for a backward database read.
+    pub const fn reversed(mut self) -> Self {
+        self.direction = match self.direction {
+            KeysetDirection::Asc => KeysetDirection::Desc,
+            KeysetDirection::Desc => KeysetDirection::Asc,
+        };
+        self.nulls = match self.nulls {
+            KeysetNulls::First => KeysetNulls::Last,
+            KeysetNulls::Last => KeysetNulls::First,
+        };
+        self
+    }
+
     pub fn order_sql(self) -> String {
         let direction = match self.direction {
             KeysetDirection::Asc => "ASC",
@@ -652,6 +665,75 @@ pub fn render_keyset_after(
         branches.push(format!("({})", terms.join(" AND ")));
     }
     Ok((branches.join(" OR "), values))
+}
+
+/// Render the lexicographic `before` predicate with explicit nullable ordering.
+pub fn render_keyset_before(
+    backend: DatabaseBackend,
+    columns: &[KeysetOrderColumn],
+    cursor: &[crate::graphql::pagination::KeysetValue],
+    start_index: usize,
+) -> Result<(String, Vec<SqlValue>), crate::graphql::errors::OrmPublicError> {
+    use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
+    use crate::graphql::pagination::KeysetValue;
+    if columns.len() != cursor.len() || columns.is_empty() {
+        return Err(OrmPublicError::new(OrmErrorCode::CursorInvalid));
+    }
+    let mut branches = Vec::new();
+    let mut values = Vec::new();
+    for index in 0..columns.len() {
+        let mut terms = Vec::new();
+        for prior in 0..index {
+            let column = columns[prior];
+            match &cursor[prior] {
+                KeysetValue::Null => terms.push(format!("{} IS NULL", column.column)),
+                value => {
+                    let value = keyset_sql_value(value)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::CursorInvalid))?;
+                    terms.push(format!(
+                        "{} = {}",
+                        column.column,
+                        backend.placeholder(start_index + values.len())
+                    ));
+                    values.push(value);
+                }
+            }
+        }
+        let column = columns[index];
+        let comparison = match &cursor[index] {
+            KeysetValue::Null => match column.nulls {
+                KeysetNulls::First => "1 = 0".to_string(),
+                KeysetNulls::Last => format!("{} IS NOT NULL", column.column),
+            },
+            value => {
+                let value = keyset_sql_value(value)
+                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::CursorInvalid))?;
+                let operator = match column.direction {
+                    KeysetDirection::Asc => "<",
+                    KeysetDirection::Desc => ">",
+                };
+                let scalar = format!(
+                    "{} {} {}",
+                    column.column,
+                    operator,
+                    backend.placeholder(start_index + values.len())
+                );
+                values.push(value);
+                match column.nulls {
+                    KeysetNulls::First => {
+                        format!("({} IS NULL OR {scalar})", column.column)
+                    }
+                    KeysetNulls::Last => {
+                        format!("({} IS NOT NULL AND {scalar})", column.column)
+                    }
+                }
+            }
+        };
+        terms.push(comparison);
+        branches.push(format!("({})", terms.join(" AND ")));
+    }
+
+    Ok((format!("({})", branches.join(" OR ")), values))
 }
 
 impl PageInput {

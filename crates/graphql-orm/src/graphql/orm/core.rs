@@ -1275,6 +1275,32 @@ where
             })?;
         T::keyset_page_in_mutation_context(self, filter, page).await
     }
+
+    /// Reads a bounded forward or backward keyset connection inside the
+    /// current transaction.
+    pub async fn keyset_connection_page<'a, T>(
+        &'a mut self,
+        filter: <T as MutationContextKeysetConnectionPage<B>>::Filter,
+        page: crate::graphql::pagination::KeysetConnectionInput,
+    ) -> Result<crate::graphql::pagination::Connection<T>, crate::graphql::errors::OrmPublicError>
+    where
+        T: MutationContextKeysetConnectionPage<B> + Entity,
+    {
+        let metadata = T::metadata();
+        self.db
+            .ensure_entity_access(
+                None,
+                metadata.entity_name,
+                metadata.read_policy,
+                EntityAccessKind::Read,
+                EntityAccessSurface::Repository,
+            )
+            .await
+            .map_err(|error| {
+                crate::graphql::errors::OrmPublicError::internal(format!("{error:?}"))
+            })?;
+        T::keyset_connection_page_in_mutation_context(self, filter, page).await
+    }
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -1480,6 +1506,28 @@ pub trait MutationContextKeysetPage<B: WriteBackend = DefaultWriteBackend>: Size
         hook_ctx: &'a mut MutationContext<'_, B>,
         filter: Self::Filter,
         page: crate::graphql::pagination::KeysetPageInput,
+    ) -> futures::future::BoxFuture<
+        'a,
+        Result<
+            crate::graphql::pagination::Connection<Self>,
+            crate::graphql::errors::OrmPublicError,
+        >,
+    >;
+}
+
+/// Generated repository contract for bounded bidirectional keyset reads.
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub trait MutationContextKeysetConnectionPage<B: WriteBackend = DefaultWriteBackend>:
+    Sized
+{
+    /// Generated typed filter.
+    type Filter;
+
+    /// Reads one bounded keyset connection in an existing transaction.
+    fn keyset_connection_page_in_mutation_context<'a>(
+        hook_ctx: &'a mut MutationContext<'_, B>,
+        filter: Self::Filter,
+        page: crate::graphql::pagination::KeysetConnectionInput,
     ) -> futures::future::BoxFuture<
         'a,
         Result<

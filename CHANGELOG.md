@@ -2,6 +2,28 @@
 
 User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
 
+## 0.7.0
+
+Companion macros crate: `graphql-orm-macros` **0.7.0**.
+
+- Added dependency-owned `OrmSchemaModule` composition with stable module ID,
+  semantic version, reserved table namespace, schema fingerprint, migration
+  target, backup descriptors, and declared restore phases.
+- Added module-aware schema/backup snapshots and fail-closed validation for
+  duplicate ownership, overlapping namespaces, invalid or duplicate restore
+  hooks, and source-controlled fingerprint drift.
+- Added backend-neutral fenced lease state, proof bindings, monotonic fencing,
+  CAS row versions, heartbeats, fenced child writes, release, and reclaim
+  contracts. Failed transitions leave the in-memory state unchanged.
+- Added validated `first`/`after` and `last`/`before` keyset windows, portable
+  before-cursor SQL predicates, and generated SQLite/PostgreSQL repository and
+  transaction helpers that restore backward reads to canonical order.
+- Aligned the optional `auth-agql` bridge with `agql-auth` 0.9.0 at exact
+  revision `2ab5dc1f963dad401a3393fd3af1392c2bb51e50`.
+- Existing GraphQL fields, CRUD behavior, offset pagination, authorization,
+  and database schemas are unchanged. The new APIs are opt-in and create no
+  automatic data migration.
+
 ## 0.6.3
 
 Companion macros crate: `graphql-orm-macros` **0.6.1**.

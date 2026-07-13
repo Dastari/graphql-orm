@@ -3178,6 +3178,18 @@ pub(crate) fn generate_graphql_operations(
                         Box::pin(async move { tx.keyset_page::<Self>(filter, page).await })
                     }).await.map_err(|error| error.public_error().clone())
                 }
+
+                /// Fetch a bounded forward or backward keyset connection using
+                /// the entity's configured canonical order.
+                pub async fn keyset_connection_page(
+                    db: &::graphql_orm::db::Database<#backend_marker>,
+                    filter: #where_input,
+                    page: ::graphql_orm::graphql::pagination::KeysetConnectionInput,
+                ) -> Result<::graphql_orm::graphql::pagination::Connection<Self>, ::graphql_orm::graphql::errors::OrmPublicError> {
+                    db.transaction(::graphql_orm::graphql::orm::TransactionMode::Default, move |tx| {
+                        Box::pin(async move { tx.keyset_connection_page::<Self>(filter, page).await })
+                    }).await.map_err(|error| error.public_error().clone())
+                }
             },
             quote! {
                 impl ::graphql_orm::graphql::orm::MutationContextKeysetPage<#backend_marker> for #struct_name {
@@ -3243,6 +3255,110 @@ pub(crate) fn generate_graphql_operations(
                                 page_info: ::graphql_orm::graphql::pagination::PageInfo {
                                     has_next_page,
                                     has_previous_page: page.after.is_some(),
+                                    start_cursor: edges.first().map(|edge| edge.cursor.clone()),
+                                    end_cursor: edges.last().map(|edge| edge.cursor.clone()),
+                                    total_count,
+                                },
+                                edges,
+                            })
+                        })
+                    }
+                }
+
+                impl ::graphql_orm::graphql::orm::MutationContextKeysetConnectionPage<#backend_marker> for #struct_name {
+                    type Filter = #where_input;
+
+                    fn keyset_connection_page_in_mutation_context<'a>(
+                        hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                        filter: Self::Filter,
+                        page: ::graphql_orm::graphql::pagination::KeysetConnectionInput,
+                    ) -> ::graphql_orm::futures::future::BoxFuture<'a, Result<::graphql_orm::graphql::pagination::Connection<Self>, ::graphql_orm::graphql::errors::OrmPublicError>> {
+                        Box::pin(async move {
+                            use ::graphql_orm::graphql::orm::DatabaseFilter;
+                            const ORDER: &[::graphql_orm::graphql::orm::KeysetOrderColumn] = &[
+                                #(#order_tokens),*
+                            ];
+                            const FINGERPRINT: &str = #fingerprint;
+                            if filter.requires_in_memory_filtering(<#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT) {
+                                return Err(::graphql_orm::graphql::errors::OrmPublicError::new(
+                                    ::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput,
+                                ));
+                            }
+                            let validated = page.validate(
+                                ::graphql_orm::graphql::orm::PaginationConfig::DEFAULT_LIMIT,
+                                i64::MAX,
+                            )?;
+                            let config = hook_ctx.database().pagination_config();
+                            let resolved = config.resolve_page(
+                                Some(&::graphql_orm::graphql::orm::PageInput {
+                                    limit: Some(validated.limit),
+                                    offset: Some(0),
+                                }),
+                                true,
+                            );
+                            let limit = resolved
+                                .limit
+                                .unwrap_or(::graphql_orm::graphql::orm::PaginationConfig::DEFAULT_LIMIT)
+                                .max(1);
+                            let backward = validated.direction
+                                == ::graphql_orm::graphql::pagination::KeysetWindowDirection::Backward;
+                            let had_cursor = validated.cursor.is_some();
+                            let mut query = ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new().filter(&filter);
+                            let total_count = if validated.include_total_count {
+                                Some(query.clone().count_on(hook_ctx.executor()).await.map_err(::graphql_orm::graphql::errors::OrmPublicError::from)?)
+                            } else {
+                                None
+                            };
+                            if let Some(cursor) = validated.cursor.as_deref() {
+                                let values = ::graphql_orm::graphql::pagination::decode_keyset_cursor(cursor, FINGERPRINT, ORDER.len())?;
+                                let (predicate, binds) = if backward {
+                                    ::graphql_orm::graphql::orm::render_keyset_before(
+                                        <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT,
+                                        ORDER,
+                                        &values,
+                                        query.values.len() + 1,
+                                    )?
+                                } else {
+                                    ::graphql_orm::graphql::orm::render_keyset_after(
+                                        <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT,
+                                        ORDER,
+                                        &values,
+                                        query.values.len() + 1,
+                                    )?
+                                };
+                                query = query.where_values(&predicate, binds);
+                            }
+                            query.order_clauses = if backward {
+                                ORDER.iter().map(|column| column.reversed().order_sql()).collect()
+                            } else {
+                                ORDER.iter().map(|column| column.order_sql()).collect()
+                            };
+                            query = query.paginate(&::graphql_orm::graphql::orm::PageInput {
+                                limit: Some(limit.saturating_add(1)),
+                                offset: Some(0),
+                            });
+                            let mut entities = query.fetch_all_on(hook_ctx.executor()).await.map_err(::graphql_orm::graphql::errors::OrmPublicError::from)?;
+                            let has_more = entities.len() > limit as usize;
+                            if has_more {
+                                entities.truncate(limit as usize);
+                            }
+                            if backward {
+                                entities.reverse();
+                            }
+                            let edges = entities
+                                .into_iter()
+                                .map(|entity| {
+                                    let values = vec![#(#cursor_tokens),*];
+                                    ::graphql_orm::graphql::pagination::Edge {
+                                        cursor: ::graphql_orm::graphql::pagination::encode_keyset_cursor(FINGERPRINT, values),
+                                        node: entity,
+                                    }
+                                })
+                                .collect::<Vec<_>>();
+                            Ok(::graphql_orm::graphql::pagination::Connection {
+                                page_info: ::graphql_orm::graphql::pagination::PageInfo {
+                                    has_next_page: if backward { had_cursor } else { has_more },
+                                    has_previous_page: if backward { has_more } else { had_cursor },
                                     start_cursor: edges.first().map(|edge| edge.cursor.clone()),
                                     end_cursor: edges.last().map(|edge| edge.cursor.clone()),
                                     total_count,
