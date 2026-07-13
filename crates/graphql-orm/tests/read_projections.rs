@@ -436,11 +436,14 @@ async fn postgres_transaction_auth_and_rls_filter_projection_rows()
         return Ok(());
     };
     let owner = graphql_orm::sqlx::PgPool::connect(&url).await?;
-    graphql_orm::sqlx::query("DROP TABLE IF EXISTS projection_tenant_secrets CASCADE")
+    // Keep this fixture in the schema granted to the reader. Some disposable
+    // PostGIS images also create a schema matching the owner role, which makes
+    // an unqualified owner-side CREATE land somewhere the reader cannot see.
+    graphql_orm::sqlx::query("DROP TABLE IF EXISTS public.projection_tenant_secrets CASCADE")
         .execute(&owner)
         .await?;
     graphql_orm::sqlx::query(
-        "CREATE TABLE projection_tenant_secrets (
+        "CREATE TABLE public.projection_tenant_secrets (
             id TEXT PRIMARY KEY,
             tenant_id TEXT NOT NULL,
             label TEXT NOT NULL,
@@ -450,20 +453,24 @@ async fn postgres_transaction_auth_and_rls_filter_projection_rows()
     .execute(&owner)
     .await?;
     graphql_orm::sqlx::query(
-        "INSERT INTO projection_tenant_secrets VALUES
+        "INSERT INTO public.projection_tenant_secrets VALUES
          ('a', 'tenant-a', 'visible', 'secret-a'),
          ('b', 'tenant-b', 'hidden', 'secret-b')",
     )
     .execute(&owner)
     .await?;
-    graphql_orm::sqlx::query("ALTER TABLE projection_tenant_secrets ENABLE ROW LEVEL SECURITY")
-        .execute(&owner)
-        .await?;
-    graphql_orm::sqlx::query("ALTER TABLE projection_tenant_secrets FORCE ROW LEVEL SECURITY")
-        .execute(&owner)
-        .await?;
     graphql_orm::sqlx::query(
-        "CREATE POLICY projection_tenant_read ON projection_tenant_secrets
+        "ALTER TABLE public.projection_tenant_secrets ENABLE ROW LEVEL SECURITY",
+    )
+    .execute(&owner)
+    .await?;
+    graphql_orm::sqlx::query(
+        "ALTER TABLE public.projection_tenant_secrets FORCE ROW LEVEL SECURITY",
+    )
+    .execute(&owner)
+    .await?;
+    graphql_orm::sqlx::query(
+        "CREATE POLICY projection_tenant_read ON public.projection_tenant_secrets
          FOR SELECT USING (tenant_id = current_setting('app.tenant_id', true))",
     )
     .execute(&owner)
@@ -481,7 +488,7 @@ async fn postgres_transaction_auth_and_rls_filter_projection_rows()
         .execute(&owner)
         .await?;
     graphql_orm::sqlx::query(&format!(
-        "GRANT SELECT ON projection_tenant_secrets TO {role}"
+        "GRANT SELECT ON public.projection_tenant_secrets TO {role}"
     ))
     .execute(&owner)
     .await?;
@@ -533,7 +540,7 @@ async fn postgres_transaction_auth_and_rls_filter_projection_rows()
 
     drop(reader);
     reader_pool.close().await;
-    graphql_orm::sqlx::query("DROP TABLE projection_tenant_secrets CASCADE")
+    graphql_orm::sqlx::query("DROP TABLE public.projection_tenant_secrets CASCADE")
         .execute(&owner)
         .await?;
     graphql_orm::sqlx::query(&format!("DROP OWNED BY {role}"))
