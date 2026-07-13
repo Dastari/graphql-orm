@@ -23,10 +23,9 @@ Backup repositories have different semantics:
 
 Those repository keys should not be forced through primary object metadata.
 
-## Future Adapter Shape
+## Adapter Shape
 
-Once `graphql-orm-backup` depends on a version of this crate with `BlobStore`, it
-can add an adapter like:
+`graphql-orm-backup` 0.4.0 exposes this adapter:
 
 ```rust
 pub struct BlobStoreBackupRepository {

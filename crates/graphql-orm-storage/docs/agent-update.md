@@ -1,6 +1,6 @@
 # Agent Update
 
-This update summarizes the `0.4.0` storage-provider boundary for agents working
+This update summarizes the `0.5.0` storage-provider boundary for agents working
 on `graphql-orm-storage` or downstream crates.
 
 ## What Changed
@@ -22,6 +22,7 @@ on `graphql-orm-storage` or downstream crates.
 - S3 now implements `BlobStore` and `ObjectStorage` behind the `s3` feature.
 - Azure Blob remains a placeholder that implements `BlobStore` and still returns
   `UnsupportedBackend`.
+- Native SMB2/SMB3 implements `BlobStore` behind the `smb` feature.
 
 ## Provider Guidance
 
@@ -40,7 +41,7 @@ metadata.
 object keys rather than primary object namespaces and generated `StoredObject`
 metadata.
 
-Future adapter shape:
+The downstream adapter is implemented as:
 
 ```rust
 pub struct BlobStoreBackupRepository {
@@ -52,5 +53,5 @@ pub struct BlobStoreBackupRepository {
 ## Still Pending
 
 - Real Azure Blob `BlobStore` provider.
-- Backup adapter implementation after downstream crate alignment.
-- Provider integration tests that require external services beyond opt-in S3.
+- Manual native SMB compatibility runs against Windows Server and common NAS
+  implementations; the automated Samba suite is opt-in.

@@ -110,7 +110,7 @@ generates object IDs, storage keys, sizes, hashes, and timestamps.
 
 ## Backup Integration
 
-`BlobStore` is the intended future sharing point for `graphql-orm-backup`.
-Backup repositories should adapt `BlobStore`; they should not use
+`BlobStore` is the sharing point used by `graphql-orm-backup` through
+`BlobStoreBackupRepository`. Backup repositories should adapt `BlobStore`; they should not use
 `StorageService` or `StoredObject`, because backup keys and primary object
 metadata have different semantics.

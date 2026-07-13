@@ -18,7 +18,7 @@ Implemented behind the `s3` feature.
 
 S3 is implemented as a `BlobStore` first. The high-level `ObjectStorage`
 behavior delegates to the same S3 blob operations so backup integrations can
-reuse the provider through a future adapter.
+reuse the provider through `BlobStoreBackupRepository`.
 
 Expected configuration:
 
@@ -52,6 +52,13 @@ Expected configuration:
 
 The implementation must use the same `storage_key` values as local storage.
 
+## Phase 4: Native SMB2/SMB3
+
+Implemented behind the `smb` feature through `BlobStore`. See
+[Native SMB2/SMB3](native-smb.md). Mounted SMB remains a separate legacy model
+using the local provider and OS-owned mount/reconnect behavior.
+
 ## Out Of Scope
 
-Dropbox and SMB are backup repository targets for `graphql-orm-backup`, not primary object storage backends for this crate.
+Dropbox remains backup-specific. Native SMB is reusable for primary objects or
+backup repositories through `BlobStore`.

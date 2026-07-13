@@ -43,6 +43,8 @@ mod object;
 #[cfg(feature = "s3")]
 mod s3;
 mod service;
+#[cfg(feature = "smb")]
+mod smb;
 mod streaming_object;
 
 #[cfg(feature = "azure")]
@@ -53,7 +55,7 @@ pub use blob::{
     BoxedStorageStream, StorageByteStream, collect_storage_stream, validate_blob_key,
 };
 pub use checksum::sha256_hex;
-pub use error::StorageError;
+pub use error::{StorageError, StorageProviderErrorKind};
 pub use key::{build_storage_key, file_extension};
 #[cfg(feature = "local")]
 pub use local::LocalStorageBackend;
@@ -64,6 +66,8 @@ pub use object::{
 #[cfg(feature = "s3")]
 pub use s3::{S3StorageBackend, S3StorageConfig};
 pub use service::{ObjectStorage, StorageService};
+#[cfg(feature = "smb")]
+pub use smb::{SmbDialect, SmbProbeOptions, SmbProbeResult, SmbStorageBackend, SmbStorageConfig};
 pub use streaming_object::{
     BoxedMultipartWriter, MultipartWriter, ObjectContentRange, ObjectInfo, ObjectMetadata,
     ObjectRangeBody, StreamingObjectStore, validate_object_bucket,

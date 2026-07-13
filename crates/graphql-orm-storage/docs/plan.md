@@ -37,7 +37,8 @@ This crate must not provide:
 - application-specific collection, record, media, tenant, or policy assumptions
 - database entities that force one application schema
 - file bytes stored in database rows
-- backup repository providers such as Dropbox or SMB
+- backup-specific providers such as Dropbox (native SMB is now a reusable
+  `BlobStore` provider)
 
 Applications should persist returned `StoredObject` metadata in their own
 `graphql-orm` entities.

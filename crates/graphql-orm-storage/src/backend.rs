@@ -12,6 +12,8 @@ pub enum StorageBackend {
     S3,
     /// Azure Blob Storage.
     AzureBlob,
+    /// Native SMB2/SMB3 storage.
+    Smb,
 }
 
 impl StorageBackend {
@@ -22,6 +24,7 @@ impl StorageBackend {
             Self::Local => "local",
             Self::S3 => "s3",
             Self::AzureBlob => "azure_blob",
+            Self::Smb => "smb",
         }
     }
 }
@@ -34,6 +37,7 @@ impl FromStr for StorageBackend {
             "local" => Ok(Self::Local),
             "s3" | "s3-compatible" | "s3_compatible" => Ok(Self::S3),
             "azure_blob" | "azure-blob" | "azureblob" => Ok(Self::AzureBlob),
+            "smb" | "smb2" | "smb3" => Ok(Self::Smb),
             other => Err(StorageError::UnsupportedBackend {
                 backend: other.to_string(),
             }),

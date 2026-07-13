@@ -1,5 +1,17 @@
 # Release Notes
 
+## 0.5.0
+
+- Added feature-gated, pure-Rust native SMB2/SMB3 `BlobStore` support with
+  redacted credentials, signing/encryption policy, atomic conditional CREATE,
+  streamed temp/flush/rename writes, paged listing, reconnect, and probe APIs.
+- Added structured remote-provider error classifications.
+- Added Samba tests covering auth, workgroup credentials, signing, encryption,
+  streaming round trips, interruption cleanup, atomic lock creation, and
+  reconnect after server restart.
+- Added migration guidance for exhaustive enum matches, direct SMB
+  configuration, mounted-provider compatibility, and downstream release order.
+
 This page records user-facing changes for recent `graphql-orm-storage`
 releases.
 

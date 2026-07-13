@@ -160,11 +160,13 @@ rows.
 - [Backup integration guidance](docs/backup-integration.md)
 - [Development and test commands](docs/development.md)
 - [Release notes](docs/release-notes.md)
+- [Migration guide](MIGRATION.md)
+- [Changelog](CHANGELOG.md)
 
 ## Status
 
-Current crate version: `0.4.0`.
+Current crate version: `0.5.0`.
 
-Local filesystem and S3-compatible storage are implemented. Azure Blob remains
-an explicit placeholder. Provider integration tests that require external
-services are opt-in.
+Local filesystem, S3-compatible storage, and feature-gated native SMB2/SMB3
+storage are implemented. Azure Blob remains an explicit placeholder. Provider
+integration tests that require external services are opt-in.
