@@ -7,13 +7,21 @@ neither the runtime nor macros crate is published to crates.io.
 
 Update both `graphql-orm` and `graphql-orm-macros` to 0.7.0 at the same reviewed
 Git revision. If `auth-agql` is enabled or the host directly uses `agql-auth`,
-align it to version 0.9.0 at revision
-`2ab5dc1f963dad401a3393fd3af1392c2bb51e50` so Cargo resolves one public type
+align it to version 0.10.0 at revision
+`c92dcb441237bbe308499b26525945f60ffa394a` so Cargo resolves one public type
 universe.
 
 Existing entities, generated GraphQL SDL, mutations, offset connections, and
 stored cursors remain valid. No automatic database or data migration is
 required.
+
+The ORM bridge API and mapped principal/session-assurance data are unchanged.
+Hosts that directly use `agql-auth` OIDC state and opt into 0.10 bound
+reauthentication must follow its 0.10 migration guide: persisted
+`OAuthLoginState` records gain an optional authorization-policy value, and a
+decomposed relational store needs a nullable column before enabling the new
+writer. Hosts that only consume the ORM principal bridge need no data
+migration.
 
 Dependency crates that own private tables may implement `OrmSchemaModule` and
 compose a `SchemaModuleCatalog`. Applying the resulting schema target remains a
@@ -418,4 +426,4 @@ access path.
 
 - No JWT, OIDC, cookie, wildcard, or product-specific scope logic was added to `graphql-orm`.
 - PostgreSQL RLS helper functions still use exact scope matching.
-- The `auth-agql` feature is available against `agql-auth` 0.9.
+- The `auth-agql` feature is available against `agql-auth` 0.10.

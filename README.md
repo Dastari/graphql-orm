@@ -47,7 +47,7 @@ graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<revi
 GitHub with an exact full revision is the only supported distribution method. Neither crate is
 published to crates.io. Replace the placeholder with the reviewed release commit (the version tag
 is an identity aid, not a substitute for `rev`). The optional `auth-agql` bridge likewise resolves
-the exact upstream revision `2ab5dc1f963dad401a3393fd3af1392c2bb51e50`.
+the exact upstream revision `c92dcb441237bbe308499b26525945f60ffa394a`.
 
 Available backend features:
 
@@ -57,7 +57,7 @@ Available backend features:
 
 Optional integration features:
 
-- `auth-agql` - optional one-way bridge from `agql-auth` 0.9 principals into
+- `auth-agql` - optional one-way bridge from `agql-auth` 0.10 principals into
   `AuthSubject` / `DbAuthContext`
 
 Naming features are independent of backend features:

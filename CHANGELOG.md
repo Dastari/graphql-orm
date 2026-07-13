@@ -18,8 +18,9 @@ Companion macros crate: `graphql-orm-macros` **0.7.0**.
 - Added validated `first`/`after` and `last`/`before` keyset windows, portable
   before-cursor SQL predicates, and generated SQLite/PostgreSQL repository and
   transaction helpers that restore backward reads to canonical order.
-- Aligned the optional `auth-agql` bridge with `agql-auth` 0.9.0 at exact
-  revision `2ab5dc1f963dad401a3393fd3af1392c2bb51e50`.
+- Aligned the optional `auth-agql` bridge with `agql-auth` 0.10.0 at exact
+  revision `c92dcb441237bbe308499b26525945f60ffa394a` while preserving the existing
+  principal/session-assurance mapping.
 - Existing GraphQL fields, CRUD behavior, offset pagination, authorization,
   and database schemas are unchanged. The new APIs are opt-in and create no
   automatic data migration.

@@ -39,7 +39,7 @@ field-case-lower = ["graphql-orm-macros/field-case-lower"]
 field-case-upper = ["graphql-orm-macros/field-case-upper"]
 
 [dependencies]
-agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "2ab5dc1f963dad401a3393fd3af1392c2bb51e50", version = "0.9.0", optional = true }
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "c92dcb441237bbe308499b26525945f60ffa394a", version = "0.10.0", optional = true }
 async-graphql = { version = "7", features = ["dataloader", "uuid"] }
 futures = "0.3"
 geo = { version = "0.33", optional = true, default-features = false }

@@ -10,8 +10,8 @@ checksum = "fe438c63458706e03479442743baae6c88256498e6431708f6dfc520a26515d3"
 
 [[package]]
 name = "agql-auth"
-version = "0.9.0"
-source = "git+https://github.com/Dastari/agql-auth.git?rev=2ab5dc1f963dad401a3393fd3af1392c2bb51e50#2ab5dc1f963dad401a3393fd3af1392c2bb51e50"
+version = "0.10.0"
+source = "git+https://github.com/Dastari/agql-auth.git?rev=c92dcb441237bbe308499b26525945f60ffa394a#c92dcb441237bbe308499b26525945f60ffa394a"
 dependencies = [
  "argon2",
  "async-graphql",

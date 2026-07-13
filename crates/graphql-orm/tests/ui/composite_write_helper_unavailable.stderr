@@ -12,7 +12,8 @@ error[E0599]: no function or associated item named `create` found for struct `Co
            candidate #1: `CacheFactory`
            candidate #2: `ExtensionFactory`
            candidate #3: `async_graphql::CustomDirectiveFactory`
-           candidate #4: `regex_syntax::hir::interval::Interval`
+           candidate #4: `curve25519_dalek::traits::BasepointTable`
+           candidate #5: `regex_syntax::hir::interval::Interval`
 
 error[E0599]: no function or associated item named `update_by_id` found for struct `CompositeWriteRecord` in the current scope
   --> tests/ui/composite_write_helper_unavailable.rs:24:35

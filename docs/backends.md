@@ -18,8 +18,8 @@ Available backend features:
 
 Optional non-backend features:
 
-- `auth-agql` - optional one-way bridge from upstream `agql-auth` 0.9
-  (`git` rev `2ab5dc1f963dad401a3393fd3af1392c2bb51e50`) into `AuthSubject` /
+- `auth-agql` - optional one-way bridge from upstream `agql-auth` 0.10
+  (`git` rev `c92dcb441237bbe308499b26525945f60ffa394a`) into `AuthSubject` /
   `DbAuthContext`.
 
 The `mssql` feature activates optional `tiberius`, `tokio-util`, and Tokio TCP support. Projects that
