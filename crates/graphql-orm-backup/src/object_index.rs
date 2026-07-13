@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use uuid::Uuid;
 
+use graphql_orm_storage::StorageByteStream;
+
 use crate::BackupError;
 
 #[async_trait]
@@ -31,6 +33,20 @@ pub trait BackupObjectIndex: Send + Sync {
     ///
     /// Returns [`BackupError`] if the object bytes cannot be loaded.
     async fn load_object(&self, object: &BackupObjectRef) -> Result<Bytes, BackupError>;
+
+    /// Loads an object's bytes as a stream.
+    ///
+    /// Existing indexes remain compatible through the buffered default.
+    /// Implementations backed by a streaming object store should override this
+    /// method so large objects remain bounded in memory.
+    async fn load_object_stream(
+        &self,
+        object: &BackupObjectRef,
+    ) -> Result<StorageByteStream, BackupError> {
+        Ok(StorageByteStream::from_bytes(
+            self.load_object(object).await?,
+        ))
+    }
 }
 
 /// Object metadata returned by an application object index.

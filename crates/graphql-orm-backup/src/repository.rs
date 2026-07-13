@@ -19,6 +19,16 @@ pub trait BackupRepository: Send + Sync {
     /// persist the blob.
     async fn put_blob(&self, key: &str, body: Bytes) -> Result<(), BackupError>;
 
+    /// Streams a blob to a repository key.
+    ///
+    /// The default implementation preserves compatibility by collecting the
+    /// stream and delegating to [`BackupRepository::put_blob`]. Repositories
+    /// with native streaming support should override this method.
+    async fn put_blob_stream(&self, key: &str, body: StorageByteStream) -> Result<(), BackupError> {
+        self.put_blob(key, collect_storage_stream(body).await?)
+            .await
+    }
+
     /// Writes a blob only when no blob exists at the key.
     ///
     /// Returns `true` when the blob was written and `false` when the key
@@ -36,6 +46,19 @@ pub trait BackupRepository: Send + Sync {
         Ok(true)
     }
 
+    /// Streams a blob only when no blob exists at the key.
+    ///
+    /// The default implementation collects for compatibility. Provider-backed
+    /// repositories should override it with an atomic conditional write.
+    async fn put_blob_stream_if_absent(
+        &self,
+        key: &str,
+        body: StorageByteStream,
+    ) -> Result<bool, BackupError> {
+        self.put_blob_if_absent(key, collect_storage_stream(body).await?)
+            .await
+    }
+
     /// Reads a blob from a repository key.
     ///
     /// # Errors
@@ -43,6 +66,13 @@ pub trait BackupRepository: Send + Sync {
     /// Returns [`BackupError`] if the key is invalid, the blob is missing, or
     /// the backend cannot read it.
     async fn get_blob(&self, key: &str) -> Result<Bytes, BackupError>;
+
+    /// Loads a blob as a byte stream.
+    ///
+    /// The default implementation wraps the existing buffered API.
+    async fn get_blob_stream(&self, key: &str) -> Result<StorageByteStream, BackupError> {
+        Ok(StorageByteStream::from_bytes(self.get_blob(key).await?))
+    }
 
     /// Checks whether a blob exists.
     ///
@@ -157,6 +187,13 @@ impl BackupRepository for BlobStoreBackupRepository {
         Ok(())
     }
 
+    async fn put_blob_stream(&self, key: &str, body: StorageByteStream) -> Result<(), BackupError> {
+        self.store
+            .put_blob(&self.apply_prefix(key), body, BlobPutOptions::default())
+            .await?;
+        Ok(())
+    }
+
     async fn put_blob_if_absent(&self, key: &str, body: Bytes) -> Result<bool, BackupError> {
         let outcome = self
             .store
@@ -169,9 +206,25 @@ impl BackupRepository for BlobStoreBackupRepository {
         Ok(outcome.is_some())
     }
 
+    async fn put_blob_stream_if_absent(
+        &self,
+        key: &str,
+        body: StorageByteStream,
+    ) -> Result<bool, BackupError> {
+        let outcome = self
+            .store
+            .put_blob_if_not_exists(&self.apply_prefix(key), body, BlobPutOptions::default())
+            .await?;
+        Ok(outcome.is_some())
+    }
+
     async fn get_blob(&self, key: &str) -> Result<Bytes, BackupError> {
         let body = self.store.get_blob(&self.apply_prefix(key)).await?;
         Ok(collect_storage_stream(body.body).await?)
+    }
+
+    async fn get_blob_stream(&self, key: &str) -> Result<StorageByteStream, BackupError> {
+        Ok(self.store.get_blob(&self.apply_prefix(key)).await?.body)
     }
 
     async fn blob_exists(&self, key: &str) -> Result<bool, BackupError> {

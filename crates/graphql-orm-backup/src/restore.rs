@@ -2,8 +2,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use graphql_orm_storage::{BlobPutOptions, BlobStore, StorageByteStream};
+use futures::StreamExt;
+use graphql_orm_storage::{BlobPutOptions, BlobStore, StorageByteStream, collect_storage_stream};
 use serde::de::DeserializeOwned;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
@@ -59,6 +61,19 @@ pub trait RestoreObjectSink: Send + Sync {
         object: BackupObjectRef,
         bytes: Bytes,
     ) -> Result<(), BackupError>;
+
+    /// Restores one object from a stream.
+    ///
+    /// Existing sinks remain compatible through the buffered default. Native
+    /// streaming sinks should override this method.
+    async fn restore_object_stream(
+        &self,
+        object: BackupObjectRef,
+        body: StorageByteStream,
+    ) -> Result<(), BackupError> {
+        self.restore_object(object, collect_storage_stream(body).await?)
+            .await
+    }
 }
 
 /// [`RestoreObjectSink`] that writes object bytes back to a
@@ -87,6 +102,23 @@ impl RestoreObjectSink for BlobStoreRestoreObjectSink {
             .put_blob(
                 &object.storage_key,
                 StorageByteStream::from_bytes(bytes),
+                BlobPutOptions {
+                    content_type: object.mime_type.clone(),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn restore_object_stream(
+        &self,
+        object: BackupObjectRef,
+        body: StorageByteStream,
+    ) -> Result<(), BackupError> {
+        self.store
+            .put_blob(
+                &object.storage_key,
+                body,
                 BlobPutOptions {
                     content_type: object.mime_type.clone(),
                 },
@@ -209,18 +241,40 @@ pub async fn restore_objects(
     sink: &dyn RestoreObjectSink,
 ) -> Result<(), BackupError> {
     for object in &manifest.objects {
-        let bytes = repository.get_blob(&object.content_key).await?;
-        let actual = crate::bytes_sha256_hex(&bytes);
-        if actual != object.sha256_hex {
+        let source = repository.get_blob_stream(&object.content_key).await?;
+        let expected = object.sha256_hex.clone();
+        let key = object.content_key.clone();
+        let state = std::sync::Arc::new(std::sync::Mutex::new(Sha256::new()));
+        let hash_state = std::sync::Arc::clone(&state);
+        let stream = source.into_inner().map(move |chunk| {
+            let chunk = chunk?;
+            let mut hasher = match hash_state.lock() {
+                Ok(hasher) => hasher,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            hasher.update(&chunk);
+            Ok::<_, graphql_orm_storage::StorageError>(chunk)
+        });
+        sink.restore_object_stream(
+            object_ref_from_entry(object),
+            StorageByteStream::new(Box::pin(stream)),
+        )
+        .await?;
+        let actual = format!(
+            "{:x}",
+            match state.lock() {
+                Ok(hasher) => hasher.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            }
+            .finalize()
+        );
+        if actual != expected {
             return Err(BackupError::ChecksumMismatch {
-                key: object.content_key.clone(),
-                expected: object.sha256_hex.clone(),
+                key,
+                expected,
                 actual,
             });
         }
-
-        sink.restore_object(object_ref_from_entry(object), bytes)
-            .await?;
     }
 
     Ok(())

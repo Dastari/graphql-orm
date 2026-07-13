@@ -1,8 +1,9 @@
 use crate::{
     BackupError, BackupRepository, BackupSnapshotManifest, DEFAULT_OBJECT_CONCURRENCY,
-    manifest::sha256_hex, verify_manifest_checksum,
+    verify_manifest_checksum,
 };
 use futures::{StreamExt, TryStreamExt, stream};
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Verification concurrency settings.
@@ -112,8 +113,12 @@ async fn verify_blob_checksum(
     content_key: String,
     expected_sha256_hex: String,
 ) -> Result<(), BackupError> {
-    let bytes = repository.get_blob(&content_key).await?;
-    let actual = sha256_hex(&bytes);
+    let mut body = repository.get_blob_stream(&content_key).await?.into_inner();
+    let mut hasher = Sha256::new();
+    while let Some(chunk) = body.next().await {
+        hasher.update(&chunk?);
+    }
+    let actual = format!("{:x}", hasher.finalize());
     if actual != expected_sha256_hex {
         return Err(BackupError::ChecksumMismatch {
             key: content_key,

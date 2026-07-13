@@ -6,7 +6,10 @@ use std::{
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt, stream};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+use graphql_orm_storage::StorageByteStream;
 
 use crate::{
     BACKUP_FORMAT_VERSION, BackupChangeAction, BackupChangeExport, BackupError, BackupKind,
@@ -532,18 +535,41 @@ async fn write_object_entries(
     let owned_refs = object_refs.to_vec();
     let mut object_entries = stream::iter(owned_refs.into_iter().enumerate())
         .map(|(index, object)| async move {
-            let bytes = objects.load_object(&object).await?;
-            let actual = sha256_hex(&bytes);
             let content_key = object_content_key(&object.sha256_hex);
+            let source = objects.load_object_stream(&object).await?;
+            let hash_state = std::sync::Arc::new(std::sync::Mutex::new(Sha256::new()));
+            let stream_state = std::sync::Arc::clone(&hash_state);
+            let stream = source.into_inner().map(move |chunk| {
+                let chunk = chunk?;
+                let mut hasher = match stream_state.lock() {
+                    Ok(hasher) => hasher,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                hasher.update(&chunk);
+                Ok(chunk)
+            });
+            let written = repository
+                .put_blob_stream_if_absent(&content_key, StorageByteStream::new(Box::pin(stream)))
+                .await?;
+            let actual = if written {
+                let hasher = match hash_state.lock() {
+                    Ok(hasher) => hasher.clone(),
+                    Err(poisoned) => poisoned.into_inner().clone(),
+                };
+                format!("{:x}", hasher.finalize())
+            } else {
+                hash_object_source(objects.load_object_stream(&object).await?).await?
+            };
             if actual != object.sha256_hex {
+                if written {
+                    repository.delete_blob(&content_key).await?;
+                }
                 return Err(BackupError::ChecksumMismatch {
                     key: content_key,
                     expected: object.sha256_hex.clone(),
                     actual,
                 });
             }
-
-            repository.put_blob_if_absent(&content_key, bytes).await?;
 
             Ok((
                 index,
@@ -563,6 +589,15 @@ async fn write_object_entries(
     object_entries.sort_by_key(|(index, _)| *index);
     let object_entries = object_entries.into_iter().map(|(_, entry)| entry).collect();
     Ok(object_entries)
+}
+
+async fn hash_object_source(source: StorageByteStream) -> Result<String, BackupError> {
+    let mut hasher = Sha256::new();
+    let mut stream = source.into_inner();
+    while let Some(chunk) = stream.next().await {
+        hasher.update(&chunk?);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 async fn release_lock<T>(

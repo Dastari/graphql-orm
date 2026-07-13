@@ -21,8 +21,9 @@ backup layout, checksums, repository writes, restore ordering, and operational s
 - zstd-compressed JSON Lines table and change payloads
 - content-addressed object blobs keyed by SHA-256
 - local filesystem repository with path traversal protection
-- `graphql-orm-storage::BlobStore` repository adapter for shared local/S3 provider code
-- mounted SMB support through local filesystem semantics and `LocalBackupRepository::open_existing`
+- `graphql-orm-storage::BlobStore` repository adapter for shared local/S3/SMB provider code
+- feature-gated native SMB2/SMB3 plus separately named mounted-SMB legacy support
+- streaming backup, verification, and restore for large referenced objects
 - bounded concurrent object writes and checksum verification
 - advisory repository writer lock for backup, compaction, and pruning operations
 - synthetic-full compaction through `compact_chain`
@@ -36,7 +37,7 @@ backup layout, checksums, repository writes, restore ordering, and operational s
 graphql-orm-backup = {
     git = "https://github.com/Dastari/graphql-orm-backup.git",
     rev = "<reviewed-full-40-character-commit-sha>",
-    version = "0.3.1"
+    version = "0.4.0"
 }
 ```
 
@@ -52,12 +53,16 @@ The default `local` feature enables `LocalBackupRepository`.
 graphql-orm-backup = {
     git = "https://github.com/Dastari/graphql-orm-backup.git",
     rev = "<reviewed-full-40-character-commit-sha>",
-    version = "0.3.1",
+    version = "0.4.0",
     default-features = false
 }
 ```
 
 Use `default-features = false` when providing only custom repository implementations.
+
+Enable `smb` for native SMB2/SMB3 through `SmbStorageBackend` and
+`BlobStoreBackupRepository`. This release pins the reviewed
+`graphql-orm-storage` 0.5.0 revision used by the backup crate.
 
 Enable the `orm` feature for the ready-made `graphql-orm` runtime adapters. The
 host application must also enable exactly one `graphql-orm` backend feature
@@ -159,7 +164,10 @@ events, object metadata persistence, or cloud credentials.
 - [Restore semantics](docs/restore-semantics.md)
 - [Provider roadmap](docs/provider-roadmap.md)
 - [Cloud provider direction](docs/cloud-provider-direction.md)
-- [SMB mounted repository guidance](docs/smb.md)
+- [Native and mounted SMB](docs/smb.md)
+- [Digitise native SMB integration](docs/digitise-native-smb.md)
+- [Migration guide](MIGRATION.md)
+- [Changelog](CHANGELOG.md)
 - [graphql-orm integration brief](docs/graphql-orm-agent-brief.md)
 
 ## Status
@@ -171,7 +179,8 @@ only supply entity metadata and object-table column names.
 
 Provider code is shared through `graphql-orm-storage::BlobStore`. `LocalBackupRepository` is a thin
 wrapper over the storage crate's local blob backend, and `BlobStoreBackupRepository` can adapt any
-storage blob provider, including S3-compatible storage from `graphql-orm-storage`.
+storage blob provider, including S3-compatible and native SMB storage from
+`graphql-orm-storage`.
 
 Client-side encryption and content-defined chunking are intentionally out of scope for the current
 crate.

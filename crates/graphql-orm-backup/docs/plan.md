@@ -53,9 +53,11 @@ Create a reusable backup and restore crate for applications using `graphql-orm`.
 
 - Stream database exports instead of holding rows in memory.
 - Add zstd compression for future change files.
-- Add a `graphql-orm-storage::BlobStore` backup repository adapter after the shared storage crate exposes that lower-level abstraction.
-- Add S3 backup repository through the shared `BlobStore` adapter path.
+- Improve provider-native pagination for repositories with very large key sets.
 - Add Azure Blob backup repository through the shared `BlobStore` adapter path.
 - Add Dropbox backup repository.
-- Implement full restore after graphql-orm import lands.
 - Implement incremental backup after graphql-orm change journal lands.
+
+Implemented since the initial plan: `BlobStoreBackupRepository`, S3 reuse,
+native SMB reuse, full restore, referenced-object restore, deletion, pruning,
+locking, and streamed referenced-object transfer.

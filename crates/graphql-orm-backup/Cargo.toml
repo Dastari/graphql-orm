@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-backup"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm-backup"
@@ -9,6 +9,7 @@ description = "Backup and restore orchestration primitives for graphql-orm appli
 [features]
 default = ["local"]
 local = ["graphql-orm-storage/local"]
+smb = ["dep:secrecy", "graphql-orm-storage/smb"]
 # Requires the host application to enable exactly one graphql-orm backend
 # feature (sqlite or postgres).
 orm = ["dep:graphql-orm"]
@@ -18,9 +19,10 @@ async-trait = "0.1"
 bytes = "1"
 futures = "0.3"
 graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "510cd85d9fbc9ae60c7117a752370c590564949e", version = "0.6.1", optional = true, default-features = false }
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm-storage.git", rev = "3c92c96bdb9f4d7b48481f2a5038c7ba73dde81c", version = "0.4.0", default-features = false }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm-storage.git", rev = "f1a1f06483d5fd3a0b8fd17f013b3ad4dd9849c5", version = "0.5.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+secrecy = { version = "0.10", optional = true }
 sha2 = "0.10"
 thiserror = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
@@ -49,3 +51,8 @@ required-features = ["local"]
 name = "restore_snapshot"
 path = "tests/restore_snapshot.rs"
 required-features = ["local"]
+
+[[test]]
+name = "smb_repository"
+path = "tests/smb_repository.rs"
+required-features = ["smb"]

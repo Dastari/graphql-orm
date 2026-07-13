@@ -43,12 +43,9 @@ Expected configuration:
 
 ## Phase 4: SMB
 
-Initial SMB support should be mounted filesystem support using `LocalBackupRepository`.
-
-Native SMB protocol support is future work. Mounts, credentials, reconnect
-behavior, and OS-level permissions are managed outside this crate. Use
-`LocalBackupRepository::open_existing` to validate that the mounted path exists
-and is a directory before using it as a repository root.
+Native SMB is implemented by `graphql-orm-storage::SmbStorageBackend` and
+adapted through `BlobStoreBackupRepository`. Mounted filesystem support remains
+an explicitly named legacy deployment option.
 
 ## Phase 5: Dropbox
 

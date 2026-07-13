@@ -1,10 +1,14 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::{StreamExt, stream};
 use graphql_orm_backup::{
     BackupChangeExport, BackupCompression, BackupError, BackupObjectIndex, BackupObjectRef,
     BackupRepository, BackupRow, BackupTableExport, DATABASE_EXPORT_FORMAT, FullBackupRequest,
@@ -12,6 +16,7 @@ use graphql_orm_backup::{
     create_full_backup, database_table_key, decompress_payload, object_content_key,
     snapshot_manifest_key, verify_manifest_and_objects, verify_manifest_checksum,
 };
+use graphql_orm_storage::StorageByteStream;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
@@ -66,6 +71,42 @@ async fn create_full_backup_writes_tables_objects_and_manifest_last() {
         repository.write_order().last(),
         Some(&snapshot_manifest_key(snapshot_id()))
     );
+}
+
+#[tokio::test]
+async fn create_full_backup_streams_large_objects_in_bounded_chunks() {
+    const CHUNK_SIZE: usize = 128 * 1024;
+    const CHUNK_COUNT: usize = 128;
+    let chunk = vec![0x5a; CHUNK_SIZE];
+    let mut hasher = sha2::Sha256::new();
+    use sha2::Digest;
+    for _ in 0..CHUNK_COUNT {
+        hasher.update(&chunk);
+    }
+    let hash = format!("{:x}", hasher.finalize());
+    let repository = StreamingProbeRepository::default();
+    let database = MockDatabase::new(vec![BackupTableExport {
+        table_name: "empty".to_string(),
+        rows: Vec::new(),
+    }]);
+    let objects = StreamingObjectIndex {
+        object: BackupObjectRef {
+            object_id: object_id(),
+            storage_key: "objects/large.bin".to_string(),
+            sha256_hex: hash,
+            size_bytes: u64::try_from(CHUNK_SIZE * CHUNK_COUNT).expect("bounded size"),
+            mime_type: Some("application/octet-stream".to_string()),
+        },
+        chunk_size: CHUNK_SIZE,
+        chunk_count: CHUNK_COUNT,
+    };
+
+    create_full_backup(&repository, &database, &objects, backup_request())
+        .await
+        .expect("streaming full backup");
+
+    assert_eq!(repository.max_chunk.load(Ordering::SeqCst), CHUNK_SIZE);
+    assert_eq!(repository.chunk_count.load(Ordering::SeqCst), CHUNK_COUNT);
 }
 
 #[tokio::test]
@@ -304,6 +345,50 @@ impl BackupRepository for RecordingRepository {
     }
 }
 
+#[derive(Default)]
+struct StreamingProbeRepository {
+    inner: RecordingRepository,
+    max_chunk: AtomicUsize,
+    chunk_count: AtomicUsize,
+}
+
+#[async_trait]
+impl BackupRepository for StreamingProbeRepository {
+    async fn put_blob(&self, key: &str, body: Bytes) -> Result<(), BackupError> {
+        self.inner.put_blob(key, body).await
+    }
+
+    async fn put_blob_stream_if_absent(
+        &self,
+        _key: &str,
+        body: StorageByteStream,
+    ) -> Result<bool, BackupError> {
+        let mut stream = body.into_inner();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            self.max_chunk.fetch_max(chunk.len(), Ordering::SeqCst);
+            self.chunk_count.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(true)
+    }
+
+    async fn get_blob(&self, key: &str) -> Result<Bytes, BackupError> {
+        self.inner.get_blob(key).await
+    }
+
+    async fn blob_exists(&self, key: &str) -> Result<bool, BackupError> {
+        self.inner.blob_exists(key).await
+    }
+
+    async fn list_blobs(&self, prefix: &str) -> Result<Vec<String>, BackupError> {
+        self.inner.list_blobs(prefix).await
+    }
+
+    async fn delete_blob(&self, key: &str) -> Result<(), BackupError> {
+        self.inner.delete_blob(key).await
+    }
+}
+
 struct MockDatabase {
     tables: Vec<BackupTableExport>,
 }
@@ -391,5 +476,40 @@ impl BackupObjectIndex for MockObjectIndex {
             .position(|candidate| candidate.object_id == object.object_id)
             .expect("object exists");
         Ok(self.bytes[index].clone())
+    }
+}
+
+struct StreamingObjectIndex {
+    object: BackupObjectRef,
+    chunk_size: usize,
+    chunk_count: usize,
+}
+
+#[async_trait]
+impl BackupObjectIndex for StreamingObjectIndex {
+    async fn list_objects_for_full_backup(&self) -> Result<Vec<BackupObjectRef>, BackupError> {
+        Ok(vec![self.object.clone()])
+    }
+
+    async fn list_objects_for_incremental_backup(
+        &self,
+        _since_snapshot_id: Uuid,
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        Ok(Vec::new())
+    }
+
+    async fn load_object(&self, _object: &BackupObjectRef) -> Result<Bytes, BackupError> {
+        Err(BackupError::UnsupportedOperation {
+            operation: "buffered load must not be used".to_string(),
+        })
+    }
+
+    async fn load_object_stream(
+        &self,
+        _object: &BackupObjectRef,
+    ) -> Result<StorageByteStream, BackupError> {
+        let chunk_size = self.chunk_size;
+        let chunks = (0..self.chunk_count).map(move |_| Ok(Bytes::from(vec![0x5a; chunk_size])));
+        Ok(StorageByteStream::new(Box::pin(stream::iter(chunks))))
     }
 }

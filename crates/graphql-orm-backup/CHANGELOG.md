@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0
+
+- Enabled native SMB repositories through the storage crate's `smb` feature
+  and `BlobStoreBackupRepository`; transport code remains in storage.
+- Added backward-compatible streaming methods to `BackupRepository`,
+  `BackupObjectIndex`, and `RestoreObjectSink`.
+- Full backup, verification, and object restore now stream referenced objects
+  and compute checksums incrementally.
+- Added Samba lifecycle coverage for full create/load/list, verify, database
+  and object restore, prune, delete, and simultaneous repository locking.
+- The snapshot format and repository key layout are unchanged.
+- Added migration guidance for streaming trait defaults, native-versus-mounted
+  SMB configuration, dependency-source identity, release order, and host
+  authorization boundaries.
+- Pinned `graphql-orm-storage` 0.5.0 to the reviewed native-SMB release commit.
+
 ## 0.3.1
 
 - Pinned `graphql-orm` 0.6.1 and `graphql-orm-storage` 0.4.0 to reviewed full
