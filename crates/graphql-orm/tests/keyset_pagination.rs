@@ -130,6 +130,58 @@ async fn bounded_composite_keyset_has_no_duplicates_when_rows_arrive_before_curs
 }
 
 #[tokio::test]
+async fn bidirectional_connection_reads_tail_and_older_window_in_canonical_order()
+-> graphql_orm::Result<()> {
+    let database = setup().await?;
+    for (rank, label) in [(1, "a"), (2, "b"), (3, "c"), (4, "d"), (5, "e")] {
+        KeysetItem::insert(&database, input(Some(1), rank, label)).await?;
+    }
+
+    let tail = KeysetItem::keyset_connection_page(
+        &database,
+        KeysetItemWhereInput::default(),
+        graphql_orm::graphql::pagination::KeysetConnectionInput {
+            last: Some(2),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("tail keyset connection");
+    assert_eq!(
+        tail.edges
+            .iter()
+            .map(|edge| edge.node.label.as_str())
+            .collect::<Vec<_>>(),
+        ["d", "e"]
+    );
+    assert!(tail.page_info.has_previous_page);
+    assert!(!tail.page_info.has_next_page);
+
+    let older = KeysetItem::keyset_connection_page(
+        &database,
+        KeysetItemWhereInput::default(),
+        graphql_orm::graphql::pagination::KeysetConnectionInput {
+            before: tail.page_info.start_cursor.clone(),
+            last: Some(2),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("older keyset connection");
+    assert_eq!(
+        older
+            .edges
+            .iter()
+            .map(|edge| edge.node.label.as_str())
+            .collect::<Vec<_>>(),
+        ["b", "c"]
+    );
+    assert!(older.page_info.has_previous_page);
+    assert!(older.page_info.has_next_page);
+    Ok(())
+}
+
+#[tokio::test]
 async fn keyset_applies_max_limit_and_counts_only_when_requested() -> graphql_orm::Result<()> {
     let database = setup()
         .await?

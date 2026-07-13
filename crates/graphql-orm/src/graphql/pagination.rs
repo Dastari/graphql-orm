@@ -130,3 +130,97 @@ pub struct KeysetPageInput {
     #[graphql(default)]
     pub include_total_count: bool,
 }
+
+/// Relay-style bounded bidirectional keyset request.
+#[derive(async_graphql::InputObject, Clone, Debug, Default, PartialEq, Eq)]
+pub struct KeysetConnectionInput {
+    /// Read forward after this opaque cursor.
+    pub after: Option<String>,
+    /// Read backward before this opaque cursor.
+    pub before: Option<String>,
+    /// Forward page size.
+    pub first: Option<i64>,
+    /// Backward page size.
+    pub last: Option<i64>,
+    /// Opt-in count; disabled by default to avoid unbounded count work.
+    #[graphql(default)]
+    pub include_total_count: bool,
+}
+
+/// Validated query direction for a keyset connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeysetWindowDirection {
+    /// Canonical forward read.
+    Forward,
+    /// Reverse database read whose edges are restored to canonical order.
+    Backward,
+}
+
+/// Parsed bounded keyset request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedKeysetConnection {
+    /// Direction.
+    pub direction: KeysetWindowDirection,
+    /// Exclusive cursor in the selected direction.
+    pub cursor: Option<String>,
+    /// Bounded requested edge count.
+    pub limit: i64,
+    /// Whether total count was explicitly requested.
+    pub include_total_count: bool,
+}
+
+impl KeysetConnectionInput {
+    /// Validates direction/cursor combinations and clamps the requested page to
+    /// the supplied maximum.
+    ///
+    /// An omitted `first`/`last` becomes a forward page using `default_limit`.
+    /// `after` may use the default forward limit, while `before` requires an
+    /// explicit `last`. Mixed directions and dual cursors fail closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-input error for ambiguous directions, a non-positive
+    /// requested page, or `before` without `last`. Returns an authorization
+    /// configuration error when either supplied limit bound is non-positive.
+    pub fn validate(
+        &self,
+        default_limit: i64,
+        maximum_limit: i64,
+    ) -> Result<ValidatedKeysetConnection, crate::graphql::errors::OrmPublicError> {
+        use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
+
+        if default_limit <= 0 || maximum_limit <= 0 {
+            return Err(OrmPublicError::new(
+                OrmErrorCode::AuthorizationMisconfigured,
+            ));
+        }
+        if self.first.is_some() && self.last.is_some()
+            || self.after.is_some() && self.before.is_some()
+            || self.last.is_some() && self.after.is_some()
+            || self.first.is_some() && self.before.is_some()
+            || self.before.is_some() && self.last.is_none()
+        {
+            return Err(OrmPublicError::new(OrmErrorCode::InvalidInput));
+        }
+
+        let (direction, cursor, requested) = if let Some(last) = self.last {
+            (KeysetWindowDirection::Backward, self.before.clone(), last)
+        } else {
+            (
+                KeysetWindowDirection::Forward,
+                self.after.clone(),
+                self.first.unwrap_or(default_limit),
+            )
+        };
+        if requested <= 0 {
+            return Err(OrmPublicError::new(OrmErrorCode::InvalidInput));
+        }
+
+        Ok(ValidatedKeysetConnection {
+            direction,
+            cursor,
+            limit: requested.min(maximum_limit),
+            include_total_count: self.include_total_count,
+        })
+    }
+}
