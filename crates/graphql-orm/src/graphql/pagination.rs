@@ -149,7 +149,6 @@ pub struct KeysetConnectionInput {
 
 /// Validated query direction for a keyset connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum KeysetWindowDirection {
     /// Canonical forward read.
     Forward,
