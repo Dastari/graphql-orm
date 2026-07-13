@@ -160,21 +160,28 @@ impl SchemaModuleCatalog {
 
             let mut tables = Vec::with_capacity(module_entities.len());
             for entity in module_entities {
-                if !entity.table_name.starts_with(descriptor.table_namespace) {
+                let Some(table_name) = table_basename(entity.table_name) else {
+                    return Err(SchemaModuleError::TableOutsideNamespace {
+                        module_id: descriptor.module_id.to_owned(),
+                        table_name: entity.table_name.to_owned(),
+                        namespace: descriptor.table_namespace.to_owned(),
+                    });
+                };
+                if !table_name.starts_with(descriptor.table_namespace) {
                     return Err(SchemaModuleError::TableOutsideNamespace {
                         module_id: descriptor.module_id.to_owned(),
                         table_name: entity.table_name.to_owned(),
                         namespace: descriptor.table_namespace.to_owned(),
                     });
                 }
-                if let Some(owner) = table_owners.insert(entity.table_name, descriptor.module_id) {
+                if let Some(owner) = table_owners.insert(table_name.clone(), descriptor.module_id) {
                     return Err(SchemaModuleError::DuplicateTableOwnership {
-                        table_name: entity.table_name.to_owned(),
+                        table_name,
                         first_module: owner.to_owned(),
                         second_module: descriptor.module_id.to_owned(),
                     });
                 }
-                tables.push(entity.table_name.to_owned());
+                tables.push(table_name);
                 entities.push(*entity);
             }
             tables.sort();
@@ -495,6 +502,20 @@ fn validate_descriptor(descriptor: &SchemaModuleDescriptor) -> Result<(), Schema
     Ok(())
 }
 
+fn table_basename(table_name: &str) -> Option<String> {
+    let component = table_name.rsplit('.').next()?.trim();
+    if component.is_empty() {
+        return None;
+    }
+    if component.starts_with('[') && component.ends_with(']') {
+        return Some(component[1..component.len() - 1].replace("]]", "]"));
+    }
+    if component.starts_with('"') && component.ends_with('"') {
+        return Some(component[1..component.len() - 1].replace("\"\"", "\""));
+    }
+    Some(component.to_owned())
+}
+
 fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes {
@@ -502,4 +523,29 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::table_basename;
+
+    #[test]
+    fn table_basename_normalizes_supported_backend_identifier_paths() {
+        assert_eq!(
+            table_basename("example_feature_items").as_deref(),
+            Some("example_feature_items")
+        );
+        assert_eq!(
+            table_basename("public.example_feature_items").as_deref(),
+            Some("example_feature_items")
+        );
+        assert_eq!(
+            table_basename("[dbo].[example_feature_items]").as_deref(),
+            Some("example_feature_items")
+        );
+        assert_eq!(
+            table_basename("\"public\".\"example_feature_items\"").as_deref(),
+            Some("example_feature_items")
+        );
+    }
 }
