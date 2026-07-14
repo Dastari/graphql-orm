@@ -1855,6 +1855,9 @@ pub(crate) fn record_executed_query() {
 pub struct ColumnDef {
     pub name: &'static str,
     pub rust_name: &'static str,
+    /// Public GraphQL field name after rename attributes and case features are
+    /// applied. Defaults to `name` for hand-built definitions.
+    pub api_name: &'static str,
     pub sql_type: &'static str,
     pub spatial: Option<SpatialColumnDef>,
     pub search: Option<SearchFieldDef>,
@@ -1864,6 +1867,12 @@ pub struct ColumnDef {
     pub is_unique: bool,
     pub is_generated: bool,
     pub is_filterable: bool,
+    /// The derive generated an order-input term for this column.
+    pub is_sortable: bool,
+    /// The column stores a date-time value rendered per backend; its
+    /// `logical_type` remains [`BackupValueKind::String`] for backup and
+    /// schema-hash compatibility.
+    pub is_date_time: bool,
     pub backup_policy: ColumnBackupPolicy,
     pub default: Option<&'static str>,
     pub references: Option<&'static str>,
@@ -1886,6 +1895,7 @@ impl ColumnDef {
         Self {
             name,
             rust_name: name,
+            api_name: name,
             sql_type,
             spatial: None,
             search: None,
@@ -1895,6 +1905,8 @@ impl ColumnDef {
             is_unique: false,
             is_generated: false,
             is_filterable: false,
+            is_sortable: false,
+            is_date_time: false,
             backup_policy: ColumnBackupPolicy::Include,
             default: None,
             references: None,
@@ -1927,8 +1939,23 @@ impl ColumnDef {
         self
     }
 
+    pub const fn sortable(mut self) -> Self {
+        self.is_sortable = true;
+        self
+    }
+
+    pub const fn date_time(mut self) -> Self {
+        self.is_date_time = true;
+        self
+    }
+
     pub const fn rust_name(mut self, rust_name: &'static str) -> Self {
         self.rust_name = rust_name;
+        self
+    }
+
+    pub const fn api_name(mut self, api_name: &'static str) -> Self {
+        self.api_name = api_name;
         self
     }
 
@@ -1967,6 +1994,9 @@ impl ColumnDef {
 pub struct FieldMetadata {
     pub name: &'static str,
     pub rust_name: &'static str,
+    /// Public GraphQL field name after rename attributes and case features are
+    /// applied. Defaults to `name` for hand-built definitions.
+    pub api_name: &'static str,
     pub sql_type: &'static str,
     pub spatial: Option<SpatialColumnDef>,
     pub search: Option<SearchFieldDef>,
@@ -1976,6 +2006,12 @@ pub struct FieldMetadata {
     pub is_unique: bool,
     pub is_generated: bool,
     pub is_filterable: bool,
+    /// The derive generated an order-input term for this column.
+    pub is_sortable: bool,
+    /// The column stores a date-time value rendered per backend; its
+    /// `logical_type` remains [`BackupValueKind::String`] for backup and
+    /// schema-hash compatibility.
+    pub is_date_time: bool,
     pub backup_policy: ColumnBackupPolicy,
     pub default: Option<&'static str>,
     pub references: Option<&'static str>,
@@ -1986,6 +2022,7 @@ impl From<&ColumnDef> for FieldMetadata {
         Self {
             name: value.name,
             rust_name: value.rust_name,
+            api_name: value.api_name,
             sql_type: value.sql_type,
             spatial: value.spatial,
             search: value.search,
@@ -1995,6 +2032,8 @@ impl From<&ColumnDef> for FieldMetadata {
             is_unique: value.is_unique,
             is_generated: value.is_generated,
             is_filterable: value.is_filterable,
+            is_sortable: value.is_sortable,
+            is_date_time: value.is_date_time,
             backup_policy: value.backup_policy,
             default: value.default,
             references: value.references,
@@ -3767,7 +3806,7 @@ fn restore_ranks_from_entities(
         .collect()
 }
 
-fn fnv1a64(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes {
         hash ^= u64::from(*byte);

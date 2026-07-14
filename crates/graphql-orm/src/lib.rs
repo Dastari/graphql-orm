@@ -353,3 +353,110 @@ pub mod graphql;
 pub mod prelude;
 /// Shared scalar and input helper types used by generated GraphQL surfaces.
 pub mod types;
+
+/// Compile-time probes proving that certain generated APIs are deliberately absent.
+///
+/// These use `compile_fail` doctests instead of full-diagnostic snapshots so the assertions
+/// hold across compiler versions regardless of rustc's error prose. Each probe is paired with
+/// a compiling twin that differs only by the offending line, so a `compile_fail` success
+/// cannot hide an unrelated breakage.
+///
+/// Append-only entities compile and expose reads:
+///
+/// ```
+/// use graphql_orm::prelude::*;
+///
+/// #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// #[graphql_entity(table = "events", plural = "Events", append_only = true)]
+/// struct Event {
+///     #[primary_key]
+///     id: graphql_orm::uuid::Uuid,
+///     #[filterable(type = "string")]
+///     #[sortable]
+///     kind: String,
+/// }
+///
+/// async fn append(database: &Database<SqliteBackend>) -> graphql_orm::Result<()> {
+///     let _ = Event::insert(database, CreateEventInput { kind: "created".to_string() }).await?;
+///     Ok(())
+/// }
+/// ```
+///
+/// ...but generate no delete helper:
+///
+/// ```compile_fail
+/// use graphql_orm::prelude::*;
+///
+/// #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// #[graphql_entity(table = "events", plural = "Events", append_only = true)]
+/// struct Event {
+///     #[primary_key]
+///     id: graphql_orm::uuid::Uuid,
+///     #[filterable(type = "string")]
+///     #[sortable]
+///     kind: String,
+/// }
+///
+/// async fn update(database: &Database<SqliteBackend>) {
+///     let _ = Event::delete_all(database).await;
+/// }
+/// ```
+///
+/// Composite-key entities compile:
+///
+/// ```
+/// use graphql_orm::prelude::*;
+///
+/// #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
+/// #[graphql_entity(
+///     backend = "sqlite",
+///     table = "composite_write_records",
+///     plural = "CompositeWriteRecords",
+///     default_sort = "tenant_id ASC, local_id ASC"
+/// )]
+/// struct CompositeWriteRecord {
+///     #[primary_key]
+///     #[sortable]
+///     pub tenant_id: i32,
+///
+///     #[primary_key]
+///     #[sortable]
+///     pub local_id: i32,
+///
+///     pub name: String,
+/// }
+///
+/// fn main() {}
+/// ```
+///
+/// ...but generate no single-key write helpers:
+///
+/// ```compile_fail
+/// use graphql_orm::prelude::*;
+///
+/// #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
+/// #[graphql_entity(
+///     backend = "sqlite",
+///     table = "composite_write_records",
+///     plural = "CompositeWriteRecords",
+///     default_sort = "tenant_id ASC, local_id ASC"
+/// )]
+/// struct CompositeWriteRecord {
+///     #[primary_key]
+///     #[sortable]
+///     pub tenant_id: i32,
+///
+///     #[primary_key]
+///     #[sortable]
+///     pub local_id: i32,
+///
+///     pub name: String,
+/// }
+///
+/// fn main() {
+///     let _ = CompositeWriteRecord::create;
+///     let _ = CompositeWriteRecord::update_by_id;
+/// }
+/// ```
+#[cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
+pub mod generated_api_absence_probes {}

@@ -1654,6 +1654,11 @@ fn backup_value_kind_tokens(ty: &syn::Type, meta: &FieldMetadata) -> proc_macro2
     }
 
     let inner_type = option_inner_type(ty).unwrap_or(ty);
+    // `Option<Vec<u8>>` stores BYTEA/BLOB (see the SQL type inference); its logical kind must be
+    // Bytes as well, not the generic `Vec` -> Json fallback.
+    if is_byte_vec_type(inner_type) {
+        return quote! { ::graphql_orm::graphql::orm::BackupValueKind::Bytes };
+    }
     if let Some(ident) = type_path_last_ident(inner_type) {
         return match ident.to_string().as_str() {
             "bool" => quote! { ::graphql_orm::graphql::orm::BackupValueKind::Bool },
@@ -2629,11 +2634,14 @@ fn generate_entity_impl(
             None => quote! { None },
         };
         let is_filterable = field_meta.filter && field_meta.filterable.is_some();
+        let is_sortable = field_meta.sortable && field_meta.order;
+        let is_date_time = field_meta.is_date_field;
 
         column_defs.push(quote! {
             ::graphql_orm::graphql::orm::ColumnDef {
                 name: #db_col,
                 rust_name: #rust_name,
+                api_name: #graphql_name,
                 sql_type: #sql_type,
                 spatial: #spatial_tokens,
                 search: #search_tokens,
@@ -2643,6 +2651,8 @@ fn generate_entity_impl(
                 is_unique: #is_unique,
                 is_generated: #is_generated,
                 is_filterable: #is_filterable,
+                is_sortable: #is_sortable,
+                is_date_time: #is_date_time,
                 backup_policy: #backup_policy,
                 default: #default_expr,
                 references: None,

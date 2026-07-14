@@ -2,6 +2,36 @@
 
 User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
 
+## 0.8.0
+
+Companion macros crate: `graphql-orm-macros` **0.8.0**.
+
+- Added an owned, backend-neutral runtime schema IR (`runtime_schema` module):
+  stable ID newtypes, owned collection/field/relation/index metadata with
+  ordered relation key pairs and composite primary keys, fail-closed structured
+  validation diagnostics, deterministic canonical serialization, and separate
+  full and ID-free structural fingerprints.
+- Added `RuntimeSchema::from_static_entities` so derive-generated
+  `EntityMetadata` graphs convert into the owned IR; equivalent static and
+  runtime definitions agree on the ID-free structural fingerprint.
+- `ColumnDef` and `FieldMetadata` gained `api_name`, `is_sortable`, and
+  `is_date_time` fields (with const builders), emitted by the derives so
+  public GraphQL names, sortability, and date-time semantics are recorded in
+  metadata. Existing backup hashing, schema planning, and generated GraphQL
+  behavior are unchanged.
+- Hand-written `ColumnDef`/`FieldMetadata` struct literals must add the new
+  fields or use the const builders; see MIGRATION.md.
+- Fixed `Option<Vec<u8>>` logical type inference: nullable byte columns now
+  carry `BackupValueKind::Bytes` instead of falling through to `Json`. Storage
+  DDL was already BYTEA/BLOB; logical backup descriptors and stable schema
+  hashes change for affected entities (see MIGRATION.md).
+- The IR fails closed: Serde deserialization enforces stable-ID validity and
+  rejects unknown properties; validation proves foreign-key target uniqueness,
+  default/value-kind compatibility, global stable-ID uniqueness, and duplicate
+  key members; canonical rendering escapes literal defaults. The ID-free
+  fingerprint is named `structural_fingerprint` and conversion reports policy,
+  backup, redaction, ownership, and propagation semantics as unsupported
+  rather than dropping them.
 ## 0.7.1
 
 Companion macros crate: `graphql-orm-macros` remains **0.7.0**.

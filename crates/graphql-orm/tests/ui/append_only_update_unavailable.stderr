@@ -1,8 +1,0 @@
-error[E0599]: no function or associated item named `delete_all` found for struct `Event` in the current scope
-  --> tests/ui/append_only_update_unavailable.rs:14:20
-   |
- 5 | struct Event {
-   | ------------ function or associated item `delete_all` not found for this struct
-...
-14 |     let _ = Event::delete_all(database).await;
-   |                    ^^^^^^^^^^ function or associated item not found in `Event`
