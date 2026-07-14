@@ -224,3 +224,69 @@ async fn generated_schema_respects_crate_wide_case_features() {
         assert_has(&sdl, "\tnot_in: [String!]");
     }
 }
+
+/// `ColumnDef.api_name` must record the same public name the generated GraphQL fields use,
+/// under every naming configuration. Run separately per field-case feature, matching the SDL
+/// assertions above.
+#[test]
+fn column_api_names_follow_the_active_naming_configuration() {
+    let case_collection = CaseCollection::metadata();
+    let api = |rust_name: &str| -> &'static str {
+        case_collection
+            .fields
+            .iter()
+            .find(|field| field.rust_name == rust_name)
+            .unwrap_or_else(|| panic!("field {rust_name} present"))
+            .api_name
+    };
+
+    // An explicit #[graphql(name = ...)] override wins under every configuration.
+    assert_eq!(api("exact_override"), "ExactName");
+
+    // An entity-level #[graphql(rename_fields = ...)] wins over case features.
+    let override_item = OverrideItem::metadata();
+    let override_value = override_item
+        .fields
+        .iter()
+        .find(|field| field.rust_name == "override_value")
+        .expect("override_value present");
+    assert_eq!(override_value.api_name, "OverrideValue");
+
+    #[cfg(not(any(
+        feature = "field-case-pascal",
+        feature = "field-case-snake",
+        feature = "field-case-screaming-snake",
+        feature = "field-case-lower",
+        feature = "field-case-upper"
+    )))]
+    {
+        // Default camelCase; serde renames are honored when no case feature is active.
+        assert_eq!(api("cover_stored_file_id"), "coverStoredFileId");
+        assert_eq!(api("serde_named_field"), "SerdeExact");
+    }
+    #[cfg(feature = "field-case-pascal")]
+    {
+        assert_eq!(api("cover_stored_file_id"), "CoverStoredFileId");
+        assert_eq!(api("serde_named_field"), "SerdeNamedField");
+    }
+    #[cfg(feature = "field-case-snake")]
+    {
+        assert_eq!(api("cover_stored_file_id"), "cover_stored_file_id");
+        assert_eq!(api("serde_named_field"), "serde_named_field");
+    }
+    #[cfg(feature = "field-case-screaming-snake")]
+    {
+        assert_eq!(api("cover_stored_file_id"), "COVER_STORED_FILE_ID");
+        assert_eq!(api("serde_named_field"), "SERDE_NAMED_FIELD");
+    }
+    #[cfg(feature = "field-case-lower")]
+    {
+        assert_eq!(api("cover_stored_file_id"), "coverstoredfileid");
+        assert_eq!(api("serde_named_field"), "serdenamedfield");
+    }
+    #[cfg(feature = "field-case-upper")]
+    {
+        assert_eq!(api("cover_stored_file_id"), "COVERSTOREDFILEID");
+        assert_eq!(api("serde_named_field"), "SERDENAMEDFIELD");
+    }
+}

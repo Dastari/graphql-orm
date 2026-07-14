@@ -11,6 +11,26 @@ required. The optional `auth-agql` bridge intentionally pins `agql-auth` at
 `c92dcb441237bbe308499b26525945f60ffa394a`. Consequently `cargo package -p graphql-orm` cannot
 resolve that Git-only optional dependency through the crates.io packaging model; this is expected.
 
+## 0.8.0
+
+Owned runtime schema IR release; **breaking** (metadata struct literals and
+nullable-byte schema identity — see MIGRATION.md). Runtime and macros are both
+`0.8.0`.
+
+- Hosts can define collections at runtime through an owned, validated,
+  backend-neutral schema IR with stable ID newtypes and deterministic
+  fingerprints, and convert existing derive metadata into the same
+  representation. See [Owned runtime schema IR](runtime-schema-ir.md).
+- Static column metadata now records the public GraphQL `api_name`, an
+  `is_sortable` marker, and an `is_date_time` marker. Generated GraphQL,
+  backup hashing, and migration planning behavior are unchanged.
+- Only hosts constructing `ColumnDef`/`FieldMetadata` struct literals by hand
+  need source changes; the const builders and derives are source-compatible.
+- Nullable `Option<Vec<u8>>` columns now report logical `Bytes` instead of
+  `Json`. Entities with such columns get new stable schema hashes and module
+  fingerprints, and pre-0.8.0 backups containing them fail 0.8.0 hash
+  verification — take fresh backups after upgrading and keep old archives for
+  pre-0.8.0 binaries (MIGRATION.md has the full compatibility statement).
 ## 0.7.1
 
 Compatible Git-only backend dependency-isolation fix. The runtime is `0.7.1`;

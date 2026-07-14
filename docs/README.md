@@ -15,6 +15,7 @@ This directory contains the project documentation that is too detailed for the r
 - [Microsoft SQL Server read-only backend](mssql.md)
 - [Federation operation roots](federation.md)
 - [Schema ownership, validation, planning, and ABI migrations](schema-management.md)
+- [Owned runtime schema IR](runtime-schema-ir.md)
 - [Runtime writes, hooks, subscriptions, and policies](runtime-and-writes.md)
 - [Backup runtime API](backup.md)
 - [Schema modules and fenced leases](schema-modules-and-leases.md)

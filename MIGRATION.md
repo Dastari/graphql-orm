@@ -3,6 +3,44 @@
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.8.0 Owned Runtime Schema IR
+
+Update both `graphql-orm` and `graphql-orm-macros` to 0.8.0 at the same reviewed
+Git revision. This is a **breaking** pre-1.0 release, not an additive one, in
+two respects:
+
+**1. Public metadata struct fields.** `ColumnDef` and `FieldMetadata` gained
+`api_name: &'static str`, `is_sortable: bool`, and `is_date_time: bool`. Code
+built through the derives or the `ColumnDef` const builders needs no changes.
+Code constructing either struct as a literal must add the new fields
+(`api_name` defaults to the column name through `ColumnDef::new`; both flags
+default to `false`), or switch to the builders: `.api_name(...)`,
+`.sortable()`, `.date_time()`.
+
+**2. Nullable-byte logical identity.** `Option<Vec<u8>>` fields previously
+reported logical type `Json` while storing BYTEA/BLOB; they now correctly
+report `Bytes`. Column DDL, stored data, row decoding, and generated GraphQL
+are unchanged. For entities **with** nullable byte columns:
+
+- `stable_schema_hash` and schema-module fingerprints that include such an
+  entity change. Bump the semantic version of any `OrmSchemaModule` whose
+  fingerprint covers one, and regenerate recorded fingerprints.
+- Backups taken before 0.8.0 that contain such an entity will fail 0.8.0
+  hash-compatibility verification. Take fresh backups after upgrading. Keep
+  the old archives: they remain readable by pre-0.8.0 binaries, and their
+  bytes are not corrupted — only the recorded schema identity differs. Do not
+  overwrite or prune them until a post-upgrade backup has been verified.
+- Logical backups written by 0.8.0 record byte columns as `Bytes` (their
+  values were already binary).
+
+Entities without nullable byte columns keep their existing hashes,
+fingerprints, and backup compatibility; no database or data migration is
+required for anyone.
+
+The new `runtime_schema` module is additive API surface. Runtime query
+execution, migration planning from the IR, and dynamic GraphQL registration
+are not part of this release.
+
 ## 0.7.1 Backend Dependency Isolation
 
 Update `graphql-orm` to 0.7.1 at the reviewed full Git revision. The companion
