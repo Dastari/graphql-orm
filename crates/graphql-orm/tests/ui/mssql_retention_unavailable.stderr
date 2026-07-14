@@ -1,0 +1,5 @@
+error: retention_purge requires a managed writable sqlite or postgres entity
+  --> tests/ui/mssql_retention_unavailable.rs:11:8
+   |
+11 | struct MssqlRetainedEvent {
+   |        ^^^^^^^^^^^^^^^^^^

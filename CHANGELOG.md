@@ -2,6 +2,28 @@
 
 User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
 
+## 0.9.0
+
+Companion macros crate: `graphql-orm-macros` **0.9.0**. Both crates require a
+pre-1.0 minor version because public schema descriptors and generated code
+change.
+
+- Added opt-in `retention_purge = "policy.key"` metadata for append-only managed
+  SQLite/PostgreSQL entities.
+- Added host-only `Database::retention_transaction[_with_auth]`, narrow
+  `RetentionContext`, generated bounded typed purge, exact outcomes, and
+  redacted post-commit notifications.
+- Added transaction-local SQLite/PostgreSQL append-only enforcement exceptions,
+  structural introspection, stable schema/module/backup fingerprints, explicit
+  migration work, policy/RLS integration, and fail-closed tamper detection.
+- Existing append-only entities remain non-purgeable and retain their previous
+  stable fingerprints. Ordinary repository, transaction, and GraphQL mutation
+  surfaces are unchanged.
+- Manual public metadata/model struct literals and exhaustive enum matches
+  require the 0.9.0 source updates listed in MIGRATION.md. Low-level backend
+  traits retain fail-closed default methods, and older serialized
+  descriptors/catalogs default retention to disabled.
+
 ## 0.8.0
 
 Companion macros crate: `graphql-orm-macros` **0.8.0**.

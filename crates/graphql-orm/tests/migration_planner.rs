@@ -36,6 +36,7 @@ fn users_v1() -> TableModel {
         foreign_keys: vec![],
         search_indexes: vec![],
         append_only: false,
+        retention_purge: false,
         check_constraints: vec![],
     }
 }
@@ -114,6 +115,7 @@ fn posts_with_fk() -> TableModel {
         }],
         search_indexes: vec![],
         append_only: false,
+        retention_purge: false,
         check_constraints: vec![],
     }
 }
@@ -153,6 +155,7 @@ fn places_with_spatial_index() -> TableModel {
         foreign_keys: vec![],
         search_indexes: vec![],
         append_only: false,
+        retention_purge: false,
         check_constraints: vec![],
     }
 }

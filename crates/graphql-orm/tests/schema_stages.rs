@@ -260,6 +260,7 @@ fn sqlite_vocabularies_v1() -> TableModel {
         foreign_keys: vec![],
         search_indexes: vec![],
         append_only: false,
+        retention_purge: false,
         check_constraints: vec![],
     }
 }
@@ -288,6 +289,7 @@ fn sqlite_vocabulary_terms_v1() -> TableModel {
         }],
         search_indexes: vec![],
         append_only: false,
+        retention_purge: false,
         check_constraints: vec![],
     }
 }

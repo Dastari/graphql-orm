@@ -57,6 +57,7 @@ fn users_v1(table_name: &str) -> TableModel {
         foreign_keys: vec![],
         search_indexes: vec![],
         append_only: false,
+        retention_purge: false,
         check_constraints: vec![],
     }
 }

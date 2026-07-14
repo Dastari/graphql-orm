@@ -199,6 +199,21 @@ Upgrade behavior:
 8. Apply statements explicitly.
 9. Record migration history.
 
+## Append-only retention capability changes
+
+`append_only` remains strict unless an entity explicitly declares a dedicated
+`retention_purge` policy key. That opt-in is structural schema state: it changes
+the SQLite DELETE trigger and reserved context-table contract, or the
+PostgreSQL trigger function and managed RLS policy. It is included in stable
+table, module, and backup fingerprints.
+
+Enabling, disabling, or repairing the capability produces an explicit
+`SetAppendOnly` step. Apply it only under a fresh host/module migration version;
+if a previously recorded version still has such work, application fails closed.
+No row data is rewritten, but operators must validate foreign-key behavior and
+existing data before enabling physical purge. See
+[Bounded append-only retention maintenance](retention-maintenance.md).
+
 ## Migration History
 
 The history table is `__graphql_orm_migrations`.

@@ -1,0 +1,11 @@
+error: retention_purge does not support a self-referential ON DELETE CASCADE because it could exceed the explicit row limit
+  --> tests/ui/retention_self_cascade.rs:14:5
+   |
+14 | /     #[relation(
+15 | |         target = "RetainedTree",
+16 | |         from = "parent_id",
+17 | |         to = "id",
+...  |
+20 | |     )]
+21 | |     parent: Option<Box<RetainedTree>>,
+   | |_____________________________________^

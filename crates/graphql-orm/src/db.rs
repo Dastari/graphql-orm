@@ -535,6 +535,15 @@ impl<B: OrmBackend> Database<B> {
         {
             return Ok(false);
         }
+        if surface == crate::graphql::orm::EntityAccessSurface::RetentionMaintenance
+            && self.entity_policy.is_none()
+        {
+            return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
+                .with_internal(format!(
+                    "retention maintenance for entity {entity_name} requires an entity policy provider"
+                ))
+                .into_graphql_error());
+        }
 
         match self.authorization_mode {
             AuthorizationMode::LegacyPermissive => {
@@ -998,6 +1007,92 @@ impl<B> Database<B>
 where
     B: TransactionBackend,
 {
+    /// Run host-only append-only retention maintenance atomically.
+    ///
+    /// This runner always uses
+    /// [`TransactionMode::StateMachine`](crate::graphql::orm::TransactionMode::StateMachine)
+    /// so bounded
+    /// selection and deletion share a deterministic write snapshot. Only
+    /// entities explicitly declaring a retention policy implement the
+    /// generated purge capability.
+    pub async fn retention_transaction<T, F>(
+        &self,
+        callback: F,
+    ) -> Result<T, crate::graphql::orm::TransactionError>
+    where
+        for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
+            sqlx::Executor<'c, Database = B::Database> + Send,
+        F: for<'tx> FnOnce(
+            &'tx mut crate::graphql::orm::RetentionContext<'_, B>,
+        ) -> futures::future::BoxFuture<
+            'tx,
+            Result<T, crate::graphql::errors::OrmPublicError>,
+        >,
+    {
+        self.retention_transaction_with_auth(None, callback).await
+    }
+
+    /// Run host-only append-only retention maintenance with transaction-local
+    /// database authorization/RLS context.
+    pub async fn retention_transaction_with_auth<T, F>(
+        &self,
+        auth: Option<&crate::graphql::orm::DbAuthContext>,
+        callback: F,
+    ) -> Result<T, crate::graphql::orm::TransactionError>
+    where
+        for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
+            sqlx::Executor<'c, Database = B::Database> + Send,
+        F: for<'tx> FnOnce(
+            &'tx mut crate::graphql::orm::RetentionContext<'_, B>,
+        ) -> futures::future::BoxFuture<
+            'tx,
+            Result<T, crate::graphql::errors::OrmPublicError>,
+        >,
+    {
+        if ORM_TRANSACTION_ACTIVE
+            .try_with(|active| *active)
+            .unwrap_or(false)
+        {
+            return Err(crate::graphql::orm::TransactionError::Rejected(
+                OrmPublicError::with_message(
+                    OrmErrorCode::Conflict,
+                    "nested ORM transactions are not supported",
+                ),
+            ));
+        }
+
+        ORM_TRANSACTION_ACTIVE
+            .scope(true, async move {
+                let mut tx = B::begin_orm_transaction(
+                    self.pool(),
+                    crate::graphql::orm::TransactionMode::StateMachine,
+                )
+                .await
+                .map_err(classify_transaction_error::<B>)?;
+                B::apply_auth_context_to_transaction(&mut tx, auth)
+                    .await
+                    .map_err(classify_transaction_error::<B>)?;
+                B::clear_retention_context(&mut tx)
+                    .await
+                    .map_err(classify_transaction_error::<B>)?;
+                let mutation = crate::graphql::orm::MutationContext::new(self, tx);
+                let mut context = crate::graphql::orm::RetentionContext::new(mutation);
+                let value = callback(&mut context).await.map_err(|error| {
+                    if error.is_retryable() {
+                        crate::graphql::orm::TransactionError::Retryable(error)
+                    } else {
+                        crate::graphql::orm::TransactionError::Rejected(error)
+                    }
+                })?;
+                context
+                    .commit_and_emit()
+                    .await
+                    .map_err(classify_transaction_error::<B>)?;
+                Ok(value)
+            })
+            .await
+    }
+
     /// Run ORM reads and mutations atomically without exposing a driver transaction.
     ///
     /// The callback must be boxed because its future borrows the transaction-bound

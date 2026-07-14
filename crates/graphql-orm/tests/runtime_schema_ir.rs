@@ -242,6 +242,7 @@ fn fixture_runtime_schema() -> RuntimeSchema {
         physical_table: "customers".to_string(),
         primary_key: vec![fid("fld_customer_id")],
         append_only: false,
+        retention_purge: false,
         fields: vec![
             RuntimeField {
                 generated: true,
@@ -361,6 +362,7 @@ fn fixture_runtime_schema() -> RuntimeSchema {
         physical_table: "contact_details".to_string(),
         primary_key: vec![fid("fld_contact_id")],
         append_only: false,
+        retention_purge: false,
         fields: vec![
             RuntimeField {
                 generated: true,
@@ -414,6 +416,7 @@ fn fixture_runtime_schema() -> RuntimeSchema {
         physical_table: "customer_notes".to_string(),
         primary_key: vec![fid("fld_note_customer_id"), fid("fld_note_seq")],
         append_only: false,
+        retention_purge: false,
         fields: vec![
             RuntimeField {
                 filterable: true,
@@ -463,6 +466,7 @@ fn fixture_runtime_schema() -> RuntimeSchema {
         physical_table: "note_attachments".to_string(),
         primary_key: vec![fid("fld_attach_id")],
         append_only: false,
+        retention_purge: false,
         fields: vec![
             RuntimeField {
                 generated: true,
@@ -576,6 +580,33 @@ fn canonical_bytes_are_independent_of_declaration_order() {
 }
 
 #[test]
+fn retention_capability_is_validated_and_fingerprinted() {
+    let mut append_only = fixture_runtime_schema();
+    append_only.collections[0].append_only = true;
+    let append_only = append_only.validate().expect("append-only schema is valid");
+
+    let mut retained = fixture_runtime_schema();
+    retained.collections[0].append_only = true;
+    retained.collections[0].retention_purge = true;
+    let retained = retained.validate().expect("retention schema is valid");
+
+    assert_ne!(append_only.fingerprint(), retained.fingerprint());
+    assert_ne!(
+        append_only.structural_fingerprint(),
+        retained.structural_fingerprint()
+    );
+    let canonical = String::from_utf8(retained.canonical_bytes()).expect("canonical utf8");
+    assert!(canonical.contains("|retention_purge=true"));
+
+    let mut invalid = fixture_runtime_schema();
+    invalid.collections[0].retention_purge = true;
+    assert!(
+        diagnostic_codes(invalid)
+            .contains(&RuntimeSchemaDiagnosticCode::RetentionRequiresAppendOnly)
+    );
+}
+
+#[test]
 fn owned_schema_survives_source_value_drop_and_serde_round_trip() {
     let validated = {
         // Build from short-lived heap strings; nothing borrowed may escape this scope.
@@ -588,6 +619,7 @@ fn owned_schema_survives_source_value_drop_and_serde_round_trip() {
             physical_table: source_table.clone(),
             primary_key: vec![fid("things.id")],
             append_only: false,
+            retention_purge: false,
             fields: vec![field("things.id", "id", "id", RuntimeValueKind::Uuid)],
             relations: vec![],
             indexes: vec![],
@@ -790,6 +822,28 @@ fn serde_cannot_bypass_stable_id_validation() {
     });
     let err = serde_json::from_value::<RuntimeSchema>(bad_id).expect_err("invalid ID rejected");
     assert!(err.to_string().contains("stable ID"));
+}
+
+#[test]
+fn legacy_runtime_schema_json_defaults_retention_to_disabled() {
+    let mut value = serde_json::to_value(fixture_runtime_schema()).expect("serializes");
+    for collection in value["collections"]
+        .as_array_mut()
+        .expect("collections array")
+    {
+        collection
+            .as_object_mut()
+            .expect("collection object")
+            .remove("retention_purge");
+    }
+
+    let decoded: RuntimeSchema = serde_json::from_value(value).expect("legacy JSON deserializes");
+    assert!(
+        decoded
+            .collections
+            .iter()
+            .all(|collection| !collection.retention_purge)
+    );
 }
 
 #[test]

@@ -83,6 +83,7 @@ fn timed_notes_schema_with_serial(
             foreign_keys: vec![],
             search_indexes: vec![],
             append_only: false,
+            retention_purge: false,
             check_constraints: vec![],
         }],
     }

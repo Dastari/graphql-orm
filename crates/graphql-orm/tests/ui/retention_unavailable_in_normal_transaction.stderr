@@ -1,0 +1,8 @@
+error[E0599]: no method named `purge` found for mutable reference `&mut MutationContext<'_>` in the current scope
+  --> tests/ui/retention_unavailable_in_normal_transaction.rs:23:22
+   |
+22 | /                 ordinary
+23 | |                     .purge::<RetainedEvent>(
+   | |                     -^^^^^ method not found in `&mut MutationContext<'_>`
+   | |_____________________|
+   |

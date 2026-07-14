@@ -17,6 +17,7 @@ This directory contains the project documentation that is too detailed for the r
 - [Schema ownership, validation, planning, and ABI migrations](schema-management.md)
 - [Owned runtime schema IR](runtime-schema-ir.md)
 - [Runtime writes, hooks, subscriptions, and policies](runtime-and-writes.md)
+- [Bounded append-only retention maintenance](retention-maintenance.md)
 - [Backup runtime API](backup.md)
 - [Schema modules and fenced leases](schema-modules-and-leases.md)
 - [Release notes](release-notes.md)

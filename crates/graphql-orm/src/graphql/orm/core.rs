@@ -1,4 +1,6 @@
 use super::dialect::DatabaseBackend;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+use super::dialect::SqlDialect;
 use super::query::{
     ChangeAction, DatabaseEntity, DatabaseSchema, DatabaseSearchSchema, EntityRelations,
 };
@@ -437,6 +439,34 @@ pub enum BoundedMutationOutcome {
     LimitExceeded { maximum: u32 },
 }
 
+/// Outcome of one bounded append-only retention purge.
+///
+/// A limit overflow is detected before any row is deleted. The surrounding
+/// retention transaction remains usable so the host may record or report the
+/// rejected maintenance attempt explicitly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RetentionPurgeOutcome {
+    /// Every matching row was deleted and `affected` is exact.
+    Purged { affected: u32 },
+    /// More rows matched than the caller-authorized ceiling; nothing changed.
+    LimitExceeded { maximum: u32 },
+}
+
+/// Redacted post-commit notification for one successful bounded purge.
+///
+/// Row contents and predicate values are intentionally absent. Hosts that
+/// require durable audit evidence should append their own managed audit entity
+/// inside the same retention transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetentionPurgeEvent {
+    /// Rust entity type name from managed metadata.
+    pub entity_name: &'static str,
+    /// Managed physical table name from generated metadata.
+    pub table_name: &'static str,
+    /// Exact number of rows deleted by the committed purge.
+    pub affected: u32,
+}
+
 impl TransactionError {
     pub fn public_error(&self) -> &crate::graphql::errors::OrmPublicError {
         match self {
@@ -593,6 +623,19 @@ pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     tx: sqlx::Transaction<'tx, B::Database>,
     deferred_events: Vec<Box<dyn DeferredEventEmitter<B>>>,
     deferred_actions: Vec<Box<dyn PostCommitActionRunner<B>>>,
+}
+
+/// Narrow transaction-bound capability for regulated retention maintenance.
+///
+/// Values of this type can only be created by
+/// [`Database::retention_transaction`](crate::db::Database::retention_transaction)
+/// or its auth-aware counterpart. It intentionally exposes append/query
+/// operations and generated bounded purge, but no raw executor or ordinary
+/// update/delete surface.
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub struct RetentionContext<'tx, B: WriteBackend = DefaultWriteBackend> {
+    mutation: MutationContext<'tx, B>,
+    poisoned: bool,
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -1304,6 +1347,216 @@ where
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+impl<'tx, B> RetentionContext<'tx, B>
+where
+    B: super::TransactionBackend,
+    for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
+        sqlx::Executor<'c, Database = B::Database> + Send,
+{
+    pub(crate) fn new(mutation: MutationContext<'tx, B>) -> Self {
+        Self {
+            mutation,
+            poisoned: false,
+        }
+    }
+
+    pub(crate) async fn commit_and_emit(mut self) -> crate::Result<()> {
+        if self.poisoned {
+            return Err(sqlx::Error::Protocol(
+                "retention transaction cannot commit after a failed maintenance operation"
+                    .to_string(),
+            ));
+        }
+        B::clear_retention_context(&mut self.mutation.tx).await?;
+        self.mutation.commit_and_emit().await
+    }
+
+    /// Append a row through the entity's normal generated insert path.
+    ///
+    /// This enables a host schema to record a separate redacted purge fact in
+    /// the same atomic transaction without assigning application-specific
+    /// audit semantics to the ORM.
+    pub async fn insert<T>(
+        &mut self,
+        input: <T as MutationContextInsert<B>>::CreateInput,
+    ) -> crate::Result<T>
+    where
+        T: MutationContextInsert<B> + Entity,
+    {
+        self.mutation.insert::<T>(input).await
+    }
+
+    /// Start a transaction-bound typed entity read.
+    pub fn query<T>(&mut self) -> MutationQuery<'_, 'tx, T, B>
+    where
+        T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+    {
+        self.mutation.query::<T>()
+    }
+
+    /// Start a transaction-bound least-privilege projection read.
+    pub fn project<P>(&mut self) -> super::query::TransactionProjectionQuery<'_, 'tx, P, B>
+    where
+        P: super::query::ReadProjection<B>,
+    {
+        self.mutation.project::<P>()
+    }
+
+    /// Purge a nonempty typed match set from an explicitly retention-enabled
+    /// append-only entity, subject to an explicit nonzero maximum.
+    pub async fn purge<T>(
+        &mut self,
+        filter: <T as RetentionPurge<B>>::Filter,
+        limit: MutationLimit,
+    ) -> crate::Result<RetentionPurgeOutcome>
+    where
+        T: RetentionPurge<B>,
+    {
+        let result = self.purge_inner::<T>(filter, limit).await;
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    async fn purge_inner<T>(
+        &mut self,
+        filter: <T as RetentionPurge<B>>::Filter,
+        limit: MutationLimit,
+    ) -> crate::Result<RetentionPurgeOutcome>
+    where
+        T: RetentionPurge<B>,
+    {
+        let metadata = T::metadata();
+        let Some(policy) = metadata.retention_policy else {
+            return Err(sqlx::Error::Protocol(
+                "entity is not enabled for retention purge".to_string(),
+            ));
+        };
+        self.mutation
+            .db
+            .ensure_entity_access(
+                None,
+                metadata.entity_name,
+                Some(policy),
+                EntityAccessKind::Write,
+                EntityAccessSurface::RetentionMaintenance,
+            )
+            .await
+            .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
+        if filter.is_empty() {
+            return Err(sqlx::Error::Protocol(
+                "retention purge requires a non-empty typed filter".to_string(),
+            ));
+        }
+        if filter.requires_in_memory_filtering(B::DIALECT) {
+            return Err(sqlx::Error::Protocol(
+                "retention purge requires a filter rendered completely by the database".to_string(),
+            ));
+        }
+        let mut query = EntityQuery::<T, B>::new().filter(&filter);
+        query.order_clauses.push(
+            T::PRIMARY_KEYS
+                .iter()
+                .map(|column| B::DIALECT.quote_identifier_path(column))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        query.page = Some(super::query::PageInput {
+            limit: Some(i64::from(limit.get()) + 1),
+            offset: None,
+        });
+        let rows = query.fetch_all_on(self.mutation.executor()).await?;
+        if rows.len() > limit.get() as usize {
+            return Ok(RetentionPurgeOutcome::LimitExceeded {
+                maximum: limit.get(),
+            });
+        }
+
+        let mut states = Vec::with_capacity(rows.len());
+        for entity in &rows {
+            self.mutation
+                .db
+                .ensure_writable_row(
+                    None,
+                    metadata.entity_name,
+                    metadata.write_policy,
+                    EntityAccessSurface::RetentionMaintenance,
+                    entity as &(dyn Any + Send + Sync),
+                )
+                .await
+                .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
+            let state = entity_state(entity)?;
+            self.mutation
+                .run_mutation_hook(
+                    None,
+                    &MutationEvent {
+                        phase: MutationPhase::Before,
+                        action: ChangeAction::Deleted,
+                        entity_name: metadata.entity_name,
+                        table_name: metadata.table_name,
+                        metadata,
+                        id: entity.retention_event_id(),
+                        changes: Vec::new(),
+                        before_state: Some(state.clone()),
+                        after_state: None,
+                    },
+                )
+                .await
+                .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
+            states.push(state);
+        }
+
+        B::set_retention_context(&mut self.mutation.tx, T::TABLE_NAME).await?;
+        let (sql, values) = EntityQuery::<T, B>::new()
+            .filter(&filter)
+            .build_delete_sql();
+        let execution = B::execute_with_binds_on(self.mutation.executor(), sql, values).await;
+        let cleared = B::clear_retention_context(&mut self.mutation.tx).await;
+        let result = execution?;
+        cleared?;
+        let affected = B::rows_affected(&result);
+        if affected != rows.len() as u64 {
+            return Err(sqlx::Error::Protocol(format!(
+                "retention purge cardinality changed: selected {}, deleted {affected}",
+                rows.len(),
+            )));
+        }
+
+        for (entity, state) in rows.iter().zip(states) {
+            self.mutation
+                .run_mutation_hook(
+                    None,
+                    &MutationEvent {
+                        phase: MutationPhase::After,
+                        action: ChangeAction::Deleted,
+                        entity_name: metadata.entity_name,
+                        table_name: metadata.table_name,
+                        metadata,
+                        id: entity.retention_event_id(),
+                        changes: Vec::new(),
+                        before_state: Some(state),
+                        after_state: None,
+                    },
+                )
+                .await
+                .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
+            T::retention_queue_changed_event(&mut self.mutation, entity).await?;
+        }
+
+        let affected = u32::try_from(affected).map_err(|_| {
+            sqlx::Error::Protocol("retention purge affected-row count overflow".to_string())
+        })?;
+        self.mutation.queue_event(RetentionPurgeEvent {
+            entity_name: metadata.entity_name,
+            table_name: metadata.table_name,
+            affected,
+        });
+        Ok(RetentionPurgeOutcome::Purged { affected })
+    }
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 async fn ensure_transaction_entity_write_access<T: Entity, B: WriteBackend>(
     db: &crate::db::Database<B>,
 ) -> crate::Result<()> {
@@ -1337,6 +1590,25 @@ pub trait MutationContextInsert<B: WriteBackend = DefaultWriteBackend>: Sized {
         hook_ctx: &'a mut MutationContext<'_, B>,
         input: Self::CreateInput,
     ) -> futures::future::BoxFuture<'a, crate::Result<Self>>;
+}
+
+/// Macro-generated capability implemented only for append-only entities that
+/// explicitly declare a dedicated retention policy.
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub trait RetentionPurge<B: super::TransactionBackend = DefaultWriteBackend>:
+    Entity + FromSqlRow<B> + serde::Serialize + Clone + Send + Sync + 'static
+{
+    /// Generated typed filter belonging to this exact entity.
+    type Filter: DatabaseFilter + Clone + Send + Sync + 'static;
+
+    #[doc(hidden)]
+    fn retention_event_id(&self) -> String;
+
+    #[doc(hidden)]
+    fn retention_queue_changed_event<'a>(
+        hook_ctx: &'a mut MutationContext<'_, B>,
+        entity: &'a Self,
+    ) -> futures::future::BoxFuture<'a, crate::Result<()>>;
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -1558,6 +1830,9 @@ pub enum EntityAccessSurface {
     GraphqlSubscription,
     GraphqlRelation,
     Repository,
+    /// Host-only bounded retention maintenance. This surface is never used by
+    /// generated GraphQL roots or ordinary repository transactions.
+    RetentionMaintenance,
 }
 
 /// Entity policy helper that gates generated access by exact scope strings.
@@ -2431,6 +2706,9 @@ pub struct EntityMetadata {
     pub read_policy: Option<&'static str>,
     pub write_policy: Option<&'static str>,
     pub append_only: bool,
+    /// Dedicated policy key required by host-only retention maintenance.
+    /// `None` means the append-only entity cannot be purged.
+    pub retention_policy: Option<&'static str>,
     pub check_constraints: Box<[CheckConstraintDef]>,
     pub fields: Box<[FieldMetadata]>,
     pub indexes: Box<[IndexMetadata]>,
@@ -2440,6 +2718,9 @@ pub struct EntityMetadata {
 }
 
 impl EntityMetadata {
+    /// Build metadata for an entity without append-only retention maintenance.
+    ///
+    /// This compatibility constructor preserves the pre-0.9 signature.
     pub fn from_schema<T>(
         entity_name: &'static str,
         backup_enabled: bool,
@@ -2448,6 +2729,32 @@ impl EntityMetadata {
         read_policy: Option<&'static str>,
         write_policy: Option<&'static str>,
         append_only: bool,
+    ) -> Self
+    where
+        T: DatabaseEntity + DatabaseSchema + EntityRelations + DatabaseSearchSchema,
+    {
+        Self::from_schema_with_retention::<T>(
+            entity_name,
+            backup_enabled,
+            backup_export_order,
+            backup_restore_order,
+            read_policy,
+            write_policy,
+            append_only,
+            None,
+        )
+    }
+
+    /// Build metadata with an optional dedicated append-only retention policy.
+    pub fn from_schema_with_retention<T>(
+        entity_name: &'static str,
+        backup_enabled: bool,
+        backup_export_order: Option<i32>,
+        backup_restore_order: Option<i32>,
+        read_policy: Option<&'static str>,
+        write_policy: Option<&'static str>,
+        append_only: bool,
+        retention_policy: Option<&'static str>,
     ) -> Self
     where
         T: DatabaseEntity + DatabaseSchema + EntityRelations + DatabaseSearchSchema,
@@ -2466,6 +2773,7 @@ impl EntityMetadata {
             read_policy,
             write_policy,
             append_only,
+            retention_policy,
             check_constraints: T::check_constraints().to_vec().into_boxed_slice(),
             fields: T::columns()
                 .iter()
@@ -2564,6 +2872,9 @@ pub struct TableModel {
     pub foreign_keys: Vec<ForeignKeyModel>,
     pub search_indexes: Vec<SearchIndexModel>,
     pub append_only: bool,
+    /// Whether generated append-only enforcement admits the exact ORM
+    /// transaction-local bounded-retention context.
+    pub retention_purge: bool,
     pub check_constraints: Vec<CheckConstraintModel>,
 }
 
@@ -2932,6 +3243,9 @@ pub struct EntityBackupDescriptor {
     pub entity_name: String,
     pub table_name: String,
     pub primary_key_column: String,
+    /// Whether this entity's append-only enforcement supports bounded purge.
+    #[serde(default)]
+    pub retention_purge: bool,
     pub export_order: i32,
     pub restore_order: i32,
     pub columns: Vec<ColumnBackupDescriptor>,
@@ -3199,6 +3513,7 @@ impl From<&EntityMetadata> for TableModel {
                 })
                 .unwrap_or_default(),
             append_only: value.append_only,
+            retention_purge: value.retention_policy.is_some(),
             check_constraints: value
                 .check_constraints
                 .iter()
@@ -3346,6 +3661,7 @@ pub fn backup_descriptors_from_entities(
                 entity_name: entity.entity_name.to_string(),
                 table_name: entity.table_name.to_string(),
                 primary_key_column: entity.primary_key.to_string(),
+                retention_purge: entity.retention_policy.is_some(),
                 export_order,
                 restore_order,
                 columns,
@@ -3382,6 +3698,9 @@ pub fn stable_schema_hash(entities: &[EntityBackupDescriptor]) -> String {
         canonical.push_str(&entity.table_name);
         canonical.push('|');
         canonical.push_str(&entity.primary_key_column);
+        if entity.retention_purge {
+            canonical.push_str("|retention_purge");
+        }
         canonical.push('\n');
 
         let mut columns = entity.columns.iter().collect::<Vec<_>>();
@@ -3487,6 +3806,9 @@ pub fn stable_schema_model_hash(schema: &SchemaModel) -> String {
         } else {
             "mutable"
         });
+        if table.retention_purge {
+            canonical.push_str("|retention_purge");
+        }
         canonical.push('\n');
 
         let mut constraints = table.check_constraints.iter().collect::<Vec<_>>();
@@ -3869,6 +4191,7 @@ pub enum MigrationStep {
     SetAppendOnly {
         table_name: String,
         enabled: bool,
+        retention_purge: bool,
     },
     SetCheckConstraints {
         table_name: String,
