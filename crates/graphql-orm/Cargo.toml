@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 description = "Runtime support crate for graphql-orm-macros"
 license = "MIT"
@@ -12,8 +12,21 @@ method = "git-full-revision"
 
 [features]
 default = ["sqlite"]
-sqlite = ["graphql-orm-macros/sqlite", "dep:geo", "dep:geo-types", "dep:geojson"]
-postgres = ["graphql-orm-macros/postgres"]
+sqlite = [
+  "graphql-orm-macros/sqlite",
+  "sqlx/runtime-tokio",
+  "sqlx/sqlite",
+  "sqlx/uuid",
+  "dep:geo",
+  "dep:geo-types",
+  "dep:geojson",
+]
+postgres = [
+  "graphql-orm-macros/postgres",
+  "sqlx/runtime-tokio-rustls",
+  "sqlx/postgres",
+  "sqlx/uuid",
+]
 mssql = [
   "graphql-orm-macros/mssql",
   "dep:tiberius",
@@ -48,7 +61,7 @@ geojson = { version = "1", optional = true, default-features = true }
 graphql-orm-macros = { path = "../graphql-orm-macros", version = "0.7.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "uuid"] }
+sqlx = { workspace = true }
 tiberius = { workspace = true, optional = true }
 tokio = { version = "1", features = ["sync"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

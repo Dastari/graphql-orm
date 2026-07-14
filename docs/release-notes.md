@@ -11,6 +11,23 @@ required. The optional `auth-agql` bridge intentionally pins `agql-auth` at
 `c92dcb441237bbe308499b26525945f60ffa394a`. Consequently `cargo package -p graphql-orm` cannot
 resolve that Git-only optional dependency through the crates.io packaging model; this is expected.
 
+## 0.7.1
+
+Compatible Git-only backend dependency-isolation fix. The runtime is `0.7.1`;
+the companion macros crate remains `0.7.0` because generated code and macro APIs
+are unchanged.
+
+- `features = ["sqlite"]` activates SQLx's SQLite driver and Tokio runtime, but
+  no PostgreSQL driver or unused SQLx TLS implementation.
+- `features = ["postgres"]` activates SQLx's PostgreSQL driver, Tokio runtime,
+  and Rustls, but no SQLite driver.
+- `features = ["mssql"]` uses Tiberius and retains only SQLx's backend-neutral
+  core types required by compatibility internals; neither SQLx database driver
+  is activated.
+- Enabling both `sqlite` and `postgres` continues to activate both SQLx drivers.
+  Public behavior and stored schemas are unchanged, so no source or data
+  migration is required.
+
 ## 0.7.0
 
 Additive Git-only durable-runtime primitives release. Runtime and macros are

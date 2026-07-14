@@ -2,6 +2,21 @@
 
 User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
 
+## 0.7.1
+
+Companion macros crate: `graphql-orm-macros` remains **0.7.0**.
+
+- Fixed backend dependency isolation so a SQLite-only build activates
+  `sqlx-sqlite` but not `sqlx-postgres`, a PostgreSQL-only build activates
+  `sqlx-postgres` but not `sqlx-sqlite`, and an MSSQL-only build activates
+  neither SQLx database driver.
+- SQLite now uses SQLx's Tokio runtime without an unused SQLx TLS stack;
+  PostgreSQL retains Tokio plus Rustls. Combined SQLite/PostgreSQL builds still
+  activate both drivers.
+- No public API, generated code, schema, migration, authorization, repository,
+  transaction, backup, GraphQL, or naming behavior changed. No data migration
+  is required.
+
 ## 0.7.0
 
 Companion macros crate: `graphql-orm-macros` **0.7.0**.

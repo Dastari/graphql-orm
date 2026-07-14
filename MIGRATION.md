@@ -3,6 +3,22 @@
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.7.1 Backend Dependency Isolation
+
+Update `graphql-orm` to 0.7.1 at the reviewed full Git revision. The companion
+`graphql-orm-macros` crate remains 0.7.0. Existing feature declarations do not
+change:
+
+```toml
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.1", default-features = false, features = ["sqlite"] }
+```
+
+Cargo now resolves only the selected backend driver. There is no Rust API,
+generated-code, GraphQL SDL, schema, configuration, or database migration.
+Remove any downstream workaround that patched SQLx features, refresh the lock
+file, and confirm the selected graph with the commands in
+[Development](docs/development.md#backend-dependency-isolation).
+
 ## 0.7.0 Schema Modules, Fenced Leases, and Bidirectional Keysets
 
 Update both `graphql-orm` and `graphql-orm-macros` to 0.7.0 at the same reviewed

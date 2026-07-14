@@ -15,6 +15,30 @@ cargo check -p graphql-orm --no-default-features --features mssql
 cargo check -p graphql-orm --no-default-features --features "sqlite mssql"
 ```
 
+## Backend Dependency Isolation
+
+Backend-only builds must not activate another SQLx database driver. Verify the
+resolved graph after any manifest or feature change:
+
+```bash
+cargo tree -p graphql-orm --no-default-features --features sqlite
+cargo tree -p graphql-orm --no-default-features --features postgres
+cargo tree -p graphql-orm --no-default-features --features mssql
+cargo tree -p graphql-orm --no-default-features --features "sqlite postgres"
+```
+
+The expected SQLx packages are:
+
+| Features | SQLx backend packages |
+| --- | --- |
+| `sqlite` | `sqlx-sqlite` only |
+| `postgres` | `sqlx-postgres` only |
+| `mssql` | neither (`sqlx-core` remains for backend-neutral compatibility internals) |
+| `sqlite postgres` | both `sqlx-sqlite` and `sqlx-postgres` |
+
+Use `cargo tree -i sqlx-postgres` and `cargo tree -i sqlx-sqlite` with the same
+feature arguments when diagnosing an unexpected reverse dependency.
+
 Useful focused tests:
 
 ```bash

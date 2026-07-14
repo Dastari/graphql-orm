@@ -7,14 +7,18 @@ database schema. Schema ownership and migration behavior are controlled by runti
 ## Features
 
 ```toml
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.1", default-features = false, features = ["sqlite"] }
 ```
 
 Available backend features:
 
-- `sqlite` - SQLite read/write/query/migration support using SQLX internally
-- `postgres` - PostgreSQL read/write/query/migration support using SQLX internally
-- `mssql` - Microsoft SQL Server read/query-only support through Tiberius
+- `sqlite` - SQLite read/write/query/migration support using SQLx's SQLite
+  driver and Tokio runtime; it does not activate `sqlx-postgres` or SQLx TLS
+- `postgres` - PostgreSQL read/write/query/migration support using SQLx's
+  PostgreSQL driver, Tokio runtime, and Rustls; it does not activate
+  `sqlx-sqlite`
+- `mssql` - Microsoft SQL Server read/query-only support through Tiberius; it
+  activates neither SQLx SQLite nor SQLx PostgreSQL
 
 Optional non-backend features:
 

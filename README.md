@@ -41,7 +41,7 @@ Select exactly the backend support your service needs:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.1", default-features = false, features = ["sqlite"] }
 ```
 
 GitHub with an exact full revision is the only supported distribution method. Neither crate is
@@ -51,9 +51,9 @@ the exact upstream revision `c92dcb441237bbe308499b26525945f60ffa394a`.
 
 Available backend features:
 
-- `sqlite`
-- `postgres`
-- `mssql` - read/query-only SQL Server support
+- `sqlite` - activates only SQLx SQLite support
+- `postgres` - activates only SQLx PostgreSQL support
+- `mssql` - read/query-only SQL Server support without either SQLx database driver
 
 Optional integration features:
 
