@@ -129,14 +129,24 @@ an exact internal DELETE policy for the same transaction-local setting.
 The database account used by application code must not be offered as a generic
 SQL execution service. A principal that can execute arbitrary SQL with those
 credentials is already outside the ORM boundary and can attempt to manipulate
-backend transaction state. Schema ownership/migration credentials should remain
-separate from runtime credentials on PostgreSQL.
+backend transaction state. This boundary includes callers that deliberately use
+the public compatibility escape hatch `MutationContext::executor()`: that API
+can issue arbitrary SQL and therefore does not inherit the generated retention
+policy, predicate, or cardinality guarantees. Security-sensitive maintenance
+code should expose only the narrow `RetentionContext` callback to untrusted
+components. Schema ownership/migration credentials should remain separate from
+runtime credentials on PostgreSQL.
 
 Capability changes produce an explicit `SetAppendOnly` migration step that
 recreates the enforcement contract. A recorded module or host migration version
 with remaining trigger/context/RLS work fails closed. Review existing data and
 foreign-key behavior before enabling physical purge, and apply under a fresh
-migration/module version.
+migration/module version. `MutationLimit` bounds rows selected and directly
+deleted from the retained entity; database cascades into ordinary child tables
+are not included in that count and can affect more child rows than the limit.
+A cascade into another append-only table remains blocked by that table's exact
+retention trigger and rolls the transaction back. Avoid cascades or account for
+their independent cardinality when selecting a retention batch size.
 
 ## Verification
 

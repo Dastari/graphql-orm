@@ -1015,6 +1015,13 @@ where
     /// selection and deletion share a deterministic write snapshot. Only
     /// entities explicitly declaring a retention policy implement the
     /// generated purge capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe [`TransactionError`](crate::graphql::orm::TransactionError)
+    /// when the transaction cannot start or commit, when the callback rejects
+    /// the work, or when transaction-local retention cleanup fails. Nested ORM
+    /// transactions are rejected before a second transaction is opened.
     pub async fn retention_transaction<T, F>(
         &self,
         callback: F,
@@ -1034,6 +1041,14 @@ where
 
     /// Run host-only append-only retention maintenance with transaction-local
     /// database authorization/RLS context.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe [`TransactionError`](crate::graphql::orm::TransactionError)
+    /// when the transaction or auth context cannot be established, the
+    /// callback rejects the work, retention cleanup fails, or commit fails.
+    /// Nested ORM transactions are rejected before a second transaction is
+    /// opened.
     pub async fn retention_transaction_with_auth<T, F>(
         &self,
         auth: Option<&crate::graphql::orm::DbAuthContext>,

@@ -107,7 +107,13 @@ Compile-time MSSQL coverage can be run without a live server:
 ```bash
 cargo check -p graphql-orm --no-default-features --features mssql
 cargo test -p graphql-orm --no-default-features --features mssql --test mssql_write_unavailable_ui
+cargo test -p graphql-orm --no-default-features --features mssql --doc
 ```
+
+The focused UI suite retains macro-owned diagnostics for unsupported composite
+mutations and retention. Basic absence of ordinary MSSQL write helpers uses
+paired compiling/`compile_fail` doctests instead of rustc-prose snapshots, so
+the assertion remains stable across supported compiler releases.
 
 ## UI Tests
 

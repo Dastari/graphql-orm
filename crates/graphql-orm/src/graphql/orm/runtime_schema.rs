@@ -366,6 +366,7 @@ pub enum RuntimeSchemaDiagnosticCode {
     UnsupportedCapability,
     UnsupportedDefault,
     InvalidDefaultOrder,
+    /// Retention was enabled for a collection that is not append-only.
     RetentionRequiresAppendOnly,
 }
 

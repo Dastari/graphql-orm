@@ -1376,6 +1376,12 @@ where
     /// This enables a host schema to record a separate redacted purge fact in
     /// the same atomic transaction without assigning application-specific
     /// audit semantics to the ORM.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ORM error when authorization, transforms, hooks, generated
+    /// SQL execution, or row decoding fails. The surrounding retention
+    /// transaction is then rolled back when that error is returned.
     pub async fn insert<T>(
         &mut self,
         input: <T as MutationContextInsert<B>>::CreateInput,
@@ -1404,6 +1410,14 @@ where
 
     /// Purge a nonempty typed match set from an explicitly retention-enabled
     /// append-only entity, subject to an explicit nonzero maximum.
+    ///
+    /// # Errors
+    ///
+    /// Returns an ORM error if the entity or row policy denies access, the
+    /// predicate is empty or cannot be rendered entirely by the database,
+    /// trigger context or hooks fail, or selected and affected cardinality do
+    /// not match exactly. Any error poisons the context so it cannot be caught
+    /// and followed by a successful commit.
     pub async fn purge<T>(
         &mut self,
         filter: <T as RetentionPurge<B>>::Filter,
@@ -4189,8 +4203,11 @@ pub enum MigrationStep {
         foreign_key: ForeignKeyModel,
     },
     SetAppendOnly {
+        /// Managed physical table whose enforcement contract changes.
         table_name: String,
+        /// Whether append-only enforcement is enabled after this step.
         enabled: bool,
+        /// Whether enforcement admits exact ORM bounded-retention context.
         retention_purge: bool,
     },
     SetCheckConstraints {
