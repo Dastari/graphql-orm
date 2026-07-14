@@ -200,19 +200,38 @@ fn render_append_only_statements(
     backend: DatabaseBackend,
     table_name: &str,
     enabled: bool,
+    retention_purge: bool,
 ) -> Vec<String> {
     let name = append_only_name(table_name);
+    let table_literal = table_name.replace('\'', "''");
     match (backend, enabled) {
-        (DatabaseBackend::Sqlite, true) => vec![
-            format!("DROP TRIGGER IF EXISTS {name}_update"),
-            format!("DROP TRIGGER IF EXISTS {name}_delete"),
-            format!(
-                "CREATE TRIGGER {name}_update BEFORE UPDATE ON {table_name} BEGIN SELECT RAISE(ABORT, 'append-only entity'); END"
-            ),
-            format!(
-                "CREATE TRIGGER {name}_delete BEFORE DELETE ON {table_name} BEGIN SELECT RAISE(ABORT, 'append-only entity'); END"
-            ),
-        ],
+        (DatabaseBackend::Sqlite, true) => {
+            let mut statements = Vec::new();
+            if retention_purge {
+                statements.push("DROP TABLE IF EXISTS __graphql_orm_retention_context".to_string());
+                statements.push(
+                    "CREATE TABLE __graphql_orm_retention_context (table_name TEXT PRIMARY KEY NOT NULL)"
+                        .to_string(),
+                );
+            }
+            statements.extend([
+                format!("DROP TRIGGER IF EXISTS {name}_update"),
+                format!("DROP TRIGGER IF EXISTS {name}_delete"),
+                format!(
+                    "CREATE TRIGGER {name}_update BEFORE UPDATE ON {table_name} BEGIN SELECT RAISE(ABORT, 'append-only entity'); END"
+                ),
+                if retention_purge {
+                    format!(
+                        "CREATE TRIGGER {name}_delete BEFORE DELETE ON {table_name} WHEN NOT EXISTS (SELECT 1 FROM __graphql_orm_retention_context WHERE table_name = '{table_literal}') BEGIN SELECT RAISE(ABORT, 'append-only entity'); END"
+                    )
+                } else {
+                    format!(
+                        "CREATE TRIGGER {name}_delete BEFORE DELETE ON {table_name} BEGIN SELECT RAISE(ABORT, 'append-only entity'); END"
+                    )
+                },
+            ]);
+            statements
+        }
         (DatabaseBackend::Sqlite, false) => vec![
             format!("DROP TRIGGER IF EXISTS {name}_update"),
             format!("DROP TRIGGER IF EXISTS {name}_delete"),
@@ -220,9 +239,15 @@ fn render_append_only_statements(
         (DatabaseBackend::Postgres, true) => vec![
             format!("DROP TRIGGER IF EXISTS {name} ON {table_name}"),
             format!("DROP FUNCTION IF EXISTS {name}()"),
-            format!(
-                "CREATE OR REPLACE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$ BEGIN RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'append-only entity'; END $$"
-            ),
+            if retention_purge {
+                format!(
+                    "CREATE OR REPLACE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$ BEGIN IF TG_OP = 'DELETE' AND current_setting('graphql_orm.retention_entity', true) = '{table_literal}' THEN RETURN OLD; END IF; RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'append-only entity'; END $$"
+                )
+            } else {
+                format!(
+                    "CREATE OR REPLACE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$ BEGIN RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'append-only entity'; END $$"
+                )
+            },
             format!("REVOKE ALL ON FUNCTION {name}() FROM PUBLIC"),
             format!(
                 "CREATE TRIGGER {name} BEFORE UPDATE OR DELETE ON {table_name} FOR EACH ROW EXECUTE FUNCTION {name}()"
@@ -588,10 +613,13 @@ pub fn diff_schema_models_for_backend(
                 });
             }
         }
-        if table.append_only != target_table.append_only {
+        if table.append_only != target_table.append_only
+            || table.retention_purge != target_table.retention_purge
+        {
             steps.push(MigrationStep::SetAppendOnly {
                 table_name: table_name.clone(),
                 enabled: target_table.append_only,
+                retention_purge: target_table.retention_purge,
             });
         }
         if table.check_constraints != target_table.check_constraints {
@@ -695,6 +723,7 @@ fn sql_string_literal(value: &str) -> String {
 enum StructuralSqlToken {
     Ident(String),
     String(String),
+    Number(String),
     LeftParen,
     RightParen,
     LeftBracket,
@@ -768,6 +797,18 @@ fn tokenize_structural_sql(sql: &str) -> Option<Vec<StructuralSqlToken>> {
                     }
                 }
                 StructuralSqlToken::Ident(value)
+            }
+            first if first.is_ascii_digit() => {
+                let mut value = first.to_string();
+                while let Some((_, next)) = chars.peek() {
+                    if next.is_ascii_digit() {
+                        value.push(*next);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                StructuralSqlToken::Number(value)
             }
             _ => return None,
         };
@@ -942,6 +983,22 @@ fn sqlite_append_only_trigger_matches(
     matches!(tokens.get(13), Some(StructuralSqlToken::String(message)) if message == "append-only entity")
 }
 
+#[cfg(feature = "sqlite")]
+fn sqlite_retention_delete_trigger_matches(
+    sql: &str,
+    expected_name: &str,
+    expected_table: &str,
+) -> bool {
+    let expected = format!(
+        "CREATE TRIGGER {expected_name} BEFORE DELETE ON {expected_table} WHEN NOT EXISTS (SELECT 1 FROM __graphql_orm_retention_context WHERE table_name = '{}') BEGIN SELECT RAISE(ABORT, 'append-only entity'); END",
+        expected_table.replace('\'', "''"),
+    );
+    matches!(
+        (tokenize_structural_sql(sql), tokenize_structural_sql(&expected)),
+        (Some(actual), Some(expected)) if actual == expected
+    )
+}
+
 #[cfg(feature = "postgres")]
 fn postgres_append_only_function_body_matches(body: &str) -> bool {
     let Some(tokens) = tokenize_structural_sql(body) else {
@@ -967,6 +1024,21 @@ fn postgres_append_only_function_body_matches(body: &str) -> bool {
         && tokens.get(11) == Some(&StructuralSqlToken::Semicolon)
         && structural_ident(tokens.get(12), "end")
         && (tokens.len() == 13 || tokens.get(13) == Some(&StructuralSqlToken::Semicolon))
+}
+
+#[cfg(feature = "postgres")]
+fn postgres_retention_function_body_matches(body: &str, expected_table: &str) -> bool {
+    let expected = format!(
+        "BEGIN IF TG_OP = 'DELETE' AND current_setting('graphql_orm.retention_entity', true) = '{}' THEN RETURN OLD; END IF; RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'append-only entity'; END",
+        expected_table.replace('\'', "''"),
+    );
+    matches!(
+        (
+            tokenize_structural_sql(body),
+            tokenize_structural_sql(&expected)
+        ),
+        (Some(actual), Some(expected)) if actual == expected
+    )
 }
 
 fn json_string(value: &str) -> String {
@@ -1384,6 +1456,7 @@ fn render_sqlite_table_rebuild_statements(
             DatabaseBackend::Sqlite,
             &target_table.table_name,
             true,
+            target_table.retention_purge,
         ));
     }
     statements
@@ -1420,6 +1493,7 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
                     backend,
                     &table.table_name,
                     true,
+                    table.retention_purge,
                 ));
             }
             statements.extend(render_constraint_comments(backend, table));
@@ -1586,7 +1660,8 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
         MigrationStep::SetAppendOnly {
             table_name,
             enabled,
-        } => render_append_only_statements(backend, table_name, *enabled),
+            retention_purge,
+        } => render_append_only_statements(backend, table_name, *enabled, *retention_purge),
         MigrationStep::SetCheckConstraints {
             table_name,
             before,
@@ -1849,10 +1924,40 @@ where
 }
 
 #[cfg(feature = "sqlite")]
+async fn sqlite_retention_context_is_valid(pool: &sqlx::SqlitePool) -> crate::Result<bool> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '__graphql_orm_retention_context')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !exists {
+        return Ok(false);
+    }
+    let columns = sqlx::query("PRAGMA table_info(__graphql_orm_retention_context)")
+        .fetch_all(pool)
+        .await?;
+    if columns.len() != 1 {
+        return Ok(false);
+    }
+    let column = &columns[0];
+    let valid_column = column.try_get::<String, _>("name")? == "table_name"
+        && column
+            .try_get::<String, _>("type")?
+            .eq_ignore_ascii_case("TEXT")
+        && column.try_get::<i64, _>("notnull")? == 1
+        && column.try_get::<i64, _>("pk")? == 1;
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM __graphql_orm_retention_context")
+        .fetch_one(pool)
+        .await?;
+    Ok(valid_column && rows == 0)
+}
+
+#[cfg(feature = "sqlite")]
 pub async fn introspect_sqlite_schema(
     provider: &impl PoolProvider<super::SqliteBackend>,
 ) -> crate::Result<SchemaModel> {
     let pool = provider.pool();
+    let retention_context_valid = sqlite_retention_context_is_valid(pool).await?;
     let table_rows = sqlx::query(
         "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     )
@@ -2017,6 +2122,7 @@ pub async fn introspect_sqlite_schema(
         .await?;
         let mut valid_update = false;
         let mut valid_delete = false;
+        let mut retention_delete = false;
         for row in append_trigger_rows {
             let trigger_name: String = row.try_get("name")?;
             let trigger_sql: Option<String> = row.try_get("sql")?;
@@ -2037,6 +2143,11 @@ pub async fn introspect_sqlite_schema(
                     &table_name,
                     "delete",
                 );
+                retention_delete = sqlite_retention_delete_trigger_matches(
+                    &trigger_sql,
+                    &trigger_name,
+                    &table_name,
+                );
             }
         }
 
@@ -2051,7 +2162,8 @@ pub async fn introspect_sqlite_schema(
             composite_unique_indexes,
             foreign_keys,
             search_indexes: Vec::new(),
-            append_only: valid_update && valid_delete,
+            append_only: valid_update && (valid_delete || retention_delete),
+            retention_purge: retention_context_valid && valid_update && retention_delete,
             check_constraints: parse_generated_check_constraints(&create_sql),
         });
     }
@@ -2383,9 +2495,13 @@ pub async fn introspect_postgres_schema(
         .bind(&append_trigger_name)
         .fetch_optional(pool)
         .await?;
-        let append_only = append_function_body
+        let append_only = append_function_body.as_deref().is_some_and(|body| {
+            postgres_append_only_function_body_matches(body)
+                || postgres_retention_function_body_matches(body, &table_name)
+        });
+        let retention_purge = append_function_body
             .as_deref()
-            .is_some_and(postgres_append_only_function_body_matches);
+            .is_some_and(|body| postgres_retention_function_body_matches(body, &table_name));
         let check_rows = sqlx::query(
             "SELECT con.conname AS name, pg_get_constraintdef(con.oid, false) AS definition,
                     obj_description(con.oid, 'pg_constraint') AS comment
@@ -2435,6 +2551,7 @@ pub async fn introspect_postgres_schema(
             foreign_keys,
             search_indexes: Vec::new(),
             append_only,
+            retention_purge,
             check_constraints,
         });
     }
@@ -2685,6 +2802,7 @@ pub async fn introspect_mssql_schema(
             foreign_keys: Vec::new(),
             search_indexes: Vec::new(),
             append_only: false,
+            retention_purge: false,
             check_constraints: Vec::new(),
         });
     }

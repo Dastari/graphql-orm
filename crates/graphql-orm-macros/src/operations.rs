@@ -590,6 +590,29 @@ pub(crate) fn generate_graphql_operations(
     let has_composite_primary_key = primary_key_fields.len() > 1;
     let composite_repository_mutations =
         has_composite_primary_key && entity_meta.repository_mutations;
+    if entity_meta.retention_policy.is_some()
+        && (backend == BackendKind::Mssql || schema_policy_read_only)
+    {
+        return Err(syn::Error::new_spanned(
+            struct_name,
+            "retention_purge requires a managed writable sqlite or postgres entity",
+        ));
+    }
+    if entity_meta.retention_policy.is_some() {
+        for field in fields {
+            let field_meta = parse_field_metadata(field)?;
+            if field_meta.is_relation
+                && field_meta.relation_target.as_deref() == Some(struct_name_str.as_str())
+                && field_meta.relation_on_delete.as_deref() == Some("cascade")
+                && field_meta.relation_emit_foreign_key != Some(false)
+            {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "retention_purge does not support a self-referential ON DELETE CASCADE because it could exceed the explicit row limit",
+                ));
+            }
+        }
+    }
     if entity_meta.repository_mutations && !has_composite_primary_key {
         return Err(syn::Error::new_spanned(
             struct_name,
@@ -3662,6 +3685,60 @@ pub(crate) fn generate_graphql_operations(
         quote! {}
     };
 
+    let retention_event_id_values = primary_key_fields
+        .iter()
+        .map(|field| {
+            let field_name = &field.field_name;
+            push_create_input_sql_value_tokens(
+                backend,
+                struct_name,
+                quote! { self.#field_name.clone() },
+                &field.field_type,
+                &field.meta,
+                quote! { ::graphql_orm::sqlx::Error },
+            )
+        })
+        .collect::<Vec<_>>();
+    let retention_event_id = if has_composite_primary_key {
+        quote! {{
+            let mut bind_values = Vec::new();
+            #(#retention_event_id_values)*
+            ::graphql_orm::graphql::orm::composite_key_id(&bind_values)
+        }}
+    } else {
+        if pk_is_bytes {
+            quote! { ::graphql_orm::graphql::orm::binary_key_id(&self.#pk_field) }
+        } else {
+            quote! { self.#pk_field.to_string() }
+        }
+    };
+    let retention_surface = if entity_meta.retention_policy.is_some() {
+        quote! {
+            impl ::graphql_orm::graphql::orm::RetentionPurge<#backend_marker> for #struct_name {
+                type Filter = #where_input;
+
+                fn retention_event_id(&self) -> String {
+                    #retention_event_id
+                }
+
+                fn retention_queue_changed_event<'a>(
+                    hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    entity: &'a Self,
+                ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<()>> {
+                    Box::pin(async move {
+                        Self::__gom_queue_changed_event(
+                            hook_ctx,
+                            ::graphql_orm::graphql::orm::ChangeAction::Deleted,
+                            entity,
+                        ).await
+                    })
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let append_only_surface = if entity_meta.append_only {
         quote! {
             #[derive(Clone, Debug)]
@@ -5039,6 +5116,7 @@ pub(crate) fn generate_graphql_operations(
             }
 
             #append_only_surface
+            #retention_surface
             #composite_mutation_surface
             #composite_write_stubs
         });
@@ -7391,6 +7469,7 @@ pub(crate) fn generate_graphql_operations(
 
         #upsert_trait_impl
         #single_bounded_trait_impls
+        #retention_surface
         #cas_trait_impl
         #keyset_trait_impl
 

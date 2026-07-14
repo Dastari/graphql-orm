@@ -62,6 +62,15 @@ pub trait SqlxBackend: OrmBackend {
     type Database: sqlx::Database;
     type QueryResult;
 
+    /// Exact affected-row count for a backend query result.
+    ///
+    /// The default fails closed for out-of-tree backends: any nonempty purge
+    /// selection will fail its cardinality check unless the backend opts in.
+    #[doc(hidden)]
+    fn rows_affected(_result: &Self::QueryResult) -> u64 {
+        0
+    }
+
     fn fetch_rows_on<'e, E>(
         executor: E,
         sql: String,
@@ -102,6 +111,34 @@ pub trait TransactionBackend: WriteBackend {
     ) -> BoxFuture<'a, crate::Result<sqlx::Transaction<'a, Self::Database>>>;
 
     fn is_retryable_transaction_error(error: &sqlx::Error) -> bool;
+
+    /// Establish the narrowly scoped append-only retention bypass for one
+    /// generated entity in the current transaction.
+    #[doc(hidden)]
+    fn set_retention_context<'a>(
+        _tx: &'a mut sqlx::Transaction<'_, Self::Database>,
+        _table_name: &'a str,
+    ) -> BoxFuture<'a, crate::Result<()>> {
+        Box::pin(async {
+            Err(sqlx::Error::Protocol(
+                "retention maintenance is not supported by this backend".to_string(),
+            ))
+        })
+    }
+
+    /// Clear every retention marker before commit. Rollback/drop also clears
+    /// backend-local state, but explicit clearing prevents pooled reuse after
+    /// a successful commit from inheriting capability.
+    #[doc(hidden)]
+    fn clear_retention_context<'a>(
+        _tx: &'a mut sqlx::Transaction<'_, Self::Database>,
+    ) -> BoxFuture<'a, crate::Result<()>> {
+        Box::pin(async {
+            Err(sqlx::Error::Protocol(
+                "retention maintenance is not supported by this backend".to_string(),
+            ))
+        })
+    }
 }
 #[allow(async_fn_in_trait)]
 /// Backend capability for read-only live schema inspection.
@@ -293,6 +330,10 @@ impl SqlxBackend for SqliteBackend {
     type Database = sqlx::Sqlite;
     type QueryResult = sqlx::sqlite::SqliteQueryResult;
 
+    fn rows_affected(result: &Self::QueryResult) -> u64 {
+        result.rows_affected()
+    }
+
     fn fetch_rows_on<'e, E>(
         executor: E,
         sql: String,
@@ -365,6 +406,36 @@ impl TransactionBackend for SqliteBackend {
             .as_database_error()
             .and_then(|error| error.code())
             .is_some_and(|code| matches!(code.as_ref(), "5" | "6" | "261" | "262" | "517"))
+    }
+
+    fn set_retention_context<'a>(
+        tx: &'a mut sqlx::Transaction<'_, Self::Database>,
+        table_name: &'a str,
+    ) -> BoxFuture<'a, crate::Result<()>> {
+        Box::pin(async move {
+            sqlx::query("DELETE FROM __graphql_orm_retention_context")
+                .execute(tx.as_mut())
+                .await?;
+            sqlx::query(
+                "INSERT INTO __graphql_orm_retention_context (table_name) VALUES (?) \
+                 ON CONFLICT(table_name) DO NOTHING",
+            )
+            .bind(table_name)
+            .execute(tx.as_mut())
+            .await?;
+            Ok(())
+        })
+    }
+
+    fn clear_retention_context<'a>(
+        tx: &'a mut sqlx::Transaction<'_, Self::Database>,
+    ) -> BoxFuture<'a, crate::Result<()>> {
+        Box::pin(async move {
+            sqlx::query("DELETE FROM __graphql_orm_retention_context")
+                .execute(tx.as_mut())
+                .await?;
+            Ok(())
+        })
     }
 }
 #[cfg(feature = "sqlite")]
@@ -486,6 +557,10 @@ impl SqlxBackend for PostgresBackend {
     type Database = sqlx::Postgres;
     type QueryResult = sqlx::postgres::PgQueryResult;
 
+    fn rows_affected(result: &Self::QueryResult) -> u64 {
+        result.rows_affected()
+    }
+
     fn fetch_rows_on<'e, E>(
         executor: E,
         sql: String,
@@ -574,6 +649,30 @@ impl TransactionBackend for PostgresBackend {
             .as_database_error()
             .and_then(|error| error.code())
             .is_some_and(|code| matches!(code.as_ref(), "40001" | "40P01" | "55P03"))
+    }
+
+    fn set_retention_context<'a>(
+        tx: &'a mut sqlx::Transaction<'_, Self::Database>,
+        table_name: &'a str,
+    ) -> BoxFuture<'a, crate::Result<()>> {
+        Box::pin(async move {
+            sqlx::query("SELECT set_config('graphql_orm.retention_entity', $1, true)")
+                .bind(table_name)
+                .execute(tx.as_mut())
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn clear_retention_context<'a>(
+        tx: &'a mut sqlx::Transaction<'_, Self::Database>,
+    ) -> BoxFuture<'a, crate::Result<()>> {
+        Box::pin(async move {
+            sqlx::query("SELECT set_config('graphql_orm.retention_entity', '', true)")
+                .execute(tx.as_mut())
+                .await?;
+            Ok(())
+        })
     }
 }
 #[cfg(feature = "postgres")]

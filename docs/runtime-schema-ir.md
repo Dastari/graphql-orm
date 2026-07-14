@@ -16,7 +16,10 @@ and `IndexId`.
   unrepresentable. Delete behavior (`restrict`/`cascade`/`set_null`) belongs only on the
   foreign-key-enforcing side.
 - Collections carry ordered primary keys (composite supported), `composite_unique` groups,
-  `append_only`, and a deterministic `default_order`.
+  `append_only`, the opt-in `retention_purge` capability, and a deterministic `default_order`.
+  Retention is valid only on append-only collections. Missing `retention_purge` properties in
+  format-v1 serialized catalogs default to `false`, so loading an older catalog cannot grant the
+  maintenance capability.
 
 ## Validation
 
@@ -46,7 +49,8 @@ Only a `ValidatedRuntimeSchema` produces canonical output:
   different stable IDs are different schemas here.
 - `structural_fingerprint()` — the ID-free structural schema. Use this to compare a
   static-derived schema with a catalog-loaded one. It is structural-only by design: it covers
-  tables, fields, keys, relations, indexes, defaults, and ordering. It does not cover
+  tables, fields, keys, relations, indexes, defaults, append-only/retention semantics, and
+  ordering. It does not cover
   authorization policy hooks, backup enablement/ordering/redaction, or relation change
   propagation — conversion fails closed when static metadata carries those semantics, so a
   successful conversion plus equal structural fingerprints cannot silently equate schemas with
@@ -70,6 +74,11 @@ derives and available on `ColumnDef`/`FieldMetadata`:
 - `is_sortable` — the derive generated an order-input term;
 - `is_date_time` — the column is a `#[date_field]`; its `logical_type` remains `String` so backup
   and existing schema hashes are unaffected.
+
+Static append-only entities declared with `retention_purge = "..."` convert with
+`RuntimeCollection::retention_purge = true`; that bit participates in canonical and structural
+fingerprints. The policy key itself is deliberately not part of structural IR because policy
+providers are host runtime behavior, not database shape.
 
 Declarations using capabilities the IR does not represent yet are reported as
 `UnsupportedCapability` diagnostics instead of being silently dropped: spatial columns, full-text

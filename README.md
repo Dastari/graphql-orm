@@ -35,6 +35,7 @@ It is designed for two related use cases:
 - owned backend-neutral runtime schema IR with validation, canonical fingerprints, and static-metadata conversion
 - backend-neutral fenced lease transitions for durable workers
 - bounded forward and backward repository keyset windows for large timelines
+- opt-in policy-gated bounded retention purge for managed append-only entities
 
 ## Install
 
@@ -42,7 +43,7 @@ Select exactly the backend support your service needs:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.8.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.9.0", default-features = false, features = ["sqlite"] }
 ```
 
 GitHub with an exact full revision is the only supported distribution method. Neither crate is
@@ -216,6 +217,7 @@ batched relation query per relation layer, not N+1 or nested N*N queries.
 - [Binary keys, private repository upserts, and conditional indexes](docs/binary-keys-and-indexes.md)
 - [Typed least-privilege read projections](docs/read-projections.md)
 - [Typed composite-key and bounded mutations](docs/composite-mutations.md)
+- [Bounded append-only retention maintenance](docs/retention-maintenance.md)
 - [Backup runtime API](docs/backup.md)
 - [Schema modules and fenced leases](docs/schema-modules-and-leases.md)
 - [Release notes](docs/release-notes.md)

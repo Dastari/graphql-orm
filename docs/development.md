@@ -88,6 +88,16 @@ Focused Postgres full-text search DDL coverage can be run without a live server:
 cargo test -p graphql-orm --no-default-features --features postgres --test full_text_search
 ```
 
+The retention-maintenance parity test is deliberately different from legacy
+PostgreSQL tests: it ignores all database URL environment variables and creates
+and removes its own loopback-only disposable Docker container with generated
+credentials and no persistent volume:
+
+```bash
+cargo test -p graphql-orm --no-default-features --features postgres \
+  --test retention_purge_postgres -- --ignored --nocapture
+```
+
 ## SQL Server Tests
 
 MSSQL live tests are opt-in. See [SQL Server read-only backend](mssql.md) for Docker and environment-variable details.
@@ -97,7 +107,13 @@ Compile-time MSSQL coverage can be run without a live server:
 ```bash
 cargo check -p graphql-orm --no-default-features --features mssql
 cargo test -p graphql-orm --no-default-features --features mssql --test mssql_write_unavailable_ui
+cargo test -p graphql-orm --no-default-features --features mssql --doc
 ```
+
+The focused UI suite retains macro-owned diagnostics for unsupported composite
+mutations and retention. Basic absence of ordinary MSSQL write helpers uses
+paired compiling/`compile_fail` doctests instead of rustc-prose snapshots, so
+the assertion remains stable across supported compiler releases.
 
 ## UI Tests
 

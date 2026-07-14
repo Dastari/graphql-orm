@@ -1116,6 +1116,7 @@ mod tests {
             entity_name: "Item".to_string(),
             table_name: "items".to_string(),
             primary_key_column: "id".to_string(),
+            retention_purge: false,
             export_order: 0,
             restore_order: 0,
             columns: Vec::new(),

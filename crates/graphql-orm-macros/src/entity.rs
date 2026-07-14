@@ -16,6 +16,8 @@ pub(crate) struct EntityMetadata {
     pub(crate) auth: Option<String>,
     pub(crate) schema_only: bool,
     pub(crate) append_only: bool,
+    /// Dedicated entity-policy key enabling host-only bounded retention purge.
+    pub(crate) retention_policy: Option<String>,
     pub(crate) repository_mutations: bool,
     pub(crate) keyset: Option<String>,
     pub(crate) backup_enabled: Option<bool>,
@@ -132,6 +134,16 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitBool = value.parse()?;
                     metadata.append_only = lit.value;
+                } else if meta.path.is_ident("retention_purge") {
+                    let value = meta.value()?;
+                    let lit: syn::LitStr = value.parse()?;
+                    if lit.value().trim().is_empty() {
+                        return Err(syn::Error::new(
+                            lit.span(),
+                            "retention_purge requires a non-empty dedicated policy key",
+                        ));
+                    }
+                    metadata.retention_policy = Some(lit.value());
                 } else if meta.path.is_ident("repository_mutations") {
                     let value = meta.value()?;
                     let lit: syn::LitBool = value.parse()?;
@@ -394,6 +406,12 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
             "append_only entities cannot declare upsert",
         ));
     }
+    if metadata.retention_policy.is_some() && !metadata.append_only {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "retention_purge is valid only for append_only entities",
+        ));
+    }
     if metadata.append_only
         && metadata
             .rls
@@ -615,6 +633,7 @@ fn rls_impl_tokens(
     entity_name_lit: &str,
     table_name: &str,
     rls: Option<&RlsMetadata>,
+    retention_purge: bool,
 ) -> proc_macro2::TokenStream {
     let Some(rls) = rls else {
         return quote! {
@@ -648,6 +667,21 @@ fn rls_impl_tokens(
         if let Some(policy) = policy {
             policies.push(rls_operation_policy_tokens(operation, policy, span));
         }
+    }
+    if retention_purge {
+        let predicate = syn::LitStr::new(
+            &format!(
+                "current_setting('graphql_orm.retention_entity', true) = '{}'",
+                table_name.value().replace('\'', "''")
+            ),
+            span,
+        );
+        policies.push(quote! {
+            ::graphql_orm::graphql::orm::RlsOperationPolicy::custom(
+                ::graphql_orm::graphql::orm::RlsOperation::Delete,
+                #predicate,
+            )
+        });
     }
 
     quote! {
@@ -1888,6 +1922,7 @@ fn generate_entity_impl(
         }
     };
 
+    let entity_name_lit = struct_name.to_string();
     let schema_only = schema_only_override || entity_meta.schema_only;
     if schema_only && !entity_meta.projections.is_empty() {
         return Err(syn::Error::new_spanned(
@@ -1895,15 +1930,55 @@ fn generate_entity_impl(
             "typed projections require GraphQLEntity; schema-only entities do not generate read APIs",
         ));
     }
+    if schema_only && entity_meta.retention_policy.is_some() {
+        return Err(syn::Error::new_spanned(
+            input,
+            "retention_purge requires GraphQLEntity and GraphQLOperations generated repository types",
+        ));
+    }
+    if entity_meta.retention_policy.is_some()
+        && (backend == BackendKind::Mssql
+            || matches!(
+                entity_meta.schema_policy.as_deref(),
+                Some("external_read_only")
+            ))
+    {
+        return Err(syn::Error::new_spanned(
+            struct_name,
+            "retention_purge requires a managed writable sqlite or postgres entity",
+        ));
+    }
+    if entity_meta.retention_policy.is_some() {
+        for field in fields {
+            let field_meta = parse_field_metadata(field)?;
+            if field_meta.is_relation
+                && field_meta.relation_target.as_deref() == Some(entity_name_lit.as_str())
+                && field_meta.relation_on_delete.as_deref() == Some("cascade")
+                && field_meta.relation_emit_foreign_key != Some(false)
+            {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "retention_purge does not support a self-referential ON DELETE CASCADE because it could exceed the explicit row limit",
+                ));
+            }
+        }
+    }
     if backend == BackendKind::Mssql && !entity_meta.projections.is_empty() {
         return Err(syn::Error::new_spanned(
             input,
             "typed projections are generated only for sqlite and postgres backends",
         ));
     }
-    let entity_name_lit = struct_name.to_string();
     let backup_enabled = entity_meta.backup_enabled.unwrap_or(true);
     let append_only = entity_meta.append_only;
+    let retention_policy = entity_meta
+        .retention_policy
+        .as_ref()
+        .map(|policy| {
+            let lit = syn::LitStr::new(policy, struct_name.span());
+            quote! { Some(#lit) }
+        })
+        .unwrap_or_else(|| quote! { None });
     let backup_export_order = entity_meta
         .backup_export_order
         .map(|order| quote! { Some(#order) })
@@ -1939,6 +2014,7 @@ fn generate_entity_impl(
         &struct_name.to_string(),
         &table_name,
         entity_meta.rls.as_ref(),
+        entity_meta.retention_policy.is_some(),
     );
     let plural_name = entity_meta
         .plural_name
@@ -3004,7 +3080,7 @@ fn generate_entity_impl(
                     static METADATA: ::std::sync::OnceLock<::graphql_orm::graphql::orm::EntityMetadata> =
                         ::std::sync::OnceLock::new();
                     METADATA.get_or_init(|| {
-                        ::graphql_orm::graphql::orm::EntityMetadata::from_schema::<Self>(
+                        ::graphql_orm::graphql::orm::EntityMetadata::from_schema_with_retention::<Self>(
                             #struct_name_str,
                             #backup_enabled,
                             #backup_export_order,
@@ -3012,6 +3088,7 @@ fn generate_entity_impl(
                             #read_policy,
                             #write_policy,
                             #append_only,
+                            #retention_policy,
                         )
                     })
                 }
@@ -3375,7 +3452,7 @@ fn generate_entity_impl(
                 static METADATA: ::std::sync::OnceLock<::graphql_orm::graphql::orm::EntityMetadata> =
                     ::std::sync::OnceLock::new();
                 METADATA.get_or_init(|| {
-                    ::graphql_orm::graphql::orm::EntityMetadata::from_schema::<Self>(
+                    ::graphql_orm::graphql::orm::EntityMetadata::from_schema_with_retention::<Self>(
                         #struct_name_str,
                         #backup_enabled,
                         #backup_export_order,
@@ -3383,6 +3460,7 @@ fn generate_entity_impl(
                         #read_policy,
                         #write_policy,
                         #append_only,
+                        #retention_policy,
                     )
                 })
             }

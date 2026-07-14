@@ -3,6 +3,48 @@
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.9.0 Bounded Append-Only Retention Purge
+
+This release adds public runtime and generated surfaces and extends public
+schema/backup descriptors, so it is a pre-1.0 minor release rather than a
+patch. Update both crates to 0.9.0 at the final reviewed release revision.
+
+Derive-generated entities need no source change unless they opt in. Code that
+constructs public descriptors manually must add disabled retention state:
+
+- `RuntimeCollection { retention_purge: false, .. }`;
+- `TableModel { retention_purge: false, .. }`;
+- `EntityBackupDescriptor { retention_purge: false, .. }` (older serialized
+  descriptors default this field to `false`);
+- `EntityMetadata` literals add `retention_policy: None`. Existing
+  `EntityMetadata::from_schema` calls remain source-compatible; only code that
+  deliberately supplies a retention key uses `from_schema_with_retention`; and
+- exhaustive matches on `EntityAccessSurface`, `RuntimeSchemaDiagnosticCode`,
+  or `MigrationStep::SetAppendOnly` must handle the new retention variant/field.
+
+Low-level backend capability traits gained safe default methods that reject
+retention maintenance, so out-of-tree implementations remain source-compatible
+unless they deliberately opt into this contract. SQLite and PostgreSQL provide
+the supported implementations. Existing format-v1 owned runtime-schema JSON
+without `retention_purge` continues to deserialize with the capability
+disabled.
+
+Existing append-only entities and fingerprints remain unchanged. To opt in,
+add a dedicated policy key such as
+`retention_purge = "audit.retention.purge"`, register an `EntityPolicy` that
+allows only `EntityAccessSurface::RetentionMaintenance`, and replace raw purge
+SQL with `Database::retention_transaction[_with_auth]` plus
+`RetentionContext::purge`. Keep ordinary write policy keys separate.
+
+Enabling or disabling retention changes managed enforcement and requires a new
+host/module migration version. SQLite adds the reserved, structurally validated
+`__graphql_orm_retention_context` table and replaces the DELETE trigger.
+PostgreSQL replaces the append-only function contract and, when managed RLS is
+enabled, adds the transaction-local retention DELETE policy. There is no row
+data rewrite. Validate foreign-key behavior and the intended cutoff before
+enabling physical deletion. See
+[Bounded append-only retention maintenance](docs/retention-maintenance.md).
+
 ## 0.8.0 Owned Runtime Schema IR
 
 Update both `graphql-orm` and `graphql-orm-macros` to 0.8.0 at the same reviewed

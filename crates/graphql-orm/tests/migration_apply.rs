@@ -108,6 +108,7 @@ async fn sqlite_migration_runner_applies_rebuild_plan() -> Result<(), Box<dyn st
             foreign_keys: vec![],
             search_indexes: vec![],
             append_only: false,
+            retention_purge: false,
             check_constraints: vec![],
         }],
     };
@@ -153,6 +154,7 @@ async fn sqlite_migration_runner_applies_rebuild_plan() -> Result<(), Box<dyn st
             foreign_keys: vec![],
             search_indexes: vec![],
             append_only: false,
+            retention_purge: false,
             check_constraints: vec![],
         }],
     };
@@ -320,6 +322,7 @@ async fn postgres_migration_runner_applies_plan() -> Result<(), Box<dyn std::err
             foreign_keys: vec![],
             search_indexes: vec![],
             append_only: false,
+            retention_purge: false,
             check_constraints: vec![],
         }],
     };
@@ -439,6 +442,7 @@ fn users_v1_like() -> TableModel {
         foreign_keys: vec![],
         search_indexes: vec![],
         append_only: false,
+        retention_purge: false,
         check_constraints: vec![],
     }
 }
@@ -541,6 +545,7 @@ fn sqlite_table(
         foreign_keys,
         search_indexes: vec![],
         append_only: false,
+        retention_purge: false,
         check_constraints: vec![],
     }
 }

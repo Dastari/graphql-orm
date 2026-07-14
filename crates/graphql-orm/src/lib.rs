@@ -460,3 +460,50 @@ pub mod types;
 /// ```
 #[cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
 pub mod generated_api_absence_probes {}
+
+/// Compile-time probes proving that MSSQL entities remain read-only.
+///
+/// These paired examples differ only by the write-helper reference. The first
+/// proves the generated read-only entity itself compiles:
+///
+/// ```
+/// use graphql_orm::prelude::*;
+///
+/// #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
+/// #[graphql_entity(backend = "mssql", table = "dbo.LegacyJobs", plural = "Jobs")]
+/// struct LegacyJob {
+///     #[primary_key]
+///     #[filterable(type = "string")]
+///     pub id: String,
+///
+///     #[filterable(type = "string")]
+///     #[sortable]
+///     pub job_name: String,
+/// }
+///
+/// fn main() {}
+/// ```
+///
+/// ...while the second proves that no ordinary create helper is generated:
+///
+/// ```compile_fail
+/// use graphql_orm::prelude::*;
+///
+/// #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
+/// #[graphql_entity(backend = "mssql", table = "dbo.LegacyJobs", plural = "Jobs")]
+/// struct LegacyJob {
+///     #[primary_key]
+///     #[filterable(type = "string")]
+///     pub id: String,
+///
+///     #[filterable(type = "string")]
+///     #[sortable]
+///     pub job_name: String,
+/// }
+///
+/// fn main() {
+///     let _ = LegacyJob::create;
+/// }
+/// ```
+#[cfg(all(feature = "mssql", not(any(feature = "sqlite", feature = "postgres"))))]
+pub mod mssql_generated_api_absence_probes {}

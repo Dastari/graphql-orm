@@ -295,6 +295,10 @@ pub struct RuntimeCollection {
     pub primary_key: Vec<FieldId>,
     /// Rows may be inserted but never updated or deleted.
     pub append_only: bool,
+    /// Append-only enforcement admits the ORM's bounded retention capability.
+    /// Missing serialized values default to `false` for format-v1 compatibility.
+    #[serde(default)]
+    pub retention_purge: bool,
     pub fields: Vec<RuntimeField>,
     pub relations: Vec<RuntimeRelation>,
     pub indexes: Vec<RuntimeIndex>,
@@ -362,6 +366,8 @@ pub enum RuntimeSchemaDiagnosticCode {
     UnsupportedCapability,
     UnsupportedDefault,
     InvalidDefaultOrder,
+    /// Retention was enabled for a collection that is not append-only.
+    RetentionRequiresAppendOnly,
 }
 
 impl RuntimeSchemaDiagnosticCode {
@@ -388,6 +394,7 @@ impl RuntimeSchemaDiagnosticCode {
             Self::DuplicateKeyMember => "duplicate_key_member",
             Self::RelationTargetKeyNotUnique => "relation_target_key_not_unique",
             Self::InvalidDefault => "invalid_default",
+            Self::RetentionRequiresAppendOnly => "retention_requires_append_only",
             Self::UnsupportedCapability => "unsupported_capability",
             Self::UnsupportedDefault => "unsupported_default",
             Self::InvalidDefaultOrder => "invalid_default_order",
@@ -766,6 +773,14 @@ impl RuntimeSchema {
                         "api_plural_name `{}` collides case-insensitively with another collection",
                         collection.api_plural_name
                     ),
+                    cid,
+                    None,
+                ));
+            }
+            if collection.retention_purge && !collection.append_only {
+                diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                    RuntimeSchemaDiagnosticCode::RetentionRequiresAppendOnly,
+                    "retention_purge requires append_only collection semantics".to_string(),
                     cid,
                     None,
                 ));
@@ -1267,12 +1282,16 @@ impl ValidatedRuntimeSchema {
                 out.push_str(&format!("|id={cid}"));
             }
             out.push_str(&format!(
-                "|type={}|plural={}|table={}|append_only={}\n",
+                "|type={}|plural={}|table={}|append_only={}",
                 collection.api_type_name,
                 collection.api_plural_name,
                 collection.physical_table,
                 collection.append_only
             ));
+            if collection.retention_purge {
+                out.push_str("|retention_purge=true");
+            }
+            out.push('\n');
 
             out.push_str(&format!(
                 "  primary_key|{}\n",
@@ -1812,6 +1831,7 @@ impl RuntimeSchema {
                 physical_table: entity.table_name.to_string(),
                 primary_key,
                 append_only: entity.append_only,
+                retention_purge: entity.retention_policy.is_some(),
                 fields,
                 relations,
                 indexes,

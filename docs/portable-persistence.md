@@ -95,6 +95,10 @@ same-name inert body, conditional `WHEN`, extra statement, or disabled/wrong-ope
 reported as drift. An approved fresh-version repair drops only the expected managed object names
 before recreating them, so stale bodies and PostgreSQL function grants cannot survive repair.
 
+Append-only remains absolute by default. Regulated hosts that need physical
+expiry may separately opt in to the policy-gated bounded maintenance contract;
+see [Bounded append-only retention maintenance](retention-maintenance.md).
+
 ## Portable constraints
 
 ```rust

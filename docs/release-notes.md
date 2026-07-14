@@ -11,6 +11,33 @@ required. The optional `auth-agql` bridge intentionally pins `agql-auth` at
 `c92dcb441237bbe308499b26525945f60ffa394a`. Consequently `cargo package -p graphql-orm` cannot
 resolve that Git-only optional dependency through the crates.io packaging model; this is expected.
 
+## 0.9.0
+
+Pre-1.0 minor release adding a deliberately narrow retention-maintenance
+boundary for append-only managed entities. Runtime and macros are both
+`0.9.0`.
+
+- Entity owners may opt in with a dedicated `retention_purge` policy key.
+- `Database::retention_transaction[_with_auth]` creates a non-escapable
+  capability exposing typed reads, normal appends, and bounded generated purge,
+  but no ordinary update/delete or raw database objects.
+- SQLite and PostgreSQL enforce the exception in exact transaction-local state;
+  cleanup occurs before commit and automatically on rollback, cancellation, or
+  dropped connections.
+- Typed nonempty filters, `MutationLimit`, primary-key ordering, one-row
+  look-ahead, exact affected counts, policy/row-policy checks, hooks, search
+  cleanup, deferred post-commit work, and RLS remain active.
+- Self-referential cascading deletes are rejected for retention-enabled
+  entities so cascades cannot exceed the caller's explicit row maximum.
+- Capability state participates in schema/module hashes and backup descriptors.
+  Existing non-opted entities preserve prior hashes and APIs.
+- This is physical deletion only; append-only update/tombstone behavior is not
+  introduced.
+- The pre-1.0 source break is limited to manual public descriptor literals and
+  exhaustive matches on extended enums. Low-level backend traits have
+  fail-closed defaults. Derive-generated entities that do not opt in remain
+  source- and schema-compatible; see MIGRATION.md for exact field additions.
+
 ## 0.8.0
 
 Owned runtime schema IR release; **breaking** (metadata struct literals and

@@ -1,0 +1,15 @@
+error: retention_purge is valid only for append_only entities
+ --> tests/ui/retention_requires_append_only.rs:3:10
+  |
+3 | #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+  |          ^^^^^^^^^^^^^
+  |
+  = note: this error originates in the derive macro `GraphQLEntity` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: retention_purge is valid only for append_only entities
+ --> tests/ui/retention_requires_append_only.rs:3:25
+  |
+3 | #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+  |                         ^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the derive macro `GraphQLOperations` (in Nightly builds, run with -Z macro-backtrace for more info)
