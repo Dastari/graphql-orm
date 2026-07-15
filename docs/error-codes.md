@@ -34,6 +34,15 @@ Internal diagnostic strings are never placed in extensions. Set
 `GRAPHQL_ORM_LOG_INTERNAL_ERRORS=1` to emit internal detail to stderr for local
 debugging.
 
+Runtime-schema record/handle errors use the separate lowercase
+`RuntimeRecordErrorCode` contract because they are host-side runtime IR errors,
+not GraphQL responses. The categories include unknown/cross-collection/stale
+handles, unloaded/null/wrong-kind values, missing columns, backend type
+mismatches, malformed portable values, unsupported backends, and invalid
+serialized records. Safe formatting includes stable IDs only; the standard
+error source retains driver detail for trusted logging. See
+[Runtime records](runtime-records.md#stable-errors).
+
 ## Before / After
 
 ```rust

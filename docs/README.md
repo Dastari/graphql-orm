@@ -16,6 +16,7 @@ This directory contains the project documentation that is too detailed for the r
 - [Federation operation roots](federation.md)
 - [Schema ownership, validation, planning, and ABI migrations](schema-management.md)
 - [Owned runtime schema IR](runtime-schema-ir.md)
+- [Runtime values, records, handles, and row decoding](runtime-records.md)
 - [Runtime writes, hooks, subscriptions, and policies](runtime-and-writes.md)
 - [Bounded append-only retention maintenance](retention-maintenance.md)
 - [Backup runtime API](backup.md)

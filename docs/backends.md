@@ -20,6 +20,11 @@ Available backend features:
 - `mssql` - Microsoft SQL Server read/query-only support through Tiberius; it
   activates neither SQLx SQLite nor SQLx PostgreSQL
 
+SQLite and PostgreSQL also implement equivalent owned runtime-schema row
+decoding with exact backend types. MSSQL static generated reads remain
+supported, but MSSQL runtime-schema decoding is explicitly unsupported in this
+release. See [Runtime records](runtime-records.md#backend-mappings).
+
 Optional non-backend features:
 
 - `auth-agql` - optional one-way bridge from upstream `agql-auth` 0.10

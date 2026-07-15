@@ -3,6 +3,32 @@
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.10.0 Runtime Record Read Foundation
+
+Update both Git-only crates to 0.10.0 at the reviewed full Git revision.
+Repository release policy keeps companion versions aligned for a public
+runtime API release; declaration syntax and generated code are unchanged.
+
+This is an additive pre-1.0 runtime API release. Existing derived entities,
+repositories, GraphQL SDL, database schemas, migration history, backups,
+authorization, and static backend behavior require no source or data
+migration. Existing `OrmBackend` implementations remain source-compatible;
+the new `RuntimeRowDecoder` capability is separate and defaults to a
+fail-closed unsupported result.
+
+Runtime-schema hosts may replace host-owned value/row-decoding models with
+`RuntimeValue`, `RuntimeRecord`, and handles resolved from their existing
+`ValidatedRuntimeSchema`. Resolve fresh handles after catalog/schema
+activation: owned handles and records are bound to the creating schema
+fingerprint, and mixing generations returns `schema_mismatch`. SQLite UUID,
+JSON, and datetime fields must use the documented text representation;
+PostgreSQL uses native UUID/JSON(B)/TIMESTAMPTZ types. Datetimes canonicalize to
+UTC at PostgreSQL-compatible rounded microsecond precision.
+
+No database migration is required. MSSQL runtime-row decoding is deliberately
+unsupported in this slice; its static generated reads are unchanged. See
+[Runtime values, records, handles, and row decoding](docs/runtime-records.md).
+
 ## 0.9.0 Bounded Append-Only Retention Purge
 
 This release adds public runtime and generated surfaces and extends public

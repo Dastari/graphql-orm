@@ -14,6 +14,12 @@
 //! reports them as [`RuntimeSchemaDiagnosticCode::UnsupportedCapability`] instead of silently
 //! degrading a declaration.
 //!
+//! Validated schemas can also resolve fingerprint-bound collection, field,
+//! relation, and projection handles and decode selected backend rows into
+//! owned records. See [`RuntimeProjection`](super::RuntimeProjection) and
+//! [`RuntimeRecord`](super::RuntimeRecord). Query rendering and execution
+//! remain outside this schema IR slice.
+//!
 //! # Validation and fingerprints
 //!
 //! [`RuntimeSchema::validate`] checks referential integrity, naming, and key compatibility and
