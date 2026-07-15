@@ -2,6 +2,26 @@
 
 User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
 
+## 0.10.0
+
+Companion macros crate: `graphql-orm-macros` **0.10.0**. Repository release
+policy keeps the Git-only companion versions aligned when public runtime APIs
+change; derive syntax and generated code are unchanged.
+
+- Added owned `RuntimeValue`, `RuntimeRecord`, finite-float, and canonical
+  datetime types covering every existing `RuntimeValueKind`.
+- Added fingerprint-bound collection, field, relation, and projection handles
+  resolved only by `ValidatedRuntimeSchema`; unknown, cross-collection,
+  duplicate, empty, and stale inputs fail before query execution.
+- Added the source-compatible `RuntimeRowDecoder` capability and exact,
+  projection-only SQLite/PostgreSQL decoding with stable safe errors and
+  retained backend sources. MSSQL/no-default configurations remain explicit
+  unsupported capabilities while existing static reads continue unchanged.
+- Added real SQLite and owned disposable-PostgreSQL parity, hostile-row,
+  nullability, type-mismatch, serialization, and feature-boundary coverage.
+- Runtime query rendering/execution, dynamic GraphQL, filters, ordering,
+  pagination, relation batching, and writes remain deliberately deferred.
+
 ## 0.9.0
 
 Companion macros crate: `graphql-orm-macros` **0.9.0**. Both crates require a

@@ -11,6 +11,34 @@ required. The optional `auth-agql` bridge intentionally pins `agql-auth` at
 `c92dcb441237bbe308499b26525945f60ffa394a`. Consequently `cargo package -p graphql-orm` cannot
 resolve that Git-only optional dependency through the crates.io packaging model; this is expected.
 
+## 0.10.0
+
+Additive pre-1.0 runtime-record foundation release. Runtime and companion
+macros are both `0.10.0` under the repository's aligned-version policy; macro
+inputs and generated code do not change.
+
+- `RuntimeValue` and `RuntimeRecord` provide an owned, deterministic read model
+  for all eight existing runtime value kinds, including explicit selected
+  `NULL` versus unloaded fields, finite floats, canonical UTC datetimes, UUID,
+  JSON, and bytes.
+- `ValidatedRuntimeSchema` resolves collection, field, relation, and projection
+  handles bound to its fingerprint and validated physical identifiers. Unknown,
+  cross-collection, duplicate, empty, and stale inputs fail before SQL.
+- SQLite and PostgreSQL implement the additive `RuntimeRowDecoder` capability,
+  decode only selected fields with exact backend types, ignore unexpected row
+  columns, retain safe backend sources, and return no partial record on error.
+- MSSQL and the `NoDefaultBackend` compatibility sentinel expose an explicit
+  unsupported capability. Existing MSSQL static reads and all derived
+  CRUD/GraphQL paths are unchanged; the existing requirement to enable at
+  least one backend feature is unchanged.
+- Equivalent real backend tests cover all value kinds and prove logical record
+  equality. Runtime query rendering/execution and dynamic GraphQL remain later
+  work; see [Runtime records](runtime-records.md).
+
+There is no source or data migration for existing consumers or third-party
+`OrmBackend` implementations. Third-party backends opt in separately by
+implementing `RuntimeRowDecoder` exactly.
+
 ## 0.9.0
 
 Pre-1.0 minor release adding a deliberately narrow retention-maintenance

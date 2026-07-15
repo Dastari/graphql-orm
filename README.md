@@ -33,6 +33,7 @@ It is designed for two related use cases:
 - federation-composable conventional GraphQL operation roots with stable Rust root names
 - dependency-owned schema modules with stable migration, backup, and restore metadata
 - owned backend-neutral runtime schema IR with validation, canonical fingerprints, and static-metadata conversion
+- owned runtime values, fingerprint-bound schema handles, projections, and exact SQLite/PostgreSQL row decoding
 - backend-neutral fenced lease transitions for durable workers
 - bounded forward and backward repository keyset windows for large timelines
 - opt-in policy-gated bounded retention purge for managed append-only entities
@@ -43,7 +44,7 @@ Select exactly the backend support your service needs:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.9.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.10.0", default-features = false, features = ["sqlite"] }
 ```
 
 GitHub with an exact full revision is the only supported distribution method. Neither crate is

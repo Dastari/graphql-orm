@@ -65,6 +65,18 @@
 //! apply schema changes. Use `database.schema()` for explicit validation,
 //! planning, and migration application.
 //!
+//! # Owned Runtime Records
+//!
+//! Hosts with a catalog-loaded [`graphql::orm::ValidatedRuntimeSchema`] can
+//! resolve fingerprint-bound [`graphql::orm::RuntimeProjection`] handles and
+//! decode selected SQLite/PostgreSQL rows into owned
+//! [`graphql::orm::RuntimeRecord`] values. Records distinguish an unloaded
+//! field from selected SQL `NULL`; all access uses stable collection/field IDs.
+//! The additive [`graphql::orm::RuntimeRowDecoder`] capability leaves existing
+//! `OrmBackend` implementations source-compatible and fails closed on a backend
+//! that has not implemented exact decoding. Query rendering and execution are
+//! deliberately outside this foundation.
+//!
 //! # Schema Query Limits
 //!
 //! Generated `schema_builder(database)` helpers apply production query safety

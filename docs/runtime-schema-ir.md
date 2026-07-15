@@ -105,6 +105,9 @@ Conversion notes:
 
 ## Deferred
 
-Runtime query execution, migration planning from the IR, transactional outbox integration, and
-dynamic GraphQL registration are later slices; the IR carries the metadata they will need
-(`filterable`, `sortable`, `generated`, defaults, ordering) without implementing them.
+Owned values, records, fingerprint-bound handles, projections, and exact SQLite/PostgreSQL row
+decoding are available through the [runtime record boundary](runtime-records.md). Runtime query
+rendering/execution, filters, ordering, pagination, relation batching, migration planning from the
+IR, transactional outbox integration, and dynamic GraphQL registration remain later slices; the
+IR carries the metadata they will need (`filterable`, `sortable`, `generated`, defaults, ordering)
+without implementing those operations.
