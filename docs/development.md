@@ -49,6 +49,8 @@ cargo test -p graphql-orm --test composite_relations_ui
 cargo test -p graphql-orm --no-default-features --features sqlite --test spatial_sqlite
 cargo test -p graphql-orm --no-default-features --features sqlite --test full_text_search
 cargo test -p graphql-orm --no-default-features --features mssql --test mssql_write_unavailable_ui
+cargo test -p graphql-orm --no-default-features --features sqlite --test repository_only_entity
+cargo test -p graphql-orm --no-default-features --features sqlite --test repository_only_entity_ui
 ```
 
 Run all default tests with:
@@ -96,6 +98,16 @@ credentials and no persistent volume:
 ```bash
 cargo test -p graphql-orm --no-default-features --features postgres \
   --test retention_purge_postgres -- --ignored --nocapture
+```
+
+The repository-only parity test follows the same owned-resource rule: it
+ignores `DATABASE_URL`/`TEST_DATABASE_URL`, starts a loopback-only PostgreSQL
+container with generated credentials/database identity, and removes it on
+success or failure:
+
+```bash
+cargo test -p graphql-orm --no-default-features --features postgres \
+  --test repository_only_postgres -- --ignored --nocapture
 ```
 
 ## SQL Server Tests

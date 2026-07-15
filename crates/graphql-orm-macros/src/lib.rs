@@ -9,6 +9,7 @@
 //! - `mutation_result!` - Generate GraphQL mutation result types
 //! - `#[derive(GraphQLEntity)]` - Generate GraphQL types, filters, and SQL helpers from a struct
 //! - `#[derive(GraphQLSchemaEntity)]` - Generate schema metadata only for migration planning
+//! - `#[derive(RepositoryEntity)]` - Generate persisted repository APIs with no GraphQL types
 //! - `#[derive(GraphQLRelations)]` - Generate relation loading with look_ahead support
 //! - `#[derive(GraphQLOperations)]` - Generate Query/Mutation/Subscription structs
 //! - `schema_roots!` - Generate root query/mutation/subscription types for a set of entities
@@ -160,6 +161,7 @@ mod mutation_result;
 mod naming;
 mod operations;
 mod relations;
+mod repository;
 mod schema_roots;
 
 #[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mssql")))]
@@ -272,9 +274,63 @@ pub fn mutation_result(input: TokenStream) -> TokenStream {
 /// attributes and backend capabilities.
 pub fn derive_graphql_entity(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+    if entity::has_repository_entity_attribute(&input.attrs) {
+        return syn::Error::new_spanned(
+            &input,
+            "GraphQLEntity requires #[graphql_entity(...)]; use RepositoryEntity for #[repository_entity(...)]",
+        )
+        .to_compile_error()
+        .into();
+    }
     match entity::generate_graphql_entity(&input) {
         Ok(tokens) => TokenStream::from(tokens),
         Err(err) => TokenStream::from(err.to_compile_error()),
+    }
+}
+
+#[proc_macro_derive(
+    RepositoryEntity,
+    attributes(
+        repository_entity,
+        graphql_rls,
+        graphql,
+        graphql_orm,
+        serde,
+        primary_key,
+        filterable,
+        sortable,
+        unique,
+        db_column,
+        relation,
+        skip_db,
+        date_field,
+        boolean_field,
+        json_field,
+        transform,
+        input_only,
+        backup,
+        index,
+        unique_index
+    )
+)]
+/// Derive managed-schema and typed repository APIs without any GraphQL type surface.
+pub fn derive_repository_entity(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let result = (|| {
+        repository::ensure_repository_declaration(&input)?;
+        let entity = repository::strip_entity_graphql_surface(
+            &input,
+            entity::generate_graphql_entity(&input)?,
+        )?;
+        let operations = repository::strip_operations_graphql_surface(
+            &input,
+            operations::generate_graphql_operations(&input)?,
+        )?;
+        Ok::<_, syn::Error>(quote! { #entity #operations })
+    })();
+    match result {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
     }
 }
 
@@ -319,6 +375,7 @@ pub fn derive_graphql_schema_entity(input: TokenStream) -> TokenStream {
     GraphQLRelations,
     attributes(
         graphql_entity,
+        repository_entity,
         graphql_rls,
         graphql,
         graphql_orm,
@@ -336,6 +393,14 @@ pub fn derive_graphql_schema_entity(input: TokenStream) -> TokenStream {
 /// `#[graphql(complex)]` on the entity type.
 pub fn derive_graphql_relations(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+    if entity::has_repository_entity_attribute(&input.attrs) {
+        return syn::Error::new_spanned(
+            &input,
+            "RepositoryEntity cannot be combined with GraphQLRelations because repository-only entities have no GraphQL object surface",
+        )
+        .to_compile_error()
+        .into();
+    }
     match relations::generate_graphql_relations(&input) {
         Ok(tokens) => TokenStream::from(tokens),
         Err(err) => TokenStream::from(err.to_compile_error()),
@@ -346,6 +411,7 @@ pub fn derive_graphql_relations(input: TokenStream) -> TokenStream {
     GraphQLOperations,
     attributes(
         graphql_entity,
+        repository_entity,
         graphql_rls,
         graphql,
         graphql_orm,
@@ -363,6 +429,14 @@ pub fn derive_graphql_relations(input: TokenStream) -> TokenStream {
 /// them.
 pub fn derive_graphql_operations(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+    if entity::has_repository_entity_attribute(&input.attrs) {
+        return syn::Error::new_spanned(
+            &input,
+            "RepositoryEntity already generates repository operations and cannot be combined with GraphQLOperations",
+        )
+        .to_compile_error()
+        .into();
+    }
     match operations::generate_graphql_operations(&input) {
         Ok(tokens) => TokenStream::from(tokens),
         Err(err) => TokenStream::from(err.to_compile_error()),

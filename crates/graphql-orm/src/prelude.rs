@@ -13,6 +13,6 @@ pub use crate::graphql::structural_auth::{
     StructuralAuthorization, merge_filters, resolve_structural_auth,
 };
 pub use crate::{
-    GraphQLEntity, GraphQLOperations, GraphQLRelations, GraphQLSchemaEntity, mutation_result,
-    schema_roots,
+    GraphQLEntity, GraphQLOperations, GraphQLRelations, GraphQLSchemaEntity, RepositoryEntity,
+    mutation_result, schema_roots,
 };

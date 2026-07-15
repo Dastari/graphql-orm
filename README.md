@@ -44,7 +44,7 @@ Select exactly the backend support your service needs:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.10.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.11.0", default-features = false, features = ["sqlite"] }
 ```
 
 GitHub with an exact full revision is the only supported distribution method. Neither crate is
@@ -128,6 +128,15 @@ query {
 
 SQLite/Postgres entities also get generated mutations and repository helpers unless policy/backend
 settings make them unavailable.
+
+For persisted types that must never enter the GraphQL type registry, derive
+`RepositoryEntity` with `#[repository_entity(...)]`. It generates ordinary Rust
+filter/order/create/update/projection types and applicable typed repository and
+transaction operations, but no async-graphql object, input, resolver,
+connection, payload, subscription, or schema-root implementation. Private and
+sensitive fields remain available to trusted repository inputs, with generated
+debug output and mutation side effects redacted. The storage model and stable
+schema hash are identical to an equivalent GraphQL-enabled declaration.
 
 `schema_roots!` can hide generated GraphQL mutations without disabling generated repository
 writes. `generated_mutations` defaults to `"all"` for compatibility; use `"none"` to expose only
@@ -217,6 +226,7 @@ batched relation query per relation layer, not N+1 or nested N*N queries.
 - [Portable transactions, CAS, append-only entities, constraints, and keysets](docs/portable-persistence.md)
 - [Binary keys, private repository upserts, and conditional indexes](docs/binary-keys-and-indexes.md)
 - [Typed least-privilege read projections](docs/read-projections.md)
+- [Repository-only persisted entities](docs/repository-only-entities.md)
 - [Typed composite-key and bounded mutations](docs/composite-mutations.md)
 - [Bounded append-only retention maintenance](docs/retention-maintenance.md)
 - [Backup runtime API](docs/backup.md)

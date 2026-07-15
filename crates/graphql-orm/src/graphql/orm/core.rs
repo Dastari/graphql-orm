@@ -656,9 +656,16 @@ where
     T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
 {
     fn new(hook_ctx: &'ctx mut MutationContext<'tx, B>) -> Self {
+        let resolved = hook_ctx
+            .database()
+            .pagination_config()
+            .resolve_page(None, true);
         Self {
             hook_ctx,
-            query: EntityQuery::new(),
+            query: EntityQuery::new().paginate(&super::query::PageInput {
+                limit: resolved.limit,
+                offset: Some(resolved.offset),
+            }),
         }
     }
 
@@ -685,20 +692,32 @@ where
 
     pub fn limit(mut self, limit: i64) -> Self {
         let mut page = self.query.page.unwrap_or_default();
-        page.limit = Some(limit);
+        page.limit = self
+            .hook_ctx
+            .database()
+            .pagination_config()
+            .clamp_explicit_limit(Some(limit));
         self.query.page = Some(page);
         self
     }
 
     pub fn offset(mut self, offset: i64) -> Self {
         let mut page = self.query.page.unwrap_or_default();
-        page.offset = Some(offset);
+        page.offset = Some(offset.max(0));
         self.query.page = Some(page);
         self
     }
 
     pub fn paginate(mut self, page: super::query::PageInput) -> Self {
-        self.query = self.query.paginate(&page);
+        let resolved = self
+            .hook_ctx
+            .database()
+            .pagination_config()
+            .resolve_page(Some(&page), true);
+        self.query = self.query.paginate(&super::query::PageInput {
+            limit: resolved.limit,
+            offset: Some(resolved.offset),
+        });
         self
     }
 
@@ -716,7 +735,8 @@ where
             .await
             .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
         let query = self.query;
-        query.fetch_all_on(self.hook_ctx.executor()).await
+        let rows = query.fetch_all_on(self.hook_ctx.executor()).await?;
+        authorize_repository_rows::<T, B>(self.hook_ctx.database(), rows).await
     }
 
     pub async fn fetch_one(self) -> crate::Result<Option<T>> {
@@ -733,7 +753,15 @@ where
             .await
             .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
         let query = self.query;
-        query.fetch_one_on(self.hook_ctx.executor()).await
+        let row = query.fetch_one_on(self.hook_ctx.executor()).await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        if authorize_repository_row::<T, B>(self.hook_ctx.database(), &row).await? {
+            Ok(Some(row))
+        } else {
+            Ok(None)
+        }
     }
 
     pub async fn count(self) -> crate::Result<i64> {
@@ -749,6 +777,11 @@ where
             )
             .await
             .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
+        if self.hook_ctx.database().row_policy().is_some() {
+            return Err(sqlx::Error::Protocol(
+                "repository count reads require database-visible row-policy predicates".to_string(),
+            ));
+        }
         let query = self.query;
         query.count_on(self.hook_ctx.executor()).await
     }
@@ -1192,7 +1225,15 @@ where
             )
             .await
             .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
-        T::find_by_id_in_mutation_context(self, id).await
+        let row = T::find_by_id_in_mutation_context(self, id).await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        if authorize_repository_row::<T, B>(self.db, &row).await? {
+            Ok(Some(row))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Find one entity by its complete generated primary-key value.
@@ -1214,7 +1255,15 @@ where
             )
             .await
             .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
-        T::find_by_key_in_mutation_context(self, key).await
+        let row = T::find_by_key_in_mutation_context(self, key).await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        if authorize_repository_row::<T, B>(self.db, &row).await? {
+            Ok(Some(row))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Update one entity selected by its complete generated key.
@@ -1316,7 +1365,24 @@ where
             .map_err(|error| {
                 crate::graphql::errors::OrmPublicError::internal(format!("{error:?}"))
             })?;
-        T::keyset_page_in_mutation_context(self, filter, page).await
+        if page.include_total_count && self.db.row_policy().is_some() {
+            return Err(crate::graphql::errors::OrmPublicError::new(
+                crate::graphql::errors::OrmErrorCode::AuthorizationMisconfigured,
+            )
+            .with_internal(
+                "repository keyset total counts require a database-visible row policy",
+            ));
+        }
+        let connection = T::keyset_page_in_mutation_context(self, filter, page).await?;
+        for edge in &connection.edges {
+            if !authorize_repository_row::<T, B>(self.db, &edge.node)
+                .await
+                .map_err(crate::graphql::errors::OrmPublicError::from)?
+            {
+                return Err(crate::graphql::errors::OrmPublicError::forbidden());
+            }
+        }
+        Ok(connection)
     }
 
     /// Reads a bounded forward or backward keyset connection inside the
@@ -1342,7 +1408,24 @@ where
             .map_err(|error| {
                 crate::graphql::errors::OrmPublicError::internal(format!("{error:?}"))
             })?;
-        T::keyset_connection_page_in_mutation_context(self, filter, page).await
+        if page.include_total_count && self.db.row_policy().is_some() {
+            return Err(crate::graphql::errors::OrmPublicError::new(
+                crate::graphql::errors::OrmErrorCode::AuthorizationMisconfigured,
+            )
+            .with_internal(
+                "repository keyset total counts require a database-visible row policy",
+            ));
+        }
+        let connection = T::keyset_connection_page_in_mutation_context(self, filter, page).await?;
+        for edge in &connection.edges {
+            if !authorize_repository_row::<T, B>(self.db, &edge.node)
+                .await
+                .map_err(crate::graphql::errors::OrmPublicError::from)?
+            {
+                return Err(crate::graphql::errors::OrmPublicError::forbidden());
+            }
+        }
+        Ok(connection)
     }
 }
 
@@ -1568,6 +1651,71 @@ where
         });
         Ok(RetentionPurgeOutcome::Purged { affected })
     }
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+async fn authorize_repository_row<T, B>(db: &crate::db::Database<B>, row: &T) -> crate::Result<bool>
+where
+    T: Entity,
+    B: WriteBackend,
+{
+    let metadata = T::metadata();
+    let record = row.repository_policy_record();
+    if db.row_policy().is_some() {
+        let record = record.ok_or_else(|| {
+            crate::graphql::errors::sqlx_error_from_public(
+                crate::graphql::errors::OrmPublicError::new(
+                    crate::graphql::errors::OrmErrorCode::AuthorizationMisconfigured,
+                )
+                .with_internal(
+                    "entity does not expose the generated repository policy-record capability",
+                ),
+            )
+        })?;
+        if !db
+            .can_read_row(
+                None,
+                metadata.entity_name,
+                metadata.read_policy,
+                EntityAccessSurface::Repository,
+                record,
+            )
+            .await
+            .map_err(crate::graphql::errors::sqlx_error_from_graphql)?
+        {
+            return Ok(false);
+        }
+    }
+    for field in T::repository_field_policies() {
+        db.ensure_repository_readable_field(
+            None,
+            metadata.entity_name,
+            field.api_name,
+            field.read_policy,
+            record,
+        )
+        .await
+        .map_err(crate::graphql::errors::sqlx_error_from_public)?;
+    }
+    Ok(true)
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+async fn authorize_repository_rows<T, B>(
+    db: &crate::db::Database<B>,
+    rows: Vec<T>,
+) -> crate::Result<Vec<T>>
+where
+    T: Entity,
+    B: WriteBackend,
+{
+    let mut visible = Vec::with_capacity(rows.len());
+    for row in rows {
+        if authorize_repository_row::<T, B>(db, &row).await? {
+            visible.push(row);
+        }
+    }
+    Ok(visible)
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -1975,6 +2123,40 @@ pub trait FieldPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
         record: Option<&'a (dyn std::any::Any + Send + Sync)>,
         value: Option<&'a (dyn std::any::Any + Send + Sync)>,
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>>;
+
+    /// Authorize one field selected through a repository-only/full-entity read.
+    ///
+    /// Existing GraphQL-only policy implementations remain source compatible,
+    /// but declared repository field policies fail closed until this method is
+    /// implemented deliberately.
+    fn can_read_repository_field<'a>(
+        &'a self,
+        _access: Option<crate::graphql::auth::AccessContext<'a>>,
+        _db: &'a crate::db::Database<B>,
+        _entity_name: &'static str,
+        _field_name: &'static str,
+        policy_key: Option<&'static str>,
+        _record: Option<&'a (dyn std::any::Any + Send + Sync)>,
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move { Ok(policy_key.is_none()) })
+    }
+
+    /// Authorize one field supplied through an ordinary Rust repository input.
+    ///
+    /// The default denies fields with declared policy keys, preventing the
+    /// absence of a GraphQL request context from becoming implicit authority.
+    fn can_write_repository_field<'a>(
+        &'a self,
+        _access: Option<crate::graphql::auth::AccessContext<'a>>,
+        _db: &'a crate::db::Database<B>,
+        _entity_name: &'static str,
+        _field_name: &'static str,
+        policy_key: Option<&'static str>,
+        _record: Option<&'a (dyn std::any::Any + Send + Sync)>,
+        _value: Option<&'a (dyn std::any::Any + Send + Sync)>,
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move { Ok(policy_key.is_none()) })
+    }
 }
 
 pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
@@ -2120,6 +2302,34 @@ where
     let json = serde_json::to_value(value).map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
     Ok(EntityState {
         value: Arc::new(value.clone()),
+        json,
+    })
+}
+
+/// Capture mutation-hook state while replacing selected top-level fields.
+///
+/// The retained type-erased value is the redacted JSON object rather than the
+/// original entity, so a mutation hook cannot recover protected fields by
+/// downcasting the state back to the entity type.
+#[doc(hidden)]
+pub fn entity_state_redacted<T>(value: &T, sensitive_fields: &[&str]) -> crate::Result<EntityState>
+where
+    T: serde::Serialize,
+{
+    let mut json =
+        serde_json::to_value(value).map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+    if let serde_json::Value::Object(fields) = &mut json {
+        for field in sensitive_fields {
+            if fields.contains_key(*field) {
+                fields.insert(
+                    (*field).to_string(),
+                    serde_json::Value::String("[redacted]".to_string()),
+                );
+            }
+        }
+    }
+    Ok(EntityState {
+        value: Arc::new(json.clone()),
         json,
     })
 }

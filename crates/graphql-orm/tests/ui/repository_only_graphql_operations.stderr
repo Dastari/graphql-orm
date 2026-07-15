@@ -1,0 +1,11 @@
+error: RepositoryEntity already generates repository operations and cannot be combined with GraphQLOperations
+  --> tests/ui/repository_only_graphql_operations.rs:10:1
+   |
+10 | / #[repository_entity(backend = "sqlite", table = "private_records", plural = "PrivateRecords")]
+11 | | struct PrivateRecord {
+12 | |     #[primary_key]
+13 | |     #[filterable(type = "string")]
+...  |
+16 | |     value: String,
+17 | | }
+   | |_^

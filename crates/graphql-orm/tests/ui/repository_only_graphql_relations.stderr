@@ -1,0 +1,11 @@
+error: RepositoryEntity cannot be combined with GraphQLRelations because repository-only entities have no GraphQL object surface
+  --> tests/ui/repository_only_graphql_relations.rs:10:1
+   |
+10 | / #[repository_entity(backend = "sqlite", table = "private_records", plural = "PrivateRecords")]
+11 | | struct PrivateRecord {
+12 | |     #[primary_key]
+13 | |     #[filterable(type = "string")]
+...  |
+16 | |     value: String,
+17 | | }
+   | |_^

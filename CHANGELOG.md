@@ -2,6 +2,28 @@
 
 User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
 
+## 0.11.0
+
+Companion macros crate: `graphql-orm-macros` **0.11.0**. Both Git-only crates
+advance together because this release adds a public derive, generated code,
+repository authorization callbacks, and runtime query types.
+
+- Added opt-in `RepositoryEntity` / `#[repository_entity(...)]` generation for
+  one canonical managed entity with typed repository CRUD, filters, ordering,
+  projections, transactions, CAS/composite operations, hooks, events, search,
+  backup, and authorization, but no async-graphql types or roots.
+- Added bounded Database-bound `RepositoryQuery` reads and separate fail-closed
+  repository field-policy callbacks. Search-enabled entities use a bounded,
+  policy-aware `RepositorySearchQuery`. Private/sensitive fields remain
+  available to trusted Rust write inputs without widening GraphQL inputs.
+- Sensitive generated input/projection debug output, mutation-hook state, and
+  change events are redacted; repository entity/row/field policies continue to
+  apply without treating an absent GraphQL context as authority.
+- Equivalent repository-only and GraphQL-enabled declarations retain identical
+  managed schema models and stable hashes. No DDL or data migration is needed.
+- SQLite/PostgreSQL provide the applicable full contract; MSSQL repository-only
+  entities are read-only and reject write configurations at compile time.
+
 ## 0.10.0
 
 Companion macros crate: `graphql-orm-macros` **0.10.0**. Repository release

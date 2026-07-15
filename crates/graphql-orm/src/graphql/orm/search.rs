@@ -7,6 +7,7 @@ use super::query::{
 use super::{DbAuthContext, OrmBackend, WriteBackend};
 use crate::graphql::filters::{SearchInput, SearchMode};
 use crate::graphql::pagination::{PageInfo, encode_cursor};
+use std::any::Any;
 use std::marker::PhantomData;
 
 /// One weighted text fragment inside a generated search document.
@@ -395,6 +396,138 @@ pub struct EntitySearchQuery<'a, T, W, B: OrmBackend> {
     query: EntityQuery<T, B>,
     pagination_config: PaginationConfig,
     _where: PhantomData<W>,
+}
+
+/// A bounded, policy-aware full-text search builder for repository entities.
+///
+/// This wrapper keeps the raw backend pool out of the generated repository
+/// surface and applies entity, row, and field authorization to every returned
+/// entity. It deliberately exposes only record-oriented search results; the
+/// GraphQL connection helper remains part of the GraphQL-enabled surface.
+pub struct RepositorySearchQuery<'a, T, W, B: OrmBackend> {
+    db: &'a crate::db::Database<B>,
+    auth: Option<DbAuthContext>,
+    query: EntitySearchQuery<'a, T, W, B>,
+}
+
+impl<'a, T, W, B> RepositorySearchQuery<'a, T, W, B>
+where
+    B: OrmBackend,
+    T: super::Entity + SearchableEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+    W: DatabaseFilter + Clone + Send + Sync + 'static,
+{
+    /// Create a bounded repository search associated with `db`.
+    pub fn new(db: &'a crate::db::Database<B>, search: SearchInput) -> Self {
+        Self {
+            db,
+            auth: None,
+            query: EntitySearchQuery::new(db.pool(), search)
+                .pagination_config(db.pagination_config()),
+        }
+    }
+
+    /// Apply transaction-style database authorization to this search.
+    pub fn with_auth(mut self, auth: Option<&DbAuthContext>) -> Self {
+        self.auth = auth.cloned();
+        self
+    }
+
+    /// Add a generated typed filter.
+    pub fn filter(mut self, filter: W) -> Self {
+        self.query = self.query.filter(filter);
+        self
+    }
+
+    /// Add a generated deterministic ordering expression.
+    pub fn order_by<O>(mut self, order: O) -> Self
+    where
+        O: DatabaseOrderBy,
+    {
+        self.query = self.query.order_by(order);
+        self
+    }
+
+    /// Apply the entity's declared default ordering after relevance.
+    pub fn default_order(mut self) -> Self {
+        self.query = self.query.default_order();
+        self
+    }
+
+    /// Set a requested limit. The database maximum is applied before SQL execution.
+    pub fn limit(mut self, limit: i64) -> Self {
+        self.query = self.query.limit(limit);
+        self
+    }
+
+    /// Set a non-negative offset.
+    pub fn offset(mut self, offset: i64) -> Self {
+        self.query = self.query.offset(offset.max(0));
+        self
+    }
+
+    /// Execute the search and return only policy-visible records.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe authorization, query-rendering, backend, or row-decoding
+    /// error. Declared policies without their required providers fail closed.
+    pub async fn fetch_all(self) -> crate::Result<Vec<SearchHit<T>>> {
+        let metadata = T::metadata();
+        self.db
+            .ensure_entity_access(
+                None,
+                metadata.entity_name,
+                metadata.read_policy,
+                super::EntityAccessKind::Read,
+                super::EntityAccessSurface::Repository,
+            )
+            .await
+            .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
+
+        let hits = self.query.fetch_all_with_auth(self.auth.as_ref()).await?;
+        let mut visible = Vec::with_capacity(hits.len());
+        for hit in hits {
+            let record = hit.entity.repository_policy_record();
+            if self.db.row_policy().is_some() && record.is_none() {
+                return Err(crate::graphql::errors::sqlx_error_from_public(
+                    crate::graphql::errors::OrmPublicError::new(
+                        crate::graphql::errors::OrmErrorCode::AuthorizationMisconfigured,
+                    )
+                    .with_internal(
+                        "entity does not expose the generated repository policy-record capability",
+                    ),
+                ));
+            }
+            if !self
+                .db
+                .can_read_row(
+                    None,
+                    metadata.entity_name,
+                    metadata.read_policy,
+                    super::EntityAccessSurface::Repository,
+                    record.unwrap_or(&hit.entity as &(dyn Any + Send + Sync)),
+                )
+                .await
+                .map_err(crate::graphql::errors::sqlx_error_from_graphql)?
+            {
+                continue;
+            }
+            for field in T::repository_field_policies() {
+                self.db
+                    .ensure_repository_readable_field(
+                        None,
+                        metadata.entity_name,
+                        field.api_name,
+                        field.read_policy,
+                        record,
+                    )
+                    .await
+                    .map_err(crate::graphql::errors::sqlx_error_from_public)?;
+            }
+            visible.push(hit);
+        }
+        Ok(visible)
+    }
 }
 
 impl<'a, T, W, B> EntitySearchQuery<'a, T, W, B>

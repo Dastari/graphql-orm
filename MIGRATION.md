@@ -3,6 +3,52 @@
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.11.0 Repository-Only Entities
+
+Update both Git-only crates to 0.11.0 at the final reviewed full Git revision.
+This is an additive pre-1.0 minor release: it introduces the public
+`RepositoryEntity` derive, `#[repository_entity(...)]` declaration attribute,
+`RepositoryQuery`, repository field-policy callbacks, and generated ordinary
+Rust DTO/input types. Existing `GraphQLEntity`, `GraphQLSchemaEntity`,
+`GraphQLOperations`, schema roots, SDL, and stored schemas remain compatible.
+
+To move a persisted entity out of GraphQL entirely, replace its GraphQL derives
+and `#[graphql_entity(...)]` with:
+
+```rust
+#[derive(RepositoryEntity, Clone, serde::Serialize, serde::Deserialize)]
+#[repository_entity(
+    backend = "sqlite",
+    table = "credentials",
+    plural = "Credentials",
+    default_sort = "username ASC"
+)]
+struct Credential { /* unchanged persisted fields */ }
+```
+
+Remove it from `schema_roots!`; attempting to register it is now an intentional
+compile error. Replace the legacy pool-bound list builder with
+`Credential::query(&database)`. Primary/unique lookups, writes, projections,
+and `MutationContext` calls retain their generated names. Repository-only
+create/update types include writable private fields, so host duplicate DTOs are
+not needed.
+
+Existing `FieldPolicy` implementations compile unchanged. Fields with no
+declared key keep the existing repository decision; a field carrying
+`read_policy`/`write_policy` is denied by the new default repository callbacks
+until the provider implements `can_read_repository_field` and/or
+`can_write_repository_field`. This deliberate fail-closed behavior prevents a
+missing GraphQL `Context` from becoming authority.
+
+Changing only the generation surface does not alter `SchemaModel`, migration
+plans, schema/module fingerprints, backup descriptors, tables, indexes,
+constraints, RLS, or data. No data or schema migration is required. Sensitive
+repository mutation-hook snapshots/events are more restrictive by design: hook
+state is redacted and cannot be downcast to the original entity, and change
+events omit the entity payload when the declaration has a sensitive field.
+Before-write input hooks remain typed and can deliberately transform the value.
+See [Repository-only entities](docs/repository-only-entities.md).
+
 ## 0.10.0 Runtime Record Read Foundation
 
 Update both Git-only crates to 0.10.0 at the reviewed full Git revision.

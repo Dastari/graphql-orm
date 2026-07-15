@@ -18,6 +18,7 @@ This directory contains the project documentation that is too detailed for the r
 - [Owned runtime schema IR](runtime-schema-ir.md)
 - [Runtime values, records, handles, and row decoding](runtime-records.md)
 - [Runtime writes, hooks, subscriptions, and policies](runtime-and-writes.md)
+- [Repository-only persisted entities](repository-only-entities.md)
 - [Bounded append-only retention maintenance](retention-maintenance.md)
 - [Backup runtime API](backup.md)
 - [Schema modules and fenced leases](schema-modules-and-leases.md)

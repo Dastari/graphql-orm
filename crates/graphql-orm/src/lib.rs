@@ -77,6 +77,14 @@
 //! that has not implemented exact decoding. Query rendering and execution are
 //! deliberately outside this foundation.
 //!
+//! # Repository-Only Entities
+//!
+//! [`RepositoryEntity`] with `#[repository_entity(...)]` generates the managed
+//! schema, typed repository inputs/queries/projections, and applicable portable
+//! transaction operations without implementing any async-graphql object or
+//! input type. It is the persisted trust boundary for host-owned credentials,
+//! grants, and other private entities that must never enter GraphQL SDL.
+//!
 //! # Schema Query Limits
 //!
 //! Generated `schema_builder(database)` helpers apply production query safety
