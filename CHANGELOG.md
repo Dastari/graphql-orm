@@ -2,6 +2,26 @@
 
 User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
 
+## 0.12.0
+
+Companion macros crate: `graphql-orm-macros` **0.12.0**. The Git-only aligned
+release policy advances both crates for this public runtime API release; derive
+syntax and generated code are unchanged.
+
+- Added schema-fingerprint-bound `RuntimePredicate`, `RuntimeOrder`,
+  `RuntimeReadRequest`, limits, page/cursor, connection, page-info, and safe
+  error APIs for runtime-schema reads.
+- Added validated recursive scalar filters, structural policy-filter `AND`,
+  explicit portable null ordering, primary-key tie-breakers, bounded
+  bidirectional keysets, hidden cursor columns, and opt-in exact count.
+- Added `Database::execute_runtime_read` with typed bindings, exact existing
+  runtime row decoding, and optional `DbAuthContext` on SQLite/PostgreSQL.
+  MSSQL remains explicitly unsupported for runtime decoding/execution while
+  static reads are unchanged.
+- Existing static queries, generated CRUD/GraphQL, backend traits, `SqlValue`,
+  legacy cursor formats, schemas, and migrations are source-compatible. No
+  schema or data migration is required.
+
 ## 0.11.0
 
 Companion macros crate: `graphql-orm-macros` **0.11.0**. Both Git-only crates

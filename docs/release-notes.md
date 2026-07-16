@@ -11,6 +11,32 @@ required. The optional `auth-agql` bridge intentionally pins `agql-auth` at
 `c92dcb441237bbe308499b26525945f60ffa394a`. Consequently `cargo package -p graphql-orm` cannot
 resolve that Git-only optional dependency through the crates.io packaging model; this is expected.
 
+## 0.12.0
+
+Additive pre-1.0 runtime query release. Runtime and companion macros are both
+`0.12.0` under the aligned Git-only policy; derive syntax and generated code
+are unchanged.
+
+- Fingerprint-bound predicates and orders validate stable handles, field
+  capability metadata, kinds, null/operator compatibility, tree/list/bind
+  limits, and deterministic primary-key tie-breakers before I/O.
+- SQLite/PostgreSQL execute bounded forward/backward `gormrq1` keysets through
+  `Database::execute_runtime_read`, use typed binds and exact runtime decoding,
+  retain hidden cursor fields as unloaded, and issue counts only on opt-in.
+- Recursive `and`/`or`/`not`, the documented portable scalar matrix,
+  case-sensitive string behavior, explicit null placement, cursor
+  schema/collection/order binding, and stable safe error categories are now
+  public contracts.
+- Optional `DbAuthContext` retains PostgreSQL transaction-local RLS behavior.
+  Hosts remain responsible for compiling required authorization predicates and
+  authorizing output/filter/order fields.
+- Static generated queries/cursors, backend traits, serialized runtime schema,
+  database schemas, and existing consumers remain compatible. MSSQL runtime
+  execution is explicitly unsupported; static MSSQL behavior is unchanged.
+
+See [Runtime queries](runtime-queries.md) and MIGRATION.md. No schema/data or
+existing cursor migration is required.
+
 ## 0.11.0
 
 Additive pre-1.0 repository-only entity release. Runtime and companion macros

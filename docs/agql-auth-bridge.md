@@ -6,7 +6,7 @@
 ## Dependency
 
 ```toml
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.11.0", features = ["sqlite", "auth-agql"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.12.0", features = ["sqlite", "auth-agql"] }
 # Host applications may depend on agql-auth directly as well. The optional
 # graphql-orm auth-agql feature pins the exact upstream release:
 # git = "https://github.com/Dastari/agql-auth.git"

@@ -17,6 +17,7 @@ This directory contains the project documentation that is too detailed for the r
 - [Schema ownership, validation, planning, and ABI migrations](schema-management.md)
 - [Owned runtime schema IR](runtime-schema-ir.md)
 - [Runtime values, records, handles, and row decoding](runtime-records.md)
+- [Runtime select, filter, order, and keyset reads](runtime-queries.md)
 - [Runtime writes, hooks, subscriptions, and policies](runtime-and-writes.md)
 - [Repository-only persisted entities](repository-only-entities.md)
 - [Bounded append-only retention maintenance](retention-maintenance.md)

@@ -106,8 +106,8 @@ Conversion notes:
 ## Deferred
 
 Owned values, records, fingerprint-bound handles, projections, and exact SQLite/PostgreSQL row
-decoding are available through the [runtime record boundary](runtime-records.md). Runtime query
-rendering/execution, filters, ordering, pagination, relation batching, migration planning from the
-IR, transactional outbox integration, and dynamic GraphQL registration remain later slices; the
-IR carries the metadata they will need (`filterable`, `sortable`, `generated`, defaults, ordering)
-without implementing those operations.
+decoding are available through the [runtime record boundary](runtime-records.md). Runtime select,
+filter, deterministic order, bounded keyset execution, and optional exact count are available
+through the [runtime query boundary](runtime-queries.md). Relation loading, migration planning from
+the IR, transactional outbox integration, writes, and dynamic GraphQL registration remain later
+slices.

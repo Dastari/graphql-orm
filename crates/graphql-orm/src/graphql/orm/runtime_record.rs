@@ -399,6 +399,8 @@ pub struct RuntimeFieldHandle {
     physical_column: String,
     value_kind: RuntimeValueKind,
     nullable: bool,
+    filterable: bool,
+    sortable: bool,
 }
 
 impl RuntimeFieldHandle {
@@ -430,6 +432,16 @@ impl RuntimeFieldHandle {
     /// Whether SQL `NULL` is valid for this field.
     pub const fn nullable(&self) -> bool {
         self.nullable
+    }
+
+    /// Whether validated runtime queries may filter on this field.
+    pub const fn filterable(&self) -> bool {
+        self.filterable
+    }
+
+    /// Whether validated runtime queries may order by this field.
+    pub const fn sortable(&self) -> bool {
+        self.sortable
     }
 }
 
@@ -618,6 +630,8 @@ impl ValidatedRuntimeSchema {
             physical_column: field.physical_column.clone(),
             value_kind: field.value_kind,
             nullable: field.nullable,
+            filterable: field.filterable,
+            sortable: field.sortable,
         })
     }
 
@@ -815,6 +829,44 @@ impl<'de> serde::Deserialize<'de> for RuntimeRecord {
 }
 
 impl RuntimeRecord {
+    /// Return this record restricted to a validated projection.
+    ///
+    /// This is used by runtime keyset execution to decode internal ordering
+    /// columns without marking them loaded in the caller-visible record.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a projection from another schema or collection, or a projected
+    /// field that was not decoded into this record.
+    pub fn project(&self, projection: &RuntimeProjection) -> Result<Self, RuntimeRecordError> {
+        if projection.schema_fingerprint != self.schema_fingerprint {
+            return Err(
+                RuntimeRecordError::new(RuntimeRecordErrorCode::SchemaMismatch)
+                    .collection(&self.collection),
+            );
+        }
+        if projection.collection.id != self.collection {
+            return Err(
+                RuntimeRecordError::new(RuntimeRecordErrorCode::CrossCollectionField)
+                    .collection(&self.collection),
+            );
+        }
+        let mut values = BTreeMap::new();
+        for field in &projection.fields {
+            let value = self.values.get(&field.id).ok_or_else(|| {
+                RuntimeRecordError::new(RuntimeRecordErrorCode::FieldUnloaded).for_field(field)
+            })?;
+            values.insert(field.id.clone(), value.clone());
+        }
+        Ok(Self {
+            format_version: self.format_version,
+            schema_fingerprint: self.schema_fingerprint.clone(),
+            collection: self.collection.clone(),
+            field_kinds: self.field_kinds.clone(),
+            values,
+        })
+    }
+
     /// Deserialize and validate a deterministic JSON record representation.
     ///
     /// # Errors

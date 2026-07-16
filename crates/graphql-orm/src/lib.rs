@@ -74,8 +74,10 @@
 //! field from selected SQL `NULL`; all access uses stable collection/field IDs.
 //! The additive [`graphql::orm::RuntimeRowDecoder`] capability leaves existing
 //! `OrmBackend` implementations source-compatible and fails closed on a backend
-//! that has not implemented exact decoding. Query rendering and execution are
-//! deliberately outside this foundation.
+//! that has not implemented exact decoding. Validated runtime predicates,
+//! deterministic orders, bounded opaque keysets, optional counts, and safe
+//! execution are provided by [`graphql::orm::RuntimeReadRequest`] and
+//! `Database::execute_runtime_read` without changing static generated APIs.
 //!
 //! # Repository-Only Entities
 //!
