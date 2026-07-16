@@ -3,6 +3,38 @@
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.13.0 Runtime Relation Batching and PostgreSQL Constraint Introspection
+
+This Git-only 0.13.0 release contains two coordinated prompts: validated
+runtime relation batching and PostgreSQL constraint-index upgrade idempotency.
+Update both aligned crates to the final reviewed full revision.
+
+Existing static entities, GraphQL SDL, generated repositories/relations,
+transactions, authorization/RLS, top-level `gormrq1` and legacy cursors,
+`RuntimeRecord`, serialized `RuntimeSchema`, third-party backend traits, and
+stored rows require no source or data migration. The new `gormrr1` relation
+cursor is accepted only by `RuntimeRelationBatchRequest` and must not be
+translated to or from another cursor family. Hosts opting into runtime
+relations replace host SQL/N+1 loaders with an anchored parent read followed by
+one explicit bounded relation layer; see
+[Validated runtime relation batching](docs/runtime-relations.md).
+
+PostgreSQL operators should replan a complete generated target before rollout.
+Constraint-owned PRIMARY KEY/UNIQUE backing indexes are now classified as
+constraints, not secondary indexes, so an unchanged schema or table-additive
+upgrade produces no `DropIndex` for them. Composite UNIQUE metadata now renders
+as `UNIQUE (a, b)` during new table creation and introspects in key order. No
+existing constraint or index is rewritten merely by upgrading the library. If
+an older managed table was created without a declared composite UNIQUE because
+of the former CREATE TABLE omission, the live/target mismatch is real and
+requires an explicit reviewed migration; do not mark an old module version as
+newly applied.
+
+MSSQL static reads remain compatible and runtime relation execution returns
+`unsupported_backend` before I/O. No macros or entity declarations changed;
+the macros version advances only under the repository's aligned Git-only
+release policy.
+
 ## 0.12.0 Runtime Query Execution
 
 Update both Git-only crates to 0.12.0 at the reviewed full Git revision. This

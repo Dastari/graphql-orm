@@ -20,6 +20,8 @@ It is designed for two related use cases:
 - Microsoft SQL Server read/query-only support through Tiberius
 - validated runtime-schema filters, deterministic keyset reads, and owned
   records on SQLite/PostgreSQL without compiled entity types
+- schema-bound, least-privilege runtime relation batching with composite keys,
+  per-parent keysets, and optional counts
 - single and composite primary-key read support
 - single and composite relation-key batching, including nested legacy shapes like
   `JimCardFiles -> Contacts -> Details`
@@ -46,7 +48,7 @@ Select exactly the backend support your service needs:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.12.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.13.0", default-features = false, features = ["sqlite"] }
 ```
 
 GitHub with an exact full revision is the only supported distribution method. Neither crate is

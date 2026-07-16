@@ -110,6 +110,19 @@ cargo test -p graphql-orm --no-default-features --features postgres \
   --test repository_only_postgres -- --ignored --nocapture
 ```
 
+The 0.13 PostgreSQL constraint-index and runtime-relation regressions also own
+their complete PostgreSQL 17 lifecycle. They ignore database URL variables,
+use generated credentials, publish only on loopback, attach a unique ownership
+label, create no volume, verify that label before cleanup, and never inspect or
+remove a pre-existing container:
+
+```bash
+cargo test -p graphql-orm --no-default-features --features postgres \
+  --test postgres_constraint_index_idempotency -- --ignored --nocapture
+cargo test -p graphql-orm --no-default-features --features postgres \
+  --test runtime_relations_postgres -- --ignored --nocapture
+```
+
 ## SQL Server Tests
 
 MSSQL live tests are opt-in. See [SQL Server read-only backend](mssql.md) for Docker and environment-variable details.

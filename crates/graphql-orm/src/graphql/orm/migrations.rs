@@ -153,6 +153,12 @@ fn render_create_table_statement_for_name(
     if has_composite_primary_key {
         parts.push(format!("PRIMARY KEY ({})", table.primary_keys().join(", ")));
     }
+    parts.extend(
+        table
+            .composite_unique_indexes
+            .iter()
+            .map(|columns| format!("UNIQUE ({})", columns.join(", "))),
+    );
     parts.extend(table.foreign_keys.iter().map(|foreign_key| {
         let constraint_name = foreign_key_constraint_name(table_name, foreign_key);
         format!(
@@ -2208,6 +2214,27 @@ impl IntrospectionBackend for super::SqliteBackend {
 impl RlsIntrospectionBackend for super::SqliteBackend {}
 
 #[cfg(feature = "postgres")]
+fn classify_postgres_unique_constraints(
+    mut members: Vec<(String, String, i64)>,
+) -> (std::collections::HashSet<String>, Vec<Vec<String>>) {
+    members.sort_by(|left, right| (&left.0, left.2).cmp(&(&right.0, right.2)));
+    let mut grouped = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for (constraint, column, _) in members {
+        grouped.entry(constraint).or_default().push(column);
+    }
+    let mut single_columns = std::collections::HashSet::new();
+    let mut composite = Vec::new();
+    for columns in grouped.into_values() {
+        if let [column] = columns.as_slice() {
+            single_columns.insert(column.clone());
+        } else if columns.len() > 1 {
+            composite.push(columns);
+        }
+    }
+    (single_columns, composite)
+}
+
+#[cfg(feature = "postgres")]
 fn parse_postgres_geometry_type(sql_type: &str) -> Option<SpatialColumnDef> {
     let trimmed = sql_type.trim();
     let lower = trimmed.to_ascii_lowercase();
@@ -2229,6 +2256,23 @@ fn parse_postgres_geometry_type(sql_type: &str) -> Option<SpatialColumnDef> {
         .and_then(|value| value.parse::<i32>().ok())
         .unwrap_or(0);
     Some(SpatialColumnDef::geometry(geometry_type, srid))
+}
+
+#[cfg(all(test, feature = "postgres"))]
+mod postgres_unique_constraint_tests {
+    use super::classify_postgres_unique_constraints;
+
+    #[test]
+    fn groups_unique_constraints_without_flattening_composite_members() {
+        let (single, composite) = classify_postgres_unique_constraints(vec![
+            ("uq_pair".into(), "second".into(), 2),
+            ("uq_one".into(), "email".into(), 1),
+            ("uq_pair".into(), "first".into(), 1),
+        ]);
+
+        assert_eq!(single.into_iter().collect::<Vec<_>>(), vec!["email"]);
+        assert_eq!(composite, vec![vec!["first", "second"]]);
+    }
 }
 
 #[cfg(feature = "postgres")]
@@ -2307,23 +2351,38 @@ pub async fn introspect_postgres_schema(
             .collect::<Result<Vec<_>, _>>()?;
 
         let unique_rows = sqlx::query(
-            "SELECT kcu.column_name
-             FROM information_schema.table_constraints tc
-             JOIN information_schema.key_column_usage kcu
-               ON tc.constraint_name = kcu.constraint_name
-              AND tc.table_schema = kcu.table_schema
-             WHERE tc.table_schema = $2
-               AND tc.table_name = $1
-               AND tc.constraint_type = 'UNIQUE'",
+            "SELECT con.conname AS constraint_name,
+                    a.attname AS column_name,
+                    keys.ordinality::bigint AS key_ordinal
+             FROM pg_constraint con
+             JOIN pg_class c ON c.oid = con.conrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             CROSS JOIN LATERAL unnest(con.conkey)
+                 WITH ORDINALITY AS keys(attnum, ordinality)
+             JOIN pg_attribute a
+               ON a.attrelid = c.oid
+              AND a.attnum = keys.attnum
+             WHERE n.nspname = $2
+               AND c.relname = $1
+               AND con.contype = 'u'
+             ORDER BY con.conname, keys.ordinality",
         )
         .bind(&table_name)
         .bind(&schema_name)
         .fetch_all(pool)
         .await?;
-        let unique_columns = unique_rows
+        let unique_members = unique_rows
             .into_iter()
-            .map(|row| row.try_get::<String, _>("column_name"))
-            .collect::<Result<std::collections::HashSet<_>, _>>()?;
+            .map(|row| {
+                Ok((
+                    row.try_get::<String, _>("constraint_name")?,
+                    row.try_get::<String, _>("column_name")?,
+                    row.try_get::<i64, _>("key_ordinal")?,
+                ))
+            })
+            .collect::<crate::Result<Vec<_>>>()?;
+        let (unique_columns, composite_unique_indexes) =
+            classify_postgres_unique_constraints(unique_members);
 
         let columns = column_rows
             .into_iter()
@@ -2351,6 +2410,8 @@ pub async fn introspect_postgres_schema(
         let index_rows = sqlx::query(
             "SELECT i.relname AS indexname,
                     ix.indisunique AS is_unique,
+                    ix.indisprimary AS is_primary,
+                    bool_or(con.oid IS NOT NULL) AS constraint_owned,
                     am.amname AS method,
                     pg_get_expr(ix.indpred, ix.indrelid) AS predicate,
                     array_remove(array_agg(a.attname ORDER BY cols.ordinality), NULL) AS columns
@@ -2359,6 +2420,7 @@ pub async fn introspect_postgres_schema(
              JOIN pg_index ix ON ix.indrelid = t.oid
              JOIN pg_class i ON i.oid = ix.indexrelid
              JOIN pg_am am ON am.oid = i.relam
+             LEFT JOIN pg_constraint con ON con.conindid = ix.indexrelid
              LEFT JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS cols(attnum, ordinality)
                ON true
              LEFT JOIN pg_attribute a
@@ -2366,7 +2428,8 @@ pub async fn introspect_postgres_schema(
               AND a.attnum = cols.attnum
              WHERE n.nspname = $2
                AND t.relname = $1
-             GROUP BY i.relname, ix.indisunique, am.amname, ix.indpred, ix.indrelid
+             GROUP BY i.relname, ix.indisunique, ix.indisprimary, am.amname,
+                      ix.indpred, ix.indrelid
              ORDER BY i.relname",
         )
         .bind(&table_name)
@@ -2376,7 +2439,9 @@ pub async fn introspect_postgres_schema(
         let mut indexes = Vec::new();
         for row in index_rows {
             let index_name: String = row.try_get("indexname")?;
-            if index_name.ends_with("_pkey") {
+            let is_primary: bool = row.try_get("is_primary")?;
+            let constraint_owned: bool = row.try_get("constraint_owned")?;
+            if is_primary || constraint_owned {
                 continue;
             }
             let unique: bool = row.try_get("is_unique")?;
@@ -2547,7 +2612,7 @@ pub async fn introspect_postgres_schema(
             default_sort: primary_key,
             columns,
             indexes,
-            composite_unique_indexes: Vec::new(),
+            composite_unique_indexes,
             foreign_keys,
             search_indexes: Vec::new(),
             append_only,

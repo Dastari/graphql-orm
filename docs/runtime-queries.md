@@ -139,6 +139,7 @@ placeholder. Rows use the existing exact `RuntimeRowDecoder`.
 No `OrmBackend`, `SqlValue`, `SelectQuery`, legacy/static cursor, generated
 entity, or serialized runtime-schema API changed. Third-party backends remain
 source-compatible and explicitly unsupported for runtime execution until they
-provide exact runtime decoding on a supported dialect. Relations, aggregates
-beyond exact count, dynamic GraphQL, runtime writes, and runtime migrations are
-intentionally deferred.
+provide exact runtime decoding on a supported dialect. Validated one-layer
+relation batching is described in [Runtime relations](runtime-relations.md).
+Relation predicates on parent collections, aggregates beyond exact count,
+dynamic GraphQL, runtime writes, and runtime migrations remain deferred.

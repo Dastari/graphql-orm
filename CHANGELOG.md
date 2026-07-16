@@ -2,6 +2,30 @@
 
 User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
 
+## 0.13.0
+
+This combined release contains two coordinated prompts. Companion macros
+crate: `graphql-orm-macros` **0.13.0** under the aligned Git-only version
+policy; derive syntax and generated code are unchanged.
+
+- Added fingerprint-bound opaque parent anchors and batched runtime to-one/
+  to-many relation reads with typed composite keys, nullable-key short circuit,
+  bounded per-parent forward/backward `gormrr1` keysets, optional exact counts,
+  stable errors, hidden grouping/cursor fields, and SQLite/PostgreSQL parity.
+- Added `RuntimeRelationLimits`, `RuntimeRelationSelection`, anchored read and
+  batch request/result types, plus `Database::execute_runtime_anchored_read`
+  and `Database::execute_runtime_relation_batch`. MSSQL remains explicitly
+  unsupported for runtime execution; static relation behavior is unchanged.
+- Fixed PostgreSQL introspection to group UNIQUE constraints by ordered catalog
+  identity and exclude `pg_constraint.conindid`/primary backing indexes from
+  ordinary indexes while preserving explicit unique and partial indexes.
+- Managed CREATE TABLE now renders declared composite UNIQUE constraints, so
+  the structured target and live PostgreSQL/SQLite schema agree after first
+  apply. Unchanged replans and additive complete-target upgrades no longer try
+  to drop constraint-owned indexes.
+- Existing runtime/static cursors, public backend traits, GraphQL/generated
+  APIs, serialized runtime schemas, and stored data are compatible.
+
 ## 0.12.0
 
 Companion macros crate: `graphql-orm-macros` **0.12.0**. The Git-only aligned
