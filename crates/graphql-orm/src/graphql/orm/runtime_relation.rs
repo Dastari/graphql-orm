@@ -320,6 +320,7 @@ pub struct RuntimeRelationBatchRequest {
     predicate: Option<RuntimePredicate>,
     order: RuntimeOrder,
     selection: RuntimeRelationSelection,
+    target_anchors: Vec<AnchorSpec>,
     limits: RuntimeRelationLimits,
 }
 
@@ -347,12 +348,78 @@ pub enum RuntimeRelationValue {
 pub struct RuntimeRelationResult {
     pub parent_index: usize,
     pub value: RuntimeRelationValue,
+    nested_anchors: Vec<Vec<RuntimeParentAnchor>>,
+}
+
+impl RuntimeRelationResult {
+    fn child_count(&self) -> usize {
+        match &self.value {
+            RuntimeRelationValue::ToOne(value) => usize::from(value.is_some()),
+            RuntimeRelationValue::ToMany(connection) => connection.edges.len(),
+        }
+    }
 }
 
 /// Complete relation layer in input-parent order.
 #[derive(Clone, Debug)]
 pub struct RuntimeRelationBatch {
     pub results: Vec<RuntimeRelationResult>,
+    anchor_relations: Vec<super::RuntimeRelationHandle>,
+}
+
+impl RuntimeRelationBatch {
+    /// Return opaque anchors for one requested next-layer relation.
+    ///
+    /// Anchors follow deterministic batch-result order and then child-edge
+    /// order. Their `parent_index` values use that flattened order, so the
+    /// next batch result associates directly with the corresponding child.
+    ///
+    /// # Errors
+    ///
+    /// Returns `invalid_relation` when the relation was not requested while
+    /// constructing this batch, or when any returned child lacks its anchor.
+    pub fn relation_parents(
+        &self,
+        relation: &super::RuntimeRelationHandle,
+    ) -> Result<Vec<RuntimeParentAnchor>, RuntimeRelationError> {
+        if !self
+            .anchor_relations
+            .iter()
+            .any(|candidate| candidate == relation)
+        {
+            return Err(
+                RuntimeRelationError::new(RuntimeRelationErrorCode::InvalidRelation)
+                    .for_relation(relation),
+            );
+        }
+        let mut anchors = Vec::new();
+        for result in &self.results {
+            if result.nested_anchors.len() != result.child_count() {
+                return Err(
+                    RuntimeRelationError::new(RuntimeRelationErrorCode::InvalidParent)
+                        .for_relation(relation),
+                );
+            }
+            for child_anchors in &result.nested_anchors {
+                let anchor = child_anchors
+                    .iter()
+                    .find(|anchor| {
+                        anchor.schema == *relation.schema_fingerprint()
+                            && anchor.relation == *relation.id()
+                    })
+                    .cloned()
+                    .ok_or_else(|| {
+                        RuntimeRelationError::new(RuntimeRelationErrorCode::InvalidParent)
+                            .for_relation(relation)
+                    })?;
+                anchors.push(anchor);
+            }
+        }
+        for (parent_index, anchor) in anchors.iter_mut().enumerate() {
+            anchor.parent_index = parent_index;
+        }
+        Ok(anchors)
+    }
 }
 
 fn supported_key_kind(kind: RuntimeValueKind) -> bool {
@@ -388,6 +455,40 @@ fn record_values(
         }
     }
     Ok((values, any_null))
+}
+
+fn record_anchors(
+    record: &RuntimeRecord,
+    specs: &[AnchorSpec],
+    parent_index: usize,
+) -> Result<Vec<RuntimeParentAnchor>, RuntimeRelationError> {
+    let mut anchors = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let (parent_identity, parent_null) = record_values(record, &spec.parent_identity_fields)?;
+        if parent_null {
+            return Err(
+                RuntimeRelationError::new(RuntimeRelationErrorCode::InvalidParent)
+                    .for_relation(&spec.relation),
+            );
+        }
+        let source_fields = spec
+            .relation
+            .key_pairs()
+            .iter()
+            .map(|(source, _)| source.clone())
+            .collect::<Vec<_>>();
+        let (relation_values, any_null) = record_values(record, &source_fields)?;
+        anchors.push(RuntimeParentAnchor {
+            schema: spec.relation.schema_fingerprint().clone(),
+            relation: spec.relation.id().clone(),
+            source: spec.relation.source().id().clone(),
+            target: spec.relation.target().id().clone(),
+            parent_index,
+            parent_identity,
+            relation_key: (!any_null).then_some(relation_values),
+        });
+    }
+    Ok(anchors)
 }
 
 impl ValidatedRuntimeSchema {
@@ -487,6 +588,37 @@ impl ValidatedRuntimeSchema {
         selection: RuntimeRelationSelection,
         limits: RuntimeRelationLimits,
     ) -> Result<RuntimeRelationBatchRequest, RuntimeRelationError> {
+        self.runtime_relation_batch_request_with_relation_keys(
+            relation,
+            anchors,
+            target_projection,
+            target_predicate,
+            target_order,
+            selection,
+            &[],
+            limits,
+        )
+    }
+
+    /// Validate one batched relation layer and retain opaque keys for the
+    /// explicitly requested next relation layer.
+    ///
+    /// # Errors
+    ///
+    /// In addition to normal relation-request validation, rejects a stale,
+    /// duplicate, or wrong-source next-layer relation before database I/O.
+    #[allow(clippy::too_many_arguments)]
+    pub fn runtime_relation_batch_request_with_relation_keys(
+        &self,
+        relation: &super::RuntimeRelationHandle,
+        anchors: Vec<RuntimeParentAnchor>,
+        target_projection: &RuntimeProjection,
+        target_predicate: Option<RuntimePredicate>,
+        target_order: RuntimeOrder,
+        selection: RuntimeRelationSelection,
+        next_relations: &[super::RuntimeRelationHandle],
+        limits: RuntimeRelationLimits,
+    ) -> Result<RuntimeRelationBatchRequest, RuntimeRelationError> {
         let current = self.resolve_relation(relation.source(), relation.id())?;
         if current != *relation {
             return Err(
@@ -571,9 +703,10 @@ impl ValidatedRuntimeSchema {
                         .for_relation(relation),
                 );
             }
-            let identity = serde_json::to_vec(&anchor.parent_identity).map_err(|error| {
-                RuntimeRelationError::new(RuntimeRelationErrorCode::InvalidParent).source(error)
-            })?;
+            let identity = serde_json::to_vec(&(anchor.parent_index, &anchor.parent_identity))
+                .map_err(|error| {
+                    RuntimeRelationError::new(RuntimeRelationErrorCode::InvalidParent).source(error)
+                })?;
             if !parent_ids.insert(identity) {
                 return Err(
                     RuntimeRelationError::new(RuntimeRelationErrorCode::InvalidParent)
@@ -596,6 +729,69 @@ impl ValidatedRuntimeSchema {
                 union.push(term.field().clone());
             }
         }
+        let target_metadata = self
+            .schema()
+            .collections
+            .iter()
+            .find(|collection| collection.id == *relation.target().id())
+            .ok_or_else(|| {
+                RuntimeRelationError::new(RuntimeRelationErrorCode::SchemaMismatch)
+                    .for_relation(relation)
+            })?;
+        let parent_identity_fields = target_metadata
+            .primary_key
+            .iter()
+            .map(|field_id| self.resolve_field(relation.target(), field_id))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut target_anchors = Vec::with_capacity(next_relations.len());
+        let mut relation_ids = BTreeSet::new();
+        for next_relation in next_relations {
+            if next_relation.schema_fingerprint() != &self.fingerprint()
+                || next_relation.source().id() != relation.target().id()
+                || !relation_ids.insert(next_relation.id().clone())
+            {
+                return Err(
+                    RuntimeRelationError::new(RuntimeRelationErrorCode::InvalidRelation)
+                        .for_relation(next_relation),
+                );
+            }
+            let current = self.resolve_relation(next_relation.source(), next_relation.id())?;
+            if current != *next_relation {
+                return Err(
+                    RuntimeRelationError::new(RuntimeRelationErrorCode::InvalidRelation)
+                        .for_relation(next_relation),
+                );
+            }
+            if next_relation.key_pairs().is_empty()
+                || next_relation.key_pairs().len() > limits.max_key_arity
+            {
+                return Err(
+                    RuntimeRelationError::new(RuntimeRelationErrorCode::ResourceLimit)
+                        .for_relation(next_relation),
+                );
+            }
+            if next_relation.key_pairs().iter().any(|(source, target)| {
+                source.value_kind() != target.value_kind()
+                    || !supported_key_kind(source.value_kind())
+            }) {
+                return Err(
+                    RuntimeRelationError::new(RuntimeRelationErrorCode::UnsupportedKey)
+                        .for_relation(next_relation),
+                );
+            }
+            for field in parent_identity_fields
+                .iter()
+                .chain(next_relation.key_pairs().iter().map(|(source, _)| source))
+            {
+                if seen.insert(field.id().clone()) {
+                    union.push(field.clone());
+                }
+            }
+            target_anchors.push(AnchorSpec {
+                relation: next_relation.clone(),
+                parent_identity_fields: parent_identity_fields.clone(),
+            });
+        }
         let decode_projection = self.resolve_projection(relation.target(), &union)?;
         Ok(RuntimeRelationBatchRequest {
             relation: relation.clone(),
@@ -605,6 +801,7 @@ impl ValidatedRuntimeSchema {
             predicate: target_predicate,
             order: target_order,
             selection,
+            target_anchors,
             limits,
         })
     }
@@ -1070,10 +1267,18 @@ where
                         })
                     }
                 },
+                nested_anchors: Vec::new(),
             })
             .collect::<Vec<_>>();
         if groups.is_empty() {
-            return Ok(RuntimeRelationBatch { results });
+            return Ok(RuntimeRelationBatch {
+                results,
+                anchor_relations: request
+                    .target_anchors
+                    .iter()
+                    .map(|spec| spec.relation.clone())
+                    .collect(),
+            });
         }
         let (sql, values) = render_relation_rows(request, B::DIALECT, &groups)?;
         let counts_requested = matches!(
@@ -1152,10 +1357,22 @@ where
                     }
                     let value = records
                         .pop()
-                        .map(|record| record.project(&request.output_projection))
+                        .map(|record| {
+                            let anchors = record_anchors(&record, &request.target_anchors, 0)?;
+                            Ok::<_, RuntimeRelationError>((
+                                record.project(&request.output_projection)?,
+                                anchors,
+                            ))
+                        })
                         .transpose()?;
                     for index in group.anchor_indexes {
-                        results[index].value = RuntimeRelationValue::ToOne(value.clone());
+                        results[index].value = RuntimeRelationValue::ToOne(
+                            value.as_ref().map(|(node, _)| node.clone()),
+                        );
+                        results[index].nested_anchors = value
+                            .as_ref()
+                            .map(|(_, anchors)| vec![anchors.clone()])
+                            .unwrap_or_default();
                     }
                 }
                 Some(page) => {
@@ -1175,7 +1392,8 @@ where
                     for index in group.anchor_indexes {
                         let anchor = &request.anchors[index];
                         let mut edges = Vec::with_capacity(records.len());
-                        for record in &records {
+                        let mut nested_anchors = Vec::with_capacity(records.len());
+                        for (edge_index, record) in records.iter().enumerate() {
                             let cursor_values = request
                                 .order
                                 .terms()
@@ -1192,6 +1410,11 @@ where
                                 node: record.project(&request.output_projection)?,
                                 cursor: encode_relation_cursor(request, anchor, cursor_values)?,
                             });
+                            nested_anchors.push(record_anchors(
+                                record,
+                                &request.target_anchors,
+                                edge_index,
+                            )?);
                         }
                         let start_cursor = edges.first().map(|edge| edge.cursor.clone());
                         let end_cursor = edges.last().map(|edge| edge.cursor.clone());
@@ -1219,11 +1442,19 @@ where
                                 },
                                 total_count: count,
                             });
+                        results[index].nested_anchors = nested_anchors;
                     }
                 }
             }
         }
         results.sort_by_key(|result| result.parent_index);
-        Ok(RuntimeRelationBatch { results })
+        Ok(RuntimeRelationBatch {
+            results,
+            anchor_relations: request
+                .target_anchors
+                .iter()
+                .map(|spec| spec.relation.clone())
+                .collect(),
+        })
     }
 }

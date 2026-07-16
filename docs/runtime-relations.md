@@ -46,7 +46,7 @@ let parents = database
     .await?;
 
 let anchors = parents.relation_parents(&contact_details)?;
-let relation_request = schema.runtime_relation_batch_request(
+let relation_request = schema.runtime_relation_batch_request_with_relation_keys(
     &contact_details,
     anchors.clone(),
     &contact_projection,
@@ -56,10 +56,28 @@ let relation_request = schema.runtime_relation_batch_request(
         pages: vec![RuntimePageRequest::first(25, None); anchors.len()],
         include_count: true,
     },
+    std::slice::from_ref(&notes),
     RuntimeRelationLimits::default(),
 )?;
 let by_parent = database
     .execute_runtime_relation_batch(&relation_request, auth.as_ref())
+    .await?;
+
+let contact_anchors = by_parent.relation_parents(&notes)?;
+let note_request = schema.runtime_relation_batch_request(
+    &notes,
+    contact_anchors.clone(),
+    &note_projection,
+    authorized_note_predicate,
+    note_order,
+    RuntimeRelationSelection::ToMany {
+        pages: vec![RuntimePageRequest::first(10, None); contact_anchors.len()],
+        include_count: false,
+    },
+    RuntimeRelationLimits::default(),
+)?;
+let notes_by_contact = database
+    .execute_runtime_relation_batch(&note_request, auth.as_ref())
     .await?;
 ```
 
@@ -75,8 +93,13 @@ per parent. Duplicate relation keys with the same page shape share a branch.
 Optional counts use one additional grouped union statement. Different
 fingerprints, relations, projections, predicates, effective orders, page
 shapes, backends, or auth contexts are separate requests and are never cached
-or mixed by graphql-orm. A host can repeat the same flow for a child relation;
-the ORM deliberately executes one explicit bounded layer at a time.
+or mixed by graphql-orm. A parent page plus
+`Customer -> ContactDetail -> Note` therefore uses one parent statement, one
+compatible contact statement, and one compatible note statement, plus one
+grouped count statement only for each layer that explicitly requests counts.
+`RuntimeRelationBatch::relation_parents` returns the next layer's opaque
+anchors in deterministic result/edge order; the ORM deliberately executes one
+explicit bounded layer at a time.
 
 ## Composite keys, pages, and cursors
 

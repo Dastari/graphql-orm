@@ -23,6 +23,9 @@ at `0.13.0`; macro syntax/output is unchanged.
   batching, bounded `page_size + 1` nested windows, optional grouped counts,
   target structural predicates, deterministic orders, and parent-bound
   `gormrr1` cursors have SQLite/PostgreSQL parity.
+- An executed relation layer can retain explicitly requested next-relation
+  keys only as opaque anchors, allowing `Customer -> ContactDetail -> Note`
+  to remain one compatible bounded statement per layer without exposing keys.
 - PostgreSQL catalog introspection now separates constraint-owned backing
   indexes from explicit indexes using structural catalog identity and groups
   composite UNIQUE members in ordinal order. Explicit unique/partial indexes

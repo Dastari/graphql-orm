@@ -33,6 +33,7 @@ fn field(id: &str, kind: RuntimeValueKind, nullable: bool) -> RuntimeField {
 fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
     let customer_id = field("customer_id", RuntimeValueKind::Integer, false);
     let contact_id = field("contact_id", RuntimeValueKind::Integer, false);
+    let note_id = field("note_id", RuntimeValueKind::Integer, false);
     RuntimeSchema {
         format_version: 1,
         collections: vec![
@@ -96,11 +97,43 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                     field("label", RuntimeValueKind::String, false),
                     field("secret", RuntimeValueKind::Bytes, false),
                 ],
-                relations: vec![],
+                relations: vec![RuntimeRelation {
+                    id: RelationId::new("contact_notes").unwrap(),
+                    api_name: "notes".into(),
+                    target: cid("notes"),
+                    key_pairs: vec![RelationKeyPair {
+                        source: contact_id.id.clone(),
+                        target: fid("note_contact_id"),
+                    }],
+                    cardinality: RelationCardinality::Many,
+                    enforce_foreign_key: false,
+                    on_delete: None,
+                }],
                 indexes: vec![],
                 composite_unique: vec![],
                 default_order: vec![RuntimeOrderTerm {
                     field: contact_id.id.clone(),
+                    direction: RuntimeOrderDirection::Asc,
+                }],
+            },
+            RuntimeCollection {
+                id: cid("notes"),
+                api_type_name: "Note".into(),
+                api_plural_name: "Notes".into(),
+                physical_table: "runtime_relation_notes".into(),
+                primary_key: vec![note_id.id.clone()],
+                append_only: false,
+                retention_purge: false,
+                fields: vec![
+                    note_id.clone(),
+                    field("note_contact_id", RuntimeValueKind::Integer, false),
+                    field("body", RuntimeValueKind::String, false),
+                ],
+                relations: vec![],
+                indexes: vec![],
+                composite_unique: vec![],
+                default_order: vec![RuntimeOrderTerm {
+                    field: note_id.id.clone(),
                     direction: RuntimeOrderDirection::Asc,
                 }],
             },
@@ -115,6 +148,7 @@ async fn batches_hidden_parent_keys_and_bounded_nested_keysets() {
     let schema = schema();
     let customers = schema.resolve_collection(&cid("customers")).unwrap();
     let contacts = schema.resolve_collection(&cid("contacts")).unwrap();
+    let notes = schema.resolve_collection(&cid("notes")).unwrap();
     let status = schema.resolve_field(&customers, &fid("status")).unwrap();
     let customer_id = schema
         .resolve_field(&customers, &fid("customer_id"))
@@ -122,6 +156,7 @@ async fn batches_hidden_parent_keys_and_bounded_nested_keysets() {
     let label = schema.resolve_field(&contacts, &fid("label")).unwrap();
     let owner_id = schema.resolve_field(&contacts, &fid("owner_id")).unwrap();
     let contact_id = schema.resolve_field(&contacts, &fid("contact_id")).unwrap();
+    let body = schema.resolve_field(&notes, &fid("body")).unwrap();
     let relation = schema
         .resolve_relation(&customers, &RelationId::new("customer_contacts").unwrap())
         .unwrap();
@@ -131,11 +166,17 @@ async fn batches_hidden_parent_keys_and_bounded_nested_keysets() {
             &RelationId::new("customer_primary_contact").unwrap(),
         )
         .unwrap();
+    let note_relation = schema
+        .resolve_relation(&contacts, &RelationId::new("contact_notes").unwrap())
+        .unwrap();
     let customer_projection = schema
         .resolve_projection(&customers, std::slice::from_ref(&status))
         .unwrap();
     let contact_projection = schema
         .resolve_projection(&contacts, std::slice::from_ref(&label))
+        .unwrap();
+    let note_projection = schema
+        .resolve_projection(&notes, std::slice::from_ref(&body))
         .unwrap();
     let query_limits = RuntimeQueryLimits::default();
     let parent_request = schema
@@ -160,6 +201,15 @@ async fn batches_hidden_parent_keys_and_bounded_nested_keysets() {
         "CREATE TABLE runtime_relation_customers (
             customer_id INTEGER PRIMARY KEY, status TEXT NOT NULL,
             primary_contact_id INTEGER NULL
+         )",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    graphql_orm::sqlx::query(
+        "CREATE TABLE runtime_relation_notes (
+            note_id INTEGER PRIMARY KEY, note_contact_id INTEGER NOT NULL,
+            body TEXT NOT NULL
          )",
     )
     .execute(database.pool())
@@ -199,6 +249,17 @@ async fn batches_hidden_parent_keys_and_bounded_nested_keysets() {
         .bind(owner)
         .bind(label)
         .bind(vec![0xff_u8, id as u8])
+        .execute(database.pool())
+        .await
+        .unwrap();
+    }
+    for (id, contact, body) in [(100_i64, 10_i64, "first"), (200, 20, "second")] {
+        graphql_orm::sqlx::query(
+            "INSERT INTO runtime_relation_notes (note_id, note_contact_id, body) VALUES (?, ?, ?)",
+        )
+        .bind(id)
+        .bind(contact)
+        .bind(body)
         .execute(database.pool())
         .await
         .unwrap();
@@ -283,8 +344,31 @@ async fn batches_hidden_parent_keys_and_bounded_nested_keysets() {
     ));
 
     let order = schema.runtime_order(&contacts, None, query_limits).unwrap();
+    assert_eq!(
+        schema
+            .runtime_relation_batch_request_with_relation_keys(
+                &relation,
+                anchors.clone(),
+                &contact_projection,
+                None,
+                order.clone(),
+                RuntimeRelationSelection::ToMany {
+                    pages: vec![RuntimePageRequest::first(1, None); anchors.len()],
+                    include_count: false,
+                },
+                std::slice::from_ref(&relation),
+                RuntimeRelationLimits::default(),
+            )
+            .unwrap_err()
+            .code(),
+        RuntimeRelationErrorCode::InvalidRelation
+    );
+    assert_eq!(
+        primary.relation_parents(&note_relation).unwrap_err().code(),
+        RuntimeRelationErrorCode::InvalidRelation
+    );
     let batch_request = schema
-        .runtime_relation_batch_request(
+        .runtime_relation_batch_request_with_relation_keys(
             &relation,
             anchors.clone(),
             &contact_projection,
@@ -294,6 +378,7 @@ async fn batches_hidden_parent_keys_and_bounded_nested_keysets() {
                 pages: vec![RuntimePageRequest::first(1, None); anchors.len()],
                 include_count: true,
             },
+            std::slice::from_ref(&note_relation),
             RuntimeRelationLimits::default(),
         )
         .unwrap();
@@ -321,6 +406,39 @@ async fn batches_hidden_parent_keys_and_bounded_nested_keysets() {
     };
     assert!(empty.edges.is_empty());
     assert_eq!(empty.total_count, Some(0));
+
+    // One next-layer batch call resolves notes for both nonempty contact
+    // parents. Hidden contact IDs remain available only through the anchors.
+    let note_anchors = batch.relation_parents(&note_relation).unwrap();
+    assert_eq!(note_anchors.len(), 2);
+    assert_eq!(note_anchors[0].parent_index(), 0);
+    assert_eq!(note_anchors[1].parent_index(), 1);
+    let note_request = schema
+        .runtime_relation_batch_request(
+            &note_relation,
+            note_anchors.clone(),
+            &note_projection,
+            None,
+            schema.runtime_order(&notes, None, query_limits).unwrap(),
+            RuntimeRelationSelection::ToMany {
+                pages: vec![RuntimePageRequest::first(10, None); note_anchors.len()],
+                include_count: false,
+            },
+            RuntimeRelationLimits::default(),
+        )
+        .unwrap();
+    let note_batch = database
+        .execute_runtime_relation_batch(&note_request, None)
+        .await
+        .unwrap();
+    let RuntimeRelationValue::ToMany(first_notes) = &note_batch.results[0].value else {
+        panic!("expected nested to-many result")
+    };
+    let RuntimeRelationValue::ToMany(second_notes) = &note_batch.results[1].value else {
+        panic!("expected nested to-many result")
+    };
+    assert_eq!(first_notes.edges[0].node.string(&body).unwrap(), "first");
+    assert_eq!(second_notes.edges[0].node.string(&body).unwrap(), "second");
 
     let cursor = first.page_info.end_cursor.clone();
     let wrong_parent_cursor = schema
