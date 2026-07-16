@@ -11,6 +11,31 @@ required. The optional `auth-agql` bridge intentionally pins `agql-auth` at
 `c92dcb441237bbe308499b26525945f60ffa394a`. Consequently `cargo package -p graphql-orm` cannot
 resolve that Git-only optional dependency through the crates.io packaging model; this is expected.
 
+## 0.11.0
+
+Additive pre-1.0 repository-only entity release. Runtime and companion macros
+are both `0.11.0` under the aligned Git-only release policy.
+
+- `RepositoryEntity` with `#[repository_entity(...)]` emits managed schema/row
+  metadata, typed filters/order/projections, ordinary Rust create/update/key
+  inputs, and applicable repository/transaction mutations while implementing
+  no async-graphql object/input types or operation roots.
+- `RepositoryQuery` provides bounded Database-bound typed list/first/optional
+  reads; `RepositorySearchQuery` does the same for search-enabled declarations.
+  Generated primary/unique lookups and transaction reads preserve entity, row,
+  field, declared-policy, auth-context, and PostgreSQL RLS decisions.
+- Repository `FieldPolicy` callbacks are separate from GraphQL callbacks and
+  default-deny declared field keys. Sensitive input/projection debug output,
+  hook state, and change-event payloads are redacted.
+- SQLite/PostgreSQL share the normal typed write and state-machine transaction
+  behavior. MSSQL retains static read-only support and rejects repository-only
+  write options during macro expansion.
+- Equivalent GraphQL-enabled and repository-only declarations have identical
+  managed storage metadata and hashes. Existing GraphQL entities and SDL remain
+  source-compatible; no DDL or data migration is required.
+
+See [Repository-only entities](repository-only-entities.md) and MIGRATION.md.
+
 ## 0.10.0
 
 Additive pre-1.0 runtime-record foundation release. Runtime and companion

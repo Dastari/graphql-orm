@@ -8,6 +8,7 @@ This crate provides the public runtime contract targeted by the derive macros:
 - filters, ordering, pagination, and row decoding
 - relation loaders and nested relation batching
 - repository helpers and write hooks
+- opt-in repository-only entities with no async-graphql type surface
 - row, field, and entity policies
 - `AuthSubject`, `AuthorizationMode`, safe public errors, structural tenant helpers,
   generated resolver auth modes, exact-scope `ScopeEntityPolicy`, and optional `auth-agql` bridge

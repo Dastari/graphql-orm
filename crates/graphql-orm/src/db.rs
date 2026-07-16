@@ -775,6 +775,173 @@ impl<B: OrmBackend> Database<B> {
         }
     }
 
+    /// Authorize a field selected through the repository surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe forbidden or authorization-misconfiguration error when
+    /// the configured repository field policy does not authorize the read.
+    pub async fn ensure_repository_readable_field(
+        &self,
+        access: Option<crate::graphql::auth::AccessContext<'_>>,
+        entity_name: &'static str,
+        field_name: &'static str,
+        policy_key: Option<&'static str>,
+        record: Option<&(dyn Any + Send + Sync)>,
+    ) -> Result<(), OrmPublicError> {
+        let allowed = match self.authorization_mode {
+            AuthorizationMode::LegacyPermissive => {
+                if let Some(policy) = &self.field_policy {
+                    policy
+                        .can_read_repository_field(
+                            access,
+                            self,
+                            entity_name,
+                            field_name,
+                            policy_key,
+                            record,
+                        )
+                        .await
+                        .map_err(|error| OrmPublicError::internal(format!("{error:?}")))?
+                } else {
+                    true
+                }
+            }
+            AuthorizationMode::DeclaredPoliciesRequired => {
+                if policy_key.is_some() && self.field_policy.is_none() {
+                    return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
+                        .with_internal(format!(
+                            "field {entity_name}.{field_name} declares a repository read policy but no field policy provider is registered"
+                        )));
+                }
+                if let Some(policy) = &self.field_policy {
+                    policy
+                        .can_read_repository_field(
+                            access,
+                            self,
+                            entity_name,
+                            field_name,
+                            policy_key,
+                            record,
+                        )
+                        .await
+                        .map_err(|error| OrmPublicError::internal(format!("{error:?}")))?
+                } else {
+                    true
+                }
+            }
+            AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
+                if let Some(policy) = &self.field_policy {
+                    policy
+                        .can_read_repository_field(
+                            access,
+                            self,
+                            entity_name,
+                            field_name,
+                            policy_key,
+                            record,
+                        )
+                        .await
+                        .map_err(|error| OrmPublicError::internal(format!("{error:?}")))?
+                } else {
+                    policy_key.is_none()
+                }
+            }
+        };
+        if allowed {
+            Ok(())
+        } else {
+            Err(OrmPublicError::forbidden())
+        }
+    }
+
+    /// Authorize a field supplied through an ordinary Rust repository input.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe forbidden or authorization-misconfiguration error when
+    /// the schema policy or configured repository field policy denies the write.
+    pub async fn ensure_repository_writable_field(
+        &self,
+        access: Option<crate::graphql::auth::AccessContext<'_>>,
+        entity_name: &'static str,
+        field_name: &'static str,
+        policy_key: Option<&'static str>,
+        record: Option<&(dyn Any + Send + Sync)>,
+        value: Option<&(dyn Any + Send + Sync)>,
+    ) -> Result<(), OrmPublicError> {
+        if !self.schema_policy.allows_entity_writes() {
+            return Err(OrmPublicError::forbidden());
+        }
+        let allowed = match self.authorization_mode {
+            AuthorizationMode::LegacyPermissive => {
+                if let Some(policy) = &self.field_policy {
+                    policy
+                        .can_write_repository_field(
+                            access,
+                            self,
+                            entity_name,
+                            field_name,
+                            policy_key,
+                            record,
+                            value,
+                        )
+                        .await
+                        .map_err(|error| OrmPublicError::internal(format!("{error:?}")))?
+                } else {
+                    true
+                }
+            }
+            AuthorizationMode::DeclaredPoliciesRequired => {
+                if policy_key.is_some() && self.field_policy.is_none() {
+                    return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
+                        .with_internal(format!(
+                            "field {entity_name}.{field_name} declares a repository write policy but no field policy provider is registered"
+                        )));
+                }
+                if let Some(policy) = &self.field_policy {
+                    policy
+                        .can_write_repository_field(
+                            access,
+                            self,
+                            entity_name,
+                            field_name,
+                            policy_key,
+                            record,
+                            value,
+                        )
+                        .await
+                        .map_err(|error| OrmPublicError::internal(format!("{error:?}")))?
+                } else {
+                    true
+                }
+            }
+            AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
+                if let Some(policy) = &self.field_policy {
+                    policy
+                        .can_write_repository_field(
+                            access,
+                            self,
+                            entity_name,
+                            field_name,
+                            policy_key,
+                            record,
+                            value,
+                        )
+                        .await
+                        .map_err(|error| OrmPublicError::internal(format!("{error:?}")))?
+                } else {
+                    policy_key.is_none()
+                }
+            }
+        };
+        if allowed {
+            Ok(())
+        } else {
+            Err(OrmPublicError::forbidden())
+        }
+    }
+
     pub async fn can_read_row(
         &self,
         ctx: Option<&async_graphql::Context<'_>>,

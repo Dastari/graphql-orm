@@ -12,6 +12,8 @@ use graphql_orm::prelude::*;
 
 - `#[derive(GraphQLEntity)]`: entity metadata, filters, order inputs, row decoding, query helpers, and optional write inputs.
 - `#[derive(GraphQLSchemaEntity)]`: schema metadata without GraphQL operation generation.
+- `#[derive(RepositoryEntity)]`: managed schema, typed repository operations, filters, ordering,
+  projections, and ordinary Rust write inputs with no async-graphql type or resolver generation.
 - `#[derive(GraphQLRelations)]`: single-key and composite-key relation resolvers with batching support.
 - `#[derive(GraphQLOperations)]`: generated query, mutation, and subscription operation types.
 - `schema_roots!`: generated root query/mutation/subscription aliases for a set of entities. Rust

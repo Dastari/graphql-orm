@@ -2368,6 +2368,15 @@ pub(crate) fn generate_graphql_operations(
                 ).await.map_err(|e| ::graphql_orm::sqlx::Error::Protocol(format!("{e:?}")))? {
                     return Ok(None);
                 }
+                for field in <Self as ::graphql_orm::graphql::orm::Entity>::repository_field_policies() {
+                    db.ensure_repository_readable_field(
+                        None,
+                        #entity_name_lit,
+                        field.api_name,
+                        field.read_policy,
+                        Some(loaded as &(dyn ::std::any::Any + Send + Sync)),
+                    ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
+                }
             }
 
             Ok(entity)
@@ -2609,6 +2618,10 @@ pub(crate) fn generate_graphql_operations(
                     ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
                 }
                 #(#upsert_policy_checks_repo)*
+                <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_create_fields(
+                    &db,
+                    &input as &(dyn ::std::any::Any + Send + Sync),
+                ).await?;
 
                 #created_pk_init
                 let action = if current_entity.is_some() {
@@ -2964,6 +2977,11 @@ pub(crate) fn generate_graphql_operations(
                         current_entity.as_ref().map(|entity| entity as &(dyn ::std::any::Any + Send + Sync)),
                         &mut input as &mut (dyn ::std::any::Any + Send + Sync),
                     ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                    <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_update_fields(
+                        &db,
+                        current_entity.as_ref().map(|entity| entity as &(dyn ::std::any::Any + Send + Sync)),
+                        &input as &(dyn ::std::any::Any + Send + Sync),
+                    ).await?;
 
                     let mut set_clauses = vec![format!("{} = {} + 1", #version_column, #version_column)];
                     let mut changed_fields = vec![#version_column];
@@ -3881,6 +3899,10 @@ pub(crate) fn generate_graphql_operations(
                     let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(#entity_name_lit, hook_ctx);
                     db.run_before_create_with_context(&mut write_ctx, &mut input as &mut (dyn ::std::any::Any + Send + Sync))
                         .await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                    <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_create_fields(
+                        &db,
+                        &input as &(dyn ::std::any::Any + Send + Sync),
+                    ).await?;
                     #created_pk_init
                     let sql = Self::__gom_rebind_sql(#insert_sql, 1);
                     let mut bind_values: Vec<SqlValue> = Vec::new();
@@ -4110,6 +4132,10 @@ pub(crate) fn generate_graphql_operations(
                     let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(#entity_name_lit, hook_ctx);
                     db.run_before_create_with_context(&mut write_ctx, &mut input as &mut (dyn ::std::any::Any + Send + Sync))
                         .await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_create_fields(
+                        &db,
+                        &input as &(dyn ::std::any::Any + Send + Sync),
+                    ).await?;
                     let key = #key_type { #(#key_from_input)* };
                     let sql = Self::__gom_rebind_sql(&::graphql_orm::graphql::orm::build_insert_sql(
                         #table_name,
@@ -4163,6 +4189,10 @@ pub(crate) fn generate_graphql_operations(
                     let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(#entity_name_lit, hook_ctx);
                     db.run_before_create_with_context(&mut write_ctx, &mut input as &mut (dyn ::std::any::Any + Send + Sync))
                         .await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_create_fields(
+                        &db,
+                        &input as &(dyn ::std::any::Any + Send + Sync),
+                    ).await?;
                     let key = #key_type { #(#key_from_input)* };
                     let lookup_input = input.clone();
                     let sql = Self::__gom_rebind_sql(&::graphql_orm::graphql::orm::build_insert_if_absent_sql(
@@ -4241,6 +4271,11 @@ pub(crate) fn generate_graphql_operations(
                         Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
                         &mut input as &mut (dyn ::std::any::Any + Send + Sync),
                     ).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_update_fields(
+                        &db,
+                        Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
+                        &input as &(dyn ::std::any::Any + Send + Sync),
+                    ).await?;
                     let mut set_clauses: Vec<String> = Vec::new();
                     let mut changed_fields: Vec<&str> = Vec::new();
                     let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
@@ -4466,6 +4501,11 @@ pub(crate) fn generate_graphql_operations(
                         Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
                         &mut input as &mut (dyn ::std::any::Any + Send + Sync),
                     ).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
+                    <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_update_fields(
+                        &db,
+                        Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
+                        &input as &(dyn ::std::any::Any + Send + Sync),
+                    ).await?;
                     let mut set_clauses: Vec<String> = Vec::new();
                     let mut changed_fields: Vec<&str> = Vec::new();
                     let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
@@ -6100,6 +6140,10 @@ pub(crate) fn generate_graphql_operations(
                     &mut write_ctx,
                     &mut input as &mut (dyn ::std::any::Any + Send + Sync),
                 ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_create_fields(
+                    &db,
+                    &input as &(dyn ::std::any::Any + Send + Sync),
+                ).await?;
                 #created_pk_init
                 let sql = Self::__gom_rebind_sql(#insert_sql, 1);
                 let mut bind_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
@@ -6183,6 +6227,11 @@ pub(crate) fn generate_graphql_operations(
                     Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
                     &mut input as &mut (dyn ::std::any::Any + Send + Sync),
                 ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_update_fields(
+                    &db,
+                    Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
+                    &input as &(dyn ::std::any::Any + Send + Sync),
+                ).await?;
 
                 let mut set_clauses: Vec<String> = Vec::new();
                 let mut changed_fields: Vec<&str> = Vec::new();
@@ -6291,6 +6340,11 @@ pub(crate) fn generate_graphql_operations(
                         Some(first_entity as &(dyn ::std::any::Any + Send + Sync)),
                         &mut input as &mut (dyn ::std::any::Any + Send + Sync),
                     ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                    <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_update_fields(
+                        &db,
+                        Some(first_entity as &(dyn ::std::any::Any + Send + Sync)),
+                        &input as &(dyn ::std::any::Any + Send + Sync),
+                    ).await?;
                 }
 
                 let mut set_clauses: Vec<String> = Vec::new();
@@ -6736,6 +6790,11 @@ pub(crate) fn generate_graphql_operations(
                     Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
                     &mut input as &mut (dyn ::std::any::Any + Send + Sync),
                 ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_update_fields(
+                    db,
+                    Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
+                    &input as &(dyn ::std::any::Any + Send + Sync),
+                ).await?;
 
                 let mut set_clauses: Vec<String> = Vec::new();
                 let mut changed_fields: Vec<&str> = Vec::new();
@@ -6870,6 +6929,11 @@ pub(crate) fn generate_graphql_operations(
                         Some(first_entity as &(dyn ::std::any::Any + Send + Sync)),
                         &mut input as &mut (dyn ::std::any::Any + Send + Sync),
                     ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                    <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_update_fields(
+                        db,
+                        Some(first_entity as &(dyn ::std::any::Any + Send + Sync)),
+                        &input as &(dyn ::std::any::Any + Send + Sync),
+                    ).await?;
                 }
 
                 let mut set_clauses: Vec<String> = Vec::new();

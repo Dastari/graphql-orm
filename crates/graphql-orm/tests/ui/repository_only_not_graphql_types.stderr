@@ -1,0 +1,194 @@
+error[E0277]: the trait bound `PrivateRecord: OutputType` is not satisfied
+  --> tests/ui/repository_only_not_graphql_types.rs:22:21
+   |
+22 |     assert_output::<PrivateRecord>();
+   |                     ^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `OutputType` is not implemented for `PrivateRecord`
+  --> tests/ui/repository_only_not_graphql_types.rs:10:1
+   |
+10 | struct PrivateRecord {
+   | ^^^^^^^^^^^^^^^^^^^^
+   = help: the following other types implement trait `OutputType`:
+             &'a [T]
+             &T
+             Arc<T>
+             Arc<[T]>
+             BTreeMap<K, V>
+             BTreeSet<T>
+             BackupValueKind
+             Box<T>
+           and $N others
+note: required by a bound in `assert_output`
+  --> tests/ui/repository_only_not_graphql_types.rs:18:21
+   |
+18 | fn assert_output<T: async_graphql::OutputType>() {}
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_output`
+
+error[E0277]: the trait bound `PrivateRecordWhereInput: InputType` is not satisfied
+  --> tests/ui/repository_only_not_graphql_types.rs:23:20
+   |
+23 |     assert_input::<PrivateRecordWhereInput>();
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `InputType` is not implemented for `PrivateRecordWhereInput`
+  --> tests/ui/repository_only_not_graphql_types.rs:3:10
+   |
+ 3 | #[derive(RepositoryEntity, Clone, serde::Serialize, serde::Deserialize)]
+   |          ^^^^^^^^^^^^^^^^
+   = help: the following other types implement trait `InputType`:
+             Arc<T>
+             Arc<[T]>
+             Arc<str>
+             BTreeMap<K, V>
+             BTreeSet<T>
+             BackupValueKind
+             BoolFilter
+             Box<T>
+           and $N others
+note: required by a bound in `assert_input`
+  --> tests/ui/repository_only_not_graphql_types.rs:19:20
+   |
+19 | fn assert_input<T: async_graphql::InputType>() {}
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_input`
+   = note: this error originates in the derive macro `RepositoryEntity` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `PrivateRecordOrderByInput: InputType` is not satisfied
+  --> tests/ui/repository_only_not_graphql_types.rs:24:20
+   |
+24 |     assert_input::<PrivateRecordOrderByInput>();
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `InputType` is not implemented for `PrivateRecordOrderByInput`
+  --> tests/ui/repository_only_not_graphql_types.rs:3:10
+   |
+ 3 | #[derive(RepositoryEntity, Clone, serde::Serialize, serde::Deserialize)]
+   |          ^^^^^^^^^^^^^^^^
+   = help: the following other types implement trait `InputType`:
+             Arc<T>
+             Arc<[T]>
+             Arc<str>
+             BTreeMap<K, V>
+             BTreeSet<T>
+             BackupValueKind
+             BoolFilter
+             Box<T>
+           and $N others
+note: required by a bound in `assert_input`
+  --> tests/ui/repository_only_not_graphql_types.rs:19:20
+   |
+19 | fn assert_input<T: async_graphql::InputType>() {}
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_input`
+   = note: this error originates in the derive macro `RepositoryEntity` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `CreatePrivateRecordInput: InputType` is not satisfied
+  --> tests/ui/repository_only_not_graphql_types.rs:25:20
+   |
+25 |     assert_input::<CreatePrivateRecordInput>();
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `InputType` is not implemented for `CreatePrivateRecordInput`
+  --> tests/ui/repository_only_not_graphql_types.rs:3:10
+   |
+ 3 | #[derive(RepositoryEntity, Clone, serde::Serialize, serde::Deserialize)]
+   |          ^^^^^^^^^^^^^^^^
+   = help: the following other types implement trait `InputType`:
+             Arc<T>
+             Arc<[T]>
+             Arc<str>
+             BTreeMap<K, V>
+             BTreeSet<T>
+             BackupValueKind
+             BoolFilter
+             Box<T>
+           and $N others
+note: required by a bound in `assert_input`
+  --> tests/ui/repository_only_not_graphql_types.rs:19:20
+   |
+19 | fn assert_input<T: async_graphql::InputType>() {}
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_input`
+   = note: this error originates in the derive macro `RepositoryEntity` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `UpdatePrivateRecordInput: InputType` is not satisfied
+  --> tests/ui/repository_only_not_graphql_types.rs:26:20
+   |
+26 |     assert_input::<UpdatePrivateRecordInput>();
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `InputType` is not implemented for `UpdatePrivateRecordInput`
+  --> tests/ui/repository_only_not_graphql_types.rs:3:10
+   |
+ 3 | #[derive(RepositoryEntity, Clone, serde::Serialize, serde::Deserialize)]
+   |          ^^^^^^^^^^^^^^^^
+   = help: the following other types implement trait `InputType`:
+             Arc<T>
+             Arc<[T]>
+             Arc<str>
+             BTreeMap<K, V>
+             BTreeSet<T>
+             BackupValueKind
+             BoolFilter
+             Box<T>
+           and $N others
+note: required by a bound in `assert_input`
+  --> tests/ui/repository_only_not_graphql_types.rs:19:20
+   |
+19 | fn assert_input<T: async_graphql::InputType>() {}
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_input`
+   = note: this error originates in the derive macro `RepositoryEntity` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `PrivateRecordProjection: OutputType` is not satisfied
+  --> tests/ui/repository_only_not_graphql_types.rs:27:21
+   |
+27 |     assert_output::<PrivateRecordProjection>();
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `OutputType` is not implemented for `PrivateRecordProjection`
+  --> tests/ui/repository_only_not_graphql_types.rs:3:10
+   |
+ 3 | #[derive(RepositoryEntity, Clone, serde::Serialize, serde::Deserialize)]
+   |          ^^^^^^^^^^^^^^^^
+   = help: the following other types implement trait `OutputType`:
+             &'a [T]
+             &T
+             Arc<T>
+             Arc<[T]>
+             BTreeMap<K, V>
+             BTreeSet<T>
+             BackupValueKind
+             Box<T>
+           and $N others
+note: required by a bound in `assert_output`
+  --> tests/ui/repository_only_not_graphql_types.rs:18:21
+   |
+18 | fn assert_output<T: async_graphql::OutputType>() {}
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_output`
+   = note: this error originates in the derive macro `RepositoryEntity` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `PrivateRecordProjection: InputType` is not satisfied
+  --> tests/ui/repository_only_not_graphql_types.rs:28:20
+   |
+28 |     assert_input::<PrivateRecordProjection>();
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `InputType` is not implemented for `PrivateRecordProjection`
+  --> tests/ui/repository_only_not_graphql_types.rs:3:10
+   |
+ 3 | #[derive(RepositoryEntity, Clone, serde::Serialize, serde::Deserialize)]
+   |          ^^^^^^^^^^^^^^^^
+   = help: the following other types implement trait `InputType`:
+             Arc<T>
+             Arc<[T]>
+             Arc<str>
+             BTreeMap<K, V>
+             BTreeSet<T>
+             BackupValueKind
+             BoolFilter
+             Box<T>
+           and $N others
+note: required by a bound in `assert_input`
+  --> tests/ui/repository_only_not_graphql_types.rs:19:20
+   |
+19 | fn assert_input<T: async_graphql::InputType>() {}
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_input`
+   = note: this error originates in the derive macro `RepositoryEntity` (in Nightly builds, run with -Z macro-backtrace for more info)

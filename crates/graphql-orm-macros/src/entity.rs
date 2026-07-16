@@ -94,9 +94,26 @@ pub(crate) struct RlsOperationMetadata {
 
 pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<EntityMetadata> {
     let mut metadata = EntityMetadata::default();
+    let mut entity_attribute: Option<&'static str> = None;
 
     for attr in attrs {
-        if attr.path().is_ident("graphql_entity") {
+        let attribute_name = if attr.path().is_ident("graphql_entity") {
+            Some("graphql_entity")
+        } else if attr.path().is_ident("repository_entity") {
+            Some("repository_entity")
+        } else {
+            None
+        };
+        if let Some(attribute_name) = attribute_name {
+            if let Some(previous) = entity_attribute {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    format!(
+                        "entity declarations may use only one surface attribute; found both #[{previous}] and #[{attribute_name}]"
+                    ),
+                ));
+            }
+            entity_attribute = Some(attribute_name);
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("table") {
                     let value = meta.value()?;
@@ -425,6 +442,18 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
     }
 
     Ok(metadata)
+}
+
+pub(crate) fn has_repository_entity_attribute(attrs: &[syn::Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|attribute| attribute.path().is_ident("repository_entity"))
+}
+
+pub(crate) fn has_graphql_entity_attribute(attrs: &[syn::Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|attribute| attribute.path().is_ident("graphql_entity"))
 }
 
 fn parse_rls_metadata(attr: &syn::Attribute) -> syn::Result<RlsMetadata> {
@@ -2172,6 +2201,7 @@ fn generate_entity_impl(
     let mut search_document_chunks = Vec::new();
     let mut sortable_columns: Vec<(syn::Ident, String)> = Vec::new();
     let mut object_field_methods = Vec::new();
+    let mut repository_field_policy_defs = Vec::new();
     let parsed_fields = collect_parsed_fields(fields.iter())?;
 
     for parsed_field in &parsed_fields {
@@ -2349,6 +2379,28 @@ fn generate_entity_impl(
             graphql_rename_fields,
             serde_rename_all,
         );
+        if !field_meta.is_relation && !field_meta.skip_db {
+            let read_policy = field_meta
+                .read_policy
+                .as_deref()
+                .map(|policy| quote! { Some(#policy) })
+                .unwrap_or_else(|| quote! { None });
+            let write_policy = field_meta
+                .write_policy
+                .as_deref()
+                .map(|policy| quote! { Some(#policy) })
+                .unwrap_or_else(|| quote! { None });
+            let sensitive = field_meta.sensitive;
+            repository_field_policy_defs.push(quote! {
+                ::graphql_orm::graphql::orm::RepositoryFieldPolicyDef {
+                    rust_name: #rust_name,
+                    api_name: #graphql_name,
+                    read_policy: #read_policy,
+                    write_policy: #write_policy,
+                    sensitive: #sensitive,
+                }
+            });
+        }
         let db_col = field_meta
             .db_column
             .clone()
@@ -3092,6 +3144,13 @@ fn generate_entity_impl(
                         )
                     })
                 }
+
+                fn repository_field_policies() -> &'static [::graphql_orm::graphql::orm::RepositoryFieldPolicyDef] {
+                    static FIELDS: &[::graphql_orm::graphql::orm::RepositoryFieldPolicyDef] = &[
+                        #(#repository_field_policy_defs),*
+                    ];
+                    FIELDS
+                }
             }
         });
     }
@@ -3464,6 +3523,20 @@ fn generate_entity_impl(
                     )
                 })
             }
+
+
+            fn repository_field_policies() -> &'static [::graphql_orm::graphql::orm::RepositoryFieldPolicyDef] {
+                static FIELDS: &[::graphql_orm::graphql::orm::RepositoryFieldPolicyDef] = &[
+                    #(#repository_field_policy_defs),*
+                ];
+                FIELDS
+            }
+
+            fn repository_policy_record(
+                &self,
+            ) -> Option<&(dyn ::std::any::Any + Send + Sync)> {
+                Some(self)
+            }
         }
 
         impl ::graphql_orm::graphql::orm::FromSqlRow<#backend_marker> for #struct_name {
@@ -3604,6 +3677,17 @@ fn generate_projection_definitions(
                     .clone()
                     .unwrap_or_else(|| ident.to_string());
                 backend_quote_identifier_path(backend, &db_column)
+            })
+            .collect::<Vec<_>>();
+        let selected_field_names = selected
+            .iter()
+            .map(|selected| {
+                selected
+                    .field
+                    .ident
+                    .as_ref()
+                    .expect("named field")
+                    .to_string()
             })
             .collect::<Vec<_>>();
         let debug_fields = selected.iter().map(|selected| {
@@ -3768,6 +3852,7 @@ fn generate_projection_definitions(
                 type Filter = #where_input;
                 type Order = #order_input;
                 const COLUMNS: &'static [&'static str] = &[#(#selected_columns),*];
+                const FIELD_NAMES: &'static [&'static str] = &[#(#selected_field_names),*];
                 const UNIQUE_COLUMNS: &'static [&'static str] = &[#(#unique_columns),*];
             }
 

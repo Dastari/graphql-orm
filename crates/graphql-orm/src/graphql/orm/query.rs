@@ -51,9 +51,58 @@ pub trait DatabaseSearchSchema {
     }
 }
 
+/// Repository authorization metadata for one persisted field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RepositoryFieldPolicyDef {
+    /// Rust field identifier used by generated projections.
+    pub rust_name: &'static str,
+    /// Public API/policy field identity after configured naming rules.
+    pub api_name: &'static str,
+    /// Optional repository read-policy key.
+    pub read_policy: Option<&'static str>,
+    /// Optional repository write-policy key.
+    pub write_policy: Option<&'static str>,
+    /// Whether generated diagnostics and debug output must redact the value.
+    pub sensitive: bool,
+}
+
 pub trait Entity: DatabaseEntity + DatabaseSchema + EntityRelations + DatabaseSearchSchema {
     fn entity_name() -> &'static str;
     fn metadata() -> &'static EntityMetadata;
+
+    /// Persisted field policy metadata used by non-GraphQL repository paths.
+    fn repository_field_policies() -> &'static [RepositoryFieldPolicyDef] {
+        &[]
+    }
+
+    /// Type-erased record used by repository row/field policy callbacks.
+    ///
+    /// The source-compatible default supplies no record. Generated
+    /// repository-only entities override it; callers then fail closed if an
+    /// application row policy requires a record from a third-party entity that
+    /// has not opted into this capability.
+    fn repository_policy_record(&self) -> Option<&(dyn Any + Send + Sync)> {
+        None
+    }
+
+    /// Authorize fields supplied by a generated repository create input.
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    fn authorize_repository_create_fields<'a, B: OrmBackend>(
+        _db: &'a crate::db::Database<B>,
+        _input: &'a (dyn Any + Send + Sync),
+    ) -> futures::future::BoxFuture<'a, crate::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Authorize fields supplied by a generated repository update input.
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    fn authorize_repository_update_fields<'a, B: OrmBackend>(
+        _db: &'a crate::db::Database<B>,
+        _existing: Option<&'a (dyn Any + Send + Sync)>,
+        _input: &'a (dyn Any + Send + Sync),
+    ) -> futures::future::BoxFuture<'a, crate::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Optional generated PostgreSQL row-level security metadata for an entity.
@@ -84,6 +133,8 @@ pub trait ReadProjection<B: OrmBackend = DefaultBackend>:
     type Order: DatabaseOrderBy;
 
     const COLUMNS: &'static [&'static str];
+    /// Rust field identities selected by this projection, in decode order.
+    const FIELD_NAMES: &'static [&'static str] = &[];
     #[doc(hidden)]
     const UNIQUE_COLUMNS: &'static [&'static str];
 }
@@ -130,6 +181,193 @@ pub trait DatabaseOrderBy {
 
     fn to_sort_expression(&self) -> Option<SortExpression> {
         self.to_sql_order().map(|clause| SortExpression { clause })
+    }
+}
+
+/// Backend-neutral, policy-aware query builder for macro-generated repository entities.
+///
+/// Unlike the legacy pool-bound compatibility builders, this type is bound to a
+/// [`Database`](crate::db::Database), applies configured entity and row policy
+/// decisions on the repository surface, and resolves the runtime page bound
+/// before executing SQL.
+pub struct RepositoryQuery<'a, T, F, O, B: OrmBackend = DefaultBackend> {
+    db: &'a crate::db::Database<B>,
+    auth: Option<DbAuthContext>,
+    query: EntityQuery<T, B>,
+    _inputs: PhantomData<(F, O)>,
+}
+
+impl<'a, T, F, O, B> RepositoryQuery<'a, T, F, O, B>
+where
+    B: OrmBackend,
+    T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+    F: DatabaseFilter + Clone + Send + Sync + 'static,
+    O: DatabaseOrderBy,
+{
+    /// Create a bounded repository query associated with `db`.
+    pub fn new(db: &'a crate::db::Database<B>) -> Self {
+        let resolved = db.pagination_config().resolve_page(None, true);
+        let query = EntityQuery::new().paginate(&PageInput {
+            limit: resolved.limit,
+            offset: Some(resolved.offset),
+        });
+        Self {
+            db,
+            auth: None,
+            query,
+            _inputs: PhantomData,
+        }
+    }
+
+    /// Apply backend-neutral transaction-style database authorization to this read.
+    pub fn with_auth(mut self, auth: Option<&DbAuthContext>) -> Self {
+        self.auth = auth.cloned();
+        self
+    }
+
+    /// Apply one generated typed filter.
+    pub fn filter(mut self, filter: F) -> Self {
+        self.query = self.query.filter_with_entity_matching(&filter);
+        self
+    }
+
+    /// Add one generated deterministic ordering input.
+    pub fn order_by(mut self, order: O) -> Self {
+        self.query = self.query.order_by(&order);
+        self
+    }
+
+    /// Apply the entity's declared default ordering.
+    pub fn default_order(mut self) -> Self {
+        self.query = self.query.default_order();
+        self
+    }
+
+    /// Set a requested limit. The database's maximum page limit is applied before SQL execution.
+    pub fn limit(mut self, limit: i64) -> Self {
+        let limit = self
+            .db
+            .pagination_config()
+            .clamp_explicit_limit(Some(limit));
+        let offset = self.query.page.as_ref().and_then(|page| page.offset);
+        self.query = self.query.paginate(&PageInput { limit, offset });
+        self
+    }
+
+    /// Set a non-negative offset while retaining the configured bound.
+    pub fn offset(mut self, offset: i64) -> Self {
+        let limit = self.query.page.as_ref().and_then(|page| page.limit);
+        self.query = self.query.paginate(&PageInput {
+            limit,
+            offset: Some(offset.max(0)),
+        });
+        self
+    }
+
+    async fn authorize(self) -> crate::Result<(Self, &'static EntityMetadata)> {
+        let metadata = T::metadata();
+        self.db
+            .ensure_entity_access(
+                None,
+                metadata.entity_name,
+                metadata.read_policy,
+                super::core::EntityAccessKind::Read,
+                super::core::EntityAccessSurface::Repository,
+            )
+            .await
+            .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
+        Ok((self, metadata))
+    }
+
+    async fn fetch_visible(
+        self,
+        pagination_override: Option<PaginationConfig>,
+    ) -> crate::Result<Vec<T>> {
+        let (this, metadata) = self.authorize().await?;
+        let rows = if let Some(pagination) = pagination_override {
+            this.query
+                .fetch_all_with_auth_and_pagination(this.db, this.auth.as_ref(), pagination)
+                .await?
+        } else {
+            this.query
+                .fetch_all_with_auth(this.db, this.auth.as_ref())
+                .await?
+        };
+        let mut visible = Vec::with_capacity(rows.len());
+        for row in rows {
+            if this
+                .db
+                .can_read_row(
+                    None,
+                    metadata.entity_name,
+                    metadata.read_policy,
+                    super::core::EntityAccessSurface::Repository,
+                    &row as &(dyn Any + Send + Sync),
+                )
+                .await
+                .map_err(crate::graphql::errors::sqlx_error_from_graphql)?
+            {
+                for field in T::repository_field_policies() {
+                    this.db
+                        .ensure_repository_readable_field(
+                            None,
+                            metadata.entity_name,
+                            field.api_name,
+                            field.read_policy,
+                            Some(&row as &(dyn Any + Send + Sync)),
+                        )
+                        .await
+                        .map_err(crate::graphql::errors::sqlx_error_from_public)?;
+                }
+                visible.push(row);
+            }
+        }
+        Ok(visible)
+    }
+
+    /// Fetch all visible rows within the resolved bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe authorization, query-rendering, backend, or row-decoding
+    /// error. Declared policies without the required provider fail closed.
+    pub async fn fetch_all(self) -> crate::Result<Vec<T>> {
+        self.fetch_visible(None).await
+    }
+
+    /// Fetch the first visible row within the resolved bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same safe errors as [`Self::fetch_all`].
+    pub async fn fetch_first(self) -> crate::Result<Option<T>> {
+        Ok(self.fetch_all().await?.into_iter().next())
+    }
+
+    /// Fetch zero or one visible row, failing closed if more than one row is visible.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cardinality error for multiple visible rows, or the same safe
+    /// errors as [`Self::fetch_all`].
+    pub async fn fetch_optional_one(mut self) -> crate::Result<Option<T>> {
+        // Cardinality checks always use one bounded look-ahead row. This must not
+        // be clamped to a configured maximum of one, or a second matching row
+        // could be mistaken for a unique result.
+        let offset = self.query.page.as_ref().and_then(|page| page.offset);
+        self.query = self.query.paginate(&PageInput {
+            limit: Some(2),
+            offset,
+        });
+        let rows = self
+            .fetch_visible(Some(PaginationConfig::unbounded()))
+            .await?;
+        if rows.len() > 1 {
+            return Err(sqlx::Error::Protocol(
+                "repository optional-one query matched more than one row".to_string(),
+            ));
+        }
+        Ok(rows.into_iter().next())
     }
 }
 
@@ -1470,6 +1708,26 @@ where
     )
     .await
     .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
+    for selected in P::FIELD_NAMES {
+        let Some(field) = <P::Entity as Entity>::repository_field_policies()
+            .iter()
+            .find(|field| field.rust_name == *selected)
+        else {
+            return Err(sqlx::Error::Protocol(format!(
+                "projection field metadata is missing for {}.{selected}",
+                metadata.entity_name
+            )));
+        };
+        db.ensure_repository_readable_field(
+            None,
+            metadata.entity_name,
+            field.api_name,
+            field.read_policy,
+            None,
+        )
+        .await
+        .map_err(crate::graphql::errors::sqlx_error_from_public)?;
+    }
     if db.row_policy().is_some() {
         return Err(sqlx::Error::Protocol(
             "projection reads are denied when an application row policy requires a full entity; use database RLS or a typed SQL-renderable filter"
@@ -1940,6 +2198,24 @@ where
         P: PoolProvider<B> + ?Sized,
     {
         let pagination_config = provider.pagination_config();
+        let rendered = render_select_query(
+            B::DIALECT,
+            &self.build_select_query_with_config(pagination_config, false),
+        );
+        let rows =
+            B::fetch_rows_with_auth(provider.pool(), &rendered.sql, &rendered.values, auth).await?;
+        self.apply_in_memory_filtering(rows, pagination_config, false)
+    }
+
+    pub(crate) async fn fetch_all_with_auth_and_pagination<P>(
+        &self,
+        provider: &P,
+        auth: Option<&DbAuthContext>,
+        pagination_config: PaginationConfig,
+    ) -> crate::Result<Vec<T>>
+    where
+        P: PoolProvider<B> + ?Sized,
+    {
         let rendered = render_select_query(
             B::DIALECT,
             &self.build_select_query_with_config(pagination_config, false),

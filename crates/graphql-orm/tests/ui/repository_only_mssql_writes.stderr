@@ -1,0 +1,11 @@
+error: repository-only MSSQL entities are read-only; write, append-only, upsert, retention, and mutation-hook options are unsupported
+  --> tests/ui/repository_only_mssql_writes.rs:4:1
+   |
+ 4 | / #[repository_entity(
+ 5 | |     backend = "mssql",
+ 6 | |     table = "private_records",
+ 7 | |     plural = "PrivateRecords",
+...  |
+14 | |     external_key: String,
+15 | | }
+   | |_^
