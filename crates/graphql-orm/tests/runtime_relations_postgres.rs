@@ -38,6 +38,7 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
     let customer_id = field("pg_customer_id", RuntimeValueKind::Integer);
     let customer_tenant = field("pg_customer_tenant", RuntimeValueKind::String);
     let contact_id = field("pg_contact_id", RuntimeValueKind::Integer);
+    let note_id = field("pg_note_id", RuntimeValueKind::Integer);
     RuntimeSchema {
         format_version: 1,
         collections: vec![
@@ -94,11 +95,44 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                     field("pg_contact_label", RuntimeValueKind::String),
                     field("pg_contact_payload", RuntimeValueKind::Bytes),
                 ],
-                relations: vec![],
+                relations: vec![RuntimeRelation {
+                    id: RelationId::new("pg_contact_notes").unwrap(),
+                    api_name: "notes".into(),
+                    target: cid("pg_notes"),
+                    key_pairs: vec![RelationKeyPair {
+                        source: contact_id.id.clone(),
+                        target: fid("pg_note_contact_id"),
+                    }],
+                    cardinality: RelationCardinality::Many,
+                    enforce_foreign_key: false,
+                    on_delete: None,
+                }],
                 indexes: vec![],
                 composite_unique: vec![],
                 default_order: vec![RuntimeOrderTerm {
                     field: contact_id.id.clone(),
+                    direction: RuntimeOrderDirection::Asc,
+                }],
+            },
+            RuntimeCollection {
+                id: cid("pg_notes"),
+                api_type_name: "PgNote".into(),
+                api_plural_name: "PgNotes".into(),
+                physical_table: "runtime_relation_pg_notes".into(),
+                primary_key: vec![note_id.id.clone()],
+                append_only: false,
+                retention_purge: false,
+                fields: vec![
+                    note_id.clone(),
+                    field("pg_note_contact_id", RuntimeValueKind::Integer),
+                    field("pg_note_tenant", RuntimeValueKind::String),
+                    field("pg_note_body", RuntimeValueKind::String),
+                ],
+                relations: vec![],
+                indexes: vec![],
+                composite_unique: vec![],
+                default_order: vec![RuntimeOrderTerm {
+                    field: note_id.id.clone(),
                     direction: RuntimeOrderDirection::Asc,
                 }],
             },
@@ -230,8 +264,26 @@ async fn composite_relation_batches_match_portable_sqlite_semantics()
     .execute(database.pool())
     .await?;
     graphql_orm::sqlx::query(
+        "CREATE TABLE runtime_relation_pg_notes (
+            pg_note_id BIGINT PRIMARY KEY,
+            pg_note_contact_id BIGINT NOT NULL,
+            pg_note_tenant TEXT NOT NULL,
+            pg_note_body TEXT NOT NULL
+         )",
+    )
+    .execute(database.pool())
+    .await?;
+    graphql_orm::sqlx::query(
         "INSERT INTO runtime_relation_pg_customers VALUES
          (1, 'tenant-a', 'active'), (2, 'tenant-a', 'active'), (3, 'tenant-b', 'empty')",
+    )
+    .execute(database.pool())
+    .await?;
+    graphql_orm::sqlx::query(
+        "INSERT INTO runtime_relation_pg_notes VALUES
+         (100, 10, 'tenant-a', 'note-a'),
+         (200, 20, 'tenant-a', 'note-c'),
+         (300, 30, 'tenant-b', 'note-private-b')",
     )
     .execute(database.pool())
     .await?;
@@ -250,9 +302,21 @@ async fn composite_relation_batches_match_portable_sqlite_semantics()
     graphql_orm::sqlx::query("ALTER TABLE runtime_relation_pg_contacts FORCE ROW LEVEL SECURITY")
         .execute(database.pool())
         .await?;
+    graphql_orm::sqlx::query("ALTER TABLE runtime_relation_pg_notes ENABLE ROW LEVEL SECURITY")
+        .execute(database.pool())
+        .await?;
+    graphql_orm::sqlx::query("ALTER TABLE runtime_relation_pg_notes FORCE ROW LEVEL SECURITY")
+        .execute(database.pool())
+        .await?;
     graphql_orm::sqlx::query(
         "CREATE POLICY runtime_relation_tenant ON runtime_relation_pg_contacts
          USING (pg_contact_tenant = current_setting('app.tenant_id', true))",
+    )
+    .execute(database.pool())
+    .await?;
+    graphql_orm::sqlx::query(
+        "CREATE POLICY runtime_relation_note_tenant ON runtime_relation_pg_notes
+         USING (pg_note_tenant = current_setting('app.tenant_id', true))",
     )
     .execute(database.pool())
     .await?;
@@ -263,7 +327,8 @@ async fn composite_relation_batches_match_portable_sqlite_semantics()
     .execute(database.pool())
     .await?;
     graphql_orm::sqlx::query(
-        "GRANT SELECT ON runtime_relation_pg_customers, runtime_relation_pg_contacts
+        "GRANT SELECT ON runtime_relation_pg_customers, runtime_relation_pg_contacts,
+         runtime_relation_pg_notes
          TO relation_reader",
     )
     .execute(database.pool())
@@ -278,15 +343,20 @@ async fn composite_relation_batches_match_portable_sqlite_semantics()
     let schema = schema();
     let customers = schema.resolve_collection(&cid("pg_customers"))?;
     let contacts = schema.resolve_collection(&cid("pg_contacts"))?;
+    let notes = schema.resolve_collection(&cid("pg_notes"))?;
     let status = schema.resolve_field(&customers, &fid("pg_customer_status"))?;
     let customer_id = schema.resolve_field(&customers, &fid("pg_customer_id"))?;
     let label = schema.resolve_field(&contacts, &fid("pg_contact_label"))?;
+    let note_body = schema.resolve_field(&notes, &fid("pg_note_body"))?;
     let relation = schema.resolve_relation(
         &customers,
         &RelationId::new("pg_customer_contacts").unwrap(),
     )?;
+    let note_relation =
+        schema.resolve_relation(&contacts, &RelationId::new("pg_contact_notes").unwrap())?;
     let parent_projection = schema.resolve_projection(&customers, std::slice::from_ref(&status))?;
     let child_projection = schema.resolve_projection(&contacts, std::slice::from_ref(&label))?;
+    let note_projection = schema.resolve_projection(&notes, std::slice::from_ref(&note_body))?;
     let query_limits = RuntimeQueryLimits::default();
     let parent_request = schema.runtime_read_request_with_relation_keys(
         &customers,
@@ -306,7 +376,7 @@ async fn composite_relation_batches_match_portable_sqlite_semantics()
         RuntimeFieldState::Unloaded
     );
     let anchors = parents.relation_parents(&relation)?;
-    let request = schema.runtime_relation_batch_request(
+    let request = schema.runtime_relation_batch_request_with_relation_keys(
         &relation,
         anchors.clone(),
         &child_projection,
@@ -316,6 +386,7 @@ async fn composite_relation_batches_match_portable_sqlite_semantics()
             pages: vec![RuntimePageRequest::first(1, None); anchors.len()],
             include_count: true,
         },
+        std::slice::from_ref(&note_relation),
         RuntimeRelationLimits::default(),
     )?;
     let batch = app_database
@@ -332,6 +403,31 @@ async fn composite_relation_batches_match_portable_sqlite_semantics()
     };
     assert!(empty.edges.is_empty());
     assert_eq!(empty.total_count, Some(0));
+
+    let note_anchors = batch.relation_parents(&note_relation)?;
+    let note_request = schema.runtime_relation_batch_request(
+        &note_relation,
+        note_anchors.clone(),
+        &note_projection,
+        None,
+        schema.runtime_order(&notes, None, query_limits)?,
+        RuntimeRelationSelection::ToMany {
+            pages: vec![RuntimePageRequest::first(10, None); note_anchors.len()],
+            include_count: false,
+        },
+        RuntimeRelationLimits::default(),
+    )?;
+    let notes_batch = app_database
+        .execute_runtime_relation_batch(&note_request, Some(&tenant_a))
+        .await?;
+    let RuntimeRelationValue::ToMany(first_notes) = &notes_batch.results[0].value else {
+        return Err("expected nested notes relation".into());
+    };
+    let RuntimeRelationValue::ToMany(second_notes) = &notes_batch.results[1].value else {
+        return Err("expected nested notes relation".into());
+    };
+    assert_eq!(first_notes.edges[0].node.string(&note_body)?, "note-a");
+    assert_eq!(second_notes.edges[0].node.string(&note_body)?, "note-c");
 
     let tenant_b = DbAuthContext {
         tenant_id: Some("tenant-b".to_string()),

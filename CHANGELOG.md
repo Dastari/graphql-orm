@@ -16,6 +16,10 @@ policy; derive syntax and generated code are unchanged.
   batch request/result types, plus `Database::execute_runtime_anchored_read`
   and `Database::execute_runtime_relation_batch`. MSSQL remains explicitly
   unsupported for runtime execution; static relation behavior is unchanged.
+- Added `runtime_relation_batch_request_with_relation_keys` and
+  `RuntimeRelationBatch::relation_parents` so an executed child layer retains
+  only opaque, redacted keys for the next explicitly requested relation. A
+  multi-level request remains one bounded compatible statement per layer.
 - Fixed PostgreSQL introspection to group UNIQUE constraints by ordered catalog
   identity and exclude `pg_constraint.conindid`/primary backing indexes from
   ordinary indexes while preserving explicit unique and partial indexes.

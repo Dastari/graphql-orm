@@ -16,7 +16,10 @@ stored rows require no source or data migration. The new `gormrr1` relation
 cursor is accepted only by `RuntimeRelationBatchRequest` and must not be
 translated to or from another cursor family. Hosts opting into runtime
 relations replace host SQL/N+1 loaders with an anchored parent read followed by
-one explicit bounded relation layer; see
+explicit bounded relation layers. Request next-layer relation keys with
+`runtime_relation_batch_request_with_relation_keys`, then pass the opaque
+anchors returned by `RuntimeRelationBatch::relation_parents` into the next
+batch request; see
 [Validated runtime relation batching](docs/runtime-relations.md).
 
 PostgreSQL operators should replan a complete generated target before rollout.
