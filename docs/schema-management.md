@@ -243,6 +243,16 @@ For PostgreSQL spatial fields, managed plans include `CREATE EXTENSION IF NOT EX
 table creation. Spatial indexes are rendered as normal migration statements, not concurrent index
 builds.
 
+PostgreSQL uniqueness introspection is structural. `pg_constraint.conkey`
+members are grouped in key ordinal order: a one-column UNIQUE constraint marks
+that column unique, while a multi-column constraint populates the table's
+composite-unique model without making each member independently unique.
+Indexes owned through `pg_constraint.conindid` (including PRIMARY KEY and
+UNIQUE backing indexes) are excluded from ordinary secondary indexes.
+Explicit unique indexes and conditional/partial unique indexes remain ordinary
+indexes. This distinction prevents unchanged constraint-owned indexes from
+being planned as `DropIndex` during an additive complete-target upgrade.
+
 For SQLite spatial fields, managed plans create `TEXT` columns that store GeoJSON. SQLite plans do
 not enable PostGIS and do not create spatial indexes. Introspection sees those columns as `TEXT`; the
 planner treats the declared spatial metadata as compatible with that storage so repeated validation

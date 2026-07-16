@@ -229,6 +229,16 @@ impl fmt::Debug for RuntimePredicate {
     }
 }
 
+impl RuntimePredicate {
+    pub(crate) fn belongs_to(&self, schema: &SchemaFingerprint, collection: &CollectionId) -> bool {
+        &self.schema == schema && &self.collection == collection
+    }
+
+    pub(crate) fn render(&self, backend: DatabaseBackend, values: &mut Vec<SqlValue>) -> String {
+        render_expr(backend, &self.expr, values)
+    }
+}
+
 /// Explicit portable null placement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -276,6 +286,10 @@ pub struct RuntimeOrder {
 impl RuntimeOrder {
     pub fn terms(&self) -> &[RuntimeEffectiveOrderTerm] {
         &self.terms
+    }
+
+    pub(crate) fn belongs_to(&self, schema: &SchemaFingerprint, collection: &CollectionId) -> bool {
+        &self.schema == schema && &self.collection == collection
     }
 }
 
@@ -984,7 +998,7 @@ fn decode_cursor(
     Ok(envelope.values)
 }
 
-fn value_bind(value: &RuntimeValue) -> Option<SqlValue> {
+pub(crate) fn value_bind(value: &RuntimeValue) -> Option<SqlValue> {
     match value {
         RuntimeValue::Null => None,
         RuntimeValue::Boolean(value) => Some(SqlValue::Bool(*value)),
@@ -998,7 +1012,11 @@ fn value_bind(value: &RuntimeValue) -> Option<SqlValue> {
     }
 }
 
-fn placeholder(backend: DatabaseBackend, index: usize, kind: RuntimeValueKind) -> String {
+pub(crate) fn placeholder(
+    backend: DatabaseBackend,
+    index: usize,
+    kind: RuntimeValueKind,
+) -> String {
     let value = backend.placeholder(index);
     if backend == DatabaseBackend::Postgres && kind == RuntimeValueKind::DateTime {
         format!("{value}::timestamptz")
@@ -1007,7 +1025,7 @@ fn placeholder(backend: DatabaseBackend, index: usize, kind: RuntimeValueKind) -
     }
 }
 
-fn ordered_column(backend: DatabaseBackend, field: &RuntimeFieldHandle) -> String {
+pub(crate) fn ordered_column(backend: DatabaseBackend, field: &RuntimeFieldHandle) -> String {
     let column = backend.quote_identifier(field.physical_column());
     if field.value_kind() == RuntimeValueKind::String {
         match backend {
@@ -1115,7 +1133,7 @@ fn render_expr(
     }
 }
 
-fn cursor_after_sql(
+pub(crate) fn cursor_after_sql(
     backend: DatabaseBackend,
     order: &[RuntimeEffectiveOrderTerm],
     cursor: &[RuntimeValue],
@@ -1136,6 +1154,61 @@ fn cursor_after_sql(
         branches.push(format!("({})", terms.join(" AND ")));
     }
     format!("({})", branches.join(" OR "))
+}
+
+pub(crate) fn effective_terms(
+    order: &RuntimeOrder,
+    backward: bool,
+) -> Vec<RuntimeEffectiveOrderTerm> {
+    if !backward {
+        return order.terms.clone();
+    }
+    order
+        .terms
+        .iter()
+        .map(|term| RuntimeEffectiveOrderTerm {
+            field: term.field.clone(),
+            direction: if term.direction == RuntimeOrderDirection::Asc {
+                RuntimeOrderDirection::Desc
+            } else {
+                RuntimeOrderDirection::Asc
+            },
+            nulls: match term.nulls {
+                RuntimeNullPlacement::First => RuntimeNullPlacement::Last,
+                RuntimeNullPlacement::Last => RuntimeNullPlacement::First,
+            },
+        })
+        .collect()
+}
+
+pub(crate) fn render_order_terms(
+    backend: DatabaseBackend,
+    terms: &[RuntimeEffectiveOrderTerm],
+) -> String {
+    terms
+        .iter()
+        .flat_map(|term| {
+            let column = ordered_column(backend, &term.field);
+            let null_rank = if term.nulls == RuntimeNullPlacement::First {
+                0
+            } else {
+                1
+            };
+            let direction = if term.direction == RuntimeOrderDirection::Asc {
+                "ASC"
+            } else {
+                "DESC"
+            };
+            vec![
+                format!(
+                    "CASE WHEN {column} IS NULL THEN {null_rank} ELSE {} END ASC",
+                    1 - null_rank
+                ),
+                format!("{column} {direction}"),
+            ]
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn cursor_equal(

@@ -11,6 +11,30 @@ required. The optional `auth-agql` bridge intentionally pins `agql-auth` at
 `c92dcb441237bbe308499b26525945f60ffa394a`. Consequently `cargo package -p graphql-orm` cannot
 resolve that Git-only optional dependency through the crates.io packaging model; this is expected.
 
+## 0.13.0
+
+Combined two-prompt pre-1.0 release. Runtime and companion macros are aligned
+at `0.13.0`; macro syntax/output is unchanged.
+
+- Runtime-schema hosts can capture requested relation source keys into opaque,
+  non-serializable, redacted parent anchors without loading them into public
+  records, then execute a validated multi-parent to-one or to-many layer.
+- Typed single/composite keys, null short-circuit, one-statement compatible
+  batching, bounded `page_size + 1` nested windows, optional grouped counts,
+  target structural predicates, deterministic orders, and parent-bound
+  `gormrr1` cursors have SQLite/PostgreSQL parity.
+- PostgreSQL catalog introspection now separates constraint-owned backing
+  indexes from explicit indexes using structural catalog identity and groups
+  composite UNIQUE members in ordinal order. Explicit unique/partial indexes
+  remain intact, unchanged replans are empty, and additive complete targets no
+  longer emit an invalid backing-index drop.
+- New-table DDL now emits declared composite UNIQUE constraints. Existing rows
+  are not rewritten. Static/GraphQL APIs, top-level cursors, backend traits,
+  auth behavior, and serialized runtime schema remain compatible.
+
+See [Runtime relations](runtime-relations.md),
+[Schema management](schema-management.md), and MIGRATION.md.
+
 ## 0.12.0
 
 Additive pre-1.0 runtime query release. Runtime and companion macros are both
