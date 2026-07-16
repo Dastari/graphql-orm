@@ -13,7 +13,7 @@ not provide an MSSQL driver.
 For a service that only uses SQL Server, select the `mssql` backend feature:
 
 ```toml
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.11.0", default-features = false, features = ["mssql"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.12.0", default-features = false, features = ["mssql"] }
 ```
 
 When exactly one of `sqlite`, `postgres`, or `mssql` is enabled, the legacy implicit backend remains

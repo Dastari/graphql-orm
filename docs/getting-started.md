@@ -4,7 +4,7 @@
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.11.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.12.0", default-features = false, features = ["sqlite"] }
 ```
 
 Exact full-revision Git dependencies are the supported installation method; the crates are not

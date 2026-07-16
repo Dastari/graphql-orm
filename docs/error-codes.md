@@ -43,6 +43,13 @@ serialized records. Safe formatting includes stable IDs only; the standard
 error source retains driver detail for trusted logging. See
 [Runtime records](runtime-records.md#stable-errors).
 
+Runtime query validation and execution use `RuntimeQueryErrorCode`: `invalid_handle`,
+`invalid_request`, `invalid_filter`, `unsupported_operator`, `unsupported_order`,
+`unsupported_backend`, `resource_limit`, `cursor_invalid`, `cursor_schema_mismatch`, `decode`, and
+`backend_execution`. Safe formatting omits SQL, physical identifiers, bound values, cursor contents,
+and backend detail; the standard error source remains available to trusted logs. See
+[runtime queries](runtime-queries.md).
+
 ## Before / After
 
 ```rust

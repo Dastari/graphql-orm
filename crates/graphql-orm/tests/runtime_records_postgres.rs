@@ -4,9 +4,11 @@
 use std::process::Command;
 
 use graphql_orm::graphql::orm::{
-    CollectionId, FieldId, PostgresBackend, RuntimeCollection, RuntimeField, RuntimeOrderDirection,
-    RuntimeOrderTerm, RuntimeProjection, RuntimeRecord, RuntimeRecordErrorCode, RuntimeRowDecoder,
-    RuntimeSchema, RuntimeValueKind, ValidatedRuntimeSchema,
+    CollectionId, FieldId, PostgresBackend, RuntimeCollection, RuntimeDateTime, RuntimeField,
+    RuntimeNullPlacement, RuntimeOrderDirection, RuntimeOrderInput, RuntimeOrderTerm,
+    RuntimePageRequest, RuntimeProjection, RuntimeQueryLimits, RuntimeRecord,
+    RuntimeRecordErrorCode, RuntimeRowDecoder, RuntimeScalarOperator, RuntimeSchema, RuntimeValue,
+    RuntimeValueKind, ValidatedRuntimeSchema,
 };
 use graphql_orm::sqlx::Connection;
 
@@ -273,6 +275,80 @@ async fn disposable_postgres_runtime_records_match_sqlite_logically_and_fail_clo
     }
 
     drop(connection);
+    drop(owned);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "creates and owns a disposable Docker PostgreSQL container"]
+async fn disposable_postgres_runtime_query_filters_pages_and_counts()
+-> Result<(), Box<dyn std::error::Error>> {
+    let owned = OwnedPostgres::start()?;
+    let database = graphql_orm::db::Database::connect_postgres(&owned.url).await?;
+    graphql_orm::sqlx::query(
+        "CREATE TABLE runtime_customers (
+            id BIGINT PRIMARY KEY, active BOOLEAN NOT NULL, count_value BIGINT NOT NULL,
+            score DOUBLE PRECISION NOT NULL, name TEXT NOT NULL, uid UUID NOT NULL,
+            document JSONB NOT NULL, payload BYTEA NOT NULL,
+            happened_at TIMESTAMPTZ NOT NULL, note TEXT NULL
+        )",
+    )
+    .execute(database.pool())
+    .await?;
+    for id in 1_i64..=4 {
+        graphql_orm::sqlx::query(
+            "INSERT INTO runtime_customers VALUES (
+                $1, TRUE, $1, $1::double precision, $2,
+                '67e55044-10b1-426f-9247-bb680e5fe0c8', '{}'::jsonb,
+                decode('ff', 'hex'), $3::timestamptz, NULL
+            )",
+        )
+        .bind(id)
+        .bind(format!("customer-{id}"))
+        .bind(format!("2026-07-1{id}T00:00:00Z"))
+        .execute(database.pool())
+        .await?;
+    }
+
+    let schema = schema();
+    let collection = schema.resolve_collection(&cid("customers"))?;
+    let id = schema.resolve_field(&collection, &fid("customer_id"))?;
+    let name = schema.resolve_field(&collection, &fid("name"))?;
+    let happened = schema.resolve_field(&collection, &fid("happened_at"))?;
+    let projection = schema.resolve_projection(&collection, &[id.clone(), name.clone()])?;
+    let limits = RuntimeQueryLimits::default();
+    let filter = schema.runtime_compare(
+        &collection,
+        &happened,
+        RuntimeScalarOperator::Gte,
+        RuntimeValue::DateTime(RuntimeDateTime::parse("2026-07-12T00:00:00Z")?),
+        limits,
+    )?;
+    let order = schema.runtime_order(
+        &collection,
+        Some(vec![RuntimeOrderInput {
+            field: name,
+            direction: RuntimeOrderDirection::Desc,
+            nulls: RuntimeNullPlacement::Last,
+        }]),
+        limits,
+    )?;
+    let request = schema.runtime_read_request(
+        &collection,
+        &projection,
+        Some(filter),
+        order,
+        RuntimePageRequest::first(2, None),
+        true,
+        limits,
+    )?;
+    let result = database.execute_runtime_read(&request, None).await?;
+    assert_eq!(result.edges.len(), 2);
+    assert!(result.page_info.has_next_page);
+    assert_eq!(result.total_count, Some(3));
+    assert_eq!(result.edges[0].node.integer(&id)?, 4);
+
+    drop(database);
     drop(owned);
     Ok(())
 }

@@ -3,6 +3,30 @@
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.12.0 Runtime Query Execution
+
+Update both Git-only crates to 0.12.0 at the reviewed full Git revision. This
+is an additive pre-1.0 public runtime API release; macro declaration/generated
+behavior is unchanged, but the aligned companion version advances under the
+repository release policy.
+
+Existing static entities, repository/GraphQL reads, mutations, transactions,
+authorization, RLS, keyset cursors, third-party `OrmBackend` implementations,
+database schemas, and serialized `RuntimeSchema` documents need no source,
+cursor, schema, or data migration. The new `gormrq1` cursor is used only by
+`RuntimeReadRequest` and is intentionally distinct from static/legacy cursors.
+Do not translate or accept offset cursors on this boundary.
+
+Runtime-schema hosts may replace their own SQL/filter/order/row-decoding layer
+with the validated constructors on `ValidatedRuntimeSchema` and
+`Database::execute_runtime_read`. Re-resolve handles after schema activation;
+old fingerprints fail closed. Hosts must compile authorization constraints to
+a second `RuntimePredicate` and structurally combine it with the application
+predicate. See [Runtime queries](docs/runtime-queries.md).
+
+No migration is required. MSSQL continues to compile and retain static reads,
+but returns the stable unsupported capability for runtime execution.
+
 ## 0.11.0 Repository-Only Entities
 
 Update both Git-only crates to 0.11.0 at the final reviewed full Git revision.

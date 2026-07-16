@@ -18,6 +18,8 @@ It is designed for two related use cases:
 - `#[derive(GraphQLRelations)]` for nested relation fields with batched loading
 - SQLite and PostgreSQL read/write support through SQLx
 - Microsoft SQL Server read/query-only support through Tiberius
+- validated runtime-schema filters, deterministic keyset reads, and owned
+  records on SQLite/PostgreSQL without compiled entity types
 - single and composite primary-key read support
 - single and composite relation-key batching, including nested legacy shapes like
   `JimCardFiles -> Contacts -> Details`
@@ -44,7 +46,7 @@ Select exactly the backend support your service needs:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.11.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.12.0", default-features = false, features = ["sqlite"] }
 ```
 
 GitHub with an exact full revision is the only supported distribution method. Neither crate is
