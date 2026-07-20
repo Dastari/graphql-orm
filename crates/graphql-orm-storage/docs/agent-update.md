@@ -1,7 +1,20 @@
 # Agent Update
 
-This update summarizes the `0.5.0` storage-provider boundary for agents working
+This update summarizes the `0.6.0` storage-provider boundary for agents working
 on `graphql-orm-storage` or downstream crates.
+
+## SMB hardening in 0.6.0
+
+- Native SMB consumes arbitrary `StorageByteStream` chunks directly. Callers no
+  longer need to split them to 1 MiB.
+- Each SMB WRITE is bounded by the negotiated maximum and the backend's
+  conservative request rule.
+- Shared parent directories are cached and concurrent creation is coalesced.
+- Reconnects invalidate directory knowledge and replace a failed client
+  generation without replaying arbitrary upload bodies or ambiguous
+  conditional creates.
+- Use `SmbStorageBackend::diagnostics` for long-running transfer counters and
+  `SmbStorageBackend::probe` for negotiated security and request-size facts.
 
 ## What Changed
 

@@ -4,10 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 NORMAL=graphql-orm-smb-test
 ENCRYPTED=graphql-orm-smb-encrypted
+CONSTRAINED=graphql-orm-smb-constrained
 PASSWORD='BackupTest-42!'
 
 cleanup() {
-  docker rm -f "$NORMAL" "$ENCRYPTED" >/dev/null 2>&1 || true
+  docker rm -f "$NORMAL" "$ENCRYPTED" "$CONSTRAINED" >/dev/null 2>&1 || true
   docker volume rm graphql-orm-smb-test-data >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -23,6 +24,10 @@ docker run -d --rm --name "$ENCRYPTED" -p 1446:445 dperson/samba:latest \
   -p -w WORKGROUP -u "backup;$PASSWORD" \
   -s 'backups;/share;yes;no;no;backup' \
   -g 'server signing = mandatory' -g 'smb encrypt = required' >/dev/null
+docker run -d --rm --name "$CONSTRAINED" -p 1447:445 dperson/samba:latest \
+  -p -w WORKGROUP -u "backup;$PASSWORD" \
+  -s 'backups;/share;yes;no;no;backup' \
+  -g 'server signing = mandatory' -g 'smb2 max write = 65536' >/dev/null
 
 sleep 2
 
@@ -37,10 +42,26 @@ SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP
   cargo test --features smb --test smb_integration \
   samba_round_trip_streaming_listing_and_atomic_create -- --ignored --nocapture
 
+SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT=1445 SMB_TEST_SHARE=backups \
+SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
+  cargo test --features smb --test smb_integration \
+  samba_oversized_chunk_cancellation_and_concurrency_matrix -- --ignored --nocapture
+
+if docker exec "$NORMAL" sh -c 'find /share -path /share/.deleted -prune -o -type f -name "*.uploading" -print -quit | grep -q .'; then
+  echo "cancelled or failed upload left an SMB temporary file" >&2
+  exit 1
+fi
+
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT=1446 SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_REQUIRE_ENCRYPTION=1 \
   cargo test --features smb --test smb_integration \
   samba_round_trip_streaming_listing_and_atomic_create -- --ignored --nocapture
+
+SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT=1447 SMB_TEST_SHARE=backups \
+SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
+SMB_TEST_EXPECT_MAX_WRITE=65536 \
+  cargo test --features smb --test smb_integration \
+  samba_constrained_max_write_handles_oversized_input_chunk -- --ignored --nocapture
 
 cd "$ROOT/../graphql-orm-backup"
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT=1445 SMB_TEST_SHARE=backups \

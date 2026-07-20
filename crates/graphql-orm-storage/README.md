@@ -165,7 +165,7 @@ rows.
 
 ## Status
 
-Current crate version: `0.5.0`.
+Current crate version: `0.6.0`.
 
 Local filesystem, S3-compatible storage, and feature-gated native SMB2/SMB3
 storage are implemented. Azure Blob remains an explicit placeholder. Provider

@@ -1,5 +1,18 @@
 # Release Notes
 
+## 0.6.0
+
+- Hardened native SMB streaming writes against negotiated request limits and
+  partial acknowledgements without buffering complete bodies.
+- Added bounded, concurrency-safe parent-directory coordination and reconnect
+  cache invalidation for large content-addressed backups.
+- Added cleanup ownership for cancelled direct and temporary uploads, bounded
+  idempotent reconnect behavior, expanded probe facts, and redaction-safe live
+  diagnostics.
+- Expanded the managed Samba matrix with a constrained `MaxWriteSize`, upload
+  concurrency 1/2/4/8, cancellation cleanup, directory-work assertions, and
+  downstream backup lifecycle coverage.
+
 ## 0.5.0
 
 - Added feature-gated, pure-Rust native SMB2/SMB3 `BlobStore` support with

@@ -67,7 +67,10 @@ pub use object::{
 pub use s3::{S3StorageBackend, S3StorageConfig};
 pub use service::{ObjectStorage, StorageService};
 #[cfg(feature = "smb")]
-pub use smb::{SmbDialect, SmbProbeOptions, SmbProbeResult, SmbStorageBackend, SmbStorageConfig};
+pub use smb::{
+    SmbBackendDiagnostics, SmbDialect, SmbProbeOptions, SmbProbeResult, SmbStorageBackend,
+    SmbStorageConfig,
+};
 pub use streaming_object::{
     BoxedMultipartWriter, MultipartWriter, ObjectContentRange, ObjectInfo, ObjectMetadata,
     ObjectRangeBody, StreamingObjectStore, validate_object_bucket,

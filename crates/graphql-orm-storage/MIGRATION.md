@@ -1,5 +1,39 @@
 # Migration Guide
 
+## 0.5.0 to 0.6.0
+
+The `BlobStore`, `ObjectStorage`, and `StreamingObjectStore` trait contracts are
+unchanged. Native SMB consumers should update the crate version:
+
+```toml
+graphql-orm-storage = {
+    version = "0.6.0",
+    default-features = false,
+    features = ["smb"]
+}
+```
+
+Downstream stream chunking workarounds can be removed. In particular, callers
+do not need to split `StorageByteStream` items to 1 MiB: the provider now bounds
+each SMB request using negotiated connection facts while preserving streaming
+backpressure.
+
+`SmbProbeResult` adds `max_read_size`, `max_write_size`,
+`max_transact_size`, and `write_request_payload_limit`, and is now
+`#[non_exhaustive]`. Code that destructures the result must use `..`. The
+existing dialect, signing/encryption, and reachability fields retain their
+meanings.
+
+`SmbStorageBackend::diagnostics` is an optional new monitoring surface. It does
+not contain endpoints, usernames, passwords, or keys. Structured tracing events
+also avoid credentials; applications only need to install a tracing subscriber
+if they want those events.
+
+Conditional-create behavior is unchanged: `Ok(None)` still means another writer
+won `FILE_CREATE`. A timeout with an unknown conditional-create outcome remains
+an error and must not be treated as a collision. If an application retries a
+failed streaming upload, it must continue to supply a fresh body.
+
 ## 0.4.x to 0.5.0
 
 The default feature set and local filesystem behavior are unchanged. Native

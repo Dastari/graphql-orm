@@ -66,11 +66,35 @@ Rename atomicity ultimately depends on the server filesystem, but the Samba
 suite exercises same-directory overwrite rename and concurrent CREATE.
 
 Uploads consume `StorageByteStream` incrementally and hash while writing.
+An input item may be arbitrarily large: the backend splits it without collecting
+the body. SMB2 `MaxWriteSize` is the WRITE payload limit and excludes protocol,
+signing, and encryption framing, so no framing bytes are subtracted. For
+interoperability, the backend additionally caps each request at 1 MiB and rounds
+larger limits down to a 64 KiB SMB2 credit boundary. It handles partial
+acknowledgements by advancing both the slice and file offset, and rejects a
+zero-byte acknowledgement for a non-empty request.
+
+New files are marked delete-on-close until the complete body is hashed and
+flushed. Cancellation guards close and remove owned direct or temporary files.
+Cleanup ownership starts only after a successful CREATE response, so a
+conditional-create collision can never delete the pre-existing object. A
+temporary file remains guarded through publication; cancellation during rename
+removes only the unique temporary name, never a successfully published target.
+
+Parent directories use a bounded 4,096-entry per-backend cache and a per-path
+single-flight coordinator. The first object opens or creates each ancestor;
+later objects under a known parent issue no directory CREATE requests. A
+successful reconnect or path-not-found response clears cached directory facts
+before safe reconstruction.
+
 Downloads use fixed chunks and retain a bounded transfer permit. Connection and
-operation deadlines are separate. Safe open/read recovery uses three bounded,
-jittered reconnect attempts. Auth, permission, invalid configuration, and
-collisions are not retried. Interrupted arbitrary upload streams are not
-replayed; callers retry with a fresh stream.
+operation deadlines are separate. Retryable timeouts and connection failures
+replace the shared client by generation, so later operations do not inherit a
+poisoned smb-rs worker. Directory creation, opens, listings, deletion, and the
+CREATE of a unique temporary name may be retried because they are idempotent.
+Stream writes are not replayed. An exclusive `FILE_CREATE` is not replayed after
+an ambiguous response because the server may already have created that exact
+target. Callers retry failed uploads with a fresh stream.
 
 If a response is lost after conditional CREATE, the server may hold a partial
 or complete target. Cleanup is best effort, so completed snapshots must still
@@ -81,7 +105,17 @@ payload sets.
 
 `SmbStorageBackend::probe` connects, negotiates, authenticates, opens the share,
 optionally creates the prefix, lists it, round-trips random bytes, compares, and
-deletes the probe. Its result reports safe dialect/security/read/write facts.
+deletes the probe. Its result reports the negotiated dialect, signing and
+encryption state, maximum read/write/transact sizes, and the effective bounded
+WRITE payload, in addition to reachability and read/write facts.
+
+`SmbStorageBackend::diagnostics` returns a redaction-safe snapshot suitable for
+polling during long backups. It includes active/completed/failed uploads,
+acknowledged bytes, WRITE and partial-response counts, reconnect generations,
+directory cache hits, remote directory CREATE requests, and coalesced waits.
+With the `smb` feature, structured `tracing` events also report connection,
+reconnect, upload start/progress/completion, and failure events. These surfaces
+do not include passwords, usernames, endpoints, or configuration debug output.
 
 Use `StorageProviderErrorKind`, which distinguishes connectivity,
 authentication, security negotiation, missing share, permission, missing path,

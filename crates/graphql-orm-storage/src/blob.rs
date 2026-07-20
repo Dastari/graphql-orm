@@ -369,6 +369,7 @@ pub fn validate_blob_key(key: &str) -> Result<(), StorageError> {
     Ok(())
 }
 
+#[cfg(any(feature = "local", feature = "smb"))]
 pub(crate) fn validate_blob_prefix(prefix: &str) -> Result<(), StorageError> {
     if prefix.is_empty() {
         Ok(())
