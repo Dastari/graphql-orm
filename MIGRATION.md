@@ -3,6 +3,43 @@
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.14.0 agql-auth 0.12 Bridge Alignment
+
+Update both Git-only graphql-orm crates to 0.14.0 at the final reviewed full
+revision. When the host also depends on agql-auth, its dependency must match the
+bridge exactly:
+
+```toml
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "3f3b0c5365adfbe436514a681d977b600991b797", version = "0.12.0" }
+```
+
+This yields one agql-auth package/type universe. Do not use a branch, local path
+override, abbreviated revision, or different version requirement.
+
+The public converter functions and exact identity/authorization-context
+mappings remain available. The bridge now omits malformed or structurally
+inconsistent session assurance, and it copies only the documented string
+`policy_version` from `AccessTokenMetadata.additional`. Hosts that read other
+custom values from `AuthSubject.claims.additional` must move those values into
+an explicit application-owned request context. This observable narrowing makes
+the release 0.14.0; macro syntax/output is unchanged, but the companion version
+advances under the aligned release policy.
+
+Direct agql-auth users must separately follow its 0.10→0.12 migration. The 0.11
+`AuthRateLimitStore` contract is atomic and versioned; graphql-orm supplies no
+implementation and requires no ORM schema migration. The 0.12 typed
+`EssentialAcrs` request and `matched_acrs` outcome remain provider evidence.
+They do not enter the bridge or imply local MFA. Only a host-constructed,
+session-bound, structurally consistent `SessionAssurance` can populate
+`AuthAssurance`/`DbAuthContext.assurance`; the exact `MfaAcceptance` decision is
+retained. A mapped `microsoft-entra/acrs/c1` context remains distinct from
+standard scalar `acr`, AMR, roles, scopes, tenant, and `policy_version`.
+
+No database schema, stored data, GraphQL SDL, generated code, resolver naming,
+or backend migration is required. Refresh lockfiles and inspect `cargo tree` for
+one agql-auth revision before running the host's authorization and live restart
+gates; compilation alone is not endpoint approval.
+
 ## 0.13.0 Runtime Relation Batching and PostgreSQL Constraint Introspection
 
 This Git-only 0.13.0 release contains two coordinated prompts: validated
@@ -653,4 +690,6 @@ access path.
 
 - No JWT, OIDC, cookie, wildcard, or product-specific scope logic was added to `graphql-orm`.
 - PostgreSQL RLS helper functions still use exact scope matching.
-- The `auth-agql` feature is available against `agql-auth` 0.10.
+- The current `auth-agql` feature targets `agql-auth` 0.12.0 at revision
+  `3f3b0c5365adfbe436514a681d977b600991b797`; earlier release sections above
+  retain their historical pins.

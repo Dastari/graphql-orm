@@ -8,8 +8,33 @@ the runtime crate unless a macro crate version is called out separately.
 `graphql-orm` and `graphql-orm-macros` are distributed only from GitHub using reviewed full commit
 revision pins. Both manifests set `publish = false`; crates.io publication is neither supported nor
 required. The optional `auth-agql` bridge intentionally pins `agql-auth` at
-`c92dcb441237bbe308499b26525945f60ffa394a`. Consequently `cargo package -p graphql-orm` cannot
+`3f3b0c5365adfbe436514a681d977b600991b797`. Consequently `cargo package -p graphql-orm` cannot
 resolve that Git-only optional dependency through the crates.io packaging model; this is expected.
+
+## 0.14.0
+
+agql-auth bridge alignment and projection-hardening release. Runtime and
+companion macros are aligned at `0.14.0`; macro syntax/output is unchanged.
+
+- The optional one-way bridge pins released agql-auth 0.12.0 at exact revision
+  `3f3b0c5365adfbe436514a681d977b600991b797`, matching the required direct host
+  dependency and resolving one agql-auth type universe.
+- Existing identity, role, scope, tenant, organization, actor, correlation,
+  reference, policy-version, and accepted assurance mappings remain exact.
+  Standard scalar ACR and provider/host policy context remain separate.
+- Malformed or token/session-inconsistent assurance is omitted. An unsatisfied
+  `MfaAcceptance` remains false, and provider `EssentialAcrs` evidence alone
+  never creates local assurance or MFA.
+- Arbitrary custom access-token claims are no longer copied; only the documented
+  string `policy_version` survives. Raw credential, OAuth/OIDC request, state,
+  cookie, and provider-response material therefore has no bridge output path.
+- graphql-orm remains uninvolved in agql-auth's atomic rate-limit store and all
+  OIDC, token-minting, and product-policy work.
+
+The projection narrowing is an observable public bridge behavior change, so
+this is a pre-1.0 minor release. No database, data, generated-code, or backend
+migration is required; see [the bridge guide](agql-auth-bridge.md) and
+[the migration guide](../MIGRATION.md).
 
 ## 0.13.0
 

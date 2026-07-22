@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2024"
 description = "Runtime support crate for graphql-orm-macros"
 license = "MIT"
@@ -54,14 +54,14 @@ field-case-lower = ["graphql-orm-macros/field-case-lower"]
 field-case-upper = ["graphql-orm-macros/field-case-upper"]
 
 [dependencies]
-agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "c92dcb441237bbe308499b26525945f60ffa394a", version = "0.10.0", optional = true }
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "3f3b0c5365adfbe436514a681d977b600991b797", version = "0.12.0", optional = true }
 async-graphql = { version = "7", features = ["dataloader", "uuid"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 futures = "0.3"
 geo = { version = "0.33", optional = true, default-features = false }
 geo-types = { version = "0.7", optional = true }
 geojson = { version = "1", optional = true, default-features = true }
-graphql-orm-macros = { path = "../graphql-orm-macros", version = "0.13.0", default-features = false }
+graphql-orm-macros = { path = "../graphql-orm-macros", version = "0.14.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { workspace = true }

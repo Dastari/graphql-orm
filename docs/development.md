@@ -15,6 +15,32 @@ cargo check -p graphql-orm --no-default-features --features mssql
 cargo check -p graphql-orm --no-default-features --features "sqlite mssql"
 ```
 
+## agql-auth Bridge Alignment
+
+The optional bridge and any direct host dependency must both use agql-auth
+0.12.0 at revision `3f3b0c5365adfbe436514a681d977b600991b797`.
+Exercise the Gema-facing feature combinations with:
+
+```bash
+cargo check -p graphql-orm --no-default-features --features "sqlite auth-agql resolver-case-pascal argument-case-pascal field-case-pascal"
+cargo check -p graphql-orm --no-default-features --features sqlite
+cargo check -p graphql-orm --no-default-features --features mssql
+cargo test -p graphql-orm --no-default-features --features "sqlite auth-agql" graphql::auth_agql::tests
+cargo test -p graphql-orm --no-default-features --features "sqlite auth-agql resolver-case-pascal argument-case-pascal field-case-pascal" --test backend_coexistence_fixture
+```
+
+Inspect both the workspace and direct-host fixture graphs; there must be one
+agql-auth package/revision and one graphql-orm/runtime-macros universe:
+
+```bash
+cargo tree -p graphql-orm --locked --no-default-features --features "sqlite auth-agql"
+cargo tree --duplicates --workspace --locked
+cargo tree --manifest-path crates/graphql-orm/tests/fixtures/backend-coexistence/Cargo.toml -p auth-service
+```
+
+The bridge must remain a principal projection. It has no rate-limit-store,
+OIDC-request, provider-evidence, token-minting, or product-policy role.
+
 ## Backend Dependency Isolation
 
 Backend-only builds must not activate another SQLx database driver. Verify the

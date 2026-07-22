@@ -6,13 +6,13 @@
 ## Dependency
 
 ```toml
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.13.0", features = ["sqlite", "auth-agql"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.14.0", features = ["sqlite", "auth-agql"] }
 # Host applications may depend on agql-auth directly as well. The optional
 # graphql-orm auth-agql feature pins the exact upstream release:
 # git = "https://github.com/Dastari/agql-auth.git"
-# rev = "c92dcb441237bbe308499b26525945f60ffa394a"
-# version = "0.10.0"
-agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "c92dcb441237bbe308499b26525945f60ffa394a", version = "0.10.0" }
+# rev = "3f3b0c5365adfbe436514a681d977b600991b797"
+# version = "0.12.0"
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "3f3b0c5365adfbe436514a681d977b600991b797", version = "0.12.0" }
 ```
 
 Both projects are intentionally Git-only. Cargo's crates.io packaging flow cannot package
@@ -45,36 +45,60 @@ Mapped fields:
 | session id | session reference |
 | actor (`token_claims.actor.sub`) | `actor_id` |
 | organization / correlation id | typed subject/database fields and redacted claims |
-| authoritative `session.assurance` | `AuthAssurance` and `DbAuthContext.assurance` |
-| assurance context and custom policy metadata | redacted `claims` / `app.claims` |
+| authoritative, structurally consistent `session.assurance` | `AuthAssurance` and `DbAuthContext.assurance` |
+| assurance context | distinct `AuthAssurance.context` / `DbAuthContext.assurance.context` |
 | custom `policy_version` string | `DbAuthContext.policy_version` |
 
-Raw JWTs, API tokens, cookies, and authorization headers are never copied.
+Raw JWTs, refresh tokens, OAuth state, nonces, authorization codes/URLs,
+claims requests, cookies, provider responses, API-token credentials, and
+authorization headers are never copied. Arbitrary `token_claims.additional`
+members are not bridge output; only the documented string `policy_version` is
+retained. Token/session/actor identifiers are references, never credentials.
 
 The database context also installs transaction-local `app.organization_id`,
 `app.correlation_id`, `app.assurance`, and `app.policy_version` settings on PostgreSQL. Assurance
-contains only the accepted authentication timestamp, normalized methods, ACR, policy context, and
-MFA decision.
+contains only the accepted authentication timestamp, normalized methods,
+standard scalar ACR, separate policy context, and exact host MFA decision. The
+bridge requires session MFA state plus access-token `auth_time`, AMR, and scalar
+ACR to be structurally consistent with the `SessionAssurance`; malformed,
+missing, or inconsistent assurance is omitted rather than repaired.
 
 ## Migrating from 0.7
 
-Update any direct `agql-auth` dependency to the exact 0.10 revision above. `AuthSubject` and
+Update any direct `agql-auth` dependency to the exact 0.12 revision above. `AuthSubject` and
 `DbAuthContext` gained organization, correlation, and assurance fields; applications constructing
 either with struct literals must add the fields or use their builders/`Default` update syntax.
-The bridge now preserves 0.8 session assurance, active scope, correlation, actor, token metadata,
-and custom policy metadata instead of retaining only the older role/scope/tenant subset.
+The bridge preserves valid 0.8+ session assurance, active scope, correlation,
+actor, safe token metadata, and the documented string `policy_version` instead
+of retaining only the older role/scope/tenant subset.
 
-## Migrating from 0.8 or 0.9
+## Migrating from an Earlier Bridge Release
 
-Update any direct `agql-auth` dependency to the exact 0.10.0 revision above at the same time as
-updating `graphql-orm`. This prevents Cargo from resolving separate package/type universes. The
-bridge API and mapped authorization data are unchanged.
+Update any direct `agql-auth` dependency to the exact 0.12.0 revision above at
+the same time as `graphql-orm`. This prevents Cargo from resolving separate
+package/type universes. Version 0.14.0 keeps the identity, role, scope, tenant,
+organization, actor, correlation, token-reference, and policy-version mappings,
+but hardens the public bridge projection: arbitrary custom claims are no longer
+copied, and malformed or token/session-inconsistent assurance is omitted. If a
+host consumed arbitrary `AuthSubject.claims.additional` values, move that data
+through an explicit application-owned request type instead of the ORM bridge.
 
-Direct users of `agql-auth` 0.10 can encounter source changes from the new OIDC authorization
-fields in public struct literals or exhaustive matches. Bound reauthentication adds an optional
-authorization policy to persisted OAuth login state. JSON/document readers accept its absence;
-decomposed relational stores need a nullable policy column before the new bound-request writer is
-enabled. Applications that only use the ORM principal bridge require no data migration.
+Direct users of `agql-auth` must also review its 0.10→0.12 migration. Version
+0.11 replaces split durable rate-limit writes with the versioned atomic
+`AuthRateLimitStore` contract. `graphql-orm` does not implement that store and
+does not add a split or synthetic ORM-backed implementation. Version 0.12 adds
+the state-bound `OidcIdTokenClaimRequest::EssentialAcrs` request and separate
+`OidcAuthorizationOutcome.matched_acrs` provider evidence. Neither OIDC
+requests/outcomes nor rate-limit persistence enter the ORM bridge. Applications
+that only consume a structurally valid `AuthPrincipal` need no database or data
+migration.
+
+An `EssentialAcrs` callback outcome alone never creates ORM assurance. The host
+must first verify and locally allowlist the provider evidence, then construct a
+session-bound `SessionAssurance`. A mapped value such as
+`microsoft-entra/acrs/c1` stays byte-for-byte in `AuthAssurance.context`; it is
+never translated into scalar `acr`, AMR, roles, scopes, tenant, or a custom
+policy field. Missing scalar ACR or context remains `None`.
 
 ## Policy Decisions Stay Host-Owned
 

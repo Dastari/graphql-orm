@@ -2,6 +2,37 @@
 
 User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
 
+## 0.14.0
+
+Companion macros crate: `graphql-orm-macros` **0.14.0** under the aligned
+Git-only version policy; macro syntax and generated output are unchanged.
+
+- Aligned the optional one-way `auth-agql` bridge with released `agql-auth`
+  0.12.0 at exact revision
+  `3f3b0c5365adfbe436514a681d977b600991b797`. A matching direct host
+  dependency resolves one package and public type universe.
+- Preserved identity, role, scope, tenant, organization, actor, correlation,
+  token/session reference, policy-version, and host-accepted assurance
+  mappings. Standard scalar `acr` and separate assurance `context` remain
+  byte-for-byte distinct and absent values are not synthesized.
+- Hardened assurance projection to omit malformed values and values
+  inconsistent with the session MFA state or access-token `auth_time`, AMR,
+  and scalar ACR. `MfaAcceptance::Unsatisfied` remains an exact negative MFA
+  decision rather than becoming authority.
+- Restricted custom claim projection to the documented string
+  `policy_version`; arbitrary `AccessTokenMetadata.additional` content no
+  longer enters `AuthSubject.claims`, `DbAuthContext`, PostgreSQL settings, or
+  their debug/serialized forms.
+- Kept OIDC request/outcome handling, provider evidence, rate-limit
+  persistence, token minting, MFA inference, and product policy outside the
+  ORM. In particular, `EssentialAcrs`/`matched_acrs` alone creates no ORM
+  assurance, and graphql-orm does not implement agql-auth 0.11's atomic
+  `AuthRateLimitStore`.
+
+This observable bridge hardening is a pre-1.0 minor release rather than a
+dependency-only patch. No database schema, data, generated-code, or backend
+migration is required.
+
 ## 0.13.0
 
 This combined release contains two coordinated prompts. Companion macros

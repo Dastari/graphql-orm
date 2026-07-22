@@ -162,6 +162,10 @@ impl OwnedPostgres {
                     .ok_or("Docker did not publish PostgreSQL on loopback")?;
                 owned.url =
                     format!("postgres://runtime_owner:{password}@127.0.0.1:{port}/{database}");
+                // `pg_isready` runs inside the container. Give Docker's
+                // loopback-published proxy a short settling window as well,
+                // especially while the full PostgreSQL matrix is under load.
+                std::thread::sleep(std::time::Duration::from_millis(500));
                 return Ok(owned);
             }
             std::thread::sleep(std::time::Duration::from_millis(250));
