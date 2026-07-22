@@ -136,6 +136,17 @@ cargo test -p graphql-orm --no-default-features --features postgres \
   --test repository_only_postgres -- --ignored --nocapture
 ```
 
+The 0.15 bounded-mutation sentinel parity test likewise owns a uniquely
+labelled loopback-only PostgreSQL 17 container and exercises the same
+single-key, composite-key, and retention ceiling/count matrix as SQLite:
+
+```bash
+cargo test -p graphql-orm --features sqlite \
+  --test bounded_mutation_sentinels
+cargo test -p graphql-orm --no-default-features --features postgres \
+  --test bounded_mutation_sentinels -- --ignored --nocapture
+```
+
 The 0.13 PostgreSQL constraint-index and runtime-relation regressions also own
 their complete PostgreSQL 17 lifecycle. They ignore database URL variables,
 use generated credentials, publish only on loopback, attach a unique ownership

@@ -2,6 +2,32 @@
 
 User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
 
+## 0.15.0
+
+Companion macros crate: `graphql-orm-macros` **0.15.0** under the aligned
+Git-only version policy. This is a pre-1.0 minor because generated bounded
+mutation behavior changes.
+
+- Fixed generated single-key and repository-only composite-key bounded update
+  and delete so their exact `MutationLimit + 1` look-ahead is no longer
+  clamped by the public 100-row pagination maximum.
+- Applied the same exact internal sentinel selection to host-only retention
+  purge. The path orders by the complete primary key and is reachable only
+  through generated bounded mutation/retention execution; ordinary GraphQL,
+  connection, repository, and runtime reads retain their existing caps.
+- Bounded mutations now reject residual/in-memory predicates before selection,
+  hooks, events, notifications, or writes instead of risking an unbounded
+  candidate scan. Database-renderable filters retain exact all-or-nothing
+  outcomes at ceilings above 100.
+- Added checked sentinel/count arithmetic and fail-closed selected-versus-
+  affected cardinality checks. Any intervening cardinality change rolls back
+  the complete transaction and releases no queued events.
+- Preserved the optional one-way agql-auth 0.12.0 bridge at exact revision
+  `3f3b0c5365adfbe436514a681d977b600991b797` and its single-type-universe
+  requirement.
+
+No database schema or stored-data migration is required.
+
 ## 0.14.0
 
 Companion macros crate: `graphql-orm-macros` **0.14.0** under the aligned

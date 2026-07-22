@@ -11,6 +11,37 @@ required. The optional `auth-agql` bridge intentionally pins `agql-auth` at
 `3f3b0c5365adfbe436514a681d977b600991b797`. Consequently `cargo package -p graphql-orm` cannot
 resolve that Git-only optional dependency through the crates.io packaging model; this is expected.
 
+## 0.15.0
+
+Bounded-mutation correctness release. Runtime and companion macros are aligned
+at `0.15.0` because generated single/composite update and delete behavior
+changes.
+
+- Generated bounded update/delete and retention purge now select exactly
+  `MutationLimit + 1` rows through a narrow internal path. The former path used
+  ordinary pagination resolution, which silently reduced any sentinel above
+  100 and could incorrectly apply only the first 100 matching rows.
+- The internal selection is ordered by the complete primary key, uses checked
+  arithmetic/conversions, and bypasses only public page defaults and maximums.
+  Public GraphQL, connection, repository, runtime-query, and `PageInput`
+  behavior remains capped exactly as before; no uncapped public read API was
+  added.
+- Residual/in-memory predicates now fail with stable `INVALID_INPUT` before
+  selection or mutation. Database-renderable predicates return exact
+  `LimitExceeded { maximum }` before hooks, events, notifications, or writes,
+  including ceilings of 1,024 and 10,000.
+- Exact/below-limit operations verify selected and affected cardinality. A
+  cardinality change causes the surrounding transaction to roll back and
+  queued events are not released.
+- Entity/row/field policy, PostgreSQL RLS, append-only retention context,
+  hooks, redaction, CAS, and transaction behavior are otherwise unchanged.
+  The agql-auth bridge remains exactly 0.12.0 at
+  `3f3b0c5365adfbe436514a681d977b600991b797`.
+
+There is no schema or data migration. Hosts should update both aligned crate
+pins to the reviewed full revision and rerun large-ceiling overflow and
+rollback gates; see [the migration guide](../MIGRATION.md).
+
 ## 0.14.0
 
 agql-auth bridge alignment and projection-hardening release. Runtime and

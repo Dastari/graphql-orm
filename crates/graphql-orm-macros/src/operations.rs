@@ -4399,15 +4399,14 @@ pub(crate) fn generate_graphql_operations(
                     if where_input.is_empty() {
                         return Err(Self::__gom_runtime_error("bounded update requires a non-empty typed filter"));
                     }
-                    let rows = EntityQuery::<Self, #backend_marker>::new()
-                        .filter_with_entity_matching(&where_input)
-                        .paginate(&::graphql_orm::graphql::orm::PageInput {
-                            limit: Some(i64::from(limit.get()) + 1),
-                            offset: None,
-                        })
-                        .fetch_all_on(hook_ctx.executor())
+                    let query = EntityQuery::<Self, #backend_marker>::new()
+                        .filter_with_entity_matching(&where_input);
+                    let rows = hook_ctx
+                        .__fetch_bounded_mutation_sentinel(query, limit)
                         .await?;
-                    if rows.len() > limit.get() as usize {
+                    let maximum = usize::try_from(limit.get())
+                        .map_err(|_| Self::__gom_runtime_error("bounded update limit conversion overflow"))?;
+                    if rows.len() > maximum {
                         return Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::LimitExceeded {
                             maximum: limit.get(),
                         });
@@ -4419,12 +4418,18 @@ pub(crate) fn generate_graphql_operations(
                             row as &(dyn ::std::any::Any + Send + Sync),
                         ).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
                     }
+                    let selected = u32::try_from(rows.len())
+                        .map_err(|_| Self::__gom_runtime_error("bounded update selected-row count overflow"))?;
                     let keys = rows.iter().map(Self::__gom_entity_key).collect::<Vec<_>>();
                     let mut affected = 0u32;
                     for key in keys {
                         if Self::__gom_update_by_key_with_mutation_context(hook_ctx, &key, input.clone()).await?.is_some() {
-                            affected += 1;
+                            affected = affected.checked_add(1)
+                                .ok_or_else(|| Self::__gom_runtime_error("bounded update affected-row count overflow"))?;
                         }
+                    }
+                    if affected != selected {
+                        return Err(Self::__gom_runtime_error("bounded update cardinality changed"));
                     }
                     Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::Applied { affected })
                 }
@@ -4441,15 +4446,14 @@ pub(crate) fn generate_graphql_operations(
                     if where_input.is_empty() {
                         return Err(Self::__gom_runtime_error("bounded delete requires a non-empty typed filter"));
                     }
-                    let rows = EntityQuery::<Self, #backend_marker>::new()
-                        .filter_with_entity_matching(&where_input)
-                        .paginate(&::graphql_orm::graphql::orm::PageInput {
-                            limit: Some(i64::from(limit.get()) + 1),
-                            offset: None,
-                        })
-                        .fetch_all_on(hook_ctx.executor())
+                    let query = EntityQuery::<Self, #backend_marker>::new()
+                        .filter_with_entity_matching(&where_input);
+                    let rows = hook_ctx
+                        .__fetch_bounded_mutation_sentinel(query, limit)
                         .await?;
-                    if rows.len() > limit.get() as usize {
+                    let maximum = usize::try_from(limit.get())
+                        .map_err(|_| Self::__gom_runtime_error("bounded delete limit conversion overflow"))?;
+                    if rows.len() > maximum {
                         return Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::LimitExceeded {
                             maximum: limit.get(),
                         });
@@ -4461,12 +4465,18 @@ pub(crate) fn generate_graphql_operations(
                             row as &(dyn ::std::any::Any + Send + Sync),
                         ).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
                     }
+                    let selected = u32::try_from(rows.len())
+                        .map_err(|_| Self::__gom_runtime_error("bounded delete selected-row count overflow"))?;
                     let keys = rows.iter().map(Self::__gom_entity_key).collect::<Vec<_>>();
                     let mut affected = 0u32;
                     for key in keys {
                         if Self::__gom_delete_by_key_with_mutation_context(hook_ctx, &key).await? {
-                            affected += 1;
+                            affected = affected.checked_add(1)
+                                .ok_or_else(|| Self::__gom_runtime_error("bounded delete affected-row count overflow"))?;
                         }
+                    }
+                    if affected != selected {
+                        return Err(Self::__gom_runtime_error("bounded delete cardinality changed"));
                     }
                     Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::Applied { affected })
                 }
@@ -4783,13 +4793,14 @@ pub(crate) fn generate_graphql_operations(
                 if where_input.is_empty() {
                     return Err(Self::__gom_runtime_error("bounded update requires a non-empty typed filter"));
                 }
-                let rows = EntityQuery::<Self, #backend_marker>::new()
-                    .filter_with_entity_matching(&where_input)
-                    .paginate(&::graphql_orm::graphql::orm::PageInput {
-                        limit: Some(i64::from(limit.get()) + 1), offset: None,
-                    })
-                    .fetch_all_on(hook_ctx.executor()).await?;
-                if rows.len() > limit.get() as usize {
+                let query = EntityQuery::<Self, #backend_marker>::new()
+                    .filter_with_entity_matching(&where_input);
+                let rows = hook_ctx
+                    .__fetch_bounded_mutation_sentinel(query, limit)
+                    .await?;
+                let maximum = usize::try_from(limit.get())
+                    .map_err(|_| Self::__gom_runtime_error("bounded update limit conversion overflow"))?;
+                if rows.len() > maximum {
                     return Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::LimitExceeded { maximum: limit.get() });
                 }
                 let db = hook_ctx.database().clone();
@@ -4800,12 +4811,18 @@ pub(crate) fn generate_graphql_operations(
                         row as &(dyn ::std::any::Any + Send + Sync),
                     ).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
                 }
+                let selected = u32::try_from(rows.len())
+                    .map_err(|_| Self::__gom_runtime_error("bounded update selected-row count overflow"))?;
                 let ids = rows.iter().map(|row| row.#pk_field.clone()).collect::<Vec<_>>();
                 let mut affected = 0u32;
                 for id in ids {
                     if Self::__gom_update_by_id_with_mutation_context(hook_ctx, &id, input.clone()).await?.is_some() {
-                        affected += 1;
+                        affected = affected.checked_add(1)
+                            .ok_or_else(|| Self::__gom_runtime_error("bounded update affected-row count overflow"))?;
                     }
+                }
+                if affected != selected {
+                    return Err(Self::__gom_runtime_error("bounded update cardinality changed"));
                 }
                 Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::Applied { affected })
             }
@@ -4820,13 +4837,14 @@ pub(crate) fn generate_graphql_operations(
                 if where_input.is_empty() {
                     return Err(Self::__gom_runtime_error("bounded delete requires a non-empty typed filter"));
                 }
-                let rows = EntityQuery::<Self, #backend_marker>::new()
-                    .filter_with_entity_matching(&where_input)
-                    .paginate(&::graphql_orm::graphql::orm::PageInput {
-                        limit: Some(i64::from(limit.get()) + 1), offset: None,
-                    })
-                    .fetch_all_on(hook_ctx.executor()).await?;
-                if rows.len() > limit.get() as usize {
+                let query = EntityQuery::<Self, #backend_marker>::new()
+                    .filter_with_entity_matching(&where_input);
+                let rows = hook_ctx
+                    .__fetch_bounded_mutation_sentinel(query, limit)
+                    .await?;
+                let maximum = usize::try_from(limit.get())
+                    .map_err(|_| Self::__gom_runtime_error("bounded delete limit conversion overflow"))?;
+                if rows.len() > maximum {
                     return Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::LimitExceeded { maximum: limit.get() });
                 }
                 let db = hook_ctx.database().clone();
@@ -4837,12 +4855,18 @@ pub(crate) fn generate_graphql_operations(
                         row as &(dyn ::std::any::Any + Send + Sync),
                     ).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
                 }
+                let selected = u32::try_from(rows.len())
+                    .map_err(|_| Self::__gom_runtime_error("bounded delete selected-row count overflow"))?;
                 let ids = rows.iter().map(|row| row.#pk_field.clone()).collect::<Vec<_>>();
                 let mut affected = 0u32;
                 for id in ids {
                     if Self::__gom_delete_by_id_with_mutation_context(hook_ctx, &id).await? {
-                        affected += 1;
+                        affected = affected.checked_add(1)
+                            .ok_or_else(|| Self::__gom_runtime_error("bounded delete affected-row count overflow"))?;
                     }
+                }
+                if affected != selected {
+                    return Err(Self::__gom_runtime_error("bounded delete cardinality changed"));
                 }
                 Ok(::graphql_orm::graphql::orm::BoundedMutationOutcome::Applied { affected })
             }

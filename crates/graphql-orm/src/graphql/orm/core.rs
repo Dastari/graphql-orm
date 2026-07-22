@@ -1,6 +1,4 @@
 use super::dialect::DatabaseBackend;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
-use super::dialect::SqlDialect;
 use super::query::{
     ChangeAction, DatabaseEntity, DatabaseSchema, DatabaseSearchSchema, EntityRelations,
 };
@@ -1035,6 +1033,29 @@ where
         self.tx.as_mut()
     }
 
+    /// Execute the exact one-row-look-ahead selection used only by generated
+    /// bounded mutations and retention maintenance.
+    ///
+    /// This is a macro/runtime implementation detail, not a repository read
+    /// surface. It deliberately accepts [`MutationLimit`] instead of public
+    /// pagination input, orders by the complete primary key, and rejects
+    /// residual filters before execution.
+    #[doc(hidden)]
+    pub async fn __fetch_bounded_mutation_sentinel<T>(
+        &mut self,
+        query: EntityQuery<T, B>,
+        limit: MutationLimit,
+    ) -> crate::Result<Vec<T>>
+    where
+        for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
+            sqlx::Executor<'c, Database = B::Database> + Send,
+        T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+    {
+        query
+            .fetch_bounded_mutation_sentinel_on(self.executor(), limit)
+            .await
+    }
+
     pub fn queue_event<T>(&mut self, event: T)
     where
         T: Clone + Send + Sync + 'static,
@@ -1546,25 +1567,15 @@ where
                 "retention purge requires a non-empty typed filter".to_string(),
             ));
         }
-        if filter.requires_in_memory_filtering(B::DIALECT) {
-            return Err(sqlx::Error::Protocol(
-                "retention purge requires a filter rendered completely by the database".to_string(),
-            ));
-        }
-        let mut query = EntityQuery::<T, B>::new().filter(&filter);
-        query.order_clauses.push(
-            T::PRIMARY_KEYS
-                .iter()
-                .map(|column| B::DIALECT.quote_identifier_path(column))
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-        query.page = Some(super::query::PageInput {
-            limit: Some(i64::from(limit.get()) + 1),
-            offset: None,
-        });
-        let rows = query.fetch_all_on(self.mutation.executor()).await?;
-        if rows.len() > limit.get() as usize {
+        let query = EntityQuery::<T, B>::new().filter_with_entity_matching(&filter);
+        let rows = self
+            .mutation
+            .__fetch_bounded_mutation_sentinel(query, limit)
+            .await?;
+        let maximum = usize::try_from(limit.get()).map_err(|_| {
+            sqlx::Error::Protocol("retention purge limit conversion overflow".to_string())
+        })?;
+        if rows.len() > maximum {
             return Ok(RetentionPurgeOutcome::LimitExceeded {
                 maximum: limit.get(),
             });
@@ -1613,7 +1624,10 @@ where
         let result = execution?;
         cleared?;
         let affected = B::rows_affected(&result);
-        if affected != rows.len() as u64 {
+        let selected = u64::try_from(rows.len()).map_err(|_| {
+            sqlx::Error::Protocol("retention purge selected-row count overflow".to_string())
+        })?;
+        if affected != selected {
             return Err(sqlx::Error::Protocol(format!(
                 "retention purge cardinality changed: selected {}, deleted {affected}",
                 rows.len(),

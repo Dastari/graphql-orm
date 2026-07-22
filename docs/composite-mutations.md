@@ -127,6 +127,16 @@ let outcome = UserRole::delete_where_bounded(&database, filter, maximum).await?;
 exact number changed. Empty filters and zero limits are rejected. Inside a state-machine
 transaction, bounded deletes followed by inserts provide atomic grant-set replacement.
 
+The generated implementation performs a deterministic complete-primary-key
+selection of exactly `MutationLimit + 1` rows. This narrow mutation sentinel is
+not resolved through `PageInput` or public pagination configuration, so limits
+of 100 and above remain exact. It does not add an uncapped repository or
+GraphQL read API: ordinary page, connection, repository, and runtime-query
+limits remain unchanged. A predicate requiring residual/in-memory evaluation
+is rejected before selection, hooks, events, notifications, or writes. After
+selection, the mutation must affect the same cardinality or the complete
+transaction fails closed.
+
 ## Authorization and transactions
 
 All new writes run through entity and row authorization, write transforms, mutation hooks, search

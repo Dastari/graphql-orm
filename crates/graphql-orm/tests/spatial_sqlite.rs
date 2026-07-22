@@ -1,6 +1,8 @@
 #![cfg(feature = "sqlite")]
 
 use graphql_orm::prelude::*;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(
     GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
@@ -121,6 +123,23 @@ fn leak_migration(
         version,
         description: "sqlite_spatial_contract",
         statements,
+    }
+}
+
+#[derive(Clone, Default)]
+struct SpatialMutationHook(Arc<AtomicUsize>);
+
+impl MutationHook<SqliteBackend> for SpatialMutationHook {
+    fn on_mutation<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _hook_ctx: &'a mut MutationContext<'_, SqliteBackend>,
+        _event: &'a MutationEvent,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<()>> {
+        Box::pin(async move {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
     }
 }
 
@@ -495,5 +514,102 @@ async fn sqlite_spatial_fields_and_predicates_round_trip() -> Result<(), Box<dyn
     let second_plan = build_migration_plan(DatabaseBackend::Sqlite, &introspected, &target_schema);
     assert!(second_plan.statements.is_empty());
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn sqlite_bounded_mutations_reject_residual_filters_before_side_effects()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::orm::{
+        DatabaseBackend, Entity, MigrationRunner, build_migration_plan,
+    };
+
+    let pool = graphql_orm::sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await?;
+    let mut database = graphql_orm::db::Database::new(pool.clone());
+    let target_schema = graphql_orm::graphql::orm::SchemaModel::from_entities(&[
+        <SqlitePlace as Entity>::metadata(),
+    ]);
+    let plan = build_migration_plan(
+        DatabaseBackend::Sqlite,
+        &graphql_orm::graphql::orm::SchemaModel {
+            extensions: Vec::new(),
+            tables: Vec::new(),
+        },
+        &target_schema,
+    );
+    database
+        .apply_migrations(&[leak_migration(&plan, "2026072201_bounded_residual_filter")])
+        .await?;
+
+    let protected_name = "row-secret:database-password";
+    let place = SqlitePlace::insert(
+        &pool,
+        CreateSqlitePlaceInput {
+            name: protected_name.to_string(),
+            location: point_value(7.25, 9.5),
+        },
+    )
+    .await?;
+    let hook = SpatialMutationHook::default();
+    database.set_mutation_hook(hook.clone());
+    let mut events = database
+        .ensure_event_sender::<SqlitePlaceChangedEvent>()
+        .subscribe();
+    let residual_filter = SqlitePlaceWhereInput {
+        name: Some(StringFilter {
+            eq: Some(protected_name.to_string()),
+            ..Default::default()
+        }),
+        location: Some(SpatialFilter {
+            equals: Some(point(7.25, 9.5)),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    for error in [
+        SqlitePlace::update_where_bounded(
+            &database,
+            residual_filter.clone(),
+            UpdateSqlitePlaceInput {
+                name: Some("must-not-be-written".to_string()),
+                ..Default::default()
+            },
+            MutationLimit::new(10)?,
+        )
+        .await
+        .expect_err("residual bounded update must fail closed"),
+        SqlitePlace::delete_where_bounded(&database, residual_filter, MutationLimit::new(10)?)
+            .await
+            .expect_err("residual bounded delete must fail closed"),
+    ] {
+        let public = OrmPublicError::from_sqlx(&error);
+        assert_eq!(public.code, OrmErrorCode::InvalidInput);
+        let rendered = format!("{error:?}{public:?}{public}");
+        for forbidden in [
+            protected_name,
+            "must-not-be-written",
+            "orm_spatial_places",
+            "7.25",
+            "9.5",
+            "SELECT",
+            "WHERE",
+        ] {
+            assert!(!rendered.contains(forbidden), "leaked {forbidden:?}");
+        }
+    }
+    assert_eq!(hook.0.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+    let unchanged = SqlitePlace::get(&pool, &place.id)
+        .await?
+        .expect("residual rejection must leave the row intact");
+    assert_eq!(unchanged.name, protected_name);
+    assert_eq!(unchanged.location, point_value(7.25, 9.5));
     Ok(())
 }

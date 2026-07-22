@@ -3,6 +3,28 @@
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.15.0 Exact Bounded-Mutation Sentinels
+
+Update both Git-only graphql-orm crates to 0.15.0 at the final reviewed full
+revision. The release corrects generated single/composite bounded update and
+delete plus retention purge when `MutationLimit` is 100 or greater. Hosts do
+not need to change existing calls: the generated implementation now obtains
+the exact `maximum + 1` sentinel without applying the public 100-row page cap.
+
+Public GraphQL, connection, repository, runtime-query, and `PageInput` limits
+are unchanged. No uncapped public read surface is introduced. Residual or
+in-memory filters on bounded mutations now return stable `INVALID_INPUT`
+before mutation; replace such filters with a completely database-rendered
+predicate. Database-renderable filters preserve exact all-or-nothing results,
+and any selected-versus-affected cardinality change fails the transaction.
+
+No database schema, stored data, GraphQL SDL, entity declaration, or backend
+migration is required. Refresh lockfiles and rerun high-ceiling overflow,
+authorization/RLS, event, rollback, and restart checks. The optional agql-auth
+bridge remains released 0.12.0 at exact revision
+`3f3b0c5365adfbe436514a681d977b600991b797`; matching direct host dependencies
+must keep that exact version and full revision so one type universe resolves.
+
 ## 0.14.0 agql-auth 0.12 Bridge Alignment
 
 Update both Git-only graphql-orm crates to 0.14.0 at the final reviewed full

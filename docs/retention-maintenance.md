@@ -84,6 +84,12 @@ the callback cannot accidentally commit partial maintenance work. A
 `LimitExceeded` outcome is not an error and deliberately leaves the transaction
 usable for a separate audit append.
 
+The one-row look-ahead is an internal retention/mutation sentinel and requests
+exactly `MutationLimit + 1`, including when the limit exceeds 100. It bypasses
+only public pagination resolution; normal `PageInput`, connection, repository,
+and runtime-query limits remain capped. The internal path cannot be used as an
+uncapped public read surface.
+
 `RetentionContext` exposes typed reads/projections, normal generated inserts,
 and generated purge. It exposes no pool, connection, executor, raw row, table
 name, column name, SQL fragment, truncate, update, or unbounded delete. It

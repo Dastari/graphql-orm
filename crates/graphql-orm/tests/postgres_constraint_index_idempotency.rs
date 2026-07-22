@@ -112,7 +112,15 @@ impl OwnedPostgres {
         };
         for _ in 0..120 {
             let ready = Command::new("docker")
-                .args(["exec", &owned.name, "pg_isready", "-U", "graphql_orm_owner"])
+                .args([
+                    "exec",
+                    &owned.name,
+                    "pg_isready",
+                    "-h",
+                    "127.0.0.1",
+                    "-U",
+                    "graphql_orm_owner",
+                ])
                 .output()?;
             if ready.status.success() {
                 let port = Command::new("docker")

@@ -11,7 +11,7 @@ use super::core::{
 use super::dialect::{DatabaseBackend, SqlDialect, current_backend};
 use super::{DefaultBackend, OrmBackend, SqlxBackend};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
-use super::{MutationContext, WriteBackend};
+use super::{MutationContext, MutationLimit, WriteBackend};
 use crate::graphql::pagination::{Connection, Edge, PageInfo, encode_cursor};
 use std::any::Any;
 use std::marker::PhantomData;
@@ -2233,6 +2233,56 @@ where
         let rendered = render_select_query(B::DIALECT, &self.build_select_query());
         let rows = B::fetch_rows_on(executor, rendered.sql, rendered.values).await?;
         self.apply_in_memory_filtering(rows, PaginationConfig::default(), false)
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) async fn fetch_bounded_mutation_sentinel_on<'e, E>(
+        &self,
+        executor: E,
+        limit: MutationLimit,
+    ) -> crate::Result<Vec<T>>
+    where
+        B: SqlxBackend,
+        E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
+    {
+        if self.requires_in_memory_filtering() {
+            return Err(crate::graphql::errors::sqlx_error_from_public(
+                crate::graphql::errors::OrmPublicError::new(
+                    crate::graphql::errors::OrmErrorCode::InvalidInput,
+                )
+                .with_internal(
+                    "bounded mutations require a filter rendered completely by the database",
+                ),
+            ));
+        }
+
+        let sentinel_limit = i64::from(limit.get()).checked_add(1).ok_or_else(|| {
+            crate::graphql::errors::sqlx_error_from_public(
+                crate::graphql::errors::OrmPublicError::new(
+                    crate::graphql::errors::OrmErrorCode::InternalError,
+                )
+                .with_internal("bounded mutation sentinel limit overflow"),
+            )
+        })?;
+        let mut query = self.clone();
+        query.order_clauses = vec![
+            T::PRIMARY_KEYS
+                .iter()
+                .map(|column| B::DIALECT.quote_identifier_path(column))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ];
+        query.page = Some(PageInput {
+            limit: Some(sentinel_limit),
+            offset: Some(0),
+        });
+        let pagination = PaginationConfig::unbounded();
+        let rendered = render_select_query(
+            B::DIALECT,
+            &query.build_select_query_with_config(pagination, false),
+        );
+        let rows = B::fetch_rows_on(executor, rendered.sql, rendered.values).await?;
+        query.apply_in_memory_filtering(rows, pagination, false)
     }
 
     pub async fn fetch_one<P>(&self, provider: &P) -> crate::Result<Option<T>>
