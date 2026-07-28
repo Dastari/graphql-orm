@@ -19,7 +19,7 @@ use graphql_orm::db::Database;
 use graphql_orm::graphql::orm::{
     BackupRow as OrmBackupRow, BackupValue, ColumnBackupPolicy, EntityBackupDescriptor,
     EntityMetadata, GraphqlOrmBackupRuntime, GraphqlOrmSchemaSnapshot,
-    RestoreContext as OrmRestoreContext, RestoreMode as OrmRestoreMode,
+    RestoreContext as OrmRestoreContext, RestoreMode as OrmRestoreMode, stable_schema_hash,
 };
 use graphql_orm::sqlx::Row as _;
 use graphql_orm_storage::{BlobStore, collect_storage_stream};
@@ -80,9 +80,14 @@ impl OrmBackupAdapter {
     /// `graphql-orm` export cannot round-trip yet (for example PostGIS
     /// geometry) without editing entity metadata, which would change
     /// migration-planning inputs. Overrides apply to export, restore
-    /// validation, and restore imports; the schema hash keeps using the
-    /// unmodified entity metadata, so the same overrides must be configured
-    /// when a snapshot is created and when it is restored.
+    /// validation, restore imports, and the backup schema hash.
+    ///
+    /// Overrides may only keep or strengthen the metadata policy:
+    /// `Include -> Redact -> Exclude`. Attempts to weaken a policy or target
+    /// an unknown table/column fail when the adapter next resolves its
+    /// descriptors. Sensitive opaque object references that must remain in a
+    /// backup should therefore be declared `Include` in host-reviewed entity
+    /// metadata rather than silently overriding `Redact` or `Exclude`.
     #[must_use]
     pub fn with_column_backup_policy(
         mut self,
@@ -107,7 +112,8 @@ impl OrmBackupAdapter {
     ///
     /// # Errors
     ///
-    /// Returns [`BackupError`] if the migration version cannot be read.
+    /// Returns [`BackupError`] if the migration version cannot be read or a
+    /// configured column policy override is invalid.
     pub async fn current_schema_snapshot(&self) -> Result<GraphqlOrmSchemaSnapshot, BackupError> {
         let migration_version = self.resolve_migration_version().await?;
         let mut snapshot = GraphqlOrmBackupRuntime::schema_snapshot(
@@ -115,25 +121,44 @@ impl OrmBackupAdapter {
             migration_version,
             &self.entities,
         );
-        self.apply_column_policy_overrides(&mut snapshot.entities);
+        self.apply_column_policy_overrides(&mut snapshot.entities)?;
+        snapshot.schema_hash = stable_schema_hash(&snapshot.entities);
         Ok(snapshot)
     }
 
-    fn apply_column_policy_overrides(&self, descriptors: &mut [EntityBackupDescriptor]) {
+    fn apply_column_policy_overrides(
+        &self,
+        descriptors: &mut [EntityBackupDescriptor],
+    ) -> Result<(), BackupError> {
         for policy_override in &self.column_policy_overrides {
-            for descriptor in descriptors
+            let Some(descriptor) = descriptors
                 .iter_mut()
-                .filter(|descriptor| descriptor.table_name == policy_override.table_name)
-            {
-                for column in descriptor
-                    .columns
-                    .iter_mut()
-                    .filter(|column| column.column_name == policy_override.column_name)
-                {
-                    column.backup_policy = policy_override.policy;
-                }
+                .find(|descriptor| descriptor.table_name == policy_override.table_name)
+            else {
+                return Err(invalid_policy_override(
+                    policy_override,
+                    "table is not a backup-enabled entity",
+                ));
+            };
+            let Some(column) = descriptor
+                .columns
+                .iter_mut()
+                .find(|column| column.column_name == policy_override.column_name)
+            else {
+                return Err(invalid_policy_override(
+                    policy_override,
+                    "column is not present in the entity backup descriptor",
+                ));
+            };
+            if policy_rank(policy_override.policy) < policy_rank(column.backup_policy) {
+                return Err(invalid_policy_override(
+                    policy_override,
+                    "override would weaken the effective metadata policy",
+                ));
             }
+            column.backup_policy = policy_override.policy;
         }
+        Ok(())
     }
 
     /// Deletes all rows from every backup-enabled table so an
@@ -148,10 +173,10 @@ impl OrmBackupAdapter {
     ///
     /// # Errors
     ///
-    /// Returns [`BackupError`] if any clear statement or the transaction
-    /// fails.
+    /// Returns [`BackupError`] if a column policy override is invalid or any
+    /// clear statement or transaction fails.
     pub async fn clear_restore_target(&self) -> Result<(), BackupError> {
-        let mut descriptors = self.descriptors();
+        let mut descriptors = self.descriptors()?;
         descriptors.sort_by(|left, right| {
             right
                 .restore_order
@@ -229,10 +254,10 @@ impl OrmBackupAdapter {
         Ok(())
     }
 
-    fn descriptors(&self) -> Vec<EntityBackupDescriptor> {
+    fn descriptors(&self) -> Result<Vec<EntityBackupDescriptor>, BackupError> {
         let mut descriptors = self.database.list_backup_entities(&self.entities);
-        self.apply_column_policy_overrides(&mut descriptors);
-        descriptors
+        self.apply_column_policy_overrides(&mut descriptors)?;
+        Ok(descriptors)
     }
 
     async fn resolve_migration_version(&self) -> Result<String, BackupError> {
@@ -261,7 +286,7 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
     }
 
     async fn restore_target_is_empty(&self) -> Result<bool, BackupError> {
-        for descriptor in self.descriptors() {
+        for descriptor in self.descriptors()? {
             let sql = format!(
                 "SELECT COUNT(*) AS row_count FROM {}",
                 quote_identifier(&descriptor.table_name)
@@ -284,7 +309,7 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
     }
 
     async fn export_full(&self) -> Result<Vec<BackupTableExport>, BackupError> {
-        let mut descriptors = self.descriptors();
+        let mut descriptors = self.descriptors()?;
         descriptors.sort_by(|left, right| {
             left.export_order
                 .cmp(&right.export_order)
@@ -329,11 +354,26 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
 
     async fn restore_full(
         &self,
+        backup_schema: GraphqlOrmBackupSchema,
         export: Vec<BackupTableExport>,
         context: RestoreContext,
     ) -> Result<(), BackupError> {
         let context = orm_restore_context(&context)?;
-        let snapshot = self.current_schema_snapshot().await?;
+        let current_snapshot = self.current_schema_snapshot().await?;
+        if backup_schema.backend != current_snapshot.backend
+            || backup_schema.schema_hash != current_snapshot.schema_hash
+        {
+            return Err(BackupError::RestoreSchemaMismatch {
+                backup_backend: backup_schema.backend,
+                backup_schema_hash: backup_schema.schema_hash,
+                target_backend: current_snapshot.backend,
+                target_schema_hash: current_snapshot.schema_hash,
+            });
+        }
+        let mut backup_snapshot = current_snapshot.clone();
+        backup_snapshot.backend = backup_schema.backend;
+        backup_snapshot.migration_version = backup_schema.migration_version;
+        backup_snapshot.schema_hash = backup_schema.schema_hash;
         let mut rows_by_table = BTreeMap::new();
         for table in export {
             rows_by_table.insert(
@@ -346,7 +386,12 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
             );
         }
         self.database
-            .restore_backup_rows(&snapshot, &snapshot, &rows_by_table, &context)
+            .restore_backup_rows(
+                &backup_snapshot,
+                &current_snapshot,
+                &rows_by_table,
+                &context,
+            )
             .await
             .map_err(database_error("restore rows"))?;
         Ok(())
@@ -534,6 +579,14 @@ fn orm_row_from_crate(row: BackupRow) -> Result<OrmBackupRow, BackupError> {
 }
 
 fn orm_restore_context(context: &RestoreContext) -> Result<OrmRestoreContext, BackupError> {
+    if matches!(context.mode, RestoreMode::EmptyDatabase)
+        && (!context.disable_policies || !context.disable_change_journal)
+    {
+        return Err(BackupError::InvalidRestoreContext {
+            reason: "applying graphql-orm restore requires administrative policy and change-journal suppression"
+                .to_string(),
+        });
+    }
     let mode = match context.mode {
         RestoreMode::EmptyDatabase => OrmRestoreMode::EmptyDatabase,
         RestoreMode::DryRun => OrmRestoreMode::DryRun,
@@ -543,6 +596,22 @@ fn orm_restore_context(context: &RestoreContext) -> Result<OrmRestoreContext, Ba
         disable_policies: context.disable_policies,
         disable_change_journal: context.disable_change_journal,
     })
+}
+
+fn policy_rank(policy: ColumnBackupPolicy) -> u8 {
+    match policy {
+        ColumnBackupPolicy::Include => 0,
+        ColumnBackupPolicy::Redact => 1,
+        ColumnBackupPolicy::Exclude => 2,
+    }
+}
+
+fn invalid_policy_override(policy_override: &ColumnPolicyOverride, reason: &str) -> BackupError {
+    BackupError::InvalidColumnBackupPolicyOverride {
+        table_name: policy_override.table_name.clone(),
+        column_name: policy_override.column_name.clone(),
+        reason: reason.to_string(),
+    }
 }
 
 fn row_value<'a>(row: &'a OrmBackupRow, column: &str) -> Result<&'a BackupValue, BackupError> {

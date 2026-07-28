@@ -29,7 +29,8 @@
 ## Incremental Backup Flow
 
 `create_incremental_backup` implements the repository-side incremental snapshot flow. It depends on
-the application or future `graphql-orm` runtime adapter returning reliable changes from
+the application adapter, or a future change-journal extension to
+`OrmBackupAdapter`, returning reliable changes from
 `GraphqlOrmBackupAdapter::export_incremental`.
 
 1. Load parent snapshot marker.
@@ -49,13 +50,16 @@ the application or future `graphql-orm` runtime adapter returning reliable chang
 2. Load and validate parent manifest chain.
 3. Verify manifest checksums.
 4. Verify object, table, and change payload checksums.
-5. Confirm target database is empty for `RestoreMode::EmptyDatabase`.
-6. Download, decompress, and parse full table payloads.
-7. Call `GraphqlOrmBackupAdapter::restore_full`.
-8. Download, decompress, and parse incremental change payloads in chain order.
-9. Call `GraphqlOrmBackupAdapter::restore_incremental` for each incremental manifest.
+5. Compare the root manifest's database backend and schema hash with the
+   target adapter.
+6. Confirm target database is empty for `RestoreMode::EmptyDatabase`.
+7. Download, decompress, and parse full table payloads.
+8. Call `GraphqlOrmBackupAdapter::restore_full` with the source manifest
+   schema.
+9. Download, decompress, and parse incremental change payloads in chain order.
+10. Call `GraphqlOrmBackupAdapter::restore_incremental` for each incremental manifest.
 
-`RestoreMode::DryRun` performs steps 1-6 and incremental parsing without calling restore methods.
+`RestoreMode::DryRun` performs steps 1-5 and payload parsing without calling restore methods.
 Stored object rehydration is explicit through `restore_objects` and a caller-supplied
 `RestoreObjectSink`.
 

@@ -167,6 +167,31 @@ pub fn ensure_empty_restore_target(
     }
 }
 
+fn manifest_schema(manifest: &BackupSnapshotManifest) -> crate::GraphqlOrmBackupSchema {
+    crate::GraphqlOrmBackupSchema {
+        backend: manifest.database_backend.clone(),
+        migration_version: manifest.graphql_orm_schema_version.clone(),
+        schema_hash: manifest.graphql_orm_schema_hash.clone(),
+    }
+}
+
+async fn verify_restore_schema(
+    database: &dyn GraphqlOrmBackupAdapter,
+    manifest: &BackupSnapshotManifest,
+) -> Result<crate::GraphqlOrmBackupSchema, BackupError> {
+    let backup = manifest_schema(manifest);
+    let target = database.schema_snapshot().await?;
+    if backup.backend != target.backend || backup.schema_hash != target.schema_hash {
+        return Err(BackupError::RestoreSchemaMismatch {
+            backup_backend: backup.backend,
+            backup_schema_hash: backup.schema_hash,
+            target_backend: target.backend,
+            target_schema_hash: target.schema_hash,
+        });
+    }
+    Ok(backup)
+}
+
 /// Restores a database snapshot chain through a `graphql-orm` backup adapter.
 ///
 /// In [`RestoreMode::DryRun`] this validates, verifies, downloads, decompresses,
@@ -188,17 +213,19 @@ pub async fn restore_snapshot(
         verify_manifest_and_objects(repository, manifest).await?;
     }
 
+    let full_manifest = chain
+        .first()
+        .ok_or_else(|| BackupError::InvalidManifestChain {
+            reason: "manifest chain is empty".to_string(),
+        })?;
+    let backup_schema = verify_restore_schema(database, full_manifest).await?;
+
     let target_is_empty = match context.mode {
         RestoreMode::DryRun => true,
         RestoreMode::EmptyDatabase => database.restore_target_is_empty().await?,
     };
     ensure_empty_restore_target(target_is_empty, &context)?;
 
-    let full_manifest = chain
-        .first()
-        .ok_or_else(|| BackupError::InvalidManifestChain {
-            reason: "manifest chain is empty".to_string(),
-        })?;
     let full_export = load_table_exports(repository, full_manifest).await?;
     let full_table_count = full_export.len() as u64;
     let full_row_count = full_export
@@ -207,7 +234,9 @@ pub async fn restore_snapshot(
         .sum::<u64>();
 
     if !matches!(context.mode, RestoreMode::DryRun) {
-        database.restore_full(full_export, context.clone()).await?;
+        database
+            .restore_full(backup_schema, full_export, context.clone())
+            .await?;
     }
 
     let mut incremental_change_count = 0_u64;

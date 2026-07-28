@@ -37,7 +37,7 @@ backup layout, checksums, repository writes, restore ordering, and operational s
 graphql-orm-backup = {
     git = "https://github.com/Dastari/graphql-orm-backup.git",
     rev = "<reviewed-full-40-character-commit-sha>",
-    version = "0.4.0"
+    version = "0.5.0"
 }
 ```
 
@@ -53,7 +53,7 @@ The default `local` feature enables `LocalBackupRepository`.
 graphql-orm-backup = {
     git = "https://github.com/Dastari/graphql-orm-backup.git",
     rev = "<reviewed-full-40-character-commit-sha>",
-    version = "0.4.0",
+    version = "0.5.0",
     default-features = false
 }
 ```
@@ -64,9 +64,15 @@ Enable `smb` for native SMB2/SMB3 through `SmbStorageBackend` and
 `BlobStoreBackupRepository`. This release pins the reviewed
 `graphql-orm-storage` 0.5.0 revision used by the backup crate.
 
-Enable the `orm` feature for the ready-made `graphql-orm` runtime adapters. The
-host application must also enable exactly one `graphql-orm` backend feature
-(`sqlite` or `postgres`).
+Enable `orm-sqlite` or `orm-postgres` for the ready-made `graphql-orm` runtime
+adapters with an exact backend. Hosts that already select a backend through
+their direct `graphql-orm` dependency may enable the lower-level `orm` feature
+instead. Exactly one ORM backend must be active.
+
+This release pins `graphql-orm` 0.15.0 at
+`6beef53633befd90a4d4810887a3e4640dc4ad91` and
+`graphql-orm-storage` 0.5.0 at
+`f1a1f06483d5fd3a0b8fd17f013b3ad4dd9849c5`.
 
 ## Snapshot Layout
 
@@ -142,12 +148,14 @@ async fn restore_database(
 ```
 
 `RestoreMode::DryRun` validates manifests, checksums, decompression, and JSONL parsing without
-calling adapter import methods.
+calling adapter import methods. Both dry-run and applying restore compare the
+manifest backend/schema hash with the target before target checks or writes.
 
 ## Adapter Boundaries
 
 - `GraphqlOrmBackupAdapter` handles schema metadata, full row export, incremental row export, and
-  full/incremental row restore.
+  full/incremental row restore. Full restore receives the source manifest
+  schema so adapters can fail closed on incompatibility.
 - `BackupObjectIndex` lists and loads application object bytes referenced by snapshots.
 - `BackupRepository` stores backup blobs and manifests.
 - `RestoreObjectSink` receives object bytes when applications rehydrate their primary object store.
@@ -176,6 +184,11 @@ Full backups, restore orchestration, incremental backups, manifest-chain validat
 compaction, local repository support, locking, pruning, and single-snapshot deletion are
 implemented. The optional `orm` feature ships ready-made `graphql-orm` runtime adapters so hosts
 only supply entity metadata and object-table column names.
+
+`OrmBackupAdapter` accepts a flattened metadata vector from
+`SchemaModuleCatalog::entities()`, including dependency-owned private schema
+modules. It does not require generated GraphQL operation roots and does not
+run module restore hooks, reconciliation, or readiness transitions.
 
 Provider code is shared through `graphql-orm-storage::BlobStore`. `LocalBackupRepository` is a thin
 wrapper over the storage crate's local blob backend, and `BlobStoreBackupRepository` can adapt any

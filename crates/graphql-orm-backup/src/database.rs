@@ -47,12 +47,17 @@ pub trait GraphqlOrmBackupAdapter: Send + Sync {
 
     /// Restores a full table export.
     ///
+    /// `backup_schema` is the schema identity recorded by the source manifest.
+    /// Implementations must reject an incompatible target before importing
+    /// rows.
+    ///
     /// # Errors
     ///
     /// Returns [`BackupError`] if the adapter cannot import the rows into the
     /// target database.
     async fn restore_full(
         &self,
+        backup_schema: GraphqlOrmBackupSchema,
         export: Vec<BackupTableExport>,
         context: RestoreContext,
     ) -> Result<(), BackupError>;

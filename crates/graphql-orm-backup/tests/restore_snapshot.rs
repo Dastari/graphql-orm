@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -109,6 +110,72 @@ async fn restore_snapshot_refuses_non_empty_empty_database_target() {
 }
 
 #[tokio::test]
+async fn restore_snapshot_rejects_schema_hash_mismatch_before_target_checks_or_writes() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = LocalBackupRepository::new(temp.path());
+    let source = MockDatabase::with_tables(vec![BackupTableExport {
+        table_name: "users".to_string(),
+        rows: vec![backup_row("users", "1", &[("name", "Ada")])],
+    }]);
+    let objects = MockObjectIndex::default();
+    create_full_backup(&repository, &source, &objects, backup_request())
+        .await
+        .expect("create full backup");
+
+    let target = MockDatabase::with_schema("sqlite", "different-schema-hash");
+    let err = restore_snapshot(
+        &repository,
+        &target,
+        snapshot_id(),
+        RestoreContext::empty_database(),
+    )
+    .await
+    .expect_err("schema mismatch rejected");
+
+    assert!(matches!(
+        err,
+        BackupError::RestoreSchemaMismatch {
+            backup_backend,
+            backup_schema_hash,
+            target_backend,
+            target_schema_hash,
+        } if backup_backend == "sqlite"
+            && backup_schema_hash == "schema-hash"
+            && target_backend == "sqlite"
+            && target_schema_hash == "different-schema-hash"
+    ));
+    assert_eq!(target.restore_target_check_count(), 0);
+    assert!(target.restored_full().is_empty());
+}
+
+#[tokio::test]
+async fn restore_snapshot_rejects_backend_mismatch_during_dry_run() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = LocalBackupRepository::new(temp.path());
+    let source = MockDatabase::with_tables(vec![BackupTableExport {
+        table_name: "users".to_string(),
+        rows: Vec::new(),
+    }]);
+    let objects = MockObjectIndex::default();
+    create_full_backup(&repository, &source, &objects, backup_request())
+        .await
+        .expect("create full backup");
+
+    let target = MockDatabase::with_schema("postgres", "schema-hash");
+    let err = restore_snapshot(
+        &repository,
+        &target,
+        snapshot_id(),
+        RestoreContext::dry_run(),
+    )
+    .await
+    .expect_err("backend mismatch rejected");
+
+    assert!(matches!(err, BackupError::RestoreSchemaMismatch { .. }));
+    assert!(target.restored_full().is_empty());
+}
+
+#[tokio::test]
 async fn restore_objects_loads_verified_object_bytes_into_sink() {
     let temp = TempDir::new().expect("temp dir");
     let repository = LocalBackupRepository::new(temp.path());
@@ -214,7 +281,10 @@ impl BackupObjectIndex for MockObjectIndex {
 struct MockDatabase {
     tables: Vec<BackupTableExport>,
     target_is_empty: bool,
+    schema: GraphqlOrmBackupSchema,
+    restore_target_checks: Arc<AtomicUsize>,
     restored_full: Arc<Mutex<Vec<BackupTableExport>>>,
+    restored_schemas: Arc<Mutex<Vec<GraphqlOrmBackupSchema>>>,
     restored_incremental: Arc<Mutex<Vec<BackupChangeExport>>>,
 }
 
@@ -223,9 +293,23 @@ impl MockDatabase {
         Self {
             tables,
             target_is_empty: true,
+            schema: GraphqlOrmBackupSchema {
+                backend: "sqlite".to_string(),
+                migration_version: "20260514000000".to_string(),
+                schema_hash: "schema-hash".to_string(),
+            },
+            restore_target_checks: Arc::default(),
             restored_full: Arc::default(),
+            restored_schemas: Arc::default(),
             restored_incremental: Arc::default(),
         }
+    }
+
+    fn with_schema(backend: &str, schema_hash: &str) -> Self {
+        let mut database = Self::with_tables(Vec::new());
+        database.schema.backend = backend.to_string();
+        database.schema.schema_hash = schema_hash.to_string();
+        database
     }
 
     fn empty_restore_target() -> Self {
@@ -245,19 +329,20 @@ impl MockDatabase {
             .expect("restored full lock")
             .clone()
     }
+
+    fn restore_target_check_count(&self) -> usize {
+        self.restore_target_checks.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait]
 impl GraphqlOrmBackupAdapter for MockDatabase {
     async fn schema_snapshot(&self) -> Result<GraphqlOrmBackupSchema, BackupError> {
-        Ok(GraphqlOrmBackupSchema {
-            backend: "sqlite".to_string(),
-            migration_version: "20260514000000".to_string(),
-            schema_hash: "schema-hash".to_string(),
-        })
+        Ok(self.schema.clone())
     }
 
     async fn restore_target_is_empty(&self) -> Result<bool, BackupError> {
+        self.restore_target_checks.fetch_add(1, Ordering::SeqCst);
         Ok(self.target_is_empty)
     }
 
@@ -274,9 +359,14 @@ impl GraphqlOrmBackupAdapter for MockDatabase {
 
     async fn restore_full(
         &self,
+        backup_schema: GraphqlOrmBackupSchema,
         export: Vec<BackupTableExport>,
         _context: RestoreContext,
     ) -> Result<(), BackupError> {
+        self.restored_schemas
+            .lock()
+            .expect("restored schemas lock")
+            .push(backup_schema);
         self.restored_full
             .lock()
             .expect("restored full lock")

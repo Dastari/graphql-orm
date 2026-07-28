@@ -6,9 +6,10 @@
 
 Provider SDKs, object stores, Dropbox, SMB, and backup repository implementations are out of scope for `graphql-orm`.
 
-## Existing Starting Point
+## Current Integration Point
 
-The `/home/toby/graphql-orm` repo already contains early backup metadata primitives in `crates/graphql-orm/src/graphql/orm/core.rs`, including:
+The reviewed `graphql-orm` 0.15.0 revision contains the backup metadata and
+runtime primitives in `crates/graphql-orm/src/graphql/orm`, including:
 
 ```rust
 pub struct EntityBackupDescriptor {
@@ -29,7 +30,9 @@ pub struct GraphqlOrmSchemaSnapshot {
 }
 ```
 
-Please extend and stabilize this surface instead of replacing it.
+`graphql-orm-backup` 0.5.0 consumes this surface through a thin
+`OrmBackupAdapter`. Future reusable changes should extend this surface rather
+than introduce host-specific database access.
 
 ## Required graphql-orm Capabilities
 
@@ -37,12 +40,12 @@ Please extend and stabilize this surface instead of replacing it.
 2. Stable schema hash and migration version.
 3. Backend-agnostic full row export.
 4. Backend-agnostic row import into an empty database.
-5. Restore context that bypasses policies and change journaling.
+5. Administrative restore context and explicit change-journal behavior.
 6. Optional change journal for true incremental backups.
 7. Delete tombstones for incremental restore.
 8. SQLite and PostgreSQL tests.
 
-## Proposed Runtime API Shape
+## Backup-Crate Adapter Shape
 
 ```rust
 #[async_trait::async_trait]
@@ -55,6 +58,7 @@ pub trait GraphqlOrmBackupRuntime {
     ) -> Result<Vec<BackupChangeExport>, BackupError>;
     async fn restore_full(
         &self,
+        backup_schema: GraphqlOrmBackupSchema,
         export: Vec<BackupTableExport>,
         context: RestoreContext,
     ) -> Result<(), BackupError>;
@@ -66,7 +70,9 @@ pub trait GraphqlOrmBackupRuntime {
 }
 ```
 
-The backup crate currently defines this as an interim adapter contract. The final API should live in `graphql-orm` or be satisfied by a thin adapter.
+The database-specific export/import implementation lives in `graphql-orm`;
+this crate's adapter adds manifest orchestration and repeats exact source/target
+schema validation at the restore boundary.
 
 ## Change Journal Direction
 
@@ -87,7 +93,9 @@ pub struct OrmChangeLog {
 }
 ```
 
-Generated CRUD and runtime insert/update/delete paths should write journal entries unless an explicit restore context disables journaling.
+Generated CRUD and runtime insert/update/delete paths should write journal
+entries unless an explicit restore path suppresses journaling. The backup
+crate does not grant database authority or bypass database-native policy.
 
 ## Please Return
 

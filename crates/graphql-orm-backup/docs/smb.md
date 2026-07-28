@@ -22,7 +22,7 @@ Ok(Arc::new(BlobStoreBackupRepository::new(store)))
 # }
 ```
 
-Enable the `smb` feature. Backup 0.4.0 pins the reviewed storage 0.5.0 Git
+Enable the `smb` feature. Backup 0.5.0 pins the reviewed storage 0.5.0 Git
 revision so downstream builds use the implementation exercised by this
 release.
 

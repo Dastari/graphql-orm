@@ -26,7 +26,7 @@ Create a reusable backup and restore crate for applications using `graphql-orm`.
 - Digitise-specific entity names or workflow assumptions.
 - Primary object storage implementation details beyond reading objects through `BackupObjectIndex`.
 
-## Initial Implementation Order
+## Historical Initial Implementation Order
 
 1. Implement manifest types and checksum helpers.
 2. Implement `BackupRepository`.
@@ -39,9 +39,14 @@ Create a reusable backup and restore crate for applications using `graphql-orm`.
 9. Implement restore context and empty-target guard.
 10. Wait for finalized `graphql-orm` export/import/change-journal APIs.
 
+The full export/import runtime API has since landed and
+`graphql-orm-backup` 0.5.0 pins the reviewed `graphql-orm` 0.15.0 revision.
+Incremental adapter execution still waits for a reliable integrated change
+journal.
+
 ## Expected Output From A Backup Agent
 
-- A compilable crate under `/home/toby/graphql-orm-backup`.
+- A compilable crate under `/home/toby/dev/graphql-orm-backup`.
 - Manifest format docs.
 - Restore semantics docs.
 - Local repository implementation.
@@ -60,4 +65,5 @@ Create a reusable backup and restore crate for applications using `graphql-orm`.
 
 Implemented since the initial plan: `BlobStoreBackupRepository`, S3 reuse,
 native SMB reuse, full restore, referenced-object restore, deletion, pruning,
-locking, and streamed referenced-object transfer.
+locking, streamed referenced-object transfer, exact restore schema preflight,
+and private schema-module conformance on SQLite and PostgreSQL.
