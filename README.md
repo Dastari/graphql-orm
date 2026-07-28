@@ -15,6 +15,8 @@ It is designed for two related use cases:
   schema metadata
 - `#[derive(GraphQLOperations)]` for generated list queries, single-entity lookups, repository
   helpers, and write operations where the backend supports writes
+- generated resolver-operation descriptors and schema-root exposure catalogs
+  with deterministic drift fingerprints
 - `#[derive(GraphQLRelations)]` for nested relation fields with batched loading
 - SQLite and PostgreSQL read/write support through SQLx
 - Microsoft SQL Server read/query-only support through Tiberius
@@ -48,7 +50,7 @@ Select exactly the backend support your service needs:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.15.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.16.0", default-features = false, features = ["sqlite"] }
 ```
 
 GitHub with an exact full revision is the only supported distribution method. Neither crate is
@@ -147,6 +149,14 @@ writes. `generated_mutations` defaults to `"all"` for compatibility; use `"none"
 custom mutation roots from `extra_mutation_types`, or use `"allowlist"` with
 `generated_mutation_allowlist: [Entity]` / `"denylist"` with
 `generated_mutation_denylist: [Entity]` for mixed public exposure.
+
+`GraphQLOperations` also implements `GraphqlOperationMetadata`, while
+`schema_roots!` emits `graphql_orm_operation_catalog()`. The catalog reports
+the exact generated root field names, categories, argument/result signatures,
+backend profile, and resolved generated-mutation exposure. Its fingerprints
+detect generated-surface drift; they do not authorize execution or bind a
+document projection or disclosure policy. See
+[generated resolver operation metadata](docs/resolver-operation-metadata.md).
 
 ## SQL Server Read-Only Example
 

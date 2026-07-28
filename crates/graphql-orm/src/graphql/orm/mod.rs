@@ -10,6 +10,7 @@ mod execution;
 mod lease;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 mod migrations;
+mod operation_metadata;
 mod query;
 mod rls;
 mod runtime_query;
@@ -34,6 +35,7 @@ pub use execution::*;
 pub use lease::*;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub use migrations::*;
+pub use operation_metadata::*;
 pub use query::*;
 pub use rls::*;
 pub use runtime_query::*;

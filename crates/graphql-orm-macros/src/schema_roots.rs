@@ -90,9 +90,11 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         .iter()
         .map(ToString::to_string)
         .collect();
-    let mutation_types: Vec<proc_macro2::TokenStream> = entities
-        .iter()
-        .filter(|entity| match args.generated_mutations {
+    let generated_mutation_is_exposed = |entity: &Ident| {
+        if backend == BackendKind::Mssql || schema_policy_read_only {
+            return false;
+        }
+        match args.generated_mutations {
             GeneratedMutationExposure::All => true,
             GeneratedMutationExposure::None => false,
             GeneratedMutationExposure::Allowlist => {
@@ -101,12 +103,54 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             GeneratedMutationExposure::Denylist => {
                 !generated_mutation_denylist.contains(&entity.to_string())
             }
-        })
+        }
+    };
+    let mutation_types: Vec<proc_macro2::TokenStream> = entities
+        .iter()
+        .filter(|entity| generated_mutation_is_exposed(entity))
         .map(|entity| {
             let name = syn::Ident::new(&format!("{}Mutations", entity), span);
             quote! { #name }
         })
         .collect();
+    let operation_metadata_groups = entities
+        .iter()
+        .map(|entity| {
+            let mutations_exposed = generated_mutation_is_exposed(entity);
+            quote! {
+                (
+                    <#entity as ::graphql_orm::graphql::orm::GraphqlOperationMetadata>
+                        ::generated_graphql_operations(),
+                    #mutations_exposed,
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    let operation_catalog_helper = quote! {
+        /// Returns deterministic generated resolver metadata for this schema root.
+        ///
+        /// The catalog resolves generated mutation allow/deny exposure but is
+        /// discovery metadata only; it does not authorize GraphQL execution.
+        pub fn graphql_orm_operation_catalog(
+        ) -> &'static ::graphql_orm::graphql::orm::GraphqlOperationCatalog {
+            static CATALOG: ::std::sync::OnceLock<
+                ::graphql_orm::graphql::orm::GraphqlOperationCatalog
+            > = ::std::sync::OnceLock::new();
+            CATALOG.get_or_init(|| {
+                let groups: &[(
+                    &'static [
+                        ::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor
+                    ],
+                    bool,
+                )] = &[
+                    #(#operation_metadata_groups),*
+                ];
+                ::graphql_orm::graphql::orm::GraphqlOperationCatalog::compose(
+                    groups.iter().copied(),
+                )
+            })
+        }
+    };
 
     let extra_subscription_type_streams: Vec<proc_macro2::TokenStream> = args
         .extra_subscription_types
@@ -184,6 +228,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
 
         return quote! {
             #query_root
+            #operation_catalog_helper
 
             pub type MutationRoot = ::graphql_orm::async_graphql::EmptyMutation;
             pub type SubscriptionRoot = ::graphql_orm::async_graphql::EmptySubscription;
@@ -333,6 +378,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         #query_root
         #mutation_root
         #subscription_root
+        #operation_catalog_helper
 
         pub type AppSchema = ::graphql_orm::async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 

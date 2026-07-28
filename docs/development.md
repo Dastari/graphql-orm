@@ -77,6 +77,10 @@ cargo test -p graphql-orm --no-default-features --features sqlite --test full_te
 cargo test -p graphql-orm --no-default-features --features mssql --test mssql_write_unavailable_ui
 cargo test -p graphql-orm --no-default-features --features sqlite --test repository_only_entity
 cargo test -p graphql-orm --no-default-features --features sqlite --test repository_only_entity_ui
+cargo test -p graphql-orm --test resolver_operation_metadata
+cargo test -p graphql-orm --no-default-features --features "sqlite resolver-case-pascal argument-case-pascal field-case-pascal" --test resolver_operation_metadata
+cargo test -p graphql-orm --no-default-features --features postgres --test resolver_operation_metadata
+cargo test -p graphql-orm --no-default-features --features mssql --test resolver_operation_metadata_mssql
 ```
 
 Run all default tests with:
