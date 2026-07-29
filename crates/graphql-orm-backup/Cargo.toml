@@ -1,0 +1,74 @@
+[package]
+name = "graphql-orm-backup"
+version = "0.6.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/Dastari/graphql-orm-backup"
+description = "Backup and restore orchestration primitives for graphql-orm applications"
+publish = false
+
+[package.metadata.distribution]
+method = "git-full-revision"
+
+[features]
+default = ["local"]
+local = ["graphql-orm-storage/local"]
+smb = ["dep:secrecy", "graphql-orm-storage/smb"]
+# Requires the host application to enable exactly one graphql-orm backend
+# feature (sqlite or postgres).
+orm = ["dep:graphql-orm"]
+orm-sqlite = ["orm", "graphql-orm/sqlite"]
+orm-postgres = ["orm", "graphql-orm/postgres"]
+
+[dependencies]
+async-trait = "0.1"
+bytes = "1"
+futures = "0.3"
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "dd68a001f47f04178bf3389dd47ee952faa6ecf0", version = "0.16.0", optional = true, default-features = false }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm-storage.git", rev = "f1a1f06483d5fd3a0b8fd17f013b3ad4dd9849c5", version = "0.5.0", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+secrecy = { version = "0.10", optional = true }
+sha2 = "0.10"
+thiserror = "2"
+uuid = { version = "1", features = ["serde", "v4"] }
+zstd = "0.13"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread"] }
+
+[[test]]
+name = "local_repository_round_trip"
+path = "tests/local_repository_round_trip.rs"
+required-features = ["local"]
+
+[[test]]
+name = "incremental_backup"
+path = "tests/incremental_backup.rs"
+required-features = ["local"]
+
+[[test]]
+name = "operational_safety"
+path = "tests/operational_safety.rs"
+required-features = ["local"]
+
+[[test]]
+name = "restore_snapshot"
+path = "tests/restore_snapshot.rs"
+required-features = ["local"]
+
+[[test]]
+name = "smb_repository"
+path = "tests/smb_repository.rs"
+required-features = ["smb"]
+
+[[test]]
+name = "orm_016_sqlite_conformance"
+path = "tests/orm_016_sqlite_conformance.rs"
+required-features = ["local", "orm-sqlite"]
+
+[[test]]
+name = "orm_016_postgres_conformance"
+path = "tests/orm_016_postgres_conformance.rs"
+required-features = ["local", "orm-postgres"]
