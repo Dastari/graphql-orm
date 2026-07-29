@@ -11,8 +11,8 @@ writes, restore orchestration, compaction, pruning, and verification.
 - `BlobStoreBackupRepository`: adapter from `graphql-orm-storage::BlobStore` to
   `BackupRepository`.
 - `LocalBackupRepository`: filesystem implementation of `BackupRepository`.
-- `GraphqlOrmBackupAdapter`: interim database export/import contract until the
-  final `graphql-orm` runtime backup API lands.
+- `GraphqlOrmBackupAdapter`: crate-level database export/import contract;
+  `OrmBackupAdapter` bridges it to the reviewed `graphql-orm` runtime.
 - `BackupObjectIndex`: application adapter that lists and loads stored objects
   referenced by a snapshot.
 - `BackupSnapshotManifest`: durable record of a snapshot's database files,
@@ -70,9 +70,8 @@ The function performs these steps:
 
 ## Database Adapter Responsibilities
 
-`GraphqlOrmBackupAdapter` is intentionally narrow. The host application or a
-future `graphql-orm` runtime adapter owns database-specific export/import
-details.
+`GraphqlOrmBackupAdapter` is intentionally narrow. A host adapter or the
+included `OrmBackupAdapter` owns database-specific export/import details.
 
 For full backups, implement:
 
@@ -84,7 +83,8 @@ For restore and incremental backups, implement:
 
 - `restore_target_is_empty`: report whether `RestoreMode::EmptyDatabase` is safe.
 - `export_incremental`: return create/update/delete changes since a parent snapshot.
-- `restore_full`: import full table exports.
+- `restore_full`: validate the supplied source manifest schema and import full
+  table exports.
 - `restore_incremental`: apply incremental changes in manifest-chain order.
 
 ## Object Index Responsibilities
@@ -141,11 +141,28 @@ fn adapters(
 The entity list must match the list used for migrations so exports and restores
 cover every application-owned table.
 
+Dependency-owned private schema modules can be passed without GraphQL roots:
+
+```rust,ignore
+let catalog = SchemaModuleCatalog::compose(&[&first_module, &second_module])?;
+let adapter = OrmBackupAdapter::new(database, catalog.entities().to_vec());
+```
+
+The backup crate consumes the composed entity metadata only. Module restore
+hooks, reconciliation, readiness, and application/provider effects remain
+host-owned.
+
 `OrmBackupAdapter::current_schema_snapshot` exposes the current schema hash for
 manifest compatibility checks, and `OrmBackupAdapter::clear_restore_target`
 empties every backup-enabled table so a replace-existing restore can run
 through the standard empty-database path. Incremental export and restore return
 `UnsupportedOperation` until a change-journal integration lands.
+
+Adapter-level column policy overrides may only strengthen
+`Include -> Redact -> Exclude`, and effective overrides participate in the
+schema hash. Applying ORM restore requires the administrative context produced
+by `RestoreContext::empty_database`; it does not grant host authorization or
+bypass database-native policy.
 
 `BlobStoreRestoreObjectSink` (available without the `orm` feature) writes
 restored object bytes back to a `graphql-orm-storage` `BlobStore` at each

@@ -204,6 +204,7 @@ impl GraphqlOrmBackupAdapter for TestDatabase {
 
     async fn restore_full(
         &self,
+        _backup_schema: GraphqlOrmBackupSchema,
         export: Vec<BackupTableExport>,
         _context: RestoreContext,
     ) -> Result<(), BackupError> {

@@ -15,7 +15,8 @@ RestoreMode::DryRun
 ```
 
 Dry run loads and validates the manifest chain, verifies payload checksums, decompresses table and
-change payloads, and parses JSON Lines without calling database restore methods.
+change payloads, compares the manifest backend/schema hash with the target, and
+parses JSON Lines without calling database restore methods.
 
 In-place restore and replacement remain future work.
 
@@ -31,7 +32,14 @@ pub struct RestoreContext {
 }
 ```
 
-The default empty restore context disables application policies and change journaling because restore is an administrative data operation, not a GraphQL user mutation.
+The default empty restore context requests application-policy and
+change-journal suppression because restore is an administrative data
+operation, not a GraphQL user mutation. `OrmBackupAdapter` rejects applying
+contexts that do not request both.
+
+The ORM row importer does not use generated GraphQL/repository mutation paths.
+The flags do not authorize restore, change the connection's database role, or
+bypass database-native row-level security. Those remain host responsibilities.
 
 ## Safety Rules
 
@@ -40,6 +48,8 @@ The default empty restore context disables application policies and change journ
 - Verify object checksums before final success.
 - Verify table payload checksums against the stored compressed bytes.
 - Decompress table payloads only after checksum verification.
+- Refuse a manifest backend/schema hash that differs from the target before
+  checking emptiness or writing.
 - Refuse `EmptyDatabase` restore when the database adapter reports a non-empty target.
 - Preserve primary keys.
 - Preserve created and updated timestamps where entities define them.
@@ -54,6 +64,10 @@ Database restore and object restore are separate. `restore_snapshot` restores ta
 through `GraphqlOrmBackupAdapter`. `restore_objects` loads verified object blobs and passes them to
 a caller-supplied `RestoreObjectSink` so applications can choose how to rehydrate their primary
 object store.
+
+A successful database restore does not imply that external objects,
+credentials, provider continuations, application reconciliation, or runtime
+readiness exist. Hosts must verify and reconcile those separately.
 
 ## Future Replacement Mode
 

@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.5.0
+
+- Aligned the optional `graphql-orm` integration with the reviewed
+  `graphql-orm` 0.15.0 commit
+  `6beef53633befd90a4d4810887a3e4640dc4ad91`; the reviewed
+  `graphql-orm-storage` 0.5.0 revision is unchanged.
+- Added `orm-sqlite` and `orm-postgres` convenience features for selecting the
+  adapter's exact backend while preserving `orm` for host feature unification.
+- Added fail-before-write restore preflight: applying and dry-run restores now
+  compare the manifest backend/schema hash with the target adapter before
+  target-emptiness checks or imports.
+- `GraphqlOrmBackupAdapter::restore_full` now receives the source manifest's
+  `GraphqlOrmBackupSchema`, allowing adapters to repeat schema validation at
+  the import boundary.
+- Adapter-level column policy overrides now reject unknown columns and any
+  `Include -> Redact -> Exclude` policy weakening. Effective overrides
+  participate in the backup schema hash.
+- Applying through `OrmBackupAdapter` now rejects restore contexts that do not
+  request both administrative policy and change-journal suppression. Database
+  roles and database-native policies remain host responsibilities.
+- Added SQLite and disposable-PostgreSQL conformance coverage using two
+  dependency-owned private schema modules without generated GraphQL roots.
+  The fixture covers a nullable UUID reference, nullable JSON, redaction,
+  exclusion, adapter policy overrides, consistent export, manifest
+  verification, dependency-ordered empty-target restore, and exact object
+  restore through a separate sink.
+- The manifest format and repository key layout are unchanged. Backups created
+  with adapter-level policy overrides under 0.4.x require the compatibility
+  handling described in `MIGRATION.md`.
+
 ## 0.4.0
 
 - Enabled native SMB repositories through the storage crate's `smb` feature

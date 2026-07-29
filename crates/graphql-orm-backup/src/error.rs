@@ -24,6 +24,26 @@ pub enum BackupError {
     #[error("restore target is not empty")]
     RestoreTargetNotEmpty,
 
+    #[error(
+        "restore schema is incompatible: backup backend/hash {backup_backend}/{backup_schema_hash}, target backend/hash {target_backend}/{target_schema_hash}"
+    )]
+    RestoreSchemaMismatch {
+        backup_backend: String,
+        backup_schema_hash: String,
+        target_backend: String,
+        target_schema_hash: String,
+    },
+
+    #[error("invalid column backup policy override for {table_name}.{column_name}: {reason}")]
+    InvalidColumnBackupPolicyOverride {
+        table_name: String,
+        column_name: String,
+        reason: String,
+    },
+
+    #[error("invalid restore context: {reason}")]
+    InvalidRestoreContext { reason: String },
+
     #[error("invalid manifest chain: {reason}")]
     InvalidManifestChain { reason: String },
 
