@@ -15,6 +15,12 @@ repository key layout, restore preflight, or persisted data. Regenerate
 `Cargo.lock`, verify that the old backup and storage repository URLs are
 absent, and rerun the selected repository and ORM conformance checks.
 
+Lock acquisition also closes a provider visibility race: after an atomic
+conditional-create collision, a lock that cannot yet be read is treated as
+active rather than returning the provider read error or attempting stale-lock
+removal. Callers may retry the complete operation later; no data migration is
+required.
+
 ## 0.5.x to 0.6.0
 
 Version 0.6.0 moves the optional ORM adapter to `graphql-orm` 0.16.0 at

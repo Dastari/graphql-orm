@@ -4,6 +4,9 @@
 
 - Consolidated into the `graphql-orm` workspace and aligned the public storage
   type universe with `graphql-orm-storage` 0.6.0 through one workspace path.
+- Lock acquisition now treats a winner that is temporarily unreadable after an
+  atomic conditional-create collision as locked. It never deletes or replaces
+  a lock whose age cannot be proved.
 - Retained the backup API, manifest format, repository key layout, and
   fail-closed restore preflight from 0.6.0.
 
