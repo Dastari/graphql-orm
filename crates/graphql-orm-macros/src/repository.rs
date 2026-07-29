@@ -424,6 +424,14 @@ pub(crate) fn strip_operations_graphql_surface(
             }
         }
     });
+    file.items.push(parse_quote! {
+        impl ::graphql_orm::graphql::orm::GraphqlOperationMetadata for #entity_ident {
+            fn generated_graphql_operations(
+            ) -> &'static [::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor] {
+                &[]
+            }
+        }
+    });
     let output = file.into_token_stream();
     if contains_generated_graphql_impl(&output) {
         return Err(syn::Error::new_spanned(

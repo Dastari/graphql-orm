@@ -11,6 +11,37 @@ required. The optional `auth-agql` bridge intentionally pins `agql-auth` at
 `3f3b0c5365adfbe436514a681d977b600991b797`. Consequently `cargo package -p graphql-orm` cannot
 resolve that Git-only optional dependency through the crates.io packaging model; this is expected.
 
+## 0.16.0
+
+Generated resolver-operation metadata release. Runtime and companion macros
+are aligned at `0.16.0`.
+
+- `GraphQLOperations` implements `GraphqlOperationMetadata` with immutable
+  descriptors for the exact resolver methods generated in the selected
+  backend/entity profile. Descriptors expose fully qualified entity identity,
+  exact root field and argument names, operation kind/category, Rust/GraphQL
+  input/result signatures, a canonical derive-owned schema declaration, and a
+  stable fingerprint.
+- `schema_roots!` emits `graphql_orm_operation_catalog()`. The catalog resolves
+  generated mutation exposure after none/allowlist/denylist policy while
+  retaining omitted generated descriptors for diagnostics, and resolves
+  generated mutation/subscription exposure under root-level read-only policy.
+- Domain-separated SHA-256 fingerprints cover generated descriptors, resolved
+  exposure, and deterministic catalog composition. They deliberately do not
+  claim to fingerprint custom roots or complete host SDL, authorize a
+  resolver, bind a document/result projection, classify data, or establish a
+  runtime page bound.
+- Search, keyset, composite-key, append-only, read-only, MSSQL, PascalCase,
+  hidden JSON, subscription, and schema-drift behavior have focused coverage.
+  Private typed projections remain repository-only and absent from the
+  GraphQL operation catalog.
+
+This is an additive pre-1.0 minor release. Existing GraphQL SDL, resolver and
+repository behavior, database schema/data, authorization, and RLS are
+unchanged; no database migration is required. See
+[Generated resolver operation metadata](resolver-operation-metadata.md) and
+the [migration guide](../MIGRATION.md).
+
 ## 0.15.0
 
 Bounded-mutation correctness release. Runtime and companion macros are aligned

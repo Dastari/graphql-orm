@@ -2,6 +2,38 @@
 
 User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
 
+## 0.16.0
+
+Companion macros crate: `graphql-orm-macros` **0.16.0** under the aligned
+Git-only version policy. This additive public runtime and generated-code
+surface is a pre-1.0 minor release.
+
+- Added `GraphqlOperationMetadata` and immutable generated descriptors for
+  every query, mutation, and subscription resolver actually emitted by
+  `GraphQLOperations`, including exact case-adjusted root field/argument names,
+  stable categories, Rust/GraphQL input/result signatures, backend/entity
+  identity, and derive-owned schema declarations.
+- Added `graphql_orm_operation_catalog()` generation to `schema_roots!`.
+  Catalog descriptors distinguish generated mutations omitted by
+  `generated_mutations` none/allowlist/denylist policy from operations actually
+  merged into the public root. Root-level read-only policy also resolves
+  generated subscriptions as unexposed.
+- Added domain-separated, length-framed SHA-256 generated/resolved/catalog
+  fingerprints with deterministic ordering and documented compatibility
+  limits. Fingerprints detect generated surface and exposure drift; they do
+  not authorize execution or bind custom roots, complete host SDL, documents,
+  result projections, disclosure policy, runtime pagination, or current
+  resolver/RLS decisions.
+- Added SQLite/PostgreSQL/MSSQL and default/PascalCase coverage for renamed
+  plurals, composite keys, list/single/search/keyset operations, every mutation
+  category, subscriptions, read-only and append-only profiles, mutation
+  allowlists, hidden JSON fields, private read projections, and fingerprint
+  drift.
+
+Existing resolver names, GraphQL SDL, database schema, stored data, repository
+APIs, authorization, and RLS behavior are unchanged. No database or data
+migration is required.
+
 ## 0.15.0
 
 Companion macros crate: `graphql-orm-macros` **0.15.0** under the aligned

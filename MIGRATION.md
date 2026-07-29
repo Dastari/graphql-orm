@@ -3,6 +3,49 @@
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.16.0 Generated Resolver Operation Metadata
+
+Update both Git-only graphql-orm crates to 0.16.0 at the reviewed final full
+revision. Existing entity declarations and `schema_roots!` blocks require no
+source changes. `GraphQLOperations` now also implements
+`GraphqlOperationMetadata`; `schema_roots!` adds the
+`graphql_orm_operation_catalog()` helper in the same module as its existing
+schema helpers.
+
+Hosts that previously reconstructed resolver names from entity/plural names
+should instead select the exact generated root coordinate from the catalog:
+
+```rust
+let operation = graphql_orm_operation_catalog()
+    .resolve(GraphqlOperationKind::Query, "users")
+    .expect("reviewed generated operation remains exposed");
+let generated_fingerprint = operation.fingerprint();
+```
+
+Do not substitute the catalog fingerprint for a complete finished-schema
+registry fingerprint when a host composes custom roots. Do not treat metadata
+discovery as registration, enablement, authorization, or disclosure approval.
+Document operation names, server-authored document hashes, selected result
+fields, model-facing argument schemas, static disclosure contracts, and
+current resolver/RLS authorization remain separate host/downstream bindings.
+
+Generated mutation none/allowlist/denylist policy now appears as
+`is_exposed() == false` on the corresponding resolved descriptors; repository
+writes and generated subscription behavior are unchanged. A root-level
+`external_read_only` policy also reports derive-generated mutation and
+subscription descriptors as unexposed because that root composes neither
+operation type. Private typed read projections remain repository-only and do
+not add descriptors or change generated GraphQL operation fingerprints. List
+categories describe connection shape rather than a fixed runtime bound; retain
+explicit host/tool output limits because `PaginationConfig` remains
+configurable.
+
+This is an additive pre-1.0 public API/generated-code release. Existing
+GraphQL SDL, resolver execution, database schema, stored data, migrations,
+backups, authorization, and RLS behavior do not change. No database or data
+migration is required. Refresh lockfiles, update both aligned versions, and
+rerun backend, naming, schema exposure, and consumer fingerprint gates.
+
 ## 0.15.0 Exact Bounded-Mutation Sentinels
 
 Update both Git-only graphql-orm crates to 0.15.0 at the final reviewed full

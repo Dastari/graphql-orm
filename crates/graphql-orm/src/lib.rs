@@ -113,6 +113,18 @@
 //! inputs, repository helpers, mutation hooks, mutation contexts, and
 //! subscriptions remain available to application code.
 //!
+//! # Generated Resolver Metadata
+//!
+//! `GraphQLOperations` implements
+//! [`graphql::orm::GraphqlOperationMetadata`] with immutable declarations for
+//! every generated query, mutation, and subscription resolver.
+//! `schema_roots!` additionally emits `graphql_orm_operation_catalog()` to
+//! resolve actual generated-mutation root exposure. Fingerprints detect
+//! generated schema drift; discovery does not authorize execution or bind
+//! custom roots, documents, result projections, disclosure policy, runtime
+//! limits, or resolver/RLS decisions. See
+//! [`graphql::orm::GraphqlOperationCatalog`].
+//!
 //! # Generated Resolver Auth
 //!
 //! Generated resolvers understand a project-agnostic

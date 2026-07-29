@@ -39,6 +39,17 @@
 //! }
 //! ```
 //!
+//! # Generated Resolver Metadata
+//!
+//! `GraphQLOperations` implements the runtime `GraphqlOperationMetadata` trait
+//! with immutable descriptors for every resolver it emits; `RepositoryEntity`
+//! implements it with an empty slice because that derive has no GraphQL
+//! surface. `schema_roots!` adds `graphql_orm_operation_catalog()`, which
+//! deterministically composes resolver declarations and resolves generated
+//! mutation exposure. The metadata is discovery and drift detection only; it
+//! grants no resolver authority and binds no custom root, GraphQL document
+//! projection, disclosure policy, or runtime limit.
+//!
 //! # Generated Resolver Auth
 //!
 //! `schema_roots!` and `#[graphql_entity(...)]` accept

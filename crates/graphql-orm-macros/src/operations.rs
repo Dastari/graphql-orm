@@ -473,6 +473,125 @@ fn push_create_input_sql_value_tokens(
     }
 }
 
+fn generated_resolver_schema_signature(
+    struct_name: &syn::Ident,
+    fields: &syn::punctuated::Punctuated<Field, syn::token::Comma>,
+    entity_meta: &crate::entity::EntityMetadata,
+    backend: BackendKind,
+    graphql_rename_fields: Option<&str>,
+    serde_rename_all: Option<&str>,
+    auto_generated_pk: bool,
+) -> syn::Result<String> {
+    let mut field_signatures = Vec::new();
+    for field in fields {
+        let field_name = field.ident.as_ref().expect("named fields validated");
+        let rust_name = field_name.to_string();
+        let meta = parse_field_metadata(field)?;
+        let graphql_name =
+            graphql_field_name(&meta, &rust_name, graphql_rename_fields, serde_rename_all);
+        let field_type = &field.ty;
+        let rust_type = quote! { #field_type }.to_string();
+        let is_timestamp = rust_name == "created_at" || rust_name == "updated_at";
+        let create_visible = !meta.is_relation
+            && !meta.skip_db
+            && (!meta.is_primary_key || !auto_generated_pk)
+            && !is_timestamp
+            && meta.write
+            && (!meta.skip_input || meta.input_only);
+        let update_visible = !meta.is_relation
+            && !meta.skip_db
+            && !meta.is_primary_key
+            && !is_timestamp
+            && meta.write
+            && (!meta.skip_input || meta.input_only);
+        let output_visible = meta.read && !meta.input_only;
+        let search = meta
+            .search
+            .as_ref()
+            .map(|search| format!("{}:{:?}:{:?}", search.weight, search.alias, search.policy));
+        let search_json = meta
+            .search_json
+            .iter()
+            .map(|search| format!("{}:{}:{:?}", search.path, search.weight, search.policy))
+            .collect::<Vec<_>>();
+        let search_relation = meta.search_relation.as_ref().map(|search| {
+            format!(
+                "{:?}:{}:{}:{:?}:{}",
+                search.fields,
+                search.weight,
+                search.max_items,
+                search.policy,
+                search.propagate_change
+            )
+        });
+        field_signatures.push(format!(
+            concat!(
+                "field graphql={:?} rust={:?} type={:?}",
+                " output={} create={} update={}",
+                " relation={} relation_target={:?} relation_multiple={} persisted={}",
+                " primary_key={} private={} sensitive={} json={} spatial={}",
+                " filter={} filterable={:?} order={} sortable={} subscribe={}",
+                " read_policy={:?} write_policy={:?}",
+                " search={:?} search_json={:?}",
+                " search_relation={:?}"
+            ),
+            graphql_name,
+            rust_name,
+            rust_type,
+            output_visible,
+            create_visible,
+            update_visible,
+            meta.is_relation,
+            meta.relation_target,
+            meta.relation_multiple,
+            !meta.skip_db,
+            meta.is_primary_key,
+            meta.is_private,
+            meta.sensitive,
+            meta.is_json_field,
+            meta.spatial.is_some(),
+            meta.filter,
+            meta.filterable,
+            meta.order,
+            meta.sortable,
+            meta.subscribe,
+            meta.read_policy,
+            meta.write_policy,
+            search,
+            search_json,
+            search_relation,
+        ));
+    }
+    field_signatures.sort();
+
+    let mut signature = format!(
+        concat!(
+            "entity={:?}\nbackend={:?}\ntable={:?}\nplural={:?}\n",
+            "schema_policy={:?}\nauth={:?}\nappend_only={}\n",
+            "keyset={:?}\nupsert={:?}\nsearch={}\nfield_case={:?}\n"
+        ),
+        struct_name.to_string(),
+        backend.name(),
+        entity_meta.table_name.as_deref().unwrap_or("unknown"),
+        entity_meta
+            .plural_name
+            .clone()
+            .unwrap_or_else(|| format!("{}s", struct_name)),
+        entity_meta.schema_policy,
+        entity_meta.auth,
+        entity_meta.append_only,
+        entity_meta.keyset,
+        entity_meta.upsert,
+        entity_meta.search.is_some(),
+        selected_field_case_rule(),
+    );
+    for field in field_signatures {
+        signature.push_str(&field);
+        signature.push('\n');
+    }
+    Ok(signature)
+}
+
 pub(crate) fn generate_graphql_operations(
     input: &DeriveInput,
 ) -> syn::Result<proc_macro2::TokenStream> {
@@ -937,6 +1056,7 @@ pub(crate) fn generate_graphql_operations(
     let delete_many_mutation_name =
         apply_graphql_case(&format!("delete{}", plural_name), resolver_case);
     let subscription_name = apply_graphql_case(&format!("{}Changed", struct_name), resolver_case);
+    let keyset_query_name = apply_graphql_case(&format!("{}Keyset", plural_name), resolver_case);
     let entity_result_field_name = apply_graphql_case(&struct_name_str, field_case);
     let where_arg_name = apply_graphql_case("where", argument_case);
     let search_arg_name = apply_graphql_case("search", argument_case);
@@ -981,19 +1101,27 @@ pub(crate) fn generate_graphql_operations(
             pub type #key_type = #pk_type_ty;
         }
     };
-    let single_query_args = if has_composite_primary_key {
+    let single_query_argument_specs = if has_composite_primary_key {
         primary_key_fields
             .iter()
             .map(|field| {
-                let field_name = &field.field_name;
-                let field_type = &field.field_type;
                 let arg_name = apply_graphql_case(&field.graphql_name, argument_case);
-                quote! { #[graphql(name = #arg_name)] #field_name: #field_type, }
+                (field.field_name.clone(), field.field_type.clone(), arg_name)
             })
             .collect::<Vec<_>>()
     } else {
-        vec![quote! { #[graphql(name = #id_arg_name)] id: #pk_type, }]
+        vec![(
+            syn::Ident::new("id", proc_macro2::Span::call_site()),
+            pk_type_ty.clone(),
+            id_arg_name.clone(),
+        )]
     };
+    let single_query_args = single_query_argument_specs
+        .iter()
+        .map(|(field_name, field_type, arg_name)| {
+            quote! { #[graphql(name = #arg_name)] #field_name: #field_type, }
+        })
+        .collect::<Vec<_>>();
     let single_query_key_init = if has_composite_primary_key {
         let fields = primary_key_fields
             .iter()
@@ -2232,6 +2360,15 @@ pub(crate) fn generate_graphql_operations(
         .iter()
         .filter_map(|f| parse_field_metadata(f).ok())
         .any(|m| m.search.is_some() || !m.search_json.is_empty() || m.search_relation.is_some());
+    let resolver_schema_signature = generated_resolver_schema_signature(
+        struct_name,
+        fields,
+        &entity_meta,
+        backend,
+        graphql_rename_fields,
+        serde_rename_all,
+        auto_generated_pk,
+    )?;
     let relation_preload_list = if has_relations {
         quote! {
             let selection = ctx.field().selection_set().collect::<Vec<_>>();
@@ -3415,8 +3552,6 @@ pub(crate) fn generate_graphql_operations(
         (quote! {}, quote! {})
     };
     let keyset_graphql_method = if keyset_parts.is_some() {
-        let keyset_query_name =
-            apply_graphql_case(&format!("{}Keyset", plural_name), resolver_case);
         quote! {
             #[graphql(name = #keyset_query_name)]
             async fn keyset(
@@ -4938,12 +5073,224 @@ pub(crate) fn generate_graphql_operations(
         quote! {}
     };
 
+    let argument_descriptor = |graphql_name: &str, rust_type: proc_macro2::TokenStream| {
+        quote! {
+            ::graphql_orm::graphql::orm::GraphqlOperationArgumentDescriptor::generated(
+                #graphql_name,
+                stringify!(#rust_type),
+                <#rust_type as ::graphql_orm::async_graphql::InputType>
+                    ::qualified_type_name(),
+            )
+        }
+    };
+    let backend_name = backend.name();
+    let descriptor = |kind: proc_macro2::TokenStream,
+                      category: proc_macro2::TokenStream,
+                      field_name: &str,
+                      arguments: Vec<proc_macro2::TokenStream>,
+                      rust_result_type: proc_macro2::TokenStream| {
+        quote! {
+            ::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor::generated(
+                concat!(module_path!(), "::", stringify!(#struct_name)),
+                stringify!(#struct_name),
+                #table_name,
+                #backend_name,
+                #kind,
+                #category,
+                #field_name,
+                vec![#(#arguments),*],
+                stringify!(#rust_result_type),
+                <#rust_result_type as ::graphql_orm::async_graphql::OutputType>
+                    ::qualified_type_name(),
+                #resolver_schema_signature,
+            )
+        }
+    };
+
+    let mut operation_descriptors = Vec::new();
+    operation_descriptors.push(descriptor(
+        quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
+        quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::List },
+        &list_query_name,
+        vec![
+            argument_descriptor(&where_arg_name, quote! { Option<#where_input> }),
+            argument_descriptor(&order_by_arg_name, quote! { Option<Vec<#order_by_input>> }),
+            argument_descriptor(
+                &page_arg_name,
+                quote! { Option<::graphql_orm::graphql::orm::PageInput> },
+            ),
+        ],
+        quote! { #connection_type },
+    ));
+    if has_search {
+        operation_descriptors.push(descriptor(
+            quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
+            quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Search },
+            &search_query_name,
+            vec![
+                argument_descriptor(
+                    &search_arg_name,
+                    quote! { ::graphql_orm::graphql::filters::SearchInput },
+                ),
+                argument_descriptor(&where_arg_name, quote! { Option<#where_input> }),
+                argument_descriptor(
+                    &page_arg_name,
+                    quote! { Option<::graphql_orm::graphql::orm::PageInput> },
+                ),
+            ],
+            quote! { #search_connection_type },
+        ));
+    }
+    if keyset_parts.is_some() {
+        operation_descriptors.push(descriptor(
+            quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
+            quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::KeysetList },
+            &keyset_query_name,
+            vec![
+                argument_descriptor(&where_arg_name, quote! { Option<#where_input> }),
+                argument_descriptor(
+                    &page_arg_name,
+                    quote! { ::graphql_orm::graphql::pagination::KeysetPageInput },
+                ),
+            ],
+            quote! { #connection_type },
+        ));
+    }
+    let single_metadata_arguments = single_query_argument_specs
+        .iter()
+        .map(|(_, field_type, graphql_name)| {
+            argument_descriptor(graphql_name, quote! { #field_type })
+        })
+        .collect::<Vec<_>>();
+    operation_descriptors.push(descriptor(
+        quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
+        quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::SingleRead },
+        &single_query_name,
+        single_metadata_arguments,
+        quote! { Option<#struct_name> },
+    ));
+
+    let create_descriptor = || {
+        descriptor(
+            quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation },
+            quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Create },
+            &create_mutation_name,
+            vec![argument_descriptor(
+                &input_arg_name,
+                quote! { #graphql_create_input },
+            )],
+            quote! { #result_type },
+        )
+    };
+    let subscription_descriptor = || {
+        descriptor(
+            quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription },
+            quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Subscription },
+            &subscription_name,
+            vec![argument_descriptor(
+                &filter_arg_name,
+                quote! { Option<::graphql_orm::graphql::orm::SubscriptionFilterInput> },
+            )],
+            quote! { #changed_event },
+        )
+    };
+
+    if entity_meta.append_only {
+        operation_descriptors.push(create_descriptor());
+        operation_descriptors.push(subscription_descriptor());
+    } else if backend != BackendKind::Mssql
+        && !schema_policy_read_only
+        && !has_composite_primary_key
+    {
+        operation_descriptors.push(create_descriptor());
+        if graphql_upsert_enabled {
+            operation_descriptors.push(descriptor(
+                quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation },
+                quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Upsert },
+                &upsert_mutation_name,
+                vec![argument_descriptor(
+                    &input_arg_name,
+                    quote! { #graphql_create_input },
+                )],
+                quote! { #upsert_result_type },
+            ));
+        }
+        operation_descriptors.push(descriptor(
+            quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation },
+            quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Update },
+            &update_mutation_name,
+            vec![
+                argument_descriptor(&id_arg_name, quote! { #pk_type_ty }),
+                argument_descriptor(&input_arg_name, quote! { #graphql_update_input }),
+            ],
+            quote! { #result_type },
+        ));
+        operation_descriptors.push(descriptor(
+            quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation },
+            quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::UpdateMany },
+            &update_many_mutation_name,
+            vec![
+                argument_descriptor(&where_arg_name, quote! { Option<#where_input> }),
+                argument_descriptor(&input_arg_name, quote! { #graphql_update_input }),
+            ],
+            quote! { #update_many_result_type },
+        ));
+        operation_descriptors.push(descriptor(
+            quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation },
+            quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Delete },
+            &delete_mutation_name,
+            vec![argument_descriptor(&id_arg_name, quote! { #pk_type_ty })],
+            quote! { #result_type },
+        ));
+        operation_descriptors.push(descriptor(
+            quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation },
+            quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::DeleteMany },
+            &delete_many_mutation_name,
+            vec![argument_descriptor(
+                &where_arg_name,
+                quote! { Option<#where_input> },
+            )],
+            quote! { #delete_many_result_type },
+        ));
+        operation_descriptors.push(subscription_descriptor());
+    }
+
+    let operation_metadata_impl = quote! {
+        impl ::graphql_orm::graphql::orm::GraphqlOperationMetadata for #struct_name {
+            fn generated_graphql_operations(
+            ) -> &'static [::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor] {
+                static OPERATIONS: ::std::sync::OnceLock<
+                    Box<[::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor]>
+                > = ::std::sync::OnceLock::new();
+                OPERATIONS.get_or_init(|| {
+                    let mut operations = vec![
+                        #(#operation_descriptors),*
+                    ];
+                    operations.sort_by(|left, right| {
+                        (
+                            left.kind(),
+                            left.field_name(),
+                            left.category(),
+                        ).cmp(&(
+                            right.kind(),
+                            right.field_name(),
+                            right.category(),
+                        ))
+                    });
+                    operations.into_boxed_slice()
+                })
+            }
+        }
+    };
+
     if backend == BackendKind::Mssql
         || schema_policy_read_only
         || has_composite_primary_key
         || entity_meta.append_only
     {
         return Ok(quote! {
+            #operation_metadata_impl
+
             // ============================================================================
             // Connection/Edge Types (for pagination)
             // ============================================================================
@@ -5187,6 +5534,8 @@ pub(crate) fn generate_graphql_operations(
     }
 
     Ok(quote! {
+        #operation_metadata_impl
+
         // ============================================================================
         // Connection/Edge Types (for pagination)
         // ============================================================================
