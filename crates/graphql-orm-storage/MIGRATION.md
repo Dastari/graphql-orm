@@ -1,5 +1,18 @@
 # Migration Guide
 
+## Repository consolidation
+
+The source repository is now
+`https://github.com/Dastari/graphql-orm.git`. Git consumers should change the
+URL, retain `version = "0.6.0"`, and pin the same reviewed full monorepo
+revision as any direct `graphql-orm`, `graphql-orm-backup`, or
+`graphql-orm-ai` dependencies.
+
+This is a source-layout change only. It does not change storage keys, provider
+configuration, persisted metadata, or the Rust API, and requires no data
+migration. Regenerate `Cargo.lock`, confirm the old storage repository URL is
+absent, and rerun the selected provider checks.
+
 ## 0.5.0 to 0.6.0
 
 The `BlobStore`, `ObjectStorage`, and `StreamingObjectStore` trait contracts are

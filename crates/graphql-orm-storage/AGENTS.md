@@ -20,7 +20,7 @@ This crate is a reusable storage companion for applications that use `graphql-or
 
 ## Current Agent Handoff
 
-- Current crate version is `0.5.0`.
+- Current crate version is `0.6.0`.
 - The storage provider boundary is now the streaming `BlobStore` trait.
 - `ObjectStorage` extends `BlobStore`; custom providers must implement `BlobStore` first.
 - `BlobStore` includes byte ranges, conditional writes, server-side copy, write options, and paged listing.

@@ -576,13 +576,11 @@ intentional.
   not a candidate regression. `cargo-semver-checks` completes successfully for
   `0.56.0` to `0.57.0`; the pre-1.0 minor move is a breaking-version boundary,
   so compatibility lints are not applicable.
-- The dependency universe resolves exactly `graphql-orm` and
-  `graphql-orm-macros` 0.16.0 at
-  `dd68a001f47f04178bf3389dd47ee952faa6ecf0`, plus `agql-auth` 0.12.0 at
-  `3f3b0c5365adfbe436514a681d977b600991b797`, and
-  `graphql-orm-backup` 0.6.0 at
-  `6a9ccedd76fd140c351c8861de72c4cb7c99feea`, with one
-  runtime/macro/auth/backup/storage source and public type universe.
+- The dependency universe resolves `graphql-orm` and `graphql-orm-macros`
+  0.16.0, `graphql-orm-backup` 0.6.0, and `graphql-orm-storage` 0.6.0 through
+  one workspace source and public type universe. External `agql-auth` 0.12.0
+  remains pinned at
+  `3f3b0c5365adfbe436514a681d977b600991b797`.
 - Pushed `0.49.0`/schema `0.46.0` and PR CI run `29495696905` are fully green.
   The `0.51.0`/schema `0.47.0` dependency checkpoint is committed and pushed
   at `21f11e46f5e7b221959844cacba7f5ad81841e36`; downstream draft PR #2 CI run

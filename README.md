@@ -1,7 +1,11 @@
-# graphql-orm
+# GraphQL ORM workspace
 
 `graphql-orm` generates async-graphql query/mutation types, typed filters, ordering, pagination,
 relation loading, repository helpers, schema metadata, and migration plans from Rust entity structs.
+
+This repository also contains the independently consumable AI, backup, and
+storage companion crates. Applications depend only on the packages they need;
+workspace membership does not enable the companion crates as ORM features.
 
 It is designed for two related use cases:
 
@@ -53,8 +57,8 @@ Select exactly the backend support your service needs:
 graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.16.0", default-features = false, features = ["sqlite"] }
 ```
 
-GitHub with an exact full revision is the only supported distribution method. Neither crate is
-published to crates.io. Replace the placeholder with the reviewed release commit (the version tag
+GitHub with an exact full revision is the only supported distribution method. The workspace packages are
+not published to crates.io. Replace the placeholder with the reviewed release commit (the version tag
 is an identity aid, not a substitute for `rev`). The optional `auth-agql` bridge likewise resolves
 the exact upstream revision `3f3b0c5365adfbe436514a681d977b600991b797`.
 
@@ -245,6 +249,7 @@ batched relation query per relation layer, not N+1 or nested N*N queries.
 - [Bounded append-only retention maintenance](docs/retention-maintenance.md)
 - [Backup runtime API](docs/backup.md)
 - [Schema modules and fenced leases](docs/schema-modules-and-leases.md)
+- [Monorepo consolidation and consumer migration](docs/monorepo-consolidation.md)
 - [Release notes](docs/release-notes.md)
 - [Development and test commands](docs/development.md)
 
@@ -257,6 +262,9 @@ available for managed schemas. SQL Server is currently read/query-only by design
 
 - `crates/graphql-orm` - runtime crate used by applications
 - `crates/graphql-orm-macros` - proc-macro crate re-exported by `graphql-orm`
+- `crates/graphql-orm-storage` - provider-neutral object storage primitives
+- `crates/graphql-orm-backup` - backup and restore orchestration
+- `crates/graphql-orm-ai` - project-agnostic AI agent runtime
 
 Applications should depend on `graphql-orm` and use the re-exported macros from
 `graphql_orm::prelude::*`.

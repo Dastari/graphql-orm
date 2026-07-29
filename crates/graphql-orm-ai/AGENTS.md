@@ -16,32 +16,20 @@ These rules apply to every human or automated change in this repository.
   Authentication, principal lifecycle, assurance, and reusable delegation
   primitives belong in `agql-auth`.
 
-## Repository ownership and upstream handoffs
+## Workspace ownership and upstream handoffs
 
-- The agent working in this repository owns only `graphql-orm-ai`. Treat
-  sibling repositories, including `agql-auth` and `graphql-orm`, as read-only.
-  Do not edit, format, commit, rebase, merge, stash, clean, switch branches, or
-  otherwise mutate their worktrees or GitHub branches.
-- Read-only inspection of sibling source, tags, PRs, and dependency metadata is
-  allowed when needed to define an integration requirement.
-- Never implement an upstream change from this repository, regardless of its
-  size or urgency. Every required change to `graphql-orm`, `agql-auth`, or any
-  other upstream crate must be expressed as a copy-ready prompt in `.handoffs/`
-  and assigned to a separate owning agent. Until that owner returns a reviewed
-  final merge or release SHA, this repository remains read-only and blocked on
-  that upstream requirement.
-- When a reusable upstream change is required, stage a copy-ready prompt in
-  `.handoffs/` for the owning repository agent. That directory is deliberately
-  ignored so temporary coordination state is not published with the crate.
-- Use one owning agent and one isolated branch/worktree per repository. An
-  owning agent may create its repository's implementation PR; downstream
-  agents wait for the reviewed upstream merge and final commit SHA.
-- After an upstream merge, update exact dependency revisions only in this
-  repository, then regenerate `Cargo.lock`, verify one dependency universe,
-  update release documentation, and rerun the full matrix.
-- A squash or rebase merge invalidates downstream pins to PR-head commits. A
-  merge commit may retain ancestry, but downstream crates should still repin to
-  the reviewed final `main` or release-tag commit before merging.
+- `graphql-orm-ai`, `graphql-orm-backup`, `graphql-orm-storage`,
+  `graphql-orm`, and `graphql-orm-macros` are packages in one workspace.
+  Cross-crate changes are permitted when a reusable contract belongs in a
+  sibling package; keep the dependency direction acyclic and test every
+  affected package in the same change.
+- Internal packages use workspace path dependencies and one root lockfile.
+  Do not reintroduce Git dependencies between workspace packages.
+- `agql-auth` remains an external repository. Treat it as read-only unless a
+  task explicitly authorizes work there. Express any required external change
+  as a reviewed handoff and wait for a final merge or release SHA.
+- Keep package-specific implementation and security rules in the owning
+  package even when a change spans the workspace.
 
 ## Database and integration safety
 

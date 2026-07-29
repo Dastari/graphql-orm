@@ -1,5 +1,12 @@
 [workspace]
 members = [
+  "crates/graphql-orm-ai",
+  "crates/graphql-orm-backup",
+  "crates/graphql-orm",
+  "crates/graphql-orm-macros",
+  "crates/graphql-orm-storage",
+]
+default-members = [
   "crates/graphql-orm",
   "crates/graphql-orm-macros",
 ]
@@ -15,9 +22,13 @@ license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm"
 
 [workspace.dependencies]
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "3f3b0c5365adfbe436514a681d977b600991b797", version = "0.12.0" }
 async-graphql = { version = "7", features = ["dataloader", "uuid"] }
 convert_case = "0.7"
 futures = "0.3"
+graphql-orm = { path = "crates/graphql-orm", version = "0.16.0", default-features = false }
+graphql-orm-backup = { path = "crates/graphql-orm-backup", version = "0.6.0", default-features = false }
+graphql-orm-storage = { path = "crates/graphql-orm-storage", version = "0.6.0", default-features = false }
 proc-macro2 = "1"
 quote = "1"
 serde = { version = "1", features = ["derive"] }

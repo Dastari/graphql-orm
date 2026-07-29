@@ -30,15 +30,17 @@ release/base branch. Persistent schema changes also require a new
 
 ## Release gate
 
-1. Confirm one exact reviewed dependency universe and full Git revisions for
-   unpublished sibling crates.
+1. Confirm one workspace path/source universe for internal packages and the
+   exact reviewed external `agql-auth` revision.
 2. Run `scripts/check-release-policy.sh <release-base>`.
 3. Run formatting, tests, warnings-denied Clippy, warnings- and
    missing-docs-denied Rustdoc, PascalCase SDL, and compile-only backend checks
    from `docs/development.md`.
-4. Run `cargo semver-checks --baseline-rev <release-base>
-   --default-features` against the reviewed baseline. Do not allow its ordinary
-   all-compatible-features heuristic to combine mutually exclusive backends.
+4. Run `cargo semver-checks --manifest-path
+   crates/graphql-orm-ai/Cargo.toml --baseline-rev <release-base>
+   --default-features` against the reviewed baseline. Do not allow its
+   ordinary all-compatible-features heuristic to combine mutually exclusive
+   backends.
 5. Review GraphQL SDL, schema-module metadata/fingerprint, migration and restore
    behavior, backup inclusion, and public error changes.
 6. Confirm no test used a live database or real consumer integration.

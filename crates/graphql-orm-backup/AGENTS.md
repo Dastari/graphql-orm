@@ -47,7 +47,7 @@ This crate is a reusable backup and restore companion for applications that use 
 - Snapshot manifests and repository key layout are provider-independent and
   unchanged in 0.4.0.
 - Run the managed real-Samba suite with
-  `/home/toby/dev/graphql-orm-storage/tests/samba/run.sh`; it includes this
-  crate's complete SMB snapshot lifecycle test.
+  `crates/graphql-orm-storage/tests/samba/run.sh` from the workspace root; it
+  includes this crate's complete SMB snapshot lifecycle test.
 - Read `docs/smb.md`, `docs/digitise-native-smb.md`, and `MIGRATION.md` before
   changing provider integration or host guidance.

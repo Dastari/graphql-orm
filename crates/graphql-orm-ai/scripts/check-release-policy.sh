@@ -7,12 +7,25 @@ if [[ $# -ne 1 ]]; then
 fi
 
 base_ref=$1
-git cat-file -e "${base_ref}^{commit}" 2>/dev/null || {
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+crate_dir=$(cd -- "${script_dir}/.." && pwd)
+repository_root=$(git -C "${crate_dir}" rev-parse --show-toplevel)
+crate_prefix=${crate_dir#"${repository_root}/"}
+
+git -C "${repository_root}" cat-file -e "${base_ref}^{commit}" 2>/dev/null || {
   echo "release-policy: base revision does not exist: ${base_ref}" >&2
   exit 2
 }
-base=$(git merge-base "${base_ref}" HEAD)
-changed=$(git diff --name-only "${base}"...HEAD)
+base=$(git -C "${repository_root}" merge-base "${base_ref}" HEAD)
+
+if ! git -C "${repository_root}" cat-file -e \
+  "${base}:${crate_prefix}/Cargo.toml" 2>/dev/null; then
+  echo "release-policy: package is new relative to the base revision"
+  exit 0
+fi
+
+changed=$(git -C "${repository_root}" diff --name-only \
+  --relative="${crate_prefix}" "${base}"...HEAD -- "${crate_prefix}")
 
 if [[ -z "${changed}" ]]; then
   echo "release-policy: no committed changes"
@@ -42,8 +55,10 @@ if [[ "${public_changed}" == true ]]; then
     exit 1
   }
 
-  current_version=$(awk -F ' *= *' '/^version = / {gsub(/"/, "", $2); print $2; exit}' Cargo.toml)
-  baseline_version=$(git show "${base}:Cargo.toml" | awk -F ' *= *' '/^version = / {gsub(/"/, "", $2); print $2; exit}')
+  current_version=$(awk -F ' *= *' '/^version = / {gsub(/"/, "", $2); print $2; exit}' "${crate_dir}/Cargo.toml")
+  baseline_version=$(git -C "${repository_root}" show \
+    "${base}:${crate_prefix}/Cargo.toml" |
+    awk -F ' *= *' '/^version = / {gsub(/"/, "", $2); print $2; exit}')
   if [[ -z "${current_version}" || -z "${baseline_version}" ]]; then
     echo "release-policy: could not read current/baseline package version" >&2
     exit 1
@@ -64,8 +79,12 @@ if grep -Eq '^src/persistence\.rs$' <<<"${changed}"; then
     echo "release-policy: persistence changes require MIGRATION.md" >&2
     exit 1
   }
-  current_schema=$(sed -n 's/.*AI_SCHEMA_MODULE_VERSION: &str = "\([^"]*\)".*/\1/p' src/persistence.rs)
-  baseline_schema=$(git show "${base}:src/persistence.rs" | sed -n 's/.*AI_SCHEMA_MODULE_VERSION: &str = "\([^"]*\)".*/\1/p')
+  current_schema=$(sed -n \
+    's/.*AI_SCHEMA_MODULE_VERSION: &str = "\([^"]*\)".*/\1/p' \
+    "${crate_dir}/src/persistence.rs")
+  baseline_schema=$(git -C "${repository_root}" show \
+    "${base}:${crate_prefix}/src/persistence.rs" |
+    sed -n 's/.*AI_SCHEMA_MODULE_VERSION: &str = "\([^"]*\)".*/\1/p')
   if [[ -n "${baseline_schema}" && "${current_schema}" == "${baseline_schema}" ]]; then
     echo "release-policy: persistence changes require a new schema-module version" >&2
     exit 1

@@ -1,66 +1,53 @@
-# Upstream Contribution Workflow
+# Workspace Contribution Workflow
 
-`graphql-orm-ai` consumes reusable contracts from `agql-auth` and
-`graphql-orm`, but its agent does not mutate either sibling repository. This
-keeps concurrent agents from overwriting work, committing another agent's
-uncommitted files, or merging a dependency revision that downstream crates no
-longer resolve.
+`graphql-orm-ai`, `graphql-orm-backup`, `graphql-orm-storage`, `graphql-orm`,
+and `graphql-orm-macros` now share one repository. A reusable internal contract
+and all affected consumers should be changed, reviewed, and tested on one
+workspace branch.
+
+`agql-auth` remains external. Changes to it still require a separately reviewed
+handoff and an exact final revision.
 
 ## Ownership model
 
-Assign one owning agent to each repository. The owner alone may edit that
-repository, change its branch, commit, push, update its PR, or merge it. When
-multiple tasks target one repository, serialize them onto the owner's branch
-or use separate worktrees and PRs with an explicit integration owner.
+Use one integration owner for a cross-crate change. Package-focused agents may
+work in separate Git worktrees, but must not edit the same files or merge
+independently into the integration branch. The integration owner resolves
+dependency order, runs the combined matrix, and publishes one candidate
+monorepo revision.
 
-Downstream agents may inspect upstream source and GitHub state read-only. They
-express required changes as copy-ready prompts in the ignored `.handoffs/`
-directory and wait for the upstream owner to return a reviewed final commit
-SHA.
+Keep implementation in the package that owns the reusable contract:
 
-This delegation is unconditional. An agent owning `graphql-orm-ai` never
-implements, formats, commits, rebases, merges, or otherwise mutates an upstream
-change, even when the change is small or apparently mechanical. Every upstream
-implementation request must be staged as a copy-ready `.handoffs/` prompt for a
-separately assigned owning agent. Read-only inspection and consuming an already
-reviewed final upstream SHA are the only permitted upstream interactions.
+1. storage primitives belong in `graphql-orm-storage`;
+2. backup/restore orchestration belongs in `graphql-orm-backup`;
+3. database, schema, and generated GraphQL contracts belong in `graphql-orm`
+   or `graphql-orm-macros`;
+4. AI runtime and provider behavior belongs in `graphql-orm-ai`; and
+5. authentication and principal lifecycle remain external in `agql-auth`.
+
+Internal packages use path dependencies and one root lockfile. Do not create
+internal Git pins or wait for separate repository SHAs.
 
 ## Dependency sequence
 
-For the current stack, merge and repin from the bottom upward:
+Implement and validate from the bottom of the affected dependency graph:
 
-1. The `agql-auth` owner completes its versioned PR, documentation, migration
-   guidance, Rustdoc, tests, and merge.
-2. The owner reports the final `main` or release-tag commit SHA and merge
-   strategy.
-3. The `graphql-orm` owner updates its exact `agql-auth` revision, lockfile,
-   README, changelog, migration guide, and compatibility checks, then merges.
-4. The owner reports the final `graphql-orm` commit SHA.
-5. The `graphql-orm-ai` owner repins both dependencies, regenerates the
-   lockfile, verifies one Cargo type/source universe, and runs its full release
-   matrix before merging.
+1. storage;
+2. backup;
+3. ORM/runtime macros where applicable; and
+4. AI.
 
-Do not merge downstream first and hope a moving branch remains compatible.
-Exact full Git revisions are intentional review boundaries.
+This order is a testing sequence, not a requirement for separate commits or
+pull requests. The final candidate must resolve one source for every internal
+package.
 
-## Merge strategy and exact revisions
-
-If a downstream manifest pins a commit from an open upstream PR:
-
-- a squash or rebase merge creates a different commit, so the downstream pin
-  must be replaced;
-- a merge commit normally retains the PR commits as ancestors, but the
-  downstream crate should still pin the reviewed merge or release-tag commit;
-  and
-- the upstream owner must report the final SHA instead of asking downstream
-  agents to infer it from a branch name.
-
-Tags are useful release names, but Git dependencies should keep a reviewed
-full commit revision while these crates remain Git-only.
+For an external `agql-auth` change, merge and record the reviewed auth revision
+first, update the root workspace dependency, then run the affected ORM and AI
+matrix.
 
 ## Shared-machine safety
 
-- Never run write commands in a sibling worktree owned by another agent.
+- Never run write commands in a worktree owned by another agent.
 - Never stage all files in a dirty worktree without proving ownership of every
   change.
 - Never resolve conflicts by discarding, stashing, or resetting another
@@ -74,14 +61,15 @@ full commit revision while these crates remain Git-only.
 
 Every upstream prompt should state:
 
-- the exact repository, base branch, existing PR/branch, and owning boundary;
+- the exact external repository, base branch, existing PR/branch, and owning
+  boundary;
 - the reusable problem and required public contract, without consumer-domain
   entities or policies;
 - compatibility and security invariants;
 - expected version, README, changelog, migration, and Rustdoc updates;
 - required tests, backend compile checks, and database isolation;
 - whether the owner should merge; and
-- the final information downstream needs: merge strategy, version, final SHA,
-  and any migration or feature changes.
+- the final information the workspace needs: merge strategy, version, final
+  SHA, and any migration or feature changes.
 
 The downstream agent resumes only after receiving that final handoff.

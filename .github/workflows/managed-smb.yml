@@ -1,0 +1,21 @@
+name: Managed SMB
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/graphql-orm-backup/**"
+      - "crates/graphql-orm-storage/**"
+      - ".github/workflows/managed-smb.yml"
+  workflow_dispatch:
+
+jobs:
+  samba:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: crates/graphql-orm-storage/tests/samba/run.sh

@@ -5,8 +5,8 @@ edition = "2024"
 authors = ["Toby Martin <toby@dastari.net>"]
 description = "Project-agnostic AI agent runtime for graphql-orm applications"
 license = "MIT"
-repository = "https://github.com/Dastari/graphql-orm-ai"
-homepage = "https://github.com/Dastari/graphql-orm-ai"
+repository = "https://github.com/Dastari/graphql-orm"
+homepage = "https://github.com/Dastari/graphql-orm"
 documentation = "https://docs.rs/graphql-orm-ai"
 readme = "README.md"
 keywords = ["ai", "graphql", "agents", "orm", "async-graphql"]
@@ -41,15 +41,15 @@ graphql-case-pascal = [
 ]
 
 [dependencies]
-agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "3f3b0c5365adfbe436514a681d977b600991b797", version = "0.12.0" }
+agql-auth = { workspace = true }
 async-graphql = { version = "7", features = ["uuid"] }
 async-stream = "0.3"
 async-trait = "0.1"
 base64 = { version = "0.22", optional = true }
 futures = "0.3"
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "dd68a001f47f04178bf3389dd47ee952faa6ecf0", version = "0.16.0", default-features = false }
-graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm-backup.git", rev = "6a9ccedd76fd140c351c8861de72c4cb7c99feea", version = "0.6.0", optional = true, default-features = false }
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm-storage.git", rev = "f1a1f06483d5fd3a0b8fd17f013b3ad4dd9849c5", version = "0.5.0", default-features = false }
+graphql-orm = { workspace = true }
+graphql-orm-backup = { workspace = true, optional = true }
+graphql-orm-storage = { workspace = true }
 hex = "0.4"
 hmac = { version = "0.12", optional = true }
 jsonschema = { version = "0.47", default-features = false }

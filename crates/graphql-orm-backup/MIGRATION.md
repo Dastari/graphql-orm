@@ -1,5 +1,19 @@
 # Migration Guide
 
+## Repository consolidation on the 0.6.0 development line
+
+The source repository is now
+`https://github.com/Dastari/graphql-orm.git`. Git consumers should use that URL
+for backup, ORM, storage, and AI packages and pin every selected package to one
+reviewed full monorepo revision.
+
+The consolidated workspace aligns this crate with
+`graphql-orm-storage` 0.6.0 while retaining `graphql-orm` 0.16.0. The move
+does not change the backup API, snapshot format, repository key layout,
+restore preflight, or persisted data. Regenerate `Cargo.lock`, verify that the
+old backup and storage repository URLs are absent, and rerun the selected
+repository and ORM conformance checks.
+
 ## 0.5.x to 0.6.0
 
 Version 0.6.0 moves the optional ORM adapter to `graphql-orm` 0.16.0 at
@@ -16,7 +30,7 @@ authorization remains a host responsibility. Hosts that enable
 
 ```toml
 graphql-orm-backup = {
-    git = "https://github.com/Dastari/graphql-orm-backup.git",
+    git = "https://github.com/Dastari/graphql-orm.git",
     rev = "<reviewed-full-40-character-commit-sha>",
     version = "0.6.0",
     default-features = false,

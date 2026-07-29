@@ -3,32 +3,32 @@
 ## Default checks
 
 ```bash
-cargo fmt --check
-cargo test --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness
-cargo clippy --all-targets --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness -- -D warnings
+cargo fmt -p graphql-orm-ai --check
+cargo test -p graphql-orm-ai --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness
+cargo clippy -p graphql-orm-ai --all-targets --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness -- -D warnings
 RUSTDOCFLAGS="-D warnings -D missing_docs" \
-  cargo doc --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness --no-deps
+  cargo doc -p graphql-orm-ai --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness --no-deps
 ```
 
 Check the optional naming contract independently:
 
 ```bash
-cargo test --features graphql-case-pascal --test graphql_naming
+cargo test -p graphql-orm-ai --features graphql-case-pascal --test graphql_naming
 RUSTDOCFLAGS="-D warnings -D missing_docs" \
-  cargo doc --features graphql-case-pascal --no-deps
+  cargo doc -p graphql-orm-ai --features graphql-case-pascal --no-deps
 ```
 
 Compile other backends without connecting to them:
 
 ```bash
-cargo check --no-default-features --features postgres
-cargo check --no-default-features --features mssql
+cargo check -p graphql-orm-ai --no-default-features --features postgres
+cargo check -p graphql-orm-ai --no-default-features --features mssql
 ```
 
 Run PostgreSQL behavioral parity only through the self-owning harness:
 
 ```bash
-cargo test --no-default-features --features postgres,provider-openai \
+cargo test -p graphql-orm-ai --no-default-features --features postgres,provider-openai \
   --test postgres_parity -- --test-threads=1
 ```
 
@@ -68,13 +68,13 @@ new schema-module version for persistence changes.
 On a committed branch, compare against the reviewed base:
 
 ```bash
-scripts/check-release-policy.sh <base-revision>
-cargo semver-checks --baseline-rev <base-revision> --default-features
+crates/graphql-orm-ai/scripts/check-release-policy.sh <base-revision>
+cargo semver-checks --manifest-path crates/graphql-orm-ai/Cargo.toml \
+  --baseline-rev <base-revision> --default-features
 ```
 
 CI additionally runs `cargo-semver-checks` against a baseline worktree. The
-current and baseline manifests each resolve their own reviewed exact Git
-dependency revisions; CI does not rewrite either universe to local sibling
-paths. The explicit default-feature selection is required: the backend
-features are mutually exclusive, while the tool's ordinary heuristic attempts
-to enable every feature at once.
+current and baseline manifests resolve their matching workspace dependency
+sets independently. The explicit default-feature selection is required: the
+backend features are mutually exclusive, while the tool's ordinary heuristic
+attempts to enable every feature at once.

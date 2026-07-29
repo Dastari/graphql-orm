@@ -301,19 +301,18 @@ exclusive.
 
 ## Integration outline
 
-Add the crate from a reviewed revision using the same dependency universe as
-the matching `graphql-orm` and `agql-auth` releases:
+Add the crate from a reviewed monorepo revision:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm-ai", rev = "<reviewed-commit>", features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.57.0", features = ["sqlite"] }
 ```
 
-> **Pre-release dependency note:** this source snapshot pins the reviewed final
-> `graphql-orm` 0.16.0, `graphql-orm-backup` 0.6.0, `agql-auth` 0.12.0, and
-> `graphql-orm-storage` 0.5.0 commits exactly. Keep the full revisions from
-> this manifest; do not replace the shared contracts with moving branches or
-> application-specific substitutes.
+> **Pre-release dependency note:** this source snapshot resolves
+> `graphql-orm` 0.16.0, `graphql-orm-backup` 0.6.0, and
+> `graphql-orm-storage` 0.6.0 from one workspace revision. `agql-auth` 0.12.0
+> remains an exact external dependency. Direct Git consumers of more than one
+> workspace package must give each package the same reviewed monorepo `rev`.
 
 A host then:
 

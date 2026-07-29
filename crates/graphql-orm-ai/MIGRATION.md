@@ -4,6 +4,23 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: repository consolidation (crate 0.57.0; schema remains 0.51.0)
+
+The source repository is now
+`https://github.com/Dastari/graphql-orm.git`. Git consumers should use that URL
+for AI, backup, storage, and ORM packages and pin every selected package to the
+same reviewed full monorepo revision.
+
+The consolidated workspace resolves `graphql-orm` 0.16.0,
+`graphql-orm-backup` 0.6.0, and `graphql-orm-storage` 0.6.0 through workspace
+paths. `agql-auth` 0.12.0 remains an exact external dependency. Remove old
+internal Git URLs and local patches, regenerate `Cargo.lock`, verify one source
+for every internal package, and rerun the complete backend/provider matrix.
+
+This source-layout and storage-dependency alignment does not change AI Rust
+APIs, GraphQL SDL, persistent entities, backup policy, or restore readiness.
+AI schema module 0.51.0 remains current and no data migration is required.
+
 ## Unreleased: backup 0.6 compatibility checkpoint (crate 0.56.0 to 0.57.0; schema 0.50.0 to 0.51.0)
 
 Update `graphql-orm-backup` to the exact reviewed 0.6.0 merge at
@@ -33,9 +50,8 @@ This checkpoint does not expose a production restore API and does not open the
 runtime after database/object import. The remaining downstream work is still
 to collect facts from restored rows, apply generated-ORM repairs, revalidate
 all invariants, record the exact recovery epoch, and open readiness only for a
-zero-fatal applied epoch. Repository consolidation of the `graphql-orm-*`
-packages may change the dependency source layout; repin only to a reviewed
-final owning-repository commit and rerun the full matrix.
+zero-fatal applied epoch. The repository consolidation section above supersedes
+this checkpoint's standalone-repository source pins.
 
 ## Unreleased: generated resolver-operation bindings (crate 0.55.0 to 0.56.0; schema remains 0.50.0)
 

@@ -23,7 +23,11 @@ Default local filesystem support:
 
 ```toml
 [dependencies]
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm-storage" }
+graphql-orm-storage = {
+    git = "https://github.com/Dastari/graphql-orm.git",
+    rev = "<reviewed-full-40-character-commit-sha>",
+    version = "0.6.0",
+}
 ```
 
 Provider-specific builds:
@@ -31,7 +35,9 @@ Provider-specific builds:
 ```toml
 [dependencies]
 graphql-orm-storage = {
-    git = "https://github.com/Dastari/graphql-orm-storage",
+    git = "https://github.com/Dastari/graphql-orm.git",
+    rev = "<reviewed-full-40-character-commit-sha>",
+    version = "0.6.0",
     default-features = false,
     features = ["s3", "azure"],
 }

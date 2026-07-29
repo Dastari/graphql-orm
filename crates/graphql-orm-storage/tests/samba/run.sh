@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+STORAGE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+WORKSPACE_ROOT="$(cd "$STORAGE_ROOT/../.." && pwd)"
 NORMAL=graphql-orm-smb-test
 ENCRYPTED=graphql-orm-smb-encrypted
 CONSTRAINED=graphql-orm-smb-constrained
@@ -31,7 +32,7 @@ docker run -d --rm --name "$CONSTRAINED" -p 1447:445 dperson/samba:latest \
 
 sleep 2
 
-cd "$ROOT"
+cd "$STORAGE_ROOT"
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT=1445 SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
   cargo test --features smb --test smb_integration \
@@ -63,12 +64,12 @@ SMB_TEST_EXPECT_MAX_WRITE=65536 \
   cargo test --features smb --test smb_integration \
   samba_constrained_max_write_handles_oversized_input_chunk -- --ignored --nocapture
 
-cd "$ROOT/../graphql-orm-backup"
+cd "$WORKSPACE_ROOT/crates/graphql-orm-backup"
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT=1445 SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
   cargo test --no-default-features --features smb --test smb_repository -- --ignored --nocapture
 
-cd "$ROOT"
+cd "$STORAGE_ROOT"
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT=1445 SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
 SMB_TEST_CONTAINER_NAME="$NORMAL" \

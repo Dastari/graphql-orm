@@ -1,6 +1,6 @@
 # GraphQL ORM monorepo consolidation
 
-Status: proposed cutover plan
+Status: consolidation implementation in progress
 
 Scope: `graphql-orm`, `graphql-orm-ai`, `graphql-orm-backup`, and
 `graphql-orm-storage`
@@ -10,6 +10,38 @@ Out of scope: `agql-auth`, which remains an external dependency
 This document is both the consolidation plan and the migration guide for
 projects that consume these crates. It should be updated with the final
 monorepo commit and crate versions before the old repositories are archived.
+
+## Implementation record
+
+The local consolidation candidate uses these immutable source checkpoints:
+
+| Package | Old-repository source commit | Filtered history tip |
+| --- | --- | --- |
+| `graphql-orm` / macros | `dd68a001f47f04178bf3389dd47ee952faa6ecf0` | Existing monorepo history |
+| `graphql-orm-storage` 0.6.0 | `05786fdd7ec20397bcd9f6665cee5b5f5b076703` | `0fa2115c2c2a33170640af1db5b1e9cf63eba19f` |
+| `graphql-orm-backup` 0.6.0 | `6a9ccedd76fd140c351c8861de72c4cb7c99feea` | `82c1f26a5b65cf8303322c2cb05116dc9a2bafea` |
+| `graphql-orm-ai` 0.57.0 | `d35e3d68d86e77d9aedb62b64842fc9a5f2701f3` | `bd36fd5b5a14d833e3b164da0dc466bdf47ed3e3` |
+
+Every tracked file was byte-compared with its source checkpoint immediately
+after import. The candidate then converted internal dependencies to workspace
+paths, aligned backup and AI with storage 0.6.0, and generated one root
+lockfile.
+
+Local validation passed for:
+
+- workspace formatting and dependency-source identity;
+- complete default tests for ORM, storage, and backup with SQLite conformance;
+- the AI provider/local-harness matrix and PascalCase contract;
+- PostgreSQL and MSSQL compile lanes;
+- storage S3/Azure-placeholder and native SMB compile lanes;
+- warnings-denied Clippy and Rustdoc for all packages;
+- public API SemVer comparison against all three imported source tips;
+- AI's test-owned PostgreSQL behavioral parity; and
+- the managed Samba matrix, including encrypted/constrained connections,
+  backup lifecycle and locking, cancellation, and reconnect.
+
+The first supported consumer baseline remains the reviewed merge commit, not
+any intermediate commit on the consolidation branch.
 
 ## Decision
 
@@ -141,22 +173,20 @@ commands after all agents have stopped.
 | --- | --- | --- |
 | `graphql-orm` | `main` at `dd68a001f47f04178bf3389dd47ee952faa6ecf0`, clean | Revalidate and use as the monorepo base |
 | `graphql-orm-backup` | `main` at `6a9ccedd76fd140c351c8861de72c4cb7c99feea`, clean | Revalidate after the storage decision |
-| `graphql-orm-storage` | `main` at `05786fdd7ec20397bcd9f6665cee5b5f5b076703`, clean and synchronized with `origin/main`; version `0.6.0` | Branch disposition resolved by [PR #1](https://github.com/Dastari/graphql-orm-storage/pull/1); record final checks and use this `main` commit as the storage import candidate |
-| `graphql-orm-ai` | `codex/openai-background-reconciliation-design` at `d35e3d68d86e77d9aedb62b64842fc9a5f2701f3`, clean, synchronized with its upstream, and 16 commits ahead of `main`; crate/schema versions `0.57.0`/`0.51.0` | Treat this as the tested pause checkpoint; explicitly merge it to old-repository `main`, retain it for later, or close it before import |
+| `graphql-orm-storage` | `main` at `05786fdd7ec20397bcd9f6665cee5b5f5b076703`, clean and synchronized with `origin/main`; version `0.6.0` | Branch disposition resolved by [PR #1](https://github.com/Dastari/graphql-orm-storage/pull/1); imported as the storage source baseline |
+| `graphql-orm-ai` | `main` at `d35e3d68d86e77d9aedb62b64842fc9a5f2701f3`, clean and synchronized with `origin/main`; crate/schema versions `0.57.0`/`0.51.0` | Tested pause checkpoint fast-forwarded to old-repository `main` and imported as the AI source baseline |
 
 Storage PR #1 rebased the hardening work onto `main`; the resulting tree
 exactly matches hardening commit
-`10b63083467f1877a88b7266af564c88c596105e`. The remaining observed branch
-disposition blocker is AI. Do not import AI until that decision is made:
-importing whichever branch happens to be checked out would create an
-ambiguous canonical history.
+`10b63083467f1877a88b7266af564c88c596105e`. All observed source branch
+dispositions are resolved.
 
 The AI checkpoint reports passing tests, Clippy, Rustdoc, PascalCase, SemVer,
 package review, alternate-backend checks, and owned PostgreSQL parity. It pins
 `graphql-orm-backup` 0.6.0 at
 `6a9ccedd76fd140c351c8861de72c4cb7c99feea`. These results make the commit a
-credible cutover candidate, but do not replace the branch-disposition and
-final-`main` steps in Phase 1.
+credible cutover candidate; it was promoted to old-repository `main` before
+history import.
 
 ## Phase 1: choose and record final source commits
 

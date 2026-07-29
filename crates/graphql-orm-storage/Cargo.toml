@@ -3,7 +3,7 @@ name = "graphql-orm-storage"
 version = "0.6.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/Dastari/graphql-orm-storage"
+repository = "https://github.com/Dastari/graphql-orm"
 description = "Provider-neutral object storage primitives for graphql-orm applications"
 
 [features]

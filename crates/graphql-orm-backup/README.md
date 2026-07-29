@@ -35,7 +35,7 @@ backup layout, checksums, repository writes, restore ordering, and operational s
 ```toml
 [dependencies]
 graphql-orm-backup = {
-    git = "https://github.com/Dastari/graphql-orm-backup.git",
+    git = "https://github.com/Dastari/graphql-orm.git",
     rev = "<reviewed-full-40-character-commit-sha>",
     version = "0.6.0"
 }
@@ -43,15 +43,15 @@ graphql-orm-backup = {
 
 GitHub with an exact reviewed revision is the supported distribution method.
 Do not depend on a moving branch. Applications that also depend directly on
-`graphql-orm` or `graphql-orm-storage` must use the same canonical Git URLs and
-revisions as this crate so Cargo resolves one instance of each shared type.
+`graphql-orm` or `graphql-orm-storage` must use this monorepo URL and the same
+revision as this crate so Cargo resolves one instance of each shared type.
 
 The default `local` feature enables `LocalBackupRepository`.
 
 ```toml
 [dependencies]
 graphql-orm-backup = {
-    git = "https://github.com/Dastari/graphql-orm-backup.git",
+    git = "https://github.com/Dastari/graphql-orm.git",
     rev = "<reviewed-full-40-character-commit-sha>",
     version = "0.6.0",
     default-features = false
@@ -61,18 +61,16 @@ graphql-orm-backup = {
 Use `default-features = false` when providing only custom repository implementations.
 
 Enable `smb` for native SMB2/SMB3 through `SmbStorageBackend` and
-`BlobStoreBackupRepository`. This release pins the reviewed
-`graphql-orm-storage` 0.5.0 revision used by the backup crate.
+`BlobStoreBackupRepository`. This workspace baseline uses
+`graphql-orm-storage` 0.6.0.
 
 Enable `orm-sqlite` or `orm-postgres` for the ready-made `graphql-orm` runtime
 adapters with an exact backend. Hosts that already select a backend through
 their direct `graphql-orm` dependency may enable the lower-level `orm` feature
 instead. Exactly one ORM backend must be active.
 
-This release pins `graphql-orm` 0.16.0 at
-`dd68a001f47f04178bf3389dd47ee952faa6ecf0` and
-`graphql-orm-storage` 0.5.0 at
-`f1a1f06483d5fd3a0b8fd17f013b3ad4dd9849c5`.
+This workspace baseline resolves `graphql-orm` 0.16.0 and
+`graphql-orm-storage` 0.6.0 from the same reviewed monorepo revision.
 The ORM revision's optional `auth-agql` bridge pins `agql-auth` 0.12.0 at
 `3f3b0c5365adfbe436514a681d977b600991b797`. This crate does not enable that
 feature or depend directly on authorization; hosts own authorization and may

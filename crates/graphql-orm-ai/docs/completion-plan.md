@@ -17,14 +17,12 @@ what remains deliberately closed.
 - Crate version: `0.57.0` (unpublished backup compatibility
   checkpoint).
 - AI schema-module version: `0.51.0`.
-- Exact reviewed dependencies:
-  - `graphql-orm` and `graphql-orm-macros` `0.16.0` at
-    `dd68a001f47f04178bf3389dd47ee952faa6ecf0`.
+- Reviewed dependency baseline:
+  - internal `graphql-orm` and `graphql-orm-macros` 0.16.0,
+    `graphql-orm-backup` 0.6.0, and `graphql-orm-storage` 0.6.0 resolve through
+    paths in one workspace and one root lockfile;
   - `agql-auth` `0.12.0` at
     `3f3b0c5365adfbe436514a681d977b600991b797`.
-  - `graphql-orm-backup` `0.6.0` at
-    `6a9ccedd76fd140c351c8861de72c4cb7c99feea`, resolving the same ORM 0.16.0
-    and storage 0.5.0 revisions.
 - The complete SQLite/provider, warnings-denied Clippy,
   warnings/missing-docs-denied Rustdoc, PascalCase GraphQL,
   PostgreSQL/MSSQL compile-only, owned disposable PostgreSQL migration,
@@ -34,12 +32,10 @@ what remains deliberately closed.
   `30253200905` passed all four jobs.
 - The backup alignment and generated resolver-operation metadata handoffs are
   satisfied. The reusable MSSQL write/runtime production capability set
-  remains an upstream `graphql-orm` handoff. The owning ORM agent is also
-  considering consolidation of the `graphql-orm-*` packages; this downstream
-  branch stops at the exact reviewed compatibility checkpoint and will repin
-  only after a reviewed final upstream commit. Copy-ready owning-agent prompts
-  are staged under `.handoffs/`; no sibling repository has been modified.
-- A 2026-07-29 read-only upstream audit confirmed the exact ORM/auth pins.
+  remains an internal `graphql-orm` dependency, but can now be implemented and
+  tested in one workspace change. `agql-auth` handoffs remain external.
+- The old AI repository's tested pause checkpoint was promoted to `main` at
+  `d35e3d68d86e77d9aedb62b64842fc9a5f2701f3` before its history was imported.
   The full SQLite/provider/PostgreSQL/MSSQL release matrix passes at this
   checkpoint and resolves one dependency universe.
 
@@ -327,14 +323,11 @@ requeued, terminal, retained-with-reason, or blocked. Append-only facts and
 incomplete external dependencies are reported truthfully. The privileged
 generic uncertain-effect evidence service remains downstream work.
 
-The upstream compatibility gate is complete: `graphql-orm-backup` 0.6.0 at
-`6a9ccedd76fd140c351c8861de72c4cb7c99feea` uses this crate's exact reviewed
-ORM 0.16.0 and storage 0.5.0 revisions. Schema 0.51.0 preserves finalized local
+The compatibility gate now resolves `graphql-orm-backup` 0.6.0, ORM 0.16.0,
+and storage 0.6.0 from one workspace. Schema 0.51.0 preserves finalized local
 object linkage in confidential backups. Applied restore is still downstream
 work and must not be claimed until the collector, repair applier, validator,
-recovery epoch, readiness gate, and database/object round trips pass. The
-owning ORM agent's proposed repository consolidation must return a reviewed
-final commit before this slice resumes.
+recovery epoch, readiness gate, and database/object round trips pass.
 
 ### Work
 

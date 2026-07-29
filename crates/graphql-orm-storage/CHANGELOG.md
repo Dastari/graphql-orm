@@ -2,6 +2,9 @@
 
 ## 0.6.0
 
+- Consolidated the crate into the `graphql-orm` workspace with one root
+  lockfile and a shared reviewed Git revision for companion crates.
+
 - Native SMB writes now split every incoming stream chunk into requests no
   larger than the negotiated `MaxWriteSize`, with a conservative 1 MiB cap and
   64 KiB SMB2 credit alignment. Partial acknowledgements advance exact offsets;

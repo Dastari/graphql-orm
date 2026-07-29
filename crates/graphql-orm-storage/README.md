@@ -32,7 +32,11 @@ Default local filesystem support:
 
 ```toml
 [dependencies]
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm-storage" }
+graphql-orm-storage = {
+    git = "https://github.com/Dastari/graphql-orm.git",
+    rev = "<reviewed-full-40-character-commit-sha>",
+    version = "0.6.0",
+}
 ```
 
 S3-compatible storage without the default local backend:
@@ -40,11 +44,17 @@ S3-compatible storage without the default local backend:
 ```toml
 [dependencies]
 graphql-orm-storage = {
-    git = "https://github.com/Dastari/graphql-orm-storage",
+    git = "https://github.com/Dastari/graphql-orm.git",
+    rev = "<reviewed-full-40-character-commit-sha>",
+    version = "0.6.0",
     default-features = false,
     features = ["s3"],
 }
 ```
+
+Git consumers pin a reviewed full monorepo revision. If an application also
+uses `graphql-orm`, `graphql-orm-backup`, or `graphql-orm-ai`, give every
+package the same `rev` so Cargo resolves one internal source universe.
 
 Available provider features:
 

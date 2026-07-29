@@ -3,7 +3,7 @@ name = "graphql-orm-backup"
 version = "0.6.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/Dastari/graphql-orm-backup"
+repository = "https://github.com/Dastari/graphql-orm"
 description = "Backup and restore orchestration primitives for graphql-orm applications"
 publish = false
 
@@ -24,8 +24,8 @@ orm-postgres = ["orm", "graphql-orm/postgres"]
 async-trait = "0.1"
 bytes = "1"
 futures = "0.3"
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "dd68a001f47f04178bf3389dd47ee952faa6ecf0", version = "0.16.0", optional = true, default-features = false }
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm-storage.git", rev = "f1a1f06483d5fd3a0b8fd17f013b3ad4dd9849c5", version = "0.5.0", default-features = false }
+graphql-orm = { workspace = true, optional = true }
+graphql-orm-storage = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 secrecy = { version = "0.10", optional = true }

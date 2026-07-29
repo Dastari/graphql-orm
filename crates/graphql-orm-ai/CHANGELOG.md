@@ -14,12 +14,11 @@ file-search IDs behind the reviewed persistent-file design.
 ### Added
 
 - SQLite and PostgreSQL builds now resolve the exact reviewed
-  `graphql-orm-backup` 0.6.0 merge
-  (`6a9ccedd76fd140c351c8861de72c4cb7c99feea`) alongside
-  `graphql-orm` 0.16.0 and `graphql-orm-storage` 0.5.0 in one source/type
-  universe. This is a dependency and backup-schema compatibility checkpoint;
-  the AI-specific empty-target restore collector, repair applier, validation,
-  recovery epoch, and readiness gate remain deliberately closed.
+  `graphql-orm-backup` 0.6.0 package alongside `graphql-orm` 0.16.0 and
+  `graphql-orm-storage` 0.6.0 in one workspace source/type universe. This is a
+  dependency and backup-schema compatibility checkpoint; the AI-specific
+  empty-target restore collector, repair applier, validation, recovery epoch,
+  and readiness gate remain deliberately closed.
 - Schema module 0.51.0 includes finalized local attachment and derived-artifact
   `blob_reference` values in confidential database backups so restored rows can
   reconnect to the separately restored object bytes. Quarantine references,
@@ -300,15 +299,19 @@ file-search IDs behind the reviewed persistent-file design.
 
 ### Changed
 
+- Consolidated into the `graphql-orm` workspace, replaced internal Git pins
+  with workspace path dependencies, and aligned storage with
+  `graphql-orm-storage` 0.6.0. The crate and schema versions remain
+  0.57.0/0.51.0 because this changes source layout rather than public or
+  persistent contracts.
 - `ModelRequest::validate` now rejects the reserved
   `ModelBuiltinTool::FileSearch` raw `store_ids` shape. A syntactically valid
   provider vector-store ID is not durable creation, ownership, scope,
   retention, cost, or deletion authority. Existing inline attachment input,
   exact provider-file deletion, rule vocabulary, and immutable per-search-call
   pricing remain available independently.
-- The exact Git dependency universe now pins `graphql-orm` 0.16.0 at
-  `dd68a001f47f04178bf3389dd47ee952faa6ecf0` and `agql-auth` 0.12.0 at the
-  peeled `v0.12.0` target
+- The dependency universe now resolves internal packages through workspace
+  paths and pins external `agql-auth` 0.12.0 at the peeled `v0.12.0` target
   `3f3b0c5365adfbe436514a681d977b600991b797`. ORM 0.16.0 adds the reviewed
   generated resolver-operation descriptor/catalog API while retaining the
   earlier PostgreSQL introspection and bounded-mutation fixes. No AI entity,

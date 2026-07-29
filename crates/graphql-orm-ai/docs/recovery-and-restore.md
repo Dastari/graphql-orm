@@ -117,13 +117,11 @@ What is missing is the production adapter chain that:
 6. records the exact recovery epoch; and
 7. opens readiness only for that applied, zero-fatal epoch.
 
-`graphql-orm-backup` 0.6.0 is merged at
-`6a9ccedd76fd140c351c8861de72c4cb7c99feea` and is pinned here against the
-same reviewed ORM 0.16.0 and storage 0.5.0 revisions. Cargo resolves one
-database/metadata/storage type universe. AI schema module 0.51.0 also includes
-finalized local attachment and artifact object keys in the confidential
-database export while continuing to redact quarantine, upload-token, provider,
-credential, and secret references.
+`graphql-orm-backup` 0.6.0, ORM 0.16.0, and storage 0.6.0 resolve through one
+workspace and one database/metadata/storage type universe. AI schema module
+0.51.0 also includes finalized local attachment and artifact object keys in
+the confidential database export while continuing to redact quarantine,
+upload-token, provider, credential, and secret references.
 
 This satisfies the upstream compatibility gate, not the applied-restore exit
 gate. The checkpoint intentionally exposes no production restore service.

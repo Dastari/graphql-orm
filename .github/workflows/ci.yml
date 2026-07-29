@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  workspace-integrity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: scripts/check-workspace-dependencies.sh
+      - run: cargo test -p graphql-orm-storage
+      - run: cargo test -p graphql-orm-backup --features orm-sqlite
+
+  orm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p graphql-orm
+      - run: cargo check -p graphql-orm --no-default-features --features postgres
+      - run: cargo check -p graphql-orm --no-default-features --features mssql
+      - run: cargo clippy -p graphql-orm --all-targets -- -D warnings
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --no-deps
+
+  companions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p graphql-orm-ai --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness
+      - run: cargo test -p graphql-orm-ai --features graphql-case-pascal --test graphql_naming
+      - run: cargo clippy -p graphql-orm-ai --all-targets --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness -- -D warnings
+      - run: RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc -p graphql-orm-ai --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness --no-deps
+
+  alternate-features:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p graphql-orm-ai --no-default-features --features postgres
+      - run: cargo check -p graphql-orm-ai --no-default-features --features mssql
+      - run: cargo check -p graphql-orm-backup --no-default-features --features local,orm-postgres
+      - run: cargo check -p graphql-orm-storage --no-default-features --features s3,azure
+      - run: cargo check -p graphql-orm-storage --no-default-features --features smb
+
+  ai-postgres-parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run ORM parity against a test-owned disposable PostgreSQL container
+        run: cargo test -p graphql-orm-ai --no-default-features --features postgres,provider-openai --test postgres_parity -- --test-threads=1
+
+  ai-release-policy:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - run: crates/graphql-orm-ai/scripts/check-release-policy.sh "${{ github.event.pull_request.base.sha }}"
+
+  semver:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Create baseline worktree
+        run: git worktree add ../graphql-orm-baseline "${{ github.event.pull_request.base.sha }}"
+      - id: companion-baseline
+        name: Detect consolidated packages in the baseline
+        run: |
+          if git cat-file -e "${{ github.event.pull_request.base.sha }}:crates/graphql-orm-ai/Cargo.toml"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          manifest-path: crates/graphql-orm/Cargo.toml
+          baseline-root: ../graphql-orm-baseline/crates/graphql-orm
+          feature-group: default-features
+      - if: steps.companion-baseline.outputs.exists == 'true'
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          manifest-path: crates/graphql-orm-storage/Cargo.toml
+          baseline-root: ../graphql-orm-baseline/crates/graphql-orm-storage
+          feature-group: default-features
+      - if: steps.companion-baseline.outputs.exists == 'true'
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          manifest-path: crates/graphql-orm-backup/Cargo.toml
+          baseline-root: ../graphql-orm-baseline/crates/graphql-orm-backup
+          feature-group: default-features
+      - if: steps.companion-baseline.outputs.exists == 'true'
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          manifest-path: crates/graphql-orm-ai/Cargo.toml
+          baseline-root: ../graphql-orm-baseline/crates/graphql-orm-ai
+          feature-group: default-features
