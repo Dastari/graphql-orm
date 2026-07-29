@@ -12,6 +12,8 @@ fn resolved_tree(features: &str) -> String {
         .args([
             "tree",
             "--locked",
+            "--color",
+            "never",
             "--edges",
             "normal",
             "--package",
