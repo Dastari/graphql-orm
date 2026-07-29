@@ -40,13 +40,15 @@ Create a reusable backup and restore crate for applications using `graphql-orm`.
 10. Wait for finalized `graphql-orm` export/import/change-journal APIs.
 
 The full export/import runtime API has since landed and
-`graphql-orm-backup` 0.6.0 pins the reviewed `graphql-orm` 0.16.0 revision.
+`graphql-orm-backup` 0.7.0 resolves the reviewed `graphql-orm` 0.16.0 workspace
+package.
 Incremental adapter execution still waits for a reliable integrated change
 journal.
 
 ## Expected Output From A Backup Agent
 
-- A compilable crate under `/home/toby/dev/graphql-orm-backup`.
+- A compilable crate under `crates/graphql-orm-backup` in the
+  `graphql-orm` workspace.
 - Manifest format docs.
 - Restore semantics docs.
 - Local repository implementation.

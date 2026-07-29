@@ -554,7 +554,7 @@ intentional.
 
 ## Current verification
 
-- The complete `0.57.0` SQLite/provider matrix passes: 176 unit tests, all
+- The complete `0.58.0` SQLite/provider matrix passes: 176 unit tests, all
   integration tests, one explicit live OpenAI test ignored, and 31 generated
   private-ORM doctests intentionally ignored. The generated-operation target
   passes four default-case tests covering exact admission, denial/drift,
@@ -574,10 +574,10 @@ intentional.
   Full `cargo package` upload preparation remains intentionally unavailable
   because unpublished Git-only `agql-auth` has no crates.io package; this is
   not a candidate regression. `cargo-semver-checks` completes successfully for
-  `0.56.0` to `0.57.0`; the pre-1.0 minor move is a breaking-version boundary,
+  `0.57.0` to `0.58.0`; the pre-1.0 minor move is a breaking-version boundary,
   so compatibility lints are not applicable.
 - The dependency universe resolves `graphql-orm` and `graphql-orm-macros`
-  0.16.0, `graphql-orm-backup` 0.6.0, and `graphql-orm-storage` 0.6.0 through
+  0.16.0, `graphql-orm-backup` 0.7.0, and `graphql-orm-storage` 0.6.0 through
   one workspace source and public type universe. External `agql-auth` 0.12.0
   remains pinned at
   `3f3b0c5365adfbe436514a681d977b600991b797`.

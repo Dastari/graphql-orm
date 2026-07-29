@@ -37,7 +37,7 @@ backup layout, checksums, repository writes, restore ordering, and operational s
 graphql-orm-backup = {
     git = "https://github.com/Dastari/graphql-orm.git",
     rev = "<reviewed-full-40-character-commit-sha>",
-    version = "0.6.0"
+    version = "0.7.0"
 }
 ```
 
@@ -53,7 +53,7 @@ The default `local` feature enables `LocalBackupRepository`.
 graphql-orm-backup = {
     git = "https://github.com/Dastari/graphql-orm.git",
     rev = "<reviewed-full-40-character-commit-sha>",
-    version = "0.6.0",
+    version = "0.7.0",
     default-features = false
 }
 ```
@@ -61,7 +61,7 @@ graphql-orm-backup = {
 Use `default-features = false` when providing only custom repository implementations.
 
 Enable `smb` for native SMB2/SMB3 through `SmbStorageBackend` and
-`BlobStoreBackupRepository`. This workspace baseline uses
+`BlobStoreBackupRepository`. Backup 0.7.0 uses
 `graphql-orm-storage` 0.6.0.
 
 Enable `orm-sqlite` or `orm-postgres` for the ready-made `graphql-orm` runtime

@@ -22,7 +22,7 @@ Ok(Arc::new(BlobStoreBackupRepository::new(store)))
 # }
 ```
 
-Enable the `smb` feature. Backup 0.6.0 uses the workspace storage 0.6.0
+Enable the `smb` feature. Backup 0.7.0 uses the workspace storage 0.6.0
 revision so downstream builds use the implementation exercised by this
 release.
 

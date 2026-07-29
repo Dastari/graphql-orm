@@ -1,7 +1,7 @@
 # Completion Plan
 
 This is the active execution plan for completing `graphql-orm-ai` from the
-current `0.57.0` backup compatibility checkpoint. The historical
+current `0.58.0` monorepo compatibility checkpoint. The historical
 architecture plan at `1573017:docs/plan.md` remains useful design context, but
 its original delivery phases no longer describe the worktree: most foundation,
 provider, persistence, authorization, approval, and coordination contracts are
@@ -14,12 +14,12 @@ what remains deliberately closed.
 
 ## Baseline
 
-- Crate version: `0.57.0` (unpublished backup compatibility
+- Crate version: `0.58.0` (unpublished monorepo compatibility
   checkpoint).
 - AI schema-module version: `0.51.0`.
 - Reviewed dependency baseline:
   - internal `graphql-orm` and `graphql-orm-macros` 0.16.0,
-    `graphql-orm-backup` 0.6.0, and `graphql-orm-storage` 0.6.0 resolve through
+    `graphql-orm-backup` 0.7.0, and `graphql-orm-storage` 0.6.0 resolve through
     paths in one workspace and one root lockfile;
   - `agql-auth` `0.12.0` at
     `3f3b0c5365adfbe436514a681d977b600991b797`.
@@ -323,7 +323,7 @@ requeued, terminal, retained-with-reason, or blocked. Append-only facts and
 incomplete external dependencies are reported truthfully. The privileged
 generic uncertain-effect evidence service remains downstream work.
 
-The compatibility gate now resolves `graphql-orm-backup` 0.6.0, ORM 0.16.0,
+The compatibility gate now resolves `graphql-orm-backup` 0.7.0, ORM 0.16.0,
 and storage 0.6.0 from one workspace. Schema 0.51.0 preserves finalized local
 object linkage in confidential backups. Applied restore is still downstream
 work and must not be claimed until the collector, repair applier, validator,

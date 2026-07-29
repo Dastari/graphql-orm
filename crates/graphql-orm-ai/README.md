@@ -159,10 +159,10 @@ waits without polling, resuming, or executing them.
   than retry.
 - Fenced run/attempt contracts, fail-closed startup, and restore reconciliation
   that treats uncertain external effects as uncertain rather than replayable.
-- An exact `graphql-orm-backup` 0.6.0 compatibility pin for SQLite and
-  PostgreSQL in the same reviewed ORM/storage type universe. Schema module
-  0.51.0 preserves finalized local attachment and artifact object keys in
-  confidential backups while keeping quarantine, upload-token, provider,
+- A workspace-resolved `graphql-orm-backup` 0.7.0 compatibility dependency for
+  SQLite and PostgreSQL in the same reviewed ORM/storage type universe. Schema
+  module 0.51.0 preserves finalized local attachment and artifact object keys
+  in confidential backups while keeping quarantine, upload-token, provider,
   credential, and secret references redacted. Production applied restore and
   runtime reopening remain closed pending the AI-specific collector, repair,
   validation, recovery-epoch, and readiness chain.
@@ -305,11 +305,11 @@ Add the crate from a reviewed monorepo revision:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.57.0", features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.58.0", features = ["sqlite"] }
 ```
 
 > **Pre-release dependency note:** this source snapshot resolves
-> `graphql-orm` 0.16.0, `graphql-orm-backup` 0.6.0, and
+> `graphql-orm` 0.16.0, `graphql-orm-backup` 0.7.0, and
 > `graphql-orm-storage` 0.6.0 from one workspace revision. `agql-auth` 0.12.0
 > remains an exact external dependency. Direct Git consumers of more than one
 > workspace package must give each package the same reviewed monorepo `rev`.

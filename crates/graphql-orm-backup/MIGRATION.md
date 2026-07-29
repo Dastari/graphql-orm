@@ -1,18 +1,19 @@
 # Migration Guide
 
-## Repository consolidation on the 0.6.0 development line
+## 0.6.0 to 0.7.0: repository consolidation
 
 The source repository is now
 `https://github.com/Dastari/graphql-orm.git`. Git consumers should use that URL
 for backup, ORM, storage, and AI packages and pin every selected package to one
 reviewed full monorepo revision.
 
-The consolidated workspace aligns this crate with
-`graphql-orm-storage` 0.6.0 while retaining `graphql-orm` 0.16.0. The move
-does not change the backup API, snapshot format, repository key layout,
-restore preflight, or persisted data. Regenerate `Cargo.lock`, verify that the
-old backup and storage repository URLs are absent, and rerun the selected
-repository and ORM conformance checks.
+The consolidated workspace advances this crate to 0.7.0 and aligns it with
+`graphql-orm-storage` 0.6.0 while retaining `graphql-orm` 0.16.0. This is a
+pre-1.0 dependency type-universe boundary because public backup contracts use
+storage types. It does not otherwise change the backup API, snapshot format,
+repository key layout, restore preflight, or persisted data. Regenerate
+`Cargo.lock`, verify that the old backup and storage repository URLs are
+absent, and rerun the selected repository and ORM conformance checks.
 
 ## 0.5.x to 0.6.0
 

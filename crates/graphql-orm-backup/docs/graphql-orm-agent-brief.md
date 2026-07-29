@@ -30,7 +30,7 @@ pub struct GraphqlOrmSchemaSnapshot {
 }
 ```
 
-`graphql-orm-backup` 0.6.0 consumes this surface through a thin
+`graphql-orm-backup` 0.7.0 consumes this surface through a thin
 `OrmBackupAdapter`. Future reusable changes should extend this surface rather
 than introduce host-specific database access.
 

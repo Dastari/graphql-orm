@@ -267,13 +267,15 @@ graphql-orm-storage = {
 }
 graphql-orm-backup = {
   path = "crates/graphql-orm-backup",
-  version = "0.6.0",
+  version = "0.7.0",
   default-features = false,
 }
 ```
 
-The versions above are examples from the pre-freeze state. Use the versions
-selected in Phase 1.
+These are the selected consolidation-candidate versions. Storage keeps 0.6.0;
+backup advances to 0.7.0 because its public API now resolves storage types
+through the monorepo source; AI advances to 0.58.0 because its backup
+dependency crosses the same source boundary.
 
 Then:
 
@@ -342,8 +344,8 @@ example:
 
 ```text
 graphql-orm-v0.16.0
-graphql-orm-ai-v0.57.0
-graphql-orm-backup-v0.6.0
+graphql-orm-ai-v0.58.0
+graphql-orm-backup-v0.7.0
 graphql-orm-storage-v0.6.0
 ```
 
@@ -403,22 +405,22 @@ graphql-orm-storage = {
 graphql-orm-backup = {
   git = "https://github.com/Dastari/graphql-orm.git",
   rev = "<same-full-monorepo-sha>",
-  version = "0.6.0",
+  version = "0.7.0",
   default-features = false,
   features = ["local", "orm-sqlite"],
 }
 graphql-orm-ai = {
   git = "https://github.com/Dastari/graphql-orm.git",
   rev = "<same-full-monorepo-sha>",
-  version = "0.57.0",
+  version = "0.58.0",
   default-features = false,
   features = ["sqlite"],
 }
 ```
 
-These versions are illustrative until the cutover notice supplies the final
-values. A consumer should declare only the crates it uses. Cargo selects the
-package by dependency name from the shared Git repository.
+These are the consolidation-candidate versions; a later release may advance
+them further. A consumer should declare only the crates it uses. Cargo selects
+the package by dependency name from the shared Git repository.
 
 Select one compatible ORM backend throughout an application. Avoid combining
 the alternative `sqlite`, `postgres`, and `mssql` paths in a single feature

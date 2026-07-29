@@ -27,7 +27,7 @@ async-graphql = { version = "7", features = ["dataloader", "uuid"] }
 convert_case = "0.7"
 futures = "0.3"
 graphql-orm = { path = "crates/graphql-orm", version = "0.16.0", default-features = false }
-graphql-orm-backup = { path = "crates/graphql-orm-backup", version = "0.6.0", default-features = false }
+graphql-orm-backup = { path = "crates/graphql-orm-backup", version = "0.7.0", default-features = false }
 graphql-orm-storage = { path = "crates/graphql-orm-storage", version = "0.6.0", default-features = false }
 proc-macro2 = "1"
 quote = "1"

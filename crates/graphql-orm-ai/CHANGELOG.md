@@ -5,7 +5,7 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.57.0` and AI
+This development line advances the pre-1.0 crate version to `0.58.0` and AI
 schema module to `0.51.0`. It aligns the reviewed dependency universe,
 integrates generated resolver-operation metadata, completes the durable OpenAI
 background terminal-reconciliation runtime, and closes raw provider
@@ -14,7 +14,7 @@ file-search IDs behind the reviewed persistent-file design.
 ### Added
 
 - SQLite and PostgreSQL builds now resolve the exact reviewed
-  `graphql-orm-backup` 0.6.0 package alongside `graphql-orm` 0.16.0 and
+  `graphql-orm-backup` 0.7.0 package alongside `graphql-orm` 0.16.0 and
   `graphql-orm-storage` 0.6.0 in one workspace source/type universe. This is a
   dependency and backup-schema compatibility checkpoint; the AI-specific
   empty-target restore collector, repair applier, validation, recovery epoch,
@@ -301,9 +301,8 @@ file-search IDs behind the reviewed persistent-file design.
 
 - Consolidated into the `graphql-orm` workspace, replaced internal Git pins
   with workspace path dependencies, and aligned storage with
-  `graphql-orm-storage` 0.6.0. The crate and schema versions remain
-  0.57.0/0.51.0 because this changes source layout rather than public or
-  persistent contracts.
+  `graphql-orm-storage` 0.6.0. The crate advances to 0.58.0 for the pre-1.0
+  dependency identity boundary; schema 0.51.0 remains unchanged.
 - `ModelRequest::validate` now rejects the reserved
   `ModelBuiltinTool::FileSearch` raw `store_ids` shape. A syntactically valid
   provider vector-store ID is not durable creation, ownership, scope,

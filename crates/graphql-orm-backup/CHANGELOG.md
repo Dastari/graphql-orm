@@ -1,10 +1,13 @@
 # Changelog
 
-## 0.6.0
+## 0.7.0
 
-- Consolidated into the `graphql-orm` workspace and aligned the internal
-  storage dependency with `graphql-orm-storage` 0.6.0 through one workspace
-  path/source universe.
+- Consolidated into the `graphql-orm` workspace and aligned the public storage
+  type universe with `graphql-orm-storage` 0.6.0 through one workspace path.
+- Retained the backup API, manifest format, repository key layout, and
+  fail-closed restore preflight from 0.6.0.
+
+## 0.6.0
 
 - Aligned the optional ORM integration with `graphql-orm` 0.16.0 at reviewed
   commit `dd68a001f47f04178bf3389dd47ee952faa6ecf0`.
@@ -14,9 +17,8 @@
   `agql-auth`.
 - Renamed the SQLite and PostgreSQL conformance targets to reflect the
   `graphql-orm` 0.16 type universe.
-- The public backup API, manifest format, repository key layout, and restore
-  preflight are unchanged from 0.5.0; the workspace storage implementation
-  advances to 0.6.0.
+- The public backup API, manifest format, repository key layout, restore
+  preflight, and storage revision are unchanged from 0.5.0.
 
 ## 0.5.0
 

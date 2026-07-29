@@ -4,7 +4,7 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
-## Unreleased: repository consolidation (crate 0.57.0; schema remains 0.51.0)
+## Unreleased: repository consolidation (crate 0.57.0 to 0.58.0; schema remains 0.51.0)
 
 The source repository is now
 `https://github.com/Dastari/graphql-orm.git`. Git consumers should use that URL
@@ -12,14 +12,16 @@ for AI, backup, storage, and ORM packages and pin every selected package to the
 same reviewed full monorepo revision.
 
 The consolidated workspace resolves `graphql-orm` 0.16.0,
-`graphql-orm-backup` 0.6.0, and `graphql-orm-storage` 0.6.0 through workspace
+`graphql-orm-backup` 0.7.0, and `graphql-orm-storage` 0.6.0 through workspace
 paths. `agql-auth` 0.12.0 remains an exact external dependency. Remove old
 internal Git URLs and local patches, regenerate `Cargo.lock`, verify one source
 for every internal package, and rerun the complete backend/provider matrix.
 
-This source-layout and storage-dependency alignment does not change AI Rust
-APIs, GraphQL SDL, persistent entities, backup policy, or restore readiness.
-AI schema module 0.51.0 remains current and no data migration is required.
+The crate advances to 0.58.0 because the backup/storage dependency identity is
+a pre-1.0 compatibility boundary. The alignment does not otherwise change AI
+Rust APIs, GraphQL SDL, persistent entities, backup policy, or restore
+readiness. AI schema module 0.51.0 remains current and no data migration is
+required.
 
 ## Unreleased: backup 0.6 compatibility checkpoint (crate 0.56.0 to 0.57.0; schema 0.50.0 to 0.51.0)
 
