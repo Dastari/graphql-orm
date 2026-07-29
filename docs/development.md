@@ -1,9 +1,17 @@
 # Development
 
-This repository is a Rust workspace with two crates:
+This repository is a Rust workspace with five crates:
 
 - `crates/graphql-orm`: runtime, backend traits, schema models, migrations, query execution, policies, and helpers.
 - `crates/graphql-orm-macros`: derive and function macros that generate entity, relation, operation, and schema-root code.
+- `crates/graphql-orm-storage`: provider-neutral local, S3, Azure-placeholder, and native SMB storage.
+- `crates/graphql-orm-backup`: provider-neutral backup and restore orchestration with optional ORM adapters.
+- `crates/graphql-orm-ai`: project-agnostic AI agent runtime and provider integrations.
+
+The default members remain the ORM runtime and macros so an ordinary root
+command stays focused. Use `--workspace` or explicit `-p` selections when a
+change spans companion crates. Never use workspace `--all-features`; ORM
+database backends are alternative configurations.
 
 ## Common Checks
 
@@ -87,6 +95,45 @@ Run all default tests with:
 
 ```bash
 cargo test
+```
+
+## Companion Crates
+
+Run companion checks with explicit packages and features:
+
+```bash
+cargo test -p graphql-orm-storage
+cargo test -p graphql-orm-backup --features orm-sqlite
+cargo test -p graphql-orm-ai \
+  --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness
+cargo check -p graphql-orm-storage --no-default-features --features s3,azure
+cargo check -p graphql-orm-storage --no-default-features --features smb
+cargo check -p graphql-orm-backup --no-default-features --features local,orm-postgres
+cargo check -p graphql-orm-ai --no-default-features --features postgres
+cargo check -p graphql-orm-ai --no-default-features --features mssql
+```
+
+The managed Samba suite creates and removes its own named containers and
+volume, and includes storage transport plus backup lifecycle coverage:
+
+```bash
+crates/graphql-orm-storage/tests/samba/run.sh
+```
+
+AI PostgreSQL parity likewise owns a disposable, labelled Docker container:
+
+```bash
+cargo test -p graphql-orm-ai --no-default-features \
+  --features postgres,provider-openai \
+  --test postgres_parity -- --test-threads=1
+```
+
+Verify that every internal crate resolves exactly once from a workspace path:
+
+```bash
+scripts/check-workspace-dependencies.sh
+cargo tree --workspace --locked -i graphql-orm
+cargo tree --workspace --locked -i graphql-orm-storage
 ```
 
 ## PostgreSQL Tests

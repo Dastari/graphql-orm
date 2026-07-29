@@ -1,0 +1,76 @@
+[package]
+name = "graphql-orm-storage"
+version = "0.6.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/Dastari/graphql-orm"
+description = "Provider-neutral object storage primitives for graphql-orm applications"
+
+[features]
+default = ["local"]
+local = ["dep:serde_json", "dep:tokio", "dep:tokio-util"]
+s3 = ["dep:aws-credential-types", "dep:aws-sdk-s3", "dep:tokio", "dep:tokio-util"]
+smb = [
+    "dep:picky",
+    "dep:picky-krb",
+    "dep:secrecy",
+    "dep:smb",
+    "dep:smb-dtyp",
+    "dep:smb-fscc",
+    "dep:smb-msg",
+    "dep:smb-rpc",
+    "dep:smb-transport",
+    "dep:tokio",
+    "dep:tracing",
+]
+azure = []
+
+[dependencies]
+async-trait = "0.1"
+aws-credential-types = { version = "1.2.14", optional = true }
+aws-sdk-s3 = { version = "1.137.0", features = ["behavior-version-latest"], optional = true }
+bytes = "1"
+futures-core = "0.3"
+futures-util = "0.3"
+picky = { version = "=7.0.0-rc.15", optional = true, default-features = false }
+picky-krb = { version = "=0.11.1", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
+secrecy = { version = "0.10", optional = true }
+sha2 = "0.10"
+smb = { version = "0.10.2", optional = true, default-features = false, features = ["async", "encrypt", "sign", "netbios-transport"] }
+smb-dtyp = { version = "=0.10.2", optional = true }
+smb-fscc = { version = "=0.10.2", optional = true }
+smb-msg = { version = "=0.10.2", optional = true }
+smb-rpc = { version = "=0.10.2", optional = true }
+smb-transport = { version = "=0.10.2", optional = true }
+thiserror = "2"
+time = { version = "0.3", features = ["serde"] }
+tokio = { version = "1", features = ["fs", "io-util", "sync", "time"], optional = true }
+tokio-util = { version = "0.7", features = ["io"], optional = true }
+tracing = { version = "0.1", optional = true }
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread"] }
+
+[[test]]
+name = "local_round_trip"
+path = "tests/local_round_trip.rs"
+required-features = ["local"]
+
+[[test]]
+name = "local_blob"
+path = "tests/local_blob.rs"
+required-features = ["local"]
+
+[[test]]
+name = "local_streaming_object"
+path = "tests/local_streaming_object.rs"
+required-features = ["local"]
+
+[[test]]
+name = "smb_integration"
+path = "tests/smb_integration.rs"
+required-features = ["smb"]

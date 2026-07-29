@@ -15,6 +15,7 @@ This directory contains the project documentation that is too detailed for the r
 - [Microsoft SQL Server read-only backend](mssql.md)
 - [Federation operation roots](federation.md)
 - [Generated resolver operation metadata](resolver-operation-metadata.md)
+- [Monorepo consolidation and consumer migration](monorepo-consolidation.md)
 - [Schema ownership, validation, planning, and ABI migrations](schema-management.md)
 - [Owned runtime schema IR](runtime-schema-ir.md)
 - [Runtime values, records, handles, and row decoding](runtime-records.md)

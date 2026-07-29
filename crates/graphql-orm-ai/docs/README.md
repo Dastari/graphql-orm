@@ -1,0 +1,46 @@
+# Documentation
+
+Start with the root [README](../README.md), then use the focused guides below.
+
+- [Getting started](getting-started.md)
+- [Architecture and crate boundaries](architecture.md)
+- [Security model](security.md)
+- [Durable worker and provider turn](worker-provider-turn.md)
+- [Usage ledger, budgets, and reporting](usage-and-budgets.md)
+- [Protected live streaming](live-streaming.md)
+- [Protected context compaction](context-compaction.md)
+- [Durable cross-session principal inbox](principal-inbox.md)
+- [Bounded session retention](session-retention.md)
+- [Recovery, backup, and restore](recovery-and-restore.md)
+- [Content-free operational telemetry](operational-telemetry.md)
+- [Protected skills and typed UI intents](skills-and-ui-intents.md)
+- [Hierarchical AI rule narrowing](hierarchical-rules.md)
+- [Attachment intake, quarantine, and cleanup](attachments.md)
+- [Provider-persistent file lifecycle](provider-files.md)
+- [Verified OpenAI webhook intake](openai-webhooks.md)
+- [Exact OpenAI background submission](openai-background.md)
+- [Native Anthropic provider](anthropic.md)
+- [Native xAI provider](xai.md)
+- [Profiled OpenAI-compatible provider](openai-compatible.md)
+- [Native Ollama provider](ollama.md)
+- [Installed local harness boundary](local-harness.md)
+- [Read-only application-tool loop](read-only-tool-loop.md)
+- [Protected coordinator checkpoints](coordinator-checkpoints.md)
+- [Canonical ordering and history proof](ordering-history.md)
+- [Coordination and review expansion gates](coordination-gates.md)
+- [Control-plane and production integration gates](control-plane-production.md)
+- [Backend and capability acceptance matrix](backend-capability-matrix.md)
+- [Supervised mutation and approval execution](supervised-tool-loop.md)
+- [Private remote GraphQL execution](remote-graphql-execution.md)
+- [Proposal and approval lifecycles](review-lifecycles.md)
+- [Development and verification](development.md)
+- [Release, SemVer, changelog, and migration process](release-process.md)
+- [Upstream contribution and multi-repository workflow](upstream-contributions.md)
+- [Implementation status](implementation-status.md)
+- [Checkpoint-based completion plan](completion-plan.md)
+- [Migration guide](../MIGRATION.md)
+- [Changelog](../CHANGELOG.md)
+
+Additional derivative, approval, and tool-authoring guides will be added as
+their production implementations land. Public Rust API details are
+available through generated rustdoc.

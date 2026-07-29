@@ -1,0 +1,69 @@
+[package]
+name = "graphql-orm-ai"
+version = "0.58.0"
+edition = "2024"
+authors = ["Toby Martin <toby@dastari.net>"]
+description = "Project-agnostic AI agent runtime for graphql-orm applications"
+license = "MIT"
+repository = "https://github.com/Dastari/graphql-orm"
+homepage = "https://github.com/Dastari/graphql-orm"
+documentation = "https://docs.rs/graphql-orm-ai"
+readme = "README.md"
+keywords = ["ai", "graphql", "agents", "orm", "async-graphql"]
+categories = ["web-programming", "api-bindings"]
+publish = false
+
+[features]
+default = ["sqlite"]
+sqlite = [
+  "graphql-orm/sqlite",
+  "dep:graphql-orm-backup",
+  "graphql-orm-backup/local",
+  "graphql-orm-backup/orm-sqlite",
+]
+postgres = [
+  "graphql-orm/postgres",
+  "dep:graphql-orm-backup",
+  "graphql-orm-backup/local",
+  "graphql-orm-backup/orm-postgres",
+]
+mssql = ["graphql-orm/mssql"]
+provider-openai = ["dep:base64", "dep:hmac", "dep:reqwest"]
+provider-anthropic = ["dep:reqwest"]
+provider-xai = ["dep:base64", "dep:reqwest"]
+provider-ollama = ["dep:base64", "dep:reqwest"]
+provider-openai-compatible = ["dep:base64", "dep:reqwest"]
+local-harness = []
+graphql-case-pascal = [
+  "graphql-orm/resolver-case-pascal",
+  "graphql-orm/argument-case-pascal",
+  "graphql-orm/field-case-pascal",
+]
+
+[dependencies]
+agql-auth = { workspace = true }
+async-graphql = { version = "7", features = ["uuid"] }
+async-stream = "0.3"
+async-trait = "0.1"
+base64 = { version = "0.22", optional = true }
+futures = "0.3"
+graphql-orm = { workspace = true }
+graphql-orm-backup = { workspace = true, optional = true }
+graphql-orm-storage = { workspace = true }
+hex = "0.4"
+hmac = { version = "0.12", optional = true }
+jsonschema = { version = "0.47", default-features = false }
+reqwest = { version = "0.13", default-features = false, features = ["http2", "json", "rustls", "stream"], optional = true }
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
+thiserror = "2"
+time = { version = "0.3", features = ["serde"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+url = "2"
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
