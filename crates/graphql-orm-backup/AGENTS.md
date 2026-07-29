@@ -20,10 +20,14 @@ This crate is a reusable backup and restore companion for applications that use 
 
 ## Current Agent Handoff
 
-- Current crate version is `0.5.0`.
-- The optional ORM adapter pins `graphql-orm` 0.15.0 at
-  `6beef53633befd90a4d4810887a3e4640dc4ad91`. Keep downstream applications in
+- Current crate version is `0.6.0`.
+- The optional ORM adapter pins `graphql-orm` 0.16.0 at
+  `dd68a001f47f04178bf3389dd47ee952faa6ecf0`. Keep downstream applications in
   the same canonical source/type universe.
+- `graphql-orm` owns its optional `agql-auth` integration and pins
+  `agql-auth` 0.12.0 at
+  `3f3b0c5365adfbe436514a681d977b600991b797`. This crate must not enable or
+  depend directly on application authorization.
 - Applying and dry-run restore compare the manifest backend/schema hash with
   the target before target checks or writes. Preserve that fail-closed
   preflight.
@@ -43,7 +47,7 @@ This crate is a reusable backup and restore companion for applications that use 
 - Snapshot manifests and repository key layout are provider-independent and
   unchanged in 0.4.0.
 - Run the managed real-Samba suite with
-  `/home/toby/graphql-orm-storage/tests/samba/run.sh`; it includes this crate's
-  complete SMB snapshot lifecycle test.
+  `/home/toby/dev/graphql-orm-storage/tests/samba/run.sh`; it includes this
+  crate's complete SMB snapshot lifecycle test.
 - Read `docs/smb.md`, `docs/digitise-native-smb.md`, and `MIGRATION.md` before
   changing provider integration or host guidance.

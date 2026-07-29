@@ -40,7 +40,7 @@ Create a reusable backup and restore crate for applications using `graphql-orm`.
 10. Wait for finalized `graphql-orm` export/import/change-journal APIs.
 
 The full export/import runtime API has since landed and
-`graphql-orm-backup` 0.5.0 pins the reviewed `graphql-orm` 0.15.0 revision.
+`graphql-orm-backup` 0.6.0 pins the reviewed `graphql-orm` 0.16.0 revision.
 Incremental adapter execution still waits for a reliable integrated change
 journal.
 

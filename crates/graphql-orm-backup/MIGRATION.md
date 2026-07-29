@@ -1,5 +1,34 @@
 # Migration Guide
 
+## 0.5.x to 0.6.0
+
+Version 0.6.0 moves the optional ORM adapter to `graphql-orm` 0.16.0 at
+reviewed commit `dd68a001f47f04178bf3389dd47ee952faa6ecf0`. Applications that
+use `graphql-orm` directly must use the same canonical Git URL and full
+revision so public ORM types resolve from one source.
+
+The reviewed ORM revision owns an optional `auth-agql` bridge that pins
+`agql-auth` 0.12.0 at
+`3f3b0c5365adfbe436514a681d977b600991b797`. This backup crate does not enable
+that feature or depend directly on `agql-auth`: backup and restore
+authorization remains a host responsibility. Hosts that enable
+`graphql-orm/auth-agql` should retain the ORM-owned exact auth revision.
+
+```toml
+graphql-orm-backup = {
+    git = "https://github.com/Dastari/graphql-orm-backup.git",
+    rev = "<reviewed-full-40-character-commit-sha>",
+    version = "0.6.0",
+    default-features = false,
+    features = ["local", "orm-sqlite"]
+}
+```
+
+Use `orm-postgres` instead for PostgreSQL. This dependency/type-universe
+alignment does not change the public backup API, manifest format, repository
+key layout, storage revision, or the fail-closed restore preflight introduced
+in 0.5.0.
+
 ## 0.4.x to 0.5.0
 
 Version 0.5.0 moves the optional ORM adapter to `graphql-orm` 0.15.0 at the

@@ -8,7 +8,7 @@ Provider SDKs, object stores, Dropbox, SMB, and backup repository implementation
 
 ## Current Integration Point
 
-The reviewed `graphql-orm` 0.15.0 revision contains the backup metadata and
+The reviewed `graphql-orm` 0.16.0 revision contains the backup metadata and
 runtime primitives in `crates/graphql-orm/src/graphql/orm`, including:
 
 ```rust
@@ -30,7 +30,7 @@ pub struct GraphqlOrmSchemaSnapshot {
 }
 ```
 
-`graphql-orm-backup` 0.5.0 consumes this surface through a thin
+`graphql-orm-backup` 0.6.0 consumes this surface through a thin
 `OrmBackupAdapter`. Future reusable changes should extend this surface rather
 than introduce host-specific database access.
 

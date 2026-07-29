@@ -412,7 +412,7 @@ impl RestoreObjectSink for RecordingObjectSink {
     feature = "orm-postgres",
     ignore = "requires GRAPHQL_ORM_BACKUP_TEST_DATABASE_URL for an owned disposable database"
 )]
-async fn private_modules_round_trip_through_graphql_orm_015(
+async fn private_modules_round_trip_through_graphql_orm_016(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pool = setup_pool().await?;
     let database = Arc::new(graphql_orm::db::Database::new(pool.clone()));
@@ -480,7 +480,7 @@ async fn private_modules_round_trip_through_graphql_orm_015(
             snapshot_id: snapshot_id(),
             created_at: 1_775_174_400,
             app_id: "orm-private-module-conformance".to_string(),
-            app_version: "0.5.0".to_string(),
+            app_version: "0.6.0".to_string(),
         },
     )
     .await?;
