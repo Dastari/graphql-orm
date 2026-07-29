@@ -37,7 +37,7 @@ backup layout, checksums, repository writes, restore ordering, and operational s
 graphql-orm-backup = {
     git = "https://github.com/Dastari/graphql-orm-backup.git",
     rev = "<reviewed-full-40-character-commit-sha>",
-    version = "0.5.0"
+    version = "0.6.0"
 }
 ```
 
@@ -53,7 +53,7 @@ The default `local` feature enables `LocalBackupRepository`.
 graphql-orm-backup = {
     git = "https://github.com/Dastari/graphql-orm-backup.git",
     rev = "<reviewed-full-40-character-commit-sha>",
-    version = "0.5.0",
+    version = "0.6.0",
     default-features = false
 }
 ```
@@ -69,10 +69,14 @@ adapters with an exact backend. Hosts that already select a backend through
 their direct `graphql-orm` dependency may enable the lower-level `orm` feature
 instead. Exactly one ORM backend must be active.
 
-This release pins `graphql-orm` 0.15.0 at
-`6beef53633befd90a4d4810887a3e4640dc4ad91` and
+This release pins `graphql-orm` 0.16.0 at
+`dd68a001f47f04178bf3389dd47ee952faa6ecf0` and
 `graphql-orm-storage` 0.5.0 at
 `f1a1f06483d5fd3a0b8fd17f013b3ad4dd9849c5`.
+The ORM revision's optional `auth-agql` bridge pins `agql-auth` 0.12.0 at
+`3f3b0c5365adfbe436514a681d977b600991b797`. This crate does not enable that
+feature or depend directly on authorization; hosts own authorization and may
+enable it through their direct `graphql-orm` dependency.
 
 ## Snapshot Layout
 

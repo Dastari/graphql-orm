@@ -896,7 +896,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1237,8 +1237,8 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.15.0"
-source = "git+https://github.com/Dastari/graphql-orm.git?rev=6beef53633befd90a4d4810887a3e4640dc4ad91#6beef53633befd90a4d4810887a3e4640dc4ad91"
+version = "0.16.0"
+source = "git+https://github.com/Dastari/graphql-orm.git?rev=dd68a001f47f04178bf3389dd47ee952faa6ecf0#dd68a001f47f04178bf3389dd47ee952faa6ecf0"
 dependencies = [
  "async-graphql",
  "chrono",
@@ -1249,6 +1249,7 @@ dependencies = [
  "graphql-orm-macros",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tokio",
  "tokio-stream",
@@ -1257,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-backup"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1277,8 +1278,8 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.15.0"
-source = "git+https://github.com/Dastari/graphql-orm.git?rev=6beef53633befd90a4d4810887a3e4640dc4ad91#6beef53633befd90a4d4810887a3e4640dc4ad91"
+version = "0.16.0"
+source = "git+https://github.com/Dastari/graphql-orm.git?rev=dd68a001f47f04178bf3389dd47ee952faa6ecf0#dd68a001f47f04178bf3389dd47ee952faa6ecf0"
 dependencies = [
  "convert_case",
  "proc-macro2",
@@ -2527,7 +2528,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2836,7 +2837,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3223,7 +3224,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3602,7 +3603,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

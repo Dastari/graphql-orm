@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.0
+
+- Aligned the optional ORM integration with `graphql-orm` 0.16.0 at reviewed
+  commit `dd68a001f47f04178bf3389dd47ee952faa6ecf0`.
+- Confirmed that revision's optional `auth-agql` bridge pins `agql-auth`
+  0.12.0 at `3f3b0c5365adfbe436514a681d977b600991b797`. Authorization remains
+  host-owned, so this crate does not enable or directly depend on
+  `agql-auth`.
+- Renamed the SQLite and PostgreSQL conformance targets to reflect the
+  `graphql-orm` 0.16 type universe.
+- The public backup API, manifest format, repository key layout, restore
+  preflight, and storage revision are unchanged from 0.5.0.
+
 ## 0.5.0
 
 - Aligned the optional `graphql-orm` integration with the reviewed

@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-backup"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm-backup"
@@ -24,7 +24,7 @@ orm-postgres = ["orm", "graphql-orm/postgres"]
 async-trait = "0.1"
 bytes = "1"
 futures = "0.3"
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "6beef53633befd90a4d4810887a3e4640dc4ad91", version = "0.15.0", optional = true, default-features = false }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "dd68a001f47f04178bf3389dd47ee952faa6ecf0", version = "0.16.0", optional = true, default-features = false }
 graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm-storage.git", rev = "f1a1f06483d5fd3a0b8fd17f013b3ad4dd9849c5", version = "0.5.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -64,11 +64,11 @@ path = "tests/smb_repository.rs"
 required-features = ["smb"]
 
 [[test]]
-name = "orm_015_sqlite_conformance"
-path = "tests/orm_015_sqlite_conformance.rs"
+name = "orm_016_sqlite_conformance"
+path = "tests/orm_016_sqlite_conformance.rs"
 required-features = ["local", "orm-sqlite"]
 
 [[test]]
-name = "orm_015_postgres_conformance"
-path = "tests/orm_015_postgres_conformance.rs"
+name = "orm_016_postgres_conformance"
+path = "tests/orm_016_postgres_conformance.rs"
 required-features = ["local", "orm-postgres"]
