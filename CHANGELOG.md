@@ -16,8 +16,8 @@ surface is a pre-1.0 minor release.
 - Added `graphql_orm_operation_catalog()` generation to `schema_roots!`.
   Catalog descriptors distinguish generated mutations omitted by
   `generated_mutations` none/allowlist/denylist policy from operations actually
-  merged into the public root. Queries and generated subscriptions retain
-  their existing exposure behavior.
+  merged into the public root. Root-level read-only policy also resolves
+  generated subscriptions as unexposed.
 - Added domain-separated, length-framed SHA-256 generated/resolved/catalog
   fingerprints with deterministic ordering and documented compatibility
   limits. Fingerprints detect generated surface and exposure drift; they do

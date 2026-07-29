@@ -31,11 +31,14 @@ current resolver/RLS authorization remain separate host/downstream bindings.
 
 Generated mutation none/allowlist/denylist policy now appears as
 `is_exposed() == false` on the corresponding resolved descriptors; repository
-writes and generated subscription behavior are unchanged. Private typed read
-projections remain repository-only and do not add descriptors or change
-generated GraphQL operation fingerprints. List categories describe connection
-shape rather than a fixed runtime bound; retain explicit host/tool output
-limits because `PaginationConfig` remains configurable.
+writes and generated subscription behavior are unchanged. A root-level
+`external_read_only` policy also reports derive-generated mutation and
+subscription descriptors as unexposed because that root composes neither
+operation type. Private typed read projections remain repository-only and do
+not add descriptors or change generated GraphQL operation fingerprints. List
+categories describe connection shape rather than a fixed runtime bound; retain
+explicit host/tool output limits because `PaginationConfig` remains
+configurable.
 
 This is an additive pre-1.0 public API/generated-code release. Existing
 GraphQL SDL, resolver execution, database schema, stored data, migrations,

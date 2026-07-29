@@ -17,10 +17,10 @@ There are two intentionally separate layers:
   that entity's `GraphQLOperations` expansion. These values say which resolver
   structs and fields were generated for the selected backend/entity profile.
 - `graphql_orm_operation_catalog()` is emitted by `schema_roots!`. It resolves
-  whether each generated mutation was actually merged under
-  `generated_mutations`, its allowlist, or its denylist. Queries and generated
-  subscriptions remain exposed whenever their generated operation type is part
-  of that schema.
+  whether each generated mutation or subscription was actually merged after
+  root/backend read-only policy and `generated_mutations` allow/deny policy.
+  Queries remain exposed whenever their generated operation type is part of
+  that schema.
 
 This separation is required because an entity derive cannot know how a later
 schema root will compose it.
@@ -137,5 +137,6 @@ generated-surface component.
   update/delete/upsert resolver categories.
 - External-read-only entities and MSSQL report only generated reads.
 - Schema-root generated mutation `none`/allowlist/denylist policy changes
-  resolved exposure and catalog fingerprints without disabling repository
-  writes or generated subscriptions.
+  mutation exposure and catalog fingerprints without disabling repository
+  writes or generated subscriptions. Root-level read-only policy marks both
+  generated mutations and subscriptions unexposed.

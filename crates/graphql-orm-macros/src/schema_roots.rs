@@ -117,11 +117,13 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         .iter()
         .map(|entity| {
             let mutations_exposed = generated_mutation_is_exposed(entity);
+            let subscriptions_exposed = backend != BackendKind::Mssql && !schema_policy_read_only;
             quote! {
                 (
                     <#entity as ::graphql_orm::graphql::orm::GraphqlOperationMetadata>
                         ::generated_graphql_operations(),
                     #mutations_exposed,
+                    #subscriptions_exposed,
                 )
             }
         })
@@ -129,8 +131,9 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let operation_catalog_helper = quote! {
         /// Returns deterministic generated resolver metadata for this schema root.
         ///
-        /// The catalog resolves generated mutation allow/deny exposure but is
-        /// discovery metadata only; it does not authorize GraphQL execution.
+        /// The catalog resolves generated root exposure after mutation and
+        /// read-only policy but is discovery metadata only; it does not
+        /// authorize GraphQL execution.
         pub fn graphql_orm_operation_catalog(
         ) -> &'static ::graphql_orm::graphql::orm::GraphqlOperationCatalog {
             static CATALOG: ::std::sync::OnceLock<
@@ -141,6 +144,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                     &'static [
                         ::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor
                     ],
+                    bool,
                     bool,
                 )] = &[
                     #(#operation_metadata_groups),*

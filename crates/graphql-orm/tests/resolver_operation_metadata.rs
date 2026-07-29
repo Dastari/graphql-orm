@@ -130,6 +130,30 @@ mod read_only_surface {
     }
 }
 
+mod root_read_only_surface {
+    use graphql_orm::prelude::*;
+
+    #[derive(
+        GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
+    )]
+    #[graphql_entity(
+        table = "resolver_metadata_root_read_only",
+        plural = "RootReadOnlyMetadataRecords"
+    )]
+    pub struct RootReadOnlyMetadataRecord {
+        #[primary_key]
+        pub id: String,
+        #[filterable(type = "string")]
+        #[sortable]
+        pub label: String,
+    }
+
+    schema_roots! {
+        schema_policy: "external_read_only",
+        entities: [RootReadOnlyMetadataRecord],
+    }
+}
+
 mod composite_surface {
     use graphql_orm::prelude::*;
 
@@ -382,6 +406,7 @@ fn read_only_composite_and_append_only_profiles_report_only_actual_resolvers() {
     use append_only_surface::ResolverMetadataEvent;
     use composite_surface::CompositeMetadataRecord;
     use read_only_surface::ReadOnlyMetadataRecord;
+    use root_read_only_surface::RootReadOnlyMetadataRecord;
 
     let read_only = ReadOnlyMetadataRecord::generated_graphql_operations();
     assert_eq!(read_only.len(), 2);
@@ -396,6 +421,18 @@ fn read_only_composite_and_append_only_profiles_report_only_actual_resolvers() {
             .count(),
         2
     );
+
+    let root_read_only = RootReadOnlyMetadataRecord::generated_graphql_operations();
+    assert!(
+        root_read_only
+            .iter()
+            .any(|operation| { operation.kind() == GraphqlOperationKind::Subscription })
+    );
+    let root_read_only_catalog = root_read_only_surface::graphql_orm_operation_catalog();
+    assert_eq!(root_read_only_catalog.exposed_operations().count(), 2);
+    assert!(root_read_only_catalog.operations().iter().all(|operation| {
+        operation.kind() == GraphqlOperationKind::Query || !operation.is_exposed()
+    }));
 
     let composite = CompositeMetadataRecord::generated_graphql_operations();
     assert_eq!(composite.len(), 2);

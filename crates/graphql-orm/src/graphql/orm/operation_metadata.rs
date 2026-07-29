@@ -323,9 +323,10 @@ pub trait GraphqlOperationMetadata {
 /// Schema-root-resolved metadata for one generated resolver.
 ///
 /// A value with [`Self::is_exposed`] equal to `false` was generated for its
-/// entity but omitted by the `schema_roots!` generated-mutation exposure
-/// policy. Queries and generated subscriptions are exposed whenever their
-/// entity operation type participates in that schema.
+/// entity but omitted by `schema_roots!` root composition. Queries are exposed
+/// whenever their entity participates in the schema; generated mutations and
+/// subscriptions additionally depend on mutation exposure and read-only
+/// root/backend policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphqlResolverOperationDescriptor {
     generated: &'static GeneratedGraphqlOperationDescriptor,
@@ -427,11 +428,11 @@ pub struct GraphqlOperationCatalog {
 }
 
 impl GraphqlOperationCatalog {
-    /// Composes generated entity descriptors with per-entity mutation exposure.
+    /// Composes descriptors with per-entity mutation/subscription exposure.
     ///
     /// Each iterator item contains one entity's static derive descriptors and
-    /// whether that entity's generated mutation type was merged into the
-    /// schema. Queries and subscriptions remain exposed whenever generated.
+    /// whether that entity's generated mutation and subscription types were
+    /// merged into the schema. Queries remain exposed whenever generated.
     ///
     /// This method is public because `schema_roots!` expands in downstream
     /// crates; applications normally call its generated
@@ -439,14 +440,17 @@ impl GraphqlOperationCatalog {
     #[doc(hidden)]
     pub fn compose<I>(groups: I) -> Self
     where
-        I: IntoIterator<Item = (&'static [GeneratedGraphqlOperationDescriptor], bool)>,
+        I: IntoIterator<Item = (&'static [GeneratedGraphqlOperationDescriptor], bool, bool)>,
     {
         let mut operations = groups
             .into_iter()
-            .flat_map(|(generated, mutations_exposed)| {
+            .flat_map(|(generated, mutations_exposed, subscriptions_exposed)| {
                 generated.iter().map(move |operation| {
-                    let exposed =
-                        operation.kind() != GraphqlOperationKind::Mutation || mutations_exposed;
+                    let exposed = match operation.kind() {
+                        GraphqlOperationKind::Query => true,
+                        GraphqlOperationKind::Mutation => mutations_exposed,
+                        GraphqlOperationKind::Subscription => subscriptions_exposed,
+                    };
                     GraphqlResolverOperationDescriptor::new(operation, exposed)
                 })
             })
@@ -586,8 +590,8 @@ mod tests {
             .into_boxed_slice()
         });
 
-        let exposed = GraphqlOperationCatalog::compose([(generated.as_ref(), true)]);
-        let hidden = GraphqlOperationCatalog::compose([(generated.as_ref(), false)]);
+        let exposed = GraphqlOperationCatalog::compose([(generated.as_ref(), true, true)]);
+        let hidden = GraphqlOperationCatalog::compose([(generated.as_ref(), false, true)]);
         assert_eq!(exposed.fingerprint().len(), 64);
         assert_ne!(exposed.fingerprint(), hidden.fingerprint());
         assert!(

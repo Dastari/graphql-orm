@@ -24,7 +24,8 @@ are aligned at `0.16.0`.
   stable fingerprint.
 - `schema_roots!` emits `graphql_orm_operation_catalog()`. The catalog resolves
   generated mutation exposure after none/allowlist/denylist policy while
-  retaining omitted generated descriptors for diagnostics.
+  retaining omitted generated descriptors for diagnostics, and resolves
+  generated mutation/subscription exposure under root-level read-only policy.
 - Domain-separated SHA-256 fingerprints cover generated descriptors, resolved
   exposure, and deterministic catalog composition. They deliberately do not
   claim to fingerprint custom roots or complete host SDL, authorize a
