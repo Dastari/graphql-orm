@@ -26,14 +26,16 @@ cargo check -p graphql-orm --no-default-features --features "sqlite mssql"
 ## agql-auth Bridge Alignment
 
 The optional bridge and any direct host dependency must both use agql-auth
-0.12.0 at revision `3f3b0c5365adfbe436514a681d977b600991b797`.
-Exercise the Gema-facing feature combinations with:
+0.13.0 at revision `d6b9cef663d52125c52f3fb90d4155ee25d34775`.
+Exercise the bridge feature combinations with:
 
 ```bash
 cargo check -p graphql-orm --no-default-features --features "sqlite auth-agql resolver-case-pascal argument-case-pascal field-case-pascal"
 cargo check -p graphql-orm --no-default-features --features sqlite
 cargo check -p graphql-orm --no-default-features --features mssql
 cargo test -p graphql-orm --no-default-features --features "sqlite auth-agql" graphql::auth_agql::tests
+cargo test -p graphql-orm --test operation_assurance
+cargo test -p graphql-orm --no-default-features --features "sqlite auth-agql" --test agql_assurance
 cargo test -p graphql-orm --no-default-features --features "sqlite auth-agql resolver-case-pascal argument-case-pascal field-case-pascal" --test backend_coexistence_fixture
 ```
 
@@ -46,8 +48,9 @@ cargo tree --duplicates --workspace --locked
 cargo tree --manifest-path crates/graphql-orm/tests/fixtures/backend-coexistence/Cargo.toml -p auth-service
 ```
 
-The bridge must remain a principal projection. It has no rate-limit-store,
-OIDC-request, provider-evidence, token-minting, or product-policy role.
+The bridge must remain an accepted-principal projection and declared-assurance
+evaluator. It has no rate-limit-store, OIDC-request, provider-evidence,
+token-minting, or application-policy role.
 
 ## Backend Dependency Isolation
 

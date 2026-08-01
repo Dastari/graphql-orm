@@ -2841,6 +2841,10 @@ pub(crate) fn generate_graphql_operations(
                 #[graphql(name = #input_arg_name)] input: #graphql_create_input,
             ) -> ::graphql_orm::async_graphql::Result<#upsert_result_type> {
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
+                )?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let pool = db.pool();
                 let auth_context = ctx
@@ -3561,6 +3565,10 @@ pub(crate) fn generate_graphql_operations(
                 #[graphql(name = #page_arg_name)] page: ::graphql_orm::graphql::pagination::KeysetPageInput,
             ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                )?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 db.ensure_entity_access(
                     Some(ctx),
@@ -3635,6 +3643,10 @@ pub(crate) fn generate_graphql_operations(
                 #[graphql(name = #page_arg_name)] page: Option<::graphql_orm::graphql::orm::PageInput>,
             ) -> ::graphql_orm::async_graphql::Result<#search_connection_type> {
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                )?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let pool = db.pool();
                 let auth_context = ctx
@@ -3944,6 +3956,10 @@ pub(crate) fn generate_graphql_operations(
                     #[graphql(name = #input_arg_name)] input: #graphql_create_input,
                 ) -> ::graphql_orm::async_graphql::Result<#result_type> {
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                    ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                        ctx,
+                        ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
+                    )?;
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                     db.ensure_entity_access(
                         Some(ctx), #entity_name_lit,
@@ -5353,6 +5369,10 @@ pub(crate) fn generate_graphql_operations(
                     use ::graphql_orm::graphql::orm::{DatabaseOrderBy, EntityQuery};
 
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                    ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                        ctx,
+                        ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                    )?;
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                     let pool = db.pool();
                     let auth_context = ctx
@@ -5471,6 +5491,10 @@ pub(crate) fn generate_graphql_operations(
 
                     #single_query_key_init
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                    ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                        ctx,
+                        ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                    )?;
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                     let pool = db.pool();
                     let auth_context = ctx
@@ -5729,6 +5753,10 @@ pub(crate) fn generate_graphql_operations(
             ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, DatabaseOrderBy, EntityQuery, FromSqlRow};
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                )?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let pool = db.pool();
                 let auth_context = ctx
@@ -5847,6 +5875,10 @@ pub(crate) fn generate_graphql_operations(
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow};
                 #single_query_key_init
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                )?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let pool = db.pool();
                 let auth_context = ctx
@@ -5904,6 +5936,10 @@ pub(crate) fn generate_graphql_operations(
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
 
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
+                )?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let pool = db.pool();
                 let auth_context = ctx
@@ -6007,6 +6043,10 @@ pub(crate) fn generate_graphql_operations(
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
 
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
+                )?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let pool = db.pool();
                 let auth_context = ctx
@@ -6158,6 +6198,10 @@ pub(crate) fn generate_graphql_operations(
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, SqlValue};
 
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
+                )?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let pool = db.pool();
                 let auth_context = ctx
@@ -6272,6 +6316,10 @@ pub(crate) fn generate_graphql_operations(
                 use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
 
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
+                )?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let auth_context = ctx
                     .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
@@ -6306,6 +6354,10 @@ pub(crate) fn generate_graphql_operations(
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow};
 
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
+                )?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let auth_context = ctx
                     .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
@@ -6349,6 +6401,10 @@ pub(crate) fn generate_graphql_operations(
             ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = #changed_event>> {
                 use ::graphql_orm::futures::StreamExt;
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription,
+                )?;
                 let db = ctx.data::<::graphql_orm::db::Database<#backend_marker>>().map_err(|_| {
                     ::graphql_orm::async_graphql::Error::new(
                         "graphql-orm Database runtime not registered; build the schema with schema_builder(database) or add Database to schema data",

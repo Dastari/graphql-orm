@@ -2,6 +2,39 @@
 
 User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
 
+## 0.17.0
+
+Companion macros crate: `graphql-orm-macros` **0.17.0** under the aligned
+Git-only version policy. This additive public runtime and generated-code
+surface is a pre-1.0 minor release.
+
+- Added provider-neutral operation assurance registries for generated and
+  custom root fields, configurable interactive-mutation defaults, explicit
+  interactive/machine/service/safety-teardown actor classes, requirements,
+  and documented exemptions.
+- Added strict completeness audits that fail when an exposed mutation has
+  neither a requirement nor exemption. Compatibility mode remains the default;
+  queries and subscriptions receive no assurance default.
+- Added provider-neutral schema directive definitions/metadata and a
+  deterministic advisory client manifest containing exact field identity,
+  policy ID, actor class, custom/generated origin, and exemption reason.
+- Generated resolvers now call a generic assurance enforcement hook before
+  database work. The hook is a compatibility no-op until a schema installs
+  `AssuranceEnforcement`; `DeclaredAssuranceGuard` gives custom fields the same
+  integration.
+- Extended the optional one-way `auth-agql` bridge with
+  `AgqlAssuranceEvaluator`, pinned to upstream revision
+  `d6b9cef663d52125c52f3fb90d4155ee25d34775`. It evaluates the upstream
+  `AssuranceRequirement` with the current user and injected clock, then emits
+  lowercase GraphQL extension key `code` with `STEP_UP_REQUIRED`,
+  `UNAUTHENTICATED`, or `FORBIDDEN`.
+- Added generated/custom mutation, machine principal, safety exemption,
+  strict audit, manifest determinism, and stable error-code coverage.
+
+Existing resolver names, SDL, database schema/data, authorization/RLS, and
+runtime behavior remain unchanged until assurance enforcement is explicitly
+installed. The manifest is advisory; server enforcement is authoritative.
+
 ## 0.16.0
 
 Companion macros crate: `graphql-orm-macros` **0.16.0** under the aligned

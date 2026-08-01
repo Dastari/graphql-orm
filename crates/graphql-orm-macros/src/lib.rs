@@ -50,6 +50,12 @@
 //! grants no resolver authority and binds no custom root, GraphQL document
 //! projection, disclosure policy, or runtime limit.
 //!
+//! Generated root resolvers also call the runtime's provider-neutral assurance
+//! hook before database work. The hook preserves existing behavior when no
+//! enforcement is installed. Assurance policy IDs, custom-field registration,
+//! schema defaults, completeness audits, directives, and manifests belong to
+//! the runtime `OperationAssuranceRegistry` rather than derive attributes.
+//!
 //! # Generated Resolver Auth
 //!
 //! `schema_roots!` and `#[graphql_entity(...)]` accept

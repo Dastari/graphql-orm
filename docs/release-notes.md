@@ -8,8 +8,42 @@ the runtime crate unless a macro crate version is called out separately.
 `graphql-orm` and `graphql-orm-macros` are distributed only from GitHub using reviewed full commit
 revision pins. Both manifests set `publish = false`; crates.io publication is neither supported nor
 required. The optional `auth-agql` bridge intentionally pins `agql-auth` at
-`3f3b0c5365adfbe436514a681d977b600991b797`. Consequently `cargo package -p graphql-orm` cannot
+`d6b9cef663d52125c52f3fb90d4155ee25d34775`. Consequently `cargo package -p graphql-orm` cannot
 resolve that Git-only optional dependency through the crates.io packaging model; this is expected.
+
+## 0.17.0
+
+Provider-neutral operation assurance release. Runtime and companion macros are
+aligned at `0.17.0`.
+
+- `OperationAssuranceRegistry` composes exposed generated-operation metadata
+  with stable custom field identities and records actor class, assurance policy
+  ID, or explicit exemption reason.
+- `AssuranceSchemaConfig` preserves a legacy no-default mode and adds an opt-in
+  interactive-mutation default plus strict completeness. Machine, service, and
+  safety teardown operations never inherit the interactive default; queries
+  and subscriptions have no default requirement.
+- Completeness audit/test helpers fail deterministically for exposed mutations
+  with neither a requirement nor exemption.
+- Provider-neutral directive definitions and field metadata can be emitted by
+  schema tooling. Deterministic versioned manifests include exact operation and
+  field identity, origin, policy ID, actor class, exemption reason, and a
+  canonical fingerprint for advisory client codegen.
+- Generated resolvers call the generic enforcement hook before database work;
+  custom resolvers use `DeclaredAssuranceGuard`. No installed enforcement means
+  no behavior change.
+- The optional bridge pins agql-auth 0.13.0 at
+  `d6b9cef663d52125c52f3fb90d4155ee25d34775` and provides
+  `AgqlAssuranceEvaluator`. It uses upstream policy evaluation with the current
+  user and injected clock and emits lowercase extension key `code` with stable
+  `STEP_UP_REQUIRED`, `UNAUTHENTICATED`, or `FORBIDDEN` values.
+
+This is an additive pre-1.0 public API and generated-code release. Existing
+SDL, resolver behavior, authorization/RLS, database schema/data, queries, and
+subscriptions are unchanged by default. The client manifest is advisory and
+never replaces authoritative server enforcement. See
+[Operation assurance](operation-assurance.md) and the
+[migration guide](../MIGRATION.md).
 
 ## 0.16.0
 

@@ -7,7 +7,7 @@ database schema. Schema ownership and migration behavior are controlled by runti
 ## Features
 
 ```toml
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.16.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.17.0", default-features = false, features = ["sqlite"] }
 ```
 
 Available backend features:
@@ -27,9 +27,9 @@ release. See [Runtime records](runtime-records.md#backend-mappings).
 
 Optional non-backend features:
 
-- `auth-agql` - optional one-way bridge from upstream `agql-auth` 0.12
-  (`git` rev `3f3b0c5365adfbe436514a681d977b600991b797`) into `AuthSubject` /
-  `DbAuthContext`.
+- `auth-agql` - optional one-way bridge from upstream `agql-auth` 0.13
+  (`git` rev `d6b9cef663d52125c52f3fb90d4155ee25d34775`) into `AuthSubject` /
+  `DbAuthContext` and declared assurance evaluation.
 
 The `mssql` feature activates optional `tiberius`, `tokio-util`, and Tokio TCP support. Projects that
 do not select `mssql` do not build the SQL Server driver path.

@@ -6,13 +6,13 @@
 ## Dependency
 
 ```toml
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.16.0", features = ["sqlite", "auth-agql"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.17.0", features = ["sqlite", "auth-agql"] }
 # Host applications may depend on agql-auth directly as well. The optional
 # graphql-orm auth-agql feature pins the exact upstream release:
 # git = "https://github.com/Dastari/agql-auth.git"
-# rev = "3f3b0c5365adfbe436514a681d977b600991b797"
-# version = "0.12.0"
-agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "3f3b0c5365adfbe436514a681d977b600991b797", version = "0.12.0" }
+# rev = "d6b9cef663d52125c52f3fb90d4155ee25d34775"
+# version = "0.13.0"
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "d6b9cef663d52125c52f3fb90d4155ee25d34775", version = "0.13.0" }
 ```
 
 Both projects are intentionally Git-only. Cargo's crates.io packaging flow cannot package
@@ -55,6 +55,25 @@ authorization headers are never copied. Arbitrary `token_claims.additional`
 members are not bridge output; only the documented string `policy_version` is
 retained. Token/session/actor identifiers are references, never credentials.
 
+## Operation Assurance Evaluation
+
+Version 0.17 adds `AgqlAssuranceEvaluator`. It converts a provider-neutral ORM
+policy ID into upstream `AssurancePolicyId` / `AssuranceRequirement`, then
+evaluates the current accepted user through the host's `AssurancePolicySet` and
+injected `Clock`. It never verifies external evidence or calls session step-up.
+
+Install it through `AssuranceEnforcement`; generated mutations call the
+enforcement hook automatically and custom fields use
+`DeclaredAssuranceGuard`. Denials expose lowercase GraphQL extension key `code`
+with `STEP_UP_REQUIRED`, `UNAUTHENTICATED`, or `FORBIDDEN`. API-token
+principals cannot satisfy user-session assurance and fail a declared
+requirement as `FORBIDDEN`; explicitly exempt machine/service operations still
+run their independent authorization checks.
+
+See [Operation assurance](operation-assurance.md). Client manifests and safe
+status projections are advisory; the current server evaluation controls
+execution.
+
 The database context also installs transaction-local `app.organization_id`,
 `app.correlation_id`, `app.assurance`, and `app.policy_version` settings on PostgreSQL. Assurance
 contains only the accepted authentication timestamp, normalized methods,
@@ -65,7 +84,7 @@ missing, or inconsistent assurance is omitted rather than repaired.
 
 ## Migrating from 0.7
 
-Update any direct `agql-auth` dependency to the exact 0.12 revision above. `AuthSubject` and
+Update any direct `agql-auth` dependency to the exact 0.13 revision above. `AuthSubject` and
 `DbAuthContext` gained organization, correlation, and assurance fields; applications constructing
 either with struct literals must add the fields or use their builders/`Default` update syntax.
 The bridge preserves valid 0.8+ session assurance, active scope, correlation,
@@ -74,16 +93,16 @@ of retaining only the older role/scope/tenant subset.
 
 ## Migrating from an Earlier Bridge Release
 
-Update any direct `agql-auth` dependency to the exact 0.12.0 revision above at
+Update any direct `agql-auth` dependency to the exact 0.13.0 revision above at
 the same time as `graphql-orm`. This prevents Cargo from resolving separate
-package/type universes. Version 0.16.0 keeps the identity, role, scope, tenant,
+package/type universes. Version 0.17.0 keeps the identity, role, scope, tenant,
 organization, actor, correlation, token-reference, and policy-version mappings,
 but hardens the public bridge projection: arbitrary custom claims are no longer
 copied, and malformed or token/session-inconsistent assurance is omitted. If a
 host consumed arbitrary `AuthSubject.claims.additional` values, move that data
 through an explicit application-owned request type instead of the ORM bridge.
 
-Direct users of `agql-auth` must also review its 0.10→0.12 migration. Version
+Direct users of `agql-auth` must also review its migration through 0.13. Version
 0.11 replaces split durable rate-limit writes with the versioned atomic
 `AuthRateLimitStore` contract. `graphql-orm` does not implement that store and
 does not add a split or synthetic ORM-backed implementation. Version 0.12 adds
@@ -92,6 +111,10 @@ the state-bound `OidcIdTokenClaimRequest::EssentialAcrs` request and separate
 requests/outcomes nor rate-limit persistence enter the ORM bridge. Applications
 that only consume a structurally valid `AuthPrincipal` need no database or data
 migration.
+
+Version 0.13 adds the policy ID, evaluation state/times, safe session status,
+denial categories, and policy-set contract consumed by the operation assurance
+evaluator. It does not change ordinary refresh eligibility.
 
 An `EssentialAcrs` callback outcome alone never creates ORM assurance. The host
 must first verify and locally allowlist the provider evidence, then construct a
@@ -102,6 +125,7 @@ policy field. Missing scalar ACR or context remains `None`.
 
 ## Policy Decisions Stay Host-Owned
 
-The bridge only maps identity. Scope hierarchies, product scopes, and business
+The bridge maps accepted identity and evaluates only explicitly declared
+assurance requirements. Scope hierarchies, application scopes, and business
 authorization remain in host policies or `agql-auth` guards. `ScopeEntityPolicy`
 in `graphql-orm` continues to use exact string matching.

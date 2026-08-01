@@ -56,6 +56,11 @@ Enable at most one feature from each group.
 runtime default remains fail-closed for compatibility; use `auth = "none"` for public generated
 schemas.
 
+Generated root resolvers also call the runtime's operation-assurance hook before
+database work. It is a compatibility no-op until the schema installs
+`AssuranceEnforcement`; classification, policy IDs, custom-field guards,
+directives, audits, and manifests are runtime registry concerns.
+
 ## Documentation
 
 See the root [README](../../README.md), project [docs](../../docs/README.md),

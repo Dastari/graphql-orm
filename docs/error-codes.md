@@ -9,6 +9,7 @@ constraint names, filesystem paths, and configuration strings stay server-side.
 | --- | --- |
 | `INVALID_INPUT` | Client input failed validation |
 | `UNAUTHENTICATED` | No principal present |
+| `STEP_UP_REQUIRED` | Current user session does not satisfy declared operation assurance |
 | `FORBIDDEN` | Principal present but not authorized |
 | `NOT_FOUND` | Resource missing or not visible (no cross-tenant existence leak) |
 | `CONFLICT` | State conflict |
@@ -33,6 +34,11 @@ Default extensions:
 Internal diagnostic strings are never placed in extensions. Set
 `GRAPHQL_ORM_LOG_INTERNAL_ERRORS=1` to emit internal detail to stderr for local
 debugging.
+
+Operation assurance uses the same lowercase extension key `code`. The optional
+`auth-agql` evaluator maps upstream evaluation states to `UNAUTHENTICATED`,
+`STEP_UP_REQUIRED`, or `FORBIDDEN` without parsing messages. Detailed upstream
+denial reasons remain separate from the stable transport category.
 
 Runtime-schema record/handle errors use the separate lowercase
 `RuntimeRecordErrorCode` contract because they are host-side runtime IR errors,

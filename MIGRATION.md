@@ -3,6 +3,80 @@
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.17.0 Provider-Neutral Operation Assurance
+
+Update `graphql-orm` and `graphql-orm-macros` together to 0.17.0 at the final
+reviewed full revision. If `auth-agql` is enabled, match its exact upstream
+dependency:
+
+```toml
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "d6b9cef663d52125c52f3fb90d4155ee25d34775", version = "0.13.0" }
+```
+
+This release is additive and opt-in. Existing schemas install no assurance
+enforcement, apply no interactive-mutation default, and retain their current
+query, mutation, subscription, authorization, RLS, SDL, and database behavior.
+
+### Before
+
+```rust
+let schema = schema_builder(database).finish();
+```
+
+### After: staged adoption
+
+First build a compatibility registry and audit the current mutation surface:
+
+```rust
+let registry = OperationAssuranceRegistry::builder(
+    graphql_orm_operation_catalog(),
+    AssuranceSchemaConfig::legacy(),
+).build()?;
+let audit = registry.audit();
+```
+
+Then register custom resolver fields, assign machine/service/safety-teardown
+actor classes, and give every exposed mutation either `require(...)` or
+`exempt(...)`. Custom fields use `DeclaredAssuranceGuard`; generated fields
+already call the runtime hook.
+
+Next configure an interactive default while strict mode remains off:
+
+```rust
+let config = AssuranceSchemaConfig::legacy()
+    .with_default_interactive_mutation_policy("interactive.recent-auth")?;
+```
+
+Install `AssuranceEnforcement` only after the upstream policy set, injected
+clock, accepted request principal, error handling, and step-up UX are ready.
+With `auth-agql`, use `AgqlAssuranceEvaluator`. Server denials expose lowercase
+extension key `code` with `STEP_UP_REQUIRED`, `UNAUTHENTICATED`, or
+`FORBIDDEN`.
+
+Finally enable `with_strict_mutation_classification(true)` and make
+`ensure_complete()` or `audit().assert_complete()` a CI gate. Export
+`manifest()` for client codegen and `schema_metadata()` for directive-aware
+schema tooling. Both are descriptive/advisory; keep server enforcement enabled
+for every protected operation.
+
+### Compatibility and rollback
+
+No database, stored-data, GraphQL-data, session, or token migration is needed.
+Queries and subscriptions never inherit the mutation default. Ordinary
+resolver auth and authorization continue independently; an assurance exemption
+does not grant authority. Machine/API-token principals cannot satisfy a user
+session requirement through the upstream evaluator and must be explicitly
+classified according to server policy.
+
+To roll back, remove `AssuranceEnforcement` from schema data and restore
+`AssuranceSchemaConfig::legacy()` (or stop building the registry), then return
+both ORM crates to the prior reviewed exact revision. Remove the client
+manifest expectation at the same time. Existing database rows and
+authentication sessions require no rewrite.
+
+See [Operation assurance](docs/operation-assurance.md) for the complete API and
+trust boundaries.
+
 ## 0.16.0 Generated Resolver Operation Metadata
 
 Update both Git-only graphql-orm crates to 0.16.0 at the reviewed final full
@@ -753,8 +827,8 @@ access path.
 
 ### Behavioral Notes
 
-- No JWT, OIDC, cookie, wildcard, or product-specific scope logic was added to `graphql-orm`.
+- No JWT, OIDC, cookie, wildcard, or application-specific scope logic was added to `graphql-orm`.
 - PostgreSQL RLS helper functions still use exact scope matching.
-- The current `auth-agql` feature targets `agql-auth` 0.12.0 at revision
-  `3f3b0c5365adfbe436514a681d977b600991b797`; earlier release sections above
+- The current `auth-agql` feature targets `agql-auth` 0.13.0 at revision
+  `d6b9cef663d52125c52f3fb90d4155ee25d34775`; earlier release sections above
   retain their historical pins.

@@ -21,6 +21,8 @@ It is designed for two related use cases:
   helpers, and write operations where the backend supports writes
 - generated resolver-operation descriptors and schema-root exposure catalogs
   with deterministic drift fingerprints
+- opt-in operation assurance classification, completeness audits, directive
+  metadata, deterministic client manifests, and authoritative resolver guards
 - `#[derive(GraphQLRelations)]` for nested relation fields with batched loading
 - SQLite and PostgreSQL read/write support through SQLx
 - Microsoft SQL Server read/query-only support through Tiberius
@@ -54,13 +56,13 @@ Select exactly the backend support your service needs:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.16.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.17.0", default-features = false, features = ["sqlite"] }
 ```
 
 GitHub with an exact full revision is the only supported distribution method. The workspace packages are
 not published to crates.io. Replace the placeholder with the reviewed release commit (the version tag
 is an identity aid, not a substitute for `rev`). The optional `auth-agql` bridge likewise resolves
-the exact upstream revision `3f3b0c5365adfbe436514a681d977b600991b797`.
+the exact upstream revision `d6b9cef663d52125c52f3fb90d4155ee25d34775`.
 
 Available backend features:
 
@@ -70,8 +72,8 @@ Available backend features:
 
 Optional integration features:
 
-- `auth-agql` - optional one-way bridge from `agql-auth` 0.12 principals into
-  `AuthSubject` / `DbAuthContext`
+- `auth-agql` - optional one-way bridge from `agql-auth` 0.13 principals into
+  `AuthSubject` / `DbAuthContext` plus declared assurance evaluation
 
 Naming features are independent of backend features:
 
@@ -161,6 +163,18 @@ backend profile, and resolved generated-mutation exposure. Its fingerprints
 detect generated-surface drift; they do not authorize execution or bind a
 document projection or disclosure policy. See
 [generated resolver operation metadata](docs/resolver-operation-metadata.md).
+
+For step-up-sensitive operations, build an `OperationAssuranceRegistry` from
+that catalog, register custom root fields, and classify every mutation with a
+policy ID or explicit exemption. Compatibility mode applies no default;
+strict mode can apply an interactive-mutation default and fail completeness
+checks for remaining gaps. Generated resolvers call the generic enforcement
+hook automatically, while custom fields use `DeclaredAssuranceGuard`. The
+optional `auth-agql` evaluator maps current upstream decisions to
+`STEP_UP_REQUIRED`, `UNAUTHENTICATED`, or `FORBIDDEN` through lowercase GraphQL
+extension key `code`. Directive metadata and deterministic manifests are
+advisory; server-side enforcement remains authoritative. See
+[operation assurance](docs/operation-assurance.md).
 
 ## SQL Server Read-Only Example
 

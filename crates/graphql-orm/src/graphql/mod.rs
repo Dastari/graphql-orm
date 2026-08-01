@@ -1,3 +1,4 @@
+pub mod assurance;
 pub mod auth;
 #[cfg(feature = "auth-agql")]
 pub mod auth_agql;

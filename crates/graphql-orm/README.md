@@ -12,6 +12,8 @@ This crate provides the public runtime contract targeted by the derive macros:
 - row, field, and entity policies
 - `AuthSubject`, `AuthorizationMode`, safe public errors, structural tenant helpers,
   generated resolver auth modes, exact-scope `ScopeEntityPolicy`, and optional `auth-agql` bridge
+- provider-neutral operation assurance registries, mutation completeness
+  audits, directive metadata, deterministic client manifests, and guards
 - schema models, validation, migration planning, and explicit migration application
 - SQLite, Postgres, and read-only SQL Server runtime support
 
@@ -42,5 +44,6 @@ pub struct User {
 - [Backend features](../../docs/backends.md)
 - [Entities and relations](../../docs/entities-and-relations.md)
 - [Schema management](../../docs/schema-management.md)
+- [Operation assurance](../../docs/operation-assurance.md)
 - [Runtime writes and policies](../../docs/runtime-and-writes.md)
 - [SQL Server read-only backend](../../docs/mssql.md)

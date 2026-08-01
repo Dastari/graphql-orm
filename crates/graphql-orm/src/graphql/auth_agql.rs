@@ -7,9 +7,18 @@
 //! not create or evaluate OIDC requests/outcomes, persist rate-limit state,
 //! mint tokens, infer MFA, or own product authorization policy.
 
+use std::fmt;
+use std::sync::Arc;
+
+use agql_auth::{
+    AssuranceEvaluationState, AssurancePolicyId, AssurancePolicySet, AssuranceRequirement,
+    AuthPrincipal, Clock, MfaAcceptance,
+};
+use async_graphql::ErrorExtensions;
+
+use crate::graphql::assurance::{AssuranceActorClass, AssuranceRequirementEvaluator};
 use crate::graphql::auth::{AuthAssurance, AuthSubject};
 use crate::graphql::orm::DbAuthContext;
-use agql_auth::{AuthPrincipal, MfaAcceptance};
 
 fn safe_user_claims(
     user: &agql_auth::AuthUser,
@@ -184,6 +193,83 @@ pub fn auth_bundle_from_principal(principal: &AuthPrincipal) -> (AuthSubject, Db
             .map(str::to_string);
     }
     (subject, db)
+}
+
+/// Server evaluator that delegates declared ORM policies to `agql-auth`.
+///
+/// The policy set and clock are host configuration. Authentication evidence is
+/// read only from the current accepted `agql-auth` request principal; provider
+/// responses and raw credentials never enter this bridge.
+#[derive(Clone)]
+pub struct AgqlAssuranceEvaluator {
+    policies: Arc<AssurancePolicySet>,
+    clock: Arc<dyn Clock>,
+}
+
+impl AgqlAssuranceEvaluator {
+    /// Creates an evaluator for use with `AssuranceEnforcement`.
+    pub fn new(policies: Arc<AssurancePolicySet>, clock: Arc<dyn Clock>) -> Self {
+        Self { policies, clock }
+    }
+}
+
+impl fmt::Debug for AgqlAssuranceEvaluator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgqlAssuranceEvaluator")
+            .field("policies", &"[configured]")
+            .field("clock", &self.clock)
+            .finish()
+    }
+}
+
+impl AssuranceRequirementEvaluator for AgqlAssuranceEvaluator {
+    fn enforce(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+        _actor_class: AssuranceActorClass,
+        policy_id: &str,
+    ) -> async_graphql::Result<()> {
+        let policy_id = AssurancePolicyId::new(policy_id)
+            .map_err(|_| assurance_graphql_error("forbidden", "FORBIDDEN"))?;
+        let requirement = AssuranceRequirement::new(policy_id);
+        let principal = agql_auth::principal_from_ctx_opt(ctx);
+        let evaluation = match principal.as_ref() {
+            None => self
+                .policies
+                .evaluate(&requirement, None, self.clock.as_ref()),
+            Some(AuthPrincipal::User(user)) => {
+                self.policies
+                    .evaluate(&requirement, Some(user), self.clock.as_ref())
+            }
+            Some(AuthPrincipal::ApiToken(_)) => {
+                return Err(assurance_graphql_error("forbidden", "FORBIDDEN"));
+            }
+        };
+        match evaluation.state {
+            AssuranceEvaluationState::Satisfied => Ok(()),
+            state => {
+                let code = state
+                    .graphql_extension_code()
+                    .expect("denied assurance evaluation has a stable code");
+                let message = match state {
+                    AssuranceEvaluationState::Unauthenticated => "unauthenticated",
+                    AssuranceEvaluationState::StepUpRequired { .. } => {
+                        "additional authentication is required"
+                    }
+                    AssuranceEvaluationState::Forbidden { .. } => "forbidden",
+                    AssuranceEvaluationState::Satisfied => unreachable!(),
+                };
+                Err(assurance_graphql_error(message, code))
+            }
+        }
+    }
+}
+
+fn assurance_graphql_error(message: &'static str, code: &'static str) -> async_graphql::Error {
+    async_graphql::Error::new(message).extend_with(|_, extensions| {
+        // GraphQL extension keys are case-sensitive. The contract uses lowercase `code`.
+        extensions.set("code", code);
+    })
 }
 
 #[cfg(test)]

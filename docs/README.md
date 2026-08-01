@@ -15,6 +15,7 @@ This directory contains the project documentation that is too detailed for the r
 - [Microsoft SQL Server read-only backend](mssql.md)
 - [Federation operation roots](federation.md)
 - [Generated resolver operation metadata](resolver-operation-metadata.md)
+- [Operation assurance, step-up classification, and manifests](operation-assurance.md)
 - [Monorepo consolidation and consumer migration](monorepo-consolidation.md)
 - [Consumer-project migration agent prompt](consumer-monorepo-migration-agent-prompt.md)
 - [Schema ownership, validation, planning, and ABI migrations](schema-management.md)

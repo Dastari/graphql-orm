@@ -11,6 +11,7 @@
 //! projection, or replace normal resolver, row-policy, field-policy, or RLS
 //! checks.
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Stable identifier for the resolver-operation fingerprint algorithm.
@@ -23,7 +24,8 @@ use sha2::{Digest, Sha256};
 pub const GRAPHQL_OPERATION_FINGERPRINT_ALGORITHM: &str = "graphql-orm-sha256-len-v1";
 
 /// GraphQL operation root containing a generated resolver.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum GraphqlOperationKind {
     /// A field on the generated `Query` root.

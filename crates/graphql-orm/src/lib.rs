@@ -125,6 +125,24 @@
 //! limits, or resolver/RLS decisions. See
 //! [`graphql::orm::GraphqlOperationCatalog`].
 //!
+//! # Operation Assurance
+//!
+//! [`graphql::assurance::OperationAssuranceRegistry`] composes generated
+//! operation metadata with custom root-field identities, provider-neutral
+//! policy IDs, actor classes, and explicit exemptions. Compatibility mode has
+//! no default. An opt-in interactive-mutation default and strict completeness
+//! gate do not apply to queries, subscriptions, machine/service fields, or
+//! safety teardown fields.
+//!
+//! Generated resolvers call
+//! [`graphql::assurance::enforce_resolver_assurance`] before database work;
+//! custom resolvers can use [`graphql::assurance::DeclaredAssuranceGuard`]. The
+//! hook is a no-op until the schema installs
+//! [`graphql::assurance::AssuranceEnforcement`]. Directive metadata and the
+//! deterministic operation-assurance manifest are advisory; enforcement is
+//! authoritative on the server. The optional `auth-agql` feature provides
+//! `AgqlAssuranceEvaluator`.
+//!
 //! # Generated Resolver Auth
 //!
 //! Generated resolvers understand a project-agnostic
