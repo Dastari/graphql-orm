@@ -114,7 +114,9 @@ application SQL. Unknown formats, identity/checksum mismatch, duplicate stored
 values, unsupported classifications/maturity, or deployment-limit widening
 fail closed.
 
-Restore snapshot producers count invalid scope-rule policies in
-`invalid_rule_policy_count`. Any nonzero count emits
-`AI_RESTORE_RULE_POLICY_INVALID` and keeps the runtime start gate closed until
-the deployment's controlled migration or restore process reconciles the rows.
+The database restore auditor must derive invalid scope-rule policy counts from
+the rows rather than accept a caller assertion. The initial collector reports
+the rule-policy audit as `NotImplemented`, which is fatal. Once implemented, a
+nonzero `invalid_rule_policy_count` emits `AI_RESTORE_RULE_POLICY_INVALID` and
+keeps the runtime start gate closed until the controlled restore process
+reconciles the rows.

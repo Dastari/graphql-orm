@@ -20,13 +20,35 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.58.0` and AI
-schema module to `0.51.0`. It aligns the reviewed dependency universe,
+This development line advances the pre-1.0 crate version to `0.59.0` and keeps
+AI schema module `0.51.0`. It begins the applied-restore implementation with
+bounded database-derived facts, aligns the reviewed dependency universe,
 integrates generated resolver-operation metadata, completes the durable OpenAI
 background terminal-reconciliation runtime, and closes raw provider
 file-search IDs behind the reviewed persistent-file design.
 
+### Changed
+
+- Removed `AiRestorePlan::readiness_report_after_apply`. A pure dry-run plan
+  cannot truthfully manufacture evidence that database repairs were applied
+  and post-apply validation succeeded. The existing
+  `AiRuntimeStartGate::open` report remains a host-attested compatibility seam,
+  not applied-restore authority; restored deployments must keep it closed.
+
 ### Added
+
+- `OrmAiRestoreFactCollector` now reads runs, approvals, and egress consents
+  through generated ORM queries in one bounded transaction. It conservatively
+  classifies interrupted effects, validates core durable shapes, reports a
+  reached bound as fatal incompleteness, and produces an opaque deterministic
+  fact digest without provider, tool, application, or blob I/O.
+- `AiRestoreAuditKind`, `AiRestoreAuditStatus`,
+  `AiCollectedRestoreFacts`, and `AiCollectedRestorePlan` make audit coverage
+  explicit. `AiRestoreReconciler::plan_collected` emits a fatal issue for
+  every unimplemented, truncated, or invalid audit and binds the dry-run plan
+  to exact fact and plan digests. These types do not prove repairs or open
+  readiness; the applier, post-apply validator, recovery epoch, and opaque
+  runtime-start proof remain closed.
 
 - SQLite and PostgreSQL builds now resolve the exact reviewed
   `graphql-orm-backup` 0.7.0 package alongside `graphql-orm` 0.16.0 and

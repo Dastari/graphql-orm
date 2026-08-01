@@ -358,12 +358,14 @@ executor and carries the returned renewed run lease. See
 physically invalidates covering checkpoints before deleting source content;
 deleting-session retention retains its stronger page-before-content order.
 
-Restore collectors must distinguish validated retention gaps from corruption
-and must validate inbox retained-payload/tombstone shape, message, context
+The retention restore auditor must distinguish validated retention gaps from
+corruption and validate inbox retained-payload/tombstone shape, message, context
 checkpoint, proposal, tool, approval,
 attachment, and artifact invariants, including exact checkpoint prefix/parent/
 source-hash/provenance/budget evidence, terminal call/step/approval linkage,
-and every artifact parent/cleanup/reference state. A nonzero
+and every artifact parent/cleanup/reference state. The initial database
+collector reports the context and retention audits as `NotImplemented`, which
+is fatal. Once implemented, a nonzero
 `invalid_context_checkpoint_count` or `invalid_session_retention_count` is
 fatal and keeps runtime readiness closed. A finalized `deleted` shell is valid
 only with an empty title, its original deletion timestamp, no protected or

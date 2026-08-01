@@ -70,6 +70,8 @@ mod orm_proposals;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_provider_output;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_restore;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_rules;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_runs;
@@ -168,6 +170,8 @@ pub use orm_proposals::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_provider_output::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_restore::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_rules::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_runs::*;
@@ -261,8 +265,8 @@ pub mod prelude {
         AiProviderAttachmentResolutionLimits, AiProviderCallExecutor, AiProviderCallLimits,
         AiProviderOutputLimits, AiProviderUsageAccounting, AiReadOnlyAgentCoordinator,
         AiReadOnlyAgentCoordinatorLimits, AiReadOnlyAgentTurnPlan, AiReadOnlyAgentTurnPlanner,
-        AiRequestedConsequentialToolCall, AiRunServiceLimits, AiSessionRetentionLimits,
-        AiSupervisedAgentCoordinator, AiSupervisedAgentCoordinatorLimits,
+        AiRequestedConsequentialToolCall, AiRestoreCollectorLimits, AiRunServiceLimits,
+        AiSessionRetentionLimits, AiSupervisedAgentCoordinator, AiSupervisedAgentCoordinatorLimits,
         AiSupervisedAgentRunOutcome, AiSupervisedAgentTurnPlan, AiSupervisedAgentTurnPlanner,
         AiSupervisedApprovalWait, AiSupervisedResumeOutcome, AiUiIntentDeliveryLimits,
         AiUiIntentDeliveryService, OrmAiApplicationToolCallService, OrmAiApprovalService,
@@ -270,9 +274,10 @@ pub mod prelude {
         OrmAiConsequentialToolCallService, OrmAiContextCompactionService,
         OrmAiCoordinatorCheckpointService, OrmAiCurrentRuleResolver, OrmAiEgressDecisionAudit,
         OrmAiInboxPruningService, OrmAiInboxService, OrmAiLiveDeltaService, OrmAiPricingService,
-        OrmAiProposalService, OrmAiProviderOutputService, OrmAiRulePolicyService, OrmAiRunService,
-        OrmAiSessionRetentionService, OrmAiSkillCatalogService, OrmAiSupervisedResumeService,
-        OrmAiUiIntentDeliveryService, OrmAiUsageService,
+        OrmAiProposalService, OrmAiProviderOutputService, OrmAiRestoreFactCollector,
+        OrmAiRulePolicyService, OrmAiRunService, OrmAiSessionRetentionService,
+        OrmAiSkillCatalogService, OrmAiSupervisedResumeService, OrmAiUiIntentDeliveryService,
+        OrmAiUsageService,
     };
     #[cfg(all(
         any(feature = "sqlite", feature = "postgres"),

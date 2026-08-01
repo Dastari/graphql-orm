@@ -19,6 +19,47 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased: bounded restore fact collection (crate 0.58.0 to 0.59.0; schema remains 0.51.0)
+
+Hosts beginning an empty-target restore may now construct
+`OrmAiRestoreFactCollector` from the restored ORM database and pass the
+verified backup manifest's AI module fingerprint to `collect`. Configure hard
+bounds through `AiRestoreCollectorLimits`. Reaching a bound returns an opaque
+fact set whose affected audit is `LimitExceeded`; it is not a successful
+partial collection.
+
+Use `AiRestoreReconciler::plan_collected` for new restore work. It accepts only
+crate-created `AiCollectedRestoreFacts`, emits a fatal issue for every
+`NotImplemented`, `LimitExceeded`, or `Invalid` audit, and returns exact fact
+and plan digests for the future recovery epoch. The initial collector completes
+only conservative run classification plus approval and non-revoked egress-
+consent revalidation counts. Encryption-key, attachment, usage, budget,
+pricing, skill, rule, checkpoint, provider-background/webhook, UI-intent,
+retention, and stream audits deliberately remain `NotImplemented` and
+therefore fatal.
+
+Existing serialized `AiRestoreSnapshotFacts` and `AiRestoreReconciler::plan`
+remain available for compatibility and pure simulations, but caller-populated
+zero counts are not database audit evidence and must not be used as production
+readiness authority. `AiCollectedRestoreFacts` does not expose the raw fact
+structure publicly, and `AiCollectedRestorePlan` cannot be consumed into an
+unbound plan. Use its read-only plan and digest accessors for inspection.
+
+`AiRestorePlan::readiness_report_after_apply` has been removed. There is no
+applied-restore replacement in this checkpoint because a pure plan cannot
+prove mutations or post-apply validation. Existing normal-start integrations
+may still supply the host-attested `AiRuntimeReadinessReport` accepted by
+`AiRuntimeStartGate::open`, but that compatibility seam is not restore
+authority and must remain closed after database/object import.
+
+This pre-1.0 breaking minor advances the crate to 0.59.0 because it removes the
+misleading readiness helper. It changes no
+entity, column, index, constraint, backup policy, or GraphQL SDL, so AI schema
+module 0.51.0 remains current and no data migration is required. Applied
+restore and runtime reopening remain closed until the remaining audits,
+bounded repair applier, post-apply validator, exact recovery epoch, and
+non-forgeable readiness path are implemented.
+
 ## Unreleased: repository consolidation (crate 0.57.0 to 0.58.0; schema remains 0.51.0)
 
 The source repository is now

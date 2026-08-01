@@ -1,8 +1,31 @@
-//! Side-effect-safe restore reconciliation planning.
+//! Side-effect-safe restore fact and reconciliation planning contracts.
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-use crate::{AiRunId, AiRunState, AiRuntimeReadinessReport};
+use crate::{AiRunId, AiRunState};
+
+const REQUIRED_RESTORE_AUDITS: [AiRestoreAuditKind; 17] = [
+    AiRestoreAuditKind::RunRecoveryClassification,
+    AiRestoreAuditKind::ApprovalRevalidationCandidates,
+    AiRestoreAuditKind::EgressConsentRevalidationCandidates,
+    AiRestoreAuditKind::EncryptionKeys,
+    AiRestoreAuditKind::Attachments,
+    AiRestoreAuditKind::UsageFacts,
+    AiRestoreAuditKind::BudgetPolicies,
+    AiRestoreAuditKind::PricingPolicies,
+    AiRestoreAuditKind::SkillCatalog,
+    AiRestoreAuditKind::RulePolicies,
+    AiRestoreAuditKind::CoordinatorCheckpoints,
+    AiRestoreAuditKind::ContextCheckpoints,
+    AiRestoreAuditKind::ProviderWebhookReceipts,
+    AiRestoreAuditKind::ProviderBackgroundSubmissions,
+    AiRestoreAuditKind::UiIntentEvents,
+    AiRestoreAuditKind::SessionRetention,
+    AiRestoreAuditKind::StreamContinuity,
+];
 
 /// External side-effect certainty captured for an interrupted run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +140,179 @@ pub struct AiRestoreSnapshotFacts {
     pub stream_gap_count: u64,
 }
 
+/// Durable audit categories required before an applied restore may open the
+/// runtime.
+///
+/// The database collector reports every category explicitly. A category that
+/// is absent, truncated, or not yet implemented is never interpreted as a
+/// successful zero-count audit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AiRestoreAuditKind {
+    /// Conservative durable run recovery candidate classification.
+    RunRecoveryClassification,
+    /// Pending or reusable approval revalidation candidate discovery.
+    ApprovalRevalidationCandidates,
+    /// Non-revoked egress-consent revalidation candidate discovery.
+    EgressConsentRevalidationCandidates,
+    /// Deployment encryption-key availability.
+    EncryptionKeys,
+    /// Local attachment and derived-artifact integrity.
+    Attachments,
+    /// Usage-ledger integrity.
+    UsageFacts,
+    /// Budget-policy integrity.
+    BudgetPolicies,
+    /// Immutable pricing-catalog integrity.
+    PricingPolicies,
+    /// Skill identity, version, and protected-content integrity.
+    SkillCatalog,
+    /// Hierarchical rule-policy integrity.
+    RulePolicies,
+    /// Coordinator-checkpoint integrity.
+    CoordinatorCheckpoints,
+    /// Context-compaction checkpoint integrity.
+    ContextCheckpoints,
+    /// Provider webhook receipt integrity.
+    ProviderWebhookReceipts,
+    /// Provider background-submission integrity.
+    ProviderBackgroundSubmissions,
+    /// UI-intent event integrity.
+    UiIntentEvents,
+    /// Session-retention and tombstone integrity.
+    SessionRetention,
+    /// Stream sequence uniqueness and represented-gap integrity.
+    StreamContinuity,
+}
+
+impl AiRestoreAuditKind {
+    /// Every audit category required by the current restore contract.
+    pub const fn required() -> &'static [Self] {
+        &REQUIRED_RESTORE_AUDITS
+    }
+
+    /// Stable content-free audit identifier used in restore issues.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RunRecoveryClassification => "run_recovery_classification",
+            Self::ApprovalRevalidationCandidates => "approval_revalidation_candidates",
+            Self::EgressConsentRevalidationCandidates => "egress_consent_revalidation_candidates",
+            Self::EncryptionKeys => "encryption_keys",
+            Self::Attachments => "attachments",
+            Self::UsageFacts => "usage_facts",
+            Self::BudgetPolicies => "budget_policies",
+            Self::PricingPolicies => "pricing_policies",
+            Self::SkillCatalog => "skill_catalog",
+            Self::RulePolicies => "rule_policies",
+            Self::CoordinatorCheckpoints => "coordinator_checkpoints",
+            Self::ContextCheckpoints => "context_checkpoints",
+            Self::ProviderWebhookReceipts => "provider_webhook_receipts",
+            Self::ProviderBackgroundSubmissions => "provider_background_submissions",
+            Self::UiIntentEvents => "ui_intent_events",
+            Self::SessionRetention => "session_retention",
+            Self::StreamContinuity => "stream_continuity",
+        }
+    }
+}
+
+/// Completeness of one database-derived restore audit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+#[non_exhaustive]
+pub enum AiRestoreAuditStatus {
+    /// The category's declared bounded collection/audit scope completed over
+    /// the entire required row set.
+    Complete,
+    /// This collector version does not yet implement the audit.
+    NotImplemented,
+    /// The configured bound was reached before the audit could complete.
+    LimitExceeded,
+    /// Rows were read, but one or more failed structural validation.
+    Invalid {
+        /// Number of structurally invalid rows observed within the bound.
+        count: u64,
+    },
+}
+
+impl AiRestoreAuditStatus {
+    /// Returns whether the category was completely audited.
+    pub const fn is_complete(self) -> bool {
+        matches!(self, Self::Complete)
+    }
+}
+
+/// Database-derived restore facts and explicit audit-completeness evidence.
+///
+/// Fields are private so a host cannot silently replace an unimplemented or
+/// truncated audit with a successful zero count. This value is still dry-run
+/// planning input; it does not prove that repairs were applied and cannot open
+/// runtime readiness.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiCollectedRestoreFacts {
+    facts: AiRestoreSnapshotFacts,
+    audit_statuses: BTreeMap<AiRestoreAuditKind, AiRestoreAuditStatus>,
+    source_rows_digest: String,
+    digest: String,
+}
+
+impl AiCollectedRestoreFacts {
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn new(
+        facts: AiRestoreSnapshotFacts,
+        audit_statuses: BTreeMap<AiRestoreAuditKind, AiRestoreAuditStatus>,
+        source_rows_digest: String,
+    ) -> Result<Self, crate::AiError> {
+        let encoded = serde_json::to_vec(&(&facts, &audit_statuses, &source_rows_digest))
+            .map_err(|_| crate::AiError::PersistenceFailed)?;
+        Ok(Self {
+            facts,
+            audit_statuses,
+            source_rows_digest,
+            digest: hex::encode(Sha256::digest(encoded)),
+        })
+    }
+
+    /// Returns the redacted facts collected from the database.
+    pub(crate) fn facts(&self) -> &AiRestoreSnapshotFacts {
+        &self.facts
+    }
+
+    /// Number of run recovery candidates collected from the database.
+    pub fn run_count(&self) -> usize {
+        self.facts.runs.len()
+    }
+
+    /// Number of approval rows requiring restore-time revalidation.
+    pub const fn pending_approval_count(&self) -> u64 {
+        self.facts.pending_approval_count
+    }
+
+    /// Number of egress-consent rows requiring restore-time revalidation.
+    pub const fn pending_egress_consent_count(&self) -> u64 {
+        self.facts.pending_egress_consent_count
+    }
+
+    /// Returns explicit status for every required audit category.
+    pub fn audit_statuses(&self) -> &BTreeMap<AiRestoreAuditKind, AiRestoreAuditStatus> {
+        &self.audit_statuses
+    }
+
+    /// Stable content-free digest of the accepted row identities, CAS
+    /// versions, and classification evidence.
+    ///
+    /// A category that exceeded its bound contributes no partial evidence;
+    /// its explicit [`AiRestoreAuditStatus::LimitExceeded`] remains fatal.
+    pub fn source_rows_digest(&self) -> &str {
+        &self.source_rows_digest
+    }
+
+    /// Stable SHA-256 digest of the collected facts and audit statuses.
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+}
+
 /// Planned recovery disposition for one run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -180,6 +376,34 @@ pub struct AiRestorePlan {
     pub issues: Vec<AiRestoreIssue>,
 }
 
+/// Restore plan bound to one exact database-collected fact set.
+///
+/// This remains a dry-run artifact. Neither this value nor its digests prove
+/// that any mutation or post-apply validation occurred.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiCollectedRestorePlan {
+    plan: AiRestorePlan,
+    facts_digest: String,
+    plan_digest: String,
+}
+
+impl AiCollectedRestorePlan {
+    /// Returns the redacted dry-run plan.
+    pub fn plan(&self) -> &AiRestorePlan {
+        &self.plan
+    }
+
+    /// Digest of the exact collected facts used to build this plan.
+    pub fn facts_digest(&self) -> &str {
+        &self.facts_digest
+    }
+
+    /// Stable SHA-256 digest binding the facts digest and dry-run plan.
+    pub fn plan_digest(&self) -> &str {
+        &self.plan_digest
+    }
+}
+
 impl AiRestorePlan {
     /// Returns fatal issue count.
     pub fn fatal_issue_count(&self) -> u64 {
@@ -187,17 +411,6 @@ impl AiRestorePlan {
             .iter()
             .filter(|issue| issue.severity == AiRestoreIssueSeverity::Fatal)
             .count() as u64
-    }
-
-    /// Produces start-gate evidence after a trusted persistence adapter has
-    /// applied and validated this exact plan.
-    pub fn readiness_report_after_apply(&self, executor_bound: bool) -> AiRuntimeReadinessReport {
-        AiRuntimeReadinessReport {
-            module_fingerprint: self.expected_module_fingerprint.clone(),
-            executor_bound,
-            restore_reconciled: true,
-            fatal_issue_count: self.fatal_issue_count(),
-        }
     }
 }
 
@@ -352,6 +565,49 @@ impl AiRestoreReconciler {
             consents_to_revalidate: facts.pending_egress_consent_count,
             issues,
         }
+    }
+
+    /// Builds a fail-closed dry-run plan from database-collected facts.
+    ///
+    /// Every incomplete, truncated, or structurally invalid audit becomes a
+    /// fatal issue. The returned digests are suitable for binding a future
+    /// recovery epoch, but do not prove application or validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::AiError::PersistenceFailed`] only if the redacted plan
+    /// cannot be deterministically serialized for hashing.
+    pub fn plan_collected(
+        &self,
+        collected: &AiCollectedRestoreFacts,
+    ) -> Result<AiCollectedRestorePlan, crate::AiError> {
+        let mut plan = self.plan(collected.facts());
+        for audit in AiRestoreAuditKind::required() {
+            let status = collected
+                .audit_statuses()
+                .get(audit)
+                .copied()
+                .unwrap_or(AiRestoreAuditStatus::NotImplemented);
+            let code = match status {
+                AiRestoreAuditStatus::Complete => continue,
+                AiRestoreAuditStatus::NotImplemented => "AI_RESTORE_AUDIT_INCOMPLETE",
+                AiRestoreAuditStatus::LimitExceeded => "AI_RESTORE_COLLECTION_LIMIT_EXCEEDED",
+                AiRestoreAuditStatus::Invalid { .. } => "AI_RESTORE_AUDIT_INVALID",
+            };
+            plan.issues.push(AiRestoreIssue {
+                code: code.to_owned(),
+                severity: AiRestoreIssueSeverity::Fatal,
+                resource_ref: Some(audit.as_str().to_owned()),
+            });
+        }
+        let facts_digest = collected.digest().to_owned();
+        let encoded = serde_json::to_vec(&(&facts_digest, &plan))
+            .map_err(|_| crate::AiError::PersistenceFailed)?;
+        Ok(AiCollectedRestorePlan {
+            plan,
+            facts_digest,
+            plan_digest: hex::encode(Sha256::digest(encoded)),
+        })
     }
 }
 

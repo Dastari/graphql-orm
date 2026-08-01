@@ -10,7 +10,7 @@ supersedes: []
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.58.0` with AI schema module
+`graphql-orm-ai` is at crate version `0.59.0` with AI schema module
 `0.51.0`. It uses workspace `graphql-orm` `0.17.0` and external `agql-auth`
 `0.13.0` at `d6b9cef663d52125c52f3fb90d4155ee25d34775`.
 
@@ -34,6 +34,11 @@ verification evidence belongs in the focused guides.
 - Provider-persistent upload, indexing, and search remain closed. Inline
   attachment input and exact deletion of known provider artifacts are separate
   implemented seams.
+- The first applied-restore prerequisite is implemented: bounded generated-ORM
+  collection derives conservative run classifications plus approval and
+  egress-consent revalidation candidates, and marks every remaining audit
+  explicitly incomplete. The repair applier,
+  complete validator, recovery epoch, and runtime-start proof remain closed.
 - Applied backup/restore, durable tool-policy management, generic privileged
   uncertain-effect recovery, and production MSSQL writes remain closed.
 

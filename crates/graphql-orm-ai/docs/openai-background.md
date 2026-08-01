@@ -335,7 +335,8 @@ to the existing deterministic submission facts. A valid unexpired
 `waiting_provider` work remains closed until the live reconciler starts. A valid
 terminal row must have the exact run outcome, attempt outcome, budget/usage,
 current retrieval-egress audit, and, for success, protected output checkpoint.
-Invalid or partial graphs increment
+The initial database collector reports this audit as `NotImplemented`, which is
+fatal. Once implemented, invalid or partial graphs increment
 `invalid_provider_background_submission_count` and keep readiness closed.
 `RecoveryRequired` remains operator-visible but never automatically retrieves,
 releases budget, or changes terminal classification.

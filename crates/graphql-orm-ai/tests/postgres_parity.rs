@@ -569,6 +569,23 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
         .await
         .expect("background reconciliation schema should migrate in owned PostgreSQL");
 
+    let collected = OrmAiRestoreFactCollector::new(database.clone())
+        .collect("postgres-parity-module-fingerprint")
+        .await
+        .expect("bounded restore facts should collect through generated PostgreSQL ORM queries");
+    assert_eq!(
+        collected
+            .audit_statuses()
+            .get(&AiRestoreAuditKind::RunRecoveryClassification),
+        Some(&AiRestoreAuditStatus::Complete)
+    );
+    assert_eq!(
+        collected
+            .audit_statuses()
+            .get(&AiRestoreAuditKind::Attachments),
+        Some(&AiRestoreAuditStatus::NotImplemented)
+    );
+
     let sessions = OrmAiSessionService::new(
         database.clone(),
         Arc::new(AllowAll),

@@ -110,10 +110,11 @@ row count removed this way.
 Deleting-session retention keeps the stronger dependency order: it deletes
 bounded context-checkpoint pages before any later pass may scrub messages.
 
-Restore collectors must populate `invalid_context_checkpoint_count`. They must
-validate prefix/parent ordering, source hashes, associated protection identity,
-direct provenance, provider/model and positive token metadata, durable
-run/attempt/generation and committed-budget evidence, and retention state. A
-nonzero count is fatal. Legacy or application-authored checkpoint payloads are
-not accepted by the reader and must be reviewed and removed or rebuilt while
-the runtime remains closed.
+The context-checkpoint restore auditor must derive
+`invalid_context_checkpoint_count` from prefix/parent ordering, source hashes,
+associated protection identity, direct provenance, provider/model and positive
+token metadata, durable run/attempt/generation and committed-budget evidence,
+and retention state. The initial database collector reports this audit as
+`NotImplemented`, which is fatal just like a nonzero invalid count. Legacy or
+application-authored checkpoint payloads are not accepted by the reader and
+must be reviewed and removed or rebuilt while the runtime remains closed.

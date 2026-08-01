@@ -185,14 +185,14 @@ Existing committed reservations are not automatically treated as historical
 usage.
 
 Backups preserve usage facts as append-only records. Before reopening after a
-restore, validate unique reservation linkage, committed reservation state,
-matching scope/principal/provider/model, non-negative amounts, and cached input
-not exceeding total input. Set
-`AiRestoreSnapshotFacts::invalid_usage_fact_count` to the number of failures;
-any nonzero value is fatal. Reporting must remain closed until restore
-reconciliation succeeds. Budget-policy validation similarly populates
-`invalid_budget_policy_count`; a nonzero value is fatal.
-Pricing-catalog validation similarly populates
-`invalid_pricing_policy_count`; reject duplicate references, scope-key or
-provider/model swaps, negative token or built-in rates, invalid cached-rate
-ordering, and missing creation-audit linkage before reporting zero.
+restore, the database auditor must validate unique reservation linkage,
+committed reservation state, matching scope/principal/provider/model,
+non-negative amounts, and cached input not exceeding total input. The initial
+collector reports usage, budget, and pricing audits as `NotImplemented`, which
+is fatal rather than an assumed zero. Once implemented, the auditors derive
+`invalid_usage_fact_count`, `invalid_budget_policy_count`, and
+`invalid_pricing_policy_count`; any nonzero value is fatal. Pricing validation
+rejects duplicate references, scope-key or provider/model swaps, negative token
+or built-in rates, invalid cached-rate ordering, and missing creation-audit
+linkage before reporting zero. Reporting remains closed until restore
+reconciliation succeeds.

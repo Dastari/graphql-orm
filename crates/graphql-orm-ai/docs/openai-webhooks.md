@@ -147,7 +147,8 @@ Restore adapters must validate the deterministic receipt identity, exact
 provider/profile/event/response facts, verified-signature flag, legal state,
 optional exact submission/run/attempt link, processed time, and creation/
 reconciliation audits. A `processed` or `duplicate_terminal` receipt must agree
-with the complete terminal submission graph. Report any failure through
-`invalid_provider_webhook_receipt_count`; a nonzero count keeps restored runtime
-readiness closed. Valid pending and matched receipts remain inert until the live
-submission reconciler owns a valid claim.
+with the complete terminal submission graph. The initial database collector
+reports this audit as `NotImplemented`, which is fatal. Once implemented, it
+derives `invalid_provider_webhook_receipt_count`; a nonzero count keeps restored
+runtime readiness closed. Valid pending and matched receipts remain inert until
+the live submission reconciler owns a valid claim.

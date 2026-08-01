@@ -114,13 +114,26 @@ declarations. `AiRestoreReconciler` already produces a side-effect-free plan:
   checkpoint, webhook, background, UI-intent, retention, or stream facts keep
   readiness closed.
 
-What is missing is the production adapter chain that:
+The first collector foundation is now implemented. `OrmAiRestoreFactCollector`
+uses generated ORM queries in one bounded serializable transaction to derive
+conservative run classifications and approval/egress-consent revalidation
+candidates. The restore target and every writer must remain closed throughout
+that transaction. The collector uses its own trusted unbounded pagination
+view, contained by deployment-owned hard limits, so host GraphQL page caps
+cannot silently truncate an audit. It returns opaque
+`AiCollectedRestoreFacts` with a deterministic digest and an
+explicit status for every required audit. Reaching a limit returns no partial
+candidate actions for that category; observing an
+invalid core row, or encountering an audit not yet implemented produces a
+fatal collected plan; a caller-supplied zero is not substituted.
+
+What remains missing from the production adapter chain is:
 
 1. creates/verifies a manifest backup through `graphql-orm-backup`;
 2. restores database rows and exact referenced attachment objects into a test-
    owned empty target;
-3. collects the restore facts from the restored rows rather than accepting
-   unbound caller assertions;
+3. completes the encryption-key, object, usage, policy, checkpoint, provider,
+   UI-intent, retention, and stream auditors currently marked incomplete;
 4. applies each planned run/approval/consent repair through generated ORM
    transactions;
 5. revalidates every post-apply invariant without provider/application I/O;
@@ -135,9 +148,12 @@ upload-token, provider, credential, and secret references.
 
 This satisfies the upstream compatibility gate, not the applied-restore exit
 gate. The checkpoint intentionally exposes no production restore service.
+The current `AiRuntimeStartGate::open` report is a host-attested compatibility
+seam and does not prove applied restore; a restored deployment must not use it
+to bypass this closed boundary.
 Runtime startup, workers, subscriptions, webhook callbacks, and provider
-access remain closed after raw database/object import until the AI-specific
-collector, generated-ORM repair applier, post-apply validator, exact recovery
+access remain closed after raw database/object import until the remaining
+collectors, generated-ORM repair applier, post-apply validator, exact recovery
 epoch, and readiness gate are implemented and exercised through SQLite and an
 owned disposable PostgreSQL round trip. Consumer owners must still rehearse
 their composed schema and object store separately.

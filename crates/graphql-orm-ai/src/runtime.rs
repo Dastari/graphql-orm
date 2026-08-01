@@ -20,7 +20,11 @@ use crate::{
 };
 use graphql_orm::graphql::orm::{OrmSchemaModule, SchemaModuleCatalog};
 
-/// Evidence required to open the runtime start gate.
+/// Host-attested inputs accepted by the current runtime start gate.
+///
+/// This report does not prove that a restore plan was applied or validated.
+/// Restored deployments must keep the gate closed until the future applied-
+/// restore validator can supply crate-owned readiness authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AiRuntimeReadinessReport {
     /// Compiled module fingerprint validated against managed schema/restore.
@@ -33,7 +37,7 @@ pub struct AiRuntimeReadinessReport {
     pub fatal_issue_count: u64,
 }
 
-/// Fail-closed runtime start gate.
+/// Runtime start gate that remains closed until explicit host attestation.
 #[derive(Debug)]
 pub struct AiRuntimeStartGate {
     expected_module_fingerprint: String,
@@ -48,8 +52,12 @@ impl AiRuntimeStartGate {
         }
     }
 
-    /// Opens the gate only for matching schema, bound execution, completed
-    /// restore reconciliation, and zero fatal issues.
+    /// Opens the gate only for host-attested matching schema, bound execution,
+    /// completed reconciliation, and zero fatal issues.
+    ///
+    /// This compatibility API validates report consistency but does not prove
+    /// database repair application. It must not be used to reopen a restored
+    /// store until the applied-restore validator is implemented.
     pub fn open(&self, report: &AiRuntimeReadinessReport) -> Result<(), AiError> {
         if report.module_fingerprint != self.expected_module_fingerprint
             || !report.executor_bound

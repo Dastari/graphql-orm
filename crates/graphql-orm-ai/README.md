@@ -173,8 +173,11 @@ waits without polling, resuming, or executing them.
   SQLite and PostgreSQL in the same reviewed ORM/storage type universe. Schema
   module 0.51.0 preserves finalized local attachment and artifact object keys
   in confidential backups while keeping quarantine, upload-token, provider,
-  credential, and secret references redacted. Production applied restore and
-  runtime reopening remain closed pending the AI-specific collector, repair,
+  credential, and secret references redacted. The generated-ORM restore
+  collector now derives bounded conservative run classifications plus
+  approval and egress-consent revalidation candidates, and marks every
+  remaining audit explicitly incomplete. Production applied restore and
+  runtime reopening remain closed pending the remaining audits, repair,
   validation, recovery-epoch, and readiness chain.
 - A concrete ORM worker for bounded claims, lease renewal, retry scheduling,
   immutable attempt outcomes, and recovery; plus a mock-tested provider turn
@@ -315,7 +318,7 @@ Add the crate from a reviewed monorepo revision:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.58.0", features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.59.0", features = ["sqlite"] }
 ```
 
 > **Pre-release dependency note:** this source snapshot resolves

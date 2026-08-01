@@ -225,10 +225,6 @@ fn restore_fatal_checks_keep_start_gate_closed() {
     });
 
     assert_eq!(plan.fatal_issue_count(), 15);
-    assert_eq!(
-        plan.readiness_report_after_apply(true).fatal_issue_count,
-        15
-    );
 }
 
 #[test]
