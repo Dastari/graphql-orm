@@ -1,0 +1,271 @@
+---
+title: "Schema Management"
+kind: reference
+status: active
+owner: graphql-orm-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
+# Schema Management
+
+`graphql-orm` treats backend support and schema ownership as separate decisions.
+
+- Backend features decide which database runtimes are compiled.
+- `SchemaPolicy` decides who owns the schema and which operations are allowed.
+- Schema changes are explicit. `Database::new`, `Database::builder`, and GraphQL schema construction do not apply migrations.
+
+## Schema Policies
+
+`SchemaPolicy` is configured on the runtime `Database`.
+
+```rust
+use graphql_orm::prelude::*;
+
+let database = Database::builder(pool)
+    .schema_policy(SchemaPolicy::Managed)
+    .build();
+```
+
+Available policies:
+
+- `ExternalReadOnly`: the live database is the source of truth. Queries and read-only validation are allowed. Entity writes and schema mutation are rejected.
+- `ExternalWritable`: the live database is the source of truth. Entity writes are allowed when the backend and entity support writes. Schema application is rejected.
+- `ValidateOnly`: validation is allowed. Planning and application are rejected.
+- `PlanOnly`: validation and planning are allowed. Application is rejected.
+- `Managed`: Rust entity metadata is the source of truth. Validation, planning, and explicit migration application are allowed when the backend implements migration support.
+
+Compatibility defaults are preserved:
+
+- SQLite and Postgres default to `Managed`.
+- MSSQL defaults to `ExternalReadOnly`.
+
+New code should prefer the builder so the ownership decision is visible at the call site.
+
+For PostgreSQL RLS metadata, the same policy controls whether `graphql-orm` manages database RLS objects:
+
+- `Managed`: plan and apply helper functions, `ENABLE ROW LEVEL SECURITY`, optional `FORCE ROW LEVEL SECURITY`, and named policies.
+- `ValidateOnly`: validate table schema and RLS state where PostgreSQL can report it, including enabled/forced flags and expected policy definitions.
+- `PlanOnly`: produce table and RLS SQL previews, but reject application.
+- `ExternalReadOnly` and `ExternalWritable`: preserve external-schema behavior and do not plan, apply, or validate RLS policies.
+
+## Validation
+
+Validation compares two structured `SchemaModel` values and returns diagnostics. It never mutates the database.
+
+```rust
+let report = database
+    .schema()
+    .validate_against_entities(&[User::metadata()])
+    .await?;
+
+if report.has_errors() {
+    for diagnostic in report.diagnostics {
+        eprintln!("{:?}: {}", diagnostic.kind, diagnostic.message);
+    }
+}
+```
+
+Diagnostics include missing tables, missing columns, type differences, nullability differences, primary-key mismatches, constraint mismatches, and unsupported backend capabilities.
+
+Search structures are part of the structured schema model when an entity has searchable fields.
+Changing searchable fields, JSON search paths, weights, language, tokenizer, or strategy changes the
+schema hash and plans a search-index create/drop/recreate step.
+
+## Planning
+
+Migration plans are structured first and rendered to backend SQL second.
+
+```rust
+let plan = database
+    .schema()
+    .plan_migration_to_entities(
+        "2026-06-27-add-users",
+        "add users table",
+        &[User::metadata()],
+    )
+    .await?;
+
+for step in &plan.steps {
+    println!("{:?}: {}", step.risk, step.reason);
+}
+```
+
+Each `PlannedMigrationStep` carries a `MigrationRisk`:
+
+- `Additive`
+- `Compatible`
+- `Risky`
+- `Destructive`
+
+Rendered SQL is available as `plan.statements`, but callers should treat it as an artifact of the plan rather than the migration source of truth.
+
+When `graphql-orm` owns only a subset of tables in a shared database, plan with
+`PlanOptions::managed_tables_only()` so unrelated live tables are not treated as destructive drift:
+
+```rust
+let plan = database
+    .schema()
+    .plan_migration_to_entities_with_options(
+        "2026-07-06-add-cache",
+        "add cache tables",
+        &[CacheEntry::metadata()],
+        PlanOptions::managed_tables_only(),
+    )
+    .await?;
+```
+
+The default planning mode remains strict and will report extra live tables.
+
+Managed migrations create full-text search storage, such as Postgres shadow tables/GIN indexes and
+SQLite FTS5 virtual tables. They do not backfill existing rows automatically. Run the generated
+rebuild API after applying a migration that adds or changes search:
+
+```rust
+Article::rebuild_search_index(&database).await?;
+```
+
+This keeps migration application predictable for large tables. New ORM writes refresh local
+searchable fields and configured JSON search paths automatically after the structures exist.
+
+`plan_migration_to_entities` and `apply_migration` remain table-schema APIs. To include RLS metadata emitted by `#[graphql_rls]`, use the schema target generated by `schema_roots!`:
+
+```rust
+let target = graphql_orm_schema_target();
+
+let report = database.schema().validate_target(&target).await?;
+let plan = database
+    .schema()
+    .plan_schema_target("2026-06-29-rls", "enable RLS", &target)
+    .await?;
+database
+    .schema()
+    .apply_schema_target(&plan, ApplyOptions::default())
+    .await?;
+```
+
+Managed PostgreSQL RLS SQL is appended after table migration SQL. Policy names are deterministic:
+`graphql_orm_<table_name>_select`, `graphql_orm_<table_name>_insert`,
+`graphql_orm_<table_name>_update`, and `graphql_orm_<table_name>_delete`, with deterministic
+sanitization for long or schema-qualified table names.
+
+## Applying
+
+Migration application is explicit and requires a backend that implements `MigrationBackend`.
+
+```rust
+database
+    .schema()
+    .apply_migration(&plan, ApplyOptions::default())
+    .await?;
+```
+
+`ApplyOptions::default()` is conservative:
+
+```rust
+ApplyOptions {
+    allow_destructive: false,
+    additive_only: false,
+    require_clean_schema: true,
+    dry_run: false,
+    expected_current_schema_hash: None,
+    record_history: true,
+}
+```
+
+Set `dry_run: true` to verify an application path without running statements. Destructive plans are rejected unless `allow_destructive` is explicitly enabled.
+
+Set `additive_only: true` for service startup paths that may create missing ORM-owned tables or
+indexes but must not alter, rebuild, or drop existing structures. Combine it with
+`PlanOptions::managed_tables_only()` when the database contains unrelated tables managed by other
+systems.
+
+## ABI Schema Upgrades
+
+The ABI migration model is built from ordered schema stages. Given a current database version and a target version, the runtime can plan and apply each forward stage.
+
+```rust
+let abi = SchemaAbi::new(vec![
+    SchemaStage::from_entities("1", "initial schema", &[User::metadata()]),
+    SchemaStage::from_entities("2", "add audit fields", &[User::metadata(), Audit::metadata()]),
+])?;
+
+database
+    .schema()
+    .apply_upgrade(&abi, "2", ApplyOptions::default())
+    .await?;
+```
+
+Upgrade behavior:
+
+1. Read the current migration version.
+2. Resolve the path from that version to the target stage.
+3. Introspect the live schema before each stage.
+4. Validate the baseline when `require_clean_schema` is true.
+5. Build a structured plan.
+6. Reject disallowed risks.
+7. Render backend SQL.
+8. Apply statements explicitly.
+9. Record migration history.
+
+## Append-only retention capability changes
+
+`append_only` remains strict unless an entity explicitly declares a dedicated
+`retention_purge` policy key. That opt-in is structural schema state: it changes
+the SQLite DELETE trigger and reserved context-table contract, or the
+PostgreSQL trigger function and managed RLS policy. It is included in stable
+table, module, and backup fingerprints.
+
+Enabling, disabling, or repairing the capability produces an explicit
+`SetAppendOnly` step. Apply it only under a fresh host/module migration version;
+if a previously recorded version still has such work, application fails closed.
+No row data is rewritten, but operators must validate foreign-key behavior and
+existing data before enabling physical purge. See
+[Bounded append-only retention maintenance](../../operations/runbooks/retention-maintenance.md).
+
+## Migration History
+
+The history table is `__graphql_orm_migrations`.
+
+Existing columns are preserved:
+
+- `version`
+- `description`
+- `applied_at`
+
+Newer migrations may also record:
+
+- `backend`
+- `graphql_orm_version`
+- `source_schema_hash`
+- `target_schema_hash`
+- `plan_hash`
+- `policy`
+
+Existing rows without the newer metadata remain valid.
+
+## Backend Support
+
+SQLite and Postgres implement validation, planning, and migration application.
+
+For PostgreSQL spatial fields, managed plans include `CREATE EXTENSION IF NOT EXISTS postgis` before
+table creation. Spatial indexes are rendered as normal migration statements, not concurrent index
+builds.
+
+PostgreSQL uniqueness introspection is structural. `pg_constraint.conkey`
+members are grouped in key ordinal order: a one-column UNIQUE constraint marks
+that column unique, while a multi-column constraint populates the table's
+composite-unique model without making each member independently unique.
+Indexes owned through `pg_constraint.conindid` (including PRIMARY KEY and
+UNIQUE backing indexes) are excluded from ordinary secondary indexes.
+Explicit unique indexes and conditional/partial unique indexes remain ordinary
+indexes. This distinction prevents unchanged constraint-owned indexes from
+being planned as `DropIndex` during an additive complete-target upgrade.
+
+For SQLite spatial fields, managed plans create `TEXT` columns that store GeoJSON. SQLite plans do
+not enable PostGIS and do not create spatial indexes. Introspection sees those columns as `TEXT`; the
+planner treats the declared spatial metadata as compatible with that storage so repeated validation
+does not rebuild the table just because the target entity marks the field as spatial.
+
+MSSQL is read-only in this phase. It can be used for queries and read-only validation where supported, but it does not implement migration application or write capability traits.

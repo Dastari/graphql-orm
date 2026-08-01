@@ -1,3 +1,13 @@
+---
+title: "graphql-orm-storage"
+kind: reference
+status: active
+owner: graphql-orm-storage-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # graphql-orm-storage
 
 `graphql-orm-storage` provides provider-neutral object storage primitives for
@@ -55,6 +65,10 @@ graphql-orm-storage = {
 Git consumers pin a reviewed full monorepo revision. If an application also
 uses `graphql-orm`, `graphql-orm-backup`, or `graphql-orm-ai`, give every
 package the same `rev` so Cargo resolves one internal source universe.
+Within this workspace, companion packages use workspace path dependencies and
+the root `Cargo.lock`; the current baseline is ORM 0.17.0, backup 0.7.0, and
+storage 0.6.0. The ORM-owned optional `agql-auth` bridge pins `agql-auth` 0.13.0
+at `d6b9cef663d52125c52f3fb90d4155ee25d34775`.
 
 Available provider features:
 
@@ -166,10 +180,9 @@ rows.
 - [Streaming APIs](docs/streaming.md)
 - [Recording and large-object streams](docs/recording-streams.md)
 - [Architecture and crate boundaries](docs/architecture.md)
-- [Provider roadmap](docs/provider-roadmap.md)
+- [Provider backlog](../../docs/plans/backlog/storage-providers/README.md)
 - [Backup integration guidance](docs/backup-integration.md)
 - [Development and test commands](docs/development.md)
-- [Release notes](docs/release-notes.md)
 - [Migration guide](MIGRATION.md)
 - [Changelog](CHANGELOG.md)
 

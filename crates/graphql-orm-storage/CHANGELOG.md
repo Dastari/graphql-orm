@@ -1,3 +1,13 @@
+---
+title: "Changelog"
+kind: reference
+status: active
+owner: graphql-orm-storage-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Changelog
 
 ## 0.6.0
@@ -50,4 +60,5 @@
 - `StorageBackend` and `StorageError` gain new variants. Exhaustive downstream
   matches must add SMB and remote-provider cases; see [MIGRATION.md](MIGRATION.md).
 
-Earlier release details remain in [docs/release-notes.md](docs/release-notes.md).
+Earlier release details remain in the archived
+[release notes](../../docs/archive/2026/graphql-orm-storage-release-notes.md).

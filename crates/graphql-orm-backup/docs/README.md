@@ -1,3 +1,13 @@
+---
+title: "Documentation"
+kind: reference
+status: active
+owner: graphql-orm-backup-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Documentation
 
 This directory contains the project documentation that is too detailed for the repository front
@@ -7,12 +17,9 @@ page.
 - [Architecture](architecture.md)
 - [Snapshot format](snapshot-format.md)
 - [Restore semantics](restore-semantics.md)
-- [Provider roadmap](provider-roadmap.md)
+- [Provider backlog](../../../docs/plans/backlog/backup-providers/README.md)
 - [Cloud provider direction](cloud-provider-direction.md)
 - [Native and mounted SMB](smb.md)
-- [Digitise native SMB integration](digitise-native-smb.md)
-- [Implementation plan](plan.md)
-- [graphql-orm integration brief](graphql-orm-agent-brief.md)
 - [Migration guide](../MIGRATION.md)
 - [Changelog](../CHANGELOG.md)
 

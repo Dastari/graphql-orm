@@ -1,3 +1,13 @@
+---
+title: "Documentation"
+kind: reference
+status: active
+owner: graphql-orm-ai-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Documentation
 
 Start with the root [README](../README.md), then use the focused guides below.
@@ -35,9 +45,10 @@ Start with the root [README](../README.md), then use the focused guides below.
 - [Proposal and approval lifecycles](review-lifecycles.md)
 - [Development and verification](development.md)
 - [Release, SemVer, changelog, and migration process](release-process.md)
-- [Upstream contribution and multi-repository workflow](upstream-contributions.md)
+- [Workspace and external-contribution workflow](upstream-contributions.md)
 - [Implementation status](implementation-status.md)
-- [Checkpoint-based completion plan](completion-plan.md)
+- [AI production-readiness plan](../../../docs/plans/active/ai-production-readiness/README.md)
+- [2026 completion ledger archive](../../../docs/archive/2026/graphql-orm-ai-completion-ledger.md)
 - [Migration guide](../MIGRATION.md)
 - [Changelog](../CHANGELOG.md)
 

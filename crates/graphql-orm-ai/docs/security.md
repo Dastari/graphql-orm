@@ -1,3 +1,13 @@
+---
+title: "Security Model"
+kind: reference
+status: active
+owner: graphql-orm-ai-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Security Model
 
 The runtime treats model output, resolver output, files, web results, provider

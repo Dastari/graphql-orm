@@ -1,3 +1,13 @@
+---
+title: "GraphQL ORM workspace agent guide"
+kind: reference
+status: active
+owner: workspace-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # GraphQL ORM workspace agent guide
 
 These rules apply to the entire repository. More specific `AGENTS.md` files
@@ -29,6 +39,30 @@ under a crate add package-local invariants.
   changes unless compatibility requires them together.
 - Update package changelogs, migration notes, versions, and examples according
   to each crate's local release rules.
+
+## Documentation authority
+
+- `docs/README.md` is the central index. Follow
+  `docs/decisions/ADR-0001-documentation-authority-and-lifecycle.md` for
+  document purpose, metadata, lifecycle, and exceptions.
+- Keep one canonical active document per topic. Code/configuration/schema and
+  generated inventories describe mechanics; architecture describes durable
+  boundaries; accepted ADRs explain why; runbooks describe operations.
+- Never edit an accepted ADR. Add a later numbered ADR that declares the old
+  record in `supersedes`.
+- Active plans may exist only at
+  `docs/plans/active/<initiative>/README.md`. Keep outcome, non-goals,
+  dependencies, acceptance gates, and one current checkpoint; do not append
+  chronological agent/session transcripts.
+- Archive completed plans, investigations, incident evidence, superseded
+  ledgers, prompts, and release chronology rather than deleting durable
+  evidence. Put temporary agent/session handoffs in ignored `.handoff/`.
+- Component-local README and topical reference files remain beside their code
+  and must be linked from the central or component index.
+- Do not hand-maintain dependency/version inventories. Run
+  `python3 scripts/generate-workspace-inventory.py` after manifest changes.
+- Run `python3 scripts/check-documentation.py` for documentation changes, and
+  state documentation impact in every pull request.
 
 ## Verification
 

@@ -1,3 +1,13 @@
+---
+title: "Durable Worker and Provider Turn"
+kind: reference
+status: active
+owner: graphql-orm-ai-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Durable Worker and Provider Turn
 
 This guide describes the implemented fenced provider-turn backend path, its

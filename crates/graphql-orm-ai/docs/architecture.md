@@ -1,3 +1,13 @@
+---
+title: "Architecture and Crate Boundaries"
+kind: architecture
+status: active
+owner: graphql-orm-ai-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Architecture and Crate Boundaries
 
 `graphql-orm-ai` owns reusable agent orchestration: sessions, protected

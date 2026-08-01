@@ -1,3 +1,13 @@
+---
+title: "Getting Started"
+kind: reference
+status: active
+owner: graphql-orm-ai-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Getting Started
 
 `graphql-orm-ai` is currently a Git-only pre-release crate. Use the same
@@ -5,10 +15,11 @@ reviewed dependency universe for `graphql-orm-ai`, `graphql-orm`, and
 `agql-auth`. The public manifest pins reviewed full Git revisions; local path
 overrides are unsupported release artifacts.
 
-The current public source snapshot consumes the reviewed final `graphql-orm`
-0.16.0 main commit and the peeled `agql-auth` 0.12.0 annotated-tag target.
-Standalone Git builds therefore resolve one reviewed dependency universe
-without depending on moving sibling default branches.
+The current public source snapshot uses workspace `graphql-orm` `0.17.0` and
+external `agql-auth` `0.13.0` at
+`d6b9cef663d52125c52f3fb90d4155ee25d34775`. Git consumers select one reviewed
+monorepo revision for workspace packages; `agql-auth` remains pinned to its
+exact external revision.
 
 ## Features
 
@@ -21,9 +32,11 @@ Exactly one persistence backend is currently required:
 Provider adapters are opt-in. `provider-openai` enables the native OpenAI
 Responses adapter and its separately installed exact-reference file-deletion
 service. It also enables raw-body OpenAI webhook verification and, with a
-writable backend, content-free durable receipt intake and exact initial
-background-response submission. Submission does not enable provider output
-retrieval, webhook reconciliation, usage settlement, or run completion.
+writable backend, content-free durable receipt intake, exact
+background-response submission, and bounded exact terminal reconciliation.
+Webhook payloads never supply response content, usage, or execution authority;
+reconciliation retrieves and verifies the exact bound response before settling
+usage or completing a run.
 `provider-anthropic` enables
 the native Anthropic Messages
 adapter with a fixed official endpoint and secret-store credential reference.
@@ -328,8 +341,10 @@ ambiguous replay remain closed. See the
 [read-only tool-loop guide](read-only-tool-loop.md) and
 [supervised tool-loop guide](supervised-tool-loop.md).
 
-See the [worker and provider-turn guide](worker-provider-turn.md) and
-[implementation status](implementation-status.md). Provider-persistent file
+See the [worker and provider-turn guide](worker-provider-turn.md),
+[implementation status](implementation-status.md), and the
+[AI production-readiness plan](../../../docs/plans/active/ai-production-readiness/README.md).
+Provider-persistent file
 upload/search, attachment quotas/derivative production, authoritative
 code-interpreter/image-generation unit pricing, and external-content
 retention,

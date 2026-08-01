@@ -1,3 +1,13 @@
+---
+title: "graphql-orm-ai"
+kind: reference
+status: active
+owner: graphql-orm-ai-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # graphql-orm-ai
 
 `graphql-orm-ai` is a project-agnostic, security-first AI agent runtime for
@@ -309,10 +319,11 @@ graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<r
 ```
 
 > **Pre-release dependency note:** this source snapshot resolves
-> `graphql-orm` 0.16.0, `graphql-orm-backup` 0.7.0, and
-> `graphql-orm-storage` 0.6.0 from one workspace revision. `agql-auth` 0.12.0
-> remains an exact external dependency. Direct Git consumers of more than one
-> workspace package must give each package the same reviewed monorepo `rev`.
+> `graphql-orm` 0.17.0, `graphql-orm-backup` 0.7.0, and
+> `graphql-orm-storage` 0.6.0 from one workspace revision. `agql-auth` 0.13.0
+> at `d6b9cef663d52125c52f3fb90d4155ee25d34775` remains an exact external
+> dependency. Direct Git consumers of more than one workspace package must
+> give each package the same reviewed monorepo `rev`.
 
 A host then:
 
@@ -395,17 +406,14 @@ logical UI-intent validation and fenced durable delivery are implemented as
 separately composable, project-neutral contracts.
 
 Production blockers include partial/multi-call and stateless supervised
-tool-batch adoption, code-interpreter/image-generation
-pricing dimensions, privileged uncertain-call
-recovery, completion of deleting-session/provider-raw/audit retention workflows,
-per-item proposal review, OpenAI background response reconciliation,
-provider-persistent file upload/search lifecycle (with raw store-ID requests
-now rejected),
+tool-batch adoption, code-interpreter/image-generation pricing dimensions,
+privileged uncertain-call recovery, completion of deleting-session/provider-
+raw/audit retention workflows, per-item proposal review, provider-persistent
+file upload/search lifecycle (with raw store-ID requests now rejected),
 attachment quotas/derivative production, production mutable secret
-stores/keyrings,
-deployment-specific delegated credential issuers/private HTTP transports,
-generated resolver disclosure metadata, and production OS/container local-
-harness launchers/ACP framing. Details live in
+stores/keyrings, deployment-specific delegated credential issuers/private HTTP
+transports, and production OS/container local-harness launchers/ACP framing.
+Details live in
 [implementation status](docs/implementation-status.md).
 
 See [session retention](docs/session-retention.md) for the bounded deletion and
@@ -487,8 +495,9 @@ Mocked HTTP/SSE tests are the default and require no provider credential.
 ## Documentation and releases
 
 The [documentation index](docs/README.md) links architecture, security,
-development, release, implementation-status, and checkpoint-based completion
-guides. Public APIs are documented in generated Rustdoc.
+development, release, implementation status, and the central
+[AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+Public APIs are documented in generated Rustdoc.
 
 The root README stays aligned with every public/runtime change. Every
 user-visible change updates [CHANGELOG.md](CHANGELOG.md), and every public
@@ -499,10 +508,11 @@ CI enforces that documentation bundle, crate/schema version movement,
 PascalCase SDL contract. Repository rules are recorded in
 [AGENTS.md](AGENTS.md).
 
-Development uses a single-owner workflow per repository. This crate's agent
-treats `agql-auth` and `graphql-orm` as read-only and sends reusable changes to
-their owning agents through explicit handoffs. See the
-[upstream contribution workflow](docs/upstream-contributions.md).
+Development uses one monorepo integration workflow for all workspace packages.
+Temporary coordination records live only in ignored root `.handoff/`.
+`agql-auth` remains external and changes to it require a reviewed handoff and
+exact merged revision. See the [workspace and external-contribution
+workflow](docs/upstream-contributions.md).
 
 ## License
 

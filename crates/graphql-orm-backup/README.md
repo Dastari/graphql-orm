@@ -1,3 +1,13 @@
+---
+title: "graphql-orm-backup"
+kind: reference
+status: active
+owner: graphql-orm-backup-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # graphql-orm-backup
 
 `graphql-orm-backup` provides backup repository, snapshot manifest, verification, restore,
@@ -69,10 +79,11 @@ adapters with an exact backend. Hosts that already select a backend through
 their direct `graphql-orm` dependency may enable the lower-level `orm` feature
 instead. Exactly one ORM backend must be active.
 
-This workspace baseline resolves `graphql-orm` 0.16.0 and
-`graphql-orm-storage` 0.6.0 from the same reviewed monorepo revision.
-The ORM revision's optional `auth-agql` bridge pins `agql-auth` 0.12.0 at
-`3f3b0c5365adfbe436514a681d977b600991b797`. This crate does not enable that
+This workspace resolves `graphql-orm` 0.17.0, `graphql-orm-backup` 0.7.0, and
+`graphql-orm-storage` 0.6.0 through workspace path dependencies and the root
+`Cargo.lock`. External consumers select one reviewed full monorepo revision.
+The ORM's optional `auth-agql` bridge pins `agql-auth` 0.13.0 at
+`d6b9cef663d52125c52f3fb90d4155ee25d34775`. This crate does not enable that
 feature or depend directly on authorization; hosts own authorization and may
 enable it through their direct `graphql-orm` dependency.
 
@@ -172,13 +183,11 @@ events, object metadata persistence, or cloud credentials.
 - [Architecture](docs/architecture.md)
 - [Snapshot format](docs/snapshot-format.md)
 - [Restore semantics](docs/restore-semantics.md)
-- [Provider roadmap](docs/provider-roadmap.md)
+- [Provider backlog](../../docs/plans/backlog/backup-providers/README.md)
 - [Cloud provider direction](docs/cloud-provider-direction.md)
 - [Native and mounted SMB](docs/smb.md)
-- [Digitise native SMB integration](docs/digitise-native-smb.md)
 - [Migration guide](MIGRATION.md)
 - [Changelog](CHANGELOG.md)
-- [graphql-orm integration brief](docs/graphql-orm-agent-brief.md)
 
 ## Status
 

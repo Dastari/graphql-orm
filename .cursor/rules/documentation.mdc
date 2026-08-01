@@ -1,0 +1,24 @@
+---
+description: Enforce the GraphQL ORM documentation authority and lifecycle
+globs:
+  - "**/*.md"
+alwaysApply: false
+---
+
+# Documentation governance
+
+- Start at `docs/README.md` and follow ADR-0001.
+- Maintain one canonical active document per topic.
+- Add the required metadata block to first-party Markdown. Embedded
+  `crates/*/.agents/**` skill documents and the GitHub PR form are exempt.
+- Describe current mechanics in code/config/schema or reference docs, durable
+  boundaries in architecture, rationale in ADRs, and operations in runbooks.
+- Never edit an accepted ADR; supersede it with a new numbered ADR.
+- Put active plans only at `docs/plans/active/<initiative>/README.md` and keep
+  them outcome-focused. Archive chronology and evidence.
+- Put temporary prompts and session handoffs in ignored `.handoff/`.
+- Link component-local docs from their component index and the central index.
+- Generate dependency/version inventory from manifests; never update its table
+  by hand.
+- Run `python3 scripts/check-documentation.py` and the inventory `--check`
+  before handoff.

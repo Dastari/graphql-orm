@@ -1,3 +1,13 @@
+---
+title: "graphql-orm-storage Agent Guide"
+kind: reference
+status: active
+owner: graphql-orm-storage-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # graphql-orm-storage Agent Guide
 
 This crate is a reusable storage companion for applications that use `graphql-orm`.
@@ -21,6 +31,13 @@ This crate is a reusable storage companion for applications that use `graphql-or
 ## Current Agent Handoff
 
 - Current crate version is `0.6.0`.
+- The workspace resolves `graphql-orm` 0.17.0 and `graphql-orm-backup` 0.7.0
+  through workspace path dependencies and one root `Cargo.lock`. Keep
+  downstream companion packages on one reviewed monorepo revision.
+- `graphql-orm` owns the optional `agql-auth` integration, pinned at
+  `agql-auth` 0.13.0 revision
+  `d6b9cef663d52125c52f3fb90d4155ee25d34775`; this crate does not depend on
+  application authorization.
 - The storage provider boundary is now the streaming `BlobStore` trait.
 - `ObjectStorage` extends `BlobStore`; custom providers must implement `BlobStore` first.
 - `BlobStore` includes byte ranges, conditional writes, server-side copy, write options, and paged listing.
@@ -41,6 +58,7 @@ This crate is a reusable storage companion for applications that use `graphql-or
   validation. Use `tests/samba/run.sh` for the managed protocol and complete
   backup lifecycle suite.
 - Azure Blob is still a feature-gated unsupported placeholder. Do not add real Azure SDK code without implementing the shared `BlobStore` provider layer first.
-- See `docs/agent-update.md`, `docs/blob-store.md`, `docs/streaming.md`,
-  `docs/backup-integration.md`, `docs/native-smb.md`, and `MIGRATION.md` before
-  making provider or backup-facing changes.
+- See `docs/blob-store.md`, `docs/streaming.md`, `docs/backup-integration.md`,
+  `docs/native-smb.md`, and `MIGRATION.md` before making provider or
+  backup-facing changes. Historical agent handoffs are archived outside this
+  crate and are not current guidance.

@@ -1,3 +1,13 @@
+---
+title: "Migration Guide"
+kind: reference
+status: active
+owner: workspace-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Migration Guide
 
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
@@ -74,7 +84,7 @@ both ORM crates to the prior reviewed exact revision. Remove the client
 manifest expectation at the same time. Existing database rows and
 authentication sessions require no rewrite.
 
-See [Operation assurance](docs/operation-assurance.md) for the complete API and
+See [Operation assurance](docs/architecture/operation-assurance.md) for the complete API and
 trust boundaries.
 
 ## 0.16.0 Generated Resolver Operation Metadata
@@ -196,7 +206,7 @@ explicit bounded relation layers. Request next-layer relation keys with
 `runtime_relation_batch_request_with_relation_keys`, then pass the opaque
 anchors returned by `RuntimeRelationBatch::relation_parents` into the next
 batch request; see
-[Validated runtime relation batching](docs/runtime-relations.md).
+[Validated runtime relation batching](docs/reference/graphql-orm/runtime-relations.md).
 
 PostgreSQL operators should replan a complete generated target before rollout.
 Constraint-owned PRIMARY KEY/UNIQUE backing indexes are now classified as
@@ -233,7 +243,7 @@ with the validated constructors on `ValidatedRuntimeSchema` and
 `Database::execute_runtime_read`. Re-resolve handles after schema activation;
 old fingerprints fail closed. Hosts must compile authorization constraints to
 a second `RuntimePredicate` and structurally combine it with the application
-predicate. See [Runtime queries](docs/runtime-queries.md).
+predicate. See [Runtime queries](docs/reference/graphql-orm/runtime-queries.md).
 
 No migration is required. MSSQL continues to compile and retain static reads,
 but returns the stable unsupported capability for runtime execution.
@@ -282,7 +292,7 @@ repository mutation-hook snapshots/events are more restrictive by design: hook
 state is redacted and cannot be downcast to the original entity, and change
 events omit the entity payload when the declaration has a sensitive field.
 Before-write input hooks remain typed and can deliberately transform the value.
-See [Repository-only entities](docs/repository-only-entities.md).
+See [Repository-only entities](docs/reference/graphql-orm/repository-only-entities.md).
 
 ## 0.10.0 Runtime Record Read Foundation
 
@@ -308,7 +318,7 @@ UTC at PostgreSQL-compatible rounded microsecond precision.
 
 No database migration is required. MSSQL runtime-row decoding is deliberately
 unsupported in this slice; its static generated reads are unchanged. See
-[Runtime values, records, handles, and row decoding](docs/runtime-records.md).
+[Runtime values, records, handles, and row decoding](docs/reference/graphql-orm/runtime-records.md).
 
 ## 0.9.0 Bounded Append-Only Retention Purge
 
@@ -350,7 +360,7 @@ PostgreSQL replaces the append-only function contract and, when managed RLS is
 enabled, adds the transaction-local retention DELETE policy. There is no row
 data rewrite. Validate foreign-key behavior and the intended cutoff before
 enabling physical deletion. See
-[Bounded append-only retention maintenance](docs/retention-maintenance.md).
+[Bounded append-only retention maintenance](docs/operations/runbooks/retention-maintenance.md).
 
 ## 0.8.0 Owned Runtime Schema IR
 
@@ -404,7 +414,7 @@ Cargo now resolves only the selected backend driver. There is no Rust API,
 generated-code, GraphQL SDL, schema, configuration, or database migration.
 Remove any downstream workaround that patched SQLx features, refresh the lock
 file, and confirm the selected graph with the commands in
-[Development](docs/development.md#backend-dependency-isolation).
+[Testing and verification](docs/development/testing.md).
 
 ## 0.7.0 Schema Modules, Fenced Leases, and Bidirectional Keysets
 
@@ -456,7 +466,7 @@ If schema tooling explicitly matched the old GraphQL type names, update those ma
 mutation and subscription roots remain absent rather than becoming fieldless objects.
 
 Regenerate provider SDL, parse or validate it, and run the federation composition check described
-in [Federation operation roots](docs/federation.md) before promotion.
+in [Federation operation roots](docs/reference/graphql-orm/federation.md) before promotion.
 
 ## 0.6.2 agql-auth Bridge Alignment
 
@@ -491,7 +501,7 @@ Mark every key field `#[primary_key]` and host-assigned with
 `#[graphql_orm(auto_generated = false)]`. Use the generated `EntityKey`, `CreateEntityInput`, and
 `UpdateEntityInput` with `find_by_key`, `insert`, `insert_if_absent`, `upsert`, `update_by_key`,
 `delete_by_key`, `update_if`, and bounded typed filter mutations. These APIs add no GraphQL mutation
-fields. See [Typed Composite-Key and Bounded Mutations](docs/composite-mutations.md).
+fields. See [Typed Composite-Key and Bounded Mutations](docs/reference/graphql-orm/composite-mutations.md).
 
 `MutationLimit::new` is required by bounded operations; an overflow returns `LimitExceeded` without
 changing rows. Legacy `update_where`/`delete_where` remain available for source compatibility and
@@ -510,7 +520,7 @@ repository or transaction methods. Mark secrets `#[graphql_orm(private, sensitiv
 If the database registers an application `RowPolicy`, projection reads now return a fail-closed
 error rather than fetching a full entity to evaluate it. Move projection-compatible tenant or
 soft-delete enforcement to generated typed filters or PostgreSQL RLS before migrating that caller.
-No GraphQL query or DTO is added. See [Typed Read Projections](docs/read-projections.md).
+No GraphQL query or DTO is added. See [Typed Read Projections](docs/reference/graphql-orm/read-projections.md).
 
 ## 0.4.3 Structural Introspection Hardening
 

@@ -1,3 +1,13 @@
+---
+title: "Repository Rules"
+kind: reference
+status: active
+owner: graphql-orm-ai-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Repository Rules
 
 These rules apply to every human or automated change in this repository.
@@ -25,9 +35,10 @@ These rules apply to every human or automated change in this repository.
   affected package in the same change.
 - Internal packages use workspace path dependencies and one root lockfile.
   Do not reintroduce Git dependencies between workspace packages.
-- `agql-auth` remains an external repository. Treat it as read-only unless a
-  task explicitly authorizes work there. Express any required external change
-  as a reviewed handoff and wait for a final merge or release SHA.
+- `agql-auth` remains external. Treat it as read-only unless a task explicitly
+  authorizes work there. Express any required external change as a reviewed
+  handoff in ignored root `.handoff/` and wait for a final merge or release
+  SHA.
 - Keep package-specific implementation and security rules in the owning
   package even when a change spans the workspace.
 
@@ -86,4 +97,5 @@ These rules apply to every human or automated change in this repository.
   exclusive.
 
 See `docs/development.md` and `docs/release-process.md` for exact commands.
-See `docs/upstream-contributions.md` for the multi-repository workflow.
+See `docs/upstream-contributions.md` for the monorepo and external-handoff
+workflow.

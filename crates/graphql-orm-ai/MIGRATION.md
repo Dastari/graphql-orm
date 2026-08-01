@@ -1,8 +1,23 @@
+---
+title: "Migration Guide"
+kind: reference
+status: active
+owner: graphql-orm-ai-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Migration Guide
 
 `graphql-orm-ai` is not yet published. This guide is still mandatory so early
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
+
+Migration entries preserve the dependency and schema facts for the checkpoint
+they describe. For the current workspace baseline and active delivery gates,
+use [implementation status](docs/implementation-status.md) and the central
+[AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
 ## Unreleased: repository consolidation (crate 0.57.0 to 0.58.0; schema remains 0.51.0)
 

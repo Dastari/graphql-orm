@@ -1,3 +1,13 @@
+---
+title: "Canonical Ordering and History Proof"
+kind: reference
+status: active
+owner: graphql-orm-ai-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Canonical Ordering and History Proof
 
 Status: Slice 3 design complete. This proof classifies existing runtime paths;

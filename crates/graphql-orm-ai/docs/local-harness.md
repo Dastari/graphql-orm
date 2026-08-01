@@ -1,3 +1,13 @@
+---
+title: "Installed Local Harness Boundary"
+kind: reference
+status: active
+owner: graphql-orm-ai-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Installed Local Harness Boundary
 
 The optional `local-harness` feature supports installed model or agent programs

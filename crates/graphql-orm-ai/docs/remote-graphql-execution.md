@@ -1,3 +1,13 @@
+---
+title: "Private Remote GraphQL Execution"
+kind: reference
+status: active
+owner: graphql-orm-ai-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Private Remote GraphQL Execution
 
 `graphql-orm-ai` can invoke reviewed application resolvers through a private

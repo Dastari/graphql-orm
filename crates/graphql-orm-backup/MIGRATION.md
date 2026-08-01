@@ -1,3 +1,13 @@
+---
+title: "Migration Guide"
+kind: reference
+status: active
+owner: graphql-orm-backup-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Migration Guide
 
 ## 0.6.0 to 0.7.0: repository consolidation

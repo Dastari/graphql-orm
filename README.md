@@ -1,3 +1,13 @@
+---
+title: "GraphQL ORM workspace"
+kind: reference
+status: active
+owner: workspace-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # GraphQL ORM workspace
 
 `graphql-orm` generates async-graphql query/mutation types, typed filters, ordering, pagination,
@@ -162,7 +172,7 @@ the exact generated root field names, categories, argument/result signatures,
 backend profile, and resolved generated-mutation exposure. Its fingerprints
 detect generated-surface drift; they do not authorize execution or bind a
 document projection or disclosure policy. See
-[generated resolver operation metadata](docs/resolver-operation-metadata.md).
+[generated resolver operation metadata](docs/reference/graphql-orm/resolver-operation-metadata.md).
 
 For step-up-sensitive operations, build an `OperationAssuranceRegistry` from
 that catalog, register custom root fields, and classify every mutation with a
@@ -174,7 +184,7 @@ optional `auth-agql` evaluator maps current upstream decisions to
 `STEP_UP_REQUIRED`, `UNAUTHENTICATED`, or `FORBIDDEN` through lowercase GraphQL
 extension key `code`. Directive metadata and deterministic manifests are
 advisory; server-side enforcement remains authoritative. See
-[operation assurance](docs/operation-assurance.md).
+[operation assurance](docs/architecture/operation-assurance.md).
 
 ## SQL Server Read-Only Example
 
@@ -248,24 +258,24 @@ batched relation query per relation layer, not N+1 or nested N*N queries.
 
 ## Documentation
 
-- [Getting started](docs/getting-started.md)
-- [Backend features and multi-backend workspaces](docs/backends.md)
-- [Entities, keys, columns, naming, and relations](docs/entities-and-relations.md)
-- [PostgreSQL RLS and auth-aware execution](docs/postgres.md)
-- [SQL Server read-only backend](docs/mssql.md)
-- [Schema ownership, validation, planning, and ABI migrations](docs/schema-management.md)
-- [Writes, repository helpers, hooks, subscriptions, and policies](docs/runtime-and-writes.md)
-- [Portable transactions, CAS, append-only entities, constraints, and keysets](docs/portable-persistence.md)
-- [Binary keys, private repository upserts, and conditional indexes](docs/binary-keys-and-indexes.md)
-- [Typed least-privilege read projections](docs/read-projections.md)
-- [Repository-only persisted entities](docs/repository-only-entities.md)
-- [Typed composite-key and bounded mutations](docs/composite-mutations.md)
-- [Bounded append-only retention maintenance](docs/retention-maintenance.md)
-- [Backup runtime API](docs/backup.md)
-- [Schema modules and fenced leases](docs/schema-modules-and-leases.md)
-- [Monorepo consolidation and consumer migration](docs/monorepo-consolidation.md)
-- [Release notes](docs/release-notes.md)
-- [Development and test commands](docs/development.md)
+- [Full documentation index and authority model](docs/README.md)
+- [Workspace setup](docs/development/setup.md)
+- [Backend features and multi-backend workspaces](docs/reference/graphql-orm/backends.md)
+- [Entities, keys, columns, naming, and relations](docs/reference/graphql-orm/entities-and-relations.md)
+- [PostgreSQL RLS and auth-aware execution](docs/reference/graphql-orm/postgres.md)
+- [SQL Server read-only backend](docs/reference/graphql-orm/mssql.md)
+- [Schema ownership, validation, planning, and ABI migrations](docs/reference/graphql-orm/schema-management.md)
+- [Writes, repository helpers, hooks, subscriptions, and policies](docs/reference/graphql-orm/runtime-and-writes.md)
+- [Portable transactions, CAS, append-only entities, constraints, and keysets](docs/architecture/portable-persistence.md)
+- [Binary keys, private repository upserts, and conditional indexes](docs/reference/graphql-orm/binary-keys-and-indexes.md)
+- [Typed least-privilege read projections](docs/reference/graphql-orm/read-projections.md)
+- [Repository-only persisted entities](docs/reference/graphql-orm/repository-only-entities.md)
+- [Typed composite-key and bounded mutations](docs/reference/graphql-orm/composite-mutations.md)
+- [Bounded append-only retention maintenance](docs/operations/runbooks/retention-maintenance.md)
+- [Backup runtime API](docs/reference/graphql-orm/backup-runtime.md)
+- [Schema modules and fenced leases](docs/architecture/schema-modules-and-leases.md)
+- [Completed monorepo consolidation](docs/plans/completed/monorepo-consolidation/README.md)
+- [Testing and verification](docs/development/testing.md)
 
 ## Status
 

@@ -1,3 +1,13 @@
+---
+title: "Usage Guide"
+kind: reference
+status: active
+owner: graphql-orm-storage-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Usage Guide
 
 `graphql-orm-storage` is a byte-storage companion crate. It stores object bytes
@@ -231,11 +241,13 @@ application-supplied authorization adapter.
 Before publishing changes, run:
 
 ```bash
-cargo fmt --check
-cargo test
-cargo test --all-features
-cargo test --no-default-features
-cargo check --features s3,azure --no-default-features
-cargo clippy --all-features --all-targets -- -D warnings
-cargo clippy --no-default-features --lib -- -D warnings
+cargo fmt --all -- --check
+cargo test -p graphql-orm-storage
+cargo test -p graphql-orm-storage --no-default-features --features s3
+cargo check -p graphql-orm-storage --no-default-features --features azure
+cargo check -p graphql-orm-storage --no-default-features --features smb
+cargo clippy -p graphql-orm-storage --all-targets -- -D warnings
 ```
+
+See [development guidance](development.md) for the complete provider and
+opt-in integration-test lanes.

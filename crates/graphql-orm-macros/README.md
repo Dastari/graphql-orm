@@ -1,3 +1,13 @@
+---
+title: "graphql-orm-macros"
+kind: reference
+status: active
+owner: graphql-orm-macros-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # `graphql-orm-macros`
 
 Procedural macros for [`graphql-orm`](../../README.md).

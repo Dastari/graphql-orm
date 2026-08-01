@@ -1,3 +1,13 @@
+---
+title: "Provider-Persistent Files"
+kind: architecture
+status: draft
+owner: graphql-orm-ai-maintainers
+last_reviewed: 2026-08-01
+review_by: 2026-11-01
+supersedes: []
+---
+
 # Provider-Persistent Files
 
 Status: design gate complete; upload, indexing, persistent-file use, and file
@@ -202,5 +212,5 @@ The current reviewed `graphql-orm` and `agql-auth` revisions provide the
 generated transaction/fencing and current-principal rehydration primitives
 needed to express this downstream design. No upstream change is requested at
 this checkpoint. The remaining blockers are the provider create/recovery and
-complete downstream cost/lifecycle contracts, so no `.handoffs/` prompt is
-needed.
+complete downstream cost/lifecycle contracts, so no root `.handoff/`
+coordination record is needed.

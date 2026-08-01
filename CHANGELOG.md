@@ -1,6 +1,18 @@
+---
+title: "Changelog"
+kind: reference
+status: active
+owner: workspace-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Changelog
 
-User-facing release notes live in [docs/release-notes.md](docs/release-notes.md).
+This file is the authoritative user-facing release chronology. The former
+[release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
+for historical context.
 
 ## 0.17.0
 
@@ -436,7 +448,7 @@ Companion macros crate: `graphql-orm-macros` **0.4.0**.
   traversal without a cursor after switching fields.
 
 See [MIGRATION.md](MIGRATION.md) and
-[portable persistence primitives](docs/portable-persistence.md).
+[portable persistence primitives](docs/architecture/portable-persistence.md).
 
 ## 0.3.0
 
@@ -511,5 +523,5 @@ See [MIGRATION.md](MIGRATION.md).
 - Added a reserved optional `auth-agql` feature; concrete agql-auth converters are deferred until
   the upstream agql-auth 0.7 API is tagged.
 
-See the 0.2.21 section in [docs/release-notes.md](docs/release-notes.md#0221) and the migration
+See the 0.2.21 section in the [historical release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md#0221) and the migration
 guide in [MIGRATION.md](MIGRATION.md).

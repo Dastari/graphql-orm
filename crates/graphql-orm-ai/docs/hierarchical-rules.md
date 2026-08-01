@@ -1,3 +1,13 @@
+---
+title: "Hierarchical AI rules"
+kind: reference
+status: active
+owner: graphql-orm-ai-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Hierarchical AI rules
 
 Hierarchical rules let a host narrow AI behavior at application-defined

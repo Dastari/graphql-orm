@@ -1,3 +1,13 @@
+---
+title: "Recovery, Retention, Backup, and Restore"
+kind: reference
+status: active
+owner: graphql-orm-ai-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Recovery, Retention, Backup, and Restore
 
 Status: Slice 4 audit complete; ordinary lifecycle closure is implemented,
@@ -117,7 +127,7 @@ What is missing is the production adapter chain that:
 6. records the exact recovery epoch; and
 7. opens readiness only for that applied, zero-fatal epoch.
 
-`graphql-orm-backup` 0.7.0, ORM 0.16.0, and storage 0.6.0 resolve through one
+`graphql-orm-backup` 0.7.0, ORM 0.17.0, and storage 0.6.0 resolve through one
 workspace and one database/metadata/storage type universe. AI schema module
 0.51.0 also includes finalized local attachment and artifact object keys in
 the confidential database export while continuing to redact quarantine,
@@ -132,8 +142,7 @@ epoch, and readiness gate are implemented and exercised through SQLite and an
 owned disposable PostgreSQL round trip. Consumer owners must still rehearse
 their composed schema and object store separately.
 
-The owning ORM agent is considering consolidation of the `graphql-orm-*`
-packages. This branch is therefore stopped at the exact reviewed dependency and
-backup-schema checkpoint. Any later repository-layout change must arrive as a
-reviewed upstream commit, be repinned here without sibling mutation, and pass
-the complete dependency and backend matrix.
+The `graphql-orm-*` packages already share this workspace. Continue restore
+work on the integration branch, keep temporary coordination only in ignored
+root `.handoff/`, and run the complete dependency and backend matrix for every
+cross-package change.

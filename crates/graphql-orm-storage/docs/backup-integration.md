@@ -1,3 +1,13 @@
+---
+title: "Backup Integration"
+kind: reference
+status: active
+owner: graphql-orm-storage-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Backup Integration
 
 `graphql-orm-backup` should reuse storage provider code through `BlobStore`, not
@@ -25,7 +35,7 @@ Those repository keys should not be forced through primary object metadata.
 
 ## Adapter Shape
 
-`graphql-orm-backup` 0.4.0 exposes this adapter:
+`graphql-orm-backup` 0.7.0 exposes this adapter:
 
 ```rust
 pub struct BlobStoreBackupRepository {
@@ -38,8 +48,12 @@ Mapping:
 
 - `BackupRepository::put_blob` calls `BlobStore::put_blob` with backup-owned
   write options
-- `BackupRepository::get_blob` collects or streams `BlobStore::get_blob`
+- `BackupRepository::get_blob_stream` preserves `BlobStore` streaming, while
+  the buffered `get_blob` helper remains suitable for small metadata
 - `BackupRepository::blob_exists` calls `BlobStore::blob_exists`
+- `BackupRepository::put_blob_if_absent` calls
+  `BlobStore::put_blob_if_not_exists`, the atomic primitive used for repository
+  locking
 - `BackupRepository::list_blobs` calls `BlobStore::list_blobs_page` or
   `BlobStore::list_blobs`
 - `BackupRepository::delete_blob` calls `BlobStore::delete_blob`

@@ -1,7 +1,8 @@
 #[test]
 fn storage_streaming_range_boundary_records_external_api_contract() {
-    let backup_boundary = include_str!("../../../docs/backup.md");
-    let range_boundary = include_str!("../../../docs/storage-streaming-range-boundary.md");
+    let backup_boundary = include_str!("../../../docs/reference/graphql-orm/backup-runtime.md");
+    let range_boundary =
+        include_str!("../../../docs/investigations/2026/storage-streaming-range-boundary.md");
 
     assert!(
         backup_boundary.contains("graphql-orm-storage"),

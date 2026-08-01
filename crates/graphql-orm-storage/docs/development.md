@@ -1,31 +1,43 @@
+---
+title: "Development"
+kind: reference
+status: active
+owner: graphql-orm-storage-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Development
 
-This repository is a single Rust crate.
+`graphql-orm-storage` is a package in the GraphQL ORM workspace. Internal
+companion dependencies use workspace path dependencies and the root
+`Cargo.lock`; do not introduce internal Git dependencies.
 
 ## Common Checks
 
-Run the default provider tests:
+Run the default local-provider tests:
 
 ```bash
-cargo test
+cargo test -p graphql-orm-storage
 ```
 
-Run the full feature matrix:
+Run explicit provider lanes. Do not use workspace `--all-features`:
 
 ```bash
-cargo fmt --check
-cargo test --all-features
-cargo test --no-default-features
-cargo test --features s3,azure --no-default-features
-cargo check --features s3,azure --no-default-features
-cargo clippy --all-features --all-targets -- -D warnings
-cargo clippy --no-default-features --lib -- -D warnings
+cargo fmt --all -- --check
+cargo test -p graphql-orm-storage --no-default-features
+cargo test -p graphql-orm-storage --no-default-features --features s3
+cargo check -p graphql-orm-storage --no-default-features --features azure
+cargo check -p graphql-orm-storage --no-default-features --features smb
+cargo clippy -p graphql-orm-storage --all-targets -- -D warnings
+cargo clippy -p graphql-orm-storage --all-targets --no-default-features --features s3 -- -D warnings
 ```
 
 Build docs with warnings denied:
 
 ```bash
-RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm-storage --no-deps
 ```
 
 ## S3 Integration Tests
@@ -43,7 +55,7 @@ S3_TEST_REGION=us-east-1 \
 S3_TEST_ACCESS_KEY=minioadmin \
 S3_TEST_SECRET_KEY=minioadmin \
 S3_TEST_PATH_STYLE=true \
-cargo test --features s3 --no-default-features --test s3_integration
+cargo test -p graphql-orm-storage --features s3 --no-default-features --test s3_integration
 ```
 
 Use a dedicated throwaway bucket or prefix. The test writes and deletes objects

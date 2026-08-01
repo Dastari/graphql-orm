@@ -1,0 +1,29 @@
+---
+title: Plans index
+kind: reference
+status: active
+owner: workspace-maintainers
+last_reviewed: 2026-08-01
+review_by: 2026-11-01
+supersedes: []
+---
+
+# Plans
+
+## Active
+
+- [AI production readiness](active/ai-production-readiness/README.md)
+
+## Backlog
+
+- [Backup providers](backlog/backup-providers/README.md)
+- [Storage providers](backlog/storage-providers/README.md)
+
+## Completed
+
+- [Monorepo consolidation](completed/monorepo-consolidation/README.md)
+
+An active plan has one canonical file at
+`docs/plans/active/<initiative>/README.md`. Update its current checkpoint rather
+than appending session chronology. On completion, move the initiative directory
+to `completed/`, set its status to `accepted`, and record the final evidence.

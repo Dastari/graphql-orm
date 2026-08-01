@@ -1,3 +1,13 @@
+---
+title: "graphql-orm-backup Agent Guide"
+kind: reference
+status: active
+owner: graphql-orm-backup-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # graphql-orm-backup Agent Guide
 
 This crate is a reusable backup and restore companion for applications that use `graphql-orm`.
@@ -21,12 +31,13 @@ This crate is a reusable backup and restore companion for applications that use 
 ## Current Agent Handoff
 
 - Current crate version is `0.7.0`.
-- The optional ORM adapter resolves `graphql-orm` 0.16.0 from the workspace.
+- The optional ORM adapter resolves `graphql-orm` 0.17.0 from the workspace.
+  Internal packages use workspace path dependencies and the root `Cargo.lock`.
   Keep downstream applications on one reviewed monorepo revision so ORM,
   backup, and storage share the same canonical source/type universe.
 - `graphql-orm` owns its optional `agql-auth` integration and pins
-  `agql-auth` 0.12.0 at
-  `3f3b0c5365adfbe436514a681d977b600991b797`. This crate must not enable or
+  `agql-auth` 0.13.0 at
+  `d6b9cef663d52125c52f3fb90d4155ee25d34775`. This crate must not enable or
   depend directly on application authorization.
 - Applying and dry-run restore compare the manifest backend/schema hash with
   the target before target checks or writes. Preserve that fail-closed
@@ -49,5 +60,6 @@ This crate is a reusable backup and restore companion for applications that use 
 - Run the managed real-Samba suite with
   `crates/graphql-orm-storage/tests/samba/run.sh` from the workspace root; it
   includes this crate's complete SMB snapshot lifecycle test.
-- Read `docs/smb.md`, `docs/digitise-native-smb.md`, and `MIGRATION.md` before
-  changing provider integration or host guidance.
+- Read `docs/smb.md` and `MIGRATION.md` before changing provider integration or
+  host guidance. Host-specific integration records are archived outside this
+  crate and are not reusable guidance.

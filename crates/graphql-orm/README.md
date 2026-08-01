@@ -1,3 +1,13 @@
+---
+title: "graphql-orm"
+kind: reference
+status: active
+owner: graphql-orm-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # `graphql-orm`
 
 Runtime crate for [`graphql-orm`](../../README.md).
@@ -40,10 +50,10 @@ pub struct User {
 
 ## Documentation
 
-- [Getting started](../../docs/getting-started.md)
-- [Backend features](../../docs/backends.md)
-- [Entities and relations](../../docs/entities-and-relations.md)
-- [Schema management](../../docs/schema-management.md)
-- [Operation assurance](../../docs/operation-assurance.md)
-- [Runtime writes and policies](../../docs/runtime-and-writes.md)
-- [SQL Server read-only backend](../../docs/mssql.md)
+- [Workspace setup](../../docs/development/setup.md)
+- [Backend features](../../docs/reference/graphql-orm/backends.md)
+- [Entities and relations](../../docs/reference/graphql-orm/entities-and-relations.md)
+- [Schema management](../../docs/reference/graphql-orm/schema-management.md)
+- [Operation assurance](../../docs/architecture/operation-assurance.md)
+- [Runtime writes and policies](../../docs/reference/graphql-orm/runtime-and-writes.md)
+- [SQL Server read-only backend](../../docs/reference/graphql-orm/mssql.md)

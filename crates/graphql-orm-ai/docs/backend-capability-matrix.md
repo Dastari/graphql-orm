@@ -1,3 +1,13 @@
+---
+title: "Backend and capability acceptance matrix"
+kind: reference
+status: active
+owner: graphql-orm-ai-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Backend and capability acceptance matrix
 
 This matrix records the Slice 7 acceptance boundary. A compile result is not a
@@ -38,7 +48,8 @@ For a candidate commit, record:
 - the owned disposable PostgreSQL result, or an explicit environmental skip
   that prevents a PostgreSQL production claim;
 - migration and schema-fingerprint deltas;
-- open `.handoffs/` prompts and their reviewed final SHAs, if returned; and
+- any temporary root `.handoff/` coordination record and its reviewed final
+  SHA, if applicable; and
 - every capability intentionally kept closed.
 
 Passing the crate matrix does not publish the crate, change `publish = false`,

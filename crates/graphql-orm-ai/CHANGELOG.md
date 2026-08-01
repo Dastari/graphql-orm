@@ -1,7 +1,22 @@
+---
+title: "Changelog"
+kind: reference
+status: active
+owner: graphql-orm-ai-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Changelog
 
 All notable user-visible changes are recorded here. The crate follows
 Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION.md).
+
+Historical development entries below retain their original dependency and
+checkpoint facts. For the current workspace baseline and active gates, use the
+[implementation status](docs/implementation-status.md) and the central
+[AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
 ## [Unreleased]
 

@@ -1,3 +1,13 @@
+---
+title: "Bounded Session Retention"
+kind: reference
+status: active
+owner: graphql-orm-ai-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Bounded Session Retention
 
 The cross-lifecycle status, privileged recovery boundary, and applied-restore

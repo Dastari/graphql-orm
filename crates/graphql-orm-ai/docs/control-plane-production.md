@@ -1,3 +1,13 @@
+---
+title: "Control-plane and production integration gates"
+kind: reference
+status: active
+owner: graphql-orm-ai-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Control-plane and production integration gates
 
 This document records the Slice 6 audit. It distinguishes implemented
@@ -12,7 +22,7 @@ mutation never grants resolver access by itself.
 | Tool catalog | Implemented. Registration requires a server-authored document, exact GraphQL contract, static disclosure schema, bounded projection, and current descriptor fingerprint. | Hosts review and register every descriptor; absence stays disabled. |
 | In-memory enablement | Implemented. `AiToolPolicySet` requires an explicit enabled binding to the exact current descriptor fingerprint and a deployment maturity ceiling. | The host supplies the current set and the principal-aware `AiToolAuthorizationPolicy`; ordinary resolver authorization still runs. |
 | Durable tool-policy record | Schema exists, but authenticated read/manage and live-policy resolution are not implemented. Existing `maximum_calls`, `maximum_output_bytes`, `constraints`, risk, and approval fields are not a runtime proof. | Keep the GraphQL lifecycle closed until the applied-restore gate passes and every stored bound is enforced at execution, not merely persisted. |
-| Operation/disclosure metadata | Explicit reviewed application contracts and disclosure schemas are implemented. ORM 0.16.0 generated catalogs now bind an exact exposed generated resolver, catalog/operation fingerprints, operation kind, and one server-authored root selection. | Hosts must explicitly classify the descriptor as an application operation and still supply the finished-schema, projection, disclosure, enablement, and authorization contracts. Custom roots remain explicit. |
+| Operation/disclosure metadata | Explicit reviewed application contracts and disclosure schemas are implemented. ORM 0.17.0 generated catalogs now bind an exact exposed generated resolver, catalog/operation fingerprints, operation kind, and one server-authored root selection. | Hosts must explicitly classify the descriptor as an application operation and still supply the finished-schema, projection, disclosure, enablement, and authorization contracts. Custom roots remain explicit. |
 | Recursion prevention | Generated operations require exact catalog resolution plus an explicit host application-domain policy. All descriptors still carry explicit operation domains, and the fail-closed identifier scanner rejects known AI control-plane and introspection names. | Metadata is discovery/drift evidence, not authorization. Keep the scanner for custom roots and defense in depth; ordinary resolver authorization remains authoritative. |
 | Provider-persistent files | Raw provider store IDs are rejected before transport. Inline attachment input and exact deletion of already-known provider artifacts remain separate capabilities. | Upload/index/search stays closed under the lifecycle in [provider-persistent files](provider-files.md). |
 
@@ -46,7 +56,7 @@ and applied restore is available.
 
 ## Resolver-operation metadata boundary
 
-`graphql-orm` 0.16.0 exposes project-agnostic static descriptors and an
+`graphql-orm` 0.17.0 exposes project-agnostic static descriptors and an
 exposure-resolved operation catalog. `GraphqlOperationContract` can bind one
 current catalog fingerprint, one exposed operation fingerprint/kind/category,
 and one server-authored document containing exactly one named operation and

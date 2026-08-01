@@ -1,3 +1,13 @@
+---
+title: "Development and Verification"
+kind: reference
+status: active
+owner: graphql-orm-ai-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Development and Verification
 
 ## Default checks
@@ -73,7 +83,7 @@ cargo semver-checks --manifest-path crates/graphql-orm-ai/Cargo.toml \
   --baseline-rev <base-revision> --default-features
 ```
 
-CI additionally runs `cargo-semver-checks` against a baseline worktree. The
+CI additionally runs `cargo-semver-checks` against a baseline checkout. The
 current and baseline manifests resolve their matching workspace dependency
 sets independently. The explicit default-feature selection is required: the
 backend features are mutually exclusive, while the tool's ordinary heuristic

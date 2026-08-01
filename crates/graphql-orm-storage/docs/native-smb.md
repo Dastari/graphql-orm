@@ -1,3 +1,13 @@
+---
+title: "Native SMB2/SMB3 Blob Storage"
+kind: reference
+status: active
+owner: graphql-orm-storage-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Native SMB2/SMB3 Blob Storage
 
 The `smb` feature provides `SmbStorageBackend`, a direct network `BlobStore`.

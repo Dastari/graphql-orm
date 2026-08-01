@@ -1,3 +1,13 @@
+---
+title: "Documentation"
+kind: reference
+status: active
+owner: graphql-orm-storage-maintainers
+last_reviewed: 2026-08-01
+review_by: 2027-02-01
+supersedes: []
+---
+
 # Documentation
 
 This directory contains the project documentation that is too detailed for the
@@ -9,11 +19,8 @@ repository front page.
 - [Streaming APIs](streaming.md)
 - [Recording and large-object streams](recording-streams.md)
 - [Architecture and crate boundaries](architecture.md)
-- [Provider roadmap](provider-roadmap.md)
+- [Provider backlog](../../../docs/plans/backlog/storage-providers/README.md)
 - [Backup integration guidance](backup-integration.md)
-- [Agent update](agent-update.md)
-- [Implementation plan](plan.md)
-- [Release notes](release-notes.md)
 - [Migration guide](../MIGRATION.md)
 - [Changelog](../CHANGELOG.md)
 - [Development and tests](development.md)

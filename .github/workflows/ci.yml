@@ -15,6 +15,15 @@ jobs:
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
+      - name: Check documentation governance
+        run: python3 scripts/check-documentation.py --base "${{ github.event.pull_request.base.sha }}"
+      - name: Check generated workspace inventory
+        run: python3 scripts/generate-workspace-inventory.py --check
+      - name: Check PR documentation impact
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 scripts/check-pr-documentation-impact.py
       - run: cargo fmt --all -- --check
       - run: scripts/check-workspace-dependencies.sh
       - run: cargo test -p graphql-orm-storage
