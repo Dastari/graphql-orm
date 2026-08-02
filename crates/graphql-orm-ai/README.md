@@ -175,10 +175,12 @@ waits without polling, resuming, or executing them.
   in confidential backups while keeping quarantine, upload-token, provider,
   credential, and secret references redacted. The generated-ORM restore
   collector now derives bounded conservative run classifications plus
-  approval and egress-consent revalidation candidates, and marks every
-  remaining audit explicitly incomplete. Production applied restore and
-  runtime reopening remain closed pending the remaining audits, repair,
-  validation, recovery-epoch, and readiness chain.
+  approval and egress-consent revalidation candidates. When supplied
+  host-attested deployment ceilings, it also validates complete budget-policy
+  and immutable pricing-catalog graphs, including exact pricing creation-audit
+  linkage. Every remaining audit is explicitly incomplete. Production applied
+  restore and runtime reopening remain closed pending the remaining audits,
+  repair, validation, recovery-epoch, and readiness chain.
 - A concrete ORM worker for bounded claims, lease renewal, retry scheduling,
   immutable attempt outcomes, and recovery; plus a mock-tested provider turn
   that durably audits egress before transport and persists protected assistant
@@ -318,7 +320,7 @@ Add the crate from a reviewed monorepo revision:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.59.0", features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.60.0", features = ["sqlite"] }
 ```
 
 > **Pre-release dependency note:** this source snapshot resolves

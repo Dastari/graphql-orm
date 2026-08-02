@@ -61,15 +61,19 @@ retention, or restore proofs remain closed.
 Monorepo consolidation and the 0.17/0.13 dependency alignment are complete.
 The protected runtime, provider adapters, exact completed-batch adoption,
 retention foundations, restore planning, and readiness observation contracts
-exist. The first database-derived collector slice now covers bounded
-conservative run classification plus approval and egress-consent revalidation
-candidates, with opaque fact/plan digests and fatal explicit statuses for every
-remaining audit. The pure plan's misleading applied-readiness helper has been
-removed; the existing host-attested compatibility gate is not restore
-authority. The next implementation slice completes the key/object and durable-
-graph auditors, then adds the bounded repair applier, validator, recovery
-epoch, and non-forgeable readiness path. Durable tool-policy management and
-provider-persistent upload/search stay closed until this gate passes.
+exist. Database-derived collection now covers bounded conservative run
+classification, approval and egress-consent revalidation candidates, and—when
+host-attested deployment ceilings are supplied—complete budget-policy and
+immutable pricing-catalog integrity with exact creation-audit linkage. Opaque
+fact/plan digests bind those inputs, and every remaining audit has a fatal
+explicit status. The pure plan's misleading applied-readiness helper has been
+removed;
+the existing host-attested compatibility gate is not restore authority. The
+next implementation slice separates historic key-header availability from
+attachment metadata/object-byte proofs and completes the remaining durable
+graphs, then adds the bounded repair applier, validator, recovery epoch, and
+non-forgeable readiness path. Durable tool-policy management and provider-
+persistent upload/search stay closed until this gate passes.
 
 Historical slice-by-slice evidence is retained in the
 [archived completion ledger](../../../archive/2026/graphql-orm-ai-completion-ledger.md)

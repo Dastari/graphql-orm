@@ -569,7 +569,31 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
         .await
         .expect("background reconciliation schema should migrate in owned PostgreSQL");
 
+    let restore_budget_limits = AiBudgetPolicyManagementLimits::new(
+        AiBudgetAmounts {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            tool_units: 1_000_000,
+            image_units: 1_000_000,
+            cost_microunits: 1_000_000,
+            runs: 1_000_000,
+        },
+        100,
+    )
+    .expect("restore budget-policy limits should validate");
+    let restore_pricing_limits = AiPricingCatalogManagementLimits::new(1_000_000, 1_000_000, 100)
+        .expect("restore pricing limits should validate")
+        .with_maximum_builtin_tool_microunits_per_call(1_000_000);
+    let restore_policy_limits = AiRestorePolicyAuditLimits::new(
+        restore_budget_limits,
+        restore_pricing_limits,
+        10_000,
+        10_000,
+        100_000,
+    )
+    .expect("restore policy-audit limits should validate");
     let collected = OrmAiRestoreFactCollector::new(database.clone())
+        .with_policy_audits(restore_policy_limits)
         .collect("postgres-parity-module-fingerprint")
         .await
         .expect("bounded restore facts should collect through generated PostgreSQL ORM queries");
@@ -584,6 +608,18 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
             .audit_statuses()
             .get(&AiRestoreAuditKind::Attachments),
         Some(&AiRestoreAuditStatus::NotImplemented)
+    );
+    assert_eq!(
+        collected
+            .audit_statuses()
+            .get(&AiRestoreAuditKind::BudgetPolicies),
+        Some(&AiRestoreAuditStatus::Complete)
+    );
+    assert_eq!(
+        collected
+            .audit_statuses()
+            .get(&AiRestoreAuditKind::PricingPolicies),
+        Some(&AiRestoreAuditStatus::Complete)
     );
 
     let sessions = OrmAiSessionService::new(

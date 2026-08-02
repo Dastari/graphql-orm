@@ -19,6 +19,48 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased: policy restore auditors (crate 0.59.0 to 0.60.0; schema remains 0.51.0)
+
+Restored deployments may now construct `AiRestorePolicyAuditLimits` from
+host-attested `AiBudgetPolicyManagementLimits` and
+`AiPricingCatalogManagementLimits`, plus explicit
+budget-policy, pricing-policy, and audit-event row bounds. Pass that value to
+`OrmAiRestoreFactCollector::with_policy_audits` before `collect`. Omitting it
+leaves `BudgetPolicies` and `PricingPolicies` as fatal `NotImplemented` audits;
+the collector never invents deployment ceilings.
+
+The budget-policy audit rederives exact scope identity, validates optional
+principal pairing and syntax, checks interval and CAS shape, requires at least
+one nonnegative ceiling, enforces every supplied deployment maximum, and
+rechecks the per-scope policy cardinality. The pricing audit validates the
+deterministic `pricing:<uuid>` identity, scope and route, provider/model shape,
+all token/fixed/built-in rate ceilings, cached-input ordering, creator fields,
+and per-route version cardinality. Every immutable pricing version must have
+exactly one matching `ai.pricing_policy.create` audit with the same creator and
+the canonical allowed outcome. Orphan, malformed, missing, or duplicate
+pricing creation audits are fatal.
+
+Because audit-event fields are intentionally not exposed as generated ORM
+filters, the pricing proof performs a bounded scan of audit-event rows and
+then selects the relevant immutable creation facts in memory. Size
+`maximum_audit_events` for the complete restored audit history. Reaching any
+policy or audit bound returns `LimitExceeded` and contributes no partial policy
+evidence. The host-attested deployment limits and complete accepted row-set
+digests are bound into `AiCollectedRestoreFacts` and its dry-run plan digest.
+
+Supplying these values does not prove that they match the live budget/pricing
+services. Before policy audit completion can contribute to runtime readiness,
+the future applied validator must bind the exact live configuration epoch to
+the recovery epoch. This checkpoint remains dry-run only.
+
+This additive pre-1.0 API advances the crate to 0.60.0. It changes no entity,
+column, index, constraint, backup policy, or GraphQL SDL, so AI schema module
+0.51.0 remains current and no data migration is required. Encryption-key,
+attachment/object, usage/counter, rule, skill, checkpoint, provider,
+UI-intent, retention, and stream audits remain fatal until implemented.
+Applied repair, validation, recovery epochs, and runtime reopening remain
+closed.
+
 ## Unreleased: bounded restore fact collection (crate 0.58.0 to 0.59.0; schema remains 0.51.0)
 
 Hosts beginning an empty-target restore may now construct

@@ -20,7 +20,7 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.59.0` and keeps
+This development line advances the pre-1.0 crate version to `0.60.0` and keeps
 AI schema module `0.51.0`. It begins the applied-restore implementation with
 bounded database-derived facts, aligns the reviewed dependency universe,
 integrates generated resolver-operation metadata, completes the durable OpenAI
@@ -37,6 +37,17 @@ file-search IDs behind the reviewed persistent-file design.
 
 ### Added
 
+- `AiRestorePolicyAuditLimits` and
+  `OrmAiRestoreFactCollector::with_policy_audits` now bind host-attested
+  deployment ceilings and independent row bounds into database-derived restore
+  facts.
+  The collector can completely audit budget-policy identity, scope,
+  principal, interval, and ceiling integrity plus immutable pricing identity,
+  route cardinality, rates, creator linkage, and exact creation-audit facts.
+  Omitted deployment ceilings, reached bounds, malformed rows, missing or
+  duplicate creation audits, and orphan pricing audits all remain fatal. These
+  dry-run inputs do not prove equivalence to live service configuration; the
+  future applied validator must bind that exact configuration epoch.
 - `OrmAiRestoreFactCollector` now reads runs, approvals, and egress consents
   through generated ORM queries in one bounded transaction. It conservatively
   classifies interrupted effects, validates core durable shapes, reports a

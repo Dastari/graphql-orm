@@ -2,7 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
@@ -12,13 +12,16 @@ use graphql_orm::graphql::orm::{
 use sha2::{Digest, Sha256};
 
 use crate::persistence::{
-    AiApprovalRecord, AiApprovalRecordOrderByInput, AiEgressConsentRecord,
-    AiEgressConsentRecordOrderByInput, AiRunRecord, AiRunRecordOrderByInput,
+    AiApprovalRecord, AiApprovalRecordOrderByInput, AiAuditEventRecord,
+    AiAuditEventRecordOrderByInput, AiBudgetPolicyRecord, AiBudgetPolicyRecordOrderByInput,
+    AiEgressConsentRecord, AiEgressConsentRecordOrderByInput, AiPricingPolicyRecord,
+    AiPricingPolicyRecordOrderByInput, AiRunRecord, AiRunRecordOrderByInput,
 };
 use crate::{
-    AiCollectedRestoreFacts, AiError, AiExternalEffectState, AiRestoreAuditKind,
+    AiBudgetAmounts, AiBudgetPolicyManagementLimits, AiCollectedRestoreFacts, AiError,
+    AiExternalEffectState, AiPricingCatalogManagementLimits, AiRestoreAuditKind,
     AiRestoreAuditStatus, AiRestoreSnapshotFacts, AiRestoredCoordinatorCheckpoint, AiRestoredRun,
-    AiRunId, AiRunState,
+    AiRunId, AiRunState, AiScope,
 };
 
 const MAXIMUM_COLLECTION_BOUND: usize = 1_000_000;
@@ -86,6 +89,82 @@ impl Default for AiRestoreCollectorLimits {
     }
 }
 
+/// Host-attested deployment ceilings and row bounds for policy restore audits.
+///
+/// These inputs are immutable for one collection pass and are included in the
+/// collected-facts digest. Omitting them leaves budget and pricing audits
+/// explicitly `not_implemented`; the collector never invents permissive
+/// ceilings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AiRestorePolicyAuditLimits {
+    budget_management: AiBudgetPolicyManagementLimits,
+    pricing_management: AiPricingCatalogManagementLimits,
+    maximum_budget_policies: usize,
+    maximum_pricing_policies: usize,
+    maximum_audit_events: usize,
+}
+
+impl AiRestorePolicyAuditLimits {
+    /// Creates validated policy-audit inputs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] when any row bound is zero
+    /// or exceeds the compiled one-million-row ceiling.
+    pub fn new(
+        budget_management: AiBudgetPolicyManagementLimits,
+        pricing_management: AiPricingCatalogManagementLimits,
+        maximum_budget_policies: usize,
+        maximum_pricing_policies: usize,
+        maximum_audit_events: usize,
+    ) -> Result<Self, AiError> {
+        if [
+            maximum_budget_policies,
+            maximum_pricing_policies,
+            maximum_audit_events,
+        ]
+        .into_iter()
+        .any(|bound| !(1..=MAXIMUM_COLLECTION_BOUND).contains(&bound))
+        {
+            return Err(AiError::InvalidConfiguration(
+                "invalid restore policy-audit limits".to_owned(),
+            ));
+        }
+        Ok(Self {
+            budget_management,
+            pricing_management,
+            maximum_budget_policies,
+            maximum_pricing_policies,
+            maximum_audit_events,
+        })
+    }
+
+    /// Current deployment budget-policy management bounds.
+    pub const fn budget_management(self) -> AiBudgetPolicyManagementLimits {
+        self.budget_management
+    }
+
+    /// Current deployment immutable pricing-catalog bounds.
+    pub const fn pricing_management(self) -> AiPricingCatalogManagementLimits {
+        self.pricing_management
+    }
+
+    /// Maximum budget-policy rows read by one pass.
+    pub const fn maximum_budget_policies(self) -> usize {
+        self.maximum_budget_policies
+    }
+
+    /// Maximum pricing-policy rows read by one pass.
+    pub const fn maximum_pricing_policies(self) -> usize {
+        self.maximum_pricing_policies
+    }
+
+    /// Maximum audit-event rows scanned for pricing-creation linkage.
+    pub const fn maximum_audit_events(self) -> usize {
+        self.maximum_audit_events
+    }
+}
+
 /// Generated-ORM restore fact collector.
 ///
 /// Collection runs in one read transaction, performs no provider, tool, blob,
@@ -95,6 +174,7 @@ impl Default for AiRestoreCollectorLimits {
 pub struct OrmAiRestoreFactCollector {
     database: Database<DefaultWriteBackend>,
     limits: AiRestoreCollectorLimits,
+    policy_audit_limits: Option<AiRestorePolicyAuditLimits>,
 }
 
 impl OrmAiRestoreFactCollector {
@@ -103,6 +183,7 @@ impl OrmAiRestoreFactCollector {
         Self {
             database,
             limits: AiRestoreCollectorLimits::default(),
+            policy_audit_limits: None,
         }
     }
 
@@ -110,6 +191,17 @@ impl OrmAiRestoreFactCollector {
     #[must_use]
     pub fn with_limits(mut self, limits: AiRestoreCollectorLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Enables complete budget- and pricing-policy database audits.
+    ///
+    /// The supplied host-attested ceilings are bound into the collected facts.
+    /// This method does not prove they match live service configuration and
+    /// grants no configuration or runtime-start authority.
+    #[must_use]
+    pub fn with_policy_audits(mut self, limits: AiRestorePolicyAuditLimits) -> Self {
+        self.policy_audit_limits = Some(limits);
         self
     }
 
@@ -124,12 +216,14 @@ impl OrmAiRestoreFactCollector {
     /// backup manifest. It is recorded for the pure reconciler's exact module
     /// comparison but is not trusted as applied-restore evidence.
     ///
-    /// This initial collector completely covers conservative run
-    /// classification and approval/consent revalidation-candidate counts. It
-    /// does not claim that the candidate rows have passed the later complete
-    /// repair and validation graph. All remaining audit categories are
-    /// explicitly `not_implemented`, so the collected plan remains fatal and
-    /// cannot be mistaken for production readiness.
+    /// Collection always covers conservative run classification and
+    /// approval/consent revalidation-candidate counts. When configured through
+    /// [`Self::with_policy_audits`], it also covers budget- and pricing-policy
+    /// integrity relative to the supplied host-attested ceilings. It does not
+    /// claim that candidates passed the later repair graph or that those
+    /// ceilings match live service configuration. Every other audit category
+    /// remains explicitly `not_implemented`, so the collected plan stays fatal
+    /// and cannot be mistaken for production readiness.
     ///
     /// The runtime and all database writers must remain closed for the whole
     /// collection pass. The single transaction bounds the operation but does
@@ -152,6 +246,7 @@ impl OrmAiRestoreFactCollector {
         }
 
         let limits = self.limits;
+        let policy_audit_limits = self.policy_audit_limits;
         let database = self
             .database
             .clone()
@@ -186,10 +281,48 @@ impl OrmAiRestoreFactCollector {
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
+                    let policies = if let Some(policy_limits) = policy_audit_limits {
+                        let budget_policies = tx
+                            .query::<AiBudgetPolicyRecord>()
+                            .order_by(AiBudgetPolicyRecordOrderByInput {
+                                updated_at: Some(OrderDirection::Asc),
+                            })
+                            .limit(query_limit(policy_limits.maximum_budget_policies))
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        let pricing_policies = tx
+                            .query::<AiPricingPolicyRecord>()
+                            .order_by(AiPricingPolicyRecordOrderByInput {
+                                created_at: Some(OrderDirection::Asc),
+                            })
+                            .limit(query_limit(policy_limits.maximum_pricing_policies))
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        let pricing_audits = tx
+                            .query::<AiAuditEventRecord>()
+                            .order_by(AiAuditEventRecordOrderByInput {
+                                created_at: Some(OrderDirection::Asc),
+                            })
+                            .limit(query_limit(policy_limits.maximum_audit_events))
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        Some(CollectedPolicyRows {
+                            limits: policy_limits,
+                            budget_policies,
+                            pricing_policies,
+                            pricing_audits,
+                        })
+                    } else {
+                        None
+                    };
                     Ok(CollectedRows {
                         runs,
                         approvals,
                         egress_consents,
+                        policies,
                     })
                 })
             })
@@ -204,6 +337,14 @@ struct CollectedRows {
     runs: Vec<AiRunRecord>,
     approvals: Vec<AiApprovalRecord>,
     egress_consents: Vec<AiEgressConsentRecord>,
+    policies: Option<CollectedPolicyRows>,
+}
+
+struct CollectedPolicyRows {
+    limits: AiRestorePolicyAuditLimits,
+    budget_policies: Vec<AiBudgetPolicyRecord>,
+    pricing_policies: Vec<AiPricingPolicyRecord>,
+    pricing_audits: Vec<AiAuditEventRecord>,
 }
 
 impl CollectedRows {
@@ -375,8 +516,26 @@ impl CollectedRows {
             audit_status(consents_truncated, invalid_consents),
         );
 
-        let source_rows = serde_json::to_vec(&(run_evidence, approval_evidence, consent_evidence))
-            .map_err(|_| AiError::PersistenceFailed)?;
+        let mut invalid_budget_policy_count = 0_u64;
+        let mut invalid_pricing_policy_count = 0_u64;
+        let policy_evidence = if let Some(policies) = self.policies {
+            let outcome = policies.audit()?;
+            invalid_budget_policy_count = outcome.invalid_budget_policy_count;
+            invalid_pricing_policy_count = outcome.invalid_pricing_policy_count;
+            statuses.insert(AiRestoreAuditKind::BudgetPolicies, outcome.budget_status);
+            statuses.insert(AiRestoreAuditKind::PricingPolicies, outcome.pricing_status);
+            Some(outcome.evidence)
+        } else {
+            None
+        };
+
+        let source_rows = serde_json::to_vec(&(
+            run_evidence,
+            approval_evidence,
+            consent_evidence,
+            policy_evidence,
+        ))
+        .map_err(|_| AiError::PersistenceFailed)?;
         AiCollectedRestoreFacts::new(
             AiRestoreSnapshotFacts {
                 module_fingerprint,
@@ -386,8 +545,8 @@ impl CollectedRows {
                 pending_egress_consent_count,
                 invalid_attachment_count: 0,
                 invalid_usage_fact_count: 0,
-                invalid_budget_policy_count: 0,
-                invalid_pricing_policy_count: 0,
+                invalid_budget_policy_count,
+                invalid_pricing_policy_count,
                 invalid_skill_catalog_count: 0,
                 invalid_rule_policy_count: 0,
                 invalid_coordinator_checkpoint_count: 0,
@@ -403,6 +562,297 @@ impl CollectedRows {
             hex::encode(Sha256::digest(source_rows)),
         )
     }
+}
+
+#[derive(serde::Serialize)]
+struct PolicyAuditEvidence {
+    limits: PolicyLimitEvidence,
+    budget_rows_digest: Option<String>,
+    pricing_rows_digest: Option<String>,
+    pricing_audit_rows_digest: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct PolicyLimitEvidence {
+    budget_ceiling: AiBudgetAmounts,
+    maximum_budget_policies_per_scope: usize,
+    maximum_budget_policies: usize,
+    maximum_fixed_call_microunits: u64,
+    maximum_token_rate_microunits_per_million: u64,
+    maximum_builtin_tool_microunits_per_call: u64,
+    maximum_pricing_versions_per_route: usize,
+    maximum_pricing_policies: usize,
+    maximum_audit_events: usize,
+}
+
+struct PolicyAuditOutcome {
+    budget_status: AiRestoreAuditStatus,
+    pricing_status: AiRestoreAuditStatus,
+    invalid_budget_policy_count: u64,
+    invalid_pricing_policy_count: u64,
+    evidence: PolicyAuditEvidence,
+}
+
+impl CollectedPolicyRows {
+    fn audit(mut self) -> Result<PolicyAuditOutcome, AiError> {
+        // Timestamp ties at the SQL sentinel boundary cannot enter accepted
+        // evidence: an overflow clears the whole dependent category, while a
+        // complete scan contains every row and is canonically sorted by ID.
+        let budget_truncated = self.budget_policies.len() > self.limits.maximum_budget_policies;
+        if budget_truncated {
+            self.budget_policies.clear();
+        }
+        self.budget_policies
+            .sort_by_key(|record| (record.updated_at, record.id));
+        let budget_rows_digest = if budget_truncated {
+            None
+        } else {
+            Some(serialized_digest(&self.budget_policies)?)
+        };
+        let invalid_budget_policy_count = if budget_truncated {
+            0
+        } else {
+            invalid_budget_policy_count(&self.budget_policies, self.limits.budget_management)
+        };
+
+        let pricing_truncated = self.pricing_policies.len() > self.limits.maximum_pricing_policies
+            || self.pricing_audits.len() > self.limits.maximum_audit_events;
+        if pricing_truncated {
+            self.pricing_policies.clear();
+            self.pricing_audits.clear();
+        } else {
+            self.pricing_audits.retain(|record| {
+                record.action == "ai.pricing_policy.create"
+                    || record.resource_kind == "pricing_policy"
+            });
+        }
+        self.pricing_policies
+            .sort_by_key(|record| (record.created_at, record.id));
+        self.pricing_audits
+            .sort_by_key(|record| (record.created_at, record.id));
+        let (pricing_rows_digest, pricing_audit_rows_digest) = if pricing_truncated {
+            (None, None)
+        } else {
+            (
+                Some(serialized_digest(&self.pricing_policies)?),
+                Some(serialized_digest(&self.pricing_audits)?),
+            )
+        };
+        let invalid_pricing_policy_count = if pricing_truncated {
+            0
+        } else {
+            invalid_pricing_policy_count(
+                &self.pricing_policies,
+                &self.pricing_audits,
+                self.limits.pricing_management,
+            )
+        };
+
+        Ok(PolicyAuditOutcome {
+            budget_status: audit_status(budget_truncated, invalid_budget_policy_count),
+            pricing_status: audit_status(pricing_truncated, invalid_pricing_policy_count),
+            invalid_budget_policy_count,
+            invalid_pricing_policy_count,
+            evidence: PolicyAuditEvidence {
+                limits: PolicyLimitEvidence::from(self.limits),
+                budget_rows_digest,
+                pricing_rows_digest,
+                pricing_audit_rows_digest,
+            },
+        })
+    }
+}
+
+impl From<AiRestorePolicyAuditLimits> for PolicyLimitEvidence {
+    fn from(value: AiRestorePolicyAuditLimits) -> Self {
+        let budget = value.budget_management;
+        let pricing = value.pricing_management;
+        Self {
+            budget_ceiling: budget.maximum_ceiling(),
+            maximum_budget_policies_per_scope: budget.maximum_policies_per_scope(),
+            maximum_budget_policies: value.maximum_budget_policies,
+            maximum_fixed_call_microunits: pricing.maximum_fixed_call_microunits(),
+            maximum_token_rate_microunits_per_million: pricing
+                .maximum_token_rate_microunits_per_million(),
+            maximum_builtin_tool_microunits_per_call: pricing
+                .maximum_builtin_tool_microunits_per_call(),
+            maximum_pricing_versions_per_route: pricing.maximum_versions_per_route(),
+            maximum_pricing_policies: value.maximum_pricing_policies,
+            maximum_audit_events: value.maximum_audit_events,
+        }
+    }
+}
+
+fn invalid_budget_policy_count(
+    records: &[AiBudgetPolicyRecord],
+    limits: AiBudgetPolicyManagementLimits,
+) -> u64 {
+    let mut invalid = BTreeSet::new();
+    let mut scopes = BTreeMap::<&str, Vec<uuid::Uuid>>::new();
+    for record in records {
+        scopes
+            .entry(record.scope_key.as_str())
+            .or_default()
+            .push(record.id);
+        if !restored_budget_policy_is_valid(record, limits.maximum_ceiling()) {
+            invalid.insert(record.id);
+        }
+    }
+    for ids in scopes
+        .values()
+        .filter(|ids| ids.len() > limits.maximum_policies_per_scope())
+    {
+        invalid.extend(ids.iter().copied());
+    }
+    invalid.len() as u64
+}
+
+fn restored_budget_policy_is_valid(
+    record: &AiBudgetPolicyRecord,
+    maximum: AiBudgetAmounts,
+) -> bool {
+    let scope = AiScope {
+        kind: record.scope_kind.clone(),
+        id: record.scope_id.clone(),
+        tenant_id: record.tenant_id.clone(),
+    };
+    let principal_is_valid = match (
+        record.principal_kind.as_deref(),
+        record.principal_subject.as_deref(),
+    ) {
+        (None, None) => true,
+        (Some(kind), Some(subject)) => {
+            valid_principal_kind(kind)
+                && !subject.trim().is_empty()
+                && subject.len() <= 512
+                && !subject.chars().any(char::is_control)
+        }
+        _ => false,
+    };
+    let ceilings = [
+        (record.maximum_input_tokens, maximum.input_tokens),
+        (record.maximum_output_tokens, maximum.output_tokens),
+        (record.maximum_tool_units, maximum.tool_units),
+        (record.maximum_image_units, maximum.image_units),
+        (record.maximum_cost_microunits, maximum.cost_microunits),
+        (record.maximum_runs, maximum.runs),
+    ];
+    record.id != uuid::Uuid::nil()
+        && record.row_version >= 0
+        && record.updated_at > 0
+        && valid_scope(&scope)
+        && record.scope_key == crate::ai_scope_key(&scope)
+        && principal_is_valid
+        && matches!(
+            record.interval_kind.as_str(),
+            "minute" | "hour" | "day" | "month" | "lifetime"
+        )
+        && ceilings.iter().any(|(value, _)| value.is_some())
+        && ceilings.into_iter().all(|(value, maximum)| {
+            value.is_none_or(|value| u64::try_from(value).is_ok_and(|value| value <= maximum))
+        })
+}
+
+fn valid_scope(scope: &AiScope) -> bool {
+    !scope.kind.trim().is_empty()
+        && scope.kind.len() <= 128
+        && !scope.kind.chars().any(char::is_control)
+        && !scope.id.trim().is_empty()
+        && scope.id.len() <= 512
+        && !scope.id.chars().any(char::is_control)
+        && scope.tenant_id.as_ref().is_none_or(|tenant| {
+            !tenant.trim().is_empty()
+                && tenant.len() <= 512
+                && !tenant.chars().any(char::is_control)
+        })
+}
+
+fn valid_principal_kind(kind: &str) -> bool {
+    kind == "user"
+        || kind.strip_prefix("api_token:").is_some_and(|value| {
+            !value.is_empty()
+                && value.len() <= 64
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'-')
+                })
+        })
+}
+
+fn invalid_pricing_policy_count(
+    policies: &[AiPricingPolicyRecord],
+    audits: &[AiAuditEventRecord],
+    limits: AiPricingCatalogManagementLimits,
+) -> u64 {
+    let mut invalid = BTreeSet::new();
+    let mut routes = BTreeMap::<(&str, &str, &str), Vec<uuid::Uuid>>::new();
+    let mut policy_by_reference = BTreeMap::new();
+    for policy in policies {
+        policy_by_reference.insert(policy.version_reference.as_str(), policy);
+        routes
+            .entry((
+                policy.scope_key.as_str(),
+                policy.provider_kind.as_str(),
+                policy.provider_model.as_str(),
+            ))
+            .or_default()
+            .push(policy.id);
+        if crate::orm_pricing::validate_restored_pricing_record(policy, limits).is_err() {
+            invalid.insert(policy.id);
+        }
+    }
+    for ids in routes
+        .values()
+        .filter(|ids| ids.len() > limits.maximum_versions_per_route())
+    {
+        invalid.extend(ids.iter().copied());
+    }
+
+    let mut audits_by_reference = BTreeMap::<&str, Vec<&AiAuditEventRecord>>::new();
+    let mut orphan_or_malformed_audits = 0_u64;
+    for audit in audits {
+        audits_by_reference
+            .entry(audit.resource_reference.as_str())
+            .or_default()
+            .push(audit);
+        if !policy_by_reference.contains_key(audit.resource_reference.as_str()) {
+            orphan_or_malformed_audits += 1;
+        }
+    }
+    for policy in policies {
+        let linked = audits_by_reference
+            .get(policy.version_reference.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if linked.len() != 1 || !valid_pricing_creation_audit(linked[0], policy) {
+            invalid.insert(policy.id);
+        }
+    }
+    (invalid.len() as u64).saturating_add(orphan_or_malformed_audits)
+}
+
+fn valid_pricing_creation_audit(
+    audit: &AiAuditEventRecord,
+    policy: &AiPricingPolicyRecord,
+) -> bool {
+    audit.id != uuid::Uuid::nil()
+        && audit.actor_principal_kind == policy.created_by_principal_kind
+        && audit.actor_subject == policy.created_by_subject
+        && audit.action == "ai.pricing_policy.create"
+        && audit.resource_kind == "pricing_policy"
+        && audit.resource_reference == policy.version_reference
+        && audit.outcome == "allowed"
+        && audit.reason_code == "immutable_pricing_version_created"
+        && uuid::Uuid::parse_str(&audit.correlation_id).is_ok_and(|id| !id.is_nil())
+        && audit.causation_id.is_none()
+        && audit.policy_version.is_none()
+        && audit.created_at >= policy.created_at
+}
+
+fn serialized_digest(value: &impl serde::Serialize) -> Result<String, AiError> {
+    let encoded = serde_json::to_vec(value).map_err(|_| AiError::PersistenceFailed)?;
+    Ok(hex::encode(Sha256::digest(encoded)))
 }
 
 const fn query_limit(maximum: usize) -> i64 {
@@ -555,6 +1005,129 @@ mod tests {
         .expect("egress consent should insert");
     }
 
+    fn policy_audit_limits(
+        maximum_budget_policies: usize,
+        maximum_pricing_policies: usize,
+        maximum_audit_events: usize,
+    ) -> AiRestorePolicyAuditLimits {
+        let budget = AiBudgetPolicyManagementLimits::new(
+            AiBudgetAmounts {
+                input_tokens: 1_000_000,
+                output_tokens: 1_000_000,
+                tool_units: 1_000_000,
+                image_units: 1_000_000,
+                cost_microunits: 1_000_000,
+                runs: 1_000_000,
+            },
+            10,
+        )
+        .expect("test budget limits should validate");
+        let pricing = AiPricingCatalogManagementLimits::new(1_000_000, 1_000_000, 10)
+            .expect("test pricing limits should validate")
+            .with_maximum_builtin_tool_microunits_per_call(1_000_000);
+        AiRestorePolicyAuditLimits::new(
+            budget,
+            pricing,
+            maximum_budget_policies,
+            maximum_pricing_policies,
+            maximum_audit_events,
+        )
+        .expect("test policy-audit limits should validate")
+    }
+
+    async fn seed_budget_policy(
+        database: &Database<SqliteBackend>,
+        scope_key_override: Option<&str>,
+        maximum_input_tokens: i64,
+    ) {
+        let scope = AiScope::new("project", "restore-project").with_tenant_id("tenant-1");
+        AiBudgetPolicyRecord::insert(
+            database,
+            crate::persistence::CreateAiBudgetPolicyRecordInput {
+                scope_key: scope_key_override
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| crate::ai_scope_key(&scope)),
+                scope_kind: scope.kind,
+                scope_id: scope.id,
+                tenant_id: scope.tenant_id,
+                principal_kind: Some("user".to_owned()),
+                principal_subject: Some("restore-user".to_owned()),
+                interval_kind: "day".to_owned(),
+                maximum_input_tokens: Some(maximum_input_tokens),
+                maximum_output_tokens: Some(10_000),
+                maximum_tool_units: None,
+                maximum_image_units: None,
+                maximum_cost_microunits: Some(100_000),
+                maximum_runs: Some(100),
+                enabled: true,
+            },
+        )
+        .await
+        .expect("budget policy should insert");
+    }
+
+    async fn seed_pricing_policy(
+        database: &Database<SqliteBackend>,
+        fixed_call_microunits: i64,
+        creator_kind: &str,
+        with_audit: bool,
+    ) -> String {
+        let id = Uuid::new_v4();
+        let version_reference = format!("pricing:{id}");
+        let scope = AiScope::new("project", "restore-project").with_tenant_id("tenant-1");
+        AiPricingPolicyRecord::insert(
+            database,
+            crate::persistence::CreateAiPricingPolicyRecordInput {
+                id,
+                version_reference: version_reference.clone(),
+                scope_key: crate::ai_scope_key(&scope),
+                scope_kind: scope.kind,
+                scope_id: scope.id,
+                tenant_id: scope.tenant_id,
+                provider_kind: "openai".to_owned(),
+                provider_model: "gpt-restore".to_owned(),
+                fixed_call_microunits,
+                input_microunits_per_million: 100_000,
+                cached_input_microunits_per_million: 50_000,
+                output_microunits_per_million: 200_000,
+                web_search_microunits_per_call: 10_000,
+                file_search_microunits_per_call: 20_000,
+                created_by_principal_kind: creator_kind.to_owned(),
+                created_by_subject: "restore-admin".to_owned(),
+            },
+        )
+        .await
+        .expect("pricing policy should insert");
+        if with_audit {
+            seed_pricing_audit(database, &version_reference, creator_kind).await;
+        }
+        version_reference
+    }
+
+    async fn seed_pricing_audit(
+        database: &Database<SqliteBackend>,
+        version_reference: &str,
+        creator_kind: &str,
+    ) {
+        AiAuditEventRecord::insert(
+            database,
+            crate::persistence::CreateAiAuditEventRecordInput {
+                actor_principal_kind: creator_kind.to_owned(),
+                actor_subject: "restore-admin".to_owned(),
+                action: "ai.pricing_policy.create".to_owned(),
+                resource_kind: "pricing_policy".to_owned(),
+                resource_reference: version_reference.to_owned(),
+                outcome: "allowed".to_owned(),
+                reason_code: "immutable_pricing_version_created".to_owned(),
+                correlation_id: Uuid::new_v4().to_string(),
+                causation_id: None,
+                policy_version: None,
+            },
+        )
+        .await
+        .expect("pricing creation audit should insert");
+    }
+
     #[tokio::test]
     async fn collector_derives_core_facts_and_fails_closed_for_remaining_audits() {
         let database = database().await;
@@ -615,6 +1188,216 @@ mod tests {
             .plan_collected(&missing_statuses)
             .expect("missing-status plan should hash");
         assert_eq!(missing_plan.plan().fatal_issue_count(), 17);
+    }
+
+    #[tokio::test]
+    async fn configured_policy_audits_complete_and_bind_deployment_limits() {
+        let database = database().await;
+        seed_budget_policy(&database, None, 100_000).await;
+        seed_pricing_policy(&database, 10_000, "user", true).await;
+        let limits = policy_audit_limits(10, 10, 10);
+        let collected = OrmAiRestoreFactCollector::new(database.clone())
+            .with_policy_audits(limits)
+            .collect("module-fingerprint")
+            .await
+            .expect("policy graphs should collect");
+
+        assert_eq!(
+            collected
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::BudgetPolicies),
+            Some(&AiRestoreAuditStatus::Complete)
+        );
+        assert_eq!(
+            collected
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::PricingPolicies),
+            Some(&AiRestoreAuditStatus::Complete)
+        );
+        assert_eq!(collected.facts().invalid_budget_policy_count, 0);
+        assert_eq!(collected.facts().invalid_pricing_policy_count, 0);
+        let plan = crate::AiRestoreReconciler::new("module-fingerprint")
+            .plan_collected(&collected)
+            .expect("policy-complete plan should hash");
+        assert_eq!(plan.plan().fatal_issue_count(), 12);
+        let repeated = OrmAiRestoreFactCollector::new(database.clone())
+            .with_policy_audits(limits)
+            .collect("module-fingerprint")
+            .await
+            .expect("same-timestamp policy rows should collect deterministically");
+        assert_eq!(collected.digest(), repeated.digest());
+
+        let wider_pricing = AiPricingCatalogManagementLimits::new(2_000_000, 2_000_000, 10)
+            .expect("wider test pricing limits should validate")
+            .with_maximum_builtin_tool_microunits_per_call(2_000_000);
+        let changed_limits =
+            AiRestorePolicyAuditLimits::new(limits.budget_management(), wider_pricing, 10, 10, 10)
+                .expect("changed policy limits should validate");
+        let changed = OrmAiRestoreFactCollector::new(database)
+            .with_policy_audits(changed_limits)
+            .collect("module-fingerprint")
+            .await
+            .expect("changed deployment limits should collect");
+        assert_ne!(collected.digest(), changed.digest());
+    }
+
+    #[tokio::test]
+    async fn policy_corruption_and_missing_creation_audit_are_invalid() {
+        let database = database().await;
+        seed_budget_policy(&database, Some("wrong-scope-key"), 2_000_000).await;
+        seed_pricing_policy(&database, 2_000_000, "user", false).await;
+        let collected = OrmAiRestoreFactCollector::new(database)
+            .with_policy_audits(policy_audit_limits(10, 10, 10))
+            .collect("module-fingerprint")
+            .await
+            .expect("invalid policy rows should be represented safely");
+
+        assert_eq!(
+            collected
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::BudgetPolicies),
+            Some(&AiRestoreAuditStatus::Invalid { count: 1 })
+        );
+        assert_eq!(
+            collected
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::PricingPolicies),
+            Some(&AiRestoreAuditStatus::Invalid { count: 1 })
+        );
+        assert_eq!(collected.facts().invalid_budget_policy_count, 1);
+        assert_eq!(collected.facts().invalid_pricing_policy_count, 1);
+    }
+
+    #[tokio::test]
+    async fn malformed_creator_duplicate_and_orphan_pricing_audits_are_invalid() {
+        let database = database().await;
+        let malformed = seed_pricing_policy(&database, 10_000, "bogus\0kind", true).await;
+        seed_pricing_audit(&database, &malformed, "bogus\0kind").await;
+        seed_pricing_audit(&database, &format!("pricing:{}", Uuid::new_v4()), "user").await;
+        let collected = OrmAiRestoreFactCollector::new(database)
+            .with_policy_audits(policy_audit_limits(10, 10, 10))
+            .collect("module-fingerprint")
+            .await
+            .expect("corrupt pricing audit graph should remain inspectable");
+
+        assert_eq!(
+            collected
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::PricingPolicies),
+            Some(&AiRestoreAuditStatus::Invalid { count: 2 })
+        );
+        assert_eq!(collected.facts().invalid_pricing_policy_count, 2);
+    }
+
+    #[tokio::test]
+    async fn policy_scope_and_route_cardinality_are_integrity_failures() {
+        let database = database().await;
+        seed_budget_policy(&database, None, 100_000).await;
+        seed_budget_policy(&database, None, 100_000).await;
+        seed_pricing_policy(&database, 10_000, "user", true).await;
+        seed_pricing_policy(&database, 10_000, "user", true).await;
+        let budget = AiBudgetPolicyManagementLimits::new(
+            AiBudgetAmounts {
+                input_tokens: 1_000_000,
+                output_tokens: 1_000_000,
+                tool_units: 1_000_000,
+                image_units: 1_000_000,
+                cost_microunits: 1_000_000,
+                runs: 1_000_000,
+            },
+            1,
+        )
+        .expect("cardinality budget limits should validate");
+        let pricing = AiPricingCatalogManagementLimits::new(1_000_000, 1_000_000, 1)
+            .expect("cardinality pricing limits should validate")
+            .with_maximum_builtin_tool_microunits_per_call(1_000_000);
+        let limits = AiRestorePolicyAuditLimits::new(budget, pricing, 10, 10, 10)
+            .expect("cardinality audit limits should validate");
+        let collected = OrmAiRestoreFactCollector::new(database)
+            .with_policy_audits(limits)
+            .collect("module-fingerprint")
+            .await
+            .expect("over-cardinality policy graphs should remain inspectable");
+
+        assert_eq!(
+            collected
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::BudgetPolicies),
+            Some(&AiRestoreAuditStatus::Invalid { count: 2 })
+        );
+        assert_eq!(
+            collected
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::PricingPolicies),
+            Some(&AiRestoreAuditStatus::Invalid { count: 2 })
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_audit_bounds_never_return_partial_success() {
+        let database = database().await;
+        seed_budget_policy(&database, None, 100_000).await;
+        seed_budget_policy(&database, None, 100_000).await;
+        seed_pricing_policy(&database, 10_000, "user", true).await;
+        seed_pricing_policy(&database, 10_000, "user", true).await;
+        let collected = OrmAiRestoreFactCollector::new(database)
+            .with_policy_audits(policy_audit_limits(1, 1, 10))
+            .collect("module-fingerprint")
+            .await
+            .expect("bounded policy collection should remain inspectable");
+
+        assert_eq!(
+            collected
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::BudgetPolicies),
+            Some(&AiRestoreAuditStatus::LimitExceeded)
+        );
+        assert_eq!(
+            collected
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::PricingPolicies),
+            Some(&AiRestoreAuditStatus::LimitExceeded)
+        );
+        assert_eq!(collected.facts().invalid_budget_policy_count, 0);
+        assert_eq!(collected.facts().invalid_pricing_policy_count, 0);
+    }
+
+    #[tokio::test]
+    async fn pricing_audit_bound_applies_to_the_complete_audit_history_scan() {
+        let database = database().await;
+        seed_pricing_policy(&database, 10_000, "user", true).await;
+        for index in 0..2 {
+            AiAuditEventRecord::insert(
+                &database,
+                crate::persistence::CreateAiAuditEventRecordInput {
+                    actor_principal_kind: "user".to_owned(),
+                    actor_subject: "restore-admin".to_owned(),
+                    action: "ai.unrelated.audit".to_owned(),
+                    resource_kind: "unrelated".to_owned(),
+                    resource_reference: format!("unrelated-{index}"),
+                    outcome: "allowed".to_owned(),
+                    reason_code: "unrelated".to_owned(),
+                    correlation_id: Uuid::new_v4().to_string(),
+                    causation_id: None,
+                    policy_version: None,
+                },
+            )
+            .await
+            .expect("unrelated audit should insert");
+        }
+        let collected = OrmAiRestoreFactCollector::new(database)
+            .with_policy_audits(policy_audit_limits(10, 10, 2))
+            .collect("module-fingerprint")
+            .await
+            .expect("whole-history bound should remain inspectable");
+
+        assert_eq!(
+            collected
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::PricingPolicies),
+            Some(&AiRestoreAuditStatus::LimitExceeded)
+        );
+        assert_eq!(collected.facts().invalid_pricing_policy_count, 0);
     }
 
     #[tokio::test]

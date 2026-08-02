@@ -187,12 +187,20 @@ usage.
 Backups preserve usage facts as append-only records. Before reopening after a
 restore, the database auditor must validate unique reservation linkage,
 committed reservation state, matching scope/principal/provider/model,
-non-negative amounts, and cached input not exceeding total input. The initial
-collector reports usage, budget, and pricing audits as `NotImplemented`, which
-is fatal rather than an assumed zero. Once implemented, the auditors derive
-`invalid_usage_fact_count`, `invalid_budget_policy_count`, and
-`invalid_pricing_policy_count`; any nonzero value is fatal. Pricing validation
-rejects duplicate references, scope-key or provider/model swaps, negative token
-or built-in rates, invalid cached-rate ordering, and missing creation-audit
-linkage before reporting zero. Reporting remains closed until restore
-reconciliation succeeds.
+non-negative amounts, and cached input not exceeding total input. Usage facts
+and their reservation/counter graph remain `NotImplemented` and fatal.
+
+Budget-policy and pricing-catalog database audits are implemented when the
+host supplies `AiRestorePolicyAuditLimits` built from host-attested immutable
+administration ceilings. Budget validation rederives exact scope identity,
+principal pairing, interval, at least one nonnegative ceiling, per-scope
+cardinality, and every supplied deployment maximum. Pricing validation rejects
+noncanonical or duplicate references, scope-key or provider/model swaps,
+negative or over-ceiling token/fixed/built-in rates, invalid cached-rate
+ordering, route-cardinality overflow, and missing, duplicate, malformed, or
+orphan immutable creation-audit linkage. Omitting deployment limits, reaching
+a row bound, or observing any invalid graph is fatal rather than an assumed
+zero. These inputs do not prove equivalence to live service configuration;
+that exact configuration epoch must be bound by the future applied validator.
+Reporting remains closed until the remaining audits and applied restore
+reconciliation succeed.

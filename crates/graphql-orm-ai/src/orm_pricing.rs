@@ -492,6 +492,76 @@ fn validate_record(record: &AiPricingPolicyRecord) -> Result<(), AiError> {
     Ok(())
 }
 
+/// Validates one restored immutable pricing row against the current
+/// supplied host-attested administration ceiling.
+pub(crate) fn validate_restored_pricing_record(
+    record: &AiPricingPolicyRecord,
+    limits: AiPricingCatalogManagementLimits,
+) -> Result<(), AiError> {
+    validate_record(record)?;
+    let expected_reference = format!("pricing:{}", record.id);
+    let rates = [
+        (
+            record.fixed_call_microunits,
+            limits.maximum_fixed_call_microunits(),
+        ),
+        (
+            record.input_microunits_per_million,
+            limits.maximum_token_rate_microunits_per_million(),
+        ),
+        (
+            record.cached_input_microunits_per_million,
+            limits.maximum_token_rate_microunits_per_million(),
+        ),
+        (
+            record.output_microunits_per_million,
+            limits.maximum_token_rate_microunits_per_million(),
+        ),
+        (
+            record.web_search_microunits_per_call,
+            limits.maximum_builtin_tool_microunits_per_call(),
+        ),
+        (
+            record.file_search_microunits_per_call,
+            limits.maximum_builtin_tool_microunits_per_call(),
+        ),
+    ];
+    if record.version_reference != expected_reference
+        || record.created_at <= 0
+        || record.scope_kind.chars().any(char::is_control)
+        || record.scope_id.chars().any(char::is_control)
+        || record
+            .tenant_id
+            .as_ref()
+            .is_some_and(|tenant| tenant.chars().any(char::is_control))
+        || !valid_creator_principal_kind(&record.created_by_principal_kind)
+        || record.created_by_subject.trim().is_empty()
+        || record.created_by_subject.len() > 512
+        || record.created_by_subject.chars().any(char::is_control)
+        || rates
+            .into_iter()
+            .any(|(stored, maximum)| u64::try_from(stored).map_or(true, |stored| stored > maximum))
+    {
+        return Err(AiError::InvalidConfiguration(
+            "restored pricing record exceeds deployment policy".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn valid_creator_principal_kind(kind: &str) -> bool {
+    kind == "user"
+        || kind.strip_prefix("api_token:").is_some_and(|value| {
+            !value.is_empty()
+                && value.len() <= 64
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'-')
+                })
+        })
+}
+
 fn validate_rates(
     input: &CreateAiPricingPolicyInput,
     limits: AiPricingCatalogManagementLimits,

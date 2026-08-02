@@ -114,26 +114,40 @@ declarations. `AiRestoreReconciler` already produces a side-effect-free plan:
   checkpoint, webhook, background, UI-intent, retention, or stream facts keep
   readiness closed.
 
-The first collector foundation is now implemented. `OrmAiRestoreFactCollector`
-uses generated ORM queries in one bounded serializable transaction to derive
+The collector foundation is now implemented. `OrmAiRestoreFactCollector` uses
+generated ORM queries in one bounded serializable transaction to derive
 conservative run classifications and approval/egress-consent revalidation
-candidates. The restore target and every writer must remain closed throughout
-that transaction. The collector uses its own trusted unbounded pagination
-view, contained by deployment-owned hard limits, so host GraphQL page caps
-cannot silently truncate an audit. It returns opaque
-`AiCollectedRestoreFacts` with a deterministic digest and an
-explicit status for every required audit. Reaching a limit returns no partial
-candidate actions for that category; observing an
-invalid core row, or encountering an audit not yet implemented produces a
-fatal collected plan; a caller-supplied zero is not substituted.
+candidates. With `AiRestorePolicyAuditLimits`, it also revalidates complete
+budget-policy and immutable pricing-catalog graphs against host-attested
+deployment ceilings and exact pricing creation-audit linkage. Those inputs do
+not prove equivalence to the live service configuration; the future applied
+validator must bind that configuration epoch. The restore target and every
+writer must remain closed throughout that transaction. The collector uses its
+own trusted unbounded pagination view, contained by deployment-owned hard
+limits, so host GraphQL page caps cannot silently truncate an audit. It returns
+opaque `AiCollectedRestoreFacts` with a deterministic digest and an explicit
+status for every required audit. Reaching a limit returns no partial evidence
+or candidate actions for that category; observing an invalid row/graph, missing
+deployment inputs, or an audit not yet implemented produces a fatal collected
+plan; a caller-supplied zero is not substituted.
+
+Encryption and object recovery deliberately remain separate. A current
+content-protection policy row cannot prove historic application-encrypted
+envelopes are openable: the future key audit must scan every protected envelope
+header and bind a prevalidated set of current and historic deployment keys.
+Likewise, attachment metadata alone cannot prove restored object bytes. The
+attachment work must distinguish a database lifecycle/parent graph proof from
+a verified backup-manifest plus target-object byte-count/SHA-256 proof; the
+aggregate attachment audit remains incomplete until both phases succeed.
 
 What remains missing from the production adapter chain is:
 
 1. creates/verifies a manifest backup through `graphql-orm-backup`;
 2. restores database rows and exact referenced attachment objects into a test-
    owned empty target;
-3. completes the encryption-key, object, usage, policy, checkpoint, provider,
-   UI-intent, retention, and stream auditors currently marked incomplete;
+3. completes the encryption-key, attachment/object, usage/counter, rule, skill,
+   checkpoint, provider, UI-intent, retention, and stream auditors currently
+   marked incomplete;
 4. applies each planned run/approval/consent repair through generated ORM
    transactions;
 5. revalidates every post-apply invariant without provider/application I/O;
