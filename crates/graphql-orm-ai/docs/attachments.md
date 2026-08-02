@@ -181,6 +181,23 @@ safely retire exact profile-bound references created by a host-owned
 persistent-file lifecycle, but this crate still does not upload, search, or
 otherwise create provider file objects.
 
+## Restore evidence
+
+Attachment restore has two required, non-interchangeable audits. Configure
+`OrmAiRestoreFactCollector::with_attachment_metadata_audit` with
+host-attested `AiRestoreAttachmentMetadataAuditLimits` to validate the bounded
+stable attachment/artifact lifecycle, exact session/message ownership graph,
+provider tuple shape, and unique namespace-safe local object references.
+Unstable upload/cleanup rows and backup-redacted transient/provider references
+remain invalid until a later repair step handles them explicitly.
+
+`AttachmentMetadataGraph::Complete` proves no external bytes. The separate
+`AttachmentObjectBytes` audit remains fatal until restore orchestration binds a
+verified snapshot manifest to the exact database evidence, streams every
+referenced object from the restored target BlobStore, and rechecks its key,
+byte count, and SHA-256. Blob metadata, existence checks, or the source-side
+restore result cannot substitute for reading the target bytes.
+
 The separate [provider-persistent file contract](provider-files.md) defines the
 required upload, index, logical-use, cost, cleanup, and restore evidence. Until
 that complete graph exists, `ModelBuiltinTool::FileSearch` is rejected and a

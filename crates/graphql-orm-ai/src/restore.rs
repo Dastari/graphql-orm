@@ -7,12 +7,13 @@ use sha2::{Digest, Sha256};
 
 use crate::{AiRunId, AiRunState};
 
-const REQUIRED_RESTORE_AUDITS: [AiRestoreAuditKind; 17] = [
+const REQUIRED_RESTORE_AUDITS: [AiRestoreAuditKind; 18] = [
     AiRestoreAuditKind::RunRecoveryClassification,
     AiRestoreAuditKind::ApprovalRevalidationCandidates,
     AiRestoreAuditKind::EgressConsentRevalidationCandidates,
     AiRestoreAuditKind::EncryptionKeys,
-    AiRestoreAuditKind::Attachments,
+    AiRestoreAuditKind::AttachmentMetadataGraph,
+    AiRestoreAuditKind::AttachmentObjectBytes,
     AiRestoreAuditKind::UsageFacts,
     AiRestoreAuditKind::BudgetPolicies,
     AiRestoreAuditKind::PricingPolicies,
@@ -91,8 +92,14 @@ pub struct AiRestoreSnapshotFacts {
     pub pending_approval_count: u64,
     /// Number of pending egress consents to expire/revalidate.
     pub pending_egress_consent_count: u64,
-    /// Missing/corrupt attachment references.
-    pub invalid_attachment_count: u64,
+    /// Attachment, artifact, parent, or lifecycle metadata rows that fail the
+    /// database-only graph audit.
+    #[serde(default, alias = "invalid_attachment_count")]
+    pub invalid_attachment_metadata_count: u64,
+    /// Local attachment/artifact objects that fail verified-manifest and
+    /// restored-target byte-count/SHA-256 validation.
+    #[serde(default)]
+    pub invalid_attachment_object_count: u64,
     /// Usage facts that fail reservation, scope, principal, provider, or
     /// non-negative/cached-subset integrity validation.
     pub invalid_usage_fact_count: u64,
@@ -158,8 +165,10 @@ pub enum AiRestoreAuditKind {
     EgressConsentRevalidationCandidates,
     /// Deployment encryption-key availability.
     EncryptionKeys,
-    /// Local attachment and derived-artifact integrity.
-    Attachments,
+    /// Local attachment/derived-artifact metadata and parent-graph integrity.
+    AttachmentMetadataGraph,
+    /// Verified-manifest and restored-target attachment object-byte integrity.
+    AttachmentObjectBytes,
     /// Usage-ledger integrity.
     UsageFacts,
     /// Budget-policy integrity.
@@ -199,7 +208,8 @@ impl AiRestoreAuditKind {
             Self::ApprovalRevalidationCandidates => "approval_revalidation_candidates",
             Self::EgressConsentRevalidationCandidates => "egress_consent_revalidation_candidates",
             Self::EncryptionKeys => "encryption_keys",
-            Self::Attachments => "attachments",
+            Self::AttachmentMetadataGraph => "attachment_metadata_graph",
+            Self::AttachmentObjectBytes => "attachment_object_bytes",
             Self::UsageFacts => "usage_facts",
             Self::BudgetPolicies => "budget_policies",
             Self::PricingPolicies => "pricing_policies",
@@ -447,9 +457,16 @@ impl AiRestoreReconciler {
                 resource_ref: Some(key_version.clone()),
             });
         }
-        if facts.invalid_attachment_count > 0 {
+        if facts.invalid_attachment_metadata_count > 0 {
             issues.push(AiRestoreIssue {
-                code: "AI_RESTORE_ATTACHMENT_INVALID".to_owned(),
+                code: "AI_RESTORE_ATTACHMENT_METADATA_INVALID".to_owned(),
+                severity: AiRestoreIssueSeverity::Fatal,
+                resource_ref: None,
+            });
+        }
+        if facts.invalid_attachment_object_count > 0 {
+            issues.push(AiRestoreIssue {
+                code: "AI_RESTORE_ATTACHMENT_OBJECT_INVALID".to_owned(),
                 severity: AiRestoreIssueSeverity::Fatal,
                 resource_ref: None,
             });

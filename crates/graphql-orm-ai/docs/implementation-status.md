@@ -10,7 +10,7 @@ supersedes: []
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.60.0` with AI schema module
+`graphql-orm-ai` is at crate version `0.61.0` with AI schema module
 `0.51.0`. It uses workspace `graphql-orm` `0.17.0` and external `agql-auth`
 `0.13.0` at `d6b9cef663d52125c52f3fb90d4155ee25d34775`.
 
@@ -39,8 +39,11 @@ verification evidence belongs in the focused guides.
   egress-consent revalidation candidates. With host-attested deployment
   ceilings supplied, it also completes budget-policy and immutable
   pricing-catalog integrity,
-  including exact creation-audit linkage. Every remaining audit is explicitly
-  incomplete. The repair applier,
+  including exact creation-audit linkage. With host-attested attachment
+  bounds, it also completes the stable attachment/artifact lifecycle,
+  ownership, parent, and safe unique object-reference metadata graph. Verified
+  manifest plus restored-target object-byte integrity remains a separate fatal
+  incomplete audit. The repair applier,
   complete validator, recovery epoch, and runtime-start proof remain closed.
 - Applied backup/restore, durable tool-policy management, generic privileged
   uncertain-effect recovery, and production MSSQL writes remain closed.

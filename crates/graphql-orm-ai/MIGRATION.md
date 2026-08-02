@@ -19,6 +19,48 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased: attachment restore metadata audit (crate 0.60.0 to 0.61.0; schema remains 0.51.0)
+
+The aggregate `AiRestoreAuditKind::Attachments` category has been replaced by
+two exact required categories: `AttachmentMetadataGraph` and
+`AttachmentObjectBytes`. This is a pre-1.0 public Rust and serialized audit-name
+break. Update downstream matches and issue-reference handling to use the two
+new variants. `AiRestoreSnapshotFacts::invalid_attachment_count` is replaced by
+`invalid_attachment_metadata_count` and `invalid_attachment_object_count`;
+deserialization accepts the old field as a metadata-count alias for legacy
+dry-run simulations, but new Rust construction must name both fields.
+
+Hosts can now construct `AiRestoreAttachmentMetadataAuditLimits` from their
+host-attested `AiAttachmentServiceLimits` and independent attachment/artifact
+row bounds, then pass it to
+`OrmAiRestoreFactCollector::with_attachment_metadata_audit`. The collector
+reads attachment and artifact rows through generated ORM queries in the same
+quiescent transaction as the other database facts. It performs bounded exact
+session/message parent lookups, checks owner and message-session linkage,
+validates the current attachment/artifact lifecycle and cleanup tuples,
+rechecks MIME, size, checksum, safe reference and protection-envelope shape,
+and rejects duplicate ownership of one local object or provider reference.
+Backup-redacted quarantine/upload/provider references cannot be inferred; a
+transient row that needs them remains invalid until a later repair contract
+handles it explicitly. Reaching either row bound yields `LimitExceeded` with
+no partial attachment evidence.
+
+`AttachmentMetadataGraph::Complete` proves only the accepted database graph.
+The collector hashes the complete rows, parent evidence, host-attested limits,
+and expected local-object facts into its opaque digest, but deliberately does
+no BlobStore/provider/application I/O. `AttachmentObjectBytes` remains fatal
+`NotImplemented`. A later restore auditor must bind a verified backup snapshot
+and manifest, stream every object from the restored target BlobStore, and
+recheck its exact key, byte count, and SHA-256; optional object metadata or a
+successful restore sink call is insufficient.
+
+This breaking pre-1.0 API advances the crate to 0.61.0. It changes no entity,
+column, index, constraint, backup policy, or GraphQL SDL, so AI schema module
+0.51.0 remains current and no data migration is required. The encryption-key,
+attachment-object, usage/counter, rule, skill, checkpoint, provider, UI-intent,
+retention, and stream audits plus the repair/validation/recovery-epoch/startup
+proof remain closed.
+
 ## Unreleased: policy restore auditors (crate 0.59.0 to 0.60.0; schema remains 0.51.0)
 
 Restored deployments may now construct `AiRestorePolicyAuditLimits` from

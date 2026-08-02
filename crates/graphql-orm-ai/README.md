@@ -178,9 +178,12 @@ waits without polling, resuming, or executing them.
   approval and egress-consent revalidation candidates. When supplied
   host-attested deployment ceilings, it also validates complete budget-policy
   and immutable pricing-catalog graphs, including exact pricing creation-audit
-  linkage. Every remaining audit is explicitly incomplete. Production applied
-  restore and runtime reopening remain closed pending the remaining audits,
-  repair, validation, recovery-epoch, and readiness chain.
+  linkage. With separate host-attested attachment bounds, it now validates the
+  complete stable attachment/artifact lifecycle and parent metadata graph,
+  including unique safe local-object ownership. Target BlobStore bytes remain
+  a separate explicitly incomplete audit. Production applied restore and
+  runtime reopening remain closed pending that object proof, the remaining
+  audits, repair, validation, recovery-epoch, and readiness chain.
 - A concrete ORM worker for bounded claims, lease renewal, retry scheduling,
   immutable attempt outcomes, and recovery; plus a mock-tested provider turn
   that durably audits egress before transport and persists protected assistant
@@ -320,7 +323,7 @@ Add the crate from a reviewed monorepo revision:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.60.0", features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.61.0", features = ["sqlite"] }
 ```
 
 > **Pre-release dependency note:** this source snapshot resolves

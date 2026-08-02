@@ -9,22 +9,27 @@ use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::orm::{
     DefaultWriteBackend, OrderDirection, PaginationConfig, TransactionError, TransactionMode,
 };
+use graphql_orm_storage::validate_blob_key;
 use sha2::{Digest, Sha256};
 
 use crate::persistence::{
-    AiApprovalRecord, AiApprovalRecordOrderByInput, AiAuditEventRecord,
-    AiAuditEventRecordOrderByInput, AiBudgetPolicyRecord, AiBudgetPolicyRecordOrderByInput,
-    AiEgressConsentRecord, AiEgressConsentRecordOrderByInput, AiPricingPolicyRecord,
-    AiPricingPolicyRecordOrderByInput, AiRunRecord, AiRunRecordOrderByInput,
+    AiApprovalRecord, AiApprovalRecordOrderByInput, AiAttachmentArtifactRecord,
+    AiAttachmentArtifactRecordOrderByInput, AiAttachmentRecord, AiAttachmentRecordOrderByInput,
+    AiAuditEventRecord, AiAuditEventRecordOrderByInput, AiBudgetPolicyRecord,
+    AiBudgetPolicyRecordOrderByInput, AiEgressConsentRecord, AiEgressConsentRecordOrderByInput,
+    AiMessageRecord, AiPricingPolicyRecord, AiPricingPolicyRecordOrderByInput, AiRunRecord,
+    AiRunRecordOrderByInput, AiSessionRecord,
 };
 use crate::{
-    AiBudgetAmounts, AiBudgetPolicyManagementLimits, AiCollectedRestoreFacts, AiError,
-    AiExternalEffectState, AiPricingCatalogManagementLimits, AiRestoreAuditKind,
-    AiRestoreAuditStatus, AiRestoreSnapshotFacts, AiRestoredCoordinatorCheckpoint, AiRestoredRun,
-    AiRunId, AiRunState, AiScope,
+    AiAttachmentServiceLimits, AiBudgetAmounts, AiBudgetPolicyManagementLimits,
+    AiCollectedRestoreFacts, AiError, AiExternalEffectState, AiPricingCatalogManagementLimits,
+    AiRestoreAuditKind, AiRestoreAuditStatus, AiRestoreSnapshotFacts,
+    AiRestoredCoordinatorCheckpoint, AiRestoredRun, AiRunId, AiRunState, AiScope,
+    ProtectedContentEnvelope, valid_mime, valid_safe_reference, valid_sha256,
 };
 
 const MAXIMUM_COLLECTION_BOUND: usize = 1_000_000;
+const ORM_BACKUP_REDACTED_VALUE: &str = "[graphql-orm:redacted]";
 /// Deployment-owned hard bounds for one restore fact collection pass.
 ///
 /// A reached bound is reported as a fatal incomplete audit; rows are never
@@ -165,6 +170,62 @@ impl AiRestorePolicyAuditLimits {
     }
 }
 
+/// Host-attested attachment intake ceilings and row bounds for the
+/// database-only attachment metadata restore audit.
+///
+/// These inputs cannot prove that referenced objects exist or that their
+/// bytes match the restored rows. Object verification is represented by the
+/// separate fatal [`AiRestoreAuditKind::AttachmentObjectBytes`] category.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AiRestoreAttachmentMetadataAuditLimits {
+    service: AiAttachmentServiceLimits,
+    maximum_attachments: usize,
+    maximum_artifacts: usize,
+}
+
+impl AiRestoreAttachmentMetadataAuditLimits {
+    /// Creates validated attachment metadata-audit inputs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] when either row bound is zero
+    /// or exceeds the compiled one-million-row ceiling.
+    pub fn new(
+        service: AiAttachmentServiceLimits,
+        maximum_attachments: usize,
+        maximum_artifacts: usize,
+    ) -> Result<Self, AiError> {
+        if [maximum_attachments, maximum_artifacts]
+            .into_iter()
+            .any(|bound| !(1..=MAXIMUM_COLLECTION_BOUND).contains(&bound))
+        {
+            return Err(AiError::InvalidConfiguration(
+                "invalid restore attachment metadata-audit limits".to_owned(),
+            ));
+        }
+        Ok(Self {
+            service,
+            maximum_attachments,
+            maximum_artifacts,
+        })
+    }
+
+    /// Host-attested attachment intake limits used for restored-row checks.
+    pub const fn service(self) -> AiAttachmentServiceLimits {
+        self.service
+    }
+
+    /// Maximum attachment rows read by one pass.
+    pub const fn maximum_attachments(self) -> usize {
+        self.maximum_attachments
+    }
+
+    /// Maximum derived-artifact rows read by one pass.
+    pub const fn maximum_artifacts(self) -> usize {
+        self.maximum_artifacts
+    }
+}
+
 /// Generated-ORM restore fact collector.
 ///
 /// Collection runs in one read transaction, performs no provider, tool, blob,
@@ -175,6 +236,7 @@ pub struct OrmAiRestoreFactCollector {
     database: Database<DefaultWriteBackend>,
     limits: AiRestoreCollectorLimits,
     policy_audit_limits: Option<AiRestorePolicyAuditLimits>,
+    attachment_metadata_audit_limits: Option<AiRestoreAttachmentMetadataAuditLimits>,
 }
 
 impl OrmAiRestoreFactCollector {
@@ -184,6 +246,7 @@ impl OrmAiRestoreFactCollector {
             database,
             limits: AiRestoreCollectorLimits::default(),
             policy_audit_limits: None,
+            attachment_metadata_audit_limits: None,
         }
     }
 
@@ -205,6 +268,20 @@ impl OrmAiRestoreFactCollector {
         self
     }
 
+    /// Enables the complete database-only attachment metadata graph audit.
+    ///
+    /// The supplied service ceilings are host-attested and bound into the
+    /// collected facts. This method performs no blob/provider I/O and cannot
+    /// complete [`AiRestoreAuditKind::AttachmentObjectBytes`].
+    #[must_use]
+    pub fn with_attachment_metadata_audit(
+        mut self,
+        limits: AiRestoreAttachmentMetadataAuditLimits,
+    ) -> Self {
+        self.attachment_metadata_audit_limits = Some(limits);
+        self
+    }
+
     /// Returns the ORM database handle used by the collector.
     pub fn database(&self) -> &Database<DefaultWriteBackend> {
         &self.database
@@ -219,11 +296,14 @@ impl OrmAiRestoreFactCollector {
     /// Collection always covers conservative run classification and
     /// approval/consent revalidation-candidate counts. When configured through
     /// [`Self::with_policy_audits`], it also covers budget- and pricing-policy
-    /// integrity relative to the supplied host-attested ceilings. It does not
-    /// claim that candidates passed the later repair graph or that those
-    /// ceilings match live service configuration. Every other audit category
-    /// remains explicitly `not_implemented`, so the collected plan stays fatal
-    /// and cannot be mistaken for production readiness.
+    /// integrity relative to the supplied host-attested ceilings. When
+    /// configured through [`Self::with_attachment_metadata_audit`], it covers
+    /// attachment/artifact lifecycle, parent, and object-reference metadata,
+    /// but not external object bytes. It does not claim that candidates passed
+    /// the later repair graph or that supplied ceilings match live service
+    /// configuration. Every other audit category remains explicitly
+    /// `not_implemented`, so the collected plan stays fatal and cannot be
+    /// mistaken for production readiness.
     ///
     /// The runtime and all database writers must remain closed for the whole
     /// collection pass. The single transaction bounds the operation but does
@@ -247,6 +327,7 @@ impl OrmAiRestoreFactCollector {
 
         let limits = self.limits;
         let policy_audit_limits = self.policy_audit_limits;
+        let attachment_metadata_audit_limits = self.attachment_metadata_audit_limits;
         let database = self
             .database
             .clone()
@@ -318,11 +399,69 @@ impl OrmAiRestoreFactCollector {
                     } else {
                         None
                     };
+                    let attachments =
+                        if let Some(attachment_limits) = attachment_metadata_audit_limits {
+                            let attachment_rows = tx
+                                .query::<AiAttachmentRecord>()
+                                .order_by(AiAttachmentRecordOrderByInput {
+                                    created_at: Some(OrderDirection::Asc),
+                                })
+                                .limit(query_limit(attachment_limits.maximum_attachments))
+                                .fetch_all()
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            let artifact_rows = tx
+                                .query::<AiAttachmentArtifactRecord>()
+                                .order_by(AiAttachmentArtifactRecordOrderByInput {
+                                    created_at: Some(OrderDirection::Asc),
+                                })
+                                .limit(query_limit(attachment_limits.maximum_artifacts))
+                                .fetch_all()
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            let mut sessions = BTreeMap::new();
+                            let mut messages = BTreeMap::new();
+                            if attachment_rows.len() <= attachment_limits.maximum_attachments
+                                && artifact_rows.len() <= attachment_limits.maximum_artifacts
+                            {
+                                for attachment in &attachment_rows {
+                                    if let std::collections::btree_map::Entry::Vacant(entry) =
+                                        sessions.entry(attachment.session_id)
+                                    {
+                                        let session = tx
+                                            .find_by_id::<AiSessionRecord>(&attachment.session_id)
+                                            .await
+                                            .map_err(OrmPublicError::from)?;
+                                        entry.insert(session);
+                                    }
+                                    if let Some(message_id) = attachment.message_id
+                                        && let std::collections::btree_map::Entry::Vacant(entry) =
+                                            messages.entry(message_id)
+                                    {
+                                        let message = tx
+                                            .find_by_id::<AiMessageRecord>(&message_id)
+                                            .await
+                                            .map_err(OrmPublicError::from)?;
+                                        entry.insert(message);
+                                    }
+                                }
+                            }
+                            Some(CollectedAttachmentMetadataRows {
+                                limits: attachment_limits,
+                                attachments: attachment_rows,
+                                artifacts: artifact_rows,
+                                sessions,
+                                messages,
+                            })
+                        } else {
+                            None
+                        };
                     Ok(CollectedRows {
                         runs,
                         approvals,
                         egress_consents,
                         policies,
+                        attachments,
                     })
                 })
             })
@@ -338,6 +477,7 @@ struct CollectedRows {
     approvals: Vec<AiApprovalRecord>,
     egress_consents: Vec<AiEgressConsentRecord>,
     policies: Option<CollectedPolicyRows>,
+    attachments: Option<CollectedAttachmentMetadataRows>,
 }
 
 struct CollectedPolicyRows {
@@ -345,6 +485,14 @@ struct CollectedPolicyRows {
     budget_policies: Vec<AiBudgetPolicyRecord>,
     pricing_policies: Vec<AiPricingPolicyRecord>,
     pricing_audits: Vec<AiAuditEventRecord>,
+}
+
+struct CollectedAttachmentMetadataRows {
+    limits: AiRestoreAttachmentMetadataAuditLimits,
+    attachments: Vec<AiAttachmentRecord>,
+    artifacts: Vec<AiAttachmentArtifactRecord>,
+    sessions: BTreeMap<graphql_orm::uuid::Uuid, Option<AiSessionRecord>>,
+    messages: BTreeMap<graphql_orm::uuid::Uuid, Option<AiMessageRecord>>,
 }
 
 impl CollectedRows {
@@ -529,11 +677,22 @@ impl CollectedRows {
             None
         };
 
+        let mut invalid_attachment_metadata_count = 0_u64;
+        let attachment_metadata_evidence = if let Some(attachments) = self.attachments {
+            let outcome = attachments.audit()?;
+            invalid_attachment_metadata_count = outcome.invalid_count;
+            statuses.insert(AiRestoreAuditKind::AttachmentMetadataGraph, outcome.status);
+            Some(outcome.evidence)
+        } else {
+            None
+        };
+
         let source_rows = serde_json::to_vec(&(
             run_evidence,
             approval_evidence,
             consent_evidence,
             policy_evidence,
+            attachment_metadata_evidence,
         ))
         .map_err(|_| AiError::PersistenceFailed)?;
         AiCollectedRestoreFacts::new(
@@ -543,7 +702,8 @@ impl CollectedRows {
                 runs,
                 pending_approval_count,
                 pending_egress_consent_count,
-                invalid_attachment_count: 0,
+                invalid_attachment_metadata_count,
+                invalid_attachment_object_count: 0,
                 invalid_usage_fact_count: 0,
                 invalid_budget_policy_count,
                 invalid_pricing_policy_count,
@@ -561,6 +721,496 @@ impl CollectedRows {
             statuses,
             hex::encode(Sha256::digest(source_rows)),
         )
+    }
+}
+
+#[derive(serde::Serialize)]
+struct AttachmentMetadataAuditEvidence {
+    limits: AttachmentMetadataLimitEvidence,
+    attachment_rows_digest: Option<String>,
+    artifact_rows_digest: Option<String>,
+    session_parent_rows_digest: Option<String>,
+    message_parent_rows_digest: Option<String>,
+    expected_object_rows_digest: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct AttachmentMetadataLimitEvidence {
+    maximum_attachment_bytes: u64,
+    maximum_filename_bytes: usize,
+    upload_ticket_ttl_seconds: i64,
+    upload_processing_ttl_seconds: i64,
+    maximum_attachments: usize,
+    maximum_artifacts: usize,
+}
+
+struct AttachmentMetadataAuditOutcome {
+    status: AiRestoreAuditStatus,
+    invalid_count: u64,
+    evidence: AttachmentMetadataAuditEvidence,
+}
+
+impl CollectedAttachmentMetadataRows {
+    fn audit(mut self) -> Result<AttachmentMetadataAuditOutcome, AiError> {
+        let truncated = self.attachments.len() > self.limits.maximum_attachments
+            || self.artifacts.len() > self.limits.maximum_artifacts;
+        if truncated {
+            self.attachments.clear();
+            self.artifacts.clear();
+            self.sessions.clear();
+            self.messages.clear();
+        }
+        self.attachments
+            .sort_by_key(|record| (record.created_at, record.id));
+        self.artifacts
+            .sort_by_key(|record| (record.created_at, record.id));
+
+        let (
+            attachment_rows_digest,
+            artifact_rows_digest,
+            session_parent_rows_digest,
+            message_parent_rows_digest,
+        ) = if truncated {
+            (None, None, None, None)
+        } else {
+            (
+                Some(serialized_digest(&self.attachments)?),
+                Some(serialized_digest(&self.artifacts)?),
+                Some(serialized_digest(&self.sessions)?),
+                Some(serialized_digest(&self.messages)?),
+            )
+        };
+
+        let mut invalid = BTreeSet::new();
+        let mut local_references = BTreeMap::new();
+        let mut provider_references = BTreeMap::new();
+        let attachment_ids = self
+            .attachments
+            .iter()
+            .map(|record| record.id)
+            .collect::<BTreeSet<_>>();
+        let non_deleted_attachment_ids = self
+            .attachments
+            .iter()
+            .filter(|record| record.deleted_at.is_none())
+            .map(|record| record.id)
+            .collect::<BTreeSet<_>>();
+        for record in &self.attachments {
+            if !restored_attachment_is_valid(
+                record,
+                &self.sessions,
+                &self.messages,
+                self.limits.service,
+            ) {
+                invalid.insert((false, record.id));
+            }
+            for reference in [
+                record.blob_reference.as_deref(),
+                record.quarantine_blob_reference.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                record_unique_reference(
+                    &mut local_references,
+                    reference,
+                    (false, record.id),
+                    &mut invalid,
+                );
+            }
+        }
+        for record in &self.artifacts {
+            if !attachment_ids.contains(&record.attachment_id)
+                || !non_deleted_attachment_ids.contains(&record.attachment_id)
+                || invalid.contains(&(false, record.attachment_id))
+                || !restored_attachment_artifact_is_valid(record)
+            {
+                invalid.insert((true, record.id));
+            }
+            if let Some(reference) = record.blob_reference.as_deref() {
+                record_unique_reference(
+                    &mut local_references,
+                    reference,
+                    (true, record.id),
+                    &mut invalid,
+                );
+            }
+            if let (Some(kind), Some(profile), Some(reference)) = (
+                record.provider_kind.as_deref(),
+                record.provider_profile_id.as_deref(),
+                record.provider_reference.as_deref(),
+            ) {
+                let exact_reference = (kind.to_owned(), profile.to_owned(), reference.to_owned());
+                if let Some(existing) = provider_references.insert(exact_reference, record.id) {
+                    invalid.insert((true, existing));
+                    invalid.insert((true, record.id));
+                }
+            }
+        }
+
+        let expected_objects = self
+            .attachments
+            .iter()
+            .flat_map(|record| {
+                [
+                    record.blob_reference.as_ref().map(|reference| {
+                        (
+                            "attachment",
+                            record.id,
+                            reference,
+                            record.byte_count,
+                            record.sha256.as_deref(),
+                            record.detected_mime.as_deref(),
+                        )
+                    }),
+                    record.quarantine_blob_reference.as_ref().map(|reference| {
+                        (
+                            "attachment_quarantine",
+                            record.id,
+                            reference,
+                            record.byte_count,
+                            record.sha256.as_deref(),
+                            record.detected_mime.as_deref(),
+                        )
+                    }),
+                ]
+                .into_iter()
+                .flatten()
+            })
+            .chain(self.artifacts.iter().filter_map(|record| {
+                record.blob_reference.as_ref().map(|reference| {
+                    (
+                        "attachment_artifact",
+                        record.id,
+                        reference,
+                        Some(record.byte_count),
+                        record.sha256.as_deref(),
+                        record.detected_mime.as_deref(),
+                    )
+                })
+            }))
+            .collect::<Vec<_>>();
+        let expected_object_rows_digest = if truncated {
+            None
+        } else {
+            Some(serialized_digest(&expected_objects)?)
+        };
+        let invalid_count = invalid.len() as u64;
+
+        Ok(AttachmentMetadataAuditOutcome {
+            status: audit_status(truncated, invalid_count),
+            invalid_count,
+            evidence: AttachmentMetadataAuditEvidence {
+                limits: AttachmentMetadataLimitEvidence::from(self.limits),
+                attachment_rows_digest,
+                artifact_rows_digest,
+                session_parent_rows_digest,
+                message_parent_rows_digest,
+                expected_object_rows_digest,
+            },
+        })
+    }
+}
+
+impl From<AiRestoreAttachmentMetadataAuditLimits> for AttachmentMetadataLimitEvidence {
+    fn from(value: AiRestoreAttachmentMetadataAuditLimits) -> Self {
+        Self {
+            maximum_attachment_bytes: value.service.maximum_attachment_bytes(),
+            maximum_filename_bytes: value.service.maximum_filename_bytes(),
+            upload_ticket_ttl_seconds: value.service.upload_ticket_ttl().whole_seconds(),
+            upload_processing_ttl_seconds: value.service.upload_processing_ttl().whole_seconds(),
+            maximum_attachments: value.maximum_attachments,
+            maximum_artifacts: value.maximum_artifacts,
+        }
+    }
+}
+
+fn restored_attachment_is_valid(
+    record: &AiAttachmentRecord,
+    sessions: &BTreeMap<graphql_orm::uuid::Uuid, Option<AiSessionRecord>>,
+    messages: &BTreeMap<graphql_orm::uuid::Uuid, Option<AiMessageRecord>>,
+    limits: AiAttachmentServiceLimits,
+) -> bool {
+    let valid_parent = sessions
+        .get(&record.session_id)
+        .and_then(Option::as_ref)
+        .is_some_and(|session| {
+            !session.id.is_nil()
+                && session.row_version >= 0
+                && matches!(session.state.as_str(), "active" | "archived")
+                && session.deleted_at.is_none()
+                && session.owner_principal_kind == record.owner_principal_kind
+                && session.owner_subject == record.owner_subject
+        });
+    let valid_message = record.message_id.is_none_or(|message_id| {
+        !message_id.is_nil()
+            && messages
+                .get(&message_id)
+                .and_then(Option::as_ref)
+                .is_some_and(|message| {
+                    message.id == message_id
+                        && message.session_id == record.session_id
+                        && message.row_version >= 0
+                        && message.message_role == "user"
+                        && message.author_principal_kind.as_deref()
+                            == Some(record.owner_principal_kind.as_str())
+                        && message.author_subject.as_deref() == Some(record.owner_subject.as_str())
+                        && message.client_message_id.is_some_and(|id| !id.is_nil())
+                        && message.completion_state == "complete"
+                        && message.finalized_at.is_some()
+                        && (record.deleted_at.is_some() || message.content_purged_at.is_none())
+                })
+    });
+    let expected_bytes = record
+        .expected_byte_count
+        .and_then(|value| u64::try_from(value).ok());
+    let observed_bytes = record
+        .byte_count
+        .and_then(|value| u64::try_from(value).ok());
+    let base_valid = !record.id.is_nil()
+        && !record.session_id.is_nil()
+        && record.row_version >= 0
+        && record.created_at > 0
+        && valid_parent
+        && valid_message
+        && valid_principal_kind(&record.owner_principal_kind)
+        && valid_safe_subject(&record.owner_subject)
+        && valid_restored_filename(&record.safe_filename, limits.maximum_filename_bytes())
+        && record.declared_mime.as_deref().is_none_or(valid_mime)
+        && record.detected_mime.as_deref().is_none_or(valid_mime)
+        && expected_bytes
+            .is_none_or(|value| value > 0 && value <= limits.maximum_attachment_bytes())
+        && observed_bytes.is_none_or(|value| {
+            value > 0
+                && value <= limits.maximum_attachment_bytes()
+                && expected_bytes.is_none_or(|expected| value == expected)
+        })
+        && record.sha256.as_deref().is_none_or(valid_sha256)
+        && record.upload_token_hash.as_deref().is_none_or(valid_sha256)
+        && record
+            .blob_reference
+            .as_deref()
+            .is_none_or(valid_local_object_reference)
+        && record
+            .quarantine_blob_reference
+            .as_deref()
+            .is_none_or(valid_local_object_reference)
+        && record
+            .scanner_version
+            .as_deref()
+            .is_none_or(|value| valid_safe_reference(value, 128))
+        && record
+            .acceptance_policy_version
+            .as_deref()
+            .is_none_or(|value| valid_safe_reference(value, 128))
+        && record
+            .rejection_code
+            .as_deref()
+            .is_none_or(|value| valid_safe_reference(value, 128))
+        && record
+            .upload_expires_at
+            .is_none_or(|value| value >= record.created_at)
+        && record
+            .processing_expires_at
+            .is_none_or(|value| value >= record.created_at)
+        && record
+            .cleanup_lease_expires_at
+            .is_none_or(|value| value >= record.created_at)
+        && record
+            .cleanup_next_attempt_at
+            .is_none_or(|value| value >= record.created_at)
+        && record
+            .finalized_at
+            .is_none_or(|value| value >= record.created_at)
+        && record
+            .deleted_at
+            .is_none_or(|value| value >= record.created_at)
+        && record.cleanup_generation.is_none_or(|value| value > 0)
+        && record.cleanup_retry_count.is_none_or(|value| value >= 0)
+        && valid_attachment_cleanup_shape(record);
+    if !base_valid {
+        return false;
+    }
+
+    let has_verifiable_object_metadata = record.blob_reference.is_some()
+        && record.quarantine_blob_reference.is_none()
+        && record.detected_mime.is_some()
+        && observed_bytes.is_some()
+        && record.sha256.is_some()
+        && record.rejection_code.is_none();
+    // Only stable post-restore states can complete this graph. Live upload,
+    // scanner, deletion, and cleanup claims require repair first even if an
+    // unredacted live database still contains their external references.
+    match (
+        record.quarantine_state.as_str(),
+        record.scan_state.as_str(),
+        record.processing_state.as_str(),
+    ) {
+        ("ready", "clean", "ready") => {
+            record.message_id.is_none()
+                && has_verifiable_object_metadata
+                && expected_bytes.is_some()
+                && record.scanner_version.is_some()
+                && record.acceptance_policy_version.is_some()
+                && record.upload_token_hash.is_none()
+                && record.upload_expires_at.is_some()
+                && record.finalized_at.is_none()
+                && record.deleted_at.is_none()
+        }
+        ("released", "clean", "complete") => {
+            // Schema 0.14 deliberately left upload expiry and the new scanner
+            // provenance columns nullable for pre-intake finalized rows. Their
+            // clean/released state, object digest, owner, and parents remain
+            // independently verifiable without fabricating migration data.
+            has_verifiable_object_metadata
+                && record.upload_token_hash.is_none()
+                && record.finalized_at.is_some()
+                && record.deleted_at.is_none()
+        }
+        ("rejected", "rejected", "complete") | ("failed", "failed", "complete") => {
+            record.message_id.is_none()
+                && record.upload_token_hash.is_none()
+                && record.rejection_code.is_some()
+                && record.finalized_at.is_none()
+                && record.deleted_at.is_none()
+                && record.blob_reference.is_none()
+                && record.quarantine_blob_reference.is_none()
+        }
+        ("expired", "failed", "complete") => {
+            record.message_id.is_none()
+                && record.blob_reference.is_none()
+                && record.quarantine_blob_reference.is_none()
+                && record.upload_token_hash.is_none()
+                && record.rejection_code.is_some()
+                && record.finalized_at.is_none()
+                && record.cleanup_generation.is_some_and(|value| value > 0)
+                && record.deleted_at.is_some()
+        }
+        ("deleted", "pending" | "clean" | "rejected" | "failed", "complete") => {
+            record.blob_reference.is_none()
+                && record.quarantine_blob_reference.is_none()
+                && record.upload_token_hash.is_none()
+                && record.deleted_at.is_some()
+        }
+        _ => false,
+    }
+}
+
+fn valid_attachment_cleanup_shape(record: &AiAttachmentRecord) -> bool {
+    match record.processing_state.as_str() {
+        "pending" | "scanning" | "ready" => {
+            record.processing_expires_at.is_some() == (record.processing_state == "scanning")
+                && record.cleanup_generation.is_none()
+                && record.cleanup_lease_expires_at.is_none()
+                && record.cleanup_retry_count.is_none()
+                && record.cleanup_next_attempt_at.is_none()
+        }
+        "deleting" => {
+            record.processing_expires_at.is_some()
+                && record.cleanup_generation.is_none()
+                && record.cleanup_lease_expires_at.is_none()
+                && record.cleanup_next_attempt_at.is_none()
+        }
+        "cleanup_required" | "retention_cleanup_required" => {
+            record.processing_expires_at.is_none()
+                && record.cleanup_generation.is_none()
+                && record.cleanup_lease_expires_at.is_none()
+                && record.cleanup_retry_count.is_none()
+                && record.cleanup_next_attempt_at.is_none()
+        }
+        "cleanup_in_progress" => {
+            record.processing_expires_at.is_none()
+                && record.cleanup_generation.is_some()
+                && record.cleanup_lease_expires_at.is_some()
+                && record.cleanup_next_attempt_at.is_none()
+        }
+        "cleanup_backoff" => {
+            record.processing_expires_at.is_none()
+                && record.cleanup_generation.is_some()
+                && record.cleanup_lease_expires_at.is_none()
+                && record.cleanup_retry_count.is_some_and(|value| value > 0)
+                && record.cleanup_next_attempt_at.is_some()
+        }
+        "complete" => {
+            record.processing_expires_at.is_none()
+                && record.cleanup_lease_expires_at.is_none()
+                && record.cleanup_next_attempt_at.is_none()
+        }
+        _ => false,
+    }
+}
+
+fn restored_attachment_artifact_is_valid(record: &AiAttachmentArtifactRecord) -> bool {
+    let has_content = record.blob_reference.is_some()
+        || record.protected_content.is_some()
+        || record.provider_reference.is_some();
+    !record.id.is_nil()
+        && !record.attachment_id.is_nil()
+        && record.row_version >= 0
+        && record.created_at > 0
+        && record
+            .deleted_at
+            .is_none_or(|value| value >= record.created_at)
+        && record.detected_mime.as_deref().is_none_or(valid_mime)
+        && record.sha256.as_deref().is_none_or(valid_sha256)
+        && record
+            .provider_reference
+            .as_deref()
+            .is_none_or(|value| value != ORM_BACKUP_REDACTED_VALUE)
+        && record
+            .blob_reference
+            .as_deref()
+            .is_none_or(valid_local_object_reference)
+        && record.protected_content.as_ref().is_none_or(|value| {
+            serde_json::from_value::<ProtectedContentEnvelope>(value.clone()).is_ok()
+        })
+        && crate::orm_session_retention::validate_attachment_artifact(record, record.attachment_id)
+            .is_ok()
+        && match record.cleanup_state.as_deref() {
+            None => {
+                has_content
+                    && record.deleted_at.is_none()
+                    && record.cleanup_generation.is_none()
+                    && record.cleanup_lease_expires_at.is_none()
+                    && record.cleanup_retry_count.is_none()
+                    && record.cleanup_next_attempt_at.is_none()
+                    && (record.blob_reference.is_none() || record.sha256.is_some())
+            }
+            Some("complete") => !has_content && record.deleted_at.is_some(),
+            Some(_) => false,
+        }
+}
+
+fn valid_restored_filename(value: &str, maximum: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum
+        && value != "."
+        && value != ".."
+        && value.trim_matches([' ', '.']) == value
+        && !value
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '\\' | ':'))
+}
+
+fn valid_safe_subject(value: &str) -> bool {
+    !value.trim().is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
+}
+
+fn valid_local_object_reference(value: &str) -> bool {
+    value != ORM_BACKUP_REDACTED_VALUE
+        && valid_safe_reference(value, 4_096)
+        && validate_blob_key(value).is_ok()
+}
+
+fn record_unique_reference(
+    references: &mut BTreeMap<String, (bool, uuid::Uuid)>,
+    reference: &str,
+    row: (bool, uuid::Uuid),
+    invalid: &mut BTreeSet<(bool, uuid::Uuid)>,
+) {
+    if let Some(existing) = references.insert(reference.to_owned(), row) {
+        invalid.insert(existing);
+        invalid.insert(row);
     }
 }
 
@@ -1128,6 +1778,646 @@ mod tests {
         .expect("pricing creation audit should insert");
     }
 
+    fn attachment_metadata_audit_limits(
+        maximum_attachments: usize,
+        maximum_artifacts: usize,
+    ) -> AiRestoreAttachmentMetadataAuditLimits {
+        AiRestoreAttachmentMetadataAuditLimits::new(
+            AiAttachmentServiceLimits::default(),
+            maximum_attachments,
+            maximum_artifacts,
+        )
+        .expect("test attachment metadata-audit limits should validate")
+    }
+
+    async fn seed_attachment_session(database: &Database<SqliteBackend>) -> (Uuid, Uuid) {
+        let session_id = Uuid::new_v4();
+        let message_id = Uuid::new_v4();
+        AiSessionRecord::insert(
+            database,
+            crate::persistence::CreateAiSessionRecordInput {
+                id: session_id,
+                owner_principal_kind: "user".to_owned(),
+                owner_subject: "restore-attachment-user".to_owned(),
+                tenant_id: Some("tenant-1".to_owned()),
+                scope_kind: "project".to_owned(),
+                scope_id: "restore-attachments".to_owned(),
+                title: "Restore attachment test".to_owned(),
+                state: "active".to_owned(),
+                stream_head: 0,
+                message_head: 1,
+                last_activity_at: 1_900_000_000,
+                archived_at: None,
+                deleted_at: None,
+            },
+        )
+        .await
+        .expect("attachment parent session should insert");
+        AiMessageRecord::insert(
+            database,
+            crate::persistence::CreateAiMessageRecordInput {
+                id: message_id,
+                session_id,
+                sequence: 1,
+                message_role: "user".to_owned(),
+                author_principal_kind: Some("user".to_owned()),
+                author_subject: Some("restore-attachment-user".to_owned()),
+                client_message_id: Some(Uuid::new_v4()),
+                content_hash: Some("restore-attachment-content".to_owned()),
+                run_id: None,
+                provider_kind: None,
+                provider_model: None,
+                protected_preview: None,
+                block_count: 0,
+                completion_state: "complete".to_owned(),
+                finalized_at: Some(1_900_000_000),
+                content_purged_at: None,
+            },
+        )
+        .await
+        .expect("attachment parent message should insert");
+        (session_id, message_id)
+    }
+
+    async fn seed_released_attachment(
+        database: &Database<SqliteBackend>,
+        session_id: Uuid,
+        message_id: Option<Uuid>,
+        blob_reference: &str,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        AiAttachmentRecord::insert(
+            database,
+            crate::persistence::CreateAiAttachmentRecordInput {
+                id,
+                owner_principal_kind: "user".to_owned(),
+                owner_subject: "restore-attachment-user".to_owned(),
+                session_id,
+                message_id,
+                blob_reference: Some(blob_reference.to_owned()),
+                quarantine_blob_reference: None,
+                safe_filename: "restored.txt".to_owned(),
+                declared_mime: Some("text/plain".to_owned()),
+                detected_mime: Some("text/plain".to_owned()),
+                expected_byte_count: Some(7),
+                byte_count: Some(7),
+                sha256: Some("0".repeat(64)),
+                upload_token_hash: None,
+                upload_expires_at: Some(2_000_000_000),
+                quarantine_state: "released".to_owned(),
+                scan_state: "clean".to_owned(),
+                processing_state: "complete".to_owned(),
+                processing_expires_at: None,
+                cleanup_generation: None,
+                cleanup_lease_expires_at: None,
+                cleanup_retry_count: None,
+                cleanup_next_attempt_at: None,
+                scanner_version: Some("restore-scanner-v1".to_owned()),
+                acceptance_policy_version: Some("restore-policy-v1".to_owned()),
+                rejection_code: None,
+                finalized_at: Some(1_900_000_000),
+                deleted_at: None,
+            },
+        )
+        .await
+        .expect("released attachment should insert");
+        id
+    }
+
+    async fn seed_active_artifact(
+        database: &Database<SqliteBackend>,
+        attachment_id: Uuid,
+        blob_reference: &str,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        AiAttachmentArtifactRecord::insert(
+            database,
+            crate::persistence::CreateAiAttachmentArtifactRecordInput {
+                id,
+                attachment_id,
+                artifact_kind: "extracted_text".to_owned(),
+                blob_reference: Some(blob_reference.to_owned()),
+                protected_content: None,
+                detected_mime: Some("text/plain".to_owned()),
+                byte_count: 7,
+                sha256: Some("1".repeat(64)),
+                provider_kind: None,
+                provider_profile_id: None,
+                provider_reference: None,
+                provider_expires_at: None,
+                cleanup_state: None,
+                cleanup_generation: None,
+                cleanup_lease_expires_at: None,
+                cleanup_retry_count: None,
+                cleanup_next_attempt_at: None,
+                deleted_at: None,
+            },
+        )
+        .await
+        .expect("active attachment artifact should insert");
+        id
+    }
+
+    #[tokio::test]
+    async fn attachment_metadata_graph_completes_without_claiming_object_bytes() {
+        let database = database().await;
+        let (session_id, message_id) = seed_attachment_session(&database).await;
+        let attachment_id = seed_released_attachment(
+            &database,
+            session_id,
+            Some(message_id),
+            "ai-attachments/objects/test/attachment",
+        )
+        .await;
+        seed_active_artifact(
+            &database,
+            attachment_id,
+            "ai-attachments/objects/test/artifact",
+        )
+        .await;
+        let limits = attachment_metadata_audit_limits(10, 10);
+        let first = OrmAiRestoreFactCollector::new(database.clone())
+            .with_attachment_metadata_audit(limits)
+            .collect("module-fingerprint")
+            .await
+            .expect("valid attachment metadata graph should collect");
+        let repeated = OrmAiRestoreFactCollector::new(database.clone())
+            .with_attachment_metadata_audit(limits)
+            .collect("module-fingerprint")
+            .await
+            .expect("attachment metadata collection should be deterministic");
+
+        assert_eq!(first.digest(), repeated.digest());
+        assert_eq!(first.facts().invalid_attachment_metadata_count, 0);
+        assert_eq!(first.facts().invalid_attachment_object_count, 0);
+        assert_eq!(
+            first
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::AttachmentMetadataGraph),
+            Some(&AiRestoreAuditStatus::Complete)
+        );
+        assert_eq!(
+            first
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::AttachmentObjectBytes),
+            Some(&AiRestoreAuditStatus::NotImplemented)
+        );
+        let plan = crate::AiRestoreReconciler::new("module-fingerprint")
+            .plan_collected(&first)
+            .expect("metadata-complete plan should hash");
+        assert!(plan.plan().issues.iter().any(|issue| {
+            issue.code == "AI_RESTORE_AUDIT_INCOMPLETE"
+                && issue.resource_ref.as_deref() == Some("attachment_object_bytes")
+        }));
+
+        let narrower_service = AiAttachmentServiceLimits::new(6, 255, time::Duration::minutes(10))
+            .expect("narrow attachment service limits should validate");
+        let changed_limits = AiRestoreAttachmentMetadataAuditLimits::new(narrower_service, 10, 10)
+            .expect("changed attachment metadata limits should validate");
+        let changed = OrmAiRestoreFactCollector::new(database)
+            .with_attachment_metadata_audit(changed_limits)
+            .collect("module-fingerprint")
+            .await
+            .expect("changed attachment limits should collect");
+        assert_ne!(first.digest(), changed.digest());
+        assert_eq!(
+            changed
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::AttachmentMetadataGraph),
+            Some(&AiRestoreAuditStatus::Invalid { count: 2 })
+        );
+    }
+
+    #[tokio::test]
+    async fn attachment_parent_corruption_and_orphan_artifacts_are_invalid() {
+        let database = database().await;
+        let (session_id, _) = seed_attachment_session(&database).await;
+        let attachment_id = seed_released_attachment(
+            &database,
+            session_id,
+            Some(Uuid::new_v4()),
+            "ai-attachments/objects/test/orphan-message",
+        )
+        .await;
+        seed_active_artifact(
+            &database,
+            Uuid::new_v4(),
+            "ai-attachments/objects/test/orphan-artifact",
+        )
+        .await;
+        seed_active_artifact(
+            &database,
+            attachment_id,
+            "ai-attachments/objects/test/valid-artifact",
+        )
+        .await;
+
+        let collected = OrmAiRestoreFactCollector::new(database.clone())
+            .with_attachment_metadata_audit(attachment_metadata_audit_limits(10, 10))
+            .collect("module-fingerprint")
+            .await
+            .expect("corrupt attachment graph should remain inspectable");
+
+        assert_eq!(collected.facts().invalid_attachment_metadata_count, 3);
+        assert_eq!(
+            collected
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::AttachmentMetadataGraph),
+            Some(&AiRestoreAuditStatus::Invalid { count: 3 })
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_sessions_and_tombstoned_artifact_parents_require_repair() {
+        let deleting_database = database().await;
+        let (session_id, message_id) = seed_attachment_session(&deleting_database).await;
+        let attachment_id = seed_released_attachment(
+            &deleting_database,
+            session_id,
+            Some(message_id),
+            "ai-attachments/objects/test/deleting-session-parent",
+        )
+        .await;
+        seed_active_artifact(
+            &deleting_database,
+            attachment_id,
+            "ai-attachments/objects/test/deleting-session-artifact",
+        )
+        .await;
+        AiSessionRecord::update_by_id(
+            &deleting_database,
+            &session_id,
+            crate::persistence::UpdateAiSessionRecordInput {
+                state: Some("deleting".to_owned()),
+                deleted_at: Some(Some(1_900_000_001)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("deleting session should update")
+        .expect("deleting session should remain present");
+        let deleting = OrmAiRestoreFactCollector::new(deleting_database)
+            .with_attachment_metadata_audit(attachment_metadata_audit_limits(10, 10))
+            .collect("module-fingerprint")
+            .await
+            .expect("deleting-session graph should remain inspectable");
+        assert_eq!(deleting.facts().invalid_attachment_metadata_count, 2);
+
+        let tombstone_database = database().await;
+        let (session_id, message_id) = seed_attachment_session(&tombstone_database).await;
+        let attachment_id = seed_released_attachment(
+            &tombstone_database,
+            session_id,
+            Some(message_id),
+            "ai-attachments/objects/test/tombstoned-parent",
+        )
+        .await;
+        seed_active_artifact(
+            &tombstone_database,
+            attachment_id,
+            "ai-attachments/objects/test/orphaned-by-tombstone",
+        )
+        .await;
+        AiAttachmentRecord::update_by_id(
+            &tombstone_database,
+            &attachment_id,
+            crate::persistence::UpdateAiAttachmentRecordInput {
+                blob_reference: Some(None),
+                quarantine_blob_reference: Some(None),
+                quarantine_state: Some("deleted".to_owned()),
+                processing_state: Some("complete".to_owned()),
+                deleted_at: Some(Some(1_900_000_001)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("attachment tombstone should update")
+        .expect("attachment tombstone should remain present");
+        let tombstoned = OrmAiRestoreFactCollector::new(tombstone_database)
+            .with_attachment_metadata_audit(attachment_metadata_audit_limits(10, 10))
+            .collect("module-fingerprint")
+            .await
+            .expect("tombstoned-parent graph should remain inspectable");
+        assert_eq!(tombstoned.facts().invalid_attachment_metadata_count, 1);
+        assert_eq!(
+            tombstoned
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::AttachmentMetadataGraph),
+            Some(&AiRestoreAuditStatus::Invalid { count: 1 })
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_finalized_attachment_may_omit_original_expected_size() {
+        let database = database().await;
+        let (session_id, message_id) = seed_attachment_session(&database).await;
+        let attachment_id = seed_released_attachment(
+            &database,
+            session_id,
+            Some(message_id),
+            "ai-attachments/objects/test/legacy-finalized",
+        )
+        .await;
+        AiAttachmentRecord::update_by_id(
+            &database,
+            &attachment_id,
+            crate::persistence::UpdateAiAttachmentRecordInput {
+                expected_byte_count: Some(None),
+                upload_expires_at: Some(None),
+                scanner_version: Some(None),
+                acceptance_policy_version: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("legacy expected-size update should succeed")
+        .expect("legacy attachment should remain present");
+
+        let collected = OrmAiRestoreFactCollector::new(database.clone())
+            .with_attachment_metadata_audit(attachment_metadata_audit_limits(10, 10))
+            .collect("module-fingerprint")
+            .await
+            .expect("legacy finalized attachment should collect");
+        assert_eq!(
+            collected
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::AttachmentMetadataGraph),
+            Some(&AiRestoreAuditStatus::Complete)
+        );
+
+        AiAttachmentRecord::update_by_id(
+            &database,
+            &attachment_id,
+            crate::persistence::UpdateAiAttachmentRecordInput {
+                message_id: Some(None),
+                quarantine_state: Some("ready".to_owned()),
+                processing_state: Some("ready".to_owned()),
+                finalized_at: Some(None),
+                scanner_version: Some(Some("restore-scanner-v1".to_owned())),
+                acceptance_policy_version: Some(Some("restore-policy-v1".to_owned())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("pre-release legacy shape should update")
+        .expect("pre-release attachment should remain present");
+        let ready = OrmAiRestoreFactCollector::new(database)
+            .with_attachment_metadata_audit(attachment_metadata_audit_limits(10, 10))
+            .collect("module-fingerprint")
+            .await
+            .expect("pre-release legacy shape should remain inspectable");
+        assert_eq!(ready.facts().invalid_attachment_metadata_count, 1);
+    }
+
+    #[tokio::test]
+    async fn unsafe_object_keys_and_wrong_message_authors_are_invalid() {
+        let database = database().await;
+        let (session_id, message_id) = seed_attachment_session(&database).await;
+        AiMessageRecord::update_by_id(
+            &database,
+            &message_id,
+            crate::persistence::UpdateAiMessageRecordInput {
+                message_role: Some("assistant".to_owned()),
+                author_subject: Some(Some("different-author".to_owned())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("message corruption should update")
+        .expect("message should remain present");
+        seed_released_attachment(
+            &database,
+            session_id,
+            Some(message_id),
+            "ai-attachments/objects/test/wrong-author",
+        )
+        .await;
+        seed_released_attachment(&database, session_id, None, "../unsafe-object").await;
+
+        let collected = OrmAiRestoreFactCollector::new(database)
+            .with_attachment_metadata_audit(attachment_metadata_audit_limits(10, 10))
+            .collect("module-fingerprint")
+            .await
+            .expect("unsafe attachment graph should remain inspectable");
+        assert_eq!(collected.facts().invalid_attachment_metadata_count, 2);
+        assert_eq!(
+            collected
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::AttachmentMetadataGraph),
+            Some(&AiRestoreAuditStatus::Invalid { count: 2 })
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_attachment_requires_cleanup_generation_proof() {
+        let database = database().await;
+        let (session_id, _) = seed_attachment_session(&database).await;
+        AiAttachmentRecord::insert(
+            &database,
+            crate::persistence::CreateAiAttachmentRecordInput {
+                id: Uuid::new_v4(),
+                owner_principal_kind: "user".to_owned(),
+                owner_subject: "restore-attachment-user".to_owned(),
+                session_id,
+                message_id: None,
+                blob_reference: None,
+                quarantine_blob_reference: None,
+                safe_filename: "expired.txt".to_owned(),
+                declared_mime: Some("text/plain".to_owned()),
+                detected_mime: None,
+                expected_byte_count: Some(7),
+                byte_count: None,
+                sha256: None,
+                upload_token_hash: None,
+                upload_expires_at: Some(1_900_000_000),
+                quarantine_state: "expired".to_owned(),
+                scan_state: "failed".to_owned(),
+                processing_state: "complete".to_owned(),
+                processing_expires_at: None,
+                cleanup_generation: None,
+                cleanup_lease_expires_at: None,
+                cleanup_retry_count: None,
+                cleanup_next_attempt_at: None,
+                scanner_version: None,
+                acceptance_policy_version: None,
+                rejection_code: Some("upload_ticket_expired".to_owned()),
+                finalized_at: None,
+                deleted_at: Some(1_900_000_001),
+            },
+        )
+        .await
+        .expect("corrupt expired attachment should insert");
+
+        let collected = OrmAiRestoreFactCollector::new(database)
+            .with_attachment_metadata_audit(attachment_metadata_audit_limits(10, 10))
+            .collect("module-fingerprint")
+            .await
+            .expect("corrupt expired row should remain inspectable");
+        assert_eq!(
+            collected
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::AttachmentMetadataGraph),
+            Some(&AiRestoreAuditStatus::Invalid { count: 1 })
+        );
+    }
+
+    #[tokio::test]
+    async fn redacted_transient_and_provider_references_fail_metadata_audit() {
+        let database = database().await;
+        let (session_id, message_id) = seed_attachment_session(&database).await;
+        let attachment_id = seed_released_attachment(
+            &database,
+            session_id,
+            Some(message_id),
+            "ai-attachments/objects/test/provider-parent",
+        )
+        .await;
+        AiAttachmentArtifactRecord::insert(
+            &database,
+            crate::persistence::CreateAiAttachmentArtifactRecordInput {
+                id: Uuid::new_v4(),
+                attachment_id,
+                artifact_kind: "provider_file".to_owned(),
+                blob_reference: None,
+                protected_content: None,
+                detected_mime: Some("text/plain".to_owned()),
+                byte_count: 7,
+                sha256: Some("1".repeat(64)),
+                provider_kind: Some("openai".to_owned()),
+                provider_profile_id: Some("restore-profile".to_owned()),
+                provider_reference: Some(ORM_BACKUP_REDACTED_VALUE.to_owned()),
+                provider_expires_at: None,
+                cleanup_state: None,
+                cleanup_generation: None,
+                cleanup_lease_expires_at: None,
+                cleanup_retry_count: None,
+                cleanup_next_attempt_at: None,
+                deleted_at: None,
+            },
+        )
+        .await
+        .expect("redacted provider artifact should insert");
+        AiAttachmentRecord::insert(
+            &database,
+            crate::persistence::CreateAiAttachmentRecordInput {
+                id: Uuid::new_v4(),
+                owner_principal_kind: "user".to_owned(),
+                owner_subject: "restore-attachment-user".to_owned(),
+                session_id,
+                message_id: None,
+                blob_reference: None,
+                quarantine_blob_reference: None,
+                safe_filename: "pending.txt".to_owned(),
+                declared_mime: Some("text/plain".to_owned()),
+                detected_mime: None,
+                expected_byte_count: Some(7),
+                byte_count: None,
+                sha256: None,
+                upload_token_hash: None,
+                upload_expires_at: Some(2_000_000_000),
+                quarantine_state: "pending_upload".to_owned(),
+                scan_state: "pending".to_owned(),
+                processing_state: "pending".to_owned(),
+                processing_expires_at: None,
+                cleanup_generation: None,
+                cleanup_lease_expires_at: None,
+                cleanup_retry_count: None,
+                cleanup_next_attempt_at: None,
+                scanner_version: None,
+                acceptance_policy_version: None,
+                rejection_code: None,
+                finalized_at: None,
+                deleted_at: None,
+            },
+        )
+        .await
+        .expect("redacted pending attachment should insert");
+
+        let collected = OrmAiRestoreFactCollector::new(database)
+            .with_attachment_metadata_audit(attachment_metadata_audit_limits(10, 10))
+            .collect("module-fingerprint")
+            .await
+            .expect("redacted graph should remain inspectable");
+        assert_eq!(collected.facts().invalid_attachment_metadata_count, 2);
+        assert_eq!(
+            collected
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::AttachmentMetadataGraph),
+            Some(&AiRestoreAuditStatus::Invalid { count: 2 })
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_object_ownership_and_scan_bounds_fail_closed() {
+        let database = database().await;
+        let (session_id, message_id) = seed_attachment_session(&database).await;
+        let mut attachment_ids = Vec::new();
+        for _ in 0..2 {
+            attachment_ids.push(
+                seed_released_attachment(
+                    &database,
+                    session_id,
+                    Some(message_id),
+                    "ai-attachments/objects/test/shared",
+                )
+                .await,
+            );
+        }
+        let duplicate = OrmAiRestoreFactCollector::new(database.clone())
+            .with_attachment_metadata_audit(attachment_metadata_audit_limits(10, 10))
+            .collect("module-fingerprint")
+            .await
+            .expect("duplicate object ownership should remain inspectable");
+        assert_eq!(duplicate.facts().invalid_attachment_metadata_count, 2);
+        assert_eq!(
+            duplicate
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::AttachmentMetadataGraph),
+            Some(&AiRestoreAuditStatus::Invalid { count: 2 })
+        );
+
+        let bounded = OrmAiRestoreFactCollector::new(database.clone())
+            .with_attachment_metadata_audit(attachment_metadata_audit_limits(1, 10))
+            .collect("module-fingerprint")
+            .await
+            .expect("overbound attachment scan should remain inspectable");
+        assert_eq!(bounded.facts().invalid_attachment_metadata_count, 0);
+        assert_eq!(
+            bounded
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::AttachmentMetadataGraph),
+            Some(&AiRestoreAuditStatus::LimitExceeded)
+        );
+
+        seed_active_artifact(
+            &database,
+            attachment_ids[0],
+            "ai-attachments/objects/test/bounded-artifact-1",
+        )
+        .await;
+        seed_active_artifact(
+            &database,
+            attachment_ids[0],
+            "ai-attachments/objects/test/bounded-artifact-2",
+        )
+        .await;
+        let artifact_bounded = OrmAiRestoreFactCollector::new(database)
+            .with_attachment_metadata_audit(attachment_metadata_audit_limits(10, 1))
+            .collect("module-fingerprint")
+            .await
+            .expect("overbound artifact scan should remain inspectable");
+        assert_eq!(
+            artifact_bounded.facts().invalid_attachment_metadata_count,
+            0
+        );
+        assert_eq!(
+            artifact_bounded
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::AttachmentMetadataGraph),
+            Some(&AiRestoreAuditStatus::LimitExceeded)
+        );
+    }
+
     #[tokio::test]
     async fn collector_derives_core_facts_and_fails_closed_for_remaining_audits() {
         let database = database().await;
@@ -1160,7 +2450,9 @@ mod tests {
             Some(&AiRestoreAuditStatus::Complete)
         );
         assert_eq!(
-            first.audit_statuses().get(&AiRestoreAuditKind::Attachments),
+            first
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::AttachmentMetadataGraph),
             Some(&AiRestoreAuditStatus::NotImplemented)
         );
 
@@ -1168,10 +2460,10 @@ mod tests {
             .plan_collected(&first)
             .expect("collected plan should hash");
         assert_eq!(bound.facts_digest(), first.digest());
-        assert_eq!(bound.plan().fatal_issue_count(), 14);
+        assert_eq!(bound.plan().fatal_issue_count(), 15);
         assert!(bound.plan().issues.iter().any(|issue| {
             issue.code == "AI_RESTORE_AUDIT_INCOMPLETE"
-                && issue.resource_ref.as_deref() == Some("attachments")
+                && issue.resource_ref.as_deref() == Some("attachment_metadata_graph")
         }));
         assert_eq!(
             bound.plan().run_actions[0].disposition,
@@ -1187,7 +2479,7 @@ mod tests {
         let missing_plan = crate::AiRestoreReconciler::new("module-fingerprint")
             .plan_collected(&missing_statuses)
             .expect("missing-status plan should hash");
-        assert_eq!(missing_plan.plan().fatal_issue_count(), 17);
+        assert_eq!(missing_plan.plan().fatal_issue_count(), 18);
     }
 
     #[tokio::test]
@@ -1219,7 +2511,7 @@ mod tests {
         let plan = crate::AiRestoreReconciler::new("module-fingerprint")
             .plan_collected(&collected)
             .expect("policy-complete plan should hash");
-        assert_eq!(plan.plan().fatal_issue_count(), 12);
+        assert_eq!(plan.plan().fatal_issue_count(), 13);
         let repeated = OrmAiRestoreFactCollector::new(database.clone())
             .with_policy_audits(limits)
             .collect("module-fingerprint")

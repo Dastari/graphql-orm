@@ -35,6 +35,89 @@ const POSTGRES_IMAGE: &str = "postgres:17-alpine";
     GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
 #[graphql_entity(
+    table = "graphql_orm_ai_sessions",
+    plural = "PostgresRestoreAttachmentSeedSessions",
+    default_sort = "id ASC"
+)]
+struct PostgresRestoreAttachmentSessionSeed {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "uuid")]
+    #[sortable]
+    id: graphql_orm::uuid::Uuid,
+    owner_principal_kind: String,
+    owner_subject: String,
+    tenant_id: Option<String>,
+    scope_kind: String,
+    scope_id: String,
+    title: String,
+    state: String,
+    stream_head: i64,
+    message_head: i64,
+    last_activity_at: i64,
+    archived_at: Option<i64>,
+    deleted_at: Option<i64>,
+}
+
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+)]
+#[graphql_entity(
+    table = "graphql_orm_ai_attachments",
+    plural = "PostgresRestoreAttachmentSeeds",
+    default_sort = "id ASC"
+)]
+struct PostgresRestoreAttachmentSeed {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "uuid")]
+    #[sortable]
+    id: graphql_orm::uuid::Uuid,
+    owner_principal_kind: String,
+    owner_subject: String,
+    session_id: graphql_orm::uuid::Uuid,
+    blob_reference: Option<String>,
+    safe_filename: String,
+    declared_mime: Option<String>,
+    detected_mime: Option<String>,
+    expected_byte_count: Option<i64>,
+    byte_count: Option<i64>,
+    sha256: Option<String>,
+    upload_expires_at: Option<i64>,
+    quarantine_state: String,
+    scan_state: String,
+    processing_state: String,
+    scanner_version: Option<String>,
+    acceptance_policy_version: Option<String>,
+    finalized_at: Option<i64>,
+}
+
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+)]
+#[graphql_entity(
+    table = "graphql_orm_ai_attachment_artifacts",
+    plural = "PostgresRestoreAttachmentArtifactSeeds",
+    default_sort = "id ASC"
+)]
+struct PostgresRestoreAttachmentArtifactSeed {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "uuid")]
+    #[sortable]
+    id: graphql_orm::uuid::Uuid,
+    attachment_id: graphql_orm::uuid::Uuid,
+    artifact_kind: String,
+    blob_reference: Option<String>,
+    detected_mime: Option<String>,
+    byte_count: i64,
+    sha256: Option<String>,
+}
+
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+)]
+#[graphql_entity(
     table = "graphql_orm_ai_provider_background_submissions",
     plural = "LegacyGraphqlOrmAiProviderBackgroundSubmissions",
     default_sort = "created_at ASC"
@@ -569,6 +652,68 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
         .await
         .expect("background reconciliation schema should migrate in owned PostgreSQL");
 
+    let restore_attachment_session_id = Uuid::new_v4();
+    let restore_attachment_id = Uuid::new_v4();
+    PostgresRestoreAttachmentSessionSeed::insert(
+        &database,
+        CreatePostgresRestoreAttachmentSessionSeedInput {
+            id: restore_attachment_session_id,
+            owner_principal_kind: "user".to_owned(),
+            owner_subject: "postgres-restore-attachment".to_owned(),
+            tenant_id: Some("tenant-1".to_owned()),
+            scope_kind: "project".to_owned(),
+            scope_id: "postgres-restore".to_owned(),
+            title: "PostgreSQL restore attachment".to_owned(),
+            state: "active".to_owned(),
+            stream_head: 0,
+            message_head: 0,
+            last_activity_at: 1_900_000_000,
+            archived_at: None,
+            deleted_at: None,
+        },
+    )
+    .await
+    .expect("PostgreSQL restore attachment parent should insert");
+    PostgresRestoreAttachmentSeed::insert(
+        &database,
+        CreatePostgresRestoreAttachmentSeedInput {
+            id: restore_attachment_id,
+            owner_principal_kind: "user".to_owned(),
+            owner_subject: "postgres-restore-attachment".to_owned(),
+            session_id: restore_attachment_session_id,
+            blob_reference: Some("ai-attachments/objects/postgres/attachment".to_owned()),
+            safe_filename: "postgres.txt".to_owned(),
+            declared_mime: Some("text/plain".to_owned()),
+            detected_mime: Some("text/plain".to_owned()),
+            expected_byte_count: Some(7),
+            byte_count: Some(7),
+            sha256: Some("0".repeat(64)),
+            upload_expires_at: Some(2_000_000_000),
+            quarantine_state: "released".to_owned(),
+            scan_state: "clean".to_owned(),
+            processing_state: "complete".to_owned(),
+            scanner_version: Some("postgres-restore-scanner".to_owned()),
+            acceptance_policy_version: Some("postgres-restore-policy".to_owned()),
+            finalized_at: Some(1_900_000_000),
+        },
+    )
+    .await
+    .expect("PostgreSQL restore attachment should insert");
+    PostgresRestoreAttachmentArtifactSeed::insert(
+        &database,
+        CreatePostgresRestoreAttachmentArtifactSeedInput {
+            id: Uuid::new_v4(),
+            attachment_id: restore_attachment_id,
+            artifact_kind: "extracted_text".to_owned(),
+            blob_reference: Some("ai-attachments/objects/postgres/artifact".to_owned()),
+            detected_mime: Some("text/plain".to_owned()),
+            byte_count: 7,
+            sha256: Some("1".repeat(64)),
+        },
+    )
+    .await
+    .expect("PostgreSQL restore attachment artifact should insert");
+
     let restore_budget_limits = AiBudgetPolicyManagementLimits::new(
         AiBudgetAmounts {
             input_tokens: 1_000_000,
@@ -592,8 +737,15 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
         100_000,
     )
     .expect("restore policy-audit limits should validate");
+    let restore_attachment_limits = AiRestoreAttachmentMetadataAuditLimits::new(
+        AiAttachmentServiceLimits::default(),
+        10_000,
+        10_000,
+    )
+    .expect("restore attachment metadata-audit limits should validate");
     let collected = OrmAiRestoreFactCollector::new(database.clone())
         .with_policy_audits(restore_policy_limits)
+        .with_attachment_metadata_audit(restore_attachment_limits)
         .collect("postgres-parity-module-fingerprint")
         .await
         .expect("bounded restore facts should collect through generated PostgreSQL ORM queries");
@@ -606,7 +758,13 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
     assert_eq!(
         collected
             .audit_statuses()
-            .get(&AiRestoreAuditKind::Attachments),
+            .get(&AiRestoreAuditKind::AttachmentMetadataGraph),
+        Some(&AiRestoreAuditStatus::Complete)
+    );
+    assert_eq!(
+        collected
+            .audit_statuses()
+            .get(&AiRestoreAuditKind::AttachmentObjectBytes),
         Some(&AiRestoreAuditStatus::NotImplemented)
     );
     assert_eq!(

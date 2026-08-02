@@ -92,7 +92,8 @@ fn restore_never_replays_uncertain_external_effect() {
         ],
         pending_approval_count: 2,
         pending_egress_consent_count: 3,
-        invalid_attachment_count: 0,
+        invalid_attachment_metadata_count: 0,
+        invalid_attachment_object_count: 0,
         invalid_usage_fact_count: 0,
         invalid_budget_policy_count: 0,
         invalid_pricing_policy_count: 0,
@@ -208,7 +209,8 @@ fn restore_fatal_checks_keep_start_gate_closed() {
         runs: vec![],
         pending_approval_count: 0,
         pending_egress_consent_count: 0,
-        invalid_attachment_count: 1,
+        invalid_attachment_metadata_count: 1,
+        invalid_attachment_object_count: 1,
         invalid_usage_fact_count: 1,
         invalid_budget_policy_count: 1,
         invalid_pricing_policy_count: 1,
@@ -224,7 +226,7 @@ fn restore_fatal_checks_keep_start_gate_closed() {
         stream_gap_count: 0,
     });
 
-    assert_eq!(plan.fatal_issue_count(), 15);
+    assert_eq!(plan.fatal_issue_count(), 16);
 }
 
 #[test]
@@ -235,7 +237,8 @@ fn legacy_restore_facts_default_new_validation_counts_to_zero() {
         runs: Vec::new(),
         pending_approval_count: 0,
         pending_egress_consent_count: 0,
-        invalid_attachment_count: 0,
+        invalid_attachment_metadata_count: 0,
+        invalid_attachment_object_count: 0,
         invalid_usage_fact_count: 0,
         invalid_budget_policy_count: 0,
         invalid_pricing_policy_count: 0,
@@ -263,9 +266,43 @@ fn legacy_restore_facts_default_new_validation_counts_to_zero() {
         .as_object_mut()
         .expect("restore facts should be an object")
         .remove("invalid_provider_background_submission_count");
+    let object = value
+        .as_object_mut()
+        .expect("restore facts should be an object");
+    object.remove("invalid_attachment_metadata_count");
+    object.remove("invalid_attachment_object_count");
+    object.insert("invalid_attachment_count".to_owned(), 2.into());
     let decoded: AiRestoreSnapshotFacts =
         serde_json::from_value(value).expect("legacy restore facts should decode");
+    assert_eq!(decoded.invalid_attachment_metadata_count, 2);
+    assert_eq!(decoded.invalid_attachment_object_count, 0);
     assert_eq!(decoded.invalid_context_checkpoint_count, 0);
     assert_eq!(decoded.invalid_provider_webhook_receipt_count, 0);
     assert_eq!(decoded.invalid_provider_background_submission_count, 0);
+
+    let current = serde_json::to_value(&decoded).expect("current restore facts should serialize");
+    let current_object = current
+        .as_object()
+        .expect("current restore facts should be an object");
+    assert!(current_object.contains_key("invalid_attachment_metadata_count"));
+    assert!(current_object.contains_key("invalid_attachment_object_count"));
+    assert!(!current_object.contains_key("invalid_attachment_count"));
+
+    let mut missing = current.clone();
+    let missing_object = missing
+        .as_object_mut()
+        .expect("missing-field facts should be an object");
+    missing_object.remove("invalid_attachment_metadata_count");
+    missing_object.remove("invalid_attachment_object_count");
+    let missing: AiRestoreSnapshotFacts =
+        serde_json::from_value(missing).expect("missing attachment counts should default");
+    assert_eq!(missing.invalid_attachment_metadata_count, 0);
+    assert_eq!(missing.invalid_attachment_object_count, 0);
+
+    let mut ambiguous = current;
+    ambiguous
+        .as_object_mut()
+        .expect("ambiguous facts should be an object")
+        .insert("invalid_attachment_count".to_owned(), 3.into());
+    assert!(serde_json::from_value::<AiRestoreSnapshotFacts>(ambiguous).is_err());
 }

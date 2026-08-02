@@ -65,15 +65,19 @@ exist. Database-derived collection now covers bounded conservative run
 classification, approval and egress-consent revalidation candidates, and—when
 host-attested deployment ceilings are supplied—complete budget-policy and
 immutable pricing-catalog integrity with exact creation-audit linkage. Opaque
-fact/plan digests bind those inputs, and every remaining audit has a fatal
-explicit status. The pure plan's misleading applied-readiness helper has been
-removed;
+fact/plan digests bind those inputs. A separately configured bounded generated-
+ORM pass now also proves stable attachment/artifact lifecycle, ownership,
+session/message parents, and unique safe local-object-reference metadata.
+Target BlobStore bytes remain a distinct fatal incomplete audit, and every
+other remaining audit has a fatal explicit status. The pure plan's misleading
+applied-readiness helper has been removed;
 the existing host-attested compatibility gate is not restore authority. The
-next implementation slice separates historic key-header availability from
-attachment metadata/object-byte proofs and completes the remaining durable
-graphs, then adds the bounded repair applier, validator, recovery epoch, and
-non-forgeable readiness path. Durable tool-policy management and provider-
-persistent upload/search stay closed until this gate passes.
+next implementation slice binds a verified backup manifest and restored-target
+byte stream to the attachment-object audit, then scans historic protected
+envelope key headers and completes the remaining durable graphs before adding
+the bounded repair applier, validator, recovery epoch, and non-forgeable
+readiness path. Durable tool-policy management and provider-persistent upload/
+search stay closed until this gate passes.
 
 Historical slice-by-slice evidence is retained in the
 [archived completion ledger](../../../archive/2026/graphql-orm-ai-completion-ledger.md)

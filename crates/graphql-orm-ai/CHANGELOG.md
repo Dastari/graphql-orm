@@ -20,7 +20,7 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.60.0` and keeps
+This development line advances the pre-1.0 crate version to `0.61.0` and keeps
 AI schema module `0.51.0`. It begins the applied-restore implementation with
 bounded database-derived facts, aligns the reviewed dependency universe,
 integrates generated resolver-operation metadata, completes the durable OpenAI
@@ -37,6 +37,18 @@ file-search IDs behind the reviewed persistent-file design.
 
 ### Added
 
+- `AiRestoreAuditKind::Attachments` is replaced by the non-overlapping
+  `AttachmentMetadataGraph` and `AttachmentObjectBytes` restore audits.
+  `AiRestoreAttachmentMetadataAuditLimits` and
+  `OrmAiRestoreFactCollector::with_attachment_metadata_audit` now perform one
+  bounded generated-ORM audit of attachment/artifact lifecycle, ownership,
+  session/message parents, provider-reference tuples, and unique local object
+  ownership. Complete canonical row and expected-object digests bind that
+  database proof to the collected facts. Missing parents, backup-redacted
+  transient/provider references, malformed state, duplicate object ownership,
+  or a reached row bound remain fatal. The database audit performs no blob I/O;
+  `AttachmentObjectBytes` remains explicitly incomplete until a verified
+  manifest and the restored target bytes are streamed and rehashed.
 - `AiRestorePolicyAuditLimits` and
   `OrmAiRestoreFactCollector::with_policy_audits` now bind host-attested
   deployment ceilings and independent row bounds into database-derived restore

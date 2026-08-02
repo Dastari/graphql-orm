@@ -121,13 +121,18 @@ candidates. With `AiRestorePolicyAuditLimits`, it also revalidates complete
 budget-policy and immutable pricing-catalog graphs against host-attested
 deployment ceilings and exact pricing creation-audit linkage. Those inputs do
 not prove equivalence to the live service configuration; the future applied
-validator must bind that configuration epoch. The restore target and every
-writer must remain closed throughout that transaction. The collector uses its
-own trusted unbounded pagination view, contained by deployment-owned hard
-limits, so host GraphQL page caps cannot silently truncate an audit. It returns
-opaque `AiCollectedRestoreFacts` with a deterministic digest and an explicit
-status for every required audit. Reaching a limit returns no partial evidence
-or candidate actions for that category; observing an invalid row/graph, missing
+validator must bind that configuration epoch. With
+`AiRestoreAttachmentMetadataAuditLimits`, the same transaction can also prove
+the bounded stable attachment/artifact lifecycle, exact session/message owner
+graph, provider tuple shape, and unique safe local-object references. Live
+upload/cleanup states and backup-redacted transient/provider references remain
+invalid until explicitly repaired. The restore target and every writer must
+remain closed throughout that transaction. The collector uses its own trusted
+unbounded pagination view, contained by deployment-owned hard limits, so host
+GraphQL page caps cannot silently truncate an audit. It returns opaque
+`AiCollectedRestoreFacts` with a deterministic digest and an explicit status
+for every required audit. Reaching a limit returns no partial evidence or
+candidate actions for that category; observing an invalid row/graph, missing
 deployment inputs, or an audit not yet implemented produces a fatal collected
 plan; a caller-supplied zero is not substituted.
 
@@ -135,10 +140,11 @@ Encryption and object recovery deliberately remain separate. A current
 content-protection policy row cannot prove historic application-encrypted
 envelopes are openable: the future key audit must scan every protected envelope
 header and bind a prevalidated set of current and historic deployment keys.
-Likewise, attachment metadata alone cannot prove restored object bytes. The
-attachment work must distinguish a database lifecycle/parent graph proof from
-a verified backup-manifest plus target-object byte-count/SHA-256 proof; the
-aggregate attachment audit remains incomplete until both phases succeed.
+Likewise, `AttachmentMetadataGraph::Complete` cannot prove restored object
+bytes. `AttachmentObjectBytes` remains a separate fatal audit until a verified
+backup manifest is bound to the database evidence and every target BlobStore
+object is streamed and rechecked for its exact key, byte count, and SHA-256.
+Optional object metadata and a successful restore-sink call are insufficient.
 
 What remains missing from the production adapter chain is:
 
