@@ -70,7 +70,7 @@ const PRODUCTS_V1: &str = r#"
     extend schema @link(url: "https://specs.apollo.dev/federation/v2.7", import: ["@key"])
     type Query { product(id: ID!): Product }
     type Mutation { renameProduct(id: ID!, name: String!): Product }
-    type Subscription { productChanged(id: ID): Product! }
+    type Subscription { productChanged(id: ID!): Product! }
     type Product @key(fields: "id") { id: ID!, name: String! }
 "#;
 
@@ -78,7 +78,7 @@ const PRODUCTS_V2: &str = r#"
     extend schema @link(url: "https://specs.apollo.dev/federation/v2.7", import: ["@key"])
     type Query { product(id: ID!): Product, version: String! }
     type Mutation { renameProduct(id: ID!, name: String!): Product }
-    type Subscription { productChanged(id: ID): Product!, productChangedV2(id: ID): Product! }
+    type Subscription { productChanged(id: ID!): Product!, productChangedV2(id: ID!): Product! }
     type Product @key(fields: "id") { id: ID!, name: String! }
 "#;
 
@@ -290,7 +290,10 @@ impl AuthenticationProvider for TestAuthenticationProvider {
             "product-admin" => ("test-subject", vec!["products.admin"]),
             "product-writer" => ("test-subject", vec!["products.write"]),
             "product-prefix" => ("test-subject", vec!["products.*"]),
-            "product-events" | "short-lived" => ("test-subject", vec!["products.events"]),
+            "product-events" | "short-lived" => (
+                "test-subject",
+                vec!["products.p1.events", "products.failure.events"],
+            ),
             "admin" => (
                 "operator",
                 vec![
@@ -1127,8 +1130,8 @@ fn authenticated_static_router_denies_before_downstream_and_expands_templates() 
             field_name: "productChanged".to_owned(),
             arguments: vec![ArgumentDescriptor {
                 name: "id".to_owned(),
-                graphql_type: "ID".to_owned(),
-                required: false,
+                graphql_type: "ID!".to_owned(),
+                required: true,
             }],
             authorization: AuthorizationRequirement::Public,
         },
@@ -1213,6 +1216,25 @@ fn authenticated_static_router_denies_before_downstream_and_expands_templates() 
         &[("authorization", "Bearer product-p1")],
     );
     assert_eq!(defaulted["data"]["product"]["id"], "p1", "{defaulted}");
+
+    let opens_before_variable_denial = products.opens() + reviews.opens();
+    let variable_denied = router.graphql_at(
+        "/api/graphql",
+        json!({
+            "query": "query Read($id: ID!) { product(id: $id) { id } }",
+            "variables": {"id": "p2"},
+            "extensions": {"graphqlOrmRouterVariables": {"id": "p1"}}
+        }),
+        &[("authorization", "Bearer product-p1")],
+    );
+    assert_eq!(
+        variable_denied["errors"][0]["extensions"]["code"], "FORBIDDEN",
+        "{variable_denied}"
+    );
+    assert_eq!(
+        products.opens() + reviews.opens(),
+        opens_before_variable_denial
+    );
 
     let inline_excluded = router.graphql_at(
         "/api/graphql",
@@ -1305,11 +1327,11 @@ fn authenticated_public_websocket_enforces_lifecycle_and_routes_upstream_websock
                 field_name: "productChanged".to_owned(),
                 arguments: vec![ArgumentDescriptor {
                     name: "id".to_owned(),
-                    graphql_type: "ID".to_owned(),
-                    required: false,
+                    graphql_type: "ID!".to_owned(),
+                    required: true,
                 }],
                 authorization: AuthorizationRequirement::AllScopes {
-                    scopes: vec![scope("products.events")],
+                    scopes: vec![scope("products.{id}.events")],
                 },
             },
         ],
@@ -1345,29 +1367,32 @@ fn authenticated_public_websocket_enforces_lifecycle_and_routes_upstream_websock
     assert_eq!(products.opens(), opens_before);
 
     let mut denied = TestWebSocket::connect_at(router.address, "/api/graphql");
-    denied.connection_init_bearer("product-p1");
-    denied.subscribe(
+    denied.connection_init_bearer("product-events");
+    denied.subscribe_with_variables_and_extensions(
         "denied",
-        "subscription { productChanged(id: \"p1\") { id name } }",
+        "subscription EndpointEvents($Id: ID!) { productChanged(id: $Id) { id name } }",
+        json!({"Id": "p2"}),
+        json!({"graphqlOrmRouterVariables": {"Id": "p1"}}),
     );
     let denial = denied.wait_for_operation_message("denied", "next");
     assert_eq!(
-        denial["payload"]["errors"][0]["extensions"]["code"],
-        "FORBIDDEN"
+        denial["payload"]["errors"][0]["extensions"]["code"], "FORBIDDEN",
+        "{denial}"
     );
     assert_eq!(products.opens(), opens_before);
     denied.close();
 
     let mut first = TestWebSocket::connect_at(router.address, "/api/graphql");
     first.connection_init_bearer("product-events");
-    first.subscribe(
+    first.subscribe_with_variables(
         "filtered",
-        "subscription { productChanged(id: \"p1\") { id name } }",
+        "subscription EndpointEvents($Id: ID!) { productChanged(id: $Id) { id name } }",
+        json!({"Id": "p1"}),
     );
     let first_event = first.wait_for_operation_message("filtered", "next");
     assert_eq!(
-        first_event["payload"]["data"]["productChanged"]["name"],
-        "websocket"
+        first_event["payload"]["data"]["productChanged"]["name"], "websocket",
+        "{first_event}"
     );
     assert!(products.saw_bearer_header());
 
@@ -1696,7 +1721,10 @@ fn hive_websocket_subscription_retires_and_reconnects_on_graph_replacement() {
 
     let mut first_connection = TestWebSocket::connect(router.address);
     first_connection.connection_init();
-    first_connection.subscribe("v1", "subscription { productChanged { id name } }");
+    first_connection.subscribe(
+        "v1",
+        "subscription { productChanged(id: \"p1\") { id name } }",
+    );
     let first_event = first_connection.wait_for_operation_message("v1", "next");
     assert_eq!(
         first_event["payload"]["data"]["productChanged"]["name"], "v1",
@@ -1717,7 +1745,10 @@ fn hive_websocket_subscription_retires_and_reconnects_on_graph_replacement() {
     let complete = first_connection.wait_for_operation_message("v1", "complete");
     assert_eq!(complete["id"], "v1");
 
-    first_connection.subscribe("stale", "subscription { productChanged { id name } }");
+    first_connection.subscribe(
+        "stale",
+        "subscription { productChanged(id: \"p1\") { id name } }",
+    );
     let stale = first_connection.wait_for_operation_message("stale", "error");
     assert_eq!(
         stale["payload"][0]["extensions"]["code"], "SERVICE_UNAVAILABLE",
@@ -1727,7 +1758,10 @@ fn hive_websocket_subscription_retires_and_reconnects_on_graph_replacement() {
 
     let mut second_connection = TestWebSocket::connect(router.address);
     second_connection.connection_init();
-    second_connection.subscribe("v2", "subscription { productChangedV2 { id name } }");
+    second_connection.subscribe(
+        "v2",
+        "subscription { productChangedV2(id: \"p1\") { id name } }",
+    );
     let second_event = second_connection.wait_for_operation_message("v2", "next");
     assert_eq!(
         second_event["payload"]["data"]["productChangedV2"]["name"], "v2",
@@ -1810,6 +1844,32 @@ impl TestWebSocket {
             "id": id,
             "type": "subscribe",
             "payload": {"query": query}
+        }));
+    }
+
+    fn subscribe_with_variables(&mut self, id: &str, query: &str, variables: Value) {
+        self.send_json(&json!({
+            "id": id,
+            "type": "subscribe",
+            "payload": {"query": query, "variables": variables}
+        }));
+    }
+
+    fn subscribe_with_variables_and_extensions(
+        &mut self,
+        id: &str,
+        query: &str,
+        variables: Value,
+        extensions: Value,
+    ) {
+        self.send_json(&json!({
+            "id": id,
+            "type": "subscribe",
+            "payload": {
+                "query": query,
+                "variables": variables,
+                "extensions": extensions
+            }
         }));
     }
 
@@ -2749,11 +2809,11 @@ fn authenticated_product_operations(include_v2: bool) -> Vec<OperationDescriptor
             field_name: "productChanged".to_owned(),
             arguments: vec![ArgumentDescriptor {
                 name: "id".to_owned(),
-                graphql_type: "ID".to_owned(),
-                required: false,
+                graphql_type: "ID!".to_owned(),
+                required: true,
             }],
             authorization: AuthorizationRequirement::AllScopes {
-                scopes: vec![scope("products.events")],
+                scopes: vec![scope("products.{id}.events")],
             },
         },
     ];
@@ -2769,11 +2829,11 @@ fn authenticated_product_operations(include_v2: bool) -> Vec<OperationDescriptor
             field_name: "productChangedV2".to_owned(),
             arguments: vec![ArgumentDescriptor {
                 name: "id".to_owned(),
-                graphql_type: "ID".to_owned(),
-                required: false,
+                graphql_type: "ID!".to_owned(),
+                required: true,
             }],
             authorization: AuthorizationRequirement::AllScopes {
-                scopes: vec![scope("products.events")],
+                scopes: vec![scope("products.{id}.events")],
             },
         });
     }

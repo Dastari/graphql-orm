@@ -165,8 +165,10 @@ An identity service may continue to use those issuer-side responsibilities from
 Authorization preflight enumerates every selected root field across aliases,
 fragments, directives, defaults, and multiple selections after GraphQL
 validation. It supports authenticated, fixed any/all-scope, and documented
-scalar argument-template requirements. Denial occurs before federation work;
-allow only permits normal downstream execution, where subgraph guards and data
+scalar argument-template requirements. Variable-backed templates are completed
+with the current operation's values before downstream execution; WebSocket
+operations never reuse variables from another operation on the connection.
+Allow only permits normal downstream execution, where subgraph guards and data
 policy remain authoritative. Only a successfully validated original bearer
 credential is propagated to GraphQL destinations.
 
@@ -186,10 +188,11 @@ one bearer credential in `connection_init`, either directly or under a
 ```
 
 The router verifies that credential before acknowledging the connection,
-authorizes every operation against its selected immutable graph, and forwards
-only the approved credential. A usable expiry is mandatory. Tokens cannot be
-replaced or refreshed in-place: at expiry the connection closes with code
-`4401`, and the client must reconnect and authenticate again.
+authorizes every operation and its own variable map against the selected
+immutable graph, and forwards only the approved credential. A usable expiry is
+mandatory. Tokens cannot be replaced or refreshed in-place: at expiry the
+connection closes with code `4401`, and the client must reconnect and
+authenticate again.
 
 Public connection count, operations per connection, client-message size,
 upstream buffering, and downstream fan-out are bounded. The default upstream

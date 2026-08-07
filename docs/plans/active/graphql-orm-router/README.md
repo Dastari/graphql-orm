@@ -618,12 +618,20 @@ OAuth `scope` string; bounded legacy `scopes` validation remains available for
 a staged expiry window. The router stays validation-only and never receives
 private signing material.
 
-The only remaining initiative slice is the separately owned GEMA consumer
-migration. No GEMA repository has been modified: Slice 9 requires explicit
-authority for changes outside this workspace, a deployment-owned parallel run,
-reversible cutover and rollback evidence, and confirmation that no other
-workload owns infrastructure before destructive cleanup. The public full-Git-
-revision source channel is approved in the 0.1.0 source distribution review.
-Every binary, container, hosted service, later lockfile, or other delivery
-channel still requires its own artifact-specific license/SBOM review under
+The separately owned GEMA consumer has completed source migration and a
+reversible live cutover while retaining the stopped Cosmo/NATS infrastructure.
+Cutover validation exposed a router defect in variable-backed subscription
+scope templates: the private Hive subscription path discarded the operation
+variables before the authorization hook. The 0.1.1 patch candidate now carries
+operation-local variables across the bounded private bridge, rejects spoofed
+internal metadata, and proves denied variable-backed subscriptions open no
+upstream connection while permitted variable and inline forms succeed.
+
+Slice 9 remains acceptance-red until GEMA pins the reviewed 0.1.1 full
+revision, rebuilds its artifact-specific SBOM/notices, validates the exact live
+reproduction, corrects its separate lowercase `authorization` header handling,
+and brings the retained FAME media process onto the selected release root.
+Cosmo/NATS deletion remains gated on those checks and workload-ownership
+confirmation. Every binary, container, hosted service, later lockfile, or other
+delivery channel still requires its own artifact-specific review under
 ADR-0008.

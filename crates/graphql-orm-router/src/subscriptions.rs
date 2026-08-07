@@ -24,6 +24,7 @@ use crate::{
 };
 
 pub(crate) const INTERNAL_SUBSCRIPTION_HEADER: &str = "x-graphql-orm-router-internal";
+pub(crate) const INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION: &str = "graphqlOrmRouterVariables";
 const GRAPHQL_TRANSPORT_WS: &str = "graphql-transport-ws";
 
 #[derive(Clone)]
@@ -576,15 +577,15 @@ fn observe_server_message(bytes: &[u8], state: &SharedConnectionState) {
 }
 
 async fn forward_subscribe(
-    message: Value,
-    raw: &str,
+    mut message: Value,
+    _raw: &str,
     state: SharedConnectionState,
 ) -> Option<ws::Message> {
     if state.borrow().phase != ConnectionPhase::Ready {
         state.borrow_mut().close();
         return Some(close_message(4401, "Connection is not acknowledged"));
     }
-    let Some(id) = message.get("id").and_then(Value::as_str) else {
+    let Some(id) = message.get("id").and_then(Value::as_str).map(str::to_owned) else {
         state.borrow_mut().close();
         return Some(close_message(4400, "Subscription ID is required"));
     };
@@ -594,28 +595,49 @@ async fn forward_subscribe(
     }
     {
         let mut state = state.borrow_mut();
-        if state.operations.contains(id) {
+        if state.operations.contains(&id) {
             state.close();
             return Some(close_message(4409, "Subscriber already exists"));
         }
         if state.operations.len() >= state.gateway.config.max_operations_per_connection {
-            return Some(operation_limit_error(id));
+            return Some(operation_limit_error(&id));
         }
-        state.operations.insert(id.to_owned());
+        state.operations.insert(id.clone());
         state.gateway.add_operation();
     }
+    inject_operation_variables(&mut message);
     let internal = state.borrow().internal_sink.clone();
     if let Some(internal) = internal
         && internal
-            .send(ws::Message::Text(raw.to_owned().into()))
+            .send(ws::Message::Text(message.to_string().into()))
             .await
             .is_ok()
     {
         return None;
     }
-    state.borrow_mut().remove_operation(id);
+    state.borrow_mut().remove_operation(&id);
     state.borrow_mut().close();
     Some(close_message(1011, "Subscription transport unavailable"))
+}
+
+fn inject_operation_variables(message: &mut Value) {
+    let Some(payload) = message.get_mut("payload").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let variables = payload
+        .get("variables")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let extensions = payload.entry("extensions").or_insert_with(|| json!({}));
+    let Some(extensions) = extensions.as_object_mut() else {
+        return;
+    };
+    // The public gateway is the only writer trusted by the private Hive
+    // endpoint. Always replace a client-supplied value for this reserved key.
+    extensions.insert(
+        INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION.to_owned(),
+        variables,
+    );
 }
 
 async fn forward_complete(
@@ -716,5 +738,29 @@ mod tests {
         let debug = format!("{first:?}");
         assert!(!debug.contains(&first.secret));
         assert!(!debug.contains(&first.path));
+    }
+
+    #[test]
+    fn subscription_gateway_overwrites_reserved_variable_metadata() {
+        let mut message = json!({
+            "id": "operation",
+            "type": "subscribe",
+            "payload": {
+                "query": "subscription ($Id: ID!) { event(id: $Id) }",
+                "variables": {"Id": "actual"},
+                "extensions": {
+                    INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION: {"Id": "spoofed"},
+                    "client": true
+                }
+            }
+        });
+
+        inject_operation_variables(&mut message);
+
+        assert_eq!(
+            message["payload"]["extensions"][INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION],
+            json!({"Id": "actual"})
+        );
+        assert_eq!(message["payload"]["extensions"]["client"], true);
     }
 }

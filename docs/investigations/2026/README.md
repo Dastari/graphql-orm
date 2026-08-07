@@ -11,4 +11,5 @@ supersedes: []
 # 2026 investigations
 
 - [GraphQL ORM Router 0.1.0 source distribution review](router-source-distribution-review.md)
+- [GraphQL ORM Router 0.1.1 source distribution review](router-0.1.1-source-distribution-review.md)
 - [Storage streaming and range boundary](storage-streaming-range-boundary.md)

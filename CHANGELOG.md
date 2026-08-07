@@ -14,6 +14,16 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## graphql-orm-router 0.1.1 - 2026-08-07
+
+This patch fixes variable-backed argument scope templates on authenticated
+HTTP and `graphql-transport-ws` operations. Subscription authorization now
+uses the variables from the individual operation and rejects a missing
+rendered scope before opening a subgraph connection. Client attempts to supply
+router-reserved internal metadata are overwritten. No configuration, protocol,
+schema, public API, or stored-data migration is required; subgraph resolver
+guards remain authoritative.
+
 ## 0.18.0 - 2026-08-07
 
 Companion macros crate: `graphql-orm-macros` **0.18.0** under the aligned

@@ -10,6 +10,19 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.1.0 to 0.1.1
+
+Replace the exact full-revision pin and rebuild the router. No configuration,
+descriptor, schema, token, client-protocol, or stored-data migration is
+required. Variable-backed scope templates on HTTP and
+`graphql-transport-ws` operations now use the current operation's values and
+deny before downstream execution when the rendered scope is absent.
+
+This patch does not weaken the subgraph boundary: resolver authorization and
+database policy remain authoritative. Existing clients continue sending
+standard GraphQL variables and must not depend on router-private GraphQL
+extension names.
+
 ## Initial adoption
 
 1. Expose Federation-compatible SDL and a protocol v1 descriptor from every

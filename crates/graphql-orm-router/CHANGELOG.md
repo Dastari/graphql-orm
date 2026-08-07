@@ -10,6 +10,21 @@ supersedes: []
 
 # Changelog
 
+## 0.1.1 - 2026-08-07
+
+- Fixed argument-templated authorization for variable-backed
+  `graphql-transport-ws` operations. The bounded public gateway now carries
+  each operation's variables across the private engine boundary, evaluates
+  the rendered requirement before opening a subgraph subscription, and
+  overwrites attempts to spoof its reserved internal metadata.
+- Made variable-dependent HTTP authorization complete against the current
+  operation's coerced values before downstream execution. Directive variables
+  and variable defaults remain part of the same fail-closed decision.
+- Added end-to-end coverage proving a variable-backed denied subscription
+  opens no upstream connection while the same permitted value succeeds in
+  both variable and inline forms. Configuration, protocol v1, public APIs, and
+  subgraph resolver responsibilities are unchanged.
+
 ## 0.1.0 - 2026-08-07
 
 - Updated the exact optional `agql-auth` pin to 0.14.0 revision

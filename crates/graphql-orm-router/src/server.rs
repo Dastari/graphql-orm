@@ -15,9 +15,9 @@ use hive_router::{
     pipeline::request_identifiers::RequestIdentifiersService,
     plugins::{
         hooks::{
+            on_execute::{OnExecuteStartHookPayload, OnExecuteStartHookResult},
             on_graphql_analysis::{OnGraphqlAnalysisHookPayload, OnGraphqlAnalysisHookResult},
             on_graphql_error::{OnGraphQLErrorHookPayload, OnGraphQLErrorHookResult},
-            on_graphql_params::{OnGraphQLParamsStartHookPayload, OnGraphQLParamsStartHookResult},
             on_http_request::{OnHttpRequestHookPayload, OnHttpRequestHookResult},
             on_plugin_init::{OnPluginInitPayload, OnPluginInitResult},
             on_subgraph_http_request::{
@@ -29,12 +29,14 @@ use hive_router::{
         },
         plugins_service::PluginService,
     },
+    sonic_rs::JsonContainerTrait,
 };
 use hive_router_config::HiveRouterConfig;
 use reqwest::{Client, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::auth::VariableResolution;
 use crate::{
     AuthenticatedPrincipal, AuthenticationProvider, RouterConfig, RouterError, RouterErrorKind,
     ScopeMatcher,
@@ -42,8 +44,8 @@ use crate::{
     federation::ActiveGraph,
     lifecycle::{GraphLifecycle, RouterHandle, fetch_initial},
     subscriptions::{
-        INTERNAL_SUBSCRIPTION_HEADER, InternalSubscriptionEndpoint, SubscriptionGateway,
-        websocket_index,
+        INTERNAL_SUBSCRIPTION_HEADER, INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION,
+        InternalSubscriptionEndpoint, SubscriptionGateway, websocket_index,
     },
 };
 
@@ -456,9 +458,10 @@ struct StaticGraphPlugin {
     runtime: PluginRuntime,
 }
 
-struct RequestVariables(std::collections::HashMap<String, hive_router::sonic_rs::Value>);
-
 struct SelectedRouterPolicy(Option<Arc<crate::auth::AuthorizationCatalog>>);
+
+#[derive(Clone, Copy)]
+struct TrustedInternalSubscription;
 
 #[derive(Clone)]
 struct PluginRuntime {
@@ -528,6 +531,7 @@ impl RouterPlugin for StaticGraphPlugin {
             .context
             .insert(SelectedRouterPolicy(selected.authorization.clone()));
         if let Some(internal) = &self.runtime.internal_subscription {
+            let is_internal_subscription = payload.router_http_request.path() == internal.path;
             let supplied = payload
                 .router_http_request
                 .headers()
@@ -535,6 +539,9 @@ impl RouterPlugin for StaticGraphPlugin {
                 .and_then(|value| value.to_str().ok());
             if !internal.authorizes(payload.router_http_request.path(), supplied) {
                 return invalid_bearer_response(payload);
+            }
+            if is_internal_subscription {
+                payload.context.insert(TrustedInternalSubscription);
             }
         }
         let Some(provider) = &self.runtime.authentication else {
@@ -580,18 +587,6 @@ impl RouterPlugin for StaticGraphPlugin {
         }
     }
 
-    async fn on_graphql_params<'execution>(
-        &'execution self,
-        payload: OnGraphQLParamsStartHookPayload<'execution>,
-    ) -> OnGraphQLParamsStartHookResult<'execution> {
-        payload.on_end(|payload| {
-            payload
-                .context
-                .insert(RequestVariables(payload.graphql_params.variables.clone()));
-            payload.proceed()
-        })
-    }
-
     async fn on_graphql_analysis<'execution>(
         &'execution self,
         payload: &mut OnGraphqlAnalysisHookPayload<'execution>,
@@ -628,15 +623,43 @@ impl RouterPlugin for StaticGraphPlugin {
             return OnGraphqlAnalysisHookResult::Proceed;
         };
         let principal = payload.context.get_ref::<AuthenticatedPrincipal>();
-        let variables = payload.context.get_ref::<RequestVariables>();
+        // Hive has already moved supplied values into its coerced-variable
+        // payload at this hook. The public WebSocket gateway therefore copies
+        // each operation's raw values into a reserved extension before it
+        // enters Hive. Only the authenticated private endpoint may activate
+        // that extension; ordinary HTTP clients cannot spoof it.
+        let trusted_subscription = payload
+            .context
+            .get_ref::<TrustedInternalSubscription>()
+            .is_some();
+        let subscription_variables = trusted_subscription.then(|| {
+            payload
+                .graphql_params
+                .extensions
+                .as_ref()
+                .and_then(|extensions| extensions.get(INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION))
+                .and_then(|variables| variables.as_object())
+                .map(|variables| {
+                    variables
+                        .iter()
+                        .map(|(name, value)| (name.to_owned(), value.clone()))
+                        .collect::<std::collections::HashMap<_, _>>()
+                })
+                .unwrap_or_default()
+        });
+        let variables = subscription_variables
+            .as_ref()
+            .unwrap_or(&payload.graphql_params.variables);
         let denials = catalog.authorize_operation(
             payload.filtered_operation_for_plan,
-            variables
-                .as_deref()
-                .map(|variables| &variables.0)
-                .unwrap_or(&payload.graphql_params.variables),
+            variables,
             principal.as_deref(),
             self.runtime.scope_matcher.as_ref(),
+            if trusted_subscription {
+                VariableResolution::Complete
+            } else {
+                VariableResolution::Preflight
+            },
         );
         if denials.is_empty() {
             return OnGraphqlAnalysisHookResult::Proceed;
@@ -654,6 +677,55 @@ impl RouterPlugin for StaticGraphPlugin {
                 errors,
                 hive_router::http::StatusCode::OK,
             ),
+        )
+    }
+
+    async fn on_execute<'execution>(
+        &'execution self,
+        payload: OnExecuteStartHookPayload<'execution>,
+    ) -> OnExecuteStartHookResult<'execution> {
+        let selected = payload.context.get_ref::<SelectedRouterPolicy>();
+        let Some(catalog) = selected
+            .as_deref()
+            .and_then(|selected| selected.0.as_deref())
+        else {
+            if self.runtime.authentication.is_some() {
+                return payload.end_with_graphql_error(
+                    GraphQLError::from_message_and_code(
+                        "authorization state is unavailable",
+                        "UNAUTHENTICATED",
+                    ),
+                    hive_router::http::StatusCode::SERVICE_UNAVAILABLE,
+                );
+            }
+            return payload.proceed();
+        };
+        let principal = payload.context.get_ref::<AuthenticatedPrincipal>();
+        // WebSocket plugin context is connection-scoped, so never cache an
+        // operation's variables there. The execute hook owns the exact coerced
+        // values for this HTTP or WebSocket operation and still runs before any
+        // subgraph execution.
+        let empty_variables = std::collections::HashMap::new();
+        let variables = payload.variable_values.as_ref().unwrap_or(&empty_variables);
+        let denials = catalog.authorize_operation(
+            payload.operation_for_plan,
+            variables,
+            principal.as_deref(),
+            self.runtime.scope_matcher.as_ref(),
+            VariableResolution::Complete,
+        );
+        if denials.is_empty() {
+            return payload.proceed();
+        }
+        self.runtime
+            .lifecycle
+            .metrics()
+            .authorization_denied(denials.len());
+        payload.end_with_graphql_errors(
+            denials
+                .into_iter()
+                .map(|denial| GraphQLError::from_message_and_code(denial.message, denial.code)),
+            hive_router::http::StatusCode::OK,
         )
     }
 

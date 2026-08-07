@@ -295,6 +295,7 @@ impl AuthorizationCatalog {
         variables: &std::collections::HashMap<String, JsonValue>,
         principal: Option<&AuthenticatedPrincipal>,
         matcher: &dyn ScopeMatcher,
+        variable_resolution: VariableResolution,
     ) -> Vec<AuthorizationDenial> {
         let mut effective_variables = variables.clone();
         if let Some(definitions) = &operation.variable_definitions {
@@ -315,16 +316,33 @@ impl AuthorizationCatalog {
         collect_included_root_fields(
             &operation.selection_set.items,
             &effective_variables,
+            variable_resolution,
             &mut fields,
         );
         fields
             .into_iter()
             .filter_map(|field| {
                 let operation = self.operations.get(&(root_type, field.name.clone()))?;
-                authorize_field(operation, field, &effective_variables, principal, matcher).err()
+                match authorize_field(
+                    operation,
+                    field,
+                    &effective_variables,
+                    principal,
+                    matcher,
+                    variable_resolution,
+                ) {
+                    AuthorizationDecision::Allowed | AuthorizationDecision::Deferred => None,
+                    AuthorizationDecision::Denied(denial) => Some(denial),
+                }
             })
             .collect()
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VariableResolution {
+    Preflight,
+    Complete,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -333,22 +351,33 @@ pub(crate) struct AuthorizationDenial {
     pub(crate) message: &'static str,
 }
 
+enum AuthorizationDecision {
+    Allowed,
+    Deferred,
+    Denied(AuthorizationDenial),
+}
+
 fn authorize_field(
     operation: &OperationDescriptor,
     field: &FieldSelection,
     variables: &std::collections::HashMap<String, JsonValue>,
     principal: Option<&AuthenticatedPrincipal>,
     matcher: &dyn ScopeMatcher,
-) -> Result<(), AuthorizationDenial> {
+    variable_resolution: VariableResolution,
+) -> AuthorizationDecision {
     let alternatives = match &operation.authorization {
         AuthorizationRequirement::Public | AuthorizationRequirement::SubgraphOnly { .. } => {
-            return Ok(());
+            return AuthorizationDecision::Allowed;
         }
         AuthorizationRequirement::Authenticated => {
-            return principal.map(|_| ()).ok_or(AuthorizationDenial {
-                code: "UNAUTHENTICATED",
-                message: "authentication is required",
-            });
+            return if principal.is_some() {
+                AuthorizationDecision::Allowed
+            } else {
+                AuthorizationDecision::Denied(AuthorizationDenial {
+                    code: "UNAUTHENTICATED",
+                    message: "authentication is required",
+                })
+            };
         }
         AuthorizationRequirement::AllScopes { scopes } => vec![scopes.as_slice()],
         AuthorizationRequirement::AnyScopes { alternatives } => alternatives
@@ -357,29 +386,64 @@ fn authorize_field(
             .collect(),
     };
     let Some(principal) = principal else {
-        return Err(AuthorizationDenial {
+        return AuthorizationDecision::Denied(AuthorizationDenial {
             code: "UNAUTHENTICATED",
             message: "authentication is required",
         });
     };
-    let allowed = alternatives.into_iter().any(|alternative| {
-        alternative.iter().all(|template| {
-            render_template(template, operation, field, variables).is_some_and(|required| {
-                principal
-                    .scopes()
-                    .iter()
-                    .any(|granted| matcher.matches(granted, &required))
-            })
-        })
-    });
-    if allowed {
-        Ok(())
+
+    let mut has_deferred_alternative = false;
+    for alternative in alternatives {
+        let mut alternative_is_deferred = false;
+        let mut alternative_is_denied = false;
+        for template in alternative {
+            match render_template(template, operation, field, variables) {
+                Some(required)
+                    if principal
+                        .scopes()
+                        .iter()
+                        .any(|granted| matcher.matches(granted, &required)) => {}
+                Some(_) => {
+                    alternative_is_denied = true;
+                    break;
+                }
+                None if variable_resolution == VariableResolution::Preflight
+                    && template_references_variable(template, field) =>
+                {
+                    alternative_is_deferred = true;
+                }
+                None => {
+                    alternative_is_denied = true;
+                    break;
+                }
+            }
+        }
+        if !alternative_is_denied && !alternative_is_deferred {
+            return AuthorizationDecision::Allowed;
+        }
+        if !alternative_is_denied && alternative_is_deferred {
+            has_deferred_alternative = true;
+        }
+    }
+
+    if has_deferred_alternative {
+        AuthorizationDecision::Deferred
     } else {
-        Err(AuthorizationDenial {
+        AuthorizationDecision::Denied(AuthorizationDenial {
             code: "FORBIDDEN",
             message: "required scope is missing",
         })
     }
+}
+
+fn template_references_variable(template: &ScopeTemplate, field: &FieldSelection) -> bool {
+    template.referenced_arguments().into_iter().any(|name| {
+        field
+            .arguments
+            .as_ref()
+            .and_then(|arguments| arguments.get_argument(name))
+            .is_some_and(|value| matches!(value, Value::Variable(_)))
+    })
 }
 
 fn render_template(
@@ -423,7 +487,8 @@ fn canonical_scalar(
             scalar_accepts_string(descriptor).then(|| value.clone())
         }
         Value::Boolean(value) => scalar_accepts_boolean(descriptor).then(|| value.to_string()),
-        Value::Int(value) => scalar_accepts_integer(descriptor).then(|| value.to_string()),
+        Value::Int(value) => (scalar_accepts_integer(descriptor) || scalar_accepts_id(descriptor))
+            .then(|| value.to_string()),
         Value::Float(value) => scalar_accepts_float(descriptor).then(|| value.to_string()),
         Value::Null | Value::List(_) | Value::Object(_) => None,
     }
@@ -431,21 +496,29 @@ fn canonical_scalar(
 
 fn canonical_json_scalar(value: &JsonValue, descriptor: &ArgumentDescriptor) -> Option<String> {
     if scalar_accepts_string(descriptor) {
-        return value.as_str().map(str::to_owned);
+        return value.as_str().map(str::to_owned).or_else(|| {
+            scalar_accepts_id(descriptor)
+                .then(|| canonical_json_integer(value))
+                .flatten()
+        });
     }
     if scalar_accepts_boolean(descriptor) {
         return value.as_bool().map(|value| value.to_string());
     }
     if scalar_accepts_integer(descriptor) {
-        return value
-            .as_i64()
-            .map(|value| value.to_string())
-            .or_else(|| value.as_u64().map(|value| value.to_string()));
+        return canonical_json_integer(value);
     }
     if scalar_accepts_float(descriptor) {
         return value.as_f64().map(|value| value.to_string());
     }
     None
+}
+
+fn canonical_json_integer(value: &JsonValue) -> Option<String> {
+    value
+        .as_i64()
+        .map(|value| value.to_string())
+        .or_else(|| value.as_u64().map(|value| value.to_string()))
 }
 
 fn scalar_name(argument: &ArgumentDescriptor) -> &str {
@@ -454,6 +527,10 @@ fn scalar_name(argument: &ArgumentDescriptor) -> &str {
 
 fn scalar_accepts_string(argument: &ArgumentDescriptor) -> bool {
     matches!(scalar_name(argument), "String" | "ID" | "UUID" | "Uuid")
+}
+
+fn scalar_accepts_id(argument: &ArgumentDescriptor) -> bool {
+    scalar_name(argument) == "ID"
 }
 
 fn scalar_accepts_boolean(argument: &ArgumentDescriptor) -> bool {
@@ -587,19 +664,35 @@ fn graph_root_contract(graph: &ActiveGraph) -> Result<GraphRootContract, RouterE
 fn collect_included_root_fields<'a>(
     selections: &'a [SelectionItem],
     variables: &std::collections::HashMap<String, JsonValue>,
+    variable_resolution: VariableResolution,
     fields: &mut Vec<&'a FieldSelection>,
 ) {
     for selection in selections {
         match selection {
-            SelectionItem::Field(field) if is_included(field, variables) => fields.push(field),
+            SelectionItem::Field(field)
+                if directive_inclusion(
+                    field.skip_if.as_deref(),
+                    field.include_if.as_deref(),
+                    variables,
+                    variable_resolution,
+                ) == DirectiveInclusion::Included =>
+            {
+                fields.push(field);
+            }
             SelectionItem::InlineFragment(fragment)
-                if directives_include(
+                if directive_inclusion(
                     fragment.skip_if.as_deref(),
                     fragment.include_if.as_deref(),
                     variables,
-                ) =>
+                    variable_resolution,
+                ) == DirectiveInclusion::Included =>
             {
-                collect_included_root_fields(&fragment.selections.items, variables, fields);
+                collect_included_root_fields(
+                    &fragment.selections.items,
+                    variables,
+                    variable_resolution,
+                    fields,
+                );
             }
             SelectionItem::Field(_)
             | SelectionItem::InlineFragment(_)
@@ -608,22 +701,27 @@ fn collect_included_root_fields<'a>(
     }
 }
 
-fn is_included(
-    field: &FieldSelection,
-    variables: &std::collections::HashMap<String, JsonValue>,
-) -> bool {
-    directives_include(
-        field.skip_if.as_deref(),
-        field.include_if.as_deref(),
-        variables,
-    )
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DirectiveInclusion {
+    Included,
+    Excluded,
+    Deferred,
 }
 
-fn directives_include(
+fn directive_inclusion(
     skip_if: Option<&str>,
     include_if: Option<&str>,
     variables: &std::collections::HashMap<String, JsonValue>,
-) -> bool {
+    variable_resolution: VariableResolution,
+) -> DirectiveInclusion {
+    if variable_resolution == VariableResolution::Preflight
+        && [skip_if, include_if]
+            .into_iter()
+            .flatten()
+            .any(|name| !variables.contains_key(name.trim_start_matches('$')))
+    {
+        return DirectiveInclusion::Deferred;
+    }
     let skipped = skip_if
         .and_then(|name| variables.get(name.trim_start_matches('$')))
         .and_then(JsonValueTrait::as_bool)
@@ -632,7 +730,11 @@ fn directives_include(
         .and_then(|name| variables.get(name.trim_start_matches('$')))
         .and_then(JsonValueTrait::as_bool)
         .unwrap_or(true);
-    !skipped && included
+    if !skipped && included {
+        DirectiveInclusion::Included
+    } else {
+        DirectiveInclusion::Excluded
+    }
 }
 
 #[cfg(test)]
