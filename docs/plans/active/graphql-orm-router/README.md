@@ -618,21 +618,32 @@ OAuth `scope` string; bounded legacy `scopes` validation remains available for
 a staged expiry window. The router stays validation-only and never receives
 private signing material.
 
-The separately owned GEMA consumer has completed source migration and a
-reversible live cutover while retaining the stopped Cosmo/NATS infrastructure.
-Cutover validation exposed a router defect in variable-backed subscription
-scope templates: the private Hive subscription path discarded the operation
-variables before the authorization hook. The reviewed 0.1.1 patch is now
-published from this repository; it carries operation-local variables across
-the bounded private bridge, rejects spoofed internal metadata, and proves
-denied variable-backed subscriptions open no upstream connection while
-permitted variable and inline forms succeed.
+The separately owned GEMA consumer has completed source migration, reversible
+live cutover, and deployment validation at consumer revision
+`7a3150cbe6c4332c1b786cb2a1a1d680bfbeb8bb`, using the reviewed router 0.1.1
+revision `d178af46648881d1959701b1fb56f2885bb326cb`. Its exact router artifact
+has SHA-256
+`021a68d07c763ad47a78d1da6a54ef06eeb245db30598123642f472da74253a9`;
+the unchanged configuration composed all eight generated protocol-v1
+descriptors with graph fingerprint
+`sha256:4425e7c84a2fc4cb0f277fbcac4602b4b3758cd4bf1e1fbb074939ae8fdaf71b`.
+Artifact-specific SBOM, notices, native/linked-component inventory, approval,
+checksums, and deployment results are retained by the deployment owner.
 
-Slice 9 remains acceptance-red until GEMA pins the reviewed 0.1.1 full
-revision, rebuilds its artifact-specific SBOM/notices, validates the exact live
-reproduction, corrects its separate lowercase `authorization` header handling,
-and brings the retained FAME media process onto the selected release root.
-Cosmo/NATS deletion remains gated on those checks and workload-ownership
-confirmation. Every binary, container, hosted service, later lockfile, or other
-delivery channel still requires its own artifact-specific review under
-ADR-0008.
+The variable-backed subscription matrix is acceptance-green: matching and
+inline values each reached FAME with one subgraph request, while a mismatched
+value returned `FORBIDDEN` with zero subgraph requests. Lowercase HTTP and
+WebSocket authorization propagation passed. FAME now rejects ambiguous header
+variants while reading names case-insensitively; FAME and its retained media
+process run from the selected release root. Strict runtime status is 14/14,
+public monitoring passed, and a graceful stop/readiness-close/restart cycle
+preserved post-restart subscriptions without changing RBI or relay tiers.
+
+Slice 9 cutover and live acceptance are closed. Cosmo, NATS, WGC, and JetStream
+assets remain inactive with no process, container, unit, or listener, so GEMA
+no longer depends on them for federation or notifications. The initiative
+remains open only for the final infrastructure ownership/removal handoff;
+permanent deletion must not occur until the deployment owner confirms that no
+other workload owns the retained assets. Every later binary, container, hosted
+service, lockfile, or delivery channel still requires its own artifact-specific
+review under ADR-0008.
