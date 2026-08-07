@@ -77,8 +77,10 @@
 //! ```
 //!
 //! `required` calls the runtime `AuthSubject` helper before generated database
-//! work. `optional` reads auth only when present and lets policy hooks decide.
-//! `none` leaves generated resolvers public.
+//! work and emits standard Federation authentication metadata as
+//! `@federation__authenticated` on each generated field. `optional` reads auth
+//! only when present and lets policy hooks decide. `none` leaves generated
+//! resolvers public.
 //!
 //! # Composite Repository Mutations
 //!

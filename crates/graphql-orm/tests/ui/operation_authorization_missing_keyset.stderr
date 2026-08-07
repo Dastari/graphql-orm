@@ -1,0 +1,5 @@
+error: operation authorization category `keyset_list` requires a generated keyset operation; configure graphql_entity keyset = "field asc|desc, ..."
+ --> tests/ui/operation_authorization_missing_keyset.rs:9:8
+  |
+9 | struct OperationAuthorizationMissingKeyset {
+  |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

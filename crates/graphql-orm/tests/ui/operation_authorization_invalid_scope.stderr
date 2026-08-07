@@ -1,0 +1,5 @@
+error: operation_authorization scope strings must not contain whitespace or control characters
+ --> tests/ui/operation_authorization_invalid_scope.rs:7:20
+  |
+7 |     any_scopes = [["records {read}"]]
+  |                    ^^^^^^^^^^^^^^^^

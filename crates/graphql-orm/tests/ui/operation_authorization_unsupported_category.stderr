@@ -1,0 +1,5 @@
+error: unsupported operation authorization category; expected a generated GraphQL operation category
+ --> tests/ui/operation_authorization_unsupported_category.rs:6:19
+  |
+6 |     categories = ["unknown"],
+  |                   ^^^^^^^^^

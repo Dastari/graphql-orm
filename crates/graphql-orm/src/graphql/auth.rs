@@ -454,6 +454,93 @@ pub fn enforce_resolver_auth(
     }
 }
 
+/// Require an authenticated subject that satisfies one complete scope
+/// alternative.
+///
+/// Each inner slice is an all-of requirement; the outer slice is any-of. Scope
+/// comparison is exact and case-sensitive. Empty alternatives and empty scope
+/// sets fail closed so generated policy metadata cannot accidentally grant
+/// access through an incomplete declaration.
+pub fn enforce_resolver_scopes(
+    ctx: &async_graphql::Context<'_>,
+    alternatives: &[&[&str]],
+) -> async_graphql::Result<AuthSubject> {
+    let subject = ctx.auth_subject()?;
+    if subject_satisfies_scope_alternatives(&subject, alternatives) {
+        Ok(subject)
+    } else {
+        Err(crate::graphql::errors::OrmPublicError::forbidden().into_graphql_error())
+    }
+}
+
+/// Require an authenticated subject that satisfies one scope-template
+/// alternative after substituting already-coerced root-field arguments.
+///
+/// Templates use `{argument}` placeholders. Expansion scans only the original
+/// template, so braces contained in an argument value remain inert data and
+/// can never introduce another placeholder. Missing arguments, malformed
+/// templates, empty alternatives, and empty scope sets fail closed.
+#[doc(hidden)]
+pub fn enforce_resolver_scope_templates(
+    ctx: &async_graphql::Context<'_>,
+    alternatives: &[&[&str]],
+    arguments: &[(&str, &str)],
+) -> async_graphql::Result<AuthSubject> {
+    let subject = ctx.auth_subject()?;
+    let allowed = alternatives.iter().any(|templates| {
+        !templates.is_empty()
+            && templates.iter().all(|template| {
+                render_scope_template(template, arguments)
+                    .is_some_and(|scope| subject.has_scope(&scope))
+            })
+    });
+    if allowed {
+        Ok(subject)
+    } else {
+        Err(crate::graphql::errors::OrmPublicError::forbidden().into_graphql_error())
+    }
+}
+
+fn render_scope_template(template: &str, arguments: &[(&str, &str)]) -> Option<String> {
+    if template.is_empty()
+        || template
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return None;
+    }
+
+    let mut rendered = String::with_capacity(template.len());
+    let mut remaining = template;
+    loop {
+        let Some(start) = remaining.find(['{', '}']) else {
+            rendered.push_str(remaining);
+            return Some(rendered);
+        };
+        if remaining.as_bytes()[start] == b'}' {
+            return None;
+        }
+        rendered.push_str(&remaining[..start]);
+        let after_start = &remaining[start + 1..];
+        let end = after_start.find('}')?;
+        let argument_name = &after_start[..end];
+        if argument_name.is_empty() || argument_name.contains('{') {
+            return None;
+        }
+        let value = arguments
+            .iter()
+            .find_map(|(name, value)| (*name == argument_name).then_some(*value))?;
+        rendered.push_str(value);
+        remaining = &after_start[end + 1..];
+    }
+}
+
+fn subject_satisfies_scope_alternatives(subject: &AuthSubject, alternatives: &[&[&str]]) -> bool {
+    alternatives.iter().any(|required_scopes| {
+        !required_scopes.is_empty() && subject.has_all_scopes(required_scopes)
+    })
+}
+
 fn dedupe_sorted(mut values: Vec<String>) -> Vec<String> {
     values.sort();
     values.dedup();
@@ -504,5 +591,76 @@ mod tests {
         );
         assert_eq!(subject.roles, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(subject.scopes, vec!["s1".to_string(), "s2".to_string()]);
+    }
+
+    #[test]
+    fn scope_alternatives_require_every_scope_in_one_alternative() {
+        let subject = AuthSubject::from_parts(
+            "u",
+            vec![],
+            vec!["tickets.read".to_string(), "tickets.write".to_string()],
+            None,
+        );
+        let alternatives: &[&[&str]] = &[
+            &["tickets.read", "tickets.admin"],
+            &["tickets.read", "tickets.write"],
+        ];
+
+        assert!(subject_satisfies_scope_alternatives(&subject, alternatives));
+        assert!(!subject_satisfies_scope_alternatives(
+            &subject,
+            &[&["tickets.read", "tickets.admin"]],
+        ));
+    }
+
+    #[test]
+    fn scope_alternatives_are_exact_and_case_sensitive() {
+        let subject = AuthSubject::from_parts("u", vec![], vec!["Tickets.Read".into()], None);
+
+        assert!(subject_satisfies_scope_alternatives(
+            &subject,
+            &[&["Tickets.Read"]],
+        ));
+        assert!(!subject_satisfies_scope_alternatives(
+            &subject,
+            &[&["tickets.read"]],
+        ));
+    }
+
+    #[test]
+    fn empty_scope_alternatives_fail_closed() {
+        let subject = AuthSubject::from_parts("u", vec![], vec!["tickets.read".into()], None);
+
+        assert!(!subject_satisfies_scope_alternatives(&subject, &[]));
+        assert!(!subject_satisfies_scope_alternatives(&subject, &[&[]]));
+        assert!(!subject_satisfies_scope_alternatives(
+            &subject,
+            &[&[], &["tickets.write"]],
+        ));
+    }
+
+    #[test]
+    fn scope_template_rendering_is_one_pass_and_fails_closed() {
+        assert_eq!(
+            render_scope_template("record.{id}.read", &[("id", "record-1")]),
+            Some("record.record-1.read".to_string())
+        );
+        assert_eq!(
+            render_scope_template(
+                "record.{id}.{permission}",
+                &[("id", "{permission}"), ("permission", "read")],
+            ),
+            Some("record.{permission}.read".to_string()),
+            "argument data must not be reinterpreted as template syntax"
+        );
+        assert_eq!(render_scope_template("record.{missing}", &[]), None);
+        assert_eq!(
+            render_scope_template("record.{id", &[("id", "record-1")]),
+            None
+        );
+        assert_eq!(
+            render_scope_template("record.}.read", &[("id", "record-1")]),
+            None
+        );
     }
 }

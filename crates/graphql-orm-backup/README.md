@@ -79,11 +79,11 @@ adapters with an exact backend. Hosts that already select a backend through
 their direct `graphql-orm` dependency may enable the lower-level `orm` feature
 instead. Exactly one ORM backend must be active.
 
-This workspace resolves `graphql-orm` 0.17.0, `graphql-orm-backup` 0.7.0, and
+This workspace resolves `graphql-orm` 0.18.0, `graphql-orm-backup` 0.7.0, and
 `graphql-orm-storage` 0.6.0 through workspace path dependencies and the root
 `Cargo.lock`. External consumers select one reviewed full monorepo revision.
-The ORM's optional `auth-agql` bridge pins `agql-auth` 0.13.0 at
-`d6b9cef663d52125c52f3fb90d4155ee25d34775`. This crate does not enable that
+The ORM's optional `auth-agql` bridge pins `agql-auth` 0.14.0 at
+`413fda3435f060604cd653c11e2cc18a668aace1`. This crate does not enable that
 feature or depend directly on authorization; hosts own authorization and may
 enable it through their direct `graphql-orm` dependency.
 

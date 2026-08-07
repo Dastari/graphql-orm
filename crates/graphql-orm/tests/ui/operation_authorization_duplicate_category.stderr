@@ -1,0 +1,5 @@
+error: duplicate operation authorization category `single_read`
+ --> tests/ui/operation_authorization_duplicate_category.rs:6:34
+  |
+6 |     categories = ["single_read", "single_read"],
+  |                                  ^^^^^^^^^^^^^

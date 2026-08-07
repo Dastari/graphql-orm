@@ -1,0 +1,5 @@
+error: unsupported operation_authorization option `required_roles`
+ --> tests/ui/operation_authorization_unknown_option.rs:8:5
+  |
+8 |     required_roles = ["records.admin"]
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

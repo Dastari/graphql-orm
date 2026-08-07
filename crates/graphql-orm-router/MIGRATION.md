@@ -1,0 +1,47 @@
+---
+title: graphql-orm-router migration guide
+kind: reference
+status: active
+owner: graphql-orm-router-maintainers
+last_reviewed: 2026-08-07
+review_by: 2027-02-07
+supersedes: []
+---
+
+# graphql-orm-router migration guide
+
+## Initial adoption
+
+1. Expose Federation-compatible SDL and a protocol v1 descriptor from every
+   subgraph. Keep direct subgraph guards authoritative.
+2. Configure static sources and run the executable with `--check` until full
+   composition, authorization binding, and runtime construction pass.
+3. Shadow representative HTTP and WebSocket operations and compare data,
+   GraphQL errors, scope decisions, and reconnect behavior.
+4. Route clients behind a reversible deployment switch. Retain the previous
+   entry point through the agreed observation window.
+5. Remove superseded federation or event infrastructure only after ownership
+   checks and an exercised rollback.
+
+Fixed generated policies emit standard Federation `@authenticated` and
+`@requiresScopes` metadata where representable. Argument-templated and custom
+policies remain in protocol metadata or subgraph-only policy; no SDL string
+rewriting is required. The router preflight never replaces the resolver guard.
+
+New access tokens should use the OAuth space-delimited `scope` claim. The
+legacy `scopes` array is accepted only with `acceptLegacyScopes: true`; a token
+containing conflicting forms is rejected. The optional `auth-agql` feature is
+a validation/matching adapter only and introduces no issuer responsibilities.
+It resolves `agql-auth` 0.14.0 at exact revision
+`413fda3435f060604cd653c11e2cc18a668aace1`; hosts with a direct dependency
+must use the same source and revision. Configure legacy acceptance directly
+with `agql_auth::AccessTokenValidatorBuilder::legacy_scope_claims` before
+wrapping the validator in `AgqlAuthenticationProvider::new`.
+
+Subscriptions move to `graphql-transport-ws` with a bearer in
+`connection_init`. Tokens are not refreshed in place. Clients must reconnect
+at expiry and after `SUBSCRIPTION_SCHEMA_RELOAD`, and must query authoritative
+state after a delivery gap.
+
+See the [operations runbook](docs/operations.md) for rollout budgets and the
+[schema evolution guide](docs/schema-evolution.md) for expand/contract rules.

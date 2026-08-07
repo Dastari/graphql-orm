@@ -48,14 +48,31 @@ type TestPool = sqlx::PgPool;
 
 #[cfg(feature = "sqlite")]
 async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
-    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
+    // Keep the in-memory database and its per-connection foreign-key setting
+    // on one connection. The rollback test below relies on a deferred foreign
+    // key that fails at commit, after generated mutation code has queued its
+    // change event.
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await?;
     sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "CREATE TABLE subscription_titles (
+            title TEXT PRIMARY KEY
+        )",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("INSERT INTO subscription_titles (title) VALUES ('Alpha')")
         .execute(&pool)
         .await?;
     sqlx::query(
         "CREATE TABLE subscription_records (
             id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
+            title TEXT NOT NULL REFERENCES subscription_titles(title) DEFERRABLE INITIALLY DEFERRED,
             created_at INTEGER NOT NULL DEFAULT (unixepoch()),
             updated_at INTEGER NOT NULL DEFAULT (unixepoch())
         )",
@@ -145,6 +162,104 @@ async fn generated_subscriptions_work_without_manual_sender_registration()
     assert_eq!(
         json["recordChanged"]["record"]["title"].as_str(),
         Some("Alpha")
+    );
+
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn generated_subscription_events_are_emitted_only_after_commit()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = test_mutex().lock().await;
+    let database = graphql_orm::db::Database::new(setup_pool().await?);
+    let schema: TestSchema = schema_builder(database.clone())
+        .data("test-user".to_string())
+        .finish();
+
+    let mut stream = Box::pin(
+        schema.execute_stream(
+            Request::new(
+                "subscription {
+                    recordChanged {
+                        action
+                        record { title }
+                    }
+                }",
+            )
+            .data("test-user".to_string()),
+        ),
+    );
+    graphql_orm::futures::future::poll_fn(|cx| match stream.as_mut().poll_next(cx) {
+        Poll::Pending => Poll::Ready(()),
+        Poll::Ready(Some(response)) => panic!(
+            "subscription yielded before mutation: {:?}",
+            response.errors
+        ),
+        Poll::Ready(None) => panic!("subscription stream ended before mutation"),
+    })
+    .await;
+
+    let committed = schema
+        .execute(
+            Request::new(
+                "mutation {
+                    createRecord(input: { title: \"Alpha\" }) {
+                        success
+                    }
+                }",
+            )
+            .data("test-user".to_string()),
+        )
+        .await;
+    assert!(committed.errors.is_empty(), "{:?}", committed.errors);
+    let committed_event = timeout(Duration::from_secs(2), stream.next())
+        .await?
+        .expect("subscription stream ended unexpectedly");
+    assert!(
+        committed_event.errors.is_empty(),
+        "{:?}",
+        committed_event.errors
+    );
+    assert_eq!(
+        committed_event.data.into_json()?["recordChanged"]["record"]["title"].as_str(),
+        Some("Alpha")
+    );
+
+    // `Rejected` has no matching parent row. SQLite defers this foreign-key
+    // check until COMMIT, so the generated mutation has already inserted and
+    // read the row, run its hooks, and queued RecordChangedEvent. A failed
+    // commit must discard that queued event.
+    let rolled_back = schema
+        .execute(
+            Request::new(
+                "mutation {
+                    createRecord(input: { title: \"Rejected\" }) {
+                        success
+                        error
+                    }
+                }",
+            )
+            .data("test-user".to_string()),
+        )
+        .await;
+    let rolled_back_json = rolled_back.data.into_json()?;
+    assert!(
+        !rolled_back.errors.is_empty()
+            || rolled_back_json["createRecord"]["success"].as_bool() == Some(false),
+        "deferred foreign-key violation unexpectedly committed: {rolled_back_json}"
+    );
+
+    let rejected_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM subscription_records WHERE title = 'Rejected'")
+            .fetch_one(database.pool())
+            .await?;
+    assert_eq!(rejected_rows, 0, "failed generated write was committed");
+    assert!(
+        timeout(Duration::from_millis(250), stream.next())
+            .await
+            .is_err(),
+        "rolled-back generated write emitted a subscription event"
     );
 
     Ok(())

@@ -1,0 +1,5 @@
+error: duplicate operation authorization category `single_read`
+ --> tests/ui/operation_authorization_duplicate_declaration.rs:6:53
+  |
+6 | #[graphql_orm(operation_authorization(categories = ["single_read"], any_scopes = [["records.admin"]]))]
+  |                                                     ^^^^^^^^^^^^^

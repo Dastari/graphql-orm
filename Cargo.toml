@@ -4,6 +4,8 @@ members = [
   "crates/graphql-orm-backup",
   "crates/graphql-orm",
   "crates/graphql-orm-macros",
+  "crates/graphql-orm-router",
+  "crates/graphql-orm-router-protocol",
   "crates/graphql-orm-storage",
 ]
 default-members = [
@@ -22,22 +24,36 @@ license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm"
 
 [workspace.dependencies]
-agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "d6b9cef663d52125c52f3fb90d4155ee25d34775", version = "0.13.0" }
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "413fda3435f060604cd653c11e2cc18a668aace1", version = "0.14.0" }
+arc-swap = "1.7"
 async-graphql = { version = "7", features = ["dataloader", "uuid"] }
+base64 = "0.22"
 convert_case = "0.7"
+cynic-parser = { version = "=0.11.2", features = ["pretty"] }
 futures = "0.3"
-graphql-orm = { path = "crates/graphql-orm", version = "0.17.0", default-features = false }
+getrandom = "0.3"
+graphql-composition = "=0.12.2"
+graphql-orm = { path = "crates/graphql-orm", version = "0.18.0", default-features = false }
 graphql-orm-backup = { path = "crates/graphql-orm-backup", version = "0.7.0", default-features = false }
+graphql-orm-router-protocol = { path = "crates/graphql-orm-router-protocol", version = "0.1.0" }
 graphql-orm-storage = { path = "crates/graphql-orm-storage", version = "0.6.0", default-features = false }
+hive-router = "=0.0.87"
+hive-router-config = "=0.1.10"
+jsonwebtoken = { version = "=11.0.0", features = ["rust_crypto"] }
 proc-macro2 = "1"
 quote = "1"
+reqwest = { version = "0.13", default-features = false, features = ["http2", "rustls", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+sha1 = "0.10"
+signal-hook = "0.4"
 sqlx = { version = "0.8", default-features = false }
 syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
 tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "rustls", "tokio", "tokio-util", "chrono"] }
+thiserror = "2"
 tokio = { version = "1" }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 uuid = { version = "1", features = ["v4"] }
+url = "2"

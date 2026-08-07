@@ -1,0 +1,10 @@
+error: operation_authorization must declare exactly one of all_scopes, any_scopes, all_scope_templates, or any_scope_templates
+ --> tests/ui/operation_authorization_mixed_scope_modes.rs:5:15
+  |
+5 |   #[graphql_orm(operation_authorization(
+  |  _______________^
+6 | |     categories = ["single_read"],
+7 | |     all_scopes = ["records.read"],
+8 | |     any_scopes = [["records.admin"]]
+9 | | ))]
+  | |_^

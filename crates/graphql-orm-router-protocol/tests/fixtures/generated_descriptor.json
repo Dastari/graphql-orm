@@ -1,0 +1,77 @@
+{
+  "protocolVersion": {
+    "major": 1,
+    "minor": 0
+  },
+  "subgraph": {
+    "id": "inventory-service",
+    "name": "Inventory"
+  },
+  "graphql": {
+    "http": "http://inventory.internal/graphql",
+    "websocket": "ws://inventory.internal/graphql"
+  },
+  "schema": {
+    "url": "http://inventory.internal/.well-known/sdl"
+  },
+  "capabilities": {
+    "subscriptions": true,
+    "authorizationMetadata": true,
+    "schemaFingerprints": true
+  },
+  "requiredSemantics": [
+    "scopeTemplates",
+    "authorizationMetadata"
+  ],
+  "operations": [
+    {
+      "rootType": "subscription",
+      "fieldName": "stockChanged",
+      "arguments": [
+        {
+          "name": "sku",
+          "graphqlType": "ID!",
+          "required": true
+        }
+      ],
+      "authorization": {
+        "kind": "anyScopes",
+        "alternatives": [
+          {
+            "scopes": [
+              "inventory.read",
+              "sku.{sku}.read"
+            ]
+          },
+          {
+            "scopes": [
+              "global.admin"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "rootType": "query",
+      "fieldName": "stock",
+      "arguments": [
+        {
+          "name": "sku",
+          "graphqlType": "ID!",
+          "required": true
+        }
+      ],
+      "authorization": {
+        "kind": "allScopes",
+        "scopes": [
+          "sku.{sku}.read"
+        ]
+      }
+    }
+  ],
+  "fingerprints": {
+    "schema": "sha256:9b0ea0e669ba8144b8ef6ce53e795d33164014812d9f655efd2625ddf258fe25",
+    "authorization": "sha256:0e9c92c674f7135bc3b43be7a6fdb0f33e41a5edb10902511ce30fe4443165e9",
+    "combined": "sha256:98375039a27d0e8917f0804234da943b7d6ccba028a84d9aef4080a784b25c0d"
+  }
+}

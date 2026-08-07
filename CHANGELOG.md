@@ -14,6 +14,78 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.18.0 - 2026-08-07
+
+Companion macros crate: `graphql-orm-macros` **0.18.0** under the aligned
+Git-only version policy. The new `graphql-orm-router-protocol` and
+`graphql-orm-router` packages begin at **0.1.0**. This release adds public ORM
+metadata, macro declaration/generated-code behavior, and optional router
+integration, so it is a pre-1.0 minor release. No database or stored-data
+migration is required.
+
+- Updated the one-way external `agql-auth` integration to 0.14.0 at exact
+  revision `413fda3435f060604cd653c11e2cc18a668aace1`. Its validator now
+  normalizes standard OAuth `scope` and bounded legacy `scopes` claims into the
+  existing principal scope vector; the ORM bridge API and stored data are
+  unchanged. Direct JWT decoders must follow the upstream rolling migration.
+- Hardened `graphql-orm-router` for standalone operation with strict JSON and
+  environment-only secrets, pre-bind checks, public/downstream deadlines,
+  connection and graceful-drain budgets, structured telemetry, authenticated
+  core metrics, optional Prometheus execution/subscription metrics, signal
+  handling, operator/schema/reconnect/threat-model guidance, migration notes,
+  release-policy lanes, and an executable HTTP/WebSocket/shutdown smoke test.
+- Added identity-bound dynamic registration and a separately bound,
+  scope-protected administrative surface with deny-by-default SSRF policy,
+  safe status/metrics, explicit refresh/removal, request limits, and documented
+  process-local restart semantics.
+- Added conditional schema and authorization-metadata polling to
+  `graphql-orm-router`, with canonical no-op fingerprints, bounded retry,
+  serialized complete-candidate admission, exact executable last-known-good
+  retention, process-local refresh/removal/status APIs, and atomic
+  graph-plus-policy replacement across HTTP and WebSocket work.
+
+- Added authenticated `graphql-transport-ws` serving to
+  `graphql-orm-router` on the public GraphQL path. Connection-init credentials
+  are verified before acknowledgement, operations reuse graph-bound scope
+  policy, the approved token is propagated to an upstream WebSocket subgraph,
+  and connections close at expiry without in-place refresh. Connections,
+  operations, client messages, upstream buffers, and ephemeral fan-out are
+  bounded; no events are persisted or replayed.
+
+- Added fail-closed HTTP authentication and advisory authorization to
+  `graphql-orm-router`: bounded rotating RS256 JWKS validation, explicit
+  standard/legacy scope migration, graph-bound operation metadata, fixed and
+  scalar-templated scope preflight, approved bearer propagation, and an
+  optional one-way exact-pinned `agql-auth` validator/matcher adapter. The
+  router remains resource-server-only and subgraph guards remain authoritative.
+- Added a public `graphql-orm-router` static HTTP graph with validated
+  fail-closed configuration, bounded credentialed SDL retrieval, atomic graph
+  preparation and identity, configurable GraphQL path, downstream-header
+  allowlisting, and liveness/readiness endpoints. Anonymous access requires an
+  explicit development-only opt-in.
+- Added repeatable authorization declarations for every generated operation
+  category, including fixed `all_scopes` and any-of/all-of requirements plus
+  argument-dependent `all_scope_templates` and `any_scope_templates`.
+  Declarations drive server-side resolver enforcement, protocol metadata, and
+  native Federation scope metadata where representable. Invalid categories,
+  missing generated operations, malformed placeholders, unknown arguments,
+  and unsupported complex substitutions fail at compile time.
+- Versioned generated-operation authorization fingerprints as v2 so templated
+  policies bind the GraphQL type and requiredness of referenced arguments
+  without changing the established discovery fingerprint.
+- Generated operations with entity-level `auth = "required"` now emit the
+  standard namespaced Federation `@federation__authenticated` directive. The
+  router structurally restores the composed `authenticated` and
+  `requiresScopes` SECURITY links required by Hive enforcement.
+- Added deterministic authorization and router-export fingerprints without
+  changing the existing generated-operation discovery fingerprint.
+- Added optional `router-protocol` export support. Ordinary `graphql-orm`
+  consumers do not resolve the protocol package unless the feature is enabled.
+- Applied the existing authentication, assurance, and entity read-policy
+  guards consistently to append-only generated subscriptions.
+- Added integration evidence that generated subscription events are released
+  only after commit and are discarded when commit rolls back.
+
 ## 0.17.0
 
 Companion macros crate: `graphql-orm-macros` **0.17.0** under the aligned

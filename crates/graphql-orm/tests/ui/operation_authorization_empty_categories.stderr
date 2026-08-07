@@ -1,0 +1,9 @@
+error: operation_authorization categories must not be empty
+ --> tests/ui/operation_authorization_empty_categories.rs:5:15
+  |
+5 |   #[graphql_orm(operation_authorization(
+  |  _______________^
+6 | |     categories = [],
+7 | |     any_scopes = [["records.read"]]
+8 | | ))]
+  | |_^

@@ -3,7 +3,7 @@ title: "GraphQL ORM workspace agent guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -16,7 +16,8 @@ under a crate add package-local invariants.
 ## Workspace boundaries
 
 - The workspace contains `graphql-orm`, `graphql-orm-macros`,
-  `graphql-orm-storage`, `graphql-orm-backup`, and `graphql-orm-ai`.
+  `graphql-orm-storage`, `graphql-orm-backup`, `graphql-orm-ai`,
+  `graphql-orm-router-protocol`, and `graphql-orm-router`.
 - `agql-auth` remains an external exact-revision dependency. Do not modify its
   repository unless the task explicitly includes it.
 - Keep the packages independently consumable. Do not turn AI, backup, or
@@ -25,7 +26,13 @@ under a crate add package-local invariants.
   `graphql-orm-ai -> graphql-orm-backup -> graphql-orm-storage`,
   `graphql-orm-ai -> graphql-orm`, optional
   `graphql-orm-backup -> graphql-orm`, and
-  `graphql-orm -> graphql-orm-macros`.
+  `graphql-orm -> graphql-orm-macros`, plus
+  `graphql-orm-router -> graphql-orm-router-protocol` and optional
+  `graphql-orm -> graphql-orm-router-protocol`.
+- Keep Federation runtime and server dependencies inside
+  `graphql-orm-router`. The protocol crate contains project-neutral data only,
+  and neither router package depends on the ORM or companion packages.
+- `graphql-orm-macros` must not depend directly on either router package.
 - Internal packages use workspace path dependencies and the root `Cargo.lock`.
   Never add Git dependencies between packages in this workspace.
 

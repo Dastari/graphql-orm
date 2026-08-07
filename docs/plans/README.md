@@ -3,7 +3,7 @@ title: Plans index
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 review_by: 2026-11-01
 supersedes: []
 ---
@@ -13,10 +13,12 @@ supersedes: []
 ## Active
 
 - [AI production readiness](active/ai-production-readiness/README.md)
+- [GraphQL ORM Router](active/graphql-orm-router/README.md)
 
 ## Backlog
 
 - [Backup providers](backlog/backup-providers/README.md)
+- [Router subgraph lifecycle resilience](backlog/router-subgraph-lifecycle-resilience/README.md)
 - [Storage providers](backlog/storage-providers/README.md)
 
 ## Completed

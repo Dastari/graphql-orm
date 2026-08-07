@@ -119,10 +119,13 @@
 //! [`graphql::orm::GraphqlOperationMetadata`] with immutable declarations for
 //! every generated query, mutation, and subscription resolver.
 //! `schema_roots!` additionally emits `graphql_orm_operation_catalog()` to
-//! resolve actual generated-mutation root exposure. Fingerprints detect
-//! generated schema drift; discovery does not authorize execution or bind
-//! custom roots, documents, result projections, disclosure policy, runtime
-//! limits, or resolver/RLS decisions. See
+//! resolve actual generated-mutation root exposure. The original discovery
+//! fingerprint remains stable; separate authorization and router-export
+//! fingerprints bind the corresponding declarations. With the optional
+//! `router-protocol` feature, a catalog can export its exposed generated
+//! operations as project-neutral router protocol declarations. Discovery does
+//! not authorize execution or bind custom roots, documents, result
+//! projections, disclosure policy, runtime limits, or resolver/RLS decisions. See
 //! [`graphql::orm::GraphqlOperationCatalog`].
 //!
 //! # Operation Assurance
@@ -152,6 +155,31 @@
 //! attaching the legacy `String` user id while migrating;
 //! [`graphql::auth::AuthExt::auth_subject`] upgrades legacy ids into subjects
 //! with empty roles and scopes.
+//!
+//! Generated list and single-record reads can declare distinct fixed policies:
+//!
+//! ```ignore
+//! #[graphql_orm(
+//!     operation_authorization(
+//!         categories = ["single_read"],
+//!         any_scopes = [["records.read"], ["records.admin"]]
+//!     ),
+//!     operation_authorization(
+//!         categories = ["list"],
+//!         all_scopes = ["records.list", "tenant.active"]
+//!     )
+//! )]
+//! ```
+//!
+//! Each inner `any_scopes` list is all-of and satisfying any alternative
+//! permits the operation. `all_scopes` requires its complete set. A category
+//! may appear only once. The generated resolver enforces the same declaration
+//! it publishes as GraphQL scope metadata and operation metadata.
+//!
+//! An entity-level `auth = "required"` also marks every generated root field
+//! with the standard Federation directive under its non-imported namespace:
+//! `@federation__authenticated`. This avoids defining a project-owned
+//! lookalike while async-graphql does not directly model `@authenticated`.
 //!
 //! Authorization policy enforcement is controlled by
 //! [`graphql::auth::AuthorizationMode`]. The current default is

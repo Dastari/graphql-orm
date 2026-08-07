@@ -1,0 +1,33 @@
+{
+  "protocolVersion": { "major": 1, "minor": 0 },
+  "subgraph": { "id": "notes-service", "name": "Notes" },
+  "graphql": { "http": "http://notes.internal/graphql" },
+  "schema": { "url": "http://notes.internal/sdl" },
+  "capabilities": {
+    "subscriptions": false,
+    "authorizationMetadata": true,
+    "schemaFingerprints": true
+  },
+  "operations": [
+    {
+      "rootType": "query",
+      "fieldName": "note",
+      "arguments": [{ "name": "id", "graphqlType": "ID!", "required": true }],
+      "authorization": { "kind": "authenticated" }
+    },
+    {
+      "rootType": "mutation",
+      "fieldName": "deleteNote",
+      "arguments": [{ "name": "id", "graphqlType": "ID!", "required": true }],
+      "authorization": {
+        "kind": "subgraphOnly",
+        "policy": { "code": "custom", "detail": "host approval is required" }
+      }
+    }
+  ],
+  "fingerprints": {
+    "schema": "sha256:1831af3828c65f488ac675f7c359572d27862608c7f1d7f4a695b85c43912e5d",
+    "authorization": "sha256:91a597d6cb0309e6f0ba3a34f0542474ab38ad8cfb3538171162afa12304936d",
+    "combined": "sha256:31f3b764a0f68aff7097e1ace35f45e2bcf6d676ffb491f0f0c3c6f38f5db1e4"
+  }
+}

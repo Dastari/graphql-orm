@@ -1,0 +1,51 @@
+{
+  "listener": "0.0.0.0:4000",
+  "graphqlPath": "/graphql",
+  "authentication": {
+    "jwksUrl": "https://identity.example/.well-known/jwks.json",
+    "issuer": "https://identity.example",
+    "audiences": ["graphql-router"],
+    "refreshIntervalSeconds": 300,
+    "cacheTtlSeconds": 900
+  },
+  "subgraphs": [
+    {
+      "name": "products",
+      "graphqlUrl": "http://10.10.0.12:8080/graphql",
+      "sdlUrl": "http://10.10.0.12:8080/schema.graphql",
+      "protocolUrl": "http://10.10.0.12:8080/.well-known/graphql-router",
+      "subscriptionWebsocketPath": "/graphql",
+      "schemaHeadersFromEnv": {
+        "authorization": "PRODUCTS_SCHEMA_AUTHORIZATION"
+      }
+    }
+  ],
+  "schemaPollIntervalMs": 30000,
+  "publicRequestTimeoutMs": 60000,
+  "subgraphRequestTimeoutMs": 30000,
+  "maxSubgraphConnectionsPerHost": 100,
+  "requestLimits": {
+    "maxRequestBodyBytes": 1048576,
+    "maxRequestHeaderBytes": 65536,
+    "maxParserTokens": 10000,
+    "maxDepth": 20,
+    "maxAliases": 50,
+    "maxDirectives": 100,
+    "maxFields": 500
+  },
+  "subscriptions": {
+    "maxConnections": 1024,
+    "maxOperationsPerConnection": 32,
+    "broadcastCapacity": 32,
+    "subgraphBufferCapacity": 1024,
+    "maxClientMessageBytes": 65536,
+    "connectionInitTimeoutMs": 5000
+  },
+  "telemetry": {
+    "logLevel": "info",
+    "prometheus": {
+      "port": 9090,
+      "path": "/metrics"
+    }
+  }
+}

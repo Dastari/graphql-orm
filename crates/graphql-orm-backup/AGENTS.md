@@ -31,13 +31,13 @@ This crate is a reusable backup and restore companion for applications that use 
 ## Current Agent Handoff
 
 - Current crate version is `0.7.0`.
-- The optional ORM adapter resolves `graphql-orm` 0.17.0 from the workspace.
+- The optional ORM adapter resolves `graphql-orm` 0.18.0 from the workspace.
   Internal packages use workspace path dependencies and the root `Cargo.lock`.
   Keep downstream applications on one reviewed monorepo revision so ORM,
   backup, and storage share the same canonical source/type universe.
 - `graphql-orm` owns its optional `agql-auth` integration and pins
-  `agql-auth` 0.13.0 at
-  `d6b9cef663d52125c52f3fb90d4155ee25d34775`. This crate must not enable or
+  `agql-auth` 0.14.0 at
+  `413fda3435f060604cd653c11e2cc18a668aace1`. This crate must not enable or
   depend directly on application authorization.
 - Applying and dry-run restore compare the manifest backend/schema hash with
   the target before target checks or writes. Preserve that fail-closed

@@ -16,6 +16,620 @@ use crate::naming::{
 use std::collections::HashMap;
 use syn::spanned::Spanned;
 
+#[derive(Clone)]
+enum FixedOperationAuthorization {
+    AllScopes(Vec<syn::LitStr>),
+    AnyScopes(Vec<Vec<syn::LitStr>>),
+    AllScopeTemplates(Vec<syn::LitStr>),
+    AnyScopeTemplates(Vec<Vec<syn::LitStr>>),
+}
+
+impl FixedOperationAuthorization {
+    fn requirement_tokens(&self) -> proc_macro2::TokenStream {
+        match self {
+            Self::AllScopes(scopes) | Self::AllScopeTemplates(scopes) => quote! {
+                ::graphql_orm::graphql::orm::GraphqlAuthorizationRequirement::AllScopes {
+                    scopes: vec![#(::std::string::ToString::to_string(#scopes)),*],
+                }
+            },
+            Self::AnyScopes(alternatives) | Self::AnyScopeTemplates(alternatives) => {
+                let alternatives = alternatives.iter().map(|alternative| {
+                    quote! {
+                        ::graphql_orm::graphql::orm::GraphqlAuthorizationScopeSet {
+                            scopes: vec![#(::std::string::ToString::to_string(#alternative)),*],
+                        }
+                    }
+                });
+                quote! {
+                    ::graphql_orm::graphql::orm::GraphqlAuthorizationRequirement::AnyScopes {
+                        alternatives: vec![#(#alternatives),*],
+                    }
+                }
+            }
+        }
+    }
+
+    fn enforcement_tokens(&self) -> proc_macro2::TokenStream {
+        let alternatives = match self {
+            Self::AllScopes(scopes) => vec![quote! { &[#(#scopes),*] }],
+            Self::AnyScopes(alternatives) => alternatives
+                .iter()
+                .map(|alternative| quote! { &[#(#alternative),*] })
+                .collect(),
+            Self::AllScopeTemplates(_) | Self::AnyScopeTemplates(_) => return quote! {},
+        };
+        quote! {
+            let _scope_subject = ::graphql_orm::graphql::auth::enforce_resolver_scopes(
+                ctx,
+                &[#(#alternatives),*],
+            )?;
+        }
+    }
+
+    fn requires_scopes_tokens(&self) -> proc_macro2::TokenStream {
+        let alternatives: Vec<&[syn::LitStr]> = match self {
+            Self::AllScopes(scopes) => vec![scopes],
+            Self::AnyScopes(alternatives) => alternatives.iter().map(Vec::as_slice).collect(),
+            Self::AllScopeTemplates(_) | Self::AnyScopeTemplates(_) => return quote! {},
+        };
+        let alternatives = alternatives.into_iter().map(|alternative| {
+            let scopes = alternative
+                .iter()
+                .map(syn::LitStr::value)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let scopes = syn::LitStr::new(&scopes, alternative[0].span());
+            quote! { requires_scopes = #scopes, }
+        });
+        quote! { #(#alternatives)* }
+    }
+
+    fn federation_requires_scopes_directive_tokens(&self) -> proc_macro2::TokenStream {
+        let alternatives: Vec<&[syn::LitStr]> = match self {
+            Self::AllScopes(scopes) => vec![scopes],
+            Self::AnyScopes(alternatives) => alternatives.iter().map(Vec::as_slice).collect(),
+            Self::AllScopeTemplates(_) | Self::AnyScopeTemplates(_) => return quote! {},
+        };
+        let alternatives = alternatives.into_iter().map(|alternative| {
+            quote! {
+                vec![#(::std::string::ToString::to_string(#alternative)),*]
+            }
+        });
+        quote! {
+            directive = ::graphql_orm::graphql::federation::federation_requires_scopes::apply(
+                vec![#(#alternatives),*]
+            ),
+        }
+    }
+
+    fn template_alternatives(&self) -> Option<Vec<&[syn::LitStr]>> {
+        match self {
+            Self::AllScopeTemplates(scopes) => Some(vec![scopes]),
+            Self::AnyScopeTemplates(alternatives) => {
+                Some(alternatives.iter().map(Vec::as_slice).collect())
+            }
+            Self::AllScopes(_) | Self::AnyScopes(_) => None,
+        }
+    }
+}
+
+fn parse_fixed_scope_array(expr: &syn::Expr, description: &str) -> syn::Result<Vec<syn::LitStr>> {
+    let syn::Expr::Array(array) = expr else {
+        return Err(syn::Error::new_spanned(
+            expr,
+            format!("operation_authorization {description} must be an array of string literals"),
+        ));
+    };
+
+    array
+        .elems
+        .iter()
+        .map(|element| match element {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(scope),
+                ..
+            }) => Ok(scope.clone()),
+            _ => Err(syn::Error::new_spanned(
+                element,
+                format!("operation_authorization {description} must contain only string literals"),
+            )),
+        })
+        .collect()
+}
+
+fn validate_fixed_scope(scope: &syn::LitStr) -> syn::Result<()> {
+    let value = scope.value();
+    if value.is_empty() {
+        return Err(syn::Error::new_spanned(
+            scope,
+            "operation_authorization scope strings must not be empty",
+        ));
+    }
+    if value
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err(syn::Error::new_spanned(
+            scope,
+            "operation_authorization scope strings must not contain whitespace or control characters",
+        ));
+    }
+    if value.contains('{') || value.contains('}') {
+        return Err(syn::Error::new_spanned(
+            scope,
+            "operation_authorization scope strings must not contain braces",
+        ));
+    }
+    Ok(())
+}
+
+fn scope_template_references(scope: &syn::LitStr) -> syn::Result<Vec<String>> {
+    let value = scope.value();
+    if value.is_empty() {
+        return Err(syn::Error::new_spanned(
+            scope,
+            "operation_authorization scope templates must not be empty",
+        ));
+    }
+    if value
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err(syn::Error::new_spanned(
+            scope,
+            "operation_authorization scope templates must not contain whitespace or control characters",
+        ));
+    }
+
+    let mut references = Vec::new();
+    let mut remaining = value.as_str();
+    while let Some(start) = remaining.find(['{', '}']) {
+        if remaining.as_bytes()[start] == b'}' {
+            return Err(syn::Error::new_spanned(
+                scope,
+                "operation_authorization scope templates must contain balanced `{argument}` placeholders",
+            ));
+        }
+        let after_start = &remaining[start + 1..];
+        let Some(end) = after_start.find('}') else {
+            return Err(syn::Error::new_spanned(
+                scope,
+                "operation_authorization scope templates must contain balanced `{argument}` placeholders",
+            ));
+        };
+        let argument = &after_start[..end];
+        let valid_name = argument
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'_' => true,
+                b'0'..=b'9' => index > 0,
+                _ => false,
+            });
+        if argument.is_empty() || argument.contains('{') || !valid_name {
+            return Err(syn::Error::new_spanned(
+                scope,
+                "operation_authorization scope template placeholders must be GraphQL argument names",
+            ));
+        }
+        references.push(argument.to_string());
+        remaining = &after_start[end + 1..];
+    }
+    Ok(references)
+}
+
+fn parse_operation_authorizations(
+    attrs: &[syn::Attribute],
+) -> syn::Result<HashMap<String, FixedOperationAuthorization>> {
+    let mut authorizations = HashMap::new();
+
+    for attr in attrs {
+        if !attr.path().is_ident("graphql_orm") {
+            continue;
+        }
+        let syn::Meta::List(list) = &attr.meta else {
+            continue;
+        };
+        let nested = list.parse_args_with(
+            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+        )?;
+
+        for meta in nested {
+            if !meta.path().is_ident("operation_authorization") {
+                continue;
+            }
+            let syn::Meta::List(operation_authorization) = meta else {
+                return Err(syn::Error::new_spanned(
+                    meta,
+                    "operation_authorization must be declared as operation_authorization(...)",
+                ));
+            };
+
+            let options = operation_authorization.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            )?;
+            let mut categories = None;
+            let mut all_scopes = None;
+            let mut any_scopes = None;
+            let mut all_scope_templates = None;
+            let mut any_scope_templates = None;
+
+            for option in options {
+                let option_name = option
+                    .path()
+                    .get_ident()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                let syn::Meta::NameValue(name_value) = option else {
+                    return Err(syn::Error::new_spanned(
+                        option,
+                        format!("unsupported operation_authorization option `{option_name}`"),
+                    ));
+                };
+                match option_name.as_str() {
+                    "categories" => {
+                        if categories.is_some() {
+                            return Err(syn::Error::new_spanned(
+                                name_value,
+                                "operation_authorization categories may only be declared once",
+                            ));
+                        }
+                        categories =
+                            Some(parse_fixed_scope_array(&name_value.value, "categories")?);
+                    }
+                    "all_scopes" => {
+                        if all_scopes.is_some() {
+                            return Err(syn::Error::new_spanned(
+                                name_value,
+                                "operation_authorization all_scopes may only be declared once",
+                            ));
+                        }
+                        let scopes = parse_fixed_scope_array(&name_value.value, "all_scopes")?;
+                        if scopes.is_empty() {
+                            return Err(syn::Error::new_spanned(
+                                name_value,
+                                "operation_authorization all_scopes must not be empty",
+                            ));
+                        }
+                        for scope in &scopes {
+                            validate_fixed_scope(scope)?;
+                        }
+                        all_scopes = Some(scopes);
+                    }
+                    "any_scopes" => {
+                        if any_scopes.is_some() {
+                            return Err(syn::Error::new_spanned(
+                                name_value,
+                                "operation_authorization any_scopes may only be declared once",
+                            ));
+                        }
+                        let syn::Expr::Array(alternatives) = &name_value.value else {
+                            return Err(syn::Error::new_spanned(
+                                name_value.value,
+                                "operation_authorization any_scopes must be an array of nonempty scope arrays",
+                            ));
+                        };
+                        let alternatives = alternatives
+                            .elems
+                            .iter()
+                            .map(|alternative| {
+                                let scopes = parse_fixed_scope_array(
+                                    alternative,
+                                    "any_scopes alternatives",
+                                )?;
+                                if scopes.is_empty() {
+                                    return Err(syn::Error::new_spanned(
+                                        alternative,
+                                        "operation_authorization any_scopes alternatives must not be empty",
+                                    ));
+                                }
+                                for scope in &scopes {
+                                    validate_fixed_scope(scope)?;
+                                }
+                                Ok(scopes)
+                            })
+                            .collect::<syn::Result<Vec<_>>>()?;
+                        if alternatives.is_empty() {
+                            return Err(syn::Error::new_spanned(
+                                name_value,
+                                "operation_authorization any_scopes must contain at least one nonempty alternative",
+                            ));
+                        }
+                        any_scopes = Some(alternatives);
+                    }
+                    "all_scope_templates" => {
+                        if all_scope_templates.is_some() {
+                            return Err(syn::Error::new_spanned(
+                                name_value,
+                                "operation_authorization all_scope_templates may only be declared once",
+                            ));
+                        }
+                        let templates =
+                            parse_fixed_scope_array(&name_value.value, "all_scope_templates")?;
+                        if templates.is_empty() {
+                            return Err(syn::Error::new_spanned(
+                                name_value,
+                                "operation_authorization all_scope_templates must not be empty",
+                            ));
+                        }
+                        for template in &templates {
+                            scope_template_references(template)?;
+                        }
+                        all_scope_templates = Some(templates);
+                    }
+                    "any_scope_templates" => {
+                        if any_scope_templates.is_some() {
+                            return Err(syn::Error::new_spanned(
+                                name_value,
+                                "operation_authorization any_scope_templates may only be declared once",
+                            ));
+                        }
+                        let syn::Expr::Array(alternatives) = &name_value.value else {
+                            return Err(syn::Error::new_spanned(
+                                name_value.value,
+                                "operation_authorization any_scope_templates must be an array of nonempty template arrays",
+                            ));
+                        };
+                        let alternatives = alternatives
+                            .elems
+                            .iter()
+                            .map(|alternative| {
+                                let templates = parse_fixed_scope_array(
+                                    alternative,
+                                    "any_scope_templates alternatives",
+                                )?;
+                                if templates.is_empty() {
+                                    return Err(syn::Error::new_spanned(
+                                        alternative,
+                                        "operation_authorization any_scope_templates alternatives must not be empty",
+                                    ));
+                                }
+                                for template in &templates {
+                                    scope_template_references(template)?;
+                                }
+                                Ok(templates)
+                            })
+                            .collect::<syn::Result<Vec<_>>>()?;
+                        if alternatives.is_empty() {
+                            return Err(syn::Error::new_spanned(
+                                name_value,
+                                "operation_authorization any_scope_templates must contain at least one nonempty alternative",
+                            ));
+                        }
+                        any_scope_templates = Some(alternatives);
+                    }
+                    _ => {
+                        return Err(syn::Error::new_spanned(
+                            name_value,
+                            format!("unsupported operation_authorization option `{option_name}`"),
+                        ));
+                    }
+                }
+            }
+
+            let categories = categories.ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &operation_authorization,
+                    "operation_authorization requires a nonempty categories array",
+                )
+            })?;
+            if categories.is_empty() {
+                return Err(syn::Error::new_spanned(
+                    &operation_authorization,
+                    "operation_authorization categories must not be empty",
+                ));
+            }
+            let authorization = match (
+                all_scopes,
+                any_scopes,
+                all_scope_templates,
+                any_scope_templates,
+            ) {
+                (Some(scopes), None, None, None) => FixedOperationAuthorization::AllScopes(scopes),
+                (None, Some(alternatives), None, None) => {
+                    FixedOperationAuthorization::AnyScopes(alternatives)
+                }
+                (None, None, Some(templates), None) => {
+                    FixedOperationAuthorization::AllScopeTemplates(templates)
+                }
+                (None, None, None, Some(alternatives)) => {
+                    FixedOperationAuthorization::AnyScopeTemplates(alternatives)
+                }
+                (None, None, None, None) => {
+                    return Err(syn::Error::new_spanned(
+                        &operation_authorization,
+                        "operation_authorization requires one scope or scope-template mode",
+                    ));
+                }
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        &operation_authorization,
+                        "operation_authorization must declare exactly one of all_scopes, any_scopes, all_scope_templates, or any_scope_templates",
+                    ));
+                }
+            };
+
+            for category in categories {
+                let category_value = category.value();
+                if !matches!(
+                    category_value.as_str(),
+                    "create"
+                        | "delete"
+                        | "delete_many"
+                        | "keyset_list"
+                        | "list"
+                        | "search"
+                        | "single_read"
+                        | "subscription"
+                        | "update"
+                        | "update_many"
+                        | "upsert"
+                ) {
+                    return Err(syn::Error::new_spanned(
+                        category,
+                        "unsupported operation authorization category; expected a generated GraphQL operation category",
+                    ));
+                }
+                if authorizations
+                    .insert(category_value.clone(), authorization.clone())
+                    .is_some()
+                {
+                    return Err(syn::Error::new_spanned(
+                        category,
+                        format!("duplicate operation authorization category `{category_value}`"),
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(authorizations)
+}
+
+#[derive(Clone)]
+struct ScopeTemplateArgumentSpec {
+    graphql_name: String,
+    rust_ident: Option<syn::Ident>,
+    rust_type: Option<syn::Type>,
+}
+
+impl ScopeTemplateArgumentSpec {
+    fn scalar(
+        graphql_name: impl Into<String>,
+        rust_ident: syn::Ident,
+        rust_type: syn::Type,
+    ) -> Self {
+        Self {
+            graphql_name: graphql_name.into(),
+            rust_ident: Some(rust_ident),
+            rust_type: Some(rust_type),
+        }
+    }
+
+    fn complex(graphql_name: impl Into<String>) -> Self {
+        Self {
+            graphql_name: graphql_name.into(),
+            rust_ident: None,
+            rust_type: None,
+        }
+    }
+}
+
+fn is_supported_scope_template_scalar(ty: &syn::Type) -> bool {
+    if is_option_type(ty) || is_vec_type(ty) {
+        return false;
+    }
+    type_path_last_ident(ty).is_some_and(|ident| {
+        matches!(
+            ident.to_string().as_str(),
+            "String"
+                | "Uuid"
+                | "bool"
+                | "f32"
+                | "f64"
+                | "i8"
+                | "i16"
+                | "i32"
+                | "i64"
+                | "isize"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "u64"
+                | "usize"
+        )
+    })
+}
+
+fn scope_enforcement_tokens(
+    category: &str,
+    authorization: Option<&FixedOperationAuthorization>,
+    arguments: &[ScopeTemplateArgumentSpec],
+) -> syn::Result<proc_macro2::TokenStream> {
+    let Some(authorization) = authorization else {
+        return Ok(quote! {});
+    };
+    let Some(alternatives) = authorization.template_alternatives() else {
+        return Ok(authorization.enforcement_tokens());
+    };
+
+    let mut referenced_arguments: Vec<&ScopeTemplateArgumentSpec> = Vec::new();
+    for template in alternatives.iter().flat_map(|alternative| *alternative) {
+        for reference in scope_template_references(template)? {
+            let Some(argument) = arguments
+                .iter()
+                .find(|argument| argument.graphql_name == reference)
+            else {
+                return Err(syn::Error::new_spanned(
+                    template,
+                    format!(
+                        "operation authorization category `{category}` scope template references unknown GraphQL argument `{reference}`"
+                    ),
+                ));
+            };
+            let Some(rust_type) = argument.rust_type.as_ref() else {
+                return Err(syn::Error::new_spanned(
+                    template,
+                    format!(
+                        "operation authorization category `{category}` scope template argument `{reference}` is a complex input; only non-null scalar arguments are supported"
+                    ),
+                ));
+            };
+            if !is_supported_scope_template_scalar(rust_type) {
+                return Err(syn::Error::new_spanned(
+                    rust_type,
+                    format!(
+                        "operation authorization category `{category}` scope template argument `{reference}` must be String, UUID, Boolean, integer, or float"
+                    ),
+                ));
+            }
+            if !referenced_arguments
+                .iter()
+                .any(|existing| existing.graphql_name == argument.graphql_name)
+            {
+                referenced_arguments.push(argument);
+            }
+        }
+    }
+
+    let value_bindings = referenced_arguments
+        .iter()
+        .enumerate()
+        .map(|(index, argument)| {
+            let value_ident = quote::format_ident!("__gom_scope_argument_{index}");
+            let rust_ident = argument
+                .rust_ident
+                .as_ref()
+                .expect("scalar template arguments have Rust identifiers");
+            quote! {
+                let #value_ident = ::std::string::ToString::to_string(&#rust_ident);
+            }
+        })
+        .collect::<Vec<_>>();
+    let argument_values = referenced_arguments
+        .iter()
+        .enumerate()
+        .map(|(index, argument)| {
+            let value_ident = quote::format_ident!("__gom_scope_argument_{index}");
+            let graphql_name = &argument.graphql_name;
+            quote! { (#graphql_name, #value_ident.as_str()) }
+        })
+        .collect::<Vec<_>>();
+    let alternatives = alternatives.into_iter().map(|alternative| {
+        quote! { &[#(#alternative),*] }
+    });
+
+    Ok(quote! {
+        #(#value_bindings)*
+        let _scope_subject =
+            ::graphql_orm::graphql::auth::enforce_resolver_scope_templates(
+                ctx,
+                &[#(#alternatives),*],
+                &[#(#argument_values),*],
+            )?;
+    })
+}
+
 #[derive(Copy, Clone)]
 enum PropagationValueKind {
     String,
@@ -598,8 +1212,15 @@ pub(crate) fn generate_graphql_operations(
     let struct_name = &input.ident;
     let struct_name_str = struct_name.to_string();
     let entity_meta = parse_entity_metadata(&input.attrs)?;
+    let operation_authorizations = parse_operation_authorizations(&input.attrs)?;
     let resolver_auth_mode =
         resolver_auth_mode_tokens(entity_meta.auth.as_deref(), struct_name.span())?;
+    let authenticated_directive = match entity_meta.auth.as_deref() {
+        Some("required") => quote! {
+            directive = ::graphql_orm::graphql::federation::federation_authenticated::apply(),
+        },
+        _ => quote! {},
+    };
     let backend = resolve_backend(
         entity_meta.backend.as_deref(),
         struct_name.span(),
@@ -612,6 +1233,71 @@ pub(crate) fn generate_graphql_operations(
     let backend_marker = backend_marker_tokens(backend);
     let pool_type = backend_pool_type_tokens(backend);
     let database_type = backend_database_type_tokens(backend);
+
+    let undeclared_operation_authorization = match entity_meta.auth.as_deref() {
+        Some("required") => quote! {
+            ::graphql_orm::graphql::orm::GraphqlAuthorizationRequirement::Authenticated
+        },
+        Some("none") => quote! {
+            ::graphql_orm::graphql::orm::GraphqlAuthorizationRequirement::Public
+        },
+        Some("optional") => quote! {
+            ::graphql_orm::graphql::orm::GraphqlAuthorizationRequirement::SubgraphOnly {
+                policy: ::graphql_orm::graphql::orm::GraphqlUnrepresentablePolicy::new(
+                    ::graphql_orm::graphql::orm::GraphqlUnrepresentablePolicyCode::Unsupported,
+                    "entity auth is optional",
+                ),
+            }
+        },
+        None => quote! {
+            ::graphql_orm::graphql::orm::GraphqlAuthorizationRequirement::SubgraphOnly {
+                policy: ::graphql_orm::graphql::orm::GraphqlUnrepresentablePolicy::new(
+                    ::graphql_orm::graphql::orm::GraphqlUnrepresentablePolicyCode::Unsupported,
+                    "entity auth is not declared",
+                ),
+            }
+        },
+        Some(_) => {
+            unreachable!("entity auth is validated before authorization metadata is emitted")
+        }
+    };
+    let authorization_tokens = |category: &str| {
+        operation_authorizations.get(category).map_or_else(
+            || undeclared_operation_authorization.clone(),
+            FixedOperationAuthorization::requirement_tokens,
+        )
+    };
+    let requires_scopes_tokens = |category: &str| {
+        operation_authorizations.get(category).map_or_else(
+            || quote! {},
+            FixedOperationAuthorization::requires_scopes_tokens,
+        )
+    };
+    let list_operation_authorization = authorization_tokens("list");
+    let list_requires_scopes = requires_scopes_tokens("list");
+    let search_operation_authorization = authorization_tokens("search");
+    let search_requires_scopes = requires_scopes_tokens("search");
+    let keyset_list_operation_authorization = authorization_tokens("keyset_list");
+    let keyset_list_requires_scopes = requires_scopes_tokens("keyset_list");
+    let single_read_operation_authorization = authorization_tokens("single_read");
+    let single_read_requires_scopes = requires_scopes_tokens("single_read");
+    let create_operation_authorization = authorization_tokens("create");
+    let create_requires_scopes = requires_scopes_tokens("create");
+    let upsert_operation_authorization = authorization_tokens("upsert");
+    let upsert_requires_scopes = requires_scopes_tokens("upsert");
+    let update_operation_authorization = authorization_tokens("update");
+    let update_requires_scopes = requires_scopes_tokens("update");
+    let update_many_operation_authorization = authorization_tokens("update_many");
+    let update_many_requires_scopes = requires_scopes_tokens("update_many");
+    let delete_operation_authorization = authorization_tokens("delete");
+    let delete_requires_scopes = requires_scopes_tokens("delete");
+    let delete_many_operation_authorization = authorization_tokens("delete_many");
+    let delete_many_requires_scopes = requires_scopes_tokens("delete_many");
+    let subscription_operation_authorization = authorization_tokens("subscription");
+    let subscription_requires_scopes = operation_authorizations.get("subscription").map_or_else(
+        || quote! {},
+        FixedOperationAuthorization::federation_requires_scopes_directive_tokens,
+    );
 
     let data = match &input.data {
         Data::Struct(data) => data,
@@ -1140,6 +1826,73 @@ pub(crate) fn generate_graphql_operations(
             let key = id;
         }
     };
+    let scope_enforcement = |category: &str| {
+        let arguments = match category {
+            "list" => vec![
+                ScopeTemplateArgumentSpec::complex(where_arg_name.clone()),
+                ScopeTemplateArgumentSpec::complex(order_by_arg_name.clone()),
+                ScopeTemplateArgumentSpec::complex(page_arg_name.clone()),
+            ],
+            "search" => vec![
+                ScopeTemplateArgumentSpec::complex(search_arg_name.clone()),
+                ScopeTemplateArgumentSpec::complex(where_arg_name.clone()),
+                ScopeTemplateArgumentSpec::complex(page_arg_name.clone()),
+            ],
+            "keyset_list" => vec![
+                ScopeTemplateArgumentSpec::complex(where_arg_name.clone()),
+                ScopeTemplateArgumentSpec::complex(page_arg_name.clone()),
+            ],
+            "single_read" => single_query_argument_specs
+                .iter()
+                .map(|(rust_ident, rust_type, graphql_name)| {
+                    ScopeTemplateArgumentSpec::scalar(
+                        graphql_name.clone(),
+                        rust_ident.clone(),
+                        rust_type.clone(),
+                    )
+                })
+                .collect(),
+            "create" | "upsert" => {
+                vec![ScopeTemplateArgumentSpec::complex(input_arg_name.clone())]
+            }
+            "update" => vec![
+                ScopeTemplateArgumentSpec::scalar(
+                    id_arg_name.clone(),
+                    syn::Ident::new("id", proc_macro2::Span::call_site()),
+                    pk_type_ty.clone(),
+                ),
+                ScopeTemplateArgumentSpec::complex(input_arg_name.clone()),
+            ],
+            "update_many" => vec![
+                ScopeTemplateArgumentSpec::complex(where_arg_name.clone()),
+                ScopeTemplateArgumentSpec::complex(input_arg_name.clone()),
+            ],
+            "delete" => vec![ScopeTemplateArgumentSpec::scalar(
+                id_arg_name.clone(),
+                syn::Ident::new("id", proc_macro2::Span::call_site()),
+                pk_type_ty.clone(),
+            )],
+            "delete_many" => {
+                vec![ScopeTemplateArgumentSpec::complex(where_arg_name.clone())]
+            }
+            "subscription" => {
+                vec![ScopeTemplateArgumentSpec::complex(filter_arg_name.clone())]
+            }
+            _ => unreachable!("validated generated operation category"),
+        };
+        scope_enforcement_tokens(category, operation_authorizations.get(category), &arguments)
+    };
+    let list_scope_enforcement = scope_enforcement("list")?;
+    let search_scope_enforcement = scope_enforcement("search")?;
+    let keyset_list_scope_enforcement = scope_enforcement("keyset_list")?;
+    let single_read_scope_enforcement = scope_enforcement("single_read")?;
+    let create_scope_enforcement = scope_enforcement("create")?;
+    let upsert_scope_enforcement = scope_enforcement("upsert")?;
+    let update_scope_enforcement = scope_enforcement("update")?;
+    let update_many_scope_enforcement = scope_enforcement("update_many")?;
+    let delete_scope_enforcement = scope_enforcement("delete")?;
+    let delete_many_scope_enforcement = scope_enforcement("delete_many")?;
+    let subscription_scope_enforcement = scope_enforcement("subscription")?;
     let key_bind_from_key_tokens = if has_composite_primary_key {
         primary_key_fields
             .iter()
@@ -2360,6 +3113,49 @@ pub(crate) fn generate_graphql_operations(
         .iter()
         .filter_map(|f| parse_field_metadata(f).ok())
         .any(|m| m.search.is_some() || !m.search_json.is_empty() || m.search_relation.is_some());
+    if operation_authorizations.contains_key("search") && !has_search {
+        return Err(syn::Error::new_spanned(
+            struct_name,
+            "operation authorization category `search` requires a generated search operation; mark at least one supported field as searchable",
+        ));
+    }
+    if operation_authorizations.contains_key("keyset_list") && keyset_parts.is_none() {
+        return Err(syn::Error::new_spanned(
+            struct_name,
+            "operation authorization category `keyset_list` requires a generated keyset operation; configure graphql_entity keyset = \"field asc|desc, ...\"",
+        ));
+    }
+    let generates_standard_write_surface = backend != BackendKind::Mssql
+        && !schema_policy_read_only
+        && !has_composite_primary_key
+        && !entity_meta.append_only;
+    let generated_category_required = |category: &str, generated: bool| -> syn::Result<()> {
+        if operation_authorizations.contains_key(category) && !generated {
+            return Err(syn::Error::new_spanned(
+                struct_name,
+                format!(
+                    "operation authorization category `{category}` requires the entity to generate that GraphQL operation"
+                ),
+            ));
+        }
+        Ok(())
+    };
+    generated_category_required(
+        "create",
+        entity_meta.append_only || generates_standard_write_surface,
+    )?;
+    generated_category_required(
+        "upsert",
+        generates_standard_write_surface && graphql_upsert_enabled,
+    )?;
+    generated_category_required("update", generates_standard_write_surface)?;
+    generated_category_required("update_many", generates_standard_write_surface)?;
+    generated_category_required("delete", generates_standard_write_surface)?;
+    generated_category_required("delete_many", generates_standard_write_surface)?;
+    generated_category_required(
+        "subscription",
+        entity_meta.append_only || generates_standard_write_surface,
+    )?;
     let resolver_schema_signature = generated_resolver_schema_signature(
         struct_name,
         fields,
@@ -2834,13 +3630,14 @@ pub(crate) fn generate_graphql_operations(
     };
     let upsert_graphql_method = if graphql_upsert_enabled {
         quote! {
-            #[graphql(name = #upsert_mutation_name)]
+            #[graphql(name = #upsert_mutation_name, #upsert_requires_scopes #authenticated_directive)]
             async fn upsert(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #[graphql(name = #input_arg_name)] input: #graphql_create_input,
             ) -> ::graphql_orm::async_graphql::Result<#upsert_result_type> {
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                #upsert_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
@@ -3557,7 +4354,7 @@ pub(crate) fn generate_graphql_operations(
     };
     let keyset_graphql_method = if keyset_parts.is_some() {
         quote! {
-            #[graphql(name = #keyset_query_name)]
+            #[graphql(name = #keyset_query_name, #keyset_list_requires_scopes #authenticated_directive)]
             async fn keyset(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
@@ -3565,6 +4362,7 @@ pub(crate) fn generate_graphql_operations(
                 #[graphql(name = #page_arg_name)] page: ::graphql_orm::graphql::pagination::KeysetPageInput,
             ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                #keyset_list_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
@@ -3634,7 +4432,7 @@ pub(crate) fn generate_graphql_operations(
 
     let search_query_method = if has_search {
         quote! {
-            #[graphql(name = #search_query_name)]
+            #[graphql(name = #search_query_name, #search_requires_scopes #authenticated_directive)]
             async fn search(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
@@ -3643,6 +4441,7 @@ pub(crate) fn generate_graphql_operations(
                 #[graphql(name = #page_arg_name)] page: Option<::graphql_orm::graphql::orm::PageInput>,
             ) -> ::graphql_orm::async_graphql::Result<#search_connection_type> {
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                #search_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
@@ -3949,13 +4748,14 @@ pub(crate) fn generate_graphql_operations(
 
             #[::graphql_orm::async_graphql::Object]
             impl #mutations_struct {
-                #[graphql(name = #create_mutation_name)]
+                #[graphql(name = #create_mutation_name, #create_requires_scopes #authenticated_directive)]
                 async fn create(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
                     #[graphql(name = #input_arg_name)] input: #graphql_create_input,
                 ) -> ::graphql_orm::async_graphql::Result<#result_type> {
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                    #create_scope_enforcement
                     ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                         ctx,
                         ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
@@ -3985,14 +4785,31 @@ pub(crate) fn generate_graphql_operations(
 
             #[::graphql_orm::async_graphql::Subscription]
             impl #subscriptions_struct {
-                #[graphql(name = #subscription_name)]
+                #[graphql(name = #subscription_name, #subscription_requires_scopes #authenticated_directive)]
                 async fn on_changed(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
                     #[graphql(name = #filter_arg_name)] _filter: Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>,
                 ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = #changed_event>> {
                     use ::graphql_orm::futures::StreamExt;
-                    let db = ctx.data::<::graphql_orm::db::Database<#backend_marker>>()?;
+                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                    #subscription_scope_enforcement
+                    ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                        ctx,
+                        ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription,
+                    )?;
+                    let db = ctx.data::<::graphql_orm::db::Database<#backend_marker>>().map_err(|_| {
+                        ::graphql_orm::async_graphql::Error::new(
+                            "graphql-orm Database runtime not registered; build the schema with schema_builder(database) or add Database to schema data",
+                        )
+                    })?;
+                    db.ensure_entity_access(
+                        Some(ctx),
+                        #entity_name_lit,
+                        <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                        ::graphql_orm::graphql::orm::EntityAccessKind::Read,
+                        ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlSubscription,
+                    ).await?;
                     let rx = db.ensure_event_sender::<#changed_event>().subscribe();
                     Ok(::graphql_orm::tokio_stream::wrappers::BroadcastStream::new(rx)
                         .filter_map(|result| async move { result.ok() }))
@@ -5104,9 +5921,10 @@ pub(crate) fn generate_graphql_operations(
                       category: proc_macro2::TokenStream,
                       field_name: &str,
                       arguments: Vec<proc_macro2::TokenStream>,
-                      rust_result_type: proc_macro2::TokenStream| {
+                      rust_result_type: proc_macro2::TokenStream,
+                      operation_authorization: &proc_macro2::TokenStream| {
         quote! {
-            ::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor::generated(
+            ::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor::generated_with_authorization(
                 concat!(module_path!(), "::", stringify!(#struct_name)),
                 stringify!(#struct_name),
                 #table_name,
@@ -5119,25 +5937,37 @@ pub(crate) fn generate_graphql_operations(
                 <#rust_result_type as ::graphql_orm::async_graphql::OutputType>
                     ::qualified_type_name(),
                 #resolver_schema_signature,
+                #operation_authorization,
             )
         }
     };
 
     let mut operation_descriptors = Vec::new();
-    operation_descriptors.push(descriptor(
-        quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
-        quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::List },
-        &list_query_name,
-        vec![
-            argument_descriptor(&where_arg_name, quote! { Option<#where_input> }),
-            argument_descriptor(&order_by_arg_name, quote! { Option<Vec<#order_by_input>> }),
-            argument_descriptor(
-                &page_arg_name,
-                quote! { Option<::graphql_orm::graphql::orm::PageInput> },
-            ),
-        ],
-        quote! { #connection_type },
-    ));
+    let list_metadata_arguments = vec![
+        argument_descriptor(&where_arg_name, quote! { Option<#where_input> }),
+        argument_descriptor(&order_by_arg_name, quote! { Option<Vec<#order_by_input>> }),
+        argument_descriptor(
+            &page_arg_name,
+            quote! { Option<::graphql_orm::graphql::orm::PageInput> },
+        ),
+    ];
+    operation_descriptors.push(quote! {
+        ::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor::generated_with_authorization(
+            concat!(module_path!(), "::", stringify!(#struct_name)),
+            stringify!(#struct_name),
+            #table_name,
+            #backend_name,
+            ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+            ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::List,
+            #list_query_name,
+            vec![#(#list_metadata_arguments),*],
+            stringify!(#connection_type),
+            <#connection_type as ::graphql_orm::async_graphql::OutputType>
+                ::qualified_type_name(),
+            #resolver_schema_signature,
+            #list_operation_authorization,
+        )
+    });
     if has_search {
         operation_descriptors.push(descriptor(
             quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
@@ -5155,6 +5985,7 @@ pub(crate) fn generate_graphql_operations(
                 ),
             ],
             quote! { #search_connection_type },
+            &search_operation_authorization,
         ));
     }
     if keyset_parts.is_some() {
@@ -5170,6 +6001,7 @@ pub(crate) fn generate_graphql_operations(
                 ),
             ],
             quote! { #connection_type },
+            &keyset_list_operation_authorization,
         ));
     }
     let single_metadata_arguments = single_query_argument_specs
@@ -5178,13 +6010,23 @@ pub(crate) fn generate_graphql_operations(
             argument_descriptor(graphql_name, quote! { #field_type })
         })
         .collect::<Vec<_>>();
-    operation_descriptors.push(descriptor(
-        quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
-        quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::SingleRead },
-        &single_query_name,
-        single_metadata_arguments,
-        quote! { Option<#struct_name> },
-    ));
+    operation_descriptors.push(quote! {
+        ::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor::generated_with_authorization(
+            concat!(module_path!(), "::", stringify!(#struct_name)),
+            stringify!(#struct_name),
+            #table_name,
+            #backend_name,
+            ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+            ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::SingleRead,
+            #single_query_name,
+            vec![#(#single_metadata_arguments),*],
+            stringify!(Option<#struct_name>),
+            <Option<#struct_name> as ::graphql_orm::async_graphql::OutputType>
+                ::qualified_type_name(),
+            #resolver_schema_signature,
+            #single_read_operation_authorization,
+        )
+    });
 
     let create_descriptor = || {
         descriptor(
@@ -5196,6 +6038,7 @@ pub(crate) fn generate_graphql_operations(
                 quote! { #graphql_create_input },
             )],
             quote! { #result_type },
+            &create_operation_authorization,
         )
     };
     let subscription_descriptor = || {
@@ -5208,6 +6051,7 @@ pub(crate) fn generate_graphql_operations(
                 quote! { Option<::graphql_orm::graphql::orm::SubscriptionFilterInput> },
             )],
             quote! { #changed_event },
+            &subscription_operation_authorization,
         )
     };
 
@@ -5229,6 +6073,7 @@ pub(crate) fn generate_graphql_operations(
                     quote! { #graphql_create_input },
                 )],
                 quote! { #upsert_result_type },
+                &upsert_operation_authorization,
             ));
         }
         operation_descriptors.push(descriptor(
@@ -5240,6 +6085,7 @@ pub(crate) fn generate_graphql_operations(
                 argument_descriptor(&input_arg_name, quote! { #graphql_update_input }),
             ],
             quote! { #result_type },
+            &update_operation_authorization,
         ));
         operation_descriptors.push(descriptor(
             quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation },
@@ -5250,6 +6096,7 @@ pub(crate) fn generate_graphql_operations(
                 argument_descriptor(&input_arg_name, quote! { #graphql_update_input }),
             ],
             quote! { #update_many_result_type },
+            &update_many_operation_authorization,
         ));
         operation_descriptors.push(descriptor(
             quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation },
@@ -5257,6 +6104,7 @@ pub(crate) fn generate_graphql_operations(
             &delete_mutation_name,
             vec![argument_descriptor(&id_arg_name, quote! { #pk_type_ty })],
             quote! { #result_type },
+            &delete_operation_authorization,
         ));
         operation_descriptors.push(descriptor(
             quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation },
@@ -5267,6 +6115,7 @@ pub(crate) fn generate_graphql_operations(
                 quote! { Option<#where_input> },
             )],
             quote! { #delete_many_result_type },
+            &delete_many_operation_authorization,
         ));
         operation_descriptors.push(subscription_descriptor());
     }
@@ -5358,7 +6207,7 @@ pub(crate) fn generate_graphql_operations(
 
             #[::graphql_orm::async_graphql::Object]
             impl #queries_struct {
-                #[graphql(name = #list_query_name)]
+                #[graphql(name = #list_query_name, #list_requires_scopes #authenticated_directive)]
                 async fn list(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
@@ -5369,6 +6218,7 @@ pub(crate) fn generate_graphql_operations(
                     use ::graphql_orm::graphql::orm::{DatabaseOrderBy, EntityQuery};
 
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                    #list_scope_enforcement
                     ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                         ctx,
                         ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
@@ -5481,7 +6331,7 @@ pub(crate) fn generate_graphql_operations(
                 #search_query_method
                 #keyset_graphql_method
 
-                #[graphql(name = #single_query_name)]
+                #[graphql(name = #single_query_name, #single_read_requires_scopes #authenticated_directive)]
                 async fn get_by_id(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
@@ -5489,8 +6339,9 @@ pub(crate) fn generate_graphql_operations(
                 ) -> ::graphql_orm::async_graphql::Result<Option<#struct_name>> {
                     use ::graphql_orm::graphql::orm::EntityQuery;
 
-                    #single_query_key_init
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                    #single_read_scope_enforcement
+                    #single_query_key_init
                     ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                         ctx,
                         ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
@@ -5743,7 +6594,7 @@ pub(crate) fn generate_graphql_operations(
         #[::graphql_orm::async_graphql::Object]
         impl #queries_struct {
             /// Get a list of #plural_name with optional filtering, sorting, and pagination
-            #[graphql(name = #list_query_name)]
+            #[graphql(name = #list_query_name, #list_requires_scopes #authenticated_directive)]
             async fn list(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
@@ -5753,6 +6604,7 @@ pub(crate) fn generate_graphql_operations(
             ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, DatabaseOrderBy, EntityQuery, FromSqlRow};
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                #list_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
@@ -5866,15 +6718,16 @@ pub(crate) fn generate_graphql_operations(
             #keyset_graphql_method
 
             /// Get a single #struct_name_str by ID
-            #[graphql(name = #single_query_name)]
+            #[graphql(name = #single_query_name, #single_read_requires_scopes #authenticated_directive)]
             async fn get_by_id(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #(#single_query_args)*
             ) -> ::graphql_orm::async_graphql::Result<Option<#struct_name>> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow};
-                #single_query_key_init
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                #single_read_scope_enforcement
+                #single_query_key_init
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
@@ -5927,7 +6780,7 @@ pub(crate) fn generate_graphql_operations(
         #[::graphql_orm::async_graphql::Object]
         impl #mutations_struct {
             /// Create a new #struct_name_str
-            #[graphql(name = #create_mutation_name)]
+            #[graphql(name = #create_mutation_name, #create_requires_scopes #authenticated_directive)]
             async fn create(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
@@ -5936,6 +6789,7 @@ pub(crate) fn generate_graphql_operations(
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
 
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                #create_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
@@ -6033,7 +6887,7 @@ pub(crate) fn generate_graphql_operations(
             #upsert_graphql_method
 
             /// Update an existing #struct_name_str
-            #[graphql(name = #update_mutation_name)]
+            #[graphql(name = #update_mutation_name, #update_requires_scopes #authenticated_directive)]
             async fn update(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
@@ -6043,6 +6897,7 @@ pub(crate) fn generate_graphql_operations(
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
 
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                #update_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
@@ -6189,7 +7044,7 @@ pub(crate) fn generate_graphql_operations(
             }
 
             /// Delete a #struct_name_str
-            #[graphql(name = #delete_mutation_name)]
+            #[graphql(name = #delete_mutation_name, #delete_requires_scopes #authenticated_directive)]
             async fn delete(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
@@ -6198,6 +7053,7 @@ pub(crate) fn generate_graphql_operations(
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, SqlValue};
 
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                #delete_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
@@ -6306,7 +7162,7 @@ pub(crate) fn generate_graphql_operations(
             }
 
             /// Update multiple #plural_name matching the given Where filter
-            #[graphql(name = #update_many_mutation_name)]
+            #[graphql(name = #update_many_mutation_name, #update_many_requires_scopes #authenticated_directive)]
             async fn update_many(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
@@ -6316,6 +7172,7 @@ pub(crate) fn generate_graphql_operations(
                 use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
 
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                #update_many_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
@@ -6345,7 +7202,7 @@ pub(crate) fn generate_graphql_operations(
             }
 
             /// Delete multiple #plural_name matching the given Where filter
-            #[graphql(name = #delete_many_mutation_name)]
+            #[graphql(name = #delete_many_mutation_name, #delete_many_requires_scopes #authenticated_directive)]
             async fn delete_many(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
@@ -6354,6 +7211,7 @@ pub(crate) fn generate_graphql_operations(
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow};
 
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                #delete_many_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
@@ -6393,7 +7251,7 @@ pub(crate) fn generate_graphql_operations(
         #[::graphql_orm::async_graphql::Subscription]
         impl #subscriptions_struct {
             /// Subscribe to #struct_name_str changes
-            #[graphql(name = #subscription_name)]
+            #[graphql(name = #subscription_name, #subscription_requires_scopes #authenticated_directive)]
             async fn on_changed(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
@@ -6401,6 +7259,7 @@ pub(crate) fn generate_graphql_operations(
             ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = #changed_event>> {
                 use ::graphql_orm::futures::StreamExt;
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                #subscription_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription,

@@ -1,0 +1,5 @@
+error: operation authorization category `upsert` requires the entity to generate that GraphQL operation
+ --> tests/ui/operation_authorization_missing_generated_category.rs:9:8
+  |
+9 | struct OperationAuthorizationMissingGeneratedCategory {
+  |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

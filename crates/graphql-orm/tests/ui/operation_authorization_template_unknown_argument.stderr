@@ -1,0 +1,5 @@
+error: operation authorization category `single_read` scope template references unknown GraphQL argument `recordId`
+ --> tests/ui/operation_authorization_template_unknown_argument.rs:7:28
+  |
+7 |     all_scope_templates = ["records.{recordId}.read"]
+  |                            ^^^^^^^^^^^^^^^^^^^^^^^^^

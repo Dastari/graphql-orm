@@ -3,7 +3,7 @@ title: Generated workspace package inventory
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 review_by: 2026-11-01
 supersedes: []
 ---
@@ -18,18 +18,20 @@ changes.
 
 | Package | Version | Path | Default features | Direct internal dependencies |
 | --- | --- | --- | --- | --- |
-| `graphql-orm` | `0.17.0` | `crates/graphql-orm` | `sqlite` | `graphql-orm-macros` |
+| `graphql-orm` | `0.18.0` | `crates/graphql-orm` | `sqlite` | `graphql-orm-macros`, `graphql-orm-router-protocol` (optional) |
 | `graphql-orm-ai` | `0.61.0` | `crates/graphql-orm-ai` | `sqlite` | `graphql-orm`, `graphql-orm-backup` (optional), `graphql-orm-storage` |
 | `graphql-orm-backup` | `0.7.0` | `crates/graphql-orm-backup` | `local` | `graphql-orm` (optional), `graphql-orm-storage` |
-| `graphql-orm-macros` | `0.17.0` | `crates/graphql-orm-macros` | `sqlite` | none |
+| `graphql-orm-macros` | `0.18.0` | `crates/graphql-orm-macros` | `sqlite` | none |
+| `graphql-orm-router` | `0.1.0` | `crates/graphql-orm-router` | none | `graphql-orm-router-protocol` |
+| `graphql-orm-router-protocol` | `0.1.0` | `crates/graphql-orm-router-protocol` | none | none |
 | `graphql-orm-storage` | `0.6.0` | `crates/graphql-orm-storage` | `local` | none |
 
 External exact-revision dependency:
 
-- `agql-auth` requirement `^0.13.0`, source `git+https://github.com/Dastari/agql-auth.git?rev=d6b9cef663d52125c52f3fb90d4155ee25d34775`, consumed by `graphql-orm`, `graphql-orm-ai`.
+- `agql-auth` requirement `^0.14.0`, source `git+https://github.com/Dastari/agql-auth.git?rev=413fda3435f060604cd653c11e2cc18a668aace1`, consumed by `graphql-orm`, `graphql-orm-ai`, `graphql-orm-router`.
 
 <!-- END GENERATED WORKSPACE PACKAGES -->
 
 Workspace membership coordinates development but does not make companion
 packages features of `graphql-orm`. See
-[ADR-0002](../decisions/ADR-0002-workspace-package-boundaries.md).
+[ADR-0007](../decisions/ADR-0007-seven-package-workspace-boundaries.md).

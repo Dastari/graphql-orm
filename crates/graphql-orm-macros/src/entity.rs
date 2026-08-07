@@ -393,6 +393,15 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                         ));
                     }
                     metadata.projections.push(projection);
+                } else if meta.path.is_ident("operation_authorization") {
+                    // `GraphQLOperations` owns this declaration. Consume its
+                    // expression-valued options here so deriving
+                    // `GraphQLEntity` alongside it remains order-independent.
+                    meta.parse_nested_meta(|option| {
+                        let value = option.value()?;
+                        let _: syn::Expr = value.parse()?;
+                        Ok(())
+                    })?;
                 }
                 Ok(())
             })?;

@@ -1,0 +1,5 @@
+error: operation_authorization any_scopes must contain at least one nonempty alternative
+ --> tests/ui/operation_authorization_empty_scope_alternatives.rs:7:5
+  |
+7 |     any_scopes = []
+  |     ^^^^^^^^^^^^^^^

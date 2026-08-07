@@ -66,13 +66,13 @@ Select exactly the backend support your service needs:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.17.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.18.0", default-features = false, features = ["sqlite"] }
 ```
 
 GitHub with an exact full revision is the only supported distribution method. The workspace packages are
 not published to crates.io. Replace the placeholder with the reviewed release commit (the version tag
 is an identity aid, not a substitute for `rev`). The optional `auth-agql` bridge likewise resolves
-the exact upstream revision `d6b9cef663d52125c52f3fb90d4155ee25d34775`.
+the exact upstream revision `413fda3435f060604cd653c11e2cc18a668aace1`.
 
 Available backend features:
 
@@ -82,7 +82,7 @@ Available backend features:
 
 Optional integration features:
 
-- `auth-agql` - optional one-way bridge from `agql-auth` 0.13 principals into
+- `auth-agql` - optional one-way bridge from `agql-auth` 0.14 principals into
   `AuthSubject` / `DbAuthContext` plus declared assurance evaluation
 
 Naming features are independent of backend features:
@@ -289,6 +289,9 @@ available for managed schemas. SQL Server is currently read/query-only by design
 - `crates/graphql-orm-storage` - provider-neutral object storage primitives
 - `crates/graphql-orm-backup` - backup and restore orchestration
 - `crates/graphql-orm-ai` - project-agnostic AI agent runtime
+- `crates/graphql-orm-router-protocol` - versioned project-neutral subgraph and
+  router declarations
+- `crates/graphql-orm-router` - federated GraphQL router runtime
 
 Applications should depend on `graphql-orm` and use the re-exported macros from
 `graphql_orm::prelude::*`.

@@ -56,6 +56,46 @@ jobs:
       - run: cargo clippy -p graphql-orm-ai --all-targets --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness -- -D warnings
       - run: RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc -p graphql-orm-ai --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness --no-deps
 
+  router:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p graphql-orm-router-protocol --locked
+      - run: cargo test -p graphql-orm-router --locked
+      - run: cargo test -p graphql-orm-router --locked --features auth-agql
+      - run: cargo clippy -p graphql-orm-router-protocol --all-targets --locked -- -D warnings
+      - run: cargo clippy -p graphql-orm-router --all-targets --locked -- -D warnings
+      - run: cargo clippy -p graphql-orm-router --all-targets --locked --features auth-agql -- -D warnings
+      - run: RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc -p graphql-orm-router-protocol --no-deps --locked
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm-router --no-deps --locked
+      - run: RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc -p graphql-orm-router --no-deps --locked --features auth-agql
+
+  router-msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.90.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p graphql-orm-router-protocol --locked
+      - run: cargo test -p graphql-orm-router --locked
+
+  router-release-policy:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - run: scripts/check-router-release-policy.sh "${{ github.event.pull_request.base.sha }}"
+
   alternate-features:
     runs-on: ubuntu-latest
     steps:
@@ -104,6 +144,14 @@ jobs:
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
+      - id: router-baseline
+        name: Detect router packages in the baseline
+        run: |
+          if git cat-file -e "${{ github.event.pull_request.base.sha }}:crates/graphql-orm-router/Cargo.toml"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: obi1kenobi/cargo-semver-checks-action@v2
         with:
           manifest-path: crates/graphql-orm/Cargo.toml
@@ -126,4 +174,16 @@ jobs:
         with:
           manifest-path: crates/graphql-orm-ai/Cargo.toml
           baseline-root: ../graphql-orm-baseline/crates/graphql-orm-ai
+          feature-group: default-features
+      - if: steps.router-baseline.outputs.exists == 'true'
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          manifest-path: crates/graphql-orm-router-protocol/Cargo.toml
+          baseline-root: ../graphql-orm-baseline/crates/graphql-orm-router-protocol
+          feature-group: default-features
+      - if: steps.router-baseline.outputs.exists == 'true'
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          manifest-path: crates/graphql-orm-router/Cargo.toml
+          baseline-root: ../graphql-orm-baseline/crates/graphql-orm-router
           feature-group: default-features

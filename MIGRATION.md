@@ -13,6 +13,39 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.18.0 Router metadata and `agql-auth` 0.14 scopes
+
+Update `graphql-orm` and `graphql-orm-macros` together to 0.18.0 at one
+reviewed full Git revision. Generated operation authorization declarations,
+the optional `router-protocol` export, and standard Federation authorization
+metadata are additive source and schema capabilities, but generated operation
+authorization fingerprints advance to version 2. Rebuild generated code and
+review any consumer that persists or compares those fingerprints.
+
+Existing databases, schema modules, RLS policy, and stored application data do
+not require migration. Router adoption is separately opt-in and requires each
+host to expose its finished SDL and matching protocol descriptor.
+
+The workspace now pins `agql-auth` 0.14.0 at exact revision
+`413fda3435f060604cd653c11e2cc18a668aace1`:
+
+```toml
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "413fda3435f060604cd653c11e2cc18a668aace1", version = "0.14.0" }
+```
+
+Update any direct host dependency at the same time so Cargo resolves one
+package and type universe. The `auth-agql` bridge continues consuming the
+normalized `AuthPrincipal::scopes()` vector, so it has no Rust API, GraphQL,
+database, RLS, or stored-data migration.
+
+The upstream access-token wire default is breaking: newly issued access JWTs
+use the OAuth space-delimited `scope` string instead of the pre-0.14 `scopes`
+array. Upstream validators accept both by default for a bounded transition;
+direct JWT decoders must add standard-claim support before issuer cutover.
+Purpose tokens retain their separate `scopes` array. Follow the upstream
+0.13-to-0.14 staged migration and wait for the maximum old access-token TTL
+plus validation leeway before rejecting legacy claims.
+
 ## 0.17.0 Provider-Neutral Operation Assurance
 
 Update `graphql-orm` and `graphql-orm-macros` together to 0.17.0 at the final
@@ -20,7 +53,7 @@ reviewed full revision. If `auth-agql` is enabled, match its exact upstream
 dependency:
 
 ```toml
-agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "d6b9cef663d52125c52f3fb90d4155ee25d34775", version = "0.13.0" }
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "413fda3435f060604cd653c11e2cc18a668aace1", version = "0.14.0" }
 ```
 
 This release is additive and opt-in. Existing schemas install no assurance
@@ -839,6 +872,6 @@ access path.
 
 - No JWT, OIDC, cookie, wildcard, or application-specific scope logic was added to `graphql-orm`.
 - PostgreSQL RLS helper functions still use exact scope matching.
-- The current `auth-agql` feature targets `agql-auth` 0.13.0 at revision
-  `d6b9cef663d52125c52f3fb90d4155ee25d34775`; earlier release sections above
+- The current `auth-agql` feature targets `agql-auth` 0.14.0 at revision
+  `413fda3435f060604cd653c11e2cc18a668aace1`; earlier release sections above
   retain their historical pins.

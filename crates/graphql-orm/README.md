@@ -24,6 +24,9 @@ This crate provides the public runtime contract targeted by the derive macros:
   generated resolver auth modes, exact-scope `ScopeEntityPolicy`, and optional `auth-agql` bridge
 - provider-neutral operation assurance registries, mutation completeness
   audits, directive metadata, deterministic client manifests, and guards
+- generated-operation fixed and argument-templated scope declarations,
+  independent authorization fingerprints, standard namespaced Federation
+  authorization metadata, and optional project-neutral router protocol export
 - schema models, validation, migration planning, and explicit migration application
 - SQLite, Postgres, and read-only SQL Server runtime support
 
@@ -47,6 +50,21 @@ pub struct User {
     pub name: String,
 }
 ```
+
+## Generated operation authorization
+
+`#[graphql_orm(operation_authorization(...))]` accepts disjoint generated
+operation categories. Use `all_scopes` or `any_scopes` for fixed requirements;
+use `all_scope_templates` or `any_scope_templates` when a scope references a
+coerced scalar root argument such as `records.{id}.read`. The derive rejects
+unknown categories and arguments, policies for operations the entity does not
+generate, malformed placeholders, nullable values, and complex input objects.
+
+The authoritative generated resolver guard and optional router protocol export
+come from the same declaration. Fixed requirements also emit standard
+Federation authorization metadata. Argument templates remain protocol metadata
+because emitting them as literal `@requiresScopes` values would change their
+meaning.
 
 ## Documentation
 

@@ -11,8 +11,8 @@ supersedes: []
 # Implementation Status
 
 `graphql-orm-ai` is at crate version `0.61.0` with AI schema module
-`0.51.0`. It uses workspace `graphql-orm` `0.17.0` and external `agql-auth`
-`0.13.0` at `d6b9cef663d52125c52f3fb90d4155ee25d34775`.
+`0.51.0`. It uses workspace `graphql-orm` `0.18.0` and external `agql-auth`
+`0.14.0` at `413fda3435f060604cd653c11e2cc18a668aace1`.
 
 The active work order, dependencies, and exit gates are maintained in the
 [AI production-readiness plan](../../../docs/plans/active/ai-production-readiness/README.md).

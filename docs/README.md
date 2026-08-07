@@ -3,7 +3,7 @@ title: GraphQL ORM documentation index
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 review_by: 2026-11-01
 supersedes: []
 ---
@@ -44,6 +44,8 @@ describe:
 - [`graphql-orm-storage`](../crates/graphql-orm-storage/docs/README.md)
 - [`graphql-orm-backup`](../crates/graphql-orm-backup/docs/README.md)
 - [`graphql-orm-ai`](../crates/graphql-orm-ai/docs/README.md)
+- [`graphql-orm-router-protocol`](../crates/graphql-orm-router-protocol/README.md)
+- [`graphql-orm-router`](../crates/graphql-orm-router/README.md)
 
 The [generated workspace package inventory](reference/workspace-packages.md)
 is the only manually linked version/dependency overview. Regenerate it with

@@ -1,0 +1,5 @@
+error: operation authorization category `search` requires a generated search operation; mark at least one supported field as searchable
+ --> tests/ui/operation_authorization_missing_search.rs:9:8
+  |
+9 | struct OperationAuthorizationMissingSearch {
+  |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

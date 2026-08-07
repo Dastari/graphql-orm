@@ -1,0 +1,5 @@
+error: operation_authorization any_scopes alternatives must not be empty
+ --> tests/ui/operation_authorization_empty_scopes.rs:7:19
+  |
+7 |     any_scopes = [[]]
+  |                   ^^

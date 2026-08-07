@@ -3,6 +3,7 @@ pub mod auth;
 #[cfg(feature = "auth-agql")]
 pub mod auth_agql;
 pub mod errors;
+pub mod federation;
 pub mod filters;
 pub mod loaders;
 pub mod orm;

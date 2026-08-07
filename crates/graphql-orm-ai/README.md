@@ -327,9 +327,9 @@ graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<r
 ```
 
 > **Pre-release dependency note:** this source snapshot resolves
-> `graphql-orm` 0.17.0, `graphql-orm-backup` 0.7.0, and
-> `graphql-orm-storage` 0.6.0 from one workspace revision. `agql-auth` 0.13.0
-> at `d6b9cef663d52125c52f3fb90d4155ee25d34775` remains an exact external
+> `graphql-orm` 0.18.0, `graphql-orm-backup` 0.7.0, and
+> `graphql-orm-storage` 0.6.0 from one workspace revision. `agql-auth` 0.14.0
+> at `413fda3435f060604cd653c11e2cc18a668aace1` remains an exact external
 > dependency. Direct Git consumers of more than one workspace package must
 > give each package the same reviewed monorepo `rev`.
 

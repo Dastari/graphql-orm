@@ -3,7 +3,7 @@ title: GraphQL contract development workflow
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -14,7 +14,10 @@ Use this sequence when a change affects generated or runtime GraphQL behavior.
 
 1. Identify the package that owns the contract. Macro syntax/code generation
    belongs to `graphql-orm-macros`; runtime execution and metadata belong to
-   `graphql-orm`; AI tool admission belongs to `graphql-orm-ai`.
+   `graphql-orm`; project-neutral router wire declarations belong to
+   `graphql-orm-router-protocol`; federation composition, execution, and early
+   denial belong to `graphql-orm-router`; AI tool admission belongs to
+   `graphql-orm-ai`.
 2. State the intended GraphQL operation, backend profile, authorization and
    assurance behavior, schema/data compatibility, and failure semantics.
 3. Change the owning contract and all affected dependants in one branch. Keep

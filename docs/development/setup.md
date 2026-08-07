@@ -3,7 +3,7 @@ title: "Workspace setup"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -11,8 +11,9 @@ supersedes: []
 # Workspace setup
 
 This repository is a Rust workspace containing independently consumable ORM,
-macro, storage, backup, and AI packages. The core ORM does not acquire backup,
-storage, or AI capabilities through optional features.
+macro, storage, backup, AI, router-protocol, and router packages. The core ORM
+does not acquire backup, storage, AI, or router runtime capabilities through
+optional features.
 
 ## Prerequisites
 
@@ -34,7 +35,14 @@ companion packages explicitly when working on them:
 cargo check -p graphql-orm-storage
 cargo check -p graphql-orm-backup
 cargo check -p graphql-orm-ai
+cargo check -p graphql-orm-router-protocol
+cargo check -p graphql-orm-router
+cargo check -p graphql-orm-router --features auth-agql
 ```
+
+The router is intentionally excluded from default members because its pinned
+Federation execution stack is substantially heavier than the protocol and core
+ORM packages. Select it only for router work.
 
 ## Backend selection
 
