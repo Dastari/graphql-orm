@@ -622,10 +622,11 @@ The separately owned GEMA consumer has completed source migration and a
 reversible live cutover while retaining the stopped Cosmo/NATS infrastructure.
 Cutover validation exposed a router defect in variable-backed subscription
 scope templates: the private Hive subscription path discarded the operation
-variables before the authorization hook. The 0.1.1 patch candidate now carries
-operation-local variables across the bounded private bridge, rejects spoofed
-internal metadata, and proves denied variable-backed subscriptions open no
-upstream connection while permitted variable and inline forms succeed.
+variables before the authorization hook. The reviewed 0.1.1 patch is now
+published from this repository; it carries operation-local variables across
+the bounded private bridge, rejects spoofed internal metadata, and proves
+denied variable-backed subscriptions open no upstream connection while
+permitted variable and inline forms succeed.
 
 Slice 9 remains acceptance-red until GEMA pins the reviewed 0.1.1 full
 revision, rebuilds its artifact-specific SBOM/notices, validates the exact live
