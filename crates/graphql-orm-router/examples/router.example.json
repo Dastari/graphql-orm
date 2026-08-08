@@ -35,6 +35,7 @@
   },
   "subscriptions": {
     "maxConnections": 1024,
+    "maxConnectionAttemptsPerSecond": 128,
     "maxOperationsPerConnection": 32,
     "broadcastCapacity": 32,
     "subgraphBufferCapacity": 1024,

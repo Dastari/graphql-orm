@@ -819,6 +819,7 @@ fn authenticated_admin_registration_binds_identity_destinations_and_restart_stat
     let metrics: Value = serde_json::from_slice(&metrics.body).unwrap();
     assert!(metrics["router_graphql_requests_total"].as_u64().unwrap() >= 2);
     assert!(metrics["router_subgraph_requests_total"].as_u64().unwrap() >= 2);
+    assert_eq!(metrics["router_websocket_rejections_total"], 0);
     assert!(
         metrics["router_composition_success_total"]
             .as_u64()
@@ -1454,18 +1455,55 @@ fn authenticated_public_websocket_enforces_lifecycle_and_routes_upstream_websock
         thread::sleep(Duration::from_millis(10));
     }
 
+    let mut oversized = TestWebSocket::connect_at(router.address, "/api/graphql");
+    oversized.connection_init_bearer("product-events");
+    oversized.send_oversized_text_frame();
+    oversized.wait_for_disconnect_without_close_code(1011);
+    thread::sleep(Duration::from_millis(50));
+
     let mut failing = TestWebSocket::connect_at(router.address, "/api/graphql");
     failing.connection_init_bearer("product-events");
     failing.subscribe(
-        "failure",
+        "live-events",
+        "subscription ProductEvents { productChanged(id: \"p1\") { id } }",
+    );
+    assert_eq!(
+        failing.wait_for_operation_message("live-events", "next")["id"],
+        "live-events"
+    );
+    failing.subscribe(
+        "rename-once",
+        "mutation RenameProduct { renameProduct(id: \"p1\", name: \"renamed\") { id name } }",
+    );
+    assert_eq!(
+        failing.wait_for_operation_message("rename-once", "next")["id"],
+        "rename-once"
+    );
+    assert_eq!(
+        failing.wait_for_operation_message("rename-once", "complete")["id"],
+        "rename-once",
+        "a one-shot mutation must complete without closing or retiring its sibling subscription"
+    );
+    failing.subscribe(
+        "failing-events",
         "subscription { productChanged(id: \"failure\") { id } }",
     );
-    let failure = failing.next_message();
-    assert_eq!(failure["id"], "failure");
-    assert!(
-        failure["payload"].get("errors").is_some() || failure["type"] == "error",
-        "upstream failure must be isolated as an operation error: {failure}"
+    let failure = failing.wait_for_operation_failure("failing-events");
+    assert_eq!(failure["id"], "failing-events");
+    failing.subscribe(
+        "rename-after-failure",
+        "mutation RenameProduct { renameProduct(id: \"p1\", name: \"renamed\") { id } }",
     );
+    assert_eq!(
+        failing.wait_for_operation_message("rename-after-failure", "next")["id"],
+        "rename-after-failure",
+        "an upstream subscription failure must not close the downstream socket"
+    );
+    assert_eq!(
+        failing.wait_for_operation_message("rename-after-failure", "complete")["id"],
+        "rename-after-failure"
+    );
+    failing.complete("live-events");
     failing.close();
     thread::sleep(Duration::from_millis(50));
 
@@ -1891,6 +1929,31 @@ impl TestWebSocket {
         }
     }
 
+    fn wait_for_operation_failure(&mut self, id: &str) -> Value {
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        let mut failure = None;
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "did not receive a terminal failure for WebSocket operation {id} within {TEST_TIMEOUT:?}"
+            );
+            let message = self.next_message();
+            if message["id"] != id {
+                continue;
+            }
+            match message["type"].as_str() {
+                Some("error") => return message,
+                Some("next") if message["payload"].get("errors").is_some() => {
+                    failure = Some(message);
+                }
+                Some("complete") => {
+                    return failure.expect("failed operation must report an error before complete");
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn close(&mut self) {
         let _ = write_websocket_frame(&mut self.stream, 0x8, &[]);
     }
@@ -1899,6 +1962,20 @@ impl TestWebSocket {
         let bytes = serde_json::to_vec(value).expect("WebSocket JSON should serialize");
         write_websocket_frame(&mut self.stream, 0x1, &bytes)
             .expect("WebSocket client frame should be written");
+    }
+
+    fn send_oversized_text_frame(&mut self) {
+        let message = json!({
+            "id": "oversized",
+            "type": "subscribe",
+            "payload": {
+                "query": "query { product(id: \"p1\") { id } }",
+                "extensions": {"padding": "x".repeat(65_536)}
+            }
+        });
+        let bytes =
+            serde_json::to_vec(&message).expect("oversized WebSocket JSON should serialize");
+        let _ = write_websocket_frame(&mut self.stream, 0x1, &bytes);
     }
 
     fn next_message(&mut self) -> Value {
@@ -1930,6 +2007,38 @@ impl TestWebSocket {
                 0x9 => write_websocket_frame(&mut self.stream, 0xA, &payload)
                     .expect("WebSocket pong should be written"),
                 _ => {}
+            }
+        }
+    }
+
+    fn wait_for_disconnect_without_close_code(&mut self, forbidden_code: u16) {
+        loop {
+            match read_websocket_frame(&mut self.stream) {
+                Ok((0x8, payload)) if payload.len() >= 2 => {
+                    let code = u16::from_be_bytes([payload[0], payload[1]]);
+                    assert_ne!(
+                        code, forbidden_code,
+                        "a secondary transport task must not mask the primary protocol failure"
+                    );
+                    return;
+                }
+                Ok((0x9, payload)) => {
+                    let _ = write_websocket_frame(&mut self.stream, 0xA, &payload);
+                }
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::UnexpectedEof
+                            | io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::BrokenPipe
+                    ) =>
+                {
+                    return;
+                }
+                Err(error) => {
+                    panic!("router did not terminate an oversized WebSocket frame: {error}")
+                }
             }
         }
     }

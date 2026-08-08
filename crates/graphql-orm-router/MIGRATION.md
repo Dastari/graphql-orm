@@ -3,12 +3,34 @@ title: graphql-orm-router migration guide
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-08
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router migration guide
+
+## 0.1.1 to 0.1.2
+
+Replace the exact full-revision pin and rebuild the router. No descriptor,
+schema, token, or stored-data migration is required. Existing configurations
+gain a default limit of 128 public WebSocket upgrade attempts per second with
+one second of burst capacity. Set
+`subscriptions.maxConnectionAttemptsPerSecond` explicitly when measured
+startup bursts require another positive budget. Limited attempts return HTTP
+429 with `Retry-After: 1`; active-connection saturation continues to return
+HTTP 503.
+
+Clients must use jittered backoff for either response and must not blindly
+replay a mutation when the socket was lost after `subscribe` but before its
+terminal `complete`: the write may already have committed. Query authoritative
+state or use an application idempotency contract. A complete one-shot
+operation can safely retire its ID while long-lived sibling subscriptions stay
+active.
+
+The public transport still has a 64 KiB serialized-message ceiling. Move bulk
+payloads to bounded HTTP operations or an application-level chunk protocol;
+raising retry frequency cannot make an oversized WebSocket operation valid.
 
 ## 0.1.0 to 0.1.1
 

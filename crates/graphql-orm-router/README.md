@@ -3,7 +3,7 @@ title: graphql-orm-router
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-08
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -76,6 +76,15 @@ The file format, environment-only secret rules, production budgets, metrics,
 reload/reconnect procedures, and residual deployment responsibilities are in
 the [component documentation](docs/README.md). Initial adopters should also read
 the [migration guide](MIGRATION.md).
+
+The public WebSocket gateway preserves GraphQL operation IDs, keeps an
+operation-scoped upstream failure from closing sibling work, and treats
+one-shot `next`/`complete` independently from long-lived subscriptions. Public
+termination is first-cause-wins and closes the private bridge. A bounded
+upgrade-attempt token bucket contains reconnect storms; clients must still use
+jittered backoff and must not automatically replay an uncertain mutation. The
+complete serialized WebSocket message remains limited to 64 KiB, so bulk
+payloads require an application HTTP or chunking contract.
 
 ## Graph lifecycle
 

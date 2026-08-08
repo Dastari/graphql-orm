@@ -544,6 +544,7 @@ impl fmt::Debug for StaticSubgraph {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubscriptionConfig {
     pub(crate) max_connections: usize,
+    pub(crate) max_connection_attempts_per_second: usize,
     pub(crate) max_operations_per_connection: usize,
     pub(crate) broadcast_capacity: usize,
     pub(crate) subgraph_buffer_capacity: usize,
@@ -561,6 +562,17 @@ impl SubscriptionConfig {
     #[must_use]
     pub fn with_max_connections(mut self, value: usize) -> Self {
         self.max_connections = value;
+        self
+    }
+
+    /// Sets the process-wide public WebSocket upgrade-attempt rate.
+    ///
+    /// The limiter uses a token bucket with one second of burst capacity. It
+    /// contains reconnect storms before they can repeatedly create private
+    /// subscription transports.
+    #[must_use]
+    pub fn with_max_connection_attempts_per_second(mut self, value: usize) -> Self {
+        self.max_connection_attempts_per_second = value;
         self
     }
 
@@ -606,6 +618,10 @@ impl SubscriptionConfig {
         let bounded = [
             ("maximum WebSocket connections", self.max_connections),
             (
+                "maximum WebSocket connection attempts per second",
+                self.max_connection_attempts_per_second,
+            ),
+            (
                 "maximum operations per WebSocket connection",
                 self.max_operations_per_connection,
             ),
@@ -645,6 +661,7 @@ impl Default for SubscriptionConfig {
     fn default() -> Self {
         Self {
             max_connections: 1_024,
+            max_connection_attempts_per_second: 128,
             max_operations_per_connection: 32,
             broadcast_capacity: 32,
             subgraph_buffer_capacity: 1_024,
@@ -1296,6 +1313,12 @@ mod tests {
         assert!(
             SubscriptionConfig::new()
                 .with_max_connections(0)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            SubscriptionConfig::new()
+                .with_max_connection_attempts_per_second(0)
                 .validate()
                 .is_err()
         );

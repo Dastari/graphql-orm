@@ -3,7 +3,7 @@ title: graphql-orm-router configuration reference
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-08
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -98,10 +98,18 @@ parser tokens, depth 20, 50 aliases, 100 directives, and normalized field cost
 must remain within the crate's hard safety ceiling.
 
 The default `subscriptions` limits are 1024 process-wide public connections,
-32 operations per connection, downstream broadcast capacity 32, upstream
-buffer capacity 1024, 64 KiB client messages, and a 5000 ms
-`connection_init` deadline. All queues are bounded. Delivery is ephemeral and
-unreplayed.
+128 connection attempts per second with one second of burst capacity, 32
+operations per connection, downstream broadcast capacity 32, upstream buffer
+capacity 1024, 64 KiB client messages, and a 5000 ms `connection_init`
+deadline. Configure the attempt budget with
+`maxConnectionAttemptsPerSecond`. Excess attempts return HTTP 429 with
+`Retry-After: 1`; active-connection saturation returns HTTP 503. All queues
+are bounded. Delivery is ephemeral and unreplayed.
+
+The message limit applies to the complete serialized
+`graphql-transport-ws` message, including variables and base64 expansion. Bulk
+uploads belong on a bounded HTTP endpoint or an application chunk protocol,
+not in one WebSocket operation.
 
 ## Administration and dynamic destinations
 

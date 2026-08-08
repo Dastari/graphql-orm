@@ -12,6 +12,7 @@ pub struct RouterMetricsSnapshot {
     active_graph_version: u64,
     active_websocket_connections: usize,
     active_subscriptions: usize,
+    websocket_rejections_total: u64,
     schema_refresh_total: u64,
     composition_success_total: u64,
     composition_failure_total: u64,
@@ -78,6 +79,12 @@ impl RouterMetricsSnapshot {
         "Current public WebSocket subscription operations."
     );
     snapshot_getter!(
+        websocket_rejections_total,
+        websocket_rejections_total,
+        u64,
+        "Total public WebSocket upgrades rejected by an admission limit."
+    );
+    snapshot_getter!(
         schema_refresh_total,
         schema_refresh_total,
         u64,
@@ -119,6 +126,7 @@ pub(crate) struct RouterMetrics {
     active_graph_version: AtomicU64,
     active_websocket_connections: AtomicUsize,
     active_subscriptions: AtomicUsize,
+    websocket_rejections_total: AtomicU64,
     schema_refresh_total: AtomicU64,
     composition_success_total: AtomicU64,
     composition_failure_total: AtomicU64,
@@ -139,6 +147,7 @@ impl RouterMetrics {
             active_graph_version: self.active_graph_version.load(Ordering::Relaxed),
             active_websocket_connections: self.active_websocket_connections.load(Ordering::Relaxed),
             active_subscriptions: self.active_subscriptions.load(Ordering::Relaxed),
+            websocket_rejections_total: self.websocket_rejections_total.load(Ordering::Relaxed),
             schema_refresh_total: self.schema_refresh_total.load(Ordering::Relaxed),
             composition_success_total: self.composition_success_total.load(Ordering::Relaxed),
             composition_failure_total: self.composition_failure_total.load(Ordering::Relaxed),
@@ -174,6 +183,11 @@ impl RouterMetrics {
 
     pub(crate) fn websocket_disconnected(&self) {
         decrement(&self.active_websocket_connections, 1);
+    }
+
+    pub(crate) fn websocket_rejected(&self) {
+        self.websocket_rejections_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn subscription_started(&self) {
@@ -234,8 +248,10 @@ mod tests {
         metrics.websocket_connected();
         metrics.subscription_started();
         metrics.subscription_started();
+        metrics.websocket_rejected();
         assert_eq!(metrics.snapshot().active_websocket_connections(), 2);
         assert_eq!(metrics.snapshot().active_subscriptions(), 2);
+        assert_eq!(metrics.snapshot().websocket_rejections_total(), 1);
 
         metrics.websocket_disconnected();
         metrics.websocket_disconnected();

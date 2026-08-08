@@ -3,7 +3,7 @@ title: graphql-orm-router operations runbook
 kind: runbook
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-08
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -45,9 +45,10 @@ than merely raising defaults.
 | SDL or descriptor body | 2 MiB | unhealthy/rejected source status |
 | Refresh attempts | 2 | refresh and composition totals |
 | WebSocket connections | 1024 | `router_websocket_connections` |
+| WebSocket attempts | 128/s, one-second burst | HTTP 429 and `router_websocket_rejections_total` |
 | Operations per WebSocket | 32 | operation limit errors |
 | Subscription fan-out / upstream buffers | 32 / 1024 | Hive lagged/dropped counters |
-| Client WebSocket message | 64 KiB | close code 4400 |
+| Client WebSocket message | 64 KiB | close code 4400 below the hard codec ceiling; transport disconnect at the ceiling |
 | Connection-init deadline | 5 s | close code 4408 |
 | Graceful drain | 10 s | shutdown duration and listener release |
 
@@ -81,6 +82,8 @@ in-place token replacement.
 - `4401`: obtain a valid token and open a new connection.
 - `4408`: send `connection_init` within the configured deadline and reconnect.
 - `4406`: request the `graphql-transport-ws` subprotocol.
+- HTTP `429`: honor `Retry-After`, add jitter, and increase exponential
+  backoff. Do not immediately reconnect.
 - `SUBSCRIPTION_SCHEMA_RELOAD`: the selected graph retired; wait for operation
   completion, open a fresh connection, and resubscribe.
 - `SERVICE_UNAVAILABLE` or `1011`: back off, query authoritative state, and
@@ -88,6 +91,21 @@ in-place token replacement.
 
 Use jittered exponential backoff and refetch state after any gap. A subscription
 is a notification channel, not the system of record.
+
+An operation-scoped subgraph subscription failure produces `error` (or a
+GraphQL error followed by `complete`) for that operation ID; it does not close
+the public socket or unrelated sibling operations. Loss of the private graph
+bridge is connection-scoped and closes the public socket with 1011. The first
+terminal cause wins, so a client frame/protocol failure is not replaced by a
+secondary bridge close.
+
+A successful one-shot query or mutation over WebSocket emits `next` and then
+`complete` with the original ID. Retire that ID on `complete`. If the socket is
+lost after a mutation was sent but before `complete`, treat its outcome as
+uncertain: do not replay it automatically unless the application has an
+idempotency contract. An oversized serialized message is a connection-level
+failure; move bulk data to bounded HTTP or chunk it below 64 KiB rather than
+retrying the same frame.
 
 ## Shutdown
 

@@ -319,6 +319,7 @@ impl FileRequestLimits {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FileSubscriptions {
     max_connections: Option<usize>,
+    max_connection_attempts_per_second: Option<usize>,
     max_operations_per_connection: Option<usize>,
     broadcast_capacity: Option<usize>,
     subgraph_buffer_capacity: Option<usize>,
@@ -331,6 +332,9 @@ impl FileSubscriptions {
         let mut value = SubscriptionConfig::new();
         if let Some(limit) = self.max_connections {
             value = value.with_max_connections(limit);
+        }
+        if let Some(limit) = self.max_connection_attempts_per_second {
+            value = value.with_max_connection_attempts_per_second(limit);
         }
         if let Some(limit) = self.max_operations_per_connection {
             value = value.with_max_operations_per_connection(limit);
@@ -521,6 +525,7 @@ mod tests {
         "subgraphRequestTimeoutMs": 5000,
         "maxSubgraphConnectionsPerHost": 75,
         "requestLimits": {"maxDepth": 12},
+        "subscriptions": {"maxConnectionAttemptsPerSecond": 55},
         "telemetry": {"logLevel": "warn", "prometheus": {"port": 4900}}
     }"#;
 
@@ -543,6 +548,14 @@ mod tests {
         assert_eq!(config.public_request_timeout, Duration::from_secs(45));
         assert_eq!(config.subgraph_request_timeout, Duration::from_secs(5));
         assert_eq!(config.max_subgraph_connections_per_host, 75);
+        assert_eq!(
+            config
+                .subscriptions
+                .as_ref()
+                .unwrap()
+                .max_connection_attempts_per_second,
+            55
+        );
         assert_eq!(config.telemetry.prometheus_port, Some(4900));
         assert_eq!(
             config.subgraphs[0].schema_headers["authorization"],

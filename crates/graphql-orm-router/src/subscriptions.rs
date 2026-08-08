@@ -5,10 +5,10 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     rc::{Rc, Weak},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
-    time::SystemTime,
+    time::{Instant, SystemTime},
 };
 
 use hive_router::ntex::{
@@ -75,6 +75,7 @@ pub(crate) struct SubscriptionGateway {
     internal_url: String,
     active_connections: AtomicUsize,
     active_operations: AtomicUsize,
+    connection_attempts: ConnectionAttemptLimiter,
     metrics: Arc<RouterMetrics>,
 }
 
@@ -88,6 +89,8 @@ impl SubscriptionGateway {
     ) -> Arc<Self> {
         let connect_address = loopback_connect_address(bound_address);
         let internal_url = format!("ws://localhost:{}{}", connect_address.port(), internal.path);
+        let connection_attempts =
+            ConnectionAttemptLimiter::new(config.max_connection_attempts_per_second);
         Arc::new(Self {
             config,
             authentication,
@@ -96,8 +99,13 @@ impl SubscriptionGateway {
             internal_url,
             active_connections: AtomicUsize::new(0),
             active_operations: AtomicUsize::new(0),
+            connection_attempts,
             metrics,
         })
+    }
+
+    fn try_reserve_connection_attempt(&self) -> bool {
+        self.connection_attempts.try_acquire()
     }
 
     fn try_reserve_connection(self: &Arc<Self>) -> Option<ConnectionPermit> {
@@ -133,6 +141,52 @@ impl SubscriptionGateway {
             self.active_operations.fetch_sub(count, Ordering::AcqRel);
             self.metrics.subscriptions_ended(count);
         }
+    }
+}
+
+struct ConnectionAttemptLimiter {
+    maximum_per_second: usize,
+    state: Mutex<ConnectionAttemptState>,
+}
+
+struct ConnectionAttemptState {
+    available: f64,
+    last_refill: Instant,
+}
+
+impl ConnectionAttemptLimiter {
+    fn new(maximum_per_second: usize) -> Self {
+        Self::new_at(maximum_per_second, Instant::now())
+    }
+
+    fn new_at(maximum_per_second: usize, now: Instant) -> Self {
+        Self {
+            maximum_per_second,
+            state: Mutex::new(ConnectionAttemptState {
+                available: maximum_per_second as f64,
+                last_refill: now,
+            }),
+        }
+    }
+
+    fn try_acquire(&self) -> bool {
+        self.try_acquire_at(Instant::now())
+    }
+
+    fn try_acquire_at(&self, now: Instant) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let elapsed = now.saturating_duration_since(state.last_refill);
+        state.last_refill = now;
+        let capacity = self.maximum_per_second as f64;
+        state.available = (state.available + elapsed.as_secs_f64() * capacity).min(capacity);
+        if state.available < 1.0 {
+            return false;
+        }
+        state.available -= 1.0;
+        true
     }
 }
 
@@ -177,6 +231,11 @@ struct ConnectionState {
     permit: Option<ConnectionPermit>,
 }
 
+struct ConnectionTermination {
+    first: bool,
+    internal_sink: Option<ws::WsSink>,
+}
+
 impl ConnectionState {
     fn remove_operation(&mut self, id: &str) {
         if self.operations.remove(id) {
@@ -184,15 +243,42 @@ impl ConnectionState {
         }
     }
 
-    fn close(&mut self) -> Option<ws::WsSink> {
+    fn terminate(&mut self) -> ConnectionTermination {
         if self.phase == ConnectionPhase::Closed {
-            return None;
+            return ConnectionTermination {
+                first: false,
+                internal_sink: None,
+            };
         }
         self.phase = ConnectionPhase::Closed;
         self.gateway.remove_operations(self.operations.len());
         self.operations.clear();
         self.permit.take();
-        self.internal_sink.take()
+        ConnectionTermination {
+            first: true,
+            internal_sink: self.internal_sink.take(),
+        }
+    }
+
+    fn terminate_and_close_internal(&mut self) {
+        let _ = self.terminate_and_close_internal_once();
+    }
+
+    fn terminate_and_close_internal_once(&mut self) -> bool {
+        let termination = self.terminate();
+        if let Some(internal) = termination.internal_sink {
+            rt::spawn(async move {
+                let _ = internal
+                    .send(close_message(1000, "Client disconnected"))
+                    .await;
+            });
+        }
+        termination.first
+    }
+
+    fn terminate_with_public_close(&mut self, code: u16, description: &str) -> Option<ws::Message> {
+        self.terminate_and_close_internal_once()
+            .then(|| close_message(code, description))
     }
 }
 
@@ -210,7 +296,14 @@ pub(crate) async fn websocket_index(
     req: HttpRequest,
     gateway: Arc<SubscriptionGateway>,
 ) -> Result<HttpResponse, web::Error> {
+    if !gateway.try_reserve_connection_attempt() {
+        gateway.metrics.websocket_rejected();
+        return Ok(HttpResponse::TooManyRequests()
+            .set_header("retry-after", "1")
+            .finish());
+    }
     let Some(permit) = gateway.try_reserve_connection() else {
+        gateway.metrics.websocket_rejected();
         return Ok(HttpResponse::ServiceUnavailable().finish());
     };
     let accepted = ws::subprotocols(&req)
@@ -257,7 +350,7 @@ async fn create_connection_service(
             gateway.config.connection_init_timeout,
         );
     } else {
-        state.borrow_mut().close();
+        state.borrow_mut().terminate_and_close_internal();
         let _ = sink
             .send(close_message(4406, "Subprotocol not acceptable"))
             .await;
@@ -271,8 +364,8 @@ async fn create_connection_service(
         async move { handle_frame(frame, sink, state).await }
     });
     let shutdown = fn_shutdown(async move || {
-        let internal = state.borrow_mut().close();
-        if let Some(internal) = internal {
+        let termination = state.borrow_mut().terminate();
+        if let Some(internal) = termination.internal_sink {
             let _ = internal
                 .send(close_message(1000, "Client disconnected"))
                 .await;
@@ -291,21 +384,23 @@ fn spawn_connection_init_timeout(
         let Some(state) = state.upgrade() else {
             return;
         };
-        let internal = {
+        let termination = {
             let mut state = state.borrow_mut();
             if state.phase != ConnectionPhase::WaitingForInit {
                 return;
             }
-            state.close()
+            state.terminate()
         };
-        if let Some(internal) = internal {
+        if let Some(internal) = termination.internal_sink {
             let _ = internal
                 .send(close_message(1000, "Connection initialization timed out"))
                 .await;
         }
-        let _ = sink
-            .send(close_message(4408, "Connection initialisation timeout"))
-            .await;
+        if termination.first {
+            let _ = sink
+                .send(close_message(4408, "Connection initialisation timeout"))
+                .await;
+        }
     });
 }
 
@@ -321,15 +416,17 @@ fn spawn_expiry(
         let Some(state) = state.upgrade() else {
             return;
         };
-        let internal = state.borrow_mut().close();
-        if let Some(internal) = internal {
+        let termination = state.borrow_mut().terminate();
+        if let Some(internal) = termination.internal_sink {
             let _ = internal
                 .send(close_message(1000, "Credential expired"))
                 .await;
         }
-        let _ = sink
-            .send(close_message(4401, "Bearer credential expired"))
-            .await;
+        if termination.first {
+            let _ = sink
+                .send(close_message(4401, "Bearer credential expired"))
+                .await;
+        }
     });
 }
 
@@ -342,28 +439,29 @@ async fn handle_frame(
         ws::Frame::Text(bytes) => {
             let max_bytes = state.borrow().gateway.config.max_client_message_bytes;
             if bytes.len() > max_bytes {
-                state.borrow_mut().close();
-                return Ok(Some(close_message(4400, "Client message is too large")));
+                return Ok(state
+                    .borrow_mut()
+                    .terminate_with_public_close(4400, "Client message is too large"));
             }
             let Ok(text) = std::str::from_utf8(&bytes) else {
-                state.borrow_mut().close();
-                return Ok(Some(close_message(4400, "Invalid client message")));
+                return Ok(state
+                    .borrow_mut()
+                    .terminate_with_public_close(4400, "Invalid client message"));
             };
             Ok(handle_text(text, sink, state).await)
         }
         ws::Frame::Ping(bytes) => Ok(Some(ws::Message::Pong(bytes))),
         ws::Frame::Pong(_) => Ok(None),
         ws::Frame::Close(reason) => {
-            let internal = state.borrow_mut().close();
-            if let Some(internal) = internal {
+            let termination = state.borrow_mut().terminate();
+            if let Some(internal) = termination.internal_sink {
                 let _ = internal.send(ws::Message::Close(reason.clone())).await;
             }
-            Ok(Some(ws::Message::Close(reason)))
+            Ok(termination.first.then(|| ws::Message::Close(reason)))
         }
-        ws::Frame::Binary(_) | ws::Frame::Continuation(_) => {
-            state.borrow_mut().close();
-            Ok(Some(close_message(4400, "Text messages are required")))
-        }
+        ws::Frame::Binary(_) | ws::Frame::Continuation(_) => Ok(state
+            .borrow_mut()
+            .terminate_with_public_close(4400, "Text messages are required")),
     }
 }
 
@@ -373,12 +471,14 @@ async fn handle_text(
     state: SharedConnectionState,
 ) -> Option<ws::Message> {
     let Ok(message) = serde_json::from_str::<Value>(text) else {
-        state.borrow_mut().close();
-        return Some(close_message(4400, "Invalid client message"));
+        return state
+            .borrow_mut()
+            .terminate_with_public_close(4400, "Invalid client message");
     };
     let Some(message_type) = message.get("type").and_then(Value::as_str) else {
-        state.borrow_mut().close();
-        return Some(close_message(4400, "Invalid client message"));
+        return state
+            .borrow_mut()
+            .terminate_with_public_close(4400, "Invalid client message");
     };
 
     match message_type {
@@ -389,10 +489,9 @@ async fn handle_text(
         "pong" => None,
         "subscribe" => forward_subscribe(message, text, state).await,
         "complete" => forward_complete(message, text, state).await,
-        _ => {
-            state.borrow_mut().close();
-            Some(close_message(4400, "Invalid client message"))
-        }
+        _ => state
+            .borrow_mut()
+            .terminate_with_public_close(4400, "Invalid client message"),
     }
 }
 
@@ -402,36 +501,39 @@ async fn initialize_connection(
     state: SharedConnectionState,
 ) -> Option<ws::Message> {
     if state.borrow().phase != ConnectionPhase::WaitingForInit {
-        state.borrow_mut().close();
-        return Some(close_message(4429, "Too many initialisation requests"));
+        return state
+            .borrow_mut()
+            .terminate_with_public_close(4429, "Too many initialisation requests");
     }
     let Some(authorization) = connection_init_authorization(message) else {
-        state.borrow_mut().close();
-        return Some(close_message(4401, "Invalid bearer credential"));
+        return state
+            .borrow_mut()
+            .terminate_with_public_close(4401, "Invalid bearer credential");
     };
     let Some(token) = crate::server::strict_bearer_token(authorization) else {
-        state.borrow_mut().close();
-        return Some(close_message(4401, "Invalid bearer credential"));
+        return state
+            .borrow_mut()
+            .terminate_with_public_close(4401, "Invalid bearer credential");
     };
     let gateway = state.borrow().gateway.clone();
     let principal = match gateway.authentication.authenticate_bearer(token) {
         Ok(principal) => principal,
         Err(_) => {
-            state.borrow_mut().close();
-            return Some(close_message(4401, "Invalid bearer credential"));
+            return state
+                .borrow_mut()
+                .terminate_with_public_close(4401, "Invalid bearer credential");
         }
     };
     let Some(expires_at) = principal.expires_at() else {
-        state.borrow_mut().close();
-        return Some(close_message(
-            4401,
-            "Bearer credential has no usable expiry",
-        ));
+        return state
+            .borrow_mut()
+            .terminate_with_public_close(4401, "Bearer credential has no usable expiry");
     };
     let now = gateway.authentication.current_time();
     if expires_at <= now {
-        state.borrow_mut().close();
-        return Some(close_message(4401, "Bearer credential expired"));
+        return state
+            .borrow_mut()
+            .terminate_with_public_close(4401, "Bearer credential expired");
     }
     state.borrow_mut().phase = ConnectionPhase::Connecting;
     spawn_expiry(
@@ -445,8 +547,9 @@ async fn initialize_connection(
         .await
         .is_err()
     {
-        state.borrow_mut().close();
-        return Some(close_message(1011, "Subscription transport unavailable"));
+        return state
+            .borrow_mut()
+            .terminate_with_public_close(1011, "Subscription transport unavailable");
     }
     None
 }
@@ -515,7 +618,13 @@ async fn forward_internal_messages(
     external_sink: ws::WsSink,
     state: SharedConnectionState,
 ) {
-    let mut clean_close = false;
+    enum ForwardEnd {
+        InternalFailure,
+        ExternalFailure,
+        InternalClose(Option<ws::CloseReason>),
+    }
+
+    let mut end = ForwardEnd::InternalFailure;
     while let Some(frame) = receiver.recv().await {
         let Ok(frame) = frame else {
             break;
@@ -531,6 +640,7 @@ async fn forward_internal_messages(
                     .await
                     .is_err()
                 {
+                    end = ForwardEnd::ExternalFailure;
                     break;
                 }
             }
@@ -541,18 +651,32 @@ async fn forward_internal_messages(
             }
             ws::Frame::Pong(_) => {}
             ws::Frame::Close(reason) => {
-                clean_close = true;
-                let _ = external_sink.send(ws::Message::Close(reason)).await;
+                end = ForwardEnd::InternalClose(reason);
                 break;
             }
             ws::Frame::Binary(_) | ws::Frame::Continuation(_) => break,
         }
     }
-    state.borrow_mut().close();
-    if !clean_close {
-        let _ = external_sink
-            .send(close_message(1011, "Subscription transport unavailable"))
-            .await;
+    let termination = state.borrow_mut().terminate();
+    if !termination.first {
+        return;
+    }
+    match end {
+        ForwardEnd::InternalClose(reason) => {
+            let _ = external_sink.send(ws::Message::Close(reason)).await;
+        }
+        ForwardEnd::InternalFailure => {
+            let _ = external_sink
+                .send(close_message(1011, "Subscription transport unavailable"))
+                .await;
+        }
+        ForwardEnd::ExternalFailure => {
+            if let Some(internal) = termination.internal_sink {
+                let _ = internal
+                    .send(close_message(1000, "Client disconnected"))
+                    .await;
+            }
+        }
     }
 }
 
@@ -582,22 +706,24 @@ async fn forward_subscribe(
     state: SharedConnectionState,
 ) -> Option<ws::Message> {
     if state.borrow().phase != ConnectionPhase::Ready {
-        state.borrow_mut().close();
-        return Some(close_message(4401, "Connection is not acknowledged"));
+        return state
+            .borrow_mut()
+            .terminate_with_public_close(4401, "Connection is not acknowledged");
     }
     let Some(id) = message.get("id").and_then(Value::as_str).map(str::to_owned) else {
-        state.borrow_mut().close();
-        return Some(close_message(4400, "Subscription ID is required"));
+        return state
+            .borrow_mut()
+            .terminate_with_public_close(4400, "Subscription ID is required");
     };
     if id.is_empty() {
-        state.borrow_mut().close();
-        return Some(close_message(4400, "Subscription ID is required"));
+        return state
+            .borrow_mut()
+            .terminate_with_public_close(4400, "Subscription ID is required");
     }
     {
         let mut state = state.borrow_mut();
         if state.operations.contains(&id) {
-            state.close();
-            return Some(close_message(4409, "Subscriber already exists"));
+            return state.terminate_with_public_close(4409, "Subscriber already exists");
         }
         if state.operations.len() >= state.gateway.config.max_operations_per_connection {
             return Some(operation_limit_error(&id));
@@ -616,8 +742,9 @@ async fn forward_subscribe(
         return None;
     }
     state.borrow_mut().remove_operation(&id);
-    state.borrow_mut().close();
-    Some(close_message(1011, "Subscription transport unavailable"))
+    state
+        .borrow_mut()
+        .terminate_with_public_close(1011, "Subscription transport unavailable")
 }
 
 fn inject_operation_variables(message: &mut Value) {
@@ -646,12 +773,14 @@ async fn forward_complete(
     state: SharedConnectionState,
 ) -> Option<ws::Message> {
     if state.borrow().phase != ConnectionPhase::Ready {
-        state.borrow_mut().close();
-        return Some(close_message(4401, "Connection is not acknowledged"));
+        return state
+            .borrow_mut()
+            .terminate_with_public_close(4401, "Connection is not acknowledged");
     }
     let Some(id) = message.get("id").and_then(Value::as_str) else {
-        state.borrow_mut().close();
-        return Some(close_message(4400, "Subscription ID is required"));
+        return state
+            .borrow_mut()
+            .terminate_with_public_close(4400, "Subscription ID is required");
     };
     state.borrow_mut().remove_operation(id);
     let internal = state.borrow().internal_sink.clone();
@@ -663,8 +792,9 @@ async fn forward_complete(
     {
         return None;
     }
-    state.borrow_mut().close();
-    Some(close_message(1011, "Subscription transport unavailable"))
+    state
+        .borrow_mut()
+        .terminate_with_public_close(1011, "Subscription transport unavailable")
 }
 
 fn operation_limit_error(id: &str) -> ws::Message {
@@ -762,5 +892,18 @@ mod tests {
             json!({"Id": "actual"})
         );
         assert_eq!(message["payload"]["extensions"]["client"], true);
+    }
+
+    #[test]
+    fn connection_attempt_limiter_contains_churn_and_refills_gradually() {
+        let start = Instant::now();
+        let limiter = ConnectionAttemptLimiter::new_at(2, start);
+
+        assert!(limiter.try_acquire_at(start));
+        assert!(limiter.try_acquire_at(start));
+        assert!(!limiter.try_acquire_at(start));
+        assert!(limiter.try_acquire_at(start + std::time::Duration::from_millis(500)));
+        assert!(!limiter.try_acquire_at(start + std::time::Duration::from_millis(500)));
+        assert!(limiter.try_acquire_at(start + std::time::Duration::from_secs(1)));
     }
 }

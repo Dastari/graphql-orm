@@ -3,12 +3,32 @@ title: graphql-orm-router changelog
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-08
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # Changelog
+
+## 0.1.2 - 2026-08-08
+
+- Made public WebSocket termination first-cause-wins. A client protocol or
+  frame-size failure now closes its private bridge without allowing the bridge
+  forwarding task to overwrite the original outcome with a secondary generic
+  `1011 Subscription transport unavailable` close.
+- Added a process-wide token bucket for public WebSocket upgrade attempts. The
+  secure default admits 128 attempts per second with one second of burst
+  capacity; excess attempts return HTTP 429 with `Retry-After: 1`, active
+  connection saturation remains HTTP 503, and both are counted by
+  `router_websocket_rejections_total`.
+- Added end-to-end evidence that operation IDs survive the bridge unchanged,
+  a one-shot mutation emits `next` then `complete` without retiring a
+  long-lived sibling, one upstream subscription failure remains
+  operation-scoped, and later operations still run on the same public socket.
+- The protocol-v1 descriptor, schema, token, and stored-data contracts are
+  unchanged. Existing deployments receive the new admission default and may
+  tune `subscriptions.maxConnectionAttemptsPerSecond` for measured connection
+  bursts.
 
 ## 0.1.1 - 2026-08-07
 

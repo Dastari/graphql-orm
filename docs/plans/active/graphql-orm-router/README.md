@@ -3,7 +3,7 @@ title: GraphQL ORM Router implementation plan
 kind: plan
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-08
 review_by: 2026-09-07
 supersedes: []
 ---
@@ -639,11 +639,22 @@ process run from the selected release root. Strict runtime status is 14/14,
 public monitoring passed, and a graceful stop/readiness-close/restart cycle
 preserved post-restart subscriptions without changing RBI or relay tiers.
 
-Slice 9 cutover and live acceptance are closed. Cosmo, NATS, WGC, and JetStream
-assets remain inactive with no process, container, unit, or listener, so GEMA
-no longer depends on them for federation or notifications. The initiative
-remains open only for the final infrastructure ownership/removal handoff;
-permanent deletion must not occur until the deployment owner confirms that no
-other workload owns the retained assets. Every later binary, container, hosted
-service, lockfile, or delivery channel still requires its own artifact-specific
-review under ADR-0008.
+A later live agent log-upload operation exposed a connection-containment gap:
+an oversized public WebSocket message ended the client transport, a secondary
+bridge task masked that cause with generic 1011, and an unbounded consumer
+retry loop exhausted the FAME connection cap. Router 0.1.2 now makes terminal
+ownership first-cause-wins, closes the private bridge on public termination,
+rate-limits public upgrade attempts, and proves stable operation IDs,
+one-shot mutation completion, sibling-operation isolation, and continued use
+of the same downstream socket after an upstream subscription failure. The
+64 KiB serialized-message boundary is unchanged; the consumer must move or
+chunk bulk log payloads and add mutation-safe jittered reconnect behavior.
+
+The live cutover remains in place, but Slice 9 acceptance is reopened until the
+0.1.2 artifact and consumer containment changes pass live validation. Cosmo,
+NATS, WGC, and JetStream assets remain inactive with no process, container,
+unit, or listener. Permanent deletion must not occur until the deployment
+owner confirms both renewed acceptance and that no other workload owns the
+retained assets. Every later binary, container, hosted service, lockfile, or
+delivery channel still requires its own artifact-specific review under
+ADR-0008.
