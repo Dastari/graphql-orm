@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-09
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -18,6 +18,31 @@ Migration entries preserve the dependency and schema facts for the checkpoint
 they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## Unreleased: deployment-only current rules (crate 0.61.0 to 0.62.0; schema remains 0.51.0)
+
+Deployments whose AI constraints are immutable process configuration can now
+construct `DeploymentAiCurrentRuleResolver` from their durable
+`CurrentPrincipalResolver`, trusted `Clock`, validated
+`AiCurrentRuleResolverLimits`, and validated `AiRuleDeploymentLimits`. The
+deployment ceiling becomes the exact effective constraint set for every
+requested target scope; the library records an empty applied-layer lineage and
+computes the canonical rule fingerprint internally.
+
+Use this resolver instead of provisioning artificial `AiScopePolicyRecord`
+rows when no operator-editable rule hierarchy exists. Deployments that manage
+hierarchical rows continue to use `OrmAiRulePolicyService` with
+`OrmAiCurrentRuleResolver` and require no source changes. Both paths share the
+same exact-reference, freshness, expiry, trusted-clock, scope-validation, and
+canonical-fingerprint implementation.
+
+The new resolver returns narrowing evidence only. Hosts must still provide all
+ordinary provider routing, tool registration and authorization, GraphQL
+resolver authorization, egress, atomic budget, approval, credential, and
+resource-access proofs. This additive pre-1.0 Rust API advances the crate to
+0.62.0. It changes no GraphQL SDL, entity, column, index, constraint,
+backup/restore contract, or persistent semantic, so AI schema module 0.51.0
+remains current and no data migration is required.
 
 ## Unreleased: attachment restore metadata audit (crate 0.60.0 to 0.61.0; schema remains 0.51.0)
 

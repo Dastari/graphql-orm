@@ -60,6 +60,30 @@ impl AiCurrentRuleResolverLimits {
     }
 }
 
+async fn resolve_current_rule_principal(
+    principal_resolver: &dyn CurrentPrincipalResolver,
+    clock: &dyn Clock,
+    limits: AiCurrentRuleResolverLimits,
+    lease: &AiRunLease,
+) -> Result<ResolvedPrincipal, AiError> {
+    let principal = principal_resolver
+        .resolve(lease.principal_reference())
+        .await
+        .map_err(|_| AiError::ReauthorizationFailed)?;
+    let now = clock.now();
+    if principal.reference() != lease.principal_reference()
+        || principal.resolved_at() > now
+        || now - principal.resolved_at() >= limits.maximum_principal_age
+        || principal
+            .reference()
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= now)
+    {
+        return Err(AiError::ReauthorizationFailed);
+    }
+    Ok(principal)
+}
+
 /// Current-principal adapter from durable leases to hierarchical rule sets.
 ///
 /// The adapter resolves the principal and complete rule lineage twice around
@@ -87,26 +111,6 @@ impl OrmAiCurrentRuleResolver {
             limits,
         }
     }
-
-    async fn current_principal(&self, lease: &AiRunLease) -> Result<ResolvedPrincipal, AiError> {
-        let principal = self
-            .principal_resolver
-            .resolve(lease.principal_reference())
-            .await
-            .map_err(|_| AiError::ReauthorizationFailed)?;
-        let now = self.clock.now();
-        if principal.reference() != lease.principal_reference()
-            || principal.resolved_at() > now
-            || now - principal.resolved_at() >= self.limits.maximum_principal_age
-            || principal
-                .reference()
-                .expires_at
-                .is_some_and(|expires_at| expires_at <= now)
-        {
-            return Err(AiError::ReauthorizationFailed);
-        }
-        Ok(principal)
-    }
 }
 
 #[async_trait]
@@ -116,16 +120,110 @@ impl AiAgentRuleResolver for OrmAiCurrentRuleResolver {
         lease: &AiRunLease,
         scope: &AiScope,
     ) -> Result<AiAgentRuleResolution, AiError> {
-        let first_principal = self.current_principal(lease).await?;
+        let first_principal = resolve_current_rule_principal(
+            self.principal_resolver.as_ref(),
+            self.clock.as_ref(),
+            self.limits,
+            lease,
+        )
+        .await?;
         let first = self
             .rule_service
             .resolve_for_run(first_principal.principal(), scope.clone())
             .await?;
-        let second_principal = self.current_principal(lease).await?;
+        let second_principal = resolve_current_rule_principal(
+            self.principal_resolver.as_ref(),
+            self.clock.as_ref(),
+            self.limits,
+            lease,
+        )
+        .await?;
         let second = self
             .rule_service
             .resolve_for_run(second_principal.principal(), scope.clone())
             .await?;
+        if first.target_scope() != scope
+            || second.target_scope() != scope
+            || first.fingerprint() != second.fingerprint()
+            || first_principal.reference() != second_principal.reference()
+        {
+            return Err(AiError::ReauthorizationFailed);
+        }
+        AiAgentRuleResolution::new(second, self.clock.now())
+    }
+}
+
+/// Current-principal resolver for immutable deployment-only AI rules.
+///
+/// The resolver treats the validated [`AiRuleDeploymentLimits`] ceiling as
+/// the complete effective rule set for every exact target scope. It persists
+/// no hierarchy, exposes no management surface, and records an explicitly
+/// empty applied-layer lineage. The current principal is rehydrated twice
+/// around canonical rule construction through the same fail-closed boundary
+/// used by [`OrmAiCurrentRuleResolver`].
+///
+/// Returned rules are constraint evidence only. They grant no provider route,
+/// tool, GraphQL resolver, egress, budget, approval, credential, or resource
+/// authority.
+pub struct DeploymentAiCurrentRuleResolver {
+    principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+    clock: Arc<dyn Clock>,
+    current_principal_limits: AiCurrentRuleResolverLimits,
+    deployment_rule_limits: AiRuleDeploymentLimits,
+}
+
+impl DeploymentAiCurrentRuleResolver {
+    /// Creates an immutable deployment-only current-rule resolver.
+    ///
+    /// Both limit values must already have passed their fallible constructors.
+    /// The deployment ceiling becomes the exact effective constraint set; no
+    /// additional host-, client-, or model-authored rule input is accepted.
+    pub fn new(
+        principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+        clock: Arc<dyn Clock>,
+        current_principal_limits: AiCurrentRuleResolverLimits,
+        deployment_rule_limits: AiRuleDeploymentLimits,
+    ) -> Self {
+        Self {
+            principal_resolver,
+            clock,
+            current_principal_limits,
+            deployment_rule_limits,
+        }
+    }
+}
+
+#[async_trait]
+impl AiAgentRuleResolver for DeploymentAiCurrentRuleResolver {
+    async fn resolve_rules(
+        &self,
+        lease: &AiRunLease,
+        scope: &AiScope,
+    ) -> Result<AiAgentRuleResolution, AiError> {
+        let first_principal = resolve_current_rule_principal(
+            self.principal_resolver.as_ref(),
+            self.clock.as_ref(),
+            self.current_principal_limits,
+            lease,
+        )
+        .await?;
+        let first = AiResolvedRuleSet::new(
+            scope.clone(),
+            self.deployment_rule_limits.ceiling().clone(),
+            Vec::new(),
+        )?;
+        let second_principal = resolve_current_rule_principal(
+            self.principal_resolver.as_ref(),
+            self.clock.as_ref(),
+            self.current_principal_limits,
+            lease,
+        )
+        .await?;
+        let second = AiResolvedRuleSet::new(
+            scope.clone(),
+            self.deployment_rule_limits.ceiling().clone(),
+            Vec::new(),
+        )?;
         if first.target_scope() != scope
             || second.target_scope() != scope
             || first.fingerprint() != second.fingerprint()
@@ -371,13 +469,7 @@ impl AiRulePolicyService for OrmAiRulePolicyService {
                 row_version: record.row_version,
             });
         }
-        let fingerprint = resolved_fingerprint(&target_scope, &effective, &applied_layers)?;
-        Ok(AiResolvedRuleSet::new(
-            target_scope,
-            effective,
-            applied_layers,
-            fingerprint,
-        ))
+        AiResolvedRuleSet::new(target_scope, effective, applied_layers)
     }
 }
 
@@ -524,21 +616,6 @@ fn stored_checksum(scope: &AiScope, stored: &StoredRulePolicy) -> Result<String,
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
-fn resolved_fingerprint(
-    target_scope: &AiScope,
-    constraints: &AiRuleConstraints,
-    layers: &[AiAppliedRuleLayer],
-) -> Result<String, AiError> {
-    let value = serde_json::json!({
-        "format": "graphql-orm-ai-resolved-rules-v1",
-        "target_scope": target_scope,
-        "constraints": constraints,
-        "layers": layers,
-    });
-    let bytes = serde_json::to_vec(&value).map_err(|_| AiError::PersistenceFailed)?;
-    Ok(hex::encode(Sha256::digest(bytes)))
-}
-
 fn rule_view(record: &AiScopePolicyRecord, scope: &AiScope) -> Result<AiRulePolicyView, AiError> {
     let constraints = parse_record(record, scope)?;
     Ok(AiRulePolicyView {
@@ -623,19 +700,8 @@ fn validate_record_identity(
 }
 
 fn validate_scope(scope: &AiScope) -> Result<(), AiError> {
-    let valid = |value: &str| {
-        !value.trim().is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
-    };
-    if !valid(&scope.kind)
-        || !valid(&scope.id)
-        || scope
-            .tenant_id
-            .as_deref()
-            .is_some_and(|value| !valid(value))
-    {
-        return Err(AiError::InvalidInput("invalid AI rule scope".to_owned()));
-    }
-    Ok(())
+    crate::rules::validate_rule_scope(scope)
+        .map_err(|_| AiError::InvalidInput("invalid AI rule scope".to_owned()))
 }
 
 fn rule_policy_id(scope: &AiScope) -> Uuid {
@@ -715,7 +781,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use agql_auth::{
-        AccessTokenMetadata, AuthUser, FixedClock, PrincipalReference, SessionContext,
+        AccessTokenMetadata, AuthError, AuthUser, FixedClock, PrincipalReference, SessionContext,
     };
     use time::OffsetDateTime;
 
@@ -736,6 +802,119 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             ResolvedPrincipal::new(reference.clone(), self.principal.clone(), self.now)
         }
+    }
+
+    #[derive(Clone, Copy)]
+    enum BoundaryMode {
+        Current,
+        RevokeOnSecond,
+        MismatchOnSecond,
+        Stale,
+        Future,
+    }
+
+    struct BoundaryPrincipalResolver {
+        principal: AuthPrincipal,
+        alternate_principal: AuthPrincipal,
+        now: OffsetDateTime,
+        mode: BoundaryMode,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl CurrentPrincipalResolver for BoundaryPrincipalResolver {
+        async fn resolve(
+            &self,
+            reference: &PrincipalReference,
+        ) -> agql_auth::AuthResult<ResolvedPrincipal> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if matches!(self.mode, BoundaryMode::RevokeOnSecond) && call == 1 {
+                return Err(AuthError::TokenRevoked);
+            }
+            if matches!(self.mode, BoundaryMode::MismatchOnSecond) && call == 1 {
+                let principal = self.alternate_principal.clone();
+                return ResolvedPrincipal::new(principal.reference(), principal, self.now);
+            }
+            let resolved_at = match self.mode {
+                BoundaryMode::Stale => self.now - time::Duration::minutes(5),
+                BoundaryMode::Future => self.now + time::Duration::seconds(1),
+                BoundaryMode::Current
+                | BoundaryMode::RevokeOnSecond
+                | BoundaryMode::MismatchOnSecond => self.now,
+            };
+            ResolvedPrincipal::new(reference.clone(), self.principal.clone(), resolved_at)
+        }
+    }
+
+    fn current_rule_principal(expires_at: Option<OffsetDateTime>) -> AuthPrincipal {
+        AuthPrincipal::User(AuthUser {
+            user_id: "current-rule-user".to_owned(),
+            session_id: Uuid::new_v4(),
+            roles: Vec::new(),
+            scopes: Vec::new(),
+            session: SessionContext::default(),
+            token_claims: AccessTokenMetadata {
+                expires_at,
+                tenant_id: Some("current-rule-tenant".to_owned()),
+                ..AccessTokenMetadata::default()
+            },
+        })
+    }
+
+    fn alternate_principal() -> AuthPrincipal {
+        AuthPrincipal::User(AuthUser {
+            user_id: "other-rule-user".to_owned(),
+            session_id: Uuid::new_v4(),
+            roles: Vec::new(),
+            scopes: Vec::new(),
+            session: SessionContext::default(),
+            token_claims: AccessTokenMetadata {
+                tenant_id: Some("current-rule-tenant".to_owned()),
+                ..AccessTokenMetadata::default()
+            },
+        })
+    }
+
+    fn deployment_constraints(maximum_steps: u64) -> AiRuleConstraints {
+        AiRuleConstraints {
+            enabled: true,
+            maximum_classification: DataClassification::Internal,
+            maximum_tool_maturity: ToolMaturity::ReadOnly,
+            approval_requirement: AiRuleApprovalRequirement::DescriptorPolicy,
+            allowed_tool_fingerprints: Some(BTreeSet::from(["a".repeat(64)])),
+            allowed_provider_kinds: Some(BTreeSet::from([ProviderKind::OpenAi])),
+            allowed_provider_capabilities: Some(BTreeSet::from([
+                AiRuleProviderCapability::Streaming,
+                AiRuleProviderCapability::CustomTools,
+                AiRuleProviderCapability::ParallelToolCalls,
+            ])),
+            allow_provider_retention: false,
+            allow_byok: false,
+            budget: AiRuleBudgetCeilings {
+                maximum_steps: Some(maximum_steps),
+                maximum_duration_seconds: Some(300),
+                maximum_output_tokens: Some(4_096),
+                maximum_cost_microunits: Some(1_000_000),
+                maximum_provider_calls: Some(4),
+                maximum_tool_units: Some(4),
+                maximum_image_units: Some(0),
+            },
+        }
+    }
+
+    fn deployment_resolver(
+        principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+        now: OffsetDateTime,
+        maximum_steps: u64,
+    ) -> DeploymentAiCurrentRuleResolver {
+        DeploymentAiCurrentRuleResolver::new(
+            principal_resolver,
+            Arc::new(FixedClock::new(now)),
+            AiCurrentRuleResolverLimits::new(time::Duration::minutes(2))
+                .expect("current-principal limits should validate"),
+            AiRuleDeploymentLimits::new(1, deployment_constraints(maximum_steps))
+                .expect("deployment limits should validate"),
+        )
     }
 
     struct FixedRuleService;
@@ -763,7 +942,7 @@ mod tests {
             _principal: &AuthPrincipal,
             target_scope: AiScope,
         ) -> Result<AiResolvedRuleSet, AiError> {
-            Ok(AiResolvedRuleSet::new(
+            AiResolvedRuleSet::new(
                 target_scope,
                 AiRuleConstraints {
                     enabled: true,
@@ -778,8 +957,7 @@ mod tests {
                     budget: AiRuleBudgetCeilings::default(),
                 },
                 Vec::new(),
-                "b".repeat(64),
-            ))
+            )
         }
     }
 
@@ -816,7 +994,178 @@ mod tests {
             .expect("fresh exact rules should resolve");
 
         assert_eq!(resolved.rules().target_scope(), &scope);
-        assert_eq!(resolved.rules().fingerprint(), "b".repeat(64));
+        assert_eq!(resolved.rules().fingerprint().len(), 64);
         assert_eq!(principal_resolver.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn deployment_rules_are_deterministic_scope_bound_and_authority_neutral() {
+        let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)
+            .expect("fixed rule time should validate");
+        let principal = current_rule_principal(None);
+        let lease = AiRunLease::test_running(principal.reference());
+        let principal_resolver = Arc::new(BoundaryPrincipalResolver {
+            principal,
+            alternate_principal: alternate_principal(),
+            now,
+            mode: BoundaryMode::Current,
+            calls: AtomicUsize::new(0),
+        });
+        let resolver = deployment_resolver(principal_resolver, now, 8);
+        let first_scope =
+            AiScope::new("fame-endpoint", "endpoint-1").with_tenant_id("current-rule-tenant");
+        let second_scope =
+            AiScope::new("fame-endpoint", "endpoint-2").with_tenant_id("current-rule-tenant");
+
+        let first = resolver
+            .resolve_rules(&lease, &first_scope)
+            .await
+            .expect("deployment rules should resolve");
+        let repeated = resolver
+            .resolve_rules(&lease, &first_scope)
+            .await
+            .expect("identical deployment rules should resolve");
+        let other_scope = resolver
+            .resolve_rules(&lease, &second_scope)
+            .await
+            .expect("a second exact scope should resolve");
+
+        assert_eq!(first.rules().target_scope(), &first_scope);
+        assert_eq!(first.rules().constraints(), &deployment_constraints(8));
+        assert!(first.rules().applied_layers().is_empty());
+        assert_eq!(first.rules().fingerprint(), repeated.rules().fingerprint());
+        assert_ne!(
+            first.rules().fingerprint(),
+            other_scope.rules().fingerprint()
+        );
+        assert_eq!(
+            first.rules().constrain_tool(
+                &"b".repeat(64),
+                ToolMaturity::ReadOnly,
+                crate::AiApprovalRule::None,
+            ),
+            None
+        );
+        assert!(!first.rules().permits_provider_request(
+            &ProviderKind::Ollama,
+            &BTreeSet::from([AiRuleProviderCapability::Streaming]),
+            DataClassification::Internal,
+            false,
+            false,
+        ));
+
+        let changed_principal = current_rule_principal(None);
+        let changed_lease = AiRunLease::test_running(changed_principal.reference());
+        let changed_resolver = deployment_resolver(
+            Arc::new(BoundaryPrincipalResolver {
+                principal: changed_principal,
+                alternate_principal: alternate_principal(),
+                now,
+                mode: BoundaryMode::Current,
+                calls: AtomicUsize::new(0),
+            }),
+            now,
+            7,
+        );
+        let changed = changed_resolver
+            .resolve_rules(&changed_lease, &first_scope)
+            .await
+            .expect("changed deployment rules should resolve");
+        assert_ne!(first.rules().fingerprint(), changed.rules().fingerprint());
+    }
+
+    #[tokio::test]
+    async fn deployment_rule_resolution_fails_on_revocation_or_reference_change() {
+        let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)
+            .expect("fixed rule time should validate");
+        let scope = AiScope::new("workspace", "default");
+        for mode in [BoundaryMode::RevokeOnSecond, BoundaryMode::MismatchOnSecond] {
+            let principal = current_rule_principal(None);
+            let lease = AiRunLease::test_running(principal.reference());
+            let resolver = deployment_resolver(
+                Arc::new(BoundaryPrincipalResolver {
+                    principal,
+                    alternate_principal: alternate_principal(),
+                    now,
+                    mode,
+                    calls: AtomicUsize::new(0),
+                }),
+                now,
+                8,
+            );
+            assert!(matches!(
+                resolver.resolve_rules(&lease, &scope).await,
+                Err(AiError::ReauthorizationFailed)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_current_rule_boundary_rejects_stale_future_and_expired_principals() {
+        let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)
+            .expect("fixed rule time should validate");
+        let scope = AiScope::new("workspace", "default");
+        for mode in [BoundaryMode::Stale, BoundaryMode::Future] {
+            let principal = current_rule_principal(None);
+            let lease = AiRunLease::test_running(principal.reference());
+            let resolver = deployment_resolver(
+                Arc::new(BoundaryPrincipalResolver {
+                    principal,
+                    alternate_principal: alternate_principal(),
+                    now,
+                    mode,
+                    calls: AtomicUsize::new(0),
+                }),
+                now,
+                8,
+            );
+            assert!(matches!(
+                resolver.resolve_rules(&lease, &scope).await,
+                Err(AiError::ReauthorizationFailed)
+            ));
+        }
+
+        let principal = current_rule_principal(Some(now));
+        let lease = AiRunLease::test_running(principal.reference());
+        let resolver = deployment_resolver(
+            Arc::new(BoundaryPrincipalResolver {
+                principal,
+                alternate_principal: alternate_principal(),
+                now,
+                mode: BoundaryMode::Current,
+                calls: AtomicUsize::new(0),
+            }),
+            now,
+            8,
+        );
+        assert!(matches!(
+            resolver.resolve_rules(&lease, &scope).await,
+            Err(AiError::ReauthorizationFailed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn deployment_rule_resolution_rejects_malformed_target_scope() {
+        let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)
+            .expect("fixed rule time should validate");
+        let principal = current_rule_principal(None);
+        let lease = AiRunLease::test_running(principal.reference());
+        let resolver = deployment_resolver(
+            Arc::new(BoundaryPrincipalResolver {
+                principal,
+                alternate_principal: alternate_principal(),
+                now,
+                mode: BoundaryMode::Current,
+                calls: AtomicUsize::new(0),
+            }),
+            now,
+            8,
+        );
+        assert!(matches!(
+            resolver
+                .resolve_rules(&lease, &AiScope::new(" ", "invalid"))
+                .await,
+            Err(AiError::InvalidConfiguration(_))
+        ));
     }
 }

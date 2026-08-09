@@ -3,7 +3,7 @@ title: "Hierarchical AI rules"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-09
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -53,12 +53,31 @@ combined with all ordinary current-principal, tool enablement, GraphQL resolver,
 static disclosure, egress, atomic budget, provider-profile, attachment, and
 one-shot approval checks. Approval rules never replace resolver authorization.
 
+## Immutable deployment-only rules
+
+Hosts with no operator-editable hierarchy use
+`DeploymentAiCurrentRuleResolver`. Its validated `AiRuleDeploymentLimits`
+ceiling is the complete effective rule set for every exact requested target
+scope. The resolver accepts no additional constraints or lineage, records an
+empty applied-layer list, and computes the canonical fingerprint inside the
+crate. It rehydrates the lease principal twice through the same shared
+freshness, expiry, exact-reference, and trusted-clock boundary as the
+ORM-backed resolver.
+
+This path avoids artificial per-resource policy rows without making rule
+evidence client- or model-authored. The target scope is validated and bound
+into the fingerprint, but the rule resolver does not authorize access to that
+resource. Current tool policy, GraphQL resolver authorization, egress,
+provider, budget, approval, and credential checks remain independently
+mandatory.
+
 ## Durable coordinator binding
 
-`OrmAiCurrentRuleResolver` adapts a fenced lease to current rule evidence. It
-rehydrates the exact principal and resolves the full hierarchy twice around
-the decision. Read-only coordinator turn plans carry that unforgeable resolved
-set plus a trusted server-derived BYOK classification.
+`OrmAiCurrentRuleResolver` and `DeploymentAiCurrentRuleResolver` adapt a fenced
+lease to current rule evidence. Both rehydrate the exact principal twice
+around canonical resolution. The ORM-backed path also resolves the full
+hierarchy twice. Read-only coordinator turn plans carry that unforgeable
+resolved set plus a trusted server-derived BYOK classification.
 
 Before provider egress, the coordinator checks the exact current fingerprint,
 provider family, inferred request capabilities, highest manifest

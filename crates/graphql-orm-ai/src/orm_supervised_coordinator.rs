@@ -1231,6 +1231,14 @@ mod tests {
     }
 
     fn test_rules_with_fingerprint(scope: AiScope, fingerprint: char) -> AiResolvedRuleSet {
+        let applied_layers = vec![crate::AiAppliedRuleLayer {
+            scope: scope.clone(),
+            row_version: i64::from(
+                fingerprint
+                    .to_digit(16)
+                    .expect("test fingerprint marker should be hexadecimal"),
+            ),
+        }];
         AiResolvedRuleSet::new(
             scope,
             AiRuleConstraints {
@@ -1253,9 +1261,9 @@ mod tests {
                     maximum_image_units: Some(100),
                 },
             },
-            Vec::new(),
-            fingerprint.to_string().repeat(64),
+            applied_layers,
         )
+        .expect("test rules should validate")
     }
 
     fn test_route() -> AiToolResultEgressRoute {

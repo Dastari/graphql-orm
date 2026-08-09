@@ -2681,6 +2681,14 @@ mod tests {
     }
 
     fn test_rules_with_fingerprint(scope: AiScope, fingerprint: char) -> AiResolvedRuleSet {
+        let applied_layers = vec![AiAppliedRuleLayer {
+            scope: scope.clone(),
+            row_version: i64::from(
+                fingerprint
+                    .to_digit(16)
+                    .expect("test fingerprint marker should be hexadecimal"),
+            ),
+        }];
         AiResolvedRuleSet::new(
             scope,
             AiRuleConstraints {
@@ -2703,9 +2711,9 @@ mod tests {
                     maximum_image_units: Some(1_000),
                 },
             },
-            Vec::new(),
-            fingerprint.to_string().repeat(64),
+            applied_layers,
         )
+        .expect("test rules should validate")
     }
 
     fn test_rule_checkpoint(
@@ -3113,12 +3121,8 @@ mod tests {
             AiRuleProviderCapability::CustomTools,
         ]));
         let without_parallel = AiAgentRuleResolution::new(
-            AiResolvedRuleSet::new(
-                fixture.scope.clone(),
-                constraints.clone(),
-                Vec::new(),
-                "5".repeat(64),
-            ),
+            AiResolvedRuleSet::new(fixture.scope.clone(), constraints.clone(), Vec::new())
+                .expect("test rules should validate"),
             OffsetDateTime::now_utc(),
         )
         .expect("test rule resolution should validate");
@@ -3133,7 +3137,8 @@ mod tests {
             .expect("test allowlist should exist")
             .insert(AiRuleProviderCapability::ParallelToolCalls);
         let with_parallel = AiAgentRuleResolution::new(
-            AiResolvedRuleSet::new(fixture.scope, constraints, Vec::new(), "6".repeat(64)),
+            AiResolvedRuleSet::new(fixture.scope, constraints, Vec::new())
+                .expect("test rules should validate"),
             OffsetDateTime::now_utc(),
         )
         .expect("test rule resolution should validate");

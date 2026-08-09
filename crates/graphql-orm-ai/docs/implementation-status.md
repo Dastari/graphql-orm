@@ -3,14 +3,14 @@ title: "Implementation Status"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-09
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.61.0` with AI schema module
+`graphql-orm-ai` is at crate version `0.62.0` with AI schema module
 `0.51.0`. It uses workspace `graphql-orm` `0.18.0` and external `agql-auth`
 `0.14.0` at `413fda3435f060604cd653c11e2cc18a668aace1`.
 
@@ -27,6 +27,10 @@ verification evidence belongs in the focused guides.
 - The crate supplies bounded provider adapters, protected persistence,
   budgets, egress, current-principal rehydration, fencing, session lifecycle,
   and the implemented OpenAI background-reconciliation path.
+- Current rule evidence supports both generated-ORM managed hierarchies and
+  immutable deployment-only ceilings with no artificial per-resource policy
+  rows. Both paths share exact-principal rehydration and canonical
+  fingerprinting; neither path grants ordinary application authority.
 - Application tools require an explicit catalog, static disclosure contract,
   current host policy, and ordinary resolver authorization. Read-only and the
   bounded sequential supervised path are implemented; broader mixed,

@@ -7,6 +7,8 @@ use agql_auth::AuthPrincipal;
 use async_graphql::{Context, Enum, ErrorExtensions, InputObject, Object, SimpleObject};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
 use crate::{
@@ -820,15 +822,99 @@ impl AiResolvedRuleSet {
         target_scope: AiScope,
         constraints: AiRuleConstraints,
         applied_layers: Vec<AiAppliedRuleLayer>,
-        fingerprint: String,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, AiError> {
+        validate_rule_scope(&target_scope)?;
+        constraints.validate()?;
+        validate_applied_rule_layers(&target_scope, &applied_layers)?;
+        let fingerprint = resolved_rule_fingerprint(&target_scope, &constraints, &applied_layers)?;
+        Ok(Self {
             target_scope,
             constraints,
             applied_layers,
             fingerprint,
+        })
+    }
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub(crate) fn validate_rule_scope(scope: &AiScope) -> Result<(), AiError> {
+    let valid = |value: &str| {
+        !value.trim().is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
+    };
+    if !valid(&scope.kind)
+        || !valid(&scope.id)
+        || scope
+            .tenant_id
+            .as_deref()
+            .is_some_and(|value| !valid(value))
+    {
+        return Err(AiError::InvalidConfiguration(
+            "invalid resolved rule scope".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+fn validate_applied_rule_layers(
+    target_scope: &AiScope,
+    applied_layers: &[AiAppliedRuleLayer],
+) -> Result<(), AiError> {
+    if applied_layers.len() > 16
+        || (!applied_layers.is_empty()
+            && applied_layers.last().map(|layer| &layer.scope) != Some(target_scope))
+    {
+        return Err(AiError::InvalidConfiguration(
+            "invalid resolved rule layer ordering".to_owned(),
+        ));
+    }
+
+    let mut identities = BTreeSet::new();
+    let mut tenant_specific = false;
+    for layer in applied_layers {
+        validate_rule_scope(&layer.scope)?;
+        if layer.row_version < 0 || !identities.insert(layer.scope.clone()) {
+            return Err(AiError::InvalidConfiguration(
+                "invalid resolved rule layer evidence".to_owned(),
+            ));
+        }
+        match (&target_scope.tenant_id, &layer.scope.tenant_id) {
+            (None, Some(_)) => {
+                return Err(AiError::InvalidConfiguration(
+                    "tenant-inconsistent resolved rule layer".to_owned(),
+                ));
+            }
+            (Some(target), Some(layer_tenant)) if target != layer_tenant => {
+                return Err(AiError::InvalidConfiguration(
+                    "tenant-inconsistent resolved rule layer".to_owned(),
+                ));
+            }
+            (_, Some(_)) => tenant_specific = true,
+            (Some(_), None) if tenant_specific => {
+                return Err(AiError::InvalidConfiguration(
+                    "invalid resolved rule layer ordering".to_owned(),
+                ));
+            }
+            (None, None) | (Some(_), None) => {}
         }
     }
+    Ok(())
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+fn resolved_rule_fingerprint(
+    target_scope: &AiScope,
+    constraints: &AiRuleConstraints,
+    layers: &[AiAppliedRuleLayer],
+) -> Result<String, AiError> {
+    let value = serde_json::json!({
+        "format": "graphql-orm-ai-resolved-rules-v1",
+        "target_scope": target_scope,
+        "constraints": constraints,
+        "layers": layers,
+    });
+    let bytes = serde_json::to_vec(&value).map_err(|_| AiError::PersistenceFailed)?;
+    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 /// GraphQL budget ceilings for one exact rule layer.
@@ -1190,8 +1276,8 @@ mod tests {
                 },
             },
             Vec::new(),
-            "a".repeat(64),
         )
+        .expect("test rules should validate")
     }
 
     fn resolution(at: i64) -> AiAgentRuleResolution {
@@ -1200,6 +1286,176 @@ mod tests {
             OffsetDateTime::from_unix_timestamp(at).expect("test time should validate"),
         )
         .expect("test rule resolution should validate")
+    }
+
+    #[test]
+    fn resolved_rule_factory_canonicalizes_empty_and_versioned_lineage() {
+        let scope = AiScope::new("project", "project-1").with_tenant_id("tenant-1");
+        let constraints = rules().constraints().clone();
+        let first = AiResolvedRuleSet::new(scope.clone(), constraints.clone(), Vec::new())
+            .expect("empty immutable lineage should validate");
+        let repeated = AiResolvedRuleSet::new(scope.clone(), constraints.clone(), Vec::new())
+            .expect("identical immutable lineage should validate");
+        let versioned = AiResolvedRuleSet::new(
+            scope.clone(),
+            constraints.clone(),
+            vec![AiAppliedRuleLayer {
+                scope: scope.clone(),
+                row_version: 1,
+            }],
+        )
+        .expect("versioned lineage should validate");
+        let changed = AiResolvedRuleSet::new(
+            scope.clone(),
+            constraints,
+            vec![AiAppliedRuleLayer {
+                scope,
+                row_version: 2,
+            }],
+        )
+        .expect("changed versioned lineage should validate");
+
+        assert_eq!(first.fingerprint(), repeated.fingerprint());
+        assert_ne!(first.fingerprint(), versioned.fingerprint());
+        assert_ne!(versioned.fingerprint(), changed.fingerprint());
+    }
+
+    #[test]
+    fn resolved_rule_fingerprint_binds_each_target_scope_dimension() {
+        let constraints = rules().constraints().clone();
+        let scopes = [
+            AiScope::new("project", "project-1").with_tenant_id("tenant-1"),
+            AiScope::new("workspace", "project-1").with_tenant_id("tenant-1"),
+            AiScope::new("project", "project-2").with_tenant_id("tenant-1"),
+            AiScope::new("project", "project-1").with_tenant_id("tenant-2"),
+        ];
+        let fingerprints = scopes
+            .into_iter()
+            .map(|scope| {
+                AiResolvedRuleSet::new(scope, constraints.clone(), Vec::new())
+                    .expect("target scope should validate")
+                    .fingerprint()
+                    .to_owned()
+            })
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(fingerprints.len(), 4);
+    }
+
+    #[test]
+    fn resolved_rule_fingerprint_binds_every_effective_constraint_dimension() {
+        let scope = AiScope::new("project", "project-1").with_tenant_id("tenant-1");
+        let base = rules().constraints().clone();
+        let mut variants = Vec::new();
+
+        let mut changed = base.clone();
+        changed.enabled = false;
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.maximum_classification = DataClassification::Public;
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.maximum_tool_maturity = ToolMaturity::ProposalOnly;
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.approval_requirement = AiRuleApprovalRequirement::OneShotForAllApplicationTools;
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.allowed_tool_fingerprints = Some(BTreeSet::new());
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.allowed_provider_kinds = Some(BTreeSet::from([ProviderKind::OpenAi]));
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.allowed_provider_capabilities =
+            Some(BTreeSet::from([AiRuleProviderCapability::Streaming]));
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.allow_provider_retention = true;
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.allow_byok = true;
+        variants.push(changed);
+
+        for (field, value) in [
+            ("steps", 3),
+            ("duration", 11),
+            ("output_tokens", 101),
+            ("cost", 1_001),
+            ("provider_calls", 2),
+            ("tool_units", 3),
+            ("image_units", 2),
+        ] {
+            let mut changed = base.clone();
+            match field {
+                "steps" => changed.budget.maximum_steps = Some(value),
+                "duration" => changed.budget.maximum_duration_seconds = Some(value),
+                "output_tokens" => changed.budget.maximum_output_tokens = Some(value),
+                "cost" => changed.budget.maximum_cost_microunits = Some(value),
+                "provider_calls" => changed.budget.maximum_provider_calls = Some(value),
+                "tool_units" => changed.budget.maximum_tool_units = Some(value),
+                "image_units" => changed.budget.maximum_image_units = Some(value),
+                _ => unreachable!("test names every budget dimension"),
+            }
+            variants.push(changed);
+        }
+
+        let base_rules = AiResolvedRuleSet::new(scope.clone(), base, Vec::new())
+            .expect("base resolved rules should validate");
+        let mut fingerprints = BTreeSet::from([base_rules.fingerprint().to_owned()]);
+        for constraints in variants {
+            let resolved = AiResolvedRuleSet::new(scope.clone(), constraints, Vec::new())
+                .expect("changed resolved rules should validate");
+            assert_ne!(base_rules.fingerprint(), resolved.fingerprint());
+            assert!(fingerprints.insert(resolved.fingerprint().to_owned()));
+        }
+    }
+
+    #[test]
+    fn resolved_rule_factory_rejects_forged_layer_evidence() {
+        let scope = AiScope::new("project", "project-1").with_tenant_id("tenant-1");
+        let constraints = rules().constraints().clone();
+        let duplicate = vec![
+            AiAppliedRuleLayer {
+                scope: scope.clone(),
+                row_version: 1,
+            },
+            AiAppliedRuleLayer {
+                scope: scope.clone(),
+                row_version: 2,
+            },
+        ];
+        assert!(matches!(
+            AiResolvedRuleSet::new(scope.clone(), constraints.clone(), duplicate),
+            Err(AiError::InvalidConfiguration(_))
+        ));
+
+        let foreign_tenant = vec![
+            AiAppliedRuleLayer {
+                scope: AiScope::new("tenant", "tenant-2").with_tenant_id("tenant-2"),
+                row_version: 1,
+            },
+            AiAppliedRuleLayer {
+                scope: scope.clone(),
+                row_version: 1,
+            },
+        ];
+        assert!(matches!(
+            AiResolvedRuleSet::new(scope.clone(), constraints.clone(), foreign_tenant),
+            Err(AiError::InvalidConfiguration(_))
+        ));
+
+        assert!(matches!(
+            AiResolvedRuleSet::new(
+                scope.clone(),
+                constraints,
+                vec![AiAppliedRuleLayer {
+                    scope,
+                    row_version: -1,
+                }],
+            ),
+            Err(AiError::InvalidConfiguration(_))
+        ));
     }
 
     #[test]

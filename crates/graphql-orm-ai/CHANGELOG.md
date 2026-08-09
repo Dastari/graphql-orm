@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-09
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -20,7 +20,7 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.61.0` and keeps
+This development line advances the pre-1.0 crate version to `0.62.0` and keeps
 AI schema module `0.51.0`. It begins the applied-restore implementation with
 bounded database-derived facts, aligns the reviewed dependency universe,
 integrates generated resolver-operation metadata, completes the durable OpenAI
@@ -36,6 +36,16 @@ file-search IDs behind the reviewed persistent-file design.
   not applied-restore authority; restored deployments must keep it closed.
 
 ### Added
+
+- `DeploymentAiCurrentRuleResolver` supplies library-owned, immutable,
+  deployment-only rule evidence without artificial ORM policy rows. It
+  rehydrates the exact lease principal twice through the same freshness,
+  expiry, and reference boundary as `OrmAiCurrentRuleResolver`, binds the
+  validated `AiRuleDeploymentLimits` ceiling to the exact requested scope,
+  records an empty applied-layer lineage, and computes the canonical
+  fingerprint internally. It remains narrowing evidence only and grants no
+  provider, tool, resolver, egress, budget, approval, credential, or resource
+  authority. The proof constructor remains crate-private.
 
 - `AiRestoreAuditKind::Attachments` is replaced by the non-overlapping
   `AttachmentMetadataGraph` and `AttachmentObjectBytes` restore audits.

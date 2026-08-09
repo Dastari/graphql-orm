@@ -3,7 +3,7 @@ title: "graphql-orm-ai"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-09
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -323,7 +323,7 @@ Add the crate from a reviewed monorepo revision:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.61.0", features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.62.0", features = ["sqlite"] }
 ```
 
 > **Pre-release dependency note:** this source snapshot resolves
@@ -353,6 +353,16 @@ A host then:
    as required, into the application or dedicated AI subgraph.
 6. Opens the runtime start gate only after managed migration validation and
    restore reconciliation succeed.
+
+Deployments with immutable process-owned AI constraints and no editable rule
+hierarchy construct `DeploymentAiCurrentRuleResolver` from the durable
+principal resolver, trusted clock, current-principal limits, and validated
+`AiRuleDeploymentLimits`. The library binds the ceiling to each exact target
+scope with an empty applied-layer lineage and a canonical fingerprint.
+Deployments with managed hierarchical policy rows continue to use
+`OrmAiRulePolicyService` and `OrmAiCurrentRuleResolver`. Neither rule path
+replaces ordinary tool, resolver, egress, provider, budget, approval, or
+resource authorization.
 
 Remote/federated consumers supply an `AiRemoteGraphqlAuthorityIssuer` and
 `AiRemoteGraphqlTransport` to `AiRemoteAuthenticatedGraphqlAdapter`. The

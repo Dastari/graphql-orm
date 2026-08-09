@@ -3,7 +3,7 @@ title: "Getting Started"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-09
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -89,15 +89,17 @@ camelCase to PascalCase.
    persistence, pass its renewed lease into intent delivery, then carry the
    returned renewed lease forward. A delivered intent remains a suggestion;
    the frontend must reauthorize resources and own all route mapping.
-9. Construct `OrmAiRulePolicyService` with immutable deployment ceilings, an
-   exact-scope access policy, a current-principal-derived hierarchy resolver,
-   recent-MFA policy, and trusted clock. Compose the separate rule roots and
-   resolve the complete hierarchy before planning a run. Wrap that service in
-   `OrmAiCurrentRuleResolver` with the durable principal resolver, trusted
-   clock, and principal-freshness limit. Pass the same rule resolver to the
-   read-only coordinator and checkpoint service; every turn plan supplies the
-   exact resolved set and trusted BYOK classification. Treat the result only as
-   additional narrowing evidence. See the
+9. For operator-managed hierarchical rules, construct
+   `OrmAiRulePolicyService` with immutable deployment ceilings, an exact-scope
+   access policy, a current-principal-derived hierarchy resolver, recent-MFA
+   policy, and trusted clock, then wrap it in `OrmAiCurrentRuleResolver`. For
+   immutable process-owned rules with no policy rows, construct
+   `DeploymentAiCurrentRuleResolver` from the durable principal resolver,
+   trusted clock, principal-freshness limit, and validated deployment limits.
+   Pass the selected rule resolver to the read-only coordinator and checkpoint
+   service; every turn plan supplies the exact resolved set and trusted BYOK
+   classification. Treat the result only as additional narrowing evidence.
+   See the
    [hierarchical-rule guide](hierarchical-rules.md).
 10. Install `OrmAiProposalService`/`OrmAiApprovalService` when composing their
    authenticated GraphQL roots. Supply host policies, fresh principal
@@ -281,13 +283,14 @@ trusted `AiReadOnlyAgentTurnPlanner` that constructs initial turns with
 shorter than the run-service lease TTL. Also supply an
 `OrmAiCoordinatorCheckpointService` as both the required
 `AiAgentCheckpointWriter` and `AiAgentCheckpointAdopter`, using the same
-principal/access/protection boundaries as transcript persistence. Resolve the
-complete hierarchy through one shared `OrmAiCurrentRuleResolver`, pass it to
-both the coordinator and checkpoint service, and include its exact
-`AiResolvedRuleSet` plus the trusted server-derived BYOK decision in every
-turn plan. A successful coordinator outcome means the terminal/recovery state
-was durably committed; a lost fence returns an error and must not be followed
-by another write from that worker. Only an exact
+principal/access/protection boundaries as transcript persistence. Resolve
+current rule evidence through one shared `OrmAiCurrentRuleResolver` or
+`DeploymentAiCurrentRuleResolver`, pass it to both the coordinator and
+checkpoint service, and include its exact `AiResolvedRuleSet` plus the trusted
+server-derived BYOK decision in every turn plan. A successful coordinator
+outcome means the terminal/recovery state was durably committed; a lost fence
+returns an error and must not be followed by another write from that worker.
+Only an exact
 completed provider-retained or bounded stateless read-only tool-batch
 checkpoint has cross-generation adoption authority, and only after fresh
 protected validation of every current and historical durable proof; see the

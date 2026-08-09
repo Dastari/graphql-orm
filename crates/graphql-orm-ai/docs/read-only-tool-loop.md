@@ -3,7 +3,7 @@ title: "Read-Only Application-Tool Loop"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-09
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -85,11 +85,12 @@ heartbeat loses the fence, the coordinator stops without attempting any final
 write.
 
 Each planner result must carry the exact current `AiResolvedRuleSet` and the
-server-derived BYOK decision. Install one shared `OrmAiCurrentRuleResolver` on
-the coordinator and ORM checkpoint service. It freshly rehydrates and resolves
-the complete hierarchy before transport, after provider return, before every
-resolver tool, around checkpoint protection, and during adoption. Estimates
-are checked before transport; authoritative usage replaces them afterward.
+server-derived BYOK decision. Install one shared `OrmAiCurrentRuleResolver` or
+`DeploymentAiCurrentRuleResolver` on the coordinator and ORM checkpoint
+service. It freshly rehydrates and resolves current rule evidence before
+transport, after provider return, before every resolver tool, around checkpoint
+protection, and during adoption. Estimates are checked before transport;
+authoritative usage replaces them afterward.
 The resulting v2 checkpoints bind the rule fingerprint and cumulative limits.
 This negative rule proof never replaces tool enablement, resolver
 authorization, egress authorization, atomic budget settlement, or approval.
