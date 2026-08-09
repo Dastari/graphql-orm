@@ -19,6 +19,25 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased: provider message preview compatibility (crate 0.62.0 to 0.62.1; schema remains 0.51.0)
+
+Provider-output persistence now writes protected assistant-message previews as
+the canonical top-level JSON string already written for user messages and read
+by `AiMessages`. Both the synchronous and OpenAI background output paths use
+that representation. Reads also accept the exact bounded `{"text":"..."}`
+object form emitted for assistant messages by crate 0.62.0. Other object shapes,
+additional fields, non-string values, and previews exceeding the configured
+session preview byte limit fail closed with `AI_PERSISTENCE_FAILED`.
+
+Hosts need only update every `graphql-orm` monorepo dependency to the same
+reviewed 0.62.1 revision. Do not rewrite or decrypt existing preview rows: the
+compatibility reader recovers valid 0.62.0 values under their original content
+protection context, owner, and scope. This patch changes no Rust API, GraphQL
+SDL, entity, column, index, constraint, backup/restore contract, or intended
+persistent semantic. The top-level string was already the canonical contract;
+the legacy object was an unreadable 0.62.0 writer defect. AI schema module
+0.51.0 therefore remains current and no data migration is required.
+
 ## Unreleased: deployment-only current rules (crate 0.61.0 to 0.62.0; schema remains 0.51.0)
 
 Deployments whose AI constraints are immutable process configuration can now

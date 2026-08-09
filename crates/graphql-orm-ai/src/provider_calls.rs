@@ -2303,6 +2303,7 @@ mod tests {
     use graphql_orm::graphql::orm::{
         ApplyOptions, ConditionalUpdateOutcome, Entity, OrmSchemaModule, TransactionMode,
     };
+    use graphql_orm::graphql::pagination::KeysetConnectionInput;
     use graphql_orm::prelude::{Database, GraphQLEntity, GraphQLOperations, SqliteBackend};
     use serde_json::json;
     use sha2::Digest;
@@ -6083,6 +6084,38 @@ mod tests {
             .expect("assistant message should exist");
         assert_eq!(message.message_role, "assistant");
         assert_eq!(message.block_count, 2);
+        assert_eq!(
+            message
+                .protected_preview
+                .as_ref()
+                .and_then(|value| value.get("value"))
+                .and_then(serde_json::Value::as_str),
+            Some("hello ba"),
+            "new assistant previews use the canonical protected JSON string",
+        );
+        let messages = session_service
+            .messages(
+                &fixture.principal,
+                fixture.lease.session_id(),
+                KeysetConnectionInput {
+                    last: Some(20),
+                    ..Default::default()
+                }
+                .validate(20, 100)
+                .expect("provider message page should validate"),
+            )
+            .await
+            .expect("persisted provider output should round-trip through AiMessages");
+        assert_eq!(
+            messages
+                .edges
+                .iter()
+                .find(|edge| edge.node.id == persisted.message_id())
+                .expect("assistant message should be present")
+                .node
+                .preview,
+            "hello ba",
+        );
         assert!(matches!(
             fixture
                 .run_service

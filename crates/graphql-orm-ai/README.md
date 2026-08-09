@@ -323,7 +323,7 @@ Add the crate from a reviewed monorepo revision:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.62.0", features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.62.1", features = ["sqlite"] }
 ```
 
 > **Pre-release dependency note:** this source snapshot resolves
@@ -422,6 +422,11 @@ distinct consumed-approval-bound continuation without another provider call.
 Protected immutable skill publication/resolution and exact schema-fingerprinted
 logical UI-intent validation and fenced durable delivery are implemented as
 separately composable, project-neutral contracts.
+
+Message previews use one protected top-level JSON string for user and assistant
+messages. Reads also accept the exact bounded `{"text":"..."}` assistant
+preview written by crate 0.62.0, but malformed, ambiguous, or oversized legacy
+objects fail closed with `AI_PERSISTENCE_FAILED`.
 
 Production blockers include partial/multi-call and stateless supervised
 tool-batch adoption, code-interpreter/image-generation pricing dimensions,

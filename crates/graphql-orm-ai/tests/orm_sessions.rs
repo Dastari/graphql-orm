@@ -52,6 +52,43 @@ impl AiContentProtectionPolicyResolver for ProtectionPolicy {
     }
 }
 
+struct LegacyPreviewProtector;
+
+#[async_trait]
+impl AiContentProtector for LegacyPreviewProtector {
+    async fn protect(
+        &self,
+        policy: &AiContentProtectionPolicy,
+        context: &ContentProtectionContext,
+        value: serde_json::Value,
+    ) -> Result<ProtectedContentEnvelope, ContentProtectionError> {
+        let value = if context.entity == "graphql_orm_ai_messages"
+            && context.field == "protected_preview"
+        {
+            let text = value
+                .as_str()
+                .ok_or(ContentProtectionError::ValidationFailed)?;
+            serde_json::json!({"text": text})
+        } else {
+            value
+        };
+        DatabaseManagedContentProtector
+            .protect(policy, context, value)
+            .await
+    }
+
+    async fn open(
+        &self,
+        policy: &AiContentProtectionPolicy,
+        context: &ContentProtectionContext,
+        envelope: &ProtectedContentEnvelope,
+    ) -> Result<serde_json::Value, ContentProtectionError> {
+        DatabaseManagedContentProtector
+            .open(policy, context, envelope)
+            .await
+    }
+}
+
 fn principal(subject: &str) -> AuthPrincipal {
     AuthPrincipal::User(AuthUser {
         user_id: subject.to_owned(),
@@ -67,6 +104,12 @@ fn principal(subject: &str) -> AuthPrincipal {
 }
 
 async fn service() -> OrmAiSessionService {
+    service_with_protector(Arc::new(DatabaseManagedContentProtector)).await
+}
+
+async fn service_with_protector(
+    content_protector: Arc<dyn AiContentProtector>,
+) -> OrmAiSessionService {
     let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
         .await
         .expect("in-memory SQLite should open");
@@ -89,7 +132,7 @@ async fn service() -> OrmAiSessionService {
         database,
         Arc::new(AllowAll),
         Arc::new(ProtectionPolicy),
-        Arc::new(DatabaseManagedContentProtector),
+        content_protector,
     )
 }
 
@@ -207,6 +250,50 @@ async fn owner_isolation_atomic_send_idempotency_and_windowed_reads() {
         events.events[0].payload.0["runId"],
         first.run_id.to_string()
     );
+}
+
+#[tokio::test]
+async fn messages_read_exact_legacy_object_previews() {
+    let service = service_with_protector(Arc::new(LegacyPreviewProtector)).await;
+    let owner = principal("legacy-owner");
+    let session = service
+        .create_session(
+            &owner,
+            CreateAiSessionInput {
+                scope: scope_input(),
+                title: Some("Legacy preview".to_owned()),
+            },
+        )
+        .await
+        .expect("legacy preview session should be created");
+    service
+        .send_message(
+            &owner,
+            SendAiMessageInput {
+                session_id: session.id,
+                text: "legacy protected preview".to_owned(),
+                attachment_ids: vec![],
+                client_message_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("legacy preview fixture should persist");
+
+    let messages = service
+        .messages(
+            &owner,
+            AiSessionId(session.id),
+            KeysetConnectionInput {
+                last: Some(20),
+                ..Default::default()
+            }
+            .validate(20, 100)
+            .expect("legacy preview page should validate"),
+        )
+        .await
+        .expect("0.62.0 object preview should remain readable");
+    assert_eq!(messages.edges.len(), 1);
+    assert_eq!(messages.edges[0].node.preview, "legacy protected preview");
 }
 
 #[tokio::test]

@@ -20,12 +20,21 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.62.0` and keeps
+This development line advances the pre-1.0 crate version to `0.62.1` and keeps
 AI schema module `0.51.0`. It begins the applied-restore implementation with
 bounded database-derived facts, aligns the reviewed dependency universe,
 integrates generated resolver-operation metadata, completes the durable OpenAI
 background terminal-reconciliation runtime, and closes raw provider
 file-search IDs behind the reviewed persistent-file design.
+
+### Fixed
+
+- Synchronous and background provider-output persistence now protect assistant
+  message previews using the same bounded top-level JSON string already used
+  by user messages and required by `AiMessages`. The reader remains compatible
+  with the exact `{"text":"..."}` form written by 0.62.0, while rejecting
+  malformed, ambiguous, or oversized legacy values. Existing protection
+  context, ownership, scope, retention, and content bounds remain enforced.
 
 ### Changed
 

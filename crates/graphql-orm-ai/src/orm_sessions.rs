@@ -19,6 +19,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::message_preview::{canonical_message_preview, decode_message_preview};
 use crate::orm_inbox::{PreparedAiInboxEvent, append_inbox_event};
 use crate::persistence::*;
 use crate::{
@@ -39,7 +40,7 @@ pub struct AiSessionServiceLimits {
     pub maximum_message_bytes: usize,
     /// Maximum attachments accepted on one message.
     pub maximum_attachments: usize,
-    /// Maximum protected preview size.
+    /// Maximum protected preview size accepted for writes and reads.
     pub maximum_preview_bytes: usize,
 }
 
@@ -295,20 +296,19 @@ impl AiSessionService for OrmAiSessionService {
                     .protected_preview
                     .as_ref()
                     .ok_or(AiError::PersistenceFailed)?;
-                self.open_value(
-                    &policy,
-                    content_context(
-                        "graphql_orm_ai_messages",
-                        edge.node.id,
-                        "protected_preview",
-                        &scope,
-                    ),
-                    protected_preview,
-                )
-                .await?
-                .as_str()
-                .ok_or(AiError::PersistenceFailed)?
-                .to_owned()
+                let opened = self
+                    .open_value(
+                        &policy,
+                        content_context(
+                            "graphql_orm_ai_messages",
+                            edge.node.id,
+                            "protected_preview",
+                            &scope,
+                        ),
+                        protected_preview,
+                    )
+                    .await?;
+                decode_message_preview(opened, self.limits.maximum_preview_bytes)?
             };
             edges.push(AiMessageEdge {
                 node: message_view(&edge.node, preview, content_purged),
@@ -771,7 +771,7 @@ impl AiSessionService for OrmAiSessionService {
                     "protected_preview",
                     &scope,
                 ),
-                json!(preview),
+                canonical_message_preview(preview),
             )
             .await?;
         let protected_content = self

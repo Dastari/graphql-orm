@@ -10,6 +10,7 @@ use serde_json::json;
 use time::Duration;
 use uuid::Uuid;
 
+use crate::message_preview::canonical_message_preview;
 use crate::orm_runs::{
     PreparedProviderBlock, PreparedProviderOutput, final_output_checkpoint_hash,
 };
@@ -174,7 +175,7 @@ pub(crate) async fn prepare_background_provider_output(
             "protected_preview",
             &preparation.scope,
         ),
-        json!({"text": preview_text}),
+        canonical_message_preview(preview_text),
     )
     .await?;
     let mut blocks = Vec::with_capacity(raw_blocks.len());
@@ -417,7 +418,7 @@ impl OrmAiProviderOutputService {
                     "protected_preview",
                     &scope,
                 ),
-                json!({"text": preview_text}),
+                canonical_message_preview(preview_text),
             )
             .await?;
 
@@ -697,5 +698,56 @@ fn map_orm(error: OrmPublicError) -> AiError {
         OrmErrorCode::ServiceUnavailable
         | OrmErrorCode::InternalError
         | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
+    }
+}
+
+#[cfg(all(test, feature = "provider-openai"))]
+mod tests {
+    use super::*;
+    use crate::{AiContentProtectionMode, AiContentProtectionPolicy, AiRunId};
+
+    #[tokio::test]
+    async fn background_output_uses_canonical_string_preview() {
+        let scope = AiScope::new("tenant", "tenant-1").with_tenant_id("tenant-1");
+        let prepared = prepare_background_provider_output(
+            &crate::DatabaseManagedContentProtector,
+            &AiContentProtectionPolicy {
+                scope: scope.clone(),
+                mode: AiContentProtectionMode::DatabaseManaged,
+                key_policy_reference: None,
+                version: 1,
+                ready: true,
+            },
+            BackgroundProviderOutputPreparation {
+                message_id: Uuid::new_v4(),
+                event_id: Uuid::new_v4(),
+                inbox_event_id: Uuid::new_v4(),
+                run_id: AiRunId::new(),
+                attempt_id: Uuid::new_v4(),
+                lease_generation: 1,
+                provider_model: "test-model".to_owned(),
+                provider_response_id: "response-1".to_owned(),
+                budget_reservation_id: Uuid::new_v4(),
+                correlation_id: "correlation-1".to_owned(),
+                owner_principal_kind: "user".to_owned(),
+                owner_subject: "user-1".to_owned(),
+                scope,
+            },
+            &[ProviderEvent::TextDelta {
+                text: "background response".to_owned(),
+            }],
+            AiProviderOutputLimits::new(64, 8, 16, 256, Duration::minutes(5))
+                .expect("background output limits should validate"),
+        )
+        .await
+        .expect("background provider output should prepare");
+
+        assert_eq!(
+            prepared
+                .protected_preview
+                .get("value")
+                .and_then(serde_json::Value::as_str),
+            Some("background respo")
+        );
     }
 }

@@ -39,6 +39,8 @@ mod live_delta;
 #[cfg(feature = "local-harness")]
 mod local_harness;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod message_preview;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_approvals;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_attachments;

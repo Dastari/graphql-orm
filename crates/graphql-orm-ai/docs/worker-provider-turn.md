@@ -118,6 +118,11 @@ into separately fetched blocks, keeps the message preview bounded, applies the
 current scope content-protection policy to every stored value, and emits one
 completed-message session event.
 
+User and assistant message previews use one protected top-level JSON string.
+The session reader also accepts the exact bounded `{"text":"..."}` assistant
+preview written by crate 0.62.0 so those rows remain readable without a data
+rewrite; any other legacy shape fails closed.
+
 `AiLiveDeltaCoalescer` provides UTF-8-safe time/byte batching no weaker than the
 50 ms / 4 KiB contract and accepts only visible text or visible reasoning
 summary events. When explicitly configured, `OrmAiLiveDeltaService` rechecks
