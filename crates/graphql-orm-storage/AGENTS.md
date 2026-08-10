@@ -3,7 +3,7 @@ title: "graphql-orm-storage Agent Guide"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -31,7 +31,7 @@ This crate is a reusable storage companion for applications that use `graphql-or
 ## Current Agent Handoff
 
 - Current crate version is `0.6.0`.
-- The workspace resolves `graphql-orm` 0.18.0 and `graphql-orm-backup` 0.7.0
+- The workspace resolves `graphql-orm` 0.19.0 and `graphql-orm-backup` 0.7.0
   through workspace path dependencies and one root `Cargo.lock`. Keep
   downstream companion packages on one reviewed monorepo revision.
 - `graphql-orm` owns the optional `agql-auth` integration, pinned at

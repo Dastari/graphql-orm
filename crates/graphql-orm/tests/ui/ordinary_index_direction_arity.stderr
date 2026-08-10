@@ -1,0 +1,5 @@
+error: index directions must have the same arity as index columns
+ --> tests/ui/ordinary_index_direction_arity.rs:7:5
+  |
+7 |     index(
+  |     ^^^^^

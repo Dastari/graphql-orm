@@ -3,7 +3,7 @@ title: "Recovery, Retention, Backup, and Restore"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -160,7 +160,7 @@ What remains missing from the production adapter chain is:
 6. records the exact recovery epoch; and
 7. opens readiness only for that applied, zero-fatal epoch.
 
-`graphql-orm-backup` 0.7.0, ORM 0.18.0, and storage 0.6.0 resolve through one
+`graphql-orm-backup` 0.7.0, ORM 0.19.0, and storage 0.6.0 resolve through one
 workspace and one database/metadata/storage type universe. AI schema module
 0.51.0 also includes finalized local attachment and artifact object keys in
 the confidential database export while continuing to redact quarantine,

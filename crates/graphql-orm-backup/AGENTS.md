@@ -3,7 +3,7 @@ title: "graphql-orm-backup Agent Guide"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -31,7 +31,7 @@ This crate is a reusable backup and restore companion for applications that use 
 ## Current Agent Handoff
 
 - Current crate version is `0.7.0`.
-- The optional ORM adapter resolves `graphql-orm` 0.18.0 from the workspace.
+- The optional ORM adapter resolves `graphql-orm` 0.19.0 from the workspace.
   Internal packages use workspace path dependencies and the root `Cargo.lock`.
   Keep downstream applications on one reviewed monorepo revision so ORM,
   backup, and storage share the same canonical source/type universe.

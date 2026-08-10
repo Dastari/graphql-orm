@@ -2836,15 +2836,61 @@ impl IndexMethod {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// Physical order for one ordinary-index column.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum IndexDirection {
+    /// Ascending index order.
+    #[default]
+    Asc,
+    /// Descending index order.
+    Desc,
+}
+
+impl IndexDirection {
+    /// SQL keyword for this index direction.
+    pub const fn as_sql(self) -> &'static str {
+        match self {
+            Self::Asc => "ASC",
+            Self::Desc => "DESC",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct IndexDef {
     pub name: &'static str,
     pub columns: &'static [&'static str],
+    /// Per-column order aligned with [`Self::columns`].
+    ///
+    /// An empty slice is the compatibility representation for all-ascending
+    /// columns. Non-empty metadata must contain exactly one direction per
+    /// column.
+    pub column_directions: &'static [IndexDirection],
     pub is_unique: bool,
     pub method: IndexMethod,
     pub is_spatial: bool,
     /// Optional portable closed-set predicate for a partial index.
     pub predicate: Option<IndexPredicateDef>,
+}
+
+impl PartialEq for IndexDef {
+    fn eq(&self, other: &Self) -> bool {
+        let self_directions_valid =
+            self.column_directions.is_empty() || self.column_directions.len() == self.columns.len();
+        let other_directions_valid = other.column_directions.is_empty()
+            || other.column_directions.len() == other.columns.len();
+        self.name == other.name
+            && self.columns == other.columns
+            && self_directions_valid
+            && other_directions_valid
+            && self.is_unique == other.is_unique
+            && self.method == other.method
+            && self.is_spatial == other.is_spatial
+            && self.predicate == other.predicate
+            && self.columns.len() == other.columns.len()
+            && (0..self.columns.len())
+                .all(|index| self.direction_at(index) == other.direction_at(index))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2858,6 +2904,7 @@ impl IndexDef {
         Self {
             name,
             columns,
+            column_directions: &[],
             is_unique: false,
             method: IndexMethod::Default,
             is_spatial: false,
@@ -2870,6 +2917,24 @@ impl IndexDef {
         self
     }
 
+    /// Set explicit per-column index directions.
+    ///
+    /// Schema validation rejects a non-empty slice whose arity differs from
+    /// [`Self::columns`].
+    pub const fn with_directions(mut self, column_directions: &'static [IndexDirection]) -> Self {
+        self.column_directions = column_directions;
+        self
+    }
+
+    /// Return one column's effective order. Missing compatibility metadata is
+    /// ascending.
+    pub fn direction_at(&self, index: usize) -> IndexDirection {
+        self.column_directions
+            .get(index)
+            .copied()
+            .unwrap_or(IndexDirection::Asc)
+    }
+
     pub const fn where_in(mut self, column: &'static str, values: &'static [&'static str]) -> Self {
         self.predicate = Some(IndexPredicateDef { column, values });
         self
@@ -2879,6 +2944,7 @@ impl IndexDef {
         Self {
             name,
             columns,
+            column_directions: &[],
             is_unique: false,
             method: IndexMethod::Gist,
             is_spatial: true,
@@ -3041,13 +3107,65 @@ pub struct ColumnModel {
     pub default: Option<String>,
 }
 
+/// One ordered source/target member of a physical foreign key.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ForeignKeyColumnPairModel {
+    /// Source column on the table that owns the constraint.
+    pub source_column: String,
+    /// Referenced column on [`ForeignKeyModel::target_table`].
+    pub target_column: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ForeignKeyModel {
-    pub source_column: String,
+    /// Backend-observed physical constraint name.
+    ///
+    /// `None` requests the library's stable generated name. Names do not
+    /// participate in semantic foreign-key equality: a legacy constraint with
+    /// an equivalent ordered key remains adoptable, while its physical name is
+    /// retained for any later drop.
+    pub constraint_name: Option<String>,
+    /// Complete ordered key pairing. The list must be non-empty.
+    pub column_pairs: Vec<ForeignKeyColumnPairModel>,
     pub target_table: String,
-    pub target_column: String,
     pub is_multiple: bool,
     pub on_delete: DeletePolicy,
+}
+
+impl ForeignKeyModel {
+    /// Construct a single-column physical foreign key.
+    pub fn single(
+        source_column: impl Into<String>,
+        target_table: impl Into<String>,
+        target_column: impl Into<String>,
+        is_multiple: bool,
+        on_delete: DeletePolicy,
+    ) -> Self {
+        Self {
+            constraint_name: None,
+            column_pairs: vec![ForeignKeyColumnPairModel {
+                source_column: source_column.into(),
+                target_column: target_column.into(),
+            }],
+            target_table: target_table.into(),
+            is_multiple,
+            on_delete,
+        }
+    }
+
+    /// Source columns in physical constraint order.
+    pub fn source_columns(&self) -> impl Iterator<Item = &str> {
+        self.column_pairs
+            .iter()
+            .map(|pair| pair.source_column.as_str())
+    }
+
+    /// Referenced columns in physical constraint order.
+    pub fn target_columns(&self) -> impl Iterator<Item = &str> {
+        self.column_pairs
+            .iter()
+            .map(|pair| pair.target_column.as_str())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -3257,6 +3375,152 @@ pub struct SchemaModel {
 impl SchemaModel {
     pub fn stable_hash(&self) -> String {
         stable_schema_model_hash(self)
+    }
+
+    /// Validate backend-neutral physical constraints before migration planning.
+    ///
+    /// This rejects malformed index direction metadata and foreign keys whose
+    /// ordered source/target members are missing, type-incompatible, duplicate,
+    /// or not backed by an exact target primary/unique key.
+    pub fn validate_physical_contract(&self) -> crate::Result<()> {
+        let tables = self
+            .tables
+            .iter()
+            .map(|table| (table.table_name.as_str(), table))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for table in &self.tables {
+            for index in &table.indexes {
+                if index.name.trim().is_empty()
+                    || index.columns.is_empty()
+                    || (!index.column_directions.is_empty()
+                        && index.column_directions.len() != index.columns.len())
+                {
+                    return Err(sqlx::Error::Protocol(format!(
+                        "invalid index column metadata for {}.{}",
+                        table.table_name, index.name
+                    )));
+                }
+                let mut index_members = std::collections::BTreeSet::new();
+                for column_name in index.columns {
+                    if !index_members.insert(*column_name)
+                        || !table
+                            .columns
+                            .iter()
+                            .any(|column| column.name == *column_name)
+                    {
+                        return Err(sqlx::Error::Protocol(format!(
+                            "index {}.{} contains a duplicate or missing column {}",
+                            table.table_name, index.name, column_name
+                        )));
+                    }
+                }
+            }
+            let mut foreign_key_identities = std::collections::BTreeSet::new();
+            for foreign_key in &table.foreign_keys {
+                if foreign_key
+                    .constraint_name
+                    .as_deref()
+                    .is_some_and(|name| name.trim().is_empty())
+                    || foreign_key.column_pairs.is_empty()
+                {
+                    return Err(sqlx::Error::Protocol(format!(
+                        "foreign key on {} has invalid constraint identity or no column pairs",
+                        table.table_name
+                    )));
+                }
+                if !foreign_key_identities.insert((
+                    foreign_key.column_pairs.clone(),
+                    foreign_key.target_table.clone(),
+                    foreign_key.on_delete.clone(),
+                )) {
+                    return Err(sqlx::Error::Protocol(format!(
+                        "table {} contains duplicate semantic foreign keys",
+                        table.table_name
+                    )));
+                }
+                let Some(target_table) = tables.get(foreign_key.target_table.as_str()) else {
+                    return Err(sqlx::Error::Protocol(format!(
+                        "foreign key on {} references unmanaged target table {}",
+                        table.table_name, foreign_key.target_table
+                    )));
+                };
+                let mut source_members = std::collections::BTreeSet::new();
+                let mut target_members = std::collections::BTreeSet::new();
+                for pair in &foreign_key.column_pairs {
+                    if !source_members.insert(pair.source_column.as_str())
+                        || !target_members.insert(pair.target_column.as_str())
+                    {
+                        return Err(sqlx::Error::Protocol(format!(
+                            "foreign key on {} contains duplicate column members",
+                            table.table_name
+                        )));
+                    }
+                    let source = table
+                        .columns
+                        .iter()
+                        .find(|column| column.name == pair.source_column)
+                        .ok_or_else(|| {
+                            sqlx::Error::Protocol(format!(
+                                "foreign key on {} references missing source column {}",
+                                table.table_name, pair.source_column
+                            ))
+                        })?;
+                    let target = target_table
+                        .columns
+                        .iter()
+                        .find(|column| column.name == pair.target_column)
+                        .ok_or_else(|| {
+                            sqlx::Error::Protocol(format!(
+                                "foreign key on {} references missing target column {}.{}",
+                                table.table_name, target_table.table_name, pair.target_column
+                            ))
+                        })?;
+                    if !source.sql_type.eq_ignore_ascii_case(&target.sql_type) {
+                        return Err(sqlx::Error::Protocol(format!(
+                            "foreign key type mismatch between {}.{} ({}) and {}.{} ({})",
+                            table.table_name,
+                            pair.source_column,
+                            source.sql_type,
+                            target_table.table_name,
+                            pair.target_column,
+                            target.sql_type
+                        )));
+                    }
+                    if foreign_key.on_delete == DeletePolicy::SetNull && !source.nullable {
+                        return Err(sqlx::Error::Protocol(format!(
+                            "SET NULL foreign key source {}.{} is not nullable",
+                            table.table_name, pair.source_column
+                        )));
+                    }
+                }
+                let target_columns = foreign_key.target_columns().collect::<Vec<_>>();
+                let target_is_unique = target_table
+                    .primary_keys()
+                    .iter()
+                    .map(String::as_str)
+                    .eq(target_columns.iter().copied())
+                    || (target_columns.len() == 1
+                        && target_table.columns.iter().any(|column| {
+                            column.name == target_columns[0]
+                                && (column.is_primary_key || column.is_unique)
+                        }))
+                    || target_table.composite_unique_indexes.iter().any(|columns| {
+                        columns.iter().map(String::as_str).collect::<Vec<_>>() == target_columns
+                    })
+                    || target_table.indexes.iter().any(|index| {
+                        index.is_unique
+                            && index.predicate.is_none()
+                            && index.columns == target_columns.as_slice()
+                    });
+                if !target_is_unique {
+                    return Err(sqlx::Error::Protocol(format!(
+                        "foreign key on {} does not reference an exact unique key on {}",
+                        table.table_name, target_table.table_name
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -3577,6 +3841,7 @@ impl SchemaAbi {
     pub fn new(stages: Vec<SchemaStage>) -> crate::Result<Self> {
         let mut seen = std::collections::HashSet::new();
         for stage in &stages {
+            stage.target_schema.validate_physical_contract()?;
             if stage.version.trim().is_empty() {
                 return Err(sqlx::Error::Protocol(
                     "Schema ABI stage version must not be empty".to_string(),
@@ -3687,12 +3952,30 @@ impl From<&EntityMetadata> for TableModel {
                 .relations
                 .iter()
                 .filter(|relation| relation.emit_foreign_key)
-                .map(|relation| ForeignKeyModel {
-                    source_column: relation.source_column.to_string(),
-                    target_table: relation.target_type.to_string(),
-                    target_column: relation.target_column.to_string(),
-                    is_multiple: relation.is_multiple,
-                    on_delete: relation.on_delete.clone(),
+                .map(|relation| {
+                    let column_pairs = relation
+                        .source_columns
+                        .iter()
+                        .zip(relation.target_columns.iter())
+                        .map(|(source_field, target_column)| {
+                            let source_column = value
+                                .fields
+                                .iter()
+                                .find(|field| field.rust_name == *source_field)
+                                .map_or(*source_field, |field| field.name);
+                            ForeignKeyColumnPairModel {
+                                source_column: source_column.to_string(),
+                                target_column: (*target_column).to_string(),
+                            }
+                        })
+                        .collect();
+                    ForeignKeyModel {
+                        constraint_name: None,
+                        column_pairs,
+                        target_table: relation.target_type.to_string(),
+                        is_multiple: relation.is_multiple,
+                        on_delete: relation.on_delete.clone(),
+                    }
                 })
                 .collect(),
             search_indexes: value
@@ -3815,15 +4098,26 @@ impl SchemaModel {
                     let Some(target_table) = entity_table_names.get(relation.target_type) else {
                         continue;
                     };
-                    (*target_table, relation.target_columns)
+                    (*target_table, relation.target_columns.to_vec())
                 } else {
-                    (entity.table_name, relation.source_columns)
+                    let source_columns = relation
+                        .source_columns
+                        .iter()
+                        .map(|source_field| {
+                            entity
+                                .fields
+                                .iter()
+                                .find(|field| field.rust_name == *source_field)
+                                .map_or(*source_field, |field| field.name)
+                        })
+                        .collect::<Vec<_>>();
+                    (entity.table_name, source_columns)
                 };
 
                 let Some(table_index) = table_positions.get(table_name) else {
                     continue;
                 };
-                add_generated_index(&mut tables[*table_index], columns);
+                add_generated_index(&mut tables[*table_index], &columns);
             }
         }
 
@@ -4049,13 +4343,19 @@ pub fn stable_schema_model_hash(schema: &SchemaModel) -> String {
         }
         canonical.push('\n');
 
-        let mut constraints = table.check_constraints.iter().collect::<Vec<_>>();
+        let mut constraints = table
+            .check_constraints
+            .iter()
+            .map(|constraint| {
+                super::migrations::canonical_check_tokens(&constraint.expression)
+                    .map(|tokens| tokens.join("|"))
+                    .unwrap_or_else(|| constraint.expression.clone())
+            })
+            .collect::<Vec<_>>();
         constraints.sort();
         for constraint in constraints {
             canonical.push_str("check:");
-            canonical.push_str(&constraint.name);
-            canonical.push('|');
-            canonical.push_str(&constraint.expression);
+            canonical.push_str(&constraint);
             canonical.push('\n');
         }
 
@@ -4110,6 +4410,11 @@ pub fn stable_schema_model_hash(schema: &SchemaModel) -> String {
             canonical.push_str(index.name);
             canonical.push('|');
             canonical.push_str(&index.columns.join(","));
+            canonical.push('|');
+            for position in 0..index.columns.len() {
+                canonical.push_str(index.direction_at(position).as_sql());
+                canonical.push(',');
+            }
             canonical.push('|');
             canonical.push_str(if index.is_unique { "unique" } else { "index" });
             canonical.push('|');
@@ -4213,27 +4518,22 @@ pub fn stable_schema_model_hash(schema: &SchemaModel) -> String {
 
         let mut foreign_keys = table.foreign_keys.iter().collect::<Vec<_>>();
         foreign_keys.sort_by(|left, right| {
-            (
-                &left.source_column,
-                &left.target_table,
-                &left.target_column,
-                &left.on_delete,
-            )
-                .cmp(&(
-                    &right.source_column,
-                    &right.target_table,
-                    &right.target_column,
-                    &right.on_delete,
-                ))
+            (&left.column_pairs, &left.target_table, &left.on_delete).cmp(&(
+                &right.column_pairs,
+                &right.target_table,
+                &right.on_delete,
+            ))
         });
         for foreign_key in foreign_keys {
             canonical.push_str("foreign_key:");
-            canonical.push_str(&foreign_key.source_column);
-            canonical.push('|');
             canonical.push_str(&foreign_key.target_table);
             canonical.push('|');
-            canonical.push_str(&foreign_key.target_column);
-            canonical.push('|');
+            for pair in &foreign_key.column_pairs {
+                canonical.push_str(&pair.source_column);
+                canonical.push_str("->");
+                canonical.push_str(&pair.target_column);
+                canonical.push(',');
+            }
             canonical.push_str(foreign_key.on_delete.as_sql());
             canonical.push('\n');
         }

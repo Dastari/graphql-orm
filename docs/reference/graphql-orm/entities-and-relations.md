@@ -3,7 +3,7 @@ title: "Entities And Relations"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -339,6 +339,32 @@ emission for external schemas:
 #[relation(target = "Customer", from = "customer_id", to = "CustomerId", emit_fk = false)]
 pub customer: Option<Customer>,
 ```
+
+For managed SQLite and PostgreSQL schemas, a composite relation emits one
+ordered compound foreign key rather than independent scalar references:
+
+```rust
+#[graphql(skip)]
+#[relation(
+    target = "SnapshotRecord",
+    from = ["provider", "tenant_key", "generation"],
+    to = ["provider", "tenant_key", "generation"],
+    on_delete = "cascade"
+)]
+pub snapshot: Option<SnapshotRecord>,
+```
+
+The target entity must participate in the same schema model, and the ordered
+target columns must exactly match a primary key, composite unique declaration,
+or unconditional unique index. Source entries name Rust fields and therefore
+honor `db_column`; target entries name physical database columns. The planner
+rejects missing, duplicate, type-incompatible, non-unique, or nullable
+`SET NULL` contracts before rendering DDL.
+
+SQLite introspection groups foreign-key members by `id` and `seq`; PostgreSQL
+uses catalog ordinality. Constraint names are physical backend details and do
+not make otherwise identical foreign keys semantically different, although an
+observed PostgreSQL name is retained for a later exact drop.
 
 ## Recursive Relations
 

@@ -29,13 +29,27 @@ pub(crate) struct EntityMetadata {
     pub(crate) notify_handler: Option<String>,
     pub(crate) upsert: Option<Vec<String>>,
     pub(crate) unique_composite: Vec<Vec<String>>,
-    pub(crate) indexes: Vec<(bool, Vec<String>)>,
+    pub(crate) indexes: Vec<OrdinaryIndexMetadata>,
     pub(crate) conditional_indexes: Vec<ConditionalIndexMetadata>,
     pub(crate) projections: Vec<ProjectionMetadata>,
     pub(crate) search: Option<SearchEntityMetadata>,
     pub(crate) serde_rename_all: Option<String>,
     pub(crate) graphql_rename_fields: Option<String>,
     pub(crate) rls: Option<RlsMetadata>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum OrdinaryIndexDirection {
+    Asc,
+    Desc,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct OrdinaryIndexMetadata {
+    pub(crate) name: Option<String>,
+    pub(crate) columns: Vec<String>,
+    pub(crate) directions: Vec<OrdinaryIndexDirection>,
+    pub(crate) unique: bool,
 }
 
 #[derive(Clone, Default)]
@@ -233,21 +247,83 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     metadata.unique_composite.push(cols);
                 } else if meta.path.is_ident("index") || meta.path.is_ident("unique_index") {
                     let unique = meta.path.is_ident("unique_index");
-                    let value = meta.value()?;
-                    let lit: syn::LitStr = value.parse()?;
-                    let cols = lit
-                        .value()
-                        .split(',')
-                        .map(|c| c.trim().to_string())
-                        .filter(|c| !c.is_empty())
-                        .collect::<Vec<_>>();
-                    if cols.is_empty() {
+                    let mut index = OrdinaryIndexMetadata {
+                        unique,
+                        ..OrdinaryIndexMetadata::default()
+                    };
+                    if meta.input.peek(syn::Token![=]) {
+                        let value = meta.value()?;
+                        let lit: syn::LitStr = value.parse()?;
+                        index.columns = lit
+                            .value()
+                            .split(',')
+                            .map(|c| c.trim().to_string())
+                            .filter(|c| !c.is_empty())
+                            .collect();
+                    } else {
+                        meta.parse_nested_meta(|option| {
+                            if option.path.is_ident("name") {
+                                let value = option.value()?;
+                                let lit: syn::LitStr = value.parse()?;
+                                index.name = Some(lit.value());
+                            } else if option.path.is_ident("columns") {
+                                let value = option.value()?;
+                                index.columns = parse_string_array_expr(
+                                    value,
+                                    "index columns must be an array of field names",
+                                )?;
+                            } else if option.path.is_ident("directions") {
+                                let value = option.value()?;
+                                let directions = parse_string_array_expr(
+                                    value,
+                                    "index directions must be an array containing asc or desc",
+                                )?;
+                                index.directions = directions
+                                    .into_iter()
+                                    .map(|direction| {
+                                        match direction.to_ascii_lowercase().as_str() {
+                                            "asc" => Ok(OrdinaryIndexDirection::Asc),
+                                            "desc" => Ok(OrdinaryIndexDirection::Desc),
+                                            _ => Err(syn::Error::new(
+                                                option.path.span(),
+                                                "index directions must contain only asc or desc",
+                                            )),
+                                        }
+                                    })
+                                    .collect::<syn::Result<Vec<_>>>()?;
+                            } else {
+                                return Err(syn::Error::new(
+                                    option.path.span(),
+                                    "unsupported ordinary index option",
+                                ));
+                            }
+                            Ok(())
+                        })?;
+                    }
+                    if index.columns.is_empty() {
                         return Err(syn::Error::new(
-                            lit.span(),
+                            meta.path.span(),
                             "index must include at least one column",
                         ));
                     }
-                    metadata.indexes.push((unique, cols));
+                    if index
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| name.trim().is_empty())
+                    {
+                        return Err(syn::Error::new(
+                            meta.path.span(),
+                            "index name must not be empty",
+                        ));
+                    }
+                    if !index.directions.is_empty() && index.directions.len() != index.columns.len()
+                    {
+                        return Err(syn::Error::new(
+                            meta.path.span(),
+                            "index directions must have the same arity as index columns",
+                        ));
+                    }
+                    metadata.indexes.push(index);
                 }
                 Ok(())
             })?;
@@ -776,6 +852,8 @@ pub(crate) struct FieldMetadata {
     pub(crate) is_version: bool,
     pub(crate) minimum: Option<String>,
     pub(crate) maximum: Option<String>,
+    pub(crate) exclusive_minimum: Option<String>,
+    pub(crate) exclusive_maximum: Option<String>,
     pub(crate) non_negative: bool,
     pub(crate) min_length: Option<usize>,
     pub(crate) max_length: Option<usize>,
@@ -814,6 +892,7 @@ pub(crate) struct FieldMetadata {
     /// Applied after reading from the database row (e.g., decryption)
     pub(crate) transform_read: Option<String>,
     pub(crate) default: Option<String>,
+    pub(crate) suppress_implicit_default: bool,
     pub(crate) auto_generated: Option<bool>,
     pub(crate) backup_policy: Option<String>,
     /// If true, include in Create/Update inputs even if #[graphql(skip)] is set.
@@ -917,6 +996,8 @@ impl Default for FieldMetadata {
             is_version: false,
             minimum: None,
             maximum: None,
+            exclusive_minimum: None,
+            exclusive_maximum: None,
             non_negative: false,
             min_length: None,
             max_length: None,
@@ -949,6 +1030,7 @@ impl Default for FieldMetadata {
             transform_write: None,
             transform_read: None,
             default: None,
+            suppress_implicit_default: false,
             auto_generated: None,
             backup_policy: None,
             input_only: false,
@@ -1202,6 +1284,32 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                                 syn::Lit::Float(value) => value.base10_digits().to_string(),
                                 _ => return Err(syn::Error::new(lit.span(), "max must be numeric")),
                             });
+                        } else if nested.path.is_ident("min_exclusive") {
+                            let value = nested.value()?;
+                            let lit: syn::Lit = value.parse()?;
+                            meta.exclusive_minimum = Some(match lit {
+                                syn::Lit::Int(value) => value.base10_digits().to_string(),
+                                syn::Lit::Float(value) => value.base10_digits().to_string(),
+                                _ => {
+                                    return Err(syn::Error::new(
+                                        lit.span(),
+                                        "min_exclusive must be numeric",
+                                    ));
+                                }
+                            });
+                        } else if nested.path.is_ident("max_exclusive") {
+                            let value = nested.value()?;
+                            let lit: syn::Lit = value.parse()?;
+                            meta.exclusive_maximum = Some(match lit {
+                                syn::Lit::Int(value) => value.base10_digits().to_string(),
+                                syn::Lit::Float(value) => value.base10_digits().to_string(),
+                                _ => {
+                                    return Err(syn::Error::new(
+                                        lit.span(),
+                                        "max_exclusive must be numeric",
+                                    ));
+                                }
+                            });
                         } else if nested.path.is_ident("non_negative") {
                             meta.non_negative = true;
                         } else if nested.path.is_ident("min_length") {
@@ -1276,9 +1384,26 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let lit: syn::LitStr = value.parse()?;
                             meta.db_column = Some(lit.value());
                         } else if nested.path.is_ident("default") {
+                            if meta.default.is_some() || meta.suppress_implicit_default {
+                                return Err(syn::Error::new(
+                                    nested.path.span(),
+                                    "default may only be declared once per field",
+                                ));
+                            }
                             let value = nested.value()?;
-                            let lit: syn::LitStr = value.parse()?;
-                            meta.default = Some(lit.value());
+                            let lit: syn::Lit = value.parse()?;
+                            match lit {
+                                syn::Lit::Str(value) => meta.default = Some(value.value()),
+                                syn::Lit::Bool(value) if !value.value => {
+                                    meta.suppress_implicit_default = true;
+                                }
+                                _ => {
+                                    return Err(syn::Error::new(
+                                        lit.span(),
+                                        "default must be a SQL string literal or false",
+                                    ));
+                                }
+                            }
                         } else if nested.path.is_ident("auto_generated") {
                             let value = nested.value()?;
                             let lit: syn::LitBool = value.parse()?;
@@ -2077,27 +2202,63 @@ fn generate_entity_impl(
             quote! { &[#(#col_lits),*] }
         })
         .collect::<Vec<_>>();
-    let mut index_defs = entity_meta
-        .indexes
-        .iter()
-        .map(|(unique, cols)| {
-            let name = format!("idx_{}_{}", raw_table_name, cols.join("_"));
-            let col_lits = cols
+    let mut index_defs = Vec::new();
+    for index in &entity_meta.indexes {
+        let mut db_columns = Vec::new();
+        for requested in &index.columns {
+            let field = fields
                 .iter()
-                .map(|c| syn::LitStr::new(c, struct_name.span()))
-                .collect::<Vec<_>>();
-
-            if *unique {
-                quote! {
-                    ::graphql_orm::graphql::orm::IndexDef::new(#name, &[#(#col_lits),*]).unique()
-                }
-            } else {
-                quote! {
-                    ::graphql_orm::graphql::orm::IndexDef::new(#name, &[#(#col_lits),*])
-                }
+                .find(|field| field.ident.as_ref().is_some_and(|ident| ident == requested))
+                .ok_or_else(|| {
+                    syn::Error::new_spanned(
+                        struct_name,
+                        format!("index references unknown field `{requested}`"),
+                    )
+                })?;
+            let field_meta = parse_field_metadata(field)?;
+            if field_meta.is_relation || field_meta.skip_db {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "index columns must be persisted scalar fields",
+                ));
             }
-        })
-        .collect::<Vec<_>>();
+            db_columns.push(field_meta.db_column.unwrap_or_else(|| requested.clone()));
+        }
+        let name = index
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("idx_{}_{}", raw_table_name, db_columns.join("_")));
+        let columns = db_columns
+            .iter()
+            .map(|column| syn::LitStr::new(column, struct_name.span()))
+            .collect::<Vec<_>>();
+        let directions = index
+            .directions
+            .iter()
+            .map(|direction| match direction {
+                OrdinaryIndexDirection::Asc => {
+                    quote! { ::graphql_orm::graphql::orm::IndexDirection::Asc }
+                }
+                OrdinaryIndexDirection::Desc => {
+                    quote! { ::graphql_orm::graphql::orm::IndexDirection::Desc }
+                }
+            })
+            .collect::<Vec<_>>();
+        let base = if index.unique {
+            quote! {
+                ::graphql_orm::graphql::orm::IndexDef::new(#name, &[#(#columns),*]).unique()
+            }
+        } else {
+            quote! {
+                ::graphql_orm::graphql::orm::IndexDef::new(#name, &[#(#columns),*])
+            }
+        };
+        if directions.is_empty() {
+            index_defs.push(base);
+        } else {
+            index_defs.push(quote! { #base.with_directions(&[#(#directions),*]) });
+        }
+    }
 
     for conditional in &entity_meta.conditional_indexes {
         if backend == BackendKind::Mssql {
@@ -2431,7 +2592,11 @@ fn generate_entity_impl(
                 | "f32"
                 | "f64"
         );
-        if (field_meta.non_negative || field_meta.minimum.is_some() || field_meta.maximum.is_some())
+        if (field_meta.non_negative
+            || field_meta.minimum.is_some()
+            || field_meta.maximum.is_some()
+            || field_meta.exclusive_minimum.is_some()
+            || field_meta.exclusive_maximum.is_some())
             && !numeric_constraint_type
         {
             return Err(syn::Error::new(
@@ -2463,6 +2628,52 @@ fn generate_entity_impl(
             {
                 return Err(syn::Error::new(field.span(), "min must not exceed max"));
             }
+        }
+        if field_meta.minimum.is_some() && field_meta.exclusive_minimum.is_some() {
+            return Err(syn::Error::new(
+                field.span(),
+                "min and min_exclusive cannot both be declared",
+            ));
+        }
+        if field_meta.maximum.is_some() && field_meta.exclusive_maximum.is_some() {
+            return Err(syn::Error::new(
+                field.span(),
+                "max and max_exclusive cannot both be declared",
+            ));
+        }
+        let lower = field_meta
+            .minimum
+            .as_ref()
+            .map(|value| (value, false))
+            .or_else(|| {
+                field_meta
+                    .exclusive_minimum
+                    .as_ref()
+                    .map(|value| (value, true))
+            });
+        let upper = field_meta
+            .maximum
+            .as_ref()
+            .map(|value| (value, false))
+            .or_else(|| {
+                field_meta
+                    .exclusive_maximum
+                    .as_ref()
+                    .map(|value| (value, true))
+            });
+        if let (Some((lower, lower_exclusive)), Some((upper, upper_exclusive))) = (lower, upper)
+            && lower
+                .parse::<f64>()
+                .ok()
+                .zip(upper.parse::<f64>().ok())
+                .is_some_and(|(lower, upper)| {
+                    lower > upper || (lower == upper && (lower_exclusive || upper_exclusive))
+                })
+        {
+            return Err(syn::Error::new(
+                field.span(),
+                "numeric lower bound must leave a non-empty range below the upper bound",
+            ));
         }
         if field_meta
             .min_length
@@ -2518,6 +2729,12 @@ fn generate_entity_impl(
         }
         if let Some(maximum) = &field_meta.maximum {
             push_constraint("max", format!("{db_col_sql} <= {maximum}"));
+        }
+        if let Some(minimum) = &field_meta.exclusive_minimum {
+            push_constraint("min_exclusive", format!("{db_col_sql} > {minimum}"));
+        }
+        if let Some(maximum) = &field_meta.exclusive_maximum {
+            push_constraint("max_exclusive", format!("{db_col_sql} < {maximum}"));
         }
         let length_function = if backend == BackendKind::Postgres && is_byte_vec_type(field_type) {
             "octet_length"
@@ -2754,8 +2971,19 @@ fn generate_entity_impl(
                 });
             }
         }
+        if field_meta.suppress_implicit_default
+            && rust_name != "created_at"
+            && rust_name != "updated_at"
+        {
+            return Err(syn::Error::new(
+                field.span(),
+                "default = false only suppresses the implicit created_at or updated_at default",
+            ));
+        }
         let default_val = field_meta.default.clone().or_else(|| {
-            if rust_name == "created_at" || rust_name == "updated_at" {
+            if !field_meta.suppress_implicit_default
+                && (rust_name == "created_at" || rust_name == "updated_at")
+            {
                 Some(backend_current_epoch_expr(backend).to_string())
             } else {
                 None
@@ -3197,7 +3425,7 @@ fn generate_entity_impl(
 
         impl ::graphql_orm::graphql::orm::DatabaseOrderBy for #order_by_name {
             fn to_sql_order(&self) -> Option<String> {
-                let mut parts = Vec::new();
+                let mut parts: Vec<String> = Vec::new();
                 #(#order_by_match_arms)*
                 if parts.is_empty() {
                     None

@@ -1,5 +1,7 @@
 #[cfg(feature = "mssql")]
 use super::OrmBackend;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+use super::core::ForeignKeyColumnPairModel;
 #[cfg(feature = "postgres")]
 use super::core::RlsOperation;
 #[cfg(feature = "mssql")]
@@ -38,48 +40,306 @@ fn defaults_equivalent(before: &Option<String>, after: &Option<String>) -> bool 
 }
 
 #[cfg(feature = "sqlite")]
-fn parse_generated_check_constraints(create_sql: &str) -> Vec<super::core::CheckConstraintModel> {
-    let mut constraints = Vec::new();
-    let mut rest = create_sql;
-    const PREFIX: &str = "CONSTRAINT graphql_orm_check_";
-    while let Some(start) = rest.find(PREFIX) {
-        rest = &rest[start + "CONSTRAINT ".len()..];
-        let Some(name_end) = rest.find(char::is_whitespace) else {
-            break;
-        };
-        let name = &rest[..name_end];
-        let after_name = rest[name_end..].trim_start();
-        let Some(check) = after_name.strip_prefix("CHECK") else {
-            rest = after_name;
-            continue;
-        };
-        let Some(open) = check.find('(') else {
-            break;
-        };
-        let mut depth = 0usize;
-        let mut close = None;
-        for (index, ch) in check[open..].char_indices() {
-            match ch {
-                '(' => depth += 1,
-                ')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        close = Some(open + index);
-                        break;
-                    }
-                }
-                _ => {}
+fn parse_sqlite_check_constraints(
+    create_sql: &str,
+) -> crate::Result<Vec<super::core::CheckConstraintModel>> {
+    fn identifier_byte(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
+    }
+
+    fn constraint_name(prefix: &str) -> Option<String> {
+        let mut tokens = prefix.split_ascii_whitespace();
+        while let Some(token) = tokens.next() {
+            if token.eq_ignore_ascii_case("constraint") {
+                return tokens
+                    .next()
+                    .map(|name| name.trim_matches(['"', '`', '[', ']']).to_string());
             }
         }
-        let Some(close) = close else { break };
-        constraints.push(super::core::CheckConstraintModel {
-            name: name.to_string(),
-            expression: check[open + 1..close].trim().to_string(),
-        });
-        rest = &check[close + 1..];
+        None
+    }
+
+    let bytes = create_sql.as_bytes();
+    let mut constraints = Vec::new();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' | b'"' | b'`' => {
+                let delimiter = bytes[index];
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == delimiter {
+                        if index + 1 < bytes.len() && bytes[index + 1] == delimiter {
+                            index += 2;
+                        } else {
+                            index += 1;
+                            break;
+                        }
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            b'[' => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b']' {
+                    index += 1;
+                }
+                index = (index + 1).min(bytes.len());
+            }
+            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                {
+                    index += 1;
+                }
+                index = (index + 2).min(bytes.len());
+            }
+            _ if index + 5 <= bytes.len()
+                && create_sql[index..index + 5].eq_ignore_ascii_case("check")
+                && (index == 0 || !identifier_byte(bytes[index - 1]))
+                && (index + 5 == bytes.len() || !identifier_byte(bytes[index + 5])) =>
+            {
+                let keyword = index;
+                index += 5;
+                while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+                    index += 1;
+                }
+                if bytes.get(index) != Some(&b'(') {
+                    return Err(sqlx::Error::Protocol(
+                        "SQLite CHECK constraint is missing its expression".to_string(),
+                    ));
+                }
+                let open = index;
+                let mut depth = 0usize;
+                let mut delimiter = None;
+                let mut close = None;
+                while index < bytes.len() {
+                    let byte = bytes[index];
+                    if let Some(active) = delimiter {
+                        if byte == active {
+                            if index + 1 < bytes.len() && bytes[index + 1] == active {
+                                index += 2;
+                                continue;
+                            }
+                            delimiter = None;
+                        }
+                    } else {
+                        match byte {
+                            b'\'' | b'"' | b'`' => delimiter = Some(byte),
+                            b'(' => depth += 1,
+                            b')' => {
+                                depth = depth.checked_sub(1).ok_or_else(|| {
+                                    sqlx::Error::Protocol(
+                                        "SQLite CHECK constraint has unbalanced parentheses"
+                                            .to_string(),
+                                    )
+                                })?;
+                                if depth == 0 {
+                                    close = Some(index);
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    index += 1;
+                }
+                let close = close.ok_or_else(|| {
+                    sqlx::Error::Protocol(
+                        "SQLite CHECK constraint has an unterminated expression".to_string(),
+                    )
+                })?;
+                let clause_start = create_sql[..keyword]
+                    .rfind(',')
+                    .or_else(|| create_sql[..keyword].rfind('('))
+                    .map_or(0, |position| position + 1);
+                let name = constraint_name(&create_sql[clause_start..keyword])
+                    .unwrap_or_else(|| format!("__sqlite_unnamed_check_{}", constraints.len()));
+                constraints.push(super::core::CheckConstraintModel {
+                    name,
+                    expression: create_sql[open + 1..close].trim().to_string(),
+                });
+                index = close + 1;
+            }
+            _ => index += 1,
+        }
     }
     constraints.sort();
-    constraints
+    Ok(constraints)
+}
+
+pub(crate) fn canonical_check_tokens(expression: &str) -> Option<Vec<String>> {
+    let bytes = expression.trim().as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index].is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+        match bytes[index] {
+            b'\'' => {
+                index += 1;
+                let mut value = String::new();
+                let mut closed = false;
+                while index < bytes.len() {
+                    if bytes[index] == b'\'' {
+                        if bytes.get(index + 1) == Some(&b'\'') {
+                            value.push('\'');
+                            index += 2;
+                        } else {
+                            index += 1;
+                            closed = true;
+                            break;
+                        }
+                    } else {
+                        value.push(bytes[index] as char);
+                        index += 1;
+                    }
+                }
+                if !closed {
+                    return None;
+                }
+                tokens.push(format!("string:{}:{value}", value.len()));
+            }
+            b'"' | b'`' | b'[' => {
+                let opener = bytes[index];
+                let closer = if opener == b'[' { b']' } else { opener };
+                index += 1;
+                let mut identifier = Vec::new();
+                let mut closed = false;
+                while index < bytes.len() {
+                    if bytes[index] == closer {
+                        if bytes.get(index + 1) == Some(&closer) {
+                            identifier.push(closer);
+                            index += 2;
+                            continue;
+                        }
+                        index += 1;
+                        closed = true;
+                        break;
+                    }
+                    identifier.push(bytes[index]);
+                    index += 1;
+                }
+                if !closed {
+                    return None;
+                }
+                let identifier = String::from_utf8(identifier).ok()?;
+                if identifier.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'$')
+                }) {
+                    tokens.push(identifier);
+                } else {
+                    tokens.push(format!(
+                        "quoted_identifier:{}:{identifier}",
+                        identifier.len()
+                    ));
+                }
+            }
+            byte if byte.is_ascii_alphabetic() || byte == b'_' => {
+                let start = index;
+                index += 1;
+                while index < bytes.len()
+                    && (bytes[index].is_ascii_alphanumeric()
+                        || matches!(bytes[index], b'_' | b'.' | b'$'))
+                {
+                    index += 1;
+                }
+                tokens.push(
+                    String::from_utf8(bytes[start..index].to_vec())
+                        .ok()?
+                        .to_ascii_lowercase(),
+                );
+            }
+            byte if byte.is_ascii_digit()
+                || ((byte == b'-' || byte == b'+')
+                    && bytes.get(index + 1).is_some_and(u8::is_ascii_digit)) =>
+            {
+                let start = index;
+                index += 1;
+                while index < bytes.len()
+                    && (bytes[index].is_ascii_digit()
+                        || matches!(bytes[index], b'.' | b'e' | b'E' | b'+' | b'-'))
+                {
+                    index += 1;
+                }
+                tokens.push(String::from_utf8(bytes[start..index].to_vec()).ok()?);
+            }
+            b'>' | b'<' | b'=' | b'!' => {
+                let start = index;
+                index += 1;
+                if bytes.get(index) == Some(&b'=')
+                    || (bytes[start] == b'<' && bytes.get(index) == Some(&b'>'))
+                {
+                    index += 1;
+                }
+                tokens.push(String::from_utf8(bytes[start..index].to_vec()).ok()?);
+            }
+            b'(' | b')' | b',' => {
+                tokens.push((bytes[index] as char).to_string());
+                index += 1;
+            }
+            _ => return None,
+        }
+    }
+
+    loop {
+        if tokens.first().map(String::as_str) != Some("(")
+            || tokens.last().map(String::as_str) != Some(")")
+        {
+            break;
+        }
+        let mut depth = 0i64;
+        let mut wraps_all = true;
+        for (position, token) in tokens.iter().enumerate() {
+            match token.as_str() {
+                "(" => depth += 1,
+                ")" => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 && position + 1 < tokens.len() {
+                wraps_all = false;
+                break;
+            }
+            if depth < 0 {
+                return None;
+            }
+        }
+        if !wraps_all || depth != 0 {
+            break;
+        }
+        tokens.remove(0);
+        tokens.pop();
+    }
+    Some(tokens)
+}
+
+fn check_constraints_equivalent(
+    current: &[super::core::CheckConstraintModel],
+    target: &[super::core::CheckConstraintModel],
+) -> bool {
+    let canonical = |constraints: &[super::core::CheckConstraintModel]| {
+        let mut values = constraints
+            .iter()
+            .map(|constraint| canonical_check_tokens(&constraint.expression))
+            .collect::<Option<Vec<_>>>()?;
+        values.sort();
+        Some(values)
+    };
+    match (canonical(current), canonical(target)) {
+        (Some(current), Some(target)) => current == target,
+        _ => current == target,
+    }
 }
 
 fn render_default_clause(backend: DatabaseBackend, default: &str) -> String {
@@ -161,19 +421,23 @@ fn render_create_table_statement_for_name(
     );
     parts.extend(table.foreign_keys.iter().map(|foreign_key| {
         let constraint_name = foreign_key_constraint_name(table_name, foreign_key);
+        let constraint_name = backend.quote_identifier(&constraint_name);
+        let source_columns = foreign_key.source_columns().collect::<Vec<_>>().join(", ");
+        let target_columns = foreign_key.target_columns().collect::<Vec<_>>().join(", ");
         format!(
             "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({}) ON DELETE {}",
             constraint_name,
-            foreign_key.source_column,
+            source_columns,
             foreign_key.target_table,
-            foreign_key.target_column,
+            target_columns,
             foreign_key.on_delete.as_sql(),
         )
     }));
     parts.extend(table.check_constraints.iter().map(|constraint| {
         format!(
             "CONSTRAINT {} CHECK ({})",
-            constraint.name, constraint.expression
+            backend.quote_identifier(&constraint.name),
+            constraint.expression
         )
     }));
     format!("CREATE TABLE {} ({})", table_name, parts.join(", "))
@@ -571,51 +835,55 @@ pub fn diff_schema_models_for_backend(
             }
         }
 
-        let current_foreign_keys = table
-            .foreign_keys
-            .iter()
-            .map(|foreign_key| {
-                (
-                    (
-                        foreign_key.source_column.clone(),
+        let current_foreign_keys = table.foreign_keys.iter().fold(
+            std::collections::BTreeMap::<_, Vec<_>>::new(),
+            |mut grouped, foreign_key| {
+                grouped
+                    .entry((
+                        foreign_key.column_pairs.clone(),
                         foreign_key.target_table.clone(),
-                        foreign_key.target_column.clone(),
                         foreign_key.on_delete.clone(),
-                    ),
-                    foreign_key,
-                )
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let target_foreign_keys = target_table
-            .foreign_keys
-            .iter()
-            .map(|foreign_key| {
-                (
-                    (
-                        foreign_key.source_column.clone(),
+                    ))
+                    .or_default()
+                    .push(foreign_key);
+                grouped
+            },
+        );
+        let target_foreign_keys = target_table.foreign_keys.iter().fold(
+            std::collections::BTreeMap::<_, Vec<_>>::new(),
+            |mut grouped, foreign_key| {
+                grouped
+                    .entry((
+                        foreign_key.column_pairs.clone(),
                         foreign_key.target_table.clone(),
-                        foreign_key.target_column.clone(),
                         foreign_key.on_delete.clone(),
-                    ),
-                    foreign_key,
-                )
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
+                    ))
+                    .or_default()
+                    .push(foreign_key);
+                grouped
+            },
+        );
 
-        for (key, foreign_key) in &current_foreign_keys {
-            if !target_foreign_keys.contains_key(key) {
+        let foreign_key_identities = current_foreign_keys
+            .keys()
+            .chain(target_foreign_keys.keys())
+            .collect::<std::collections::BTreeSet<_>>();
+        for key in foreign_key_identities {
+            let mut current = current_foreign_keys.get(key).cloned().unwrap_or_default();
+            let mut target = target_foreign_keys.get(key).cloned().unwrap_or_default();
+            current.sort_by_key(|foreign_key| &foreign_key.constraint_name);
+            target.sort_by_key(|foreign_key| &foreign_key.constraint_name);
+            let common = current.len().min(target.len());
+            for foreign_key in current.into_iter().skip(common) {
                 steps.push(MigrationStep::DropForeignKey {
                     table_name: table_name.clone(),
-                    foreign_key: (*foreign_key).clone(),
+                    foreign_key: foreign_key.clone(),
                 });
             }
-        }
-
-        for (key, foreign_key) in &target_foreign_keys {
-            if !current_foreign_keys.contains_key(key) {
+            for foreign_key in target.into_iter().skip(common) {
                 steps.push(MigrationStep::AddForeignKey {
                     table_name: table_name.clone(),
-                    foreign_key: (*foreign_key).clone(),
+                    foreign_key: foreign_key.clone(),
                 });
             }
         }
@@ -628,7 +896,8 @@ pub fn diff_schema_models_for_backend(
                 retention_purge: target_table.retention_purge,
             });
         }
-        if table.check_constraints != target_table.check_constraints {
+        if !check_constraints_equivalent(&table.check_constraints, &target_table.check_constraints)
+        {
             steps.push(MigrationStep::SetCheckConstraints {
                 table_name: table_name.clone(),
                 before: table.check_constraints.clone(),
@@ -641,10 +910,24 @@ pub fn diff_schema_models_for_backend(
 }
 
 fn foreign_key_constraint_name(table_name: &str, foreign_key: &ForeignKeyModel) -> String {
-    format!(
+    if let Some(name) = &foreign_key.constraint_name {
+        return name.clone();
+    }
+    let sources = foreign_key.source_columns().collect::<Vec<_>>().join("_");
+    let targets = foreign_key.target_columns().collect::<Vec<_>>().join("_");
+    let full = format!(
         "fk_{}_{}_{}_{}",
-        table_name, foreign_key.source_column, foreign_key.target_table, foreign_key.target_column
-    )
+        table_name, sources, foreign_key.target_table, targets
+    );
+    if full.len() <= 63 {
+        return full;
+    }
+    let hash = format!("{:016x}", super::core::fnv1a64(full.as_bytes()));
+    let mut prefix_len = 63usize.saturating_sub(hash.len() + 1);
+    while !full.is_char_boundary(prefix_len) {
+        prefix_len = prefix_len.saturating_sub(1);
+    }
+    format!("{}_{}", &full[..prefix_len], hash)
 }
 
 fn migration_step_table_name(step: &MigrationStep) -> Option<&str> {
@@ -691,7 +974,15 @@ fn render_create_index_statement(
     let columns = index
         .columns
         .iter()
-        .map(|column| backend.quote_identifier(column))
+        .enumerate()
+        .map(|(position, column)| {
+            let quoted = backend.quote_identifier(column);
+            if index.column_directions.is_empty() {
+                quoted
+            } else {
+                format!("{quoted} {}", index.direction_at(position).as_sql())
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let predicate = index
@@ -1614,14 +1905,17 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
             foreign_key,
         } => {
             let constraint_name = foreign_key_constraint_name(table_name, foreign_key);
+            let quoted_constraint_name = backend.quote_identifier(&constraint_name);
+            let source_columns = foreign_key.source_columns().collect::<Vec<_>>().join(", ");
+            let target_columns = foreign_key.target_columns().collect::<Vec<_>>().join(", ");
             match backend {
                 DatabaseBackend::Postgres => vec![format!(
                     "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({}) ON DELETE {}",
                     table_name,
-                    constraint_name,
-                    foreign_key.source_column,
+                    quoted_constraint_name,
+                    source_columns,
                     foreign_key.target_table,
-                    foreign_key.target_column,
+                    target_columns,
                     foreign_key.on_delete.as_sql()
                 )],
                 DatabaseBackend::Sqlite => vec![format!(
@@ -1631,10 +1925,10 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
                 DatabaseBackend::Mysql | DatabaseBackend::Mssql => vec![format!(
                     "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({}) ON DELETE {}",
                     table_name,
-                    constraint_name,
-                    foreign_key.source_column,
+                    quoted_constraint_name,
+                    source_columns,
                     foreign_key.target_table,
-                    foreign_key.target_column,
+                    target_columns,
                     foreign_key.on_delete.as_sql()
                 )],
             }
@@ -1644,10 +1938,11 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
             foreign_key,
         } => {
             let constraint_name = foreign_key_constraint_name(table_name, foreign_key);
+            let quoted_constraint_name = backend.quote_identifier(&constraint_name);
             match backend {
                 DatabaseBackend::Postgres => vec![format!(
                     "ALTER TABLE {} DROP CONSTRAINT {}",
-                    table_name, constraint_name
+                    table_name, quoted_constraint_name
                 )],
                 DatabaseBackend::Sqlite => vec![format!(
                     "-- sqlite requires table rebuild to drop foreign key {} on {}",
@@ -1655,11 +1950,11 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
                 )],
                 DatabaseBackend::Mysql => vec![format!(
                     "ALTER TABLE {} DROP FOREIGN KEY {}",
-                    table_name, constraint_name
+                    table_name, quoted_constraint_name
                 )],
                 DatabaseBackend::Mssql => vec![format!(
                     "ALTER TABLE {} DROP CONSTRAINT {}",
-                    table_name, constraint_name
+                    table_name, quoted_constraint_name
                 )],
             }
         }
@@ -1679,20 +1974,21 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
                     .map(|constraint| {
                         format!(
                             "ALTER TABLE {table_name} DROP CONSTRAINT IF EXISTS {}",
-                            constraint.name
+                            backend.quote_identifier(&constraint.name)
                         )
                     })
                     .collect::<Vec<_>>();
                 statements.extend(after.iter().map(|constraint| {
                     format!(
                         "ALTER TABLE {table_name} ADD CONSTRAINT {} CHECK ({})",
-                        constraint.name, constraint.expression
+                        backend.quote_identifier(&constraint.name),
+                        constraint.expression
                     )
                 }));
                 statements.extend(after.iter().map(|constraint| {
                     format!(
                         "COMMENT ON CONSTRAINT {} ON {} IS '{}'",
-                        constraint.name,
+                        backend.quote_identifier(&constraint.name),
                         table_name,
                         constraint_comment(&constraint.expression)
                     )
@@ -2025,21 +2321,38 @@ pub async fn introspect_sqlite_schema(
                 .try_get::<String, _>("origin")
                 .unwrap_or_else(|_| "c".to_string());
 
-            let pragma_index_info = format!("PRAGMA index_info({})", index_name);
+            let pragma_index_info = format!("PRAGMA index_xinfo({})", index_name);
             let index_info_rows = sqlx::query(&pragma_index_info).fetch_all(pool).await?;
-            let mut column_names = index_info_rows
-                .into_iter()
-                .map(|index_row| {
-                    // seqno order is reliable for composite UNIQUE constraints.
-                    let seqno: i64 = index_row.try_get("seqno").unwrap_or(0);
-                    let name: String = index_row.try_get("name")?;
-                    Ok((seqno, name))
-                })
-                .collect::<Result<Vec<_>, sqlx::Error>>()?;
-            column_names.sort_by_key(|(seqno, _)| *seqno);
-            let column_names = column_names
-                .into_iter()
-                .map(|(_, name)| name)
+            let mut index_columns = Vec::new();
+            for index_row in index_info_rows {
+                // index_xinfo also returns the auxiliary rowid column with
+                // key=0. It is not part of the declared index key.
+                if index_row.try_get::<i64, _>("key").unwrap_or(1) == 0 {
+                    continue;
+                }
+                let seqno: i64 = index_row.try_get("seqno").unwrap_or(0);
+                let name = index_row
+                    .try_get::<Option<String>, _>("name")?
+                    .ok_or_else(|| {
+                        sqlx::Error::Protocol(format!(
+                            "SQLite expression index {index_name} is not representable by graphql-orm"
+                        ))
+                    })?;
+                let direction = if index_row.try_get::<i64, _>("desc").unwrap_or(0) != 0 {
+                    super::core::IndexDirection::Desc
+                } else {
+                    super::core::IndexDirection::Asc
+                };
+                index_columns.push((seqno, name, direction));
+            }
+            index_columns.sort_by_key(|(seqno, ..)| *seqno);
+            let column_names = index_columns
+                .iter()
+                .map(|(_, name, _)| name.clone())
+                .collect::<Vec<_>>();
+            let column_directions = index_columns
+                .iter()
+                .map(|(_, _, direction)| *direction)
                 .collect::<Vec<_>>();
 
             // Inline UNIQUE / PRIMARY KEY constraints become sqlite_autoindex_*
@@ -2089,9 +2402,12 @@ pub async fn introspect_sqlite_schema(
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
             );
+            let leaked_directions: &'static [super::core::IndexDirection] =
+                Box::leak(column_directions.into_boxed_slice());
             indexes.push(super::core::IndexDef {
                 name: leaked_name,
                 columns: leaked_columns,
+                column_directions: leaked_directions,
                 is_unique: unique,
                 method: IndexMethod::Default,
                 is_spatial: false,
@@ -2101,22 +2417,68 @@ pub async fn introspect_sqlite_schema(
 
         let pragma_fk_list = format!("PRAGMA foreign_key_list({})", table_name);
         let foreign_key_rows = sqlx::query(&pragma_fk_list).fetch_all(pool).await?;
-        let foreign_keys = foreign_key_rows
-            .into_iter()
-            .map(|row| {
-                Ok(ForeignKeyModel {
-                    source_column: row.try_get("from")?,
-                    target_table: row.try_get("table")?,
-                    target_column: row.try_get("to")?,
-                    is_multiple: false,
-                    on_delete: match row.try_get::<String, _>("on_delete")?.as_str() {
-                        "CASCADE" => super::core::DeletePolicy::Cascade,
-                        "SET NULL" => super::core::DeletePolicy::SetNull,
-                        _ => super::core::DeletePolicy::Restrict,
-                    },
+        let mut grouped_foreign_keys =
+            std::collections::BTreeMap::<i64, Vec<(i64, String, String, String, String)>>::new();
+        for row in foreign_key_rows {
+            grouped_foreign_keys
+                .entry(row.try_get("id")?)
+                .or_default()
+                .push((
+                    row.try_get("seq")?,
+                    row.try_get("from")?,
+                    row.try_get("table")?,
+                    row.try_get("to")?,
+                    row.try_get("on_delete")?,
+                ));
+        }
+        let mut foreign_keys = Vec::with_capacity(grouped_foreign_keys.len());
+        for (constraint_id, mut members) in grouped_foreign_keys {
+            members.sort_by_key(|(sequence, ..)| *sequence);
+            if members
+                .iter()
+                .enumerate()
+                .any(|(expected, (actual, ..))| *actual != expected as i64)
+            {
+                return Err(sqlx::Error::Protocol(format!(
+                    "SQLite foreign key {constraint_id} on {table_name} has invalid member ordinals"
+                )));
+            }
+            let Some((_, _, target_table, _, delete_rule)) = members.first() else {
+                continue;
+            };
+            if members
+                .iter()
+                .any(|(_, _, member_target, _, member_delete)| {
+                    member_target != target_table || member_delete != delete_rule
                 })
-            })
-            .collect::<crate::Result<Vec<_>>>()?;
+            {
+                return Err(sqlx::Error::Protocol(format!(
+                    "SQLite foreign key {constraint_id} on {table_name} has inconsistent member metadata"
+                )));
+            }
+            let column_pairs = members
+                .iter()
+                .map(
+                    |(_, source_column, _, target_column, _)| ForeignKeyColumnPairModel {
+                        source_column: source_column.clone(),
+                        target_column: target_column.clone(),
+                    },
+                )
+                .collect();
+            foreign_keys.push(ForeignKeyModel {
+                // PRAGMA foreign_key_list does not expose the optional SQLite
+                // constraint name. Semantic identity is the ordered key.
+                constraint_name: None,
+                column_pairs,
+                target_table: target_table.clone(),
+                is_multiple: false,
+                on_delete: match delete_rule.as_str() {
+                    "CASCADE" => super::core::DeletePolicy::Cascade,
+                    "SET NULL" => super::core::DeletePolicy::SetNull,
+                    _ => super::core::DeletePolicy::Restrict,
+                },
+            });
+        }
         let append_name = append_only_name(&table_name);
         let append_trigger_rows = sqlx::query(
             "SELECT name, sql FROM sqlite_master
@@ -2170,7 +2532,7 @@ pub async fn introspect_sqlite_schema(
             search_indexes: Vec::new(),
             append_only: valid_update && (valid_delete || retention_delete),
             retention_purge: retention_context_valid && valid_update && retention_delete,
-            check_constraints: parse_generated_check_constraints(&create_sql),
+            check_constraints: parse_sqlite_check_constraints(&create_sql)?,
         });
     }
 
@@ -2414,7 +2776,9 @@ pub async fn introspect_postgres_schema(
                     bool_or(con.oid IS NOT NULL) AS constraint_owned,
                     am.amname AS method,
                     pg_get_expr(ix.indpred, ix.indrelid) AS predicate,
-                    array_remove(array_agg(a.attname ORDER BY cols.ordinality), NULL) AS columns
+                    array_remove(array_agg(a.attname ORDER BY cols.ordinality), NULL) AS columns,
+                    array_agg(((ix.indoption[cols.ordinality - 1] & 1) = 1)
+                              ORDER BY cols.ordinality) AS descending
              FROM pg_class t
              JOIN pg_namespace n ON n.oid = t.relnamespace
              JOIN pg_index ix ON ix.indrelid = t.oid
@@ -2455,6 +2819,12 @@ pub async fn introspect_postgres_schema(
                 _ => IndexMethod::Default,
             };
             let column_names: Vec<String> = row.try_get("columns")?;
+            let descending: Vec<bool> = row.try_get("descending")?;
+            if column_names.len() != descending.len() {
+                return Err(sqlx::Error::Protocol(format!(
+                    "PostgreSQL returned malformed index direction metadata for {index_name}"
+                )));
+            }
             let is_spatial = method == IndexMethod::Gist
                 && column_names.iter().any(|column_name| {
                     columns
@@ -2469,9 +2839,23 @@ pub async fn introspect_postgres_schema(
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
             );
+            let leaked_directions: &'static [super::core::IndexDirection] = Box::leak(
+                descending
+                    .into_iter()
+                    .map(|descending| {
+                        if descending {
+                            super::core::IndexDirection::Desc
+                        } else {
+                            super::core::IndexDirection::Asc
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            );
             indexes.push(super::core::IndexDef {
                 name: leaked_name,
                 columns: leaked_columns,
+                column_directions: leaked_directions,
                 is_unique: unique,
                 method,
                 is_spatial,
@@ -2481,23 +2865,35 @@ pub async fn introspect_postgres_schema(
 
         let foreign_key_rows = sqlx::query(
             "SELECT
-                kcu.column_name AS source_column,
-                ccu.table_name AS target_table,
-                ccu.column_name AS target_column,
-                rc.delete_rule AS delete_rule
-             FROM information_schema.table_constraints tc
-             JOIN information_schema.key_column_usage kcu
-               ON tc.constraint_name = kcu.constraint_name
-              AND tc.table_schema = kcu.table_schema
-             JOIN information_schema.constraint_column_usage ccu
-               ON ccu.constraint_name = tc.constraint_name
-              AND ccu.constraint_schema = tc.table_schema
-             JOIN information_schema.referential_constraints rc
-               ON rc.constraint_name = tc.constraint_name
-              AND rc.constraint_schema = tc.table_schema
-             WHERE tc.table_schema = $2
-               AND tc.table_name = $1
-               AND tc.constraint_type = 'FOREIGN KEY'",
+                con.conname AS constraint_name,
+                target.relname AS target_table,
+                CASE con.confdeltype
+                    WHEN 'c' THEN 'CASCADE'
+                    WHEN 'n' THEN 'SET NULL'
+                    ELSE 'RESTRICT'
+                END AS delete_rule,
+                array_agg(source_attribute.attname ORDER BY source_key.ordinality) AS source_columns,
+                array_agg(target_attribute.attname ORDER BY source_key.ordinality) AS target_columns
+             FROM pg_constraint con
+             JOIN pg_class source ON source.oid = con.conrelid
+             JOIN pg_namespace source_namespace ON source_namespace.oid = source.relnamespace
+             JOIN pg_class target ON target.oid = con.confrelid
+             JOIN LATERAL unnest(con.conkey) WITH ORDINALITY
+               AS source_key(attnum, ordinality) ON true
+             JOIN LATERAL unnest(con.confkey) WITH ORDINALITY
+               AS target_key(attnum, ordinality)
+               ON target_key.ordinality = source_key.ordinality
+             JOIN pg_attribute source_attribute
+               ON source_attribute.attrelid = source.oid
+              AND source_attribute.attnum = source_key.attnum
+             JOIN pg_attribute target_attribute
+               ON target_attribute.attrelid = target.oid
+              AND target_attribute.attnum = target_key.attnum
+             WHERE source_namespace.nspname = $2
+               AND source.relname = $1
+               AND con.contype = 'f'
+             GROUP BY con.oid, con.conname, target.relname, con.confdeltype
+             ORDER BY con.conname",
         )
         .bind(&table_name)
         .bind(&schema_name)
@@ -2506,10 +2902,24 @@ pub async fn introspect_postgres_schema(
         let foreign_keys = foreign_key_rows
             .into_iter()
             .map(|row| {
+                let source_columns: Vec<String> = row.try_get("source_columns")?;
+                let target_columns: Vec<String> = row.try_get("target_columns")?;
+                if source_columns.is_empty() || source_columns.len() != target_columns.len() {
+                    return Err(sqlx::Error::Protocol(
+                        "PostgreSQL returned malformed compound foreign-key metadata".to_string(),
+                    ));
+                }
                 Ok(ForeignKeyModel {
-                    source_column: row.try_get("source_column")?,
+                    constraint_name: Some(row.try_get("constraint_name")?),
+                    column_pairs: source_columns
+                        .into_iter()
+                        .zip(target_columns)
+                        .map(|(source_column, target_column)| ForeignKeyColumnPairModel {
+                            source_column,
+                            target_column,
+                        })
+                        .collect(),
                     target_table: row.try_get("target_table")?,
-                    target_column: row.try_get("target_column")?,
                     is_multiple: false,
                     on_delete: match row.try_get::<String, _>("delete_rule")?.as_str() {
                         "CASCADE" => super::core::DeletePolicy::Cascade,
@@ -2574,7 +2984,7 @@ pub async fn introspect_postgres_schema(
              JOIN pg_class c ON c.oid = con.conrelid
              JOIN pg_namespace n ON n.oid = c.relnamespace
              WHERE n.nspname = $2 AND c.relname = $1
-               AND con.contype = 'c' AND con.conname LIKE 'graphql_orm_check_%'
+               AND con.contype = 'c'
              ORDER BY con.conname",
         )
         .bind(&table_name)

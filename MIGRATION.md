@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -12,6 +12,87 @@ supersedes: []
 
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
+
+## 0.19.0 Compound foreign keys and directional indexes
+
+Update `graphql-orm` and `graphql-orm-macros` together to 0.19.0 at one
+reviewed full Git revision. Existing entity declarations using the original
+`index = "a,b"` and single-column relation forms remain source compatible.
+
+Compound managed relations now produce one physical constraint. Declare the
+ordered Rust source fields and ordered target database columns together:
+
+```rust
+#[relation(
+    target = "SnapshotRecord",
+    from = ["provider", "tenant_key", "generation"],
+    to = ["provider", "tenant_key", "generation"],
+    on_delete = "cascade"
+)]
+snapshot: Option<SnapshotRecord>,
+```
+
+Every target member must be present in the same managed schema model and the
+ordered tuple must be an exact primary key, composite unique declaration, or
+unconditional unique index. Source members are translated through
+`#[graphql_orm(db_column = "...")]`; target members remain database-column
+names. A migration that previously passed only the referencing entity may need
+to include the referenced repository/schema entity so uniqueness and type
+compatibility can be proven.
+
+Named directional ordinary indexes use the nested form:
+
+```rust
+#[graphql_entity(index(
+    name = "idx_snapshot_latest",
+    columns = ["provider", "tenant_key", "generation"],
+    directions = ["asc", "asc", "desc"]
+))]
+```
+
+Omitting `directions` keeps every column ascending. If supplied, its arity must
+match `columns`. Existing string index declarations keep generated names.
+
+Use `#[graphql_orm(min_exclusive = 0)]` or
+`#[graphql_orm(max_exclusive = 100)]` when an existing check uses strict
+comparison. Use `#[graphql_orm(default = false)]` only to suppress the
+conventional implicit default inferred for a `created_at` or `updated_at`
+field; SQL-expression defaults remain string literals.
+
+### Public model migration
+
+`ForeignKeyModel` now owns `column_pairs: Vec<ForeignKeyColumnPairModel>` and
+an optional observed `constraint_name` instead of scalar source/target column
+fields. Replace single-column struct literals with
+`ForeignKeyModel::single(...)`; compound callers construct the ordered pair
+list. `IndexDef` adds `column_directions`; constructor-based callers need no
+change, while direct struct literals must supply `&[]` for compatibility or an
+exact direction slice. These changes are why the aligned packages advance as
+a pre-1.0 minor version.
+
+### Existing database adoption
+
+There is no adoption flag or unchecked migration-history bypass. Plan against
+the live database normally. When introspected primary keys, unique keys,
+foreign-key members/order/target/delete action, ordinary index name/order, and
+supported check expressions are semantically equal, the plan is empty and
+ordinary `apply_migration` records the version without DDL. This preserves all
+rows and constraints.
+
+The check comparator intentionally accepts only a closed grammar of simple
+identifiers, literals, comparison operators, parentheses, and commas. It
+normalizes physical names, whitespace, keyword case, redundant balanced outer
+parentheses, and quoting of ordinary lowercase portable identifiers;
+case-sensitive quoted identifiers remain distinct. It does not infer
+mathematical or type-affinity equivalence. Unsupported, weakened, partial,
+reordered, or ambiguous contracts remain explicit drift and must not be
+force-adopted.
+
+Schema hashes now bind ordered compound-FK members and effective index
+directions while treating physical check/FK names as non-semantic. Refresh any
+reviewed hash expectations and run an empty replan plus backend integrity
+checks before removing a legacy migration path. No application row or GraphQL
+schema migration is otherwise required.
 
 ## 0.18.0 Router metadata and `agql-auth` 0.14 scopes
 

@@ -750,9 +750,9 @@ async fn postgres_introspection_uses_active_schema_search_path()
         })
     );
     assert!(children.foreign_keys.iter().any(|foreign_key| {
-        foreign_key.source_column == "parent_id"
+        foreign_key.source_columns().eq(["parent_id"].into_iter())
             && foreign_key.target_table == "parents"
-            && foreign_key.target_column == "id"
+            && foreign_key.target_columns().eq(["id"].into_iter())
     }));
     assert!(children.columns.iter().any(|column| {
         column.name == "payload" && column.sql_type.eq_ignore_ascii_case("jsonb")

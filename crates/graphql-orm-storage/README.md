@@ -3,7 +3,7 @@ title: "graphql-orm-storage"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -66,7 +66,7 @@ Git consumers pin a reviewed full monorepo revision. If an application also
 uses `graphql-orm`, `graphql-orm-backup`, or `graphql-orm-ai`, give every
 package the same `rev` so Cargo resolves one internal source universe.
 Within this workspace, companion packages use workspace path dependencies and
-the root `Cargo.lock`; the current baseline is ORM 0.18.0, backup 0.7.0, and
+the root `Cargo.lock`; the current baseline is ORM 0.19.0, backup 0.7.0, and
 storage 0.6.0. The ORM-owned optional `agql-auth` bridge pins `agql-auth` 0.14.0
 at `413fda3435f060604cd653c11e2cc18a668aace1`.
 

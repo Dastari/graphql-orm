@@ -15,7 +15,7 @@ reviewed dependency universe for `graphql-orm-ai`, `graphql-orm`, and
 `agql-auth`. The public manifest pins reviewed full Git revisions; local path
 overrides are unsupported release artifacts.
 
-The current public source snapshot uses workspace `graphql-orm` `0.18.0` and
+The current public source snapshot uses workspace `graphql-orm` `0.19.0` and
 external `agql-auth` `0.14.0` at
 `413fda3435f060604cd653c11e2cc18a668aace1`. Git consumers select one reviewed
 monorepo revision for workspace packages; `agql-auth` remains pinned to its

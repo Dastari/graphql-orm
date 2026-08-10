@@ -274,9 +274,9 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
             .any(|column| column.name == "author_id")
     );
     assert!(posts_table.foreign_keys.iter().any(|foreign_key| {
-        foreign_key.source_column == "author_id"
+        foreign_key.source_columns().eq(["author_id"].into_iter())
             && foreign_key.target_table == "users"
-            && foreign_key.target_column == "id"
+            && foreign_key.target_columns().eq(["id"].into_iter())
     }));
     assert!(matches!(
         graphql_orm::graphql::orm::current_backend(),

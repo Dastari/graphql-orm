@@ -280,13 +280,13 @@ fn sqlite_vocabulary_terms_v1() -> TableModel {
         ],
         indexes: vec![],
         composite_unique_indexes: vec![],
-        foreign_keys: vec![ForeignKeyModel {
-            source_column: "vocabulary_id".to_string(),
-            target_table: "vocabularies".to_string(),
-            target_column: "id".to_string(),
-            is_multiple: false,
-            on_delete: DeletePolicy::Cascade,
-        }],
+        foreign_keys: vec![ForeignKeyModel::single(
+            "vocabulary_id",
+            "vocabularies",
+            "id",
+            false,
+            DeletePolicy::Cascade,
+        )],
         search_indexes: vec![],
         append_only: false,
         retention_purge: false,
@@ -384,9 +384,11 @@ async fn sqlite_schema_stage_rebuilds_related_tables_in_one_stage()
             .any(|column| { column.name == "term" && column.sql_type == "VARCHAR(255)" })
     );
     assert!(terms_table.foreign_keys.iter().any(|foreign_key| {
-        foreign_key.source_column == "vocabulary_id"
+        foreign_key
+            .source_columns()
+            .eq(["vocabulary_id"].into_iter())
             && foreign_key.target_table == "vocabularies"
-            && foreign_key.target_column == "id"
+            && foreign_key.target_columns().eq(["id"].into_iter())
     }));
 
     Ok(())

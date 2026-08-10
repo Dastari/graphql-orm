@@ -1,0 +1,5 @@
+error: index name must not be empty
+ --> tests/ui/ordinary_index_empty_name.rs:7:5
+  |
+7 |     index(name = " ", columns = ["generation"], directions = ["desc"])
+  |     ^^^^^

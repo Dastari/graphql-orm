@@ -125,6 +125,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         options: PlanOptions,
     ) -> crate::Result<PlannedMigration> {
         ensure_planning_policy(self.policy(), "plan schema migration")?;
+        target.validate_physical_contract()?;
         let planned_current = schema_current_for_plan(current, target, options);
         Ok(plan_migration_for_backend::<B>(
             version.into(),
@@ -200,6 +201,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         B: IntrospectionBackend,
     {
         ensure_planning_policy(self.policy(), "plan schema target")?;
+        target.schema.validate_physical_contract()?;
         let version = version.into();
         let description = description.into();
         let current = B::introspect_schema(self.database.pool()).await?;

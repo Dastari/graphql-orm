@@ -3,7 +3,7 @@ title: "GraphQL ORM workspace"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -43,6 +43,8 @@ It is designed for two related use cases:
 - single and composite primary-key read support
 - single and composite relation-key batching, including nested legacy shapes like
   `JimCardFiles -> Contacts -> Details`
+- managed compound foreign keys with ordered member introspection on SQLite and PostgreSQL
+- stable named ordinary indexes with typed per-column ascending or descending order
 - portable spatial fields and predicates with native PostGIS support and SQLite GeoJSON fallback
 - portable per-entity full-text search with native Postgres search tables and SQLite FTS5 support
 - explicit schema ownership policies for managed, external, validate-only, and plan-only schemas
@@ -66,7 +68,7 @@ Select exactly the backend support your service needs:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.18.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.19.0", default-features = false, features = ["sqlite"] }
 ```
 
 GitHub with an exact full revision is the only supported distribution method. The workspace packages are
@@ -267,7 +269,7 @@ batched relation query per relation layer, not N+1 or nested N*N queries.
 - [Schema ownership, validation, planning, and ABI migrations](docs/reference/graphql-orm/schema-management.md)
 - [Writes, repository helpers, hooks, subscriptions, and policies](docs/reference/graphql-orm/runtime-and-writes.md)
 - [Portable transactions, CAS, append-only entities, constraints, and keysets](docs/architecture/portable-persistence.md)
-- [Binary keys, private repository upserts, and conditional indexes](docs/reference/graphql-orm/binary-keys-and-indexes.md)
+- [Binary keys, private repository upserts, and indexes](docs/reference/graphql-orm/binary-keys-and-indexes.md)
 - [Typed least-privilege read projections](docs/reference/graphql-orm/read-projections.md)
 - [Repository-only persisted entities](docs/reference/graphql-orm/repository-only-entities.md)
 - [Typed composite-key and bounded mutations](docs/reference/graphql-orm/composite-mutations.md)

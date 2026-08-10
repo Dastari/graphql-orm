@@ -1,14 +1,14 @@
 ---
-title: "Binary Keys and Conditional Indexes"
+title: "Binary Keys and Indexes"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-10
 review_by: 2027-02-01
 supersedes: []
 ---
 
-# Binary Keys and Conditional Indexes
+# Binary Keys and Indexes
 
 ## Binary primary keys
 
@@ -33,6 +33,32 @@ An `upsert = "digest"` target may be private when the trusted Rust create input 
 target fields are public, the GraphQL upsert field is generated as before. If any conflict-target
 field is absent from the public create input, graphql-orm omits that GraphQL field and retains
 repository and `MutationContext::upsert` capability.
+
+## Named directional ordinary indexes
+
+The original shorthand remains available and produces an all-ascending index
+with a deterministic generated name:
+
+```rust
+#[graphql_entity(index = "provider,tenant_key,generation")]
+```
+
+Use the nested form when an existing physical contract requires a stable name
+or per-column order:
+
+```rust
+#[graphql_entity(index(
+    name = "idx_snapshot_latest",
+    columns = ["provider", "tenant_key", "generation"],
+    directions = ["asc", "asc", "desc"]
+))]
+```
+
+`columns` names Rust fields and is translated through each field's
+`db_column`. `directions` is optional; when present it must contain exactly one
+`asc` or `desc` value per column. SQLite and PostgreSQL introspection retain
+the order, and a direction mismatch plans an explicit drop/recreate rather
+than being silently adopted.
 
 ## Portable conditional indexes
 
@@ -70,3 +96,15 @@ Rust type and generate named managed checks on both write backends.
 
 SQL comparisons involving `NULL` evaluate to UNKNOWN, which satisfies a check constraint. Use
 non-null fields or separate nullability constraints when the comparison must always be evaluated.
+
+Strict numeric literal bounds are available through `min_exclusive` and
+`max_exclusive`, alongside the inclusive `min`, `max`, and `non_negative`
+forms:
+
+```rust
+#[graphql_orm(min_exclusive = 0)]
+generation: i64,
+```
+
+Inclusive and exclusive bounds for the same side are mutually exclusive, and
+the macro rejects an empty numeric range.

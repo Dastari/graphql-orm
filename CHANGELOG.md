@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,45 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## 0.19.0 - 2026-08-10
+
+Companion macros crate: `graphql-orm-macros` **0.19.0** under the aligned
+Git-only version policy. This release changes public physical-schema model
+types and generated migration metadata, so it is a pre-1.0 minor release.
+
+- Added ordered compound physical foreign keys. Relation lowering now retains
+  every `from`/`to` pair, translates source Rust fields through `db_column`,
+  validates the exact referenced primary or unique key, and renders one
+  compound constraint with its configured delete policy.
+- SQLite introspection now groups `PRAGMA foreign_key_list` members by
+  constraint ID and sequence. PostgreSQL introspection pairs `conkey` and
+  `confkey` members by ordinal through `pg_constraint`. Both backends therefore
+  round-trip compound foreign keys without flattening them.
+- Added stable, optional ordinary-index names and typed per-column `ASC`/`DESC`
+  metadata. SQLite `index_xinfo` and PostgreSQL `indoption` introspection retain
+  direction, and planner drift recreates an index whose order differs.
+- Added exact numeric `min_exclusive` and `max_exclusive` field checks and
+  `default = false` for suppressing the conventional implicit timestamp
+  default when adopting an existing column without one.
+- Added conservative semantic comparison for supported simple check
+  expressions. Physical constraint names, whitespace, identifier quoting, and
+  redundant outer parentheses do not force DDL, while changed or unrecognized
+  expressions remain drift.
+- Existing semantically equivalent SQLite layouts can now be recorded by the
+  ordinary empty-plan migration-history path. There is no generic adoption
+  override: partial, reordered, differently targeted, weakened, or ambiguous
+  foreign keys/checks remain migration work or fail closed.
+- Physical-schema validation now rejects malformed index-direction arity and
+  foreign keys whose members are absent, duplicated, type-incompatible, or do
+  not reference an exact managed unique key.
+
+No stored row rewrite is required. Fresh SQLite and PostgreSQL schemas use the
+new metadata directly; compatible existing SQLite schemas are adopted only
+after live introspection proves semantic equality. Schema hashes change where
+check, foreign-key, or index-order metadata participates. See the
+[0.19.0 migration guide](MIGRATION.md#0190-compound-foreign-keys-and-directional-indexes)
+for the source migration from public struct literals.
 
 ## graphql-orm-router 0.1.1 - 2026-08-07
 

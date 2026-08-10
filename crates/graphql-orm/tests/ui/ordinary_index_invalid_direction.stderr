@@ -1,0 +1,5 @@
+error: index directions must contain only asc or desc
+  --> tests/ui/ordinary_index_invalid_direction.rs:10:9
+   |
+10 |         directions = ["sideways"]
+   |         ^^^^^^^^^^

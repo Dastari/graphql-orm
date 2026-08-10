@@ -3,7 +3,7 @@ title: "graphql-orm-backup"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -79,7 +79,7 @@ adapters with an exact backend. Hosts that already select a backend through
 their direct `graphql-orm` dependency may enable the lower-level `orm` feature
 instead. Exactly one ORM backend must be active.
 
-This workspace resolves `graphql-orm` 0.18.0, `graphql-orm-backup` 0.7.0, and
+This workspace resolves `graphql-orm` 0.19.0, `graphql-orm-backup` 0.7.0, and
 `graphql-orm-storage` 0.6.0 through workspace path dependencies and the root
 `Cargo.lock`. External consumers select one reviewed full monorepo revision.
 The ORM's optional `auth-agql` bridge pins `agql-auth` 0.14.0 at

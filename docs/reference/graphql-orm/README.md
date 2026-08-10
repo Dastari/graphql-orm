@@ -3,7 +3,7 @@ title: GraphQL ORM runtime reference index
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -33,7 +33,7 @@ guidance for the core ORM package.
 - [Composite mutations](composite-mutations.md)
 - [Repository-only entities](repository-only-entities.md)
 - [Read projections](read-projections.md)
-- [Binary keys and conditional indexes](binary-keys-and-indexes.md)
+- [Binary keys and indexes](binary-keys-and-indexes.md)
 - [Resolver operation metadata](resolver-operation-metadata.md)
 - [Pagination migration](pagination-migration.md)
 

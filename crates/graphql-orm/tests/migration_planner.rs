@@ -106,13 +106,13 @@ fn posts_with_fk() -> TableModel {
         ],
         indexes: vec![],
         composite_unique_indexes: vec![],
-        foreign_keys: vec![ForeignKeyModel {
-            source_column: "author_id".to_string(),
-            target_table: "users".to_string(),
-            target_column: "id".to_string(),
-            is_multiple: false,
-            on_delete: DeletePolicy::Restrict,
-        }],
+        foreign_keys: vec![ForeignKeyModel::single(
+            "author_id",
+            "users",
+            "id",
+            false,
+            DeletePolicy::Restrict,
+        )],
         search_indexes: vec![],
         append_only: false,
         retention_purge: false,
@@ -439,9 +439,9 @@ fn diff_detects_foreign_key_addition() {
         step,
         MigrationStep::AddForeignKey { table_name, foreign_key }
             if table_name == "posts"
-                && foreign_key.source_column == "author_id"
+                && foreign_key.source_columns().eq(["author_id"].into_iter())
                 && foreign_key.target_table == "users"
-                && foreign_key.target_column == "id"
+                && foreign_key.target_columns().eq(["id"].into_iter())
                 && foreign_key.on_delete == DeletePolicy::Restrict
     )));
 }
@@ -465,8 +465,33 @@ fn postgres_plan_renders_foreign_key_statement() {
 
     let plan = build_migration_plan(DatabaseBackend::Postgres, &current, &target);
     assert!(plan.statements.iter().any(|statement| {
-        statement.contains("ALTER TABLE posts ADD CONSTRAINT fk_posts_author_id_users_id")
+        statement.contains("ALTER TABLE posts ADD CONSTRAINT \"fk_posts_author_id_users_id\"")
             && statement.contains("FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE RESTRICT")
+    }));
+}
+
+#[test]
+fn postgres_fk_drop_uses_the_exact_quoted_observed_constraint_name() {
+    let mut posts = posts_with_fk();
+    posts.foreign_keys[0].constraint_name = Some("Legacy \"Posts\" Author FK".to_string());
+    let current = SchemaModel {
+        extensions: Vec::new(),
+        tables: vec![users_v1(), posts],
+    };
+    let target = SchemaModel {
+        extensions: Vec::new(),
+        tables: vec![
+            users_v1(),
+            TableModel {
+                foreign_keys: vec![],
+                ..posts_with_fk()
+            },
+        ],
+    };
+
+    let plan = build_migration_plan(DatabaseBackend::Postgres, &current, &target);
+    assert!(plan.statements.iter().any(|statement| {
+        statement == "ALTER TABLE posts DROP CONSTRAINT \"Legacy \"\"Posts\"\" Author FK\""
     }));
 }
 

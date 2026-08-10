@@ -516,13 +516,13 @@ fn sqlite_varchar_column(name: &str, primary_key: bool, nullable: bool) -> Colum
 
 #[cfg(feature = "sqlite")]
 fn sqlite_fk(source_column: &str, target_table: &str) -> ForeignKeyModel {
-    ForeignKeyModel {
-        source_column: source_column.to_string(),
-        target_table: target_table.to_string(),
-        target_column: "id".to_string(),
-        is_multiple: false,
-        on_delete: DeletePolicy::Cascade,
-    }
+    ForeignKeyModel::single(
+        source_column,
+        target_table,
+        "id",
+        false,
+        DeletePolicy::Cascade,
+    )
 }
 
 #[cfg(feature = "sqlite")]
@@ -708,11 +708,14 @@ async fn sqlite_migration_runner_rebuilds_parent_child_chain_in_one_migration()
         .find(|table| table.table_name == "stage_children")
         .expect("stage_children exists");
     assert!(parent_table.foreign_keys.iter().any(|foreign_key| {
-        foreign_key.source_column == "grandparent_id"
+        foreign_key
+            .source_columns()
+            .eq(["grandparent_id"].into_iter())
             && foreign_key.target_table == "stage_grandparents"
     }));
     assert!(child_table.foreign_keys.iter().any(|foreign_key| {
-        foreign_key.source_column == "parent_id" && foreign_key.target_table == "stage_parents"
+        foreign_key.source_columns().eq(["parent_id"].into_iter())
+            && foreign_key.target_table == "stage_parents"
     }));
 
     Ok(())
@@ -802,7 +805,8 @@ async fn sqlite_migration_runner_rebuilds_self_referential_table()
         .find(|table| table.table_name == "stage_nodes")
         .expect("stage_nodes exists");
     assert!(nodes_table.foreign_keys.iter().any(|foreign_key| {
-        foreign_key.source_column == "parent_id" && foreign_key.target_table == "stage_nodes"
+        foreign_key.source_columns().eq(["parent_id"].into_iter())
+            && foreign_key.target_table == "stage_nodes"
     }));
 
     Ok(())

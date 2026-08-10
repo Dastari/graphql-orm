@@ -42,6 +42,50 @@ struct PgConstraintUpgradeAddition {
     note: String,
 }
 
+#[derive(GraphQLSchemaEntity, Clone, Debug)]
+#[graphql_entity(
+    backend = "postgres",
+    table = "pg_compound_fk_parents",
+    plural = "PgCompoundFkParents",
+    default_sort = "tenant_key ASC, generation DESC",
+    index(
+        name = "idx_pg_compound_fk_parents_latest",
+        columns = ["tenant_key", "generation"],
+        directions = ["asc", "desc"]
+    )
+)]
+#[allow(dead_code)]
+struct PgCompoundFkParent {
+    #[primary_key]
+    tenant_key: String,
+    #[primary_key]
+    generation: i64,
+    payload: String,
+}
+
+#[derive(GraphQLSchemaEntity, Clone, Debug)]
+#[graphql_entity(
+    backend = "postgres",
+    table = "pg_compound_fk_children",
+    plural = "PgCompoundFkChildren",
+    default_sort = "id ASC"
+)]
+#[allow(dead_code)]
+struct PgCompoundFkChild {
+    #[primary_key]
+    id: String,
+    tenant_key: String,
+    generation: i64,
+    #[graphql(skip)]
+    #[relation(
+        target = "PgCompoundFkParent",
+        from = ["tenant_key", "generation"],
+        to = ["tenant_key", "generation"],
+        on_delete = "cascade"
+    )]
+    parent: Option<String>,
+}
+
 struct OwnedPostgres {
     name: String,
     owner_token: String,
@@ -259,5 +303,106 @@ async fn constraint_indexes_are_structural_and_additive_upgrade_is_idempotent()
             .collect::<BTreeSet<_>>(),
         expected_indexes
     );
+
+    let compound_entities = [
+        PgCompoundFkParent::metadata(),
+        PgCompoundFkChild::metadata(),
+    ];
+    let compound_plan = database
+        .schema()
+        .plan_migration_to_entities_with_options(
+            "pg-compound-fk-v1",
+            "compound foreign-key target",
+            &compound_entities,
+            PlanOptions::managed_tables_only(),
+        )
+        .await?;
+    assert!(compound_plan.statements.iter().any(|statement| {
+        statement.contains(
+            "FOREIGN KEY (tenant_key, generation) REFERENCES pg_compound_fk_parents(tenant_key, generation) ON DELETE CASCADE",
+        )
+    }));
+    database
+        .schema()
+        .apply_migration(&compound_plan, ApplyOptions::default())
+        .await?;
+
+    let compound_live = introspect_postgres_schema(&database).await?;
+    let child = compound_live
+        .tables
+        .iter()
+        .find(|table| table.table_name == "pg_compound_fk_children")
+        .ok_or("missing PostgreSQL compound child")?;
+    assert_eq!(child.foreign_keys.len(), 1);
+    assert_eq!(child.foreign_keys[0].column_pairs.len(), 2);
+    assert!(child.foreign_keys[0].constraint_name.is_some());
+    let parent = compound_live
+        .tables
+        .iter()
+        .find(|table| table.table_name == "pg_compound_fk_parents")
+        .ok_or("missing PostgreSQL compound parent")?;
+    let latest = parent
+        .indexes
+        .iter()
+        .find(|index| index.name == "idx_pg_compound_fk_parents_latest")
+        .ok_or("missing PostgreSQL directional index")?;
+    assert_eq!(
+        (0..latest.columns.len())
+            .map(|position| latest.direction_at(position))
+            .collect::<Vec<_>>(),
+        [IndexDirection::Asc, IndexDirection::Desc]
+    );
+    let compound_restart = database
+        .schema()
+        .plan_migration_to_entities_with_options(
+            "pg-compound-fk-v2",
+            "compound foreign-key restart",
+            &compound_entities,
+            PlanOptions::managed_tables_only(),
+        )
+        .await?;
+    assert!(
+        compound_restart.steps.is_empty(),
+        "PostgreSQL compound schema drifted: {compound_restart:#?}"
+    );
+
+    graphql_orm::sqlx::query(
+        "INSERT INTO pg_compound_fk_parents (tenant_key, generation, payload) VALUES ($1, $2, $3)",
+    )
+    .bind("tenant-a")
+    .bind(1_i64)
+    .bind("payload")
+    .execute(database.pool())
+    .await?;
+    graphql_orm::sqlx::query(
+        "INSERT INTO pg_compound_fk_children (id, tenant_key, generation) VALUES ($1, $2, $3)",
+    )
+    .bind("matching")
+    .bind("tenant-a")
+    .bind(1_i64)
+    .execute(database.pool())
+    .await?;
+    graphql_orm::sqlx::query(
+        "INSERT INTO pg_compound_fk_children (id, tenant_key, generation) VALUES ($1, $2, $3)",
+    )
+    .bind("mismatch")
+    .bind("tenant-a")
+    .bind(2_i64)
+    .execute(database.pool())
+    .await
+    .expect_err("PostgreSQL compound foreign key must reject a partial match");
+    graphql_orm::sqlx::query(
+        "DELETE FROM pg_compound_fk_parents WHERE tenant_key = $1 AND generation = $2",
+    )
+    .bind("tenant-a")
+    .bind(1_i64)
+    .execute(database.pool())
+    .await?;
+    let remaining: i64 = graphql_orm::sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pg_compound_fk_children WHERE id = 'matching'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(remaining, 0);
     Ok(())
 }

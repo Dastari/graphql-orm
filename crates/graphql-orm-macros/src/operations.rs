@@ -873,18 +873,15 @@ fn resolve_upsert_config(
                 .map(|column| resolve_schema_column_name(column, &field_columns))
                 .collect::<Vec<_>>()
         }));
-        unique_targets.extend(
-            entity_meta
-                .indexes
-                .iter()
-                .filter(|(unique, _)| *unique)
-                .map(|(_, columns)| {
-                    columns
-                        .iter()
-                        .map(|column| resolve_schema_column_name(column, &field_columns))
-                        .collect::<Vec<_>>()
-                }),
-        );
+        unique_targets.extend(entity_meta.indexes.iter().filter(|index| index.unique).map(
+            |index| {
+                index
+                    .columns
+                    .iter()
+                    .map(|column| resolve_schema_column_name(column, &field_columns))
+                    .collect::<Vec<_>>()
+            },
+        ));
 
         if !unique_targets.contains(&target_columns) {
             return Err(syn::Error::new(

@@ -1,0 +1,5 @@
+error: index references unknown field `missing`
+ --> tests/ui/ordinary_index_unknown_field.rs:5:8
+  |
+5 | struct BadIndexUnknown {
+  |        ^^^^^^^^^^^^^^^

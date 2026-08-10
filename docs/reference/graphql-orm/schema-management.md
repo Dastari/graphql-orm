@@ -3,7 +3,7 @@ title: "Schema Management"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -117,6 +117,30 @@ let plan = database
 ```
 
 The default planning mode remains strict and will report extra live tables.
+
+### Compatible existing-schema adoption
+
+Adoption uses the ordinary planner and migration-history path; there is no
+generic bypass option. If live introspection proves that managed primary and
+unique keys, ordered compound foreign keys, delete actions, named index
+columns/directions, and supported check expressions satisfy the target entity
+contract, the resulting plan has no steps or statements. Applying that empty
+plan records the migration version without rebuilding a table, dropping an
+index, or rewriting a row.
+
+Check comparison is deliberately conservative. It recognizes a closed grammar
+of simple identifiers, literals, comparisons, parentheses, and commas, and
+normalizes only physical names, whitespace, keyword case, redundant balanced
+outer parentheses, and quoting of ordinary lowercase portable identifiers.
+Case-sensitive quoted identifiers remain distinct. The comparator does not
+claim algebraic or database-affinity equivalence. A partial, reordered,
+differently targeted, weakened, or unrecognized constraint remains drift.
+Repair or explicitly migrate it; do not record the version by hand.
+
+For SQLite, enable `PRAGMA foreign_keys = ON` on every managed connection and
+run `PRAGMA foreign_key_check` after migration. Migration application remains
+transactional: a failed table rebuild does not record history and restores the
+pre-migration schema and rows.
 
 Managed migrations create full-text search storage, such as Postgres shadow tables/GIN indexes and
 SQLite FTS5 virtual tables. They do not backfill existing rows automatically. Run the generated
@@ -262,6 +286,13 @@ UNIQUE backing indexes) are excluded from ordinary secondary indexes.
 Explicit unique indexes and conditional/partial unique indexes remain ordinary
 indexes. This distinction prevents unchanged constraint-owned indexes from
 being planned as `DropIndex` during an additive complete-target upgrade.
+
+Compound foreign-key introspection is structural as well. SQLite groups
+`PRAGMA foreign_key_list` rows by constraint `id` and orders members by `seq`;
+PostgreSQL pairs `pg_constraint.conkey` and `confkey` members by ordinal.
+Ordinary index direction comes from SQLite `index_xinfo` and PostgreSQL
+`indoption`, so an unchanged compound relation or descending key replans to an
+empty migration.
 
 For SQLite spatial fields, managed plans create `TEXT` columns that store GeoJSON. SQLite plans do
 not enable PostGIS and do not create spatial indexes. Introspection sees those columns as `TEXT`; the
