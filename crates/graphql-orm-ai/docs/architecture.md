@@ -3,7 +3,7 @@ title: "Architecture and Crate Boundaries"
 kind: architecture
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -212,6 +212,12 @@ approval-required/non-idempotent tools, other ambiguous resume, and stateless
 reasoning continuation require their complete preview, approval,
 fresh-authorization, persistence, and reconciliation contracts before
 exposure.
+
+An explicit chat-only turn mode accepts only an initial provider plan without
+application tools, provider-built-in tools, tool-result input, or continuation.
+It retains the same rule, provider, egress, budget, and output boundaries but
+has no tool-result route, tool checkpoint, tool execution, or continuation
+authority.
 
 ## Context compaction
 

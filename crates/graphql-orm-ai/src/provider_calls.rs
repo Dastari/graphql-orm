@@ -576,6 +576,17 @@ impl AiProviderCallPlan {
         !self.request.tools.is_empty()
     }
 
+    pub(crate) fn is_tool_free_initial(&self) -> bool {
+        self.request.tools.is_empty()
+            && self.request.builtin_tools.is_empty()
+            && self.request.continuation.is_none()
+            && !self
+                .request
+                .input
+                .iter()
+                .any(|block| matches!(block, ModelInputBlock::ToolResult { .. }))
+    }
+
     pub(crate) fn has_only_supervised_tools(&self) -> bool {
         !self.tool_rule_bindings.is_empty()
             && self.tool_rule_bindings.len() == self.request.tools.len()
@@ -793,6 +804,92 @@ impl AiProviderCallPlan {
                 approval: AiApprovalRule::None,
             }],
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_chat_plan(lease: &AiRunLease, scope: crate::AiScope) -> Self {
+        let model = "coordinator-test-model".to_owned();
+        let request = ModelRequest {
+            model: model.clone(),
+            instructions: vec!["Return one bounded chat response".to_owned()],
+            input: vec![ModelInputBlock::Text {
+                text: "test chat input".to_owned(),
+            }],
+            continuation: None,
+            continuation_mode: ModelContinuationMode::ProviderRetained,
+            tools: Vec::new(),
+            builtin_tools: Vec::new(),
+            maximum_builtin_tool_calls: None,
+            output_schema: None,
+            maximum_output_tokens: Some(64),
+        };
+        let budget = AiBudgetReservationRequest {
+            scope: scope.clone(),
+            session_id: lease.session_id(),
+            run_id: lease.run_id(),
+            attempt_id: lease.attempt_id(),
+            lease_generation: lease.lease_generation(),
+            provider_kind: ProviderKind::OpenAi,
+            model: model.clone(),
+            pricing_policy_version: "test-pricing-v1".to_owned(),
+            estimate: AiBudgetAmounts {
+                output_tokens: 64,
+                runs: 1,
+                ..AiBudgetAmounts::default()
+            },
+            idempotency_key: uuid::Uuid::new_v4().to_string(),
+            expires_at: time::OffsetDateTime::now_utc() + time::Duration::minutes(5),
+        };
+        let manifest = AiEgressManifest {
+            provider_profile_id: "coordinator-test-profile".to_owned(),
+            provider_kind: ProviderKind::OpenAi.as_str().to_owned(),
+            model,
+            destination: "coordinator-test-destination".to_owned(),
+            destination_trust: crate::AiDestinationTrust::ManagedProvider,
+            capability: AiEgressCapability::ModelInference,
+            scope,
+            session_id: Some(lease.session_id()),
+            run_id: Some(lease.run_id()),
+            sources: Vec::new(),
+            estimated_bytes: request.conservative_egress_bytes(),
+            estimated_tokens: 0,
+            attachment_count: 0,
+            purpose: "coordinator_chat_test".to_owned(),
+            retention: "none".to_owned(),
+            residency: None,
+            policy_version: "egress-v1".to_owned(),
+            consent_reference: None,
+        };
+        Self::new(
+            ProviderKind::OpenAi,
+            request,
+            budget,
+            vec![manifest],
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .expect("coordinator chat test plan should validate")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_builtin_plan(lease: &AiRunLease, scope: crate::AiScope) -> Self {
+        let mut plan = Self::test_chat_plan(lease, scope);
+        plan.request.builtin_tools = vec![ModelBuiltinTool::CodeInterpreter];
+        plan.request.maximum_builtin_tool_calls = Some(1);
+        plan
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_chat_continuation_plan(lease: &AiRunLease, scope: crate::AiScope) -> Self {
+        let mut plan = Self::test_chat_plan(lease, scope);
+        plan.request.input = vec![ModelInputBlock::ToolResult {
+            call_id: "previous-test-call".to_owned(),
+            tool_id: "test.read".to_owned(),
+            output: serde_json::json!({"test": true}),
+        }];
+        plan.request.continuation = Some(ModelContinuation::ProviderResponse {
+            response_id: "previous-test-response".to_owned(),
+        });
+        plan
     }
 
     #[cfg(test)]
@@ -6318,6 +6415,36 @@ mod tests {
             AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
                 .expect("test provider limits should validate"),
         );
+        assert!(matches!(
+            executor.execute(&fixture.lease, plan(&fixture)).await,
+            Err(AiError::ProviderFailed)
+        ));
+        assert_eq!(fixture.mock.request_count(), 1);
+        assert_eq!(reservation_state(&fixture.database).await, "uncertain");
+    }
+
+    #[tokio::test]
+    async fn tool_free_provider_plan_rejects_unoffered_application_tool_event() {
+        let fixture = fixture(vec![
+            ProviderEvent::ResponseStarted {
+                response_id: Some("unoffered-tool-response".to_owned()),
+            },
+            ProviderEvent::ToolCallStarted {
+                call_id: "unoffered-call".to_owned(),
+                tool_id: "records.read".to_owned(),
+            },
+        ])
+        .await;
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate"),
+        );
+
         assert!(matches!(
             executor.execute(&fixture.lease, plan(&fixture)).await,
             Err(AiError::ProviderFailed)

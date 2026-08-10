@@ -3,7 +3,7 @@ title: "graphql-orm-ai"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-09
+last_reviewed: 2026-08-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -323,7 +323,7 @@ Add the crate from a reviewed monorepo revision:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.62.1", features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.63.0", features = ["sqlite"] }
 ```
 
 > **Pre-release dependency note:** this source snapshot resolves
@@ -363,6 +363,13 @@ Deployments with managed hierarchical policy rows continue to use
 `OrmAiRulePolicyService` and `OrmAiCurrentRuleResolver`. Neither rule path
 replaces ordinary tool, resolver, egress, provider, budget, approval, or
 resource authorization.
+
+For an initial turn that exposes no application or provider-built-in tools,
+construct the ordinary exact `AiProviderCallPlan` and bind it with
+`AiReadOnlyAgentTurnPlan::new_chat`. This mode requires the provider-plan scope
+to equal the current rule target and has no tool-result route, checkpoint, or
+continuation path. Tool-bearing read-only turns continue to use
+`AiReadOnlyAgentTurnPlan::new` with one exact result-egress route.
 
 Remote/federated consumers supply an `AiRemoteGraphqlAuthorityIssuer` and
 `AiRemoteGraphqlTransport` to `AiRemoteAuthenticatedGraphqlAdapter`. The

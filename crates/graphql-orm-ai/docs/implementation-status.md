@@ -3,14 +3,14 @@ title: "Implementation Status"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-09
+last_reviewed: 2026-08-10
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.62.1` with AI schema module
+`graphql-orm-ai` is at crate version `0.63.0` with AI schema module
 `0.51.0`. It uses workspace `graphql-orm` `0.18.0` and external `agql-auth`
 `0.14.0` at `413fda3435f060604cd653c11e2cc18a668aace1`.
 
@@ -35,6 +35,10 @@ verification evidence belongs in the focused guides.
   current host policy, and ordinary resolver authorization. Read-only and the
   bounded sequential supervised path are implemented; broader mixed,
   parallel, and stateless consequential execution remains closed.
+- The read-only coordinator also accepts an exact initial tool-free chat plan.
+  It retains current rule/provider/egress/budget/output checks but has no
+  application or built-in tool exposure, tool-result route, tool checkpoint,
+  or continuation authority.
 - Provider-persistent upload, indexing, and search remain closed. Inline
   attachment input and exact deletion of known provider artifacts are separate
   implemented seams.

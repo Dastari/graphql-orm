@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-09
+last_reviewed: 2026-08-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -18,6 +18,31 @@ Migration entries preserve the dependency and schema facts for the checkpoint
 they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## Unreleased: tool-free coordinator turns (crate 0.62.1 to 0.63.0; schema remains 0.51.0)
+
+Hosts can now wrap an ordinary initial `AiProviderCallPlan::new` result with
+`AiReadOnlyAgentTurnPlan::new_chat(provider_call, rules, uses_byok)`. The new
+factory accepts only an exact-scope provider call with no application tools,
+provider-built-in tools, continuation, or tool-result input. It deliberately
+has no `AiToolResultEgressRoute`, tool checkpoint, tool execution, or
+continuation path. Existing tool-bearing planners continue to call
+`AiReadOnlyAgentTurnPlan::new` unchanged.
+
+The coordinator still freshly resolves the planned rule fingerprint before
+and after provider transport, projects provider kind/capability,
+classification, retention, BYOK, and estimated rule budgets, and relies on the
+ordinary provider executor for current-principal, egress-manifest, provider,
+and atomic-budget enforcement. Authoritative usage is accepted before the
+ordinary protected final output and `Completed` transition. A provider tool
+event cannot normalize without an exact offered definition and fingerprint;
+even a custom executor returning a manufactured tool result reaches no tool
+service, checkpoint, or continuation.
+
+This additive pre-1.0 Rust API advances the crate to 0.63.0. It changes no
+GraphQL SDL, entity, column, index, constraint, backup/restore contract, or
+persistent semantic, so AI schema module 0.51.0 remains current and no data
+migration is required.
 
 ## Unreleased: provider message preview compatibility (crate 0.62.0 to 0.62.1; schema remains 0.51.0)
 

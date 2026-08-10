@@ -3,7 +3,7 @@ title: "Read-Only Application-Tool Loop"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-09
+last_reviewed: 2026-08-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -94,6 +94,16 @@ authoritative usage replaces them afterward.
 The resulting v2 checkpoints bind the rule fingerprint and cumulative limits.
 This negative rule proof never replaces tool enablement, resolver
 authorization, egress authorization, atomic budget settlement, or approval.
+
+For a first turn with no tools, use `AiReadOnlyAgentTurnPlan::new_chat`. The
+factory accepts only an initial provider plan with no application tools,
+provider-built-in tools, continuation, or tool-result input and with the exact
+rule target scope. The coordinator performs the same pre/post-provider rule
+and usage checks, then persists ordinary final output and completes without a
+tool-result route, provider-turn checkpoint, tool call, or continuation. A
+provider-emitted application tool cannot normalize without an offered exact
+definition; a custom executor that returns one still fails closed before the
+tool boundary.
 
 Create one `AiAgentLoopGuard` from the original running lease. It binds the
 session, run, attempt, generation, maximum provider turns, and maximum total

@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-09
+last_reviewed: 2026-08-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -20,7 +20,7 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.62.1` and keeps
+This development line advances the pre-1.0 crate version to `0.63.0` and keeps
 AI schema module `0.51.0`. It begins the applied-restore implementation with
 bounded database-derived facts, aligns the reviewed dependency universe,
 integrates generated resolver-operation metadata, completes the durable OpenAI
@@ -45,6 +45,16 @@ file-search IDs behind the reviewed persistent-file design.
   not applied-restore authority; restored deployments must keep it closed.
 
 ### Added
+
+- `AiReadOnlyAgentTurnPlan::new_chat` now binds an initial provider call with
+  no application or provider-built-in tools, tool-result input, continuation,
+  or tool-result egress route to one exact current rule set. The read-only
+  coordinator preserves its ordinary current-principal, rule, provider,
+  classification, BYOK, egress, atomic-budget, output-protection, and terminal
+  checks while completing this single tool-free turn without a tool checkpoint
+  or continuation. Unoffered application-tool events remain rejected by the
+  provider normalizer and fail closed before any tool service if a custom
+  executor violates that boundary.
 
 - `DeploymentAiCurrentRuleResolver` supplies library-owned, immutable,
   deployment-only rule evidence without artificial ORM policy rows. It

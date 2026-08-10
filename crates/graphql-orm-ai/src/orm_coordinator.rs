@@ -53,15 +53,21 @@ impl AiReadOnlyAgentCoordinatorLimits {
 
 /// One host-planned provider turn for the read-only coordinator.
 ///
-/// Construction proves that custom application tools, one exact resolved-rule
-/// set, and a structurally valid result-egress route are present. It does not
-/// authorize discovery, resolver execution, provider egress, BYOK use, or
-/// spend; those decisions remain fresh per turn/call.
+/// Construction proves either a truly tool-free initial chat request or custom
+/// application tools with one structurally valid result-egress route, plus one
+/// exact resolved-rule set. It does not authorize discovery, resolver
+/// execution, provider egress, BYOK use, or spend; those decisions remain fresh
+/// per turn/call.
 pub struct AiReadOnlyAgentTurnPlan {
     provider_call: AiProviderCallPlan,
-    result_egress_route: AiToolResultEgressRoute,
+    mode: AiReadOnlyAgentTurnMode,
     rules: AiResolvedRuleSet,
     uses_byok: bool,
+}
+
+enum AiReadOnlyAgentTurnMode {
+    ChatOnly,
+    ApplicationTools(AiToolResultEgressRoute),
 }
 
 impl AiReadOnlyAgentTurnPlan {
@@ -91,7 +97,38 @@ impl AiReadOnlyAgentTurnPlan {
         result_egress_route.validate()?;
         Ok(Self {
             provider_call,
-            result_egress_route,
+            mode: AiReadOnlyAgentTurnMode::ApplicationTools(result_egress_route),
+            rules,
+            uses_byok,
+        })
+    }
+
+    /// Binds a truly tool-free initial provider call to current rule evidence.
+    ///
+    /// This mode has no application-tool result route, checkpoint, or
+    /// continuation path. `uses_byok` must be derived by the trusted planner
+    /// from the selected credential profile and remains only a negative rule
+    /// constraint, not provider or credential authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidInput`] unless the provider plan is an initial
+    /// request with no application tools, provider-built-in tools, continuation,
+    /// or tool-result input and its scope exactly matches the resolved-rule
+    /// target.
+    pub fn new_chat(
+        provider_call: AiProviderCallPlan,
+        rules: AiResolvedRuleSet,
+        uses_byok: bool,
+    ) -> Result<Self, AiError> {
+        if !provider_call.is_tool_free_initial() || provider_call.scope() != rules.target_scope() {
+            return Err(AiError::InvalidInput(
+                "chat turn plan is not tool-free or exactly rule-bound".to_owned(),
+            ));
+        }
+        Ok(Self {
+            provider_call,
+            mode: AiReadOnlyAgentTurnMode::ChatOnly,
             rules,
             uses_byok,
         })
@@ -103,7 +140,7 @@ impl AiReadOnlyAgentTurnPlan {
         AiProviderCallPlan,
         AiScope,
         String,
-        AiToolResultEgressRoute,
+        AiReadOnlyAgentTurnMode,
         AiResolvedRuleSet,
         bool,
     ) {
@@ -113,7 +150,7 @@ impl AiReadOnlyAgentTurnPlan {
             self.provider_call,
             scope,
             correlation_id,
-            self.result_egress_route,
+            self.mode,
             self.rules,
             self.uses_byok,
         )
@@ -710,7 +747,7 @@ impl AiReadOnlyAgentCoordinator {
                     .finish_failed(&lease, &guard, "provider_turn_limit_reached")
                     .await;
             }
-            let (provider_plan, scope, correlation_id, route, planned_rules, uses_byok) =
+            let (provider_plan, scope, correlation_id, mode, planned_rules, uses_byok) =
                 turn_plan.into_parts();
             let resolution = match self.rule_resolver.resolve_rules(&lease, &scope).await {
                 Ok(resolution)
@@ -804,6 +841,27 @@ impl AiReadOnlyAgentCoordinator {
                         .await;
                 }
             };
+            let route = match mode {
+                AiReadOnlyAgentTurnMode::ChatOnly => match observed {
+                    AiAgentLoopTurn::Completed => {
+                        return self
+                            .finish_completed_provider_turn(&lease, &guard, &result)
+                            .await;
+                    }
+                    AiAgentLoopTurn::ToolCalls { .. } => {
+                        return self
+                            .finish_recovery(
+                                &lease,
+                                &guard,
+                                AiAgentRecoveryPhase::ProviderTurn,
+                                "chat_turn_returned_application_tools",
+                                result.provider_response_id(),
+                            )
+                            .await;
+                    }
+                },
+                AiReadOnlyAgentTurnMode::ApplicationTools(route) => route,
+            };
             lease = match self
                 .checkpoint_writer
                 .persist_provider_turn(
@@ -834,34 +892,9 @@ impl AiReadOnlyAgentCoordinator {
             };
             match observed {
                 AiAgentLoopTurn::Completed => {
-                    let persisted = match self.output_writer.persist_output(&lease, &result).await {
-                        Ok(persisted) => persisted,
-                        Err(_) => {
-                            return self
-                                .finish_recovery(
-                                    &lease,
-                                    &guard,
-                                    AiAgentRecoveryPhase::ProviderOutput,
-                                    "provider_output_uncertain",
-                                    result.provider_response_id(),
-                                )
-                                .await;
-                        }
-                    };
-                    let message_id = persisted.message_id();
-                    lease = persisted.into_lease();
-                    let completion = AiRunCompletion::new(
-                        AiRunState::Completed,
-                        "agent_completed",
-                        None,
-                        result.provider_response_id().map(str::to_owned),
-                    )?;
-                    self.run_control.finish(&lease, completion).await?;
-                    return Ok(Completed {
-                        message_id,
-                        provider_turns: guard.provider_turns(),
-                        total_tool_calls: guard.total_tool_calls(),
-                    });
+                    return self
+                        .finish_completed_provider_turn(&lease, &guard, &result)
+                        .await;
                 }
                 AiAgentLoopTurn::ToolCalls {
                     provider_turn_index,
@@ -1078,6 +1111,42 @@ impl AiReadOnlyAgentCoordinator {
         }
     }
 
+    async fn finish_completed_provider_turn(
+        &self,
+        lease: &AiRunLease,
+        guard: &AiAgentLoopGuard,
+        result: &AiProviderCallResult,
+    ) -> Result<AiReadOnlyAgentRunOutcome, AiError> {
+        let persisted = match self.output_writer.persist_output(lease, result).await {
+            Ok(persisted) => persisted,
+            Err(_) => {
+                return self
+                    .finish_recovery(
+                        lease,
+                        guard,
+                        AiAgentRecoveryPhase::ProviderOutput,
+                        "provider_output_uncertain",
+                        result.provider_response_id(),
+                    )
+                    .await;
+            }
+        };
+        let message_id = persisted.message_id();
+        let lease = persisted.into_lease();
+        let completion = AiRunCompletion::new(
+            AiRunState::Completed,
+            "agent_completed",
+            None,
+            result.provider_response_id().map(str::to_owned),
+        )?;
+        self.run_control.finish(&lease, completion).await?;
+        Ok(Completed {
+            message_id,
+            provider_turns: guard.provider_turns(),
+            total_tool_calls: guard.total_tool_calls(),
+        })
+    }
+
     async fn finish_failed(
         &self,
         lease: &AiRunLease,
@@ -1227,6 +1296,11 @@ mod tests {
         continuation_count: AtomicUsize,
     }
 
+    struct TestChatPlanner {
+        scope: AiScope,
+        continuation_count: AtomicUsize,
+    }
+
     #[async_trait]
     impl AiReadOnlyAgentTurnPlanner for TestPlanner {
         async fn initial_plan(
@@ -1254,6 +1328,30 @@ mod tests {
                 test_rules(self.scope.clone()),
                 false,
             )
+        }
+    }
+
+    #[async_trait]
+    impl AiReadOnlyAgentTurnPlanner for TestChatPlanner {
+        async fn initial_plan(
+            &self,
+            lease: &AiRunLease,
+        ) -> Result<AiReadOnlyAgentTurnPlan, AiError> {
+            AiReadOnlyAgentTurnPlan::new_chat(
+                AiProviderCallPlan::test_chat_plan(lease, self.scope.clone()),
+                test_rules(self.scope.clone()),
+                false,
+            )
+        }
+
+        async fn continuation_plan(
+            &self,
+            _lease: &AiRunLease,
+            _provider_turns: u32,
+            _continuation: AiAgentContinuation,
+        ) -> Result<AiReadOnlyAgentTurnPlan, AiError> {
+            self.continuation_count.fetch_add(1, Ordering::SeqCst);
+            Err(AiError::Conflict)
         }
     }
 
@@ -1386,6 +1484,64 @@ mod tests {
 
     struct TestToolExecutor {
         expose_result: bool,
+    }
+
+    #[derive(Default)]
+    struct ChatForbiddenBoundaries {
+        tool_calls: AtomicUsize,
+        provider_checkpoints: AtomicUsize,
+        tool_batch_checkpoints: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AiAgentReadOnlyToolExecutor for ChatForbiddenBoundaries {
+        async fn execute_tool(
+            &self,
+            _lease: &AiRunLease,
+            _provider_result: &AiProviderCallResult,
+            _context: AiApplicationToolCallContext,
+            _route: AiToolResultEgressRoute,
+        ) -> Result<AiPersistedApplicationToolCall, AiError> {
+            self.tool_calls.fetch_add(1, Ordering::SeqCst);
+            Err(AiError::Forbidden)
+        }
+    }
+
+    #[async_trait]
+    impl AiAgentCheckpointWriter for ChatForbiddenBoundaries {
+        async fn persist_provider_turn(
+            &self,
+            _lease: &AiRunLease,
+            _result: &AiProviderCallResult,
+            _scope: &AiScope,
+            _correlation_id: &str,
+            _route: &AiToolResultEgressRoute,
+            _rules: &AiResolvedRuleSet,
+            _rule_usage: AiRuleRunUsage,
+            _provider_turns: u32,
+            _total_tool_calls: u32,
+        ) -> Result<AiRunLease, AiError> {
+            self.provider_checkpoints.fetch_add(1, Ordering::SeqCst);
+            Err(AiError::Forbidden)
+        }
+
+        async fn persist_tool_batch(
+            &self,
+            _lease: &AiRunLease,
+            _result: &AiProviderCallResult,
+            _completed_tools: &[AiPersistedApplicationToolCall],
+            _continuation: &AiAgentContinuation,
+            _scope: &AiScope,
+            _correlation_id: &str,
+            _route: &AiToolResultEgressRoute,
+            _rules: &AiResolvedRuleSet,
+            _rule_usage: AiRuleRunUsage,
+            _provider_turns: u32,
+            _total_tool_calls: u32,
+        ) -> Result<AiRunLease, AiError> {
+            self.tool_batch_checkpoints.fetch_add(1, Ordering::SeqCst);
+            Err(AiError::Forbidden)
+        }
     }
 
     #[async_trait]
@@ -1739,6 +1895,203 @@ mod tests {
             planner,
             coordinator_limits,
         )
+    }
+
+    #[test]
+    fn chat_turn_factory_accepts_only_exact_initial_tool_free_plans() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let scope = test_scope();
+        let plan = AiReadOnlyAgentTurnPlan::new_chat(
+            AiProviderCallPlan::test_chat_plan(&lease, scope.clone()),
+            test_rules(scope.clone()),
+            false,
+        )
+        .expect("an exact initial tool-free plan should validate");
+        let (_, _, _, mode, _, _) = plan.into_parts();
+        assert!(matches!(mode, AiReadOnlyAgentTurnMode::ChatOnly));
+
+        assert!(matches!(
+            AiReadOnlyAgentTurnPlan::new_chat(
+                AiProviderCallPlan::test_plan(&lease, scope.clone(), false),
+                test_rules(scope.clone()),
+                false,
+            ),
+            Err(AiError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            AiReadOnlyAgentTurnPlan::new_chat(
+                AiProviderCallPlan::test_builtin_plan(&lease, scope.clone()),
+                test_rules(scope.clone()),
+                false,
+            ),
+            Err(AiError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            AiReadOnlyAgentTurnPlan::new_chat(
+                AiProviderCallPlan::test_chat_continuation_plan(&lease, scope.clone()),
+                test_rules(scope.clone()),
+                false,
+            ),
+            Err(AiError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            AiReadOnlyAgentTurnPlan::new_chat(
+                AiProviderCallPlan::test_chat_plan(&lease, scope),
+                test_rules(AiScope::new("test", "different-scope")),
+                false,
+            ),
+            Err(AiError::InvalidInput(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn chat_turn_persists_final_output_without_tool_boundaries() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        let provider = Arc::new(TestProviderExecutor {
+            responses: Mutex::new(VecDeque::from([Ok(AiProviderCallResult::test_result(
+                &lease,
+                None,
+                "response-chat-final",
+                Vec::new(),
+            ))])),
+            delay: None,
+        });
+        let planner = Arc::new(TestChatPlanner {
+            scope: test_scope(),
+            continuation_count: AtomicUsize::new(0),
+        });
+        let forbidden = Arc::new(ChatForbiddenBoundaries::default());
+        let coordinator = AiReadOnlyAgentCoordinator::new(
+            run.clone(),
+            provider,
+            forbidden.clone(),
+            Arc::new(TestOutputWriter),
+            forbidden.clone(),
+            Arc::new(TestCheckpointWriter),
+            Arc::new(TestRuleResolver),
+            planner.clone(),
+            limits(50),
+        );
+
+        let outcome = coordinator
+            .execute_claimed(&lease)
+            .await
+            .expect("chat-only coordinator turn should complete");
+
+        assert!(matches!(
+            outcome,
+            Completed {
+                provider_turns: 1,
+                total_tool_calls: 0,
+                ..
+            }
+        ));
+        assert_eq!(forbidden.tool_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(forbidden.provider_checkpoints.load(Ordering::SeqCst), 0);
+        assert_eq!(forbidden.tool_batch_checkpoints.load(Ordering::SeqCst), 0);
+        assert_eq!(planner.continuation_count.load(Ordering::SeqCst), 0);
+        assert_eq!(run.final_states(), vec![AiRunState::Completed]);
+    }
+
+    #[tokio::test]
+    async fn chat_turn_rejects_unoffered_tool_call_without_tool_execution() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        let provider = Arc::new(TestProviderExecutor {
+            responses: Mutex::new(VecDeque::from([Ok(AiProviderCallResult::test_result(
+                &lease,
+                None,
+                "response-chat-tool",
+                vec![("unoffered-call", "test.read", json!({}))],
+            ))])),
+            delay: None,
+        });
+        let planner = Arc::new(TestChatPlanner {
+            scope: test_scope(),
+            continuation_count: AtomicUsize::new(0),
+        });
+        let forbidden = Arc::new(ChatForbiddenBoundaries::default());
+        let coordinator = AiReadOnlyAgentCoordinator::new(
+            run.clone(),
+            provider,
+            forbidden.clone(),
+            Arc::new(TestOutputWriter),
+            forbidden.clone(),
+            Arc::new(TestCheckpointWriter),
+            Arc::new(TestRuleResolver),
+            planner.clone(),
+            limits(50),
+        );
+
+        let outcome = coordinator
+            .execute_claimed(&lease)
+            .await
+            .expect("unoffered chat tool call should close for recovery");
+
+        assert!(matches!(
+            outcome,
+            RecoveryRequired {
+                phase: AiAgentRecoveryPhase::ProviderTurn,
+                provider_turns: 1,
+                ..
+            }
+        ));
+        assert_eq!(forbidden.tool_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(forbidden.provider_checkpoints.load(Ordering::SeqCst), 0);
+        assert_eq!(forbidden.tool_batch_checkpoints.load(Ordering::SeqCst), 0);
+        assert_eq!(planner.continuation_count.load(Ordering::SeqCst), 0);
+        assert_eq!(run.final_states(), vec![AiRunState::RecoveryRequired]);
+    }
+
+    #[tokio::test]
+    async fn chat_turn_rechecks_current_rules_after_provider_transport() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        let provider = Arc::new(TestProviderExecutor {
+            responses: Mutex::new(VecDeque::from([Ok(AiProviderCallResult::test_result(
+                &lease,
+                None,
+                "response-chat-stale-rule",
+                Vec::new(),
+            ))])),
+            delay: None,
+        });
+        let planner = Arc::new(TestChatPlanner {
+            scope: test_scope(),
+            continuation_count: AtomicUsize::new(0),
+        });
+        let forbidden = Arc::new(ChatForbiddenBoundaries::default());
+        let coordinator = AiReadOnlyAgentCoordinator::new(
+            run.clone(),
+            provider,
+            forbidden.clone(),
+            Arc::new(TestOutputWriter),
+            forbidden.clone(),
+            Arc::new(TestCheckpointWriter),
+            Arc::new(ChangingRuleResolver(AtomicUsize::new(0))),
+            planner.clone(),
+            limits(50),
+        );
+
+        let outcome = coordinator
+            .execute_claimed(&lease)
+            .await
+            .expect("changed chat rules should close for recovery");
+
+        assert!(matches!(
+            outcome,
+            RecoveryRequired {
+                phase: AiAgentRecoveryPhase::ProviderTurn,
+                provider_turns: 1,
+                total_tool_calls: 0,
+            }
+        ));
+        assert_eq!(forbidden.tool_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(forbidden.provider_checkpoints.load(Ordering::SeqCst), 0);
+        assert_eq!(forbidden.tool_batch_checkpoints.load(Ordering::SeqCst), 0);
+        assert_eq!(planner.continuation_count.load(Ordering::SeqCst), 0);
+        assert_eq!(run.final_states(), vec![AiRunState::RecoveryRequired]);
     }
 
     #[tokio::test]

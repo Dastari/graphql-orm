@@ -3,7 +3,7 @@ title: "Getting Started"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-09
+last_reviewed: 2026-08-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -295,6 +295,12 @@ completed provider-retained or bounded stateless read-only tool-batch
 checkpoint has cross-generation adoption authority, and only after fresh
 protected validation of every current and historical durable proof; see the
 [checkpoint guide](coordinator-checkpoints.md).
+
+For a first tool-free chat turn, the same planner can construct the ordinary
+no-tool `AiProviderCallPlan` and wrap it with
+`AiReadOnlyAgentTurnPlan::new_chat`. Do not fabricate a tool-result route: this
+mode completes directly through protected provider-output persistence and has
+no tool checkpoint or continuation authority.
 
 For sequential provider-retained supervised mutations, construct
 `AiSupervisedAgentCoordinator` with the same run, provider, output, checkpoint,
