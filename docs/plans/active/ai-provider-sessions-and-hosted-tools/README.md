@@ -319,7 +319,8 @@ This work remains back-burner and is not a dependency of hosted web search.
 ## Current checkpoint
 
 Phases 1 through 4 have project-neutral upstream contracts from the 0.69.0
-development line, and the retained Codex milestone is implemented in 0.70.0:
+development line, the retained Codex milestone is implemented in 0.70.0, and
+0.71.0 corrects canonical router transport of its tool manifests:
 
 - a strict fresh-turn Codex app-server adapter with exact-run reuse, global and
   per-owner admission, cancellation/terminal cleanup, protocol allowlisting,
@@ -340,7 +341,7 @@ development line, and the retained Codex milestone is implemented in 0.70.0:
 
 Phase 5 multiplexing and the visual-browser broker remain deferred
 investigations. The current review boundary is full backend/provider,
-documentation, SemVer, and release-policy verification for 0.70.0 / schema
+documentation, SemVer, and release-policy verification for 0.71.0 / schema
 module 0.55.0.
 
 ## Current milestone: retained Codex threads

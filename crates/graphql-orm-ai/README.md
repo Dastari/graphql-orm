@@ -335,11 +335,11 @@ Add the crate from a reviewed monorepo revision:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.70.0", features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.71.0", features = ["sqlite"] }
 ```
 
 > **Pre-release dependency note:** this source snapshot resolves
-> `graphql-orm` 0.21.0, `graphql-orm-ai-tool-profiles` 0.2.0, and
+> `graphql-orm` 0.21.0, `graphql-orm-ai-tool-profiles` 0.3.0, and
 > `graphql-orm-storage` 0.6.0 from one workspace revision. Optional
 > `graphql-orm-backup` 0.7.0 is a direct host dependency. `agql-auth` 0.14.0
 > at `413fda3435f060604cd653c11e2cc18a668aace1` remains an exact external

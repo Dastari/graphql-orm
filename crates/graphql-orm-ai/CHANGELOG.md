@@ -20,7 +20,7 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.70.0` and AI
+This development line advances the pre-1.0 crate version to `0.71.0` and AI
 schema module `0.55.0`. It begins the applied-restore implementation with
 bounded database-derived facts, aligns the reviewed dependency universe,
 integrates generated resolver-operation metadata, completes the durable OpenAI
@@ -29,6 +29,11 @@ file-search IDs behind the reviewed persistent-file design.
 
 ### Fixed
 
+- Re-exported GraphQL tool manifest version 2 recursively canonicalizes JSON
+  object keys for manifest and nested descriptor fingerprints. Router
+  `DescriptorExtension` normalization now round-trips unchanged complex
+  projections, disclosure maps, and JSON Schemas without weakening any stale,
+  schema, descriptor, or fingerprint validation.
 - Provider-session cleanup canonicalizes trusted absence-observation times to
   the durable second-resolution clock before freshness comparison, so a valid
   same-instant proof with subsecond precision is not rejected as future-dated.

@@ -77,6 +77,13 @@ allowed_internal_edges = {
     ("graphql-orm", "graphql-orm-operation-catalog"),
     ("graphql-orm-operation-catalog", "graphql-orm-router-protocol"),
     ("graphql-orm-router", "graphql-orm-router-protocol"),
+    # Test-only end-to-end coverage proves that profile manifests survive the
+    # router protocol's canonical extension transport. This edge must never
+    # become a normal or build dependency.
+    ("graphql-orm-ai-tool-profiles", "graphql-orm-router-protocol"),
+}
+test_only_internal_edges = {
+    ("graphql-orm-ai-tool-profiles", "graphql-orm-router-protocol"),
 }
 actual_internal_edges = set()
 for package_id, node in nodes_by_id.items():
@@ -86,7 +93,16 @@ for package_id, node in nodes_by_id.items():
     for dependency in node["deps"]:
         target = packages_by_id[dependency["pkg"]]["name"]
         if target in expected:
-            actual_internal_edges.add((source, target))
+            edge = (source, target)
+            actual_internal_edges.add(edge)
+            if edge in test_only_internal_edges and any(
+                dependency_kind["kind"] != "dev"
+                for dependency_kind in dependency["dep_kinds"]
+            ):
+                raise SystemExit(
+                    "workspace-dependencies: test-only internal edge became "
+                    f"a runtime/build dependency: {source} -> {target}"
+                )
 
 unexpected_edges = actual_internal_edges - allowed_internal_edges
 if unexpected_edges:

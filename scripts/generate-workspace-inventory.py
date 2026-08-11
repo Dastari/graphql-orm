@@ -50,7 +50,9 @@ def render(metadata: dict[str, object]) -> str:
             if dependency["name"] not in names:
                 continue
             label = f"`{dependency['name']}`"
-            if dependency.get("optional"):
+            if dependency.get("kind") == "dev":
+                label += " (dev-only)"
+            elif dependency.get("optional"):
                 label += " (optional)"
             internal.append((dependency["name"], label))
         dependency_text = ", ".join(label for _, label in sorted(internal)) or "none"

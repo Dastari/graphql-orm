@@ -10,9 +10,9 @@ supersedes: []
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.70.0` with AI schema module
+`graphql-orm-ai` is at crate version `0.71.0` with AI schema module
 `0.55.0`. It uses workspace `graphql-orm` `0.21.0`, backend-neutral
-`graphql-orm-ai-tool-profiles` `0.2.0`, and external `agql-auth`
+`graphql-orm-ai-tool-profiles` `0.3.0`, and external `agql-auth`
 `0.14.0` at `413fda3435f060604cd653c11e2cc18a668aace1`.
 
 The active work order, dependencies, and exit gates are maintained in the

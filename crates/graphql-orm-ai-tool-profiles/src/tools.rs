@@ -4,7 +4,9 @@ use graphql_orm_operation_catalog::GraphqlResolverOperationDescriptor;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{AiError, DataClassification, GraphqlOperationContract};
+use crate::{
+    AiError, DataClassification, GraphqlOperationContract, canonical_json::canonical_json_bytes,
+};
 
 /// Stable validated tool identifier.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -350,8 +352,7 @@ impl AiToolDescriptor {
 
     fn refresh_fingerprint(&mut self) {
         self.fingerprint.clear();
-        let encoded = serde_json::to_vec(self)
-            .expect("AiToolDescriptor consists only of serializable values");
+        let encoded = canonical_json_bytes(self);
         self.fingerprint = hex::encode(Sha256::digest(encoded));
     }
 

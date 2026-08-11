@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-ai-tool-profiles"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["Toby Martin <toby@dastari.net>"]
 description = "Backend-neutral GraphQL AI tool profile compiler and manifest contracts"
@@ -26,3 +26,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
+
+[dev-dependencies]
+graphql-orm-router-protocol = { workspace = true }
+serde_json = { version = "1", features = ["preserve_order"] }

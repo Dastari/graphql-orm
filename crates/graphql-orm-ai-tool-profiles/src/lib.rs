@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod canonical_json;
 mod data;
 mod disclosure;
 mod error;

@@ -17,10 +17,11 @@ use crate::{
     AiDisclosureShape, AiError, AiGeneratedGraphqlOperationPolicy, AiToolDescriptor,
     AiToolOperationDomain, AiToolOperationKind, AiToolRisk, DataClassification,
     GraphqlExecutionTargetId, GraphqlOperationContract, ToolMaturity,
+    canonical_json::canonical_json_bytes,
 };
 
 /// Current wire version for compiled GraphQL tool manifests.
-pub const AI_GRAPHQL_TOOL_MANIFEST_VERSION: u16 = 1;
+pub const AI_GRAPHQL_TOOL_MANIFEST_VERSION: u16 = 2;
 
 /// Stable optional router-descriptor extension identity for a compiled
 /// GraphQL tool manifest.
@@ -1890,7 +1891,7 @@ fn identity_hash(
 }
 
 fn sha256_json(value: &Value) -> String {
-    let encoded = serde_json::to_vec(value).expect("fingerprint value always serializes");
+    let encoded = canonical_json_bytes(value);
     hex::encode(Sha256::digest(encoded))
 }
 

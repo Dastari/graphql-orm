@@ -19,6 +19,24 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased: canonical GraphQL tool manifests (crate 0.70.0 to 0.71.0; schema remains 0.55.0)
+
+The re-exported `graphql-orm-ai-tool-profiles` package moves from 0.2.0 to
+0.3.0 and `AI_GRAPHQL_TOOL_MANIFEST_VERSION` moves from 1 to 2. Update every
+owning-subgraph producer and AI consumer to the same reviewed monorepo
+revision. Version 2 recursively canonicalizes JSON object keys before hashing
+manifests and nested tool descriptors, so canonical router-extension transport
+does not invalidate an unchanged contract.
+
+Existing version 1 payloads remain unsupported. Exact descriptor/tool-policy
+fingerprints may change when their JSON Schema object members were authored in
+a noncanonical order; review and update immutable allowlists rather than
+copying old fingerprints. Array order, schemas, projections, disclosures,
+logical targets, documents, versions, and all validation remain authoritative.
+
+No database or GraphQL schema migration, table/index/constraint change,
+backfill, or row rewrite is required. AI schema module 0.55.0 remains current.
+
 ## Unreleased: retained Codex threads and experimental dynamic tools (crate 0.69.0 to 0.70.0; schema 0.54.0 to 0.55.0)
 
 Apply AI schema module 0.55.0 before enabling retained provider turns. This is
