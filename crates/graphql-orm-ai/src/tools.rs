@@ -8,12 +8,11 @@ use graphql_orm::graphql::orm::{GraphqlOperationCatalog, GraphqlOperationKind};
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
-use crate::ModelToolDefinition;
+use crate::{AiApprovalRule, AiToolRisk, ModelToolDefinition};
 use crate::{
-    AiApprovalRule, AiDisclosureSchema, AiError, AiGeneratedGraphqlOperationPolicy,
-    AiGraphqlToolManifestCatalog, AiScope, AiToolDescriptor, AiToolId, AiToolOperationDomain,
-    AiToolOperationKind, AiToolRisk, ToolGraphqlRequest, ToolMaturity,
-    contains_forbidden_graphql_name,
+    AiDisclosureSchema, AiError, AiGeneratedGraphqlOperationPolicy, AiGraphqlToolManifestCatalog,
+    AiScope, AiToolDescriptor, AiToolId, AiToolOperationDomain, AiToolOperationKind,
+    ToolGraphqlRequest, ToolMaturity, contains_forbidden_graphql_name,
 };
 
 const JSON_SCHEMA_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
@@ -78,7 +77,7 @@ impl AiToolCatalog {
     /// domain revalidation.
     ///
     /// The contract must have been created with
-    /// [`GraphqlOperationContract::with_generated_operation`]. This method
+    /// [`crate::GraphqlOperationContract::with_generated_operation`]. This method
     /// re-resolves the current exposed catalog coordinate, verifies the
     /// catalog and operation fingerprints, proves that the server-authored
     /// document contains only that root field, and asks the host to classify

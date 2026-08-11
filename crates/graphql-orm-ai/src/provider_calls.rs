@@ -2964,6 +2964,8 @@ mod tests {
                 next_attempt_at: Some(now.unix_timestamp()),
                 error_code: None,
                 latest_checkpoint_id: None,
+                cancellation_request_id: None,
+                cancellation_requested_at: None,
             },
         )
         .await

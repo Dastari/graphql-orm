@@ -1119,12 +1119,51 @@ pub(crate) struct AiRunRecord {
     pub error_code: Option<String>,
     /// Latest exact coordinator checkpoint for recovery classification.
     pub latest_checkpoint_id: Option<graphql_orm::uuid::Uuid>,
+    /// Idempotency key that won the owner cancellation fence.
+    pub cancellation_request_id: Option<graphql_orm::uuid::Uuid>,
+    /// Server timestamp at which cancellation became terminal.
+    pub cancellation_requested_at: Option<i64>,
     /// Created timestamp.
     #[sortable]
     pub created_at: i64,
     /// CAS version.
     #[graphql_orm(version, default = "0")]
     pub row_version: i64,
+}
+
+/// Immutable owner cancellation request used for idempotent replay.
+#[backend_selected_graphql_entity(
+    table = "graphql_orm_ai_run_cancellation_requests",
+    plural = "GraphqlOrmAiRunCancellationRequests",
+    default_sort = "requested_at ASC"
+)]
+#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
+#[cfg_attr(
+    any(feature = "sqlite", feature = "postgres"),
+    derive(GraphQLEntity, GraphQLOperations)
+)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub(crate) struct AiRunCancellationRequestRecord {
+    /// Client-generated idempotency key.
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    pub id: graphql_orm::uuid::Uuid,
+    /// Exact owning session.
+    #[filterable(type = "uuid")]
+    pub session_id: graphql_orm::uuid::Uuid,
+    /// Exact cancelled run. At most one request may win per run.
+    #[unique]
+    #[filterable(type = "uuid")]
+    pub run_id: graphql_orm::uuid::Uuid,
+    /// Safe owner principal kind.
+    pub principal_kind: String,
+    /// Safe owner subject.
+    pub principal_subject: String,
+    /// Canonical terminal outcome.
+    pub outcome_state: String,
+    /// Server timestamp at which the request won.
+    #[sortable]
+    pub requested_at: i64,
 }
 
 /// Immutable run-attempt/fence history.
@@ -1426,6 +1465,7 @@ pub(crate) struct AiToolCallRecord {
     /// Attempt/fencing generation that owns the result.
     pub lease_generation: i64,
     /// Durable state.
+    #[filterable(type = "string")]
     pub state: String,
     /// Created timestamp.
     #[sortable]
@@ -2102,7 +2142,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.52.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.53.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 
@@ -2168,6 +2208,7 @@ impl OrmSchemaModule for AiSchemaModule {
                 AiAttachmentRecord::metadata(),
                 AiAttachmentArtifactRecord::metadata(),
                 AiRunRecord::metadata(),
+                AiRunCancellationRequestRecord::metadata(),
                 AiRunAttemptRecord::metadata(),
                 AiRunAttemptOutcomeRecord::metadata(),
                 AiRunStepRecord::metadata(),

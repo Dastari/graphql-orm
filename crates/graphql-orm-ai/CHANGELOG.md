@@ -20,8 +20,8 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.66.0` and AI
-schema module `0.52.0`. It begins the applied-restore implementation with
+This development line advances the pre-1.0 crate version to `0.67.0` and AI
+schema module `0.53.0`. It begins the applied-restore implementation with
 bounded database-derived facts, aligns the reviewed dependency universe,
 integrates generated resolver-operation metadata, completes the durable OpenAI
 background terminal-reconciliation runtime, and closes raw provider
@@ -61,6 +61,18 @@ file-search IDs behind the reviewed persistent-file design.
   not applied-restore authority; restored deployments must keep it closed.
 
 ### Added
+
+- `CancelAiRun` and `AiRunCancellationService` add an owner-authorized,
+  idempotent cancellation request for one exact session/run pair. The ORM
+  service rehydrates current authority, atomically wins the durable run fence,
+  closes active tool/approval/background state, records immutable request and
+  attempt evidence, and appends protected request/final session and owner-inbox
+  events. `AiRunCancellationHub` accelerates worker wakeups without replacing
+  authoritative database polling. The read-only coordinator drops an active
+  provider future and checks the durable cancellation fence before tools,
+  checkpoints, output persistence, continuations, and terminal completion.
+- AI schema module 0.53.0 adds nullable cancellation evidence to private run
+  rows and the private idempotency record. No generated CRUD root is exposed.
 
 - `RenameAiSession` and `AiSessionService::rename_session` now provide an
   owner-authorized, bounded, revision-fenced, idempotent session-title update.

@@ -73,6 +73,8 @@ mod orm_restore;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_rules;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_run_cancellation;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_runs;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_session_retention;
@@ -109,6 +111,7 @@ mod providers;
 mod remote_execution;
 mod restore;
 mod rules;
+mod run_cancellation;
 mod run_state;
 mod runtime;
 mod secrets;
@@ -174,6 +177,8 @@ pub use orm_restore::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_rules::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_run_cancellation::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_runs::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_session_retention::*;
@@ -212,6 +217,7 @@ pub use providers::*;
 pub use remote_execution::*;
 pub use restore::*;
 pub use rules::*;
+pub use run_cancellation::*;
 pub use run_state::*;
 pub use runtime::*;
 pub use secrets::*;
@@ -243,11 +249,12 @@ pub mod prelude {
         AiRemoteGraphqlAuthorityIssuer, AiRemoteGraphqlDelegationRequest,
         AiRemoteGraphqlExecutionLimits, AiRemoteGraphqlTransport, AiResolvedProviderAttachment,
         AiRuleAccessPolicy, AiRuleDeploymentLimits, AiRuleHierarchyResolver, AiRulePolicyService,
-        AiRuleRunUsage, AiRuntime, AiRuntimeBuilder, AiScope, AiSecretStore,
-        AiSessionRetentionService, AiSessionTitleWorkService, AiSkillAccessPolicy,
-        AiSkillCatalogService, AiToolAuthorizationPolicy, AiToolCatalog, AiToolDescriptor,
-        AiUiIntentCatalog, AiUiIntentTypeDescriptor, AiUsageAccessPolicy, AiUsageService,
-        DataClassification, SecretRef, ToolMaturity,
+        AiRuleRunUsage, AiRunCancellationHub, AiRunCancellationService, AiRuntime,
+        AiRuntimeBuilder, AiScope, AiSecretStore, AiSessionRetentionService,
+        AiSessionTitleWorkService, AiSkillAccessPolicy, AiSkillCatalogService,
+        AiToolAuthorizationPolicy, AiToolCatalog, AiToolDescriptor, AiUiIntentCatalog,
+        AiUiIntentTypeDescriptor, AiUsageAccessPolicy, AiUsageService, DataClassification,
+        SecretRef, ToolMaturity,
     };
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub use crate::{
@@ -269,20 +276,21 @@ pub mod prelude {
         AiProviderOutputLimits, AiProviderUsageAccounting, AiReadOnlyAgentCoordinator,
         AiReadOnlyAgentCoordinatorLimits, AiReadOnlyAgentTurnPlan, AiReadOnlyAgentTurnPlanner,
         AiRequestedConsequentialToolCall, AiRestoreAttachmentMetadataAuditLimits,
-        AiRestoreCollectorLimits, AiRestorePolicyAuditLimits, AiRunServiceLimits,
-        AiSessionRetentionLimits, AiSessionTitleWorkLimits, AiSupervisedAgentCoordinator,
-        AiSupervisedAgentCoordinatorLimits, AiSupervisedAgentRunOutcome, AiSupervisedAgentTurnPlan,
-        AiSupervisedAgentTurnPlanner, AiSupervisedApprovalWait, AiSupervisedResumeOutcome,
-        AiUiIntentDeliveryLimits, AiUiIntentDeliveryService, DeploymentAiCurrentRuleResolver,
+        AiRestoreCollectorLimits, AiRestorePolicyAuditLimits, AiRunCancellationLimits,
+        AiRunServiceLimits, AiSessionRetentionLimits, AiSessionTitleWorkLimits,
+        AiSupervisedAgentCoordinator, AiSupervisedAgentCoordinatorLimits,
+        AiSupervisedAgentRunOutcome, AiSupervisedAgentTurnPlan, AiSupervisedAgentTurnPlanner,
+        AiSupervisedApprovalWait, AiSupervisedResumeOutcome, AiUiIntentDeliveryLimits,
+        AiUiIntentDeliveryService, DeploymentAiCurrentRuleResolver,
         OrmAiApplicationToolCallService, OrmAiApprovalService,
         OrmAiApprovalWaitReconciliationService, OrmAiAttachmentService, OrmAiBudgetService,
         OrmAiConsequentialToolCallService, OrmAiContextCompactionService,
         OrmAiCoordinatorCheckpointService, OrmAiCurrentRuleResolver, OrmAiEgressDecisionAudit,
         OrmAiInboxPruningService, OrmAiInboxService, OrmAiLiveDeltaService, OrmAiPricingService,
         OrmAiProposalService, OrmAiProviderOutputService, OrmAiRestoreFactCollector,
-        OrmAiRulePolicyService, OrmAiRunService, OrmAiSessionRetentionService,
-        OrmAiSessionTitleWorkService, OrmAiSkillCatalogService, OrmAiSupervisedResumeService,
-        OrmAiUiIntentDeliveryService, OrmAiUsageService,
+        OrmAiRulePolicyService, OrmAiRunCancellationService, OrmAiRunService,
+        OrmAiSessionRetentionService, OrmAiSessionTitleWorkService, OrmAiSkillCatalogService,
+        OrmAiSupervisedResumeService, OrmAiUiIntentDeliveryService, OrmAiUsageService,
     };
     #[cfg(all(
         any(feature = "sqlite", feature = "postgres"),

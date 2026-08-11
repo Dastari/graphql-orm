@@ -35,7 +35,7 @@ waits without polling, resuming, or executing them.
 
 ## What it provides
 
-- An ORM-owned `AiSchemaModule` with 42 private records for configuration,
+- An ORM-owned `AiSchemaModule` with 43 private records for configuration,
   protected chat history, runs, attempts, tool calls, proposals, approvals,
   budgets, usage, provider background bindings, egress, audit, skills, and
   restore readiness.
@@ -48,6 +48,11 @@ waits without polling, resuming, or executing them.
   owner/scope authority and lease fences are rechecked before protected input
   disclosure and conditional commit, so manual and pre-upgrade titles win
   races.
+- Owner-authorized `CancelAiRun` with exact session/run binding, idempotent
+  request IDs, durable protected request/final events, fenced run/tool/approval
+  closure, and process-local worker wakeups backed by authoritative database
+  polling. Coordinators check the cancellation fence before every later
+  external-effect or persistence boundary.
 - Protected bounded context compaction that renews the run fence, rehydrates
   authority, opens only a contiguous prefix segment, binds exact
   message/block/parent provenance and a chained source hash, and persists only
@@ -329,7 +334,7 @@ Add the crate from a reviewed monorepo revision:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.66.0", features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.67.0", features = ["sqlite"] }
 ```
 
 > **Pre-release dependency note:** this source snapshot resolves

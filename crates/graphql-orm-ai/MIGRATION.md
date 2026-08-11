@@ -19,6 +19,31 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased: owner-authorized run cancellation (crate 0.66.0 to 0.67.0; schema 0.52.0 to 0.53.0)
+
+Apply AI schema module 0.53.0 before exposing `CancelAiRun` or starting a
+cancellation-aware coordinator. The additive migration adds nullable
+`cancellation_request_id` and `cancellation_requested_at` run columns plus the
+private `graphql_orm_ai_run_cancellation_requests` idempotency table. Existing
+runs remain unchanged and no protected content is rewritten.
+
+Construct one shared `AiRunCancellationHub`; install it on
+`OrmAiRunService::with_cancellation_hub` and pass it to
+`OrmAiRunCancellationService`. Compose the service as
+`Arc<dyn AiRunCancellationService>` beside `AiMutationRoot`. The GraphQL
+`CancelAiRun(Input:)` mutation accepts only an exact session ID, run ID, and
+client-generated request UUID. The owner receives an authoritative terminal
+view; replay and inbox consumers observe `run_cancellation_requested` followed
+by `run_cancelled`.
+
+The database marker, not the in-process notification, is authoritative.
+Provider futures are dropped when cancellation wins; local harness providers
+must retain their established terminate-on-drop contract. Custom run-control
+implementations remain source compatible through default cancellation methods,
+but they do not become cancellation-aware until they implement the durable
+observation boundary. This is an additive Rust and GraphQL API change with an
+additive schema migration and no application-data migration.
+
 ## Unreleased: backend-neutral tool-profile producers (crate 0.65.0 to 0.66.0; schema remains 0.52.0)
 
 Owning subgraphs that only publish reviewed AI GraphQL tool manifests should

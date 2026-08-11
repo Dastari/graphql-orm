@@ -117,7 +117,7 @@ impl AiRunState {
                 next,
                 Self::Queued | Self::Cancelled | Self::Failed | Self::RecoveryRequired
             ),
-            Self::WaitingProvider => false,
+            Self::WaitingProvider => matches!(next, Self::Cancelled),
             Self::RecoveryRequired | Self::Completed | Self::Failed | Self::Cancelled => false,
         }
     }

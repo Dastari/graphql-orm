@@ -11,8 +11,8 @@ use graphql_orm::graphql::pagination::{
 use uuid::Uuid;
 
 use crate::{
-    AiError, AiInboxEventPage, AiInboxService, AiScope, AiSessionId, AiUsageConnection,
-    AiUsageFilterInput,
+    AiError, AiInboxEventPage, AiInboxService, AiRunCancellationService, AiRunCancellationView,
+    AiScope, AiSessionId, AiUsageConnection, AiUsageFilterInput, CancelAiRunInput,
 };
 
 /// Scope input for session creation/configuration.
@@ -487,6 +487,19 @@ pub struct AiMutationRoot;
 )]
 #[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
 impl AiMutationRoot {
+    /// Requests an owner-authorized durable cancellation for one active run.
+    async fn cancel_ai_run(
+        &self,
+        context: &Context<'_>,
+        input: CancelAiRunInput,
+    ) -> async_graphql::Result<AiRunCancellationView> {
+        let principal = agql_auth::principal_from_ctx(context)?;
+        cancellation_service(context)?
+            .request_cancellation(&principal, input)
+            .await
+            .map_err(extend)
+    }
+
     /// Creates a private owner-only session.
     async fn create_ai_session(
         &self,
@@ -587,6 +600,18 @@ fn inbox_service(context: &Context<'_>) -> async_graphql::Result<Arc<dyn AiInbox
         .cloned()
         .ok_or_else(|| {
             AiError::InvalidConfiguration("AI inbox service is not installed".to_owned()).extend()
+        })
+}
+
+fn cancellation_service(
+    context: &Context<'_>,
+) -> async_graphql::Result<Arc<dyn AiRunCancellationService>> {
+    context
+        .data_opt::<Arc<dyn AiRunCancellationService>>()
+        .cloned()
+        .ok_or_else(|| {
+            AiError::InvalidConfiguration("AI run cancellation service is not installed".to_owned())
+                .extend()
         })
 }
 

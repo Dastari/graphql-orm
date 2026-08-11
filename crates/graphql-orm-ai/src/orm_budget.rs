@@ -1691,6 +1691,8 @@ mod tests {
                 next_attempt_at: None,
                 error_code: None,
                 latest_checkpoint_id: None,
+                cancellation_request_id: None,
+                cancellation_requested_at: None,
             },
         )
         .await

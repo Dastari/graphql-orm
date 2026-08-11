@@ -1150,6 +1150,8 @@ impl AiSessionService for OrmAiSessionService {
                         next_attempt_at: Some(now),
                         error_code: None,
                         latest_checkpoint_id: None,
+                        cancellation_request_id: None,
+                        cancellation_requested_at: None,
                     })
                     .await
                     .map_err(OrmPublicError::from)?;

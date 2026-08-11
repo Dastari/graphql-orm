@@ -43,6 +43,33 @@ struct RecordingInboxService {
     request: Mutex<Option<(String, i64, i64)>>,
 }
 
+#[derive(Default)]
+struct RecordingCancellationService {
+    request: Mutex<Option<(String, CancelAiRunInput)>>,
+}
+
+#[async_trait]
+impl AiRunCancellationService for RecordingCancellationService {
+    async fn request_cancellation(
+        &self,
+        principal: &AuthPrincipal,
+        input: CancelAiRunInput,
+    ) -> Result<AiRunCancellationView, AiError> {
+        *self
+            .request
+            .lock()
+            .expect("test mutex should not be poisoned") =
+            Some((principal.subject().to_owned(), input.clone()));
+        Ok(AiRunCancellationView {
+            session_id: input.session_id,
+            run_id: input.run_id,
+            client_request_id: input.client_request_id,
+            state: "cancelled".to_owned(),
+            requested_at: 42,
+        })
+    }
+}
+
 #[async_trait]
 impl AiInboxService for RecordingInboxService {
     async fn inbox_event_page(
@@ -331,6 +358,51 @@ async fn rename_mutation_passes_closed_input_and_current_principal() {
             .as_deref(),
         Some("user-a")
     );
+}
+
+#[tokio::test]
+async fn cancel_run_mutation_passes_exact_pair_and_current_principal() {
+    let session_service = Arc::new(RecordingSessionService::default());
+    let cancellation = Arc::new(RecordingCancellationService::default());
+    let schema = Schema::build(AiQueryRoot, AiMutationRoot, EmptySubscription)
+        .data(session_service as Arc<dyn AiSessionService>)
+        .data(cancellation.clone() as Arc<dyn AiRunCancellationService>)
+        .finish();
+    let session_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    let client_request_id = Uuid::new_v4();
+    let response = schema
+        .execute(
+            Request::new(format!(
+                "mutation {{ cancelAiRun(input: {{ sessionId: \"{session_id}\", runId: \"{run_id}\", clientRequestId: \"{client_request_id}\" }}) {{ sessionId runId clientRequestId state requestedAt }} }}"
+            ))
+            .data(principal("run-owner")),
+        )
+        .await;
+
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(
+        response.data.into_json().expect("response JSON"),
+        json!({
+            "cancelAiRun": {
+                "sessionId": session_id,
+                "runId": run_id,
+                "clientRequestId": client_request_id,
+                "state": "cancelled",
+                "requestedAt": 42,
+            }
+        })
+    );
+    let recorded = cancellation
+        .request
+        .lock()
+        .expect("test mutex should not be poisoned")
+        .clone()
+        .expect("cancellation service should receive a request");
+    assert_eq!(recorded.0, "run-owner");
+    assert_eq!(recorded.1.session_id, session_id);
+    assert_eq!(recorded.1.run_id, run_id);
+    assert_eq!(recorded.1.client_request_id, client_request_id);
 }
 
 #[tokio::test]

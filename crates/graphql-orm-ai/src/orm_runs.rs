@@ -20,8 +20,8 @@ use uuid::Uuid;
 use crate::orm_inbox::{PreparedAiInboxEvent, append_inbox_event};
 use crate::persistence::*;
 use crate::{
-    AiApprovalId, AiBudgetAmounts, AiError, AiRunId, AiRunState, AiSessionId, AiSessionWakeup,
-    AiToolCallId,
+    AiApprovalId, AiBudgetAmounts, AiError, AiRunCancellation, AiRunCancellationHub, AiRunId,
+    AiRunState, AiSessionId, AiSessionWakeup, AiToolCallId,
 };
 
 const MAXIMUM_WORKER_ID_BYTES: usize = 256;
@@ -339,6 +339,7 @@ pub struct OrmAiRunService {
     database: Database<DefaultWriteBackend>,
     clock: Arc<dyn Clock>,
     limits: AiRunServiceLimits,
+    cancellation_hub: Option<Arc<AiRunCancellationHub>>,
 }
 
 #[derive(Clone)]
@@ -611,12 +612,80 @@ impl OrmAiRunService {
             database,
             clock,
             limits,
+            cancellation_hub: None,
         }
+    }
+
+    /// Enables process-local immediate cancellation wakeups. Durable polling
+    /// remains authoritative when the notification is absent or missed.
+    #[must_use]
+    pub fn with_cancellation_hub(mut self, hub: Arc<AiRunCancellationHub>) -> Self {
+        self.cancellation_hub = Some(hub);
+        self
     }
 
     /// Returns the ORM database handle for host schema composition.
     pub fn database(&self) -> &Database<DefaultWriteBackend> {
         &self.database
+    }
+
+    /// Observes whether an owner cancellation has already won the exact run
+    /// attempt/generation fence.
+    pub async fn cancellation(
+        &self,
+        lease: &AiRunLease,
+    ) -> Result<Option<AiRunCancellation>, AiError> {
+        let current = AiRunRecord::find_by_id(&self.database, &lease.run_id.0)
+            .await
+            .map_err(|_| AiError::PersistenceFailed)?
+            .ok_or(AiError::NotFound)?;
+        let stored_reference: PrincipalReference =
+            serde_json::from_value(current.principal_reference.clone())
+                .map_err(|_| AiError::PersistenceFailed)?;
+        if current.session_id != lease.session_id.0
+            || current.input_message_id != lease.input_message_id
+            || stored_reference != lease.principal_reference
+            || current.attempt_id != Some(lease.attempt_id)
+            || current.lease_generation != lease.lease_generation
+        {
+            return Err(AiError::Conflict);
+        }
+        if current.state != AiRunState::Cancelled.as_str() {
+            return Ok(None);
+        }
+        let request_id = current
+            .cancellation_request_id
+            .ok_or(AiError::PersistenceFailed)?;
+        let requested_at = current
+            .cancellation_requested_at
+            .ok_or(AiError::PersistenceFailed)?;
+        Ok(Some(AiRunCancellation::new(
+            lease.session_id,
+            lease.run_id,
+            request_id,
+            requested_at,
+        )))
+    }
+
+    /// Waits for a process-local wakeup or the bounded durable polling
+    /// deadline, then reads the authoritative cancellation state.
+    pub async fn wait_for_cancellation(
+        &self,
+        lease: &AiRunLease,
+        maximum_wait: std::time::Duration,
+    ) -> Result<Option<AiRunCancellation>, AiError> {
+        if let Some(cancellation) = self.cancellation(lease).await? {
+            return Ok(Some(cancellation));
+        }
+        if maximum_wait.is_zero() {
+            return Ok(None);
+        }
+        if let Some(hub) = &self.cancellation_hub {
+            hub.wait(lease.run_id, maximum_wait).await;
+        } else {
+            tokio::time::sleep(maximum_wait).await;
+        }
+        self.cancellation(lease).await
     }
 
     #[cfg(all(
@@ -4113,6 +4182,8 @@ mod tests {
                 next_attempt_at: Some(fixture.clock.now().unix_timestamp()),
                 error_code: None,
                 latest_checkpoint_id: None,
+                cancellation_request_id: None,
+                cancellation_requested_at: None,
             },
         )
         .await

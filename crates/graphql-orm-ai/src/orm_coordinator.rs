@@ -243,6 +243,26 @@ pub trait AiAgentRunControl: Send + Sync {
     /// persisted.
     async fn heartbeat(&self, lease: &AiRunLease) -> Result<AiRunLease, AiError>;
 
+    /// Reads an already-terminal owner cancellation for the exact attempt.
+    async fn cancellation(
+        &self,
+        _lease: &AiRunLease,
+    ) -> Result<Option<crate::AiRunCancellation>, AiError> {
+        Ok(None)
+    }
+
+    /// Waits up to a bounded interval for cancellation. Implementations may
+    /// accelerate this with process-local notifications, but durable state is
+    /// authoritative.
+    async fn wait_for_cancellation(
+        &self,
+        lease: &AiRunLease,
+        maximum_wait: std::time::Duration,
+    ) -> Result<Option<crate::AiRunCancellation>, AiError> {
+        tokio::time::sleep(maximum_wait).await;
+        self.cancellation(lease).await
+    }
+
     /// Commits one exact terminal/recovery outcome.
     ///
     /// # Errors
@@ -260,6 +280,21 @@ impl AiAgentRunControl for OrmAiRunService {
 
     async fn heartbeat(&self, lease: &AiRunLease) -> Result<AiRunLease, AiError> {
         OrmAiRunService::heartbeat(self, lease).await
+    }
+
+    async fn cancellation(
+        &self,
+        lease: &AiRunLease,
+    ) -> Result<Option<crate::AiRunCancellation>, AiError> {
+        OrmAiRunService::cancellation(self, lease).await
+    }
+
+    async fn wait_for_cancellation(
+        &self,
+        lease: &AiRunLease,
+        maximum_wait: std::time::Duration,
+    ) -> Result<Option<crate::AiRunCancellation>, AiError> {
+        OrmAiRunService::wait_for_cancellation(self, lease, maximum_wait).await
     }
 
     async fn finish(&self, lease: &AiRunLease, completion: AiRunCompletion) -> Result<(), AiError> {
@@ -539,6 +574,14 @@ pub enum AiReadOnlyAgentRunOutcome {
         /// Durably resolved application-tool call count.
         total_tool_calls: u32,
     },
+    /// The owner cancellation fence won and no later tool, output, or
+    /// continuation was persisted.
+    Cancelled {
+        /// Accepted provider-turn count before cancellation.
+        provider_turns: u32,
+        /// Durably resolved application-tool call count before cancellation.
+        total_tool_calls: u32,
+    },
     /// An external boundary remained ambiguous and the run was durably closed
     /// for privileged reconciliation instead of being replayed.
     RecoveryRequired {
@@ -621,7 +664,24 @@ impl AiReadOnlyAgentCoordinator {
         &self,
         claimed: &AiRunLease,
     ) -> Result<AiReadOnlyAgentRunOutcome, AiError> {
-        let mut lease = self.run_control.start(claimed).await?;
+        let mut lease = match self.run_control.start(claimed).await {
+            Ok(lease) => lease,
+            Err(error) => {
+                if self.run_control.cancellation(claimed).await?.is_some() {
+                    return Ok(Cancelled {
+                        provider_turns: 0,
+                        total_tool_calls: 0,
+                    });
+                }
+                return Err(error);
+            }
+        };
+        if self.run_control.cancellation(&lease).await?.is_some() {
+            return Ok(Cancelled {
+                provider_turns: 0,
+                total_tool_calls: 0,
+            });
+        }
         let (mut guard, mut turn_plan, mut rule_usage) = if lease.latest_checkpoint_id().is_some() {
             let adopted = match self.checkpoint_adopter.adopt_tool_batch(&lease).await {
                 Ok(Some(adopted)) => adopted,
@@ -742,6 +802,12 @@ impl AiReadOnlyAgentCoordinator {
         };
 
         loop {
+            if self.run_control.cancellation(&lease).await?.is_some() {
+                return Ok(Cancelled {
+                    provider_turns: guard.provider_turns(),
+                    total_tool_calls: guard.total_tool_calls(),
+                });
+            }
             if !guard.can_begin_provider_turn() {
                 return self
                     .finish_failed(&lease, &guard, "provider_turn_limit_reached")
@@ -784,6 +850,12 @@ impl AiReadOnlyAgentCoordinator {
             {
                 Ok(result) => result,
                 Err(ProviderTurnFailure::Provider) => {
+                    if self.run_control.cancellation(&lease).await?.is_some() {
+                        return Ok(Cancelled {
+                            provider_turns: guard.provider_turns(),
+                            total_tool_calls: guard.total_tool_calls(),
+                        });
+                    }
                     return self
                         .finish_recovery(
                             &lease,
@@ -795,7 +867,20 @@ impl AiReadOnlyAgentCoordinator {
                         .await;
                 }
                 Err(ProviderTurnFailure::LeaseLost(error)) => return Err(error),
+                Err(ProviderTurnFailure::Cancelled) => {
+                    return Ok(Cancelled {
+                        provider_turns: guard.provider_turns(),
+                        total_tool_calls: guard.total_tool_calls(),
+                    });
+                }
             };
+
+            if self.run_control.cancellation(&lease).await?.is_some() {
+                return Ok(Cancelled {
+                    provider_turns: guard.provider_turns(),
+                    total_tool_calls: guard.total_tool_calls(),
+                });
+            }
 
             let observed = match guard.observe_provider_turn(&result) {
                 Ok(observed) => observed,
@@ -923,6 +1008,12 @@ impl AiReadOnlyAgentCoordinator {
                         };
                     let mut completed_tools = Vec::with_capacity(call_count);
                     for tool_call_index in 0..call_count {
+                        if self.run_control.cancellation(&lease).await?.is_some() {
+                            return Ok(Cancelled {
+                                provider_turns: guard.provider_turns(),
+                                total_tool_calls: guard.total_tool_calls(),
+                            });
+                        }
                         match self.rule_resolver.resolve_rules(&lease, &scope).await {
                             Ok(current)
                                 if current.rules().fingerprint() == planned_rules.fingerprint() =>
@@ -958,6 +1049,12 @@ impl AiReadOnlyAgentCoordinator {
                         {
                             Ok(persisted) => persisted,
                             Err(_) => {
+                                if self.run_control.cancellation(&lease).await?.is_some() {
+                                    return Ok(Cancelled {
+                                        provider_turns: guard.provider_turns(),
+                                        total_tool_calls: guard.total_tool_calls(),
+                                    });
+                                }
                                 return self
                                     .finish_recovery(
                                         &lease,
@@ -980,6 +1077,12 @@ impl AiReadOnlyAgentCoordinator {
                                 .await;
                         }
                         lease = renewed;
+                        if self.run_control.cancellation(&lease).await?.is_some() {
+                            return Ok(Cancelled {
+                                provider_turns: guard.provider_turns(),
+                                total_tool_calls: guard.total_tool_calls(),
+                            });
+                        }
                         completed_tools.push(persisted);
                     }
                     let continuation = match guard.continuation() {
@@ -1096,16 +1199,24 @@ impl AiReadOnlyAgentCoordinator {
         tokio::pin!(provider);
         let heartbeat_delay = self.limits.heartbeat_interval.unsigned_abs();
         loop {
-            let heartbeat = tokio::time::sleep(heartbeat_delay);
-            tokio::pin!(heartbeat);
+            let cancellation_lease = lease.clone();
+            let cancellation = self
+                .run_control
+                .wait_for_cancellation(&cancellation_lease, heartbeat_delay);
+            tokio::pin!(cancellation);
             tokio::select! {
                 result = &mut provider => return result.map_err(|_| ProviderTurnFailure::Provider),
-                () = &mut heartbeat => {
-                    *lease = self
-                        .run_control
-                        .heartbeat(lease)
-                        .await
-                        .map_err(ProviderTurnFailure::LeaseLost)?;
+                result = &mut cancellation => {
+                    match result.map_err(ProviderTurnFailure::LeaseLost)? {
+                        Some(_) => return Err(ProviderTurnFailure::Cancelled),
+                        None => {
+                            *lease = self
+                                .run_control
+                                .heartbeat(lease)
+                                .await
+                                .map_err(ProviderTurnFailure::LeaseLost)?;
+                        }
+                    }
                 }
             }
         }
@@ -1117,6 +1228,12 @@ impl AiReadOnlyAgentCoordinator {
         guard: &AiAgentLoopGuard,
         result: &AiProviderCallResult,
     ) -> Result<AiReadOnlyAgentRunOutcome, AiError> {
+        if self.run_control.cancellation(lease).await?.is_some() {
+            return Ok(Cancelled {
+                provider_turns: guard.provider_turns(),
+                total_tool_calls: guard.total_tool_calls(),
+            });
+        }
         let persisted = match self.output_writer.persist_output(lease, result).await {
             Ok(persisted) => persisted,
             Err(_) => {
@@ -1133,6 +1250,12 @@ impl AiReadOnlyAgentCoordinator {
         };
         let message_id = persisted.message_id();
         let lease = persisted.into_lease();
+        if self.run_control.cancellation(&lease).await?.is_some() {
+            return Ok(Cancelled {
+                provider_turns: guard.provider_turns(),
+                total_tool_calls: guard.total_tool_calls(),
+            });
+        }
         let completion = AiRunCompletion::new(
             AiRunState::Completed,
             "agent_completed",
@@ -1153,6 +1276,12 @@ impl AiReadOnlyAgentCoordinator {
         guard: &AiAgentLoopGuard,
         code: &str,
     ) -> Result<AiReadOnlyAgentRunOutcome, AiError> {
+        if self.run_control.cancellation(lease).await?.is_some() {
+            return Ok(Cancelled {
+                provider_turns: guard.provider_turns(),
+                total_tool_calls: guard.total_tool_calls(),
+            });
+        }
         let completion =
             AiRunCompletion::new(AiRunState::Failed, code, Some(code.to_owned()), None)?;
         self.run_control.finish(lease, completion).await?;
@@ -1170,6 +1299,12 @@ impl AiReadOnlyAgentCoordinator {
         code: &str,
         provider_response_id: Option<&str>,
     ) -> Result<AiReadOnlyAgentRunOutcome, AiError> {
+        if self.run_control.cancellation(lease).await?.is_some() {
+            return Ok(Cancelled {
+                provider_turns: guard.provider_turns(),
+                total_tool_calls: guard.total_tool_calls(),
+            });
+        }
         let completion = AiRunCompletion::new(
             AiRunState::RecoveryRequired,
             code,
@@ -1188,6 +1323,7 @@ impl AiReadOnlyAgentCoordinator {
 enum ProviderTurnFailure {
     Provider,
     LeaseLost(AiError),
+    Cancelled,
 }
 
 #[cfg(all(test, feature = "sqlite"))]
@@ -1203,14 +1339,15 @@ mod tests {
 
     use super::*;
     use crate::{
-        AiDataSourceRef, AiDestinationTrust, AiEgressCapability, AiEgressManifest, AiSourceTrust,
-        DataClassification, ModelContinuation,
+        AiDataSourceRef, AiDestinationTrust, AiEgressCapability, AiEgressManifest,
+        AiRunCancellation, AiSourceTrust, DataClassification, ModelContinuation,
     };
 
     struct TestRunControl {
         finishes: Mutex<Vec<AiRunState>>,
         heartbeat_count: AtomicUsize,
         fail_heartbeat: AtomicBool,
+        cancelled: AtomicBool,
     }
 
     impl TestRunControl {
@@ -1219,6 +1356,7 @@ mod tests {
                 finishes: Mutex::new(Vec::new()),
                 heartbeat_count: AtomicUsize::new(0),
                 fail_heartbeat: AtomicBool::new(false),
+                cancelled: AtomicBool::new(false),
             }
         }
 
@@ -1243,6 +1381,29 @@ mod tests {
             } else {
                 Ok(lease.clone())
             }
+        }
+
+        async fn cancellation(
+            &self,
+            lease: &AiRunLease,
+        ) -> Result<Option<AiRunCancellation>, AiError> {
+            Ok(self.cancelled.load(Ordering::SeqCst).then(|| {
+                AiRunCancellation::new(
+                    lease.session_id(),
+                    lease.run_id(),
+                    Uuid::from_u128(91),
+                    1_700_000_000,
+                )
+            }))
+        }
+
+        async fn wait_for_cancellation(
+            &self,
+            lease: &AiRunLease,
+            maximum_wait: std::time::Duration,
+        ) -> Result<Option<AiRunCancellation>, AiError> {
+            tokio::time::sleep(maximum_wait.min(std::time::Duration::from_millis(5))).await;
+            self.cancellation(lease).await
         }
 
         async fn finish(
@@ -1992,6 +2153,61 @@ mod tests {
         assert_eq!(forbidden.tool_batch_checkpoints.load(Ordering::SeqCst), 0);
         assert_eq!(planner.continuation_count.load(Ordering::SeqCst), 0);
         assert_eq!(run.final_states(), vec![AiRunState::Completed]);
+    }
+
+    #[tokio::test]
+    async fn owner_cancellation_drops_active_provider_and_writes_no_later_output() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        let provider = Arc::new(TestProviderExecutor {
+            responses: Mutex::new(VecDeque::from([Ok(AiProviderCallResult::test_result(
+                &lease,
+                None,
+                "response-cancelled-before-return",
+                Vec::new(),
+            ))])),
+            delay: Some(std::time::Duration::from_secs(5)),
+        });
+        let planner = Arc::new(TestChatPlanner {
+            scope: test_scope(),
+            continuation_count: AtomicUsize::new(0),
+        });
+        let forbidden = Arc::new(ChatForbiddenBoundaries::default());
+        let coordinator = AiReadOnlyAgentCoordinator::new(
+            run.clone(),
+            provider.clone(),
+            forbidden.clone(),
+            Arc::new(TestOutputWriter),
+            forbidden.clone(),
+            Arc::new(TestCheckpointWriter),
+            Arc::new(TestRuleResolver),
+            planner.clone(),
+            limits(10),
+        );
+        let cancel_run = run.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+            cancel_run.cancelled.store(true, Ordering::SeqCst);
+        });
+
+        let outcome = coordinator
+            .execute_claimed(&lease)
+            .await
+            .expect("durable cancellation should become the canonical outcome");
+
+        assert!(matches!(
+            outcome,
+            Cancelled {
+                provider_turns: 0,
+                total_tool_calls: 0
+            }
+        ));
+        assert_eq!(provider.remaining_responses(), 1);
+        assert_eq!(forbidden.tool_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(forbidden.provider_checkpoints.load(Ordering::SeqCst), 0);
+        assert_eq!(forbidden.tool_batch_checkpoints.load(Ordering::SeqCst), 0);
+        assert_eq!(planner.continuation_count.load(Ordering::SeqCst), 0);
+        assert!(run.final_states().is_empty());
     }
 
     #[tokio::test]

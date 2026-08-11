@@ -8,8 +8,8 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
 
     assert_eq!(catalog.modules().len(), 1);
     assert_eq!(catalog.modules()[0].version, AI_SCHEMA_MODULE_VERSION);
-    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.52.0");
-    assert_eq!(catalog.entities().len(), 42);
+    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.53.0");
+    assert_eq!(catalog.entities().len(), 43);
     assert!(
         catalog
             .entities()
