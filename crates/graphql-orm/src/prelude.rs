@@ -25,5 +25,5 @@ pub use crate::graphql::structural_auth::{
 };
 pub use crate::{
     GraphQLEntity, GraphQLOperations, GraphQLRelations, GraphQLSchemaEntity, RepositoryEntity,
-    mutation_result, schema_roots,
+    backend_selected_graphql_entity, mutation_result, schema_roots,
 };

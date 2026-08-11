@@ -13,6 +13,24 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.21.0 Backend-neutral operation catalog and companion derives
+
+Update `graphql-orm` and `graphql-orm-macros` together to 0.21.0 at one
+reviewed full Git revision. Existing imports of resolver-operation metadata
+through `graphql_orm::graphql::orm` remain source compatible; the canonical
+types now live in `graphql-orm-operation-catalog` 0.1.0 so database-neutral
+manifest producers do not have to select an ORM backend.
+
+Reusable companion packages exposing mutually exclusive `sqlite`, `postgres`,
+and `mssql` features may replace `#[graphql_entity(...)]` with
+`#[backend_selected_graphql_entity(...)]`. The latter accepts the same entity
+arguments except `backend` and supplies the backend from the companion crate's
+own selected feature. Application entities with a fixed backend should keep
+the ordinary explicit `backend = "..."` declaration.
+
+No database, SDL, migration-history, backup, operation fingerprint, or stored
+data migration is required.
+
 ## 0.20.0 Semantic entity descriptions
 
 Update `graphql-orm` and `graphql-orm-macros` together to 0.20.0 at one

@@ -225,7 +225,7 @@ impl AiRemoteGraphqlDelegationRequest {
             || request.contract.schema_fingerprint != target.schema_fingerprint
             || request.contract.document_hash != stable_text_hash(&request.document)
             || request.operation_name != request.contract.operation_name
-            || crate::tools::contains_forbidden_graphql_name(&request.document)
+            || crate::contains_forbidden_graphql_name(&request.document)
             || request.invocation.scope.kind.trim().is_empty()
             || request.invocation.scope.id.trim().is_empty()
             || !valid_reference(&request.invocation.correlation_id)

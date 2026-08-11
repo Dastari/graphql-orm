@@ -1,0 +1,25 @@
+[package]
+name = "graphql-orm-operation-catalog"
+version = "0.1.0"
+edition = "2024"
+authors = ["Toby Martin <toby@dastari.net>"]
+description = "Backend-neutral generated GraphQL operation metadata for graphql-orm"
+license = "MIT"
+repository = "https://github.com/Dastari/graphql-orm"
+homepage = "https://github.com/Dastari/graphql-orm"
+documentation = "https://docs.rs/graphql-orm-operation-catalog"
+readme = "README.md"
+keywords = ["graphql", "metadata", "schema", "orm"]
+categories = ["web-programming", "data-structures"]
+publish = false
+
+[package.metadata.distribution]
+method = "git-full-revision"
+
+[features]
+router-protocol = ["dep:graphql-orm-router-protocol"]
+
+[dependencies]
+graphql-orm-router-protocol = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"] }
+sha2 = { workspace = true }

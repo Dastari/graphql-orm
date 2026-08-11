@@ -20,7 +20,7 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.65.0` and AI
+This development line advances the pre-1.0 crate version to `0.66.0` and AI
 schema module `0.52.0`. It begins the applied-restore implementation with
 bounded database-derived facts, aligns the reviewed dependency universe,
 integrates generated resolver-operation metadata, completes the durable OpenAI
@@ -37,6 +37,22 @@ file-search IDs behind the reviewed persistent-file design.
   context, ownership, scope, retention, and content bounds remain enforced.
 
 ### Changed
+
+- The canonical GraphQL tool-profile/compiler/manifest surface now lives in
+  the database-neutral `graphql-orm-ai-tool-profiles` package and is re-exported
+  unchanged by `graphql-orm-ai`. Owning subgraphs can compile reviewed
+  generated and custom profiles without selecting or compiling an AI
+  persistence backend. Generated resolver metadata similarly lives in the
+  backend-neutral `graphql-orm-operation-catalog` package and remains
+  re-exported by `graphql-orm`.
+- AI persistence no longer acquires `graphql-orm-backup` transitively. Hosts
+  that use the independent backup companion declare it directly at the same
+  reviewed monorepo revision. This removes an unused backend-unification edge;
+  AI schema metadata and restore contracts are unchanged.
+- Companion crates with a mutually exclusive host backend can use
+  `#[backend_selected_graphql_entity(...)]` so their entity derives bind their
+  own `sqlite`, `postgres`, or `mssql` feature even when another workspace root
+  unifies additional `graphql-orm` backend features.
 
 - Removed `AiRestorePlan::readiness_report_after_apply`. A pure dry-run plan
   cannot truthfully manufacture evidence that database repairs were applied

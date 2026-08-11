@@ -3,7 +3,7 @@ title: GraphQL ORM documentation index
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-11
 review_by: 2026-11-01
 supersedes: []
 ---
@@ -41,9 +41,11 @@ describe:
 
 - [`graphql-orm`](../crates/graphql-orm/README.md)
 - [`graphql-orm-macros`](../crates/graphql-orm-macros/README.md)
+- [`graphql-orm-operation-catalog`](../crates/graphql-orm-operation-catalog/README.md)
 - [`graphql-orm-storage`](../crates/graphql-orm-storage/docs/README.md)
 - [`graphql-orm-backup`](../crates/graphql-orm-backup/docs/README.md)
 - [`graphql-orm-ai`](../crates/graphql-orm-ai/docs/README.md)
+- [`graphql-orm-ai-tool-profiles`](../crates/graphql-orm-ai-tool-profiles/README.md)
 - [`graphql-orm-router-protocol`](../crates/graphql-orm-router-protocol/README.md)
 - [`graphql-orm-router`](../crates/graphql-orm-router/README.md)
 

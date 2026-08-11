@@ -3,7 +3,7 @@ title: "GraphQL ORM workspace"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,9 +13,10 @@ supersedes: []
 `graphql-orm` generates async-graphql query/mutation types, typed filters, ordering, pagination,
 relation loading, repository helpers, schema metadata, and migration plans from Rust entity structs.
 
-This repository also contains the independently consumable AI, backup, and
-storage companion crates. Applications depend only on the packages they need;
-workspace membership does not enable the companion crates as ORM features.
+This repository also contains independently consumable operation-catalog,
+AI-tool-profile, AI-runtime, backup, storage, router-protocol, and router
+packages. Applications depend only on the packages they need; workspace
+membership does not enable companion packages as ORM features.
 
 It is designed for two related use cases:
 
@@ -68,7 +69,7 @@ Select exactly the backend support your service needs:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.20.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.21.0", default-features = false, features = ["sqlite"] }
 ```
 
 GitHub with an exact full revision is the only supported distribution method. The workspace packages are

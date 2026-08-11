@@ -2990,7 +2990,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -3000,7 +3000,7 @@ dependencies = [
  "geo-types",
  "geojson",
  "graphql-orm-macros",
- "graphql-orm-router-protocol",
+ "graphql-orm-operation-catalog",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3016,7 +3016,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai"
-version = "0.65.0"
+version = "0.66.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -3026,7 +3026,7 @@ dependencies = [
  "base64 0.22.1",
  "futures",
  "graphql-orm",
- "graphql-orm-backup",
+ "graphql-orm-ai-tool-profiles",
  "graphql-orm-storage",
  "hex",
  "hmac 0.12.1",
@@ -3042,6 +3042,21 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "graphql-orm-ai-tool-profiles"
+version = "0.1.0"
+dependencies = [
+ "async-graphql",
+ "async-graphql-parser",
+ "graphql-orm-operation-catalog",
+ "hex",
+ "jsonschema 0.47.0",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -3066,12 +3081,21 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "convert_case 0.7.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "graphql-orm-operation-catalog"
+version = "0.1.0"
+dependencies = [
+ "graphql-orm-router-protocol",
+ "serde",
+ "sha2 0.10.9",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-ai"
-version = "0.65.0"
+version = "0.66.0"
 edition = "2024"
 authors = ["Toby Martin <toby@dastari.net>"]
 description = "Project-agnostic AI agent runtime for graphql-orm applications"
@@ -17,15 +17,9 @@ publish = false
 default = ["sqlite"]
 sqlite = [
   "graphql-orm/sqlite",
-  "dep:graphql-orm-backup",
-  "graphql-orm-backup/local",
-  "graphql-orm-backup/orm-sqlite",
 ]
 postgres = [
   "graphql-orm/postgres",
-  "dep:graphql-orm-backup",
-  "graphql-orm-backup/local",
-  "graphql-orm-backup/orm-postgres",
 ]
 mssql = ["graphql-orm/mssql"]
 provider-openai = ["dep:base64", "dep:hmac", "dep:reqwest"]
@@ -49,7 +43,7 @@ async-trait = "0.1"
 base64 = { version = "0.22", optional = true }
 futures = "0.3"
 graphql-orm = { workspace = true }
-graphql-orm-backup = { workspace = true, optional = true }
+graphql-orm-ai-tool-profiles = { workspace = true }
 graphql-orm-storage = { workspace = true }
 hex = "0.4"
 hmac = { version = "0.12", optional = true }

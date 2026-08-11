@@ -7,14 +7,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use async_graphql_parser::{parse_schema, types::TypeSystemDefinition};
-use graphql_orm::graphql::orm::{GraphqlOperationCatalog, GraphqlOperationKind};
+use graphql_orm_operation_catalog::{GraphqlOperationCatalog, GraphqlOperationKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
     AiApprovalRule, AiDisclosureDisposition, AiDisclosureSchema, AiDisclosureShape, AiError,
-    AiGeneratedGraphqlOperationPolicy, AiToolCatalog, AiToolDescriptor, AiToolOperationDomain,
+    AiGeneratedGraphqlOperationPolicy, AiToolDescriptor, AiToolOperationDomain,
     AiToolOperationKind, AiToolRisk, DataClassification, GraphqlExecutionTargetId,
     GraphqlOperationContract, ToolMaturity,
 };
@@ -30,6 +30,35 @@ const MAXIMUM_DESCRIPTION_BYTES: usize = 512;
 const MAXIMUM_PROJECTION_DEPTH: usize = 8;
 const MAXIMUM_PROFILE_INPUTS: usize = 64;
 const MAXIMUM_SELECTIONS_PER_LEVEL: usize = 128;
+
+/// Consumer-side registration boundary for canonical tool manifests.
+///
+/// Implementations remain responsible for default-deny registration. Profile
+/// compilation and transport never enable a tool or grant resolver authority.
+pub trait AiGraphqlToolManifestCatalog {
+    /// Registers one generated entry after current operation-catalog admission.
+    fn register_generated_manifest_entry(
+        &mut self,
+        descriptor: AiToolDescriptor,
+        disclosure_schema: AiDisclosureSchema,
+        operation_catalog: &GraphqlOperationCatalog,
+        operation_policy: &dyn AiGeneratedGraphqlOperationPolicy,
+    ) -> Result<(), AiError>;
+
+    /// Registers one finished-schema-validated custom entry.
+    fn register_custom_manifest_entry(
+        &mut self,
+        descriptor: AiToolDescriptor,
+        disclosure_schema: AiDisclosureSchema,
+    ) -> Result<(), AiError>;
+
+    /// Registers one entry already validated by an aggregated active manifest set.
+    fn register_aggregated_manifest_entry(
+        &mut self,
+        descriptor: AiToolDescriptor,
+        disclosure_schema: AiDisclosureSchema,
+    ) -> Result<(), AiError>;
+}
 
 /// GraphQL operation root used by a tool profile.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -548,12 +577,15 @@ impl AiGraphqlToolManifest {
     /// Registers every compiled entry. Generated entries are revalidated
     /// against the current ORM operation catalog and host classification;
     /// custom roots remain bound to the same finished-schema fingerprint.
-    pub fn register_into(
+    pub fn register_into<C>(
         &self,
-        catalog: &mut AiToolCatalog,
+        catalog: &mut C,
         operation_catalog: &GraphqlOperationCatalog,
         operation_policy: &dyn AiGeneratedGraphqlOperationPolicy,
-    ) -> Result<(), AiError> {
+    ) -> Result<(), AiError>
+    where
+        C: AiGraphqlToolManifestCatalog,
+    {
         if self.version != AI_GRAPHQL_TOOL_MANIFEST_VERSION
             || self.fingerprint != self.compute_fingerprint()
         {
@@ -562,13 +594,13 @@ impl AiGraphqlToolManifest {
         self.validate_entries()?;
         for entry in &self.entries {
             match entry.source {
-                AiGraphqlToolSource::Generated => catalog.register_generated_with_disclosure(
+                AiGraphqlToolSource::Generated => catalog.register_generated_manifest_entry(
                     entry.descriptor.clone(),
                     entry.disclosure_schema.clone(),
                     operation_catalog,
                     operation_policy,
                 )?,
-                AiGraphqlToolSource::Custom => catalog.register_with_disclosure(
+                AiGraphqlToolSource::Custom => catalog.register_custom_manifest_entry(
                     entry.descriptor.clone(),
                     entry.disclosure_schema.clone(),
                 )?,
@@ -731,11 +763,14 @@ impl AiGraphqlToolManifestSet {
     ///
     /// Returns an error if any manifest entry is inconsistent or conflicts
     /// with an entry already registered in `catalog`.
-    pub fn register_into(&self, catalog: &mut AiToolCatalog) -> Result<(), AiError> {
+    pub fn register_into<C>(&self, catalog: &mut C) -> Result<(), AiError>
+    where
+        C: AiGraphqlToolManifestCatalog,
+    {
         for manifest in &self.manifests {
             manifest.validate_entries()?;
             for entry in &manifest.entries {
-                catalog.register_compiled_manifest_entry(
+                catalog.register_aggregated_manifest_entry(
                     entry.descriptor.clone(),
                     entry.disclosure_schema.clone(),
                 )?;

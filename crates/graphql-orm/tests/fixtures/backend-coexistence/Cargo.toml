@@ -1,4 +1,3 @@
 [workspace]
-members = ["auth-service", "jim-service"]
+members = ["auth-service", "fame-ai-runtime", "jim-service"]
 resolver = "3"
-

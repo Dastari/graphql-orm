@@ -186,7 +186,9 @@ impl AiDisclosureSchema {
         evaluate_node(value, &self.root, 0)
     }
 
-    pub(crate) fn maximum_list_bound(&self) -> u32 {
+    /// Returns the greatest explicit list-cardinality bound in the schema.
+    #[doc(hidden)]
+    pub fn maximum_list_bound(&self) -> u32 {
         maximum_list_bound(&self.root)
     }
 

@@ -13,4 +13,5 @@ graphql-orm = { path = "../../../../", default-features = false, features = [
   "argument-case-pascal",
   "field-case-pascal",
 ] }
+graphql-orm-ai-tool-profiles = { path = "../../../../../graphql-orm-ai-tool-profiles" }
 serde = { version = "1", features = ["derive"] }

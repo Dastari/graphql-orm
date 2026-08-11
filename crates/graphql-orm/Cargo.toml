@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm"
-version = "0.20.0"
+version = "0.21.0"
 edition = "2024"
 description = "Runtime support crate for graphql-orm-macros"
 license = "MIT"
@@ -37,7 +37,7 @@ mssql = [
 ]
 change-journal = []
 auth-agql = ["dep:agql-auth"]
-router-protocol = ["dep:graphql-orm-router-protocol"]
+router-protocol = ["graphql-orm-operation-catalog/router-protocol"]
 resolver-case-pascal = ["graphql-orm-macros/resolver-case-pascal"]
 resolver-case-snake = ["graphql-orm-macros/resolver-case-snake"]
 resolver-case-screaming-snake = ["graphql-orm-macros/resolver-case-screaming-snake"]
@@ -62,8 +62,8 @@ futures = "0.3"
 geo = { version = "0.33", optional = true, default-features = false }
 geo-types = { version = "0.7", optional = true }
 geojson = { version = "1", optional = true, default-features = true }
-graphql-orm-macros = { path = "../graphql-orm-macros", version = "0.20.0", default-features = false }
-graphql-orm-router-protocol = { workspace = true, optional = true }
+graphql-orm-macros = { path = "../graphql-orm-macros", version = "0.21.0", default-features = false }
+graphql-orm-operation-catalog = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = { workspace = true }

@@ -1,0 +1,29 @@
+[package]
+name = "graphql-orm-ai-tool-profiles"
+version = "0.1.0"
+edition = "2024"
+authors = ["Toby Martin <toby@dastari.net>"]
+description = "Backend-neutral GraphQL AI tool profile compiler and manifest contracts"
+license = "MIT"
+repository = "https://github.com/Dastari/graphql-orm"
+homepage = "https://github.com/Dastari/graphql-orm"
+documentation = "https://docs.rs/graphql-orm-ai-tool-profiles"
+readme = "README.md"
+keywords = ["ai", "graphql", "tools", "schema"]
+categories = ["web-programming", "api-bindings"]
+publish = false
+
+[package.metadata.distribution]
+method = "git-full-revision"
+
+[dependencies]
+async-graphql = { version = "7", features = ["uuid"] }
+async-graphql-parser = { workspace = true }
+graphql-orm-operation-catalog = { workspace = true }
+hex = "0.4"
+jsonschema = { version = "0.47", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+

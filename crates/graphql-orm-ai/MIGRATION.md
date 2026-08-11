@@ -19,6 +19,30 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased: backend-neutral tool-profile producers (crate 0.65.0 to 0.66.0; schema remains 0.52.0)
+
+Owning subgraphs that only publish reviewed AI GraphQL tool manifests should
+depend on `graphql-orm-ai-tool-profiles` 0.1.0. The package accepts the same
+profile, builder, manifest, descriptor, disclosure, execution-target, and
+generated-operation policy types previously exposed by `graphql-orm-ai`, but
+has no database, persistence, backup, storage, provider, or coordinator
+dependency. `graphql-orm-ai` re-exports those canonical types, so wire payloads
+and fingerprints are byte-identical and require no transformation.
+
+Generated resolver catalog types are now owned by
+`graphql-orm-operation-catalog` 0.1.0 and remain source-compatible re-exports
+from `graphql-orm`. Mixed-backend workspaces should update `graphql-orm` and
+`graphql-orm-macros` together to 0.21.0. Reusable companion crates whose own
+`sqlite`, `postgres`, and `mssql` features are mutually exclusive may use
+`#[backend_selected_graphql_entity(...)]` to keep derive selection local to
+the consuming package despite Cargo feature unification.
+
+`graphql-orm-ai` no longer pulls `graphql-orm-backup` transitively. Hosts using
+backup/restore orchestration must declare `graphql-orm-backup` directly with
+the matching backend and reviewed revision. AI schema module 0.52.0, GraphQL
+SDL, stored rows, manifest wire version, and persistent semantics are
+unchanged; no schema or data migration is required.
+
 ## Unreleased: durable session titles (crate 0.64.0 to 0.65.0; schema 0.51.0 to 0.52.0)
 
 Apply AI schema module 0.52.0 before starting a 0.65.0 session or title worker.

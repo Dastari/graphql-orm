@@ -16,17 +16,21 @@ under a crate add package-local invariants.
 ## Workspace boundaries
 
 - The workspace contains `graphql-orm`, `graphql-orm-macros`,
-  `graphql-orm-storage`, `graphql-orm-backup`, `graphql-orm-ai`,
+  `graphql-orm-operation-catalog`, `graphql-orm-storage`,
+  `graphql-orm-backup`, `graphql-orm-ai-tool-profiles`, `graphql-orm-ai`,
   `graphql-orm-router-protocol`, and `graphql-orm-router`.
 - `agql-auth` remains an external exact-revision dependency. Do not modify its
   repository unless the task explicitly includes it.
 - Keep the packages independently consumable. Do not turn AI, backup, or
   storage into features or optional dependencies of the core ORM crate.
 - Preserve this acyclic dependency direction:
-  `graphql-orm-ai -> graphql-orm-backup -> graphql-orm-storage`,
-  `graphql-orm-ai -> graphql-orm`, optional
+  `graphql-orm-ai -> graphql-orm-ai-tool-profiles -> graphql-orm-operation-catalog`,
+  `graphql-orm-ai -> graphql-orm`,
+  `graphql-orm-ai -> graphql-orm-storage`,
+  `graphql-orm-backup -> graphql-orm-storage`, optional
   `graphql-orm-backup -> graphql-orm`, and
-  `graphql-orm -> graphql-orm-macros`, plus
+  `graphql-orm -> graphql-orm-macros`,
+  `graphql-orm -> graphql-orm-operation-catalog`, plus
   `graphql-orm-router -> graphql-orm-router-protocol` and optional
   `graphql-orm -> graphql-orm-router-protocol`.
 - Keep Federation runtime and server dependencies inside

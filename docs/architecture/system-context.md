@@ -3,24 +3,27 @@ title: GraphQL ORM system context
 kind: architecture
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-11
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # GraphQL ORM system context
 
-The repository contains seven independently consumable Rust packages. Workspace
+The repository contains nine independently consumable Rust packages. Workspace
 membership provides coordinated development, path dependencies, and one lock
 file; it does not combine the companion packages into features of the ORM.
 
 ```mermaid
 flowchart LR
-    AI[graphql-orm-ai] --> ORM[graphql-orm]
-    AI --> Backup[graphql-orm-backup]
+    AI[graphql-orm-ai] --> Profiles[graphql-orm-ai-tool-profiles]
+    Profiles --> Catalog[graphql-orm-operation-catalog]
+    AI --> ORM[graphql-orm]
+    AI --> Storage[graphql-orm-storage]
     Backup -. optional ORM adapter .-> ORM
     Backup --> Storage[graphql-orm-storage]
     ORM --> Macros[graphql-orm-macros]
+    ORM --> Catalog
     Router[graphql-orm-router] --> Protocol[graphql-orm-router-protocol]
     ORM -. optional metadata export .-> Protocol
     Router --> Federation[external federation runtime and composition]
@@ -31,10 +34,12 @@ flowchart LR
 
 The allowed internal dependency direction is acyclic:
 
-`graphql-orm-ai -> graphql-orm-backup -> graphql-orm-storage`,
-`graphql-orm-ai -> graphql-orm`, optional
+`graphql-orm-ai -> graphql-orm-ai-tool-profiles -> graphql-orm-operation-catalog`,
+`graphql-orm-ai -> graphql-orm`, `graphql-orm-ai -> graphql-orm-storage`, optional
 `graphql-orm-backup -> graphql-orm`, and
-`graphql-orm -> graphql-orm-macros`, plus
+`graphql-orm-backup -> graphql-orm-storage`,
+`graphql-orm -> graphql-orm-macros`,
+`graphql-orm -> graphql-orm-operation-catalog`, plus
 `graphql-orm-router -> graphql-orm-router-protocol` and optional
 `graphql-orm -> graphql-orm-router-protocol`.
 
@@ -48,9 +53,11 @@ No package uses a Git dependency on another package in this repository.
 | --- | --- | --- |
 | `graphql-orm` | entity metadata, generated/runtime GraphQL operations, database execution, schema modules, persistence contracts | provider transport, backup repositories, application policy |
 | `graphql-orm-macros` | proc-macro parsing and generated code | runtime I/O or application behavior |
+| `graphql-orm-operation-catalog` | backend-neutral generated GraphQL operation metadata and optional router-protocol conversion | database backends, proc macros, execution, application policy |
 | `graphql-orm-storage` | provider-neutral object/blob storage and streaming provider implementations | backup manifests, database records, application metadata |
 | `graphql-orm-backup` | snapshot/restore orchestration, manifests, repository safety, optional ORM adapters | object transport implementations or application authorization |
 | `graphql-orm-ai` | protected AI control plane, provider adapters, durable coordination, AI schema module | host authorization decisions, deployment credentials, arbitrary application mutation authority |
+| `graphql-orm-ai-tool-profiles` | backend-neutral AI GraphQL tool profiles, validation, compiled documents, disclosure contracts, manifests, and fingerprints | persistence, providers, coordinators, backup, storage, application authority |
 | `graphql-orm-router-protocol` | versioned project-neutral subgraph identity, endpoint advertisement, capabilities, fingerprints, operation and authorization declarations | URL trust, credentials, server runtime, database access, application policy |
 | `graphql-orm-router` | federation composition/execution adapters, graph lifecycle, public transports, registration, authentication preflight, observability | authoritative subgraph authorization, ORM/database execution, application policy, identity issuance |
 

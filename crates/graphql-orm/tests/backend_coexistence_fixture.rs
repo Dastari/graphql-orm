@@ -13,13 +13,15 @@ fn sqlite_and_mssql_services_can_share_one_graphql_orm_build() {
     let status = std::process::Command::new(cargo)
         .env("CARGO_TARGET_DIR", target_dir)
         .args([
-            "check",
+            "test",
             "--manifest-path",
             manifest,
             "-p",
             "auth-service",
             "-p",
             "jim-service",
+            "-p",
+            "fame-ai-runtime",
             "--features",
             "jim-service/graphql-orm-mssql-poc",
         ])

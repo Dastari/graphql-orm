@@ -14,6 +14,26 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.21.0 - 2026-08-11
+
+Companion macros crate: `graphql-orm-macros` **0.21.0**. New independently
+consumable packages: `graphql-orm-operation-catalog` **0.1.0** and
+`graphql-orm-ai-tool-profiles` **0.1.0**.
+
+- Generated resolver-operation metadata now has a backend-neutral canonical
+  owner and remains re-exported unchanged from `graphql-orm`.
+- Reviewed AI GraphQL profile compilation and manifest wire contracts now have
+  a database-neutral package. MSSQL application subgraphs can publish exact
+  manifests in the same Cargo invocation as a SQLite AI runtime without
+  selecting an AI persistence backend or duplicating serialized types.
+- `#[backend_selected_graphql_entity(...)]` lets a reusable companion crate
+  bind derives to its own mutually exclusive host backend feature when Cargo
+  has unified other `graphql-orm` backend features elsewhere in the workspace.
+
+Existing ORM imports and operation fingerprints remain source/wire compatible.
+There is no database, GraphQL SDL, migration-history, backup, or stored-data
+migration.
+
 ## 0.20.0 - 2026-08-11
 
 Companion macros crate: `graphql-orm-macros` **0.20.0** under the aligned

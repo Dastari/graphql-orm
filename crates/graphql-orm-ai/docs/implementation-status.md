@@ -10,8 +10,9 @@ supersedes: []
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.65.0` with AI schema module
-`0.52.0`. It uses workspace `graphql-orm` `0.20.0` and external `agql-auth`
+`graphql-orm-ai` is at crate version `0.66.0` with AI schema module
+`0.52.0`. It uses workspace `graphql-orm` `0.21.0`, backend-neutral
+`graphql-orm-ai-tool-profiles` `0.1.0`, and external `agql-auth`
 `0.14.0` at `413fda3435f060604cd653c11e2cc18a668aace1`.
 
 The active work order, dependencies, and exit gates are maintained in the
@@ -35,6 +36,10 @@ verification evidence belongs in the focused guides.
   current host policy, and ordinary resolver authorization. Read-only and the
   bounded sequential supervised path are implemented; broader mixed,
   parallel, and stateless consequential execution remains closed.
+- Owning subgraphs can compile the same canonical generated/custom GraphQL
+  tool manifests through `graphql-orm-ai-tool-profiles` without selecting an
+  AI persistence backend. The runtime consumes those exact wire values and
+  fingerprints without transformation.
 - The read-only coordinator also accepts an exact initial tool-free chat plan.
   It retains current rule/provider/egress/budget/output checks but has no
   application or built-in tool exposure, tool-result route, tool checkpoint,

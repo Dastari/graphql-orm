@@ -1,5 +1,11 @@
-use graphql_orm::async_graphql::SimpleObject;
+use graphql_orm::async_graphql::{Object, SimpleObject};
 use graphql_orm::prelude::*;
+use graphql_orm_ai_tool_profiles::{
+    AiDisclosureRule, AiDisclosureSchema, AiDisclosureShape, AiGeneratedGraphqlOperationPolicy,
+    AiGraphqlArgumentPlan, AiGraphqlArgumentValue, AiGraphqlProfileInput, AiGraphqlSelection,
+    AiGraphqlToolManifest, AiGraphqlToolManifestBuilder, AiGraphqlToolProfile,
+    DataClassification, GraphqlExecutionTargetId,
+};
 
 #[derive(
     GraphQLEntity,
@@ -290,10 +296,29 @@ impl graphql_orm::graphql::loaders::BatchLoadEntity<graphql_orm::MssqlBackend> f
     }
 }
 
+#[derive(Clone, Debug, SimpleObject)]
+#[graphql(rename_fields = "PascalCase")]
+pub struct JimComment {
+    pub line_no: i32,
+    pub comment: String,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct JimCustomQuery;
+
+#[Object(rename_fields = "PascalCase", rename_args = "PascalCase")]
+impl JimCustomQuery {
+    async fn jim_work_item_comments(&self, job_no: String, first: i32) -> Vec<JimComment> {
+        let _ = (job_no, first);
+        Vec::new()
+    }
+}
+
 schema_roots! {
     backend: "mssql",
     schema_policy: "external_read_only",
     query_custom_ops: [],
+    extra_query_types: [JimCustomQuery],
     entities: [Job, JobLabour, JimCardFile, JimCardFileContact, JimCardFileDetail],
 }
 
@@ -301,4 +326,130 @@ pub fn build_schema(
     pool: graphql_orm::db::mssql::MssqlPool,
 ) -> graphql_orm::async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot> {
     schema_builder(graphql_orm::db::Database::<graphql_orm::MssqlBackend>::new(pool)).finish()
+}
+
+struct AdmitJimGenerated;
+
+impl AiGeneratedGraphqlOperationPolicy for AdmitJimGenerated {
+    fn is_application_operation(&self, operation: &GraphqlResolverOperationDescriptor) -> bool {
+        operation.entity_name() == "Job"
+    }
+}
+
+fn disclosure(
+    version: &str,
+    root: &str,
+    root_shape: AiDisclosureShape,
+) -> AiDisclosureSchema {
+    let rule = AiDisclosureRule::exportable(DataClassification::Confidential);
+    AiDisclosureSchema::new(
+        version,
+        AiDisclosureShape::object(rule, [(root.to_owned(), root_shape)]),
+    )
+    .expect("fixture disclosure is valid")
+}
+
+pub fn ai_tool_manifest() -> Result<(String, AiGraphqlToolManifest), String> {
+    let mut config = graphql_orm::tiberius::Config::new();
+    config.host("fixture.invalid");
+    config.port(1433);
+    config.authentication(graphql_orm::tiberius::AuthMethod::sql_server(
+        "fixture",
+        "fixture",
+    ));
+    let pool = graphql_orm::db::mssql::MssqlPool::new(config);
+    let sdl = build_schema(pool).sdl();
+    let catalog = graphql_orm_operation_catalog();
+    let operation = catalog
+        .exposed_operations()
+        .find(|operation| {
+            operation.entity_name() == "Job"
+                && operation.category() == GeneratedGraphqlOperationCategory::SingleRead
+        })
+        .ok_or_else(|| "missing generated Job detail operation".to_owned())?;
+    let id_argument = operation
+        .arguments()
+        .first()
+        .ok_or_else(|| "missing generated Job identity argument".to_owned())?;
+    let rule = AiDisclosureRule::exportable(DataClassification::Confidential);
+    let generated = AiGraphqlToolProfile::read_only(
+        "details",
+        operation.field_name(),
+        "Show a reviewed subset of one visible Jim job",
+        vec![
+            AiGraphqlSelection::scalar("jobId"),
+            AiGraphqlSelection::scalar("jobName"),
+        ],
+        disclosure(
+            "jim-job-details-v1",
+            operation.field_name(),
+            AiDisclosureShape::object(
+                rule,
+                [
+                    ("jobId".to_owned(), AiDisclosureShape::scalar(rule)),
+                    ("jobName".to_owned(), AiDisclosureShape::scalar(rule)),
+                ],
+            ),
+        ),
+        16 * 1024,
+        1,
+    )
+    .with_inputs([AiGraphqlProfileInput::integer(
+        "JobNo",
+        "Public Jim job number",
+        true,
+        1,
+        i64::from(i32::MAX),
+    )])
+    .with_arguments([AiGraphqlArgumentPlan::new(
+        id_argument.graphql_name(),
+        AiGraphqlArgumentValue::input("JobNo"),
+    )]);
+    let custom = AiGraphqlToolProfile::read_only(
+        "comments",
+        "JimWorkItemComments",
+        "List a bounded reviewed set of comments for one Jim work item",
+        vec![
+            AiGraphqlSelection::scalar("LineNo"),
+            AiGraphqlSelection::scalar("Comment"),
+        ],
+        disclosure(
+            "jim-comments-v1",
+            "JimWorkItemComments",
+            AiDisclosureShape::list(
+                rule,
+                25,
+                AiDisclosureShape::object(
+                    rule,
+                    [
+                        ("LineNo".to_owned(), AiDisclosureShape::scalar(rule)),
+                        ("Comment".to_owned(), AiDisclosureShape::scalar(rule)),
+                    ],
+                ),
+            ),
+        ),
+        32 * 1024,
+        25,
+    )
+    .with_root_list_bound(25)
+    .with_inputs([
+        AiGraphqlProfileInput::string("JobNo", "Public Jim job number", true, 1, 64),
+        AiGraphqlProfileInput::integer("Limit", "Maximum comment count", true, 1, 25),
+    ])
+    .with_arguments([
+        AiGraphqlArgumentPlan::new("JobNo", AiGraphqlArgumentValue::input("JobNo")),
+        AiGraphqlArgumentPlan::new("First", AiGraphqlArgumentValue::input("Limit")),
+    ]);
+
+    let target = GraphqlExecutionTargetId::parse("jim-graph").map_err(|error| error.to_string())?;
+    let mut builder = AiGraphqlToolManifestBuilder::new("jim-service", target, &sdl)
+        .map_err(|error| error.to_string())?;
+    builder
+        .add_generated_profile(generated, catalog, &AdmitJimGenerated)
+        .map_err(|error| error.to_string())?;
+    builder
+        .add_custom_profile(custom)
+        .map_err(|error| error.to_string())?;
+    let manifest = builder.build().map_err(|error| error.to_string())?;
+    Ok((sdl, manifest))
 }

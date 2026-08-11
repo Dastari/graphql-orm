@@ -261,6 +261,42 @@ pub fn mutation_result(input: TokenStream) -> TokenStream {
     mutation_result::expand(parsed).into()
 }
 
+#[proc_macro_attribute]
+/// Select an entity's explicit backend from the consuming crate's backend feature.
+///
+/// This is intended for reusable companion crates that expose mutually
+/// exclusive `sqlite`, `postgres`, and `mssql` features while depending on a
+/// `graphql-orm` instance whose features may be unified with other workspace
+/// consumers. The attribute accepts the same arguments as `graphql_entity`
+/// except `backend`, which it supplies itself.
+pub fn backend_selected_graphql_entity(args: TokenStream, input: TokenStream) -> TokenStream {
+    let args = proc_macro2::TokenStream::from(args);
+    let input = parse_macro_input!(input as syn::ItemStruct);
+    let mut sqlite = input.clone();
+    sqlite.attrs.push(syn::parse_quote!(
+        #[graphql_entity(backend = "sqlite", #args)]
+    ));
+    let mut postgres = input.clone();
+    postgres.attrs.push(syn::parse_quote!(
+        #[graphql_entity(backend = "postgres", #args)]
+    ));
+    let mut mssql = input;
+    mssql.attrs.push(syn::parse_quote!(
+        #[graphql_entity(backend = "mssql", #args)]
+    ));
+    quote::quote! {
+        #[cfg(feature = "sqlite")]
+        #sqlite
+
+        #[cfg(feature = "postgres")]
+        #postgres
+
+        #[cfg(feature = "mssql")]
+        #mssql
+    }
+    .into()
+}
+
 #[proc_macro_derive(
     GraphQLEntity,
     attributes(

@@ -28,6 +28,7 @@ jobs:
       - run: scripts/check-workspace-dependencies.sh
       - run: cargo test -p graphql-orm-storage
       - run: cargo test -p graphql-orm-backup --features orm-sqlite
+      - run: cargo test -p graphql-orm-operation-catalog -p graphql-orm-ai-tool-profiles
 
   orm:
     runs-on: ubuntu-latest
@@ -54,7 +55,8 @@ jobs:
       - run: cargo test -p graphql-orm-ai --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness
       - run: cargo test -p graphql-orm-ai --features graphql-case-pascal --test graphql_naming
       - run: cargo clippy -p graphql-orm-ai --all-targets --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness -- -D warnings
-      - run: RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc -p graphql-orm-ai --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness --no-deps
+      - run: cargo clippy -p graphql-orm-operation-catalog -p graphql-orm-ai-tool-profiles --all-targets -- -D warnings
+      - run: RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc -p graphql-orm-ai -p graphql-orm-operation-catalog -p graphql-orm-ai-tool-profiles --features graphql-orm-ai/provider-openai,graphql-orm-ai/provider-anthropic,graphql-orm-ai/provider-xai,graphql-orm-ai/provider-ollama,graphql-orm-ai/provider-openai-compatible,graphql-orm-ai/local-harness --no-deps
 
   router:
     runs-on: ubuntu-latest
@@ -104,6 +106,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p graphql-orm-ai --no-default-features --features postgres
       - run: cargo check -p graphql-orm-ai --no-default-features --features mssql
+      - run: cargo check -p graphql-orm-ai -p graphql-orm --no-default-features --features graphql-orm-ai/sqlite,graphql-orm/mssql
       - run: cargo check -p graphql-orm-backup --no-default-features --features local,orm-postgres
       - run: cargo check -p graphql-orm-storage --no-default-features --features s3,azure
       - run: cargo check -p graphql-orm-storage --no-default-features --features smb

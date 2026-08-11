@@ -38,8 +38,10 @@ expected = {
     "graphql-orm-storage",
     "graphql-orm-backup",
     "graphql-orm-ai",
+    "graphql-orm-ai-tool-profiles",
     "graphql-orm-router-protocol",
     "graphql-orm-router",
+    "graphql-orm-operation-catalog",
 }
 
 for package_name in sorted(expected):
@@ -65,13 +67,15 @@ for package_name in sorted(expected):
 packages_by_id = {package["id"]: package for package in metadata["packages"]}
 nodes_by_id = {node["id"]: node for node in metadata["resolve"]["nodes"]}
 allowed_internal_edges = {
-    ("graphql-orm-ai", "graphql-orm-backup"),
+    ("graphql-orm-ai", "graphql-orm-ai-tool-profiles"),
     ("graphql-orm-ai", "graphql-orm-storage"),
     ("graphql-orm-ai", "graphql-orm"),
+    ("graphql-orm-ai-tool-profiles", "graphql-orm-operation-catalog"),
     ("graphql-orm-backup", "graphql-orm-storage"),
     ("graphql-orm-backup", "graphql-orm"),
     ("graphql-orm", "graphql-orm-macros"),
-    ("graphql-orm", "graphql-orm-router-protocol"),
+    ("graphql-orm", "graphql-orm-operation-catalog"),
+    ("graphql-orm-operation-catalog", "graphql-orm-router-protocol"),
     ("graphql-orm-router", "graphql-orm-router-protocol"),
 }
 actual_internal_edges = set()
@@ -127,6 +131,55 @@ if forbidden_resolved:
         "workspace-dependencies: protocol resolves forbidden runtime "
         f"dependencies: {', '.join(forbidden_resolved)}"
     )
+
+neutral_boundaries = {
+    "graphql-orm-operation-catalog": {
+        "graphql-orm",
+        "graphql-orm-ai",
+        "graphql-orm-backup",
+        "graphql-orm-storage",
+        "graphql-orm-macros",
+        "sqlx",
+        "tiberius",
+    },
+    "graphql-orm-ai-tool-profiles": {
+        "graphql-orm",
+        "graphql-orm-ai",
+        "graphql-orm-backup",
+        "graphql-orm-storage",
+        "sqlx",
+        "tiberius",
+        "reqwest",
+    },
+}
+for neutral_package, forbidden in neutral_boundaries.items():
+    neutral_id = next(
+        package["id"]
+        for package in metadata["packages"]
+        if package["name"] == neutral_package
+    )
+    pending = [neutral_id]
+    visited = set()
+    while pending:
+        package_id = pending.pop()
+        if package_id in visited:
+            continue
+        visited.add(package_id)
+        pending.extend(
+            dependency["pkg"] for dependency in nodes_by_id[package_id]["deps"]
+        )
+    resolved = sorted(
+        {
+            packages_by_id[package_id]["name"]
+            for package_id in visited
+            if packages_by_id[package_id]["name"] in forbidden
+        }
+    )
+    if resolved:
+        raise SystemExit(
+            f"workspace-dependencies: {neutral_package} resolves forbidden "
+            f"dependencies: {', '.join(resolved)}"
+        )
 
 print(
     "workspace-dependencies: path sources, internal directions, and protocol "
