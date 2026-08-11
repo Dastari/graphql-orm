@@ -297,6 +297,156 @@ async fn messages_read_exact_legacy_object_previews() {
 }
 
 #[tokio::test]
+async fn owner_rename_is_idempotent_revision_fenced_and_durably_replayed() {
+    let service = service().await;
+    let owner = principal("rename-owner");
+    let stranger = principal("rename-stranger");
+    let session = service
+        .create_session(
+            &owner,
+            CreateAiSessionInput {
+                scope: scope_input(),
+                title: None,
+            },
+        )
+        .await
+        .expect("default-title session should be created");
+    assert_eq!(session.title, "New chat");
+    assert_eq!(session.title_revision, 0);
+
+    let client_mutation_id = Uuid::new_v4();
+    let renamed = service
+        .rename_session(
+            &owner,
+            RenameAiSessionInput {
+                session_id: session.id,
+                title: "  Durable research  ".to_owned(),
+                client_mutation_id,
+                expected_title_revision: Some(0),
+            },
+        )
+        .await
+        .expect("owner rename should commit");
+    assert_eq!(renamed.title, "Durable research");
+    assert_eq!(renamed.title_revision, 1);
+    assert_eq!(renamed.stream_head, 1);
+
+    let replay = service
+        .rename_session(
+            &owner,
+            RenameAiSessionInput {
+                session_id: session.id,
+                title: "Durable research".to_owned(),
+                client_mutation_id,
+                expected_title_revision: Some(0),
+            },
+        )
+        .await
+        .expect("identical mutation replay should be stable");
+    assert_eq!(replay.title_revision, 1);
+    assert_eq!(replay.stream_head, 1);
+
+    assert!(matches!(
+        service
+            .rename_session(
+                &owner,
+                RenameAiSessionInput {
+                    session_id: session.id,
+                    title: "Different title".to_owned(),
+                    client_mutation_id,
+                    expected_title_revision: None,
+                },
+            )
+            .await,
+        Err(AiError::Conflict)
+    ));
+    assert!(matches!(
+        service
+            .rename_session(
+                &owner,
+                RenameAiSessionInput {
+                    session_id: session.id,
+                    title: "Stale title".to_owned(),
+                    client_mutation_id: Uuid::new_v4(),
+                    expected_title_revision: Some(0),
+                },
+            )
+            .await,
+        Err(AiError::Conflict)
+    ));
+    assert!(matches!(
+        service
+            .rename_session(
+                &stranger,
+                RenameAiSessionInput {
+                    session_id: session.id,
+                    title: "Cross-owner title".to_owned(),
+                    client_mutation_id: Uuid::new_v4(),
+                    expected_title_revision: None,
+                },
+            )
+            .await,
+        Err(AiError::NotFound)
+    ));
+
+    let events = service
+        .session_event_page(&owner, AiSessionId(session.id), 0, 10)
+        .await
+        .expect("rename event should replay");
+    assert_eq!(events.events.len(), 1);
+    assert_eq!(events.events[0].event_type, "session_title_changed");
+    assert_eq!(events.events[0].payload.0["title"], "Durable research");
+    assert_eq!(events.events[0].payload.0["titleRevision"], 1);
+    assert_eq!(events.events[0].payload.0["actor"], "user");
+}
+
+#[tokio::test]
+async fn rename_rejects_blank_control_and_oversized_titles() {
+    let service = service().await;
+    let owner = principal("title-validation-owner");
+    let session = service
+        .create_session(
+            &owner,
+            CreateAiSessionInput {
+                scope: scope_input(),
+                title: None,
+            },
+        )
+        .await
+        .expect("session should be created");
+    for invalid_title in ["   ".to_owned(), "bad\ntitle".to_owned(), "x".repeat(257)] {
+        assert!(matches!(
+            service
+                .rename_session(
+                    &owner,
+                    RenameAiSessionInput {
+                        session_id: session.id,
+                        title: invalid_title,
+                        client_mutation_id: Uuid::new_v4(),
+                        expected_title_revision: None,
+                    },
+                )
+                .await,
+            Err(AiError::InvalidInput(_))
+        ));
+    }
+    assert!(matches!(
+        service
+            .rename_session(
+                &owner,
+                RenameAiSessionInput {
+                    session_id: session.id,
+                    title: "Valid title".to_owned(),
+                    client_mutation_id: Uuid::nil(),
+                    expected_title_revision: None,
+                },
+            )
+            .await,
+        Err(AiError::InvalidInput(_))
+    ));
+}
+
+#[tokio::test]
 async fn archive_restore_and_session_keyset_are_bounded() {
     let service = service().await;
     let owner = principal("owner");

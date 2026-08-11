@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use agql_auth::AuthPrincipal;
-use async_graphql::{Context, ErrorExtensions, InputObject, Object, SimpleObject};
+use async_graphql::{Context, Enum, ErrorExtensions, InputObject, Object, SimpleObject};
 use async_trait::async_trait;
 use graphql_orm::graphql::pagination::{
     KeysetConnectionInput, PageInfo, ValidatedKeysetConnection,
@@ -49,6 +49,8 @@ pub struct AiSessionView {
     pub scope_id: String,
     /// User-visible title.
     pub title: String,
+    /// Monotonic title revision used for compare-and-set updates.
+    pub title_revision: i64,
     /// Active/archived/deleting state.
     pub state: String,
     /// Durable event stream head.
@@ -191,6 +193,40 @@ pub struct CreateAiSessionInput {
     pub title: Option<String>,
 }
 
+/// Closed, server-controlled source for a session title update.
+#[derive(Clone, Copy, Debug, Enum, PartialEq, Eq)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+pub enum AiSessionTitleActor {
+    /// An authenticated owner used the ordinary rename mutation.
+    User,
+    /// A reviewed host worker completed the durable first-message title job.
+    ReviewedTitleWorker,
+}
+
+impl AiSessionTitleActor {
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::ReviewedTitleWorker => "reviewed_title_worker",
+        }
+    }
+}
+
+/// Owner-authorized session-title update.
+#[derive(Clone, Debug, InputObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct RenameAiSessionInput {
+    /// Session receiving the title.
+    pub session_id: Uuid,
+    /// New bounded user-visible title.
+    pub title: String,
+    /// Client-generated mutation idempotency key.
+    pub client_mutation_id: Uuid,
+    /// Optional exact title revision required by the caller.
+    pub expected_title_revision: Option<i64>,
+}
+
 /// Message submission input.
 #[derive(Clone, Debug, InputObject)]
 #[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
@@ -266,6 +302,18 @@ pub trait AiSessionService: Send + Sync {
         principal: &AuthPrincipal,
         input: CreateAiSessionInput,
     ) -> Result<AiSessionView, AiError>;
+
+    /// Renames an owner-visible session and appends its durable event and
+    /// principal-inbox notification atomically.
+    async fn rename_session(
+        &self,
+        _principal: &AuthPrincipal,
+        _input: RenameAiSessionInput,
+    ) -> Result<AiSessionView, AiError> {
+        Err(AiError::InvalidConfiguration(
+            "AI session rename is not implemented by this service".to_owned(),
+        ))
+    }
 
     /// Archives a visible owned session.
     async fn archive_session(
@@ -448,6 +496,19 @@ impl AiMutationRoot {
         let principal = agql_auth::principal_from_ctx(context)?;
         service(context)?
             .create_session(&principal, input)
+            .await
+            .map_err(extend)
+    }
+
+    /// Renames an owned session through a durable compare-and-set update.
+    async fn rename_ai_session(
+        &self,
+        context: &Context<'_>,
+        input: RenameAiSessionInput,
+    ) -> async_graphql::Result<AiSessionView> {
+        let principal = agql_auth::principal_from_ctx(context)?;
+        service(context)?
+            .rename_session(&principal, input)
             .await
             .map_err(extend)
     }

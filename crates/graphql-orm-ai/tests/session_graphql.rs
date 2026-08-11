@@ -35,6 +35,7 @@ fn page_info() -> PageInfo {
 struct RecordingSessionService {
     message_page: Mutex<Option<ValidatedKeysetConnection>>,
     principal_subject: Mutex<Option<String>>,
+    rename_input: Mutex<Option<RenameAiSessionInput>>,
 }
 
 #[derive(Default)]
@@ -152,6 +153,7 @@ impl AiSessionService for RecordingSessionService {
             scope_kind: input.scope.kind,
             scope_id: input.scope.id,
             title: input.title.unwrap_or_else(|| "New chat".to_owned()),
+            title_revision: 0,
             state: "active".to_owned(),
             stream_head: 0,
             last_activity_at: 0,
@@ -162,6 +164,32 @@ impl AiSessionService for RecordingSessionService {
                 .principal_subject
                 .lock()
                 .expect("test mutex should not be poisoned") = Some(principal.subject().to_owned());
+        })
+    }
+
+    async fn rename_session(
+        &self,
+        principal: &AuthPrincipal,
+        input: RenameAiSessionInput,
+    ) -> Result<AiSessionView, AiError> {
+        *self
+            .principal_subject
+            .lock()
+            .expect("test mutex should not be poisoned") = Some(principal.subject().to_owned());
+        *self
+            .rename_input
+            .lock()
+            .expect("test mutex should not be poisoned") = Some(input.clone());
+        Ok(AiSessionView {
+            id: input.session_id,
+            scope_kind: "collection".to_owned(),
+            scope_id: "54".to_owned(),
+            title: input.title,
+            title_revision: 2,
+            state: "active".to_owned(),
+            stream_head: 4,
+            last_activity_at: 10,
+            archived_at: None,
         })
     }
 
@@ -257,6 +285,52 @@ async fn session_roots_fail_closed_without_authentication() {
     let response = schema.execute("{ aiSessions { edges { cursor } } }").await;
 
     assert_eq!(response.errors.len(), 1);
+}
+
+#[tokio::test]
+async fn rename_mutation_passes_closed_input_and_current_principal() {
+    let service = Arc::new(RecordingSessionService::default());
+    let schema = schema(service.clone());
+    let session_id = Uuid::new_v4();
+    let mutation_id = Uuid::new_v4();
+    let response = schema
+        .execute(
+            Request::new(format!(
+                "mutation {{ renameAiSession(input: {{ sessionId: \"{session_id}\", title: \"Reviewed title\", clientMutationId: \"{mutation_id}\", expectedTitleRevision: 1 }}) {{ id title titleRevision streamHead }} }}"
+            ))
+            .data(principal("user-a")),
+        )
+        .await;
+
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(
+        response.data.into_json().expect("response JSON"),
+        json!({
+            "renameAiSession": {
+                "id": session_id,
+                "title": "Reviewed title",
+                "titleRevision": 2,
+                "streamHead": 4,
+            }
+        })
+    );
+    let input = service
+        .rename_input
+        .lock()
+        .expect("test mutex should not be poisoned")
+        .clone()
+        .expect("rename service should receive an input");
+    assert_eq!(input.session_id, session_id);
+    assert_eq!(input.client_mutation_id, mutation_id);
+    assert_eq!(input.expected_title_revision, Some(1));
+    assert_eq!(
+        service
+            .principal_subject
+            .lock()
+            .expect("test mutex should not be poisoned")
+            .as_deref(),
+        Some("user-a")
+    );
 }
 
 #[tokio::test]

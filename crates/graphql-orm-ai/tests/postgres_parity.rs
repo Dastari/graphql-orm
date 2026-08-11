@@ -6,8 +6,9 @@ use std::thread;
 use std::time::{Duration as StdDuration, Instant};
 
 use agql_auth::{
-    AccessTokenMetadata, AssuranceMatchMode, AuthPrincipal, AuthUser, FixedClock, MfaAcceptance,
-    RecentMfaPolicy, SessionAssurance, SessionContext, SystemClock,
+    AccessTokenMetadata, AssuranceMatchMode, AuthPrincipal, AuthUser, Clock,
+    CurrentPrincipalResolver, FixedClock, MfaAcceptance, PrincipalReference, RecentMfaPolicy,
+    ResolvedPrincipal, SessionAssurance, SessionContext, SystemClock,
 };
 use async_trait::async_trait;
 use graphql_orm::graphql::orm::{ApplyOptions, Entity, OrmSchemaModule};
@@ -417,6 +418,24 @@ impl AiContentProtectionPolicyResolver for ProtectionPolicy {
             version: 1,
             ready: true,
         })
+    }
+}
+
+struct ParityPrincipalResolver {
+    principal: AuthPrincipal,
+    clock: Arc<FixedClock>,
+}
+
+#[async_trait]
+impl CurrentPrincipalResolver for ParityPrincipalResolver {
+    async fn resolve(
+        &self,
+        reference: &PrincipalReference,
+    ) -> agql_auth::AuthResult<ResolvedPrincipal> {
+        if reference != &self.principal.reference() {
+            return Err(agql_auth::AuthError::Forbidden);
+        }
+        ResolvedPrincipal::new(reference.clone(), self.principal.clone(), self.clock.now())
     }
 }
 
@@ -833,6 +852,91 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
     assert_eq!(messages.edges.len(), 1);
     assert_eq!(messages.edges[0].node.id, queued.message_id);
 
+    let renamed = sessions
+        .rename_session(
+            &principal,
+            RenameAiSessionInput {
+                session_id: session.id,
+                title: "Renamed PostgreSQL parity".to_owned(),
+                client_mutation_id: Uuid::new_v4(),
+                expected_title_revision: Some(0),
+            },
+        )
+        .await
+        .expect("owner rename should commit on PostgreSQL");
+    assert_eq!(renamed.title_revision, 1);
+    assert_eq!(renamed.title, "Renamed PostgreSQL parity");
+
+    let default_session = sessions
+        .create_session(
+            &principal,
+            CreateAiSessionInput {
+                scope: AiScopeInput {
+                    kind: "postgres-parity".to_owned(),
+                    id: "scope-1".to_owned(),
+                    tenant_id: Some("postgres-parity-tenant".to_owned()),
+                },
+                title: None,
+            },
+        )
+        .await
+        .expect("default-title session should insert on PostgreSQL");
+    let default_queued = sessions
+        .send_message(
+            &principal,
+            SendAiMessageInput {
+                session_id: default_session.id,
+                text: "Generate a PostgreSQL-backed title".to_owned(),
+                attachment_ids: vec![],
+                client_message_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("first PostgreSQL message should enqueue title work");
+    let title_clock = Arc::new(FixedClock::new(
+        OffsetDateTime::now_utc() + Duration::seconds(2),
+    ));
+    let title_work = OrmAiSessionTitleWorkService::new(
+        database.clone(),
+        Arc::new(AllowAll),
+        Arc::new(ProtectionPolicy),
+        Arc::new(DatabaseManagedContentProtector),
+        Arc::new(ParityPrincipalResolver {
+            principal: principal.clone(),
+            clock: title_clock.clone(),
+        }),
+        title_clock,
+        AiSessionTitleWorkLimits::default(),
+    );
+    let title_claim = match title_work
+        .claim_next("postgres-title-worker")
+        .await
+        .expect("PostgreSQL title claim should succeed")
+    {
+        Some(claim) => claim,
+        None => title_work
+            .claim_next("postgres-title-worker")
+            .await
+            .expect("PostgreSQL title claim retry should succeed")
+            .expect("default-title work should remain after custom-title work is superseded"),
+    };
+    assert_eq!(title_claim.session_id(), AiSessionId(default_session.id));
+    let title_input = title_work
+        .open_first_message(&title_claim)
+        .await
+        .expect("current principal should open PostgreSQL first-message content");
+    assert_eq!(title_input.text(), "Generate a PostgreSQL-backed title");
+    let title_outcome = title_work
+        .complete(&title_claim, "PostgreSQL title lifecycle".to_owned())
+        .await
+        .expect("PostgreSQL title completion should commit");
+    let AiSessionTitleCommitOutcome::Applied(titled_session) = title_outcome else {
+        panic!("default PostgreSQL title should remain eligible");
+    };
+    assert_eq!(titled_session.id, default_session.id);
+    assert_eq!(titled_session.title, "PostgreSQL title lifecycle");
+    assert_eq!(titled_session.title_revision, 1);
+
     let skills = OrmAiSkillCatalogService::new(
         database.clone(),
         Arc::new(AllowSkills),
@@ -983,7 +1087,7 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
         .await
         .expect("generated PostgreSQL claim transaction should succeed")
         .expect("queued run should be claimable");
-    assert_eq!(claimed.run_id().0, queued.run_id);
+    assert!([queued.run_id, default_queued.run_id].contains(&claimed.run_id().0));
     let running = runs
         .start(&claimed)
         .await

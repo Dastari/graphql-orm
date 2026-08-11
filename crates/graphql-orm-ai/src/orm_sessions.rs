@@ -26,9 +26,9 @@ use crate::{
     AiAccessPolicy, AiContentProtectionPolicy, AiContentProtectionPolicyResolver,
     AiContentProtector, AiError, AiMessageBlockView, AiMessageConnection, AiMessageEdge,
     AiMessageView, AiScope, AiSessionAction, AiSessionConnection, AiSessionEdge,
-    AiSessionEventPage, AiSessionEventView, AiSessionId, AiSessionService, AiSessionView,
-    AiSessionWakeup, ContentProtectionContext, CreateAiSessionInput, ProtectedContentEnvelope,
-    SendAiMessageInput, SendAiMessagePayload,
+    AiSessionEventPage, AiSessionEventView, AiSessionId, AiSessionService, AiSessionTitleActor,
+    AiSessionView, AiSessionWakeup, ContentProtectionContext, CreateAiSessionInput,
+    ProtectedContentEnvelope, RenameAiSessionInput, SendAiMessageInput, SendAiMessagePayload,
 };
 
 /// Service-side limits that are enforced even when callers bypass GraphQL.
@@ -524,10 +524,13 @@ impl AiSessionService for OrmAiSessionService {
         validate_scope(&scope)?;
         self.require_scope(principal, &scope, AiSessionAction::Create)
             .await?;
-        let title = input.title.unwrap_or_else(|| "New chat".to_owned());
-        if title.trim().is_empty() || title.len() > self.limits.maximum_title_bytes {
-            return Err(AiError::InvalidInput("invalid session title".to_owned()));
-        }
+        let (title, title_source) = match input.title {
+            Some(title) => (
+                normalize_title(title, self.limits.maximum_title_bytes)?,
+                AiSessionTitleActor::User.as_str().to_owned(),
+            ),
+            None => ("New chat".to_owned(), "default".to_owned()),
+        };
         let session_id = Uuid::new_v4();
         let participant_id = Uuid::new_v4();
         let inbox_event_id = Uuid::new_v4();
@@ -561,6 +564,8 @@ impl AiSessionService for OrmAiSessionService {
                             scope_kind: scope_for_insert.kind.clone(),
                             scope_id: scope_for_insert.id.clone(),
                             title,
+                            title_revision: 0,
+                            title_source,
                             state: "active".to_owned(),
                             stream_head: 0,
                             message_head: 0,
@@ -601,6 +606,201 @@ impl AiSessionService for OrmAiSessionService {
             .await
             .map_err(map_transaction)?;
         Ok(session_view(&session))
+    }
+
+    async fn rename_session(
+        &self,
+        principal: &AuthPrincipal,
+        input: RenameAiSessionInput,
+    ) -> Result<AiSessionView, AiError> {
+        if input.client_mutation_id.is_nil() {
+            return Err(AiError::InvalidInput(
+                "invalid client mutation ID".to_owned(),
+            ));
+        }
+        let title = normalize_title(input.title, self.limits.maximum_title_bytes)?;
+        if input
+            .expected_title_revision
+            .is_some_and(|revision| revision < 0)
+        {
+            return Err(AiError::InvalidInput(
+                "invalid expected title revision".to_owned(),
+            ));
+        }
+        let session_id = AiSessionId(input.session_id);
+        let visible = self
+            .visible_session(principal, session_id, AiSessionAction::Write)
+            .await?
+            .ok_or(AiError::NotFound)?;
+        if !matches!(visible.state.as_str(), "active" | "archived") {
+            return Err(AiError::Conflict);
+        }
+        let observed_title_revision = visible.title_revision;
+        let title_revision = observed_title_revision
+            .checked_add(1)
+            .ok_or(AiError::Conflict)?;
+        let scope = record_scope(&visible);
+        let policy = self.protection_policy(principal, &scope).await?;
+        let event_id = Uuid::new_v4();
+        let inbox_event_id = Uuid::new_v4();
+        let title_hash = session_title_hash(&title, AiSessionTitleActor::User);
+        let protected_event = self
+            .protect_value(
+                &policy,
+                content_context(
+                    "graphql_orm_ai_session_events",
+                    event_id,
+                    "protected_payload",
+                    &scope,
+                ),
+                json!({
+                    "sessionId": session_id.0,
+                    "title": title,
+                    "titleRevision": title_revision,
+                    "actor": AiSessionTitleActor::User.as_str(),
+                }),
+            )
+            .await?;
+        let protected_inbox_event = self
+            .protect_value(
+                &policy,
+                content_context(
+                    "graphql_orm_ai_inbox_events",
+                    inbox_event_id,
+                    "protected_payload",
+                    &scope,
+                ),
+                json!({
+                    "sessionId": session_id.0,
+                    "title": title,
+                    "titleRevision": title_revision,
+                    "actor": AiSessionTitleActor::User.as_str(),
+                }),
+            )
+            .await?;
+        let (principal_kind, principal_subject) = principal_identity(principal);
+        let principal_subject = principal_subject.to_owned();
+        let client_mutation_id = input.client_mutation_id;
+        let expected_title_revision = input.expected_title_revision;
+        let actor = AiSessionTitleActor::User.as_str().to_owned();
+        let now = unix_seconds();
+        let record = self
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    if let Some(existing) = tx
+                        .find_by_id::<AiSessionTitleMutationRecord>(&client_mutation_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                    {
+                        if existing.session_id != session_id.0
+                            || existing.title_hash != title_hash
+                            || existing.actor != actor
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let current = tx
+                            .find_by_id::<AiSessionRecord>(&session_id.0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if current.owner_principal_kind != principal_kind
+                            || current.owner_subject != principal_subject
+                            || current.deleted_at.is_some()
+                        {
+                            return Err(OrmPublicError::not_found());
+                        }
+                        return Ok(current);
+                    }
+
+                    let current = tx
+                        .find_by_id::<AiSessionRecord>(&session_id.0)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    if current.owner_principal_kind != principal_kind
+                        || current.owner_subject != principal_subject
+                        || current.deleted_at.is_some()
+                    {
+                        return Err(OrmPublicError::not_found());
+                    }
+                    if !matches!(current.state.as_str(), "active" | "archived")
+                        || current.title_revision != observed_title_revision
+                        || expected_title_revision
+                            .is_some_and(|revision| revision != current.title_revision)
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let event_sequence = current
+                        .stream_head
+                        .checked_add(1)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                    let outcome = tx
+                        .compare_and_swap::<AiSessionRecord>(
+                            &current.id,
+                            current.row_version,
+                            AiSessionRecordWhereInput::default(),
+                            UpdateAiSessionRecordInput {
+                                title: Some(title.clone()),
+                                title_revision: Some(title_revision),
+                                title_source: Some(actor.clone()),
+                                stream_head: Some(event_sequence),
+                                last_activity_at: Some(now),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let ConditionalUpdateOutcome::Updated(updated) = outcome else {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    };
+                    tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                        id: event_id,
+                        session_id: session_id.0,
+                        sequence: event_sequence,
+                        event_type: "session_title_changed".to_owned(),
+                        run_id: None,
+                        causation_id: Some(client_mutation_id.to_string()),
+                        correlation_id: client_mutation_id.to_string(),
+                        protected_payload: protected_event,
+                    })
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    tx.insert::<AiSessionTitleMutationRecord>(
+                        CreateAiSessionTitleMutationRecordInput {
+                            id: client_mutation_id,
+                            session_id: session_id.0,
+                            title_hash,
+                            title_revision,
+                            actor: actor.clone(),
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    tx.queue_event(AiSessionWakeup {
+                        session_id: session_id.0,
+                        sequence: event_sequence,
+                    });
+                    append_inbox_event(
+                        tx,
+                        PreparedAiInboxEvent {
+                            id: inbox_event_id,
+                            principal_kind,
+                            principal_subject,
+                            scope,
+                            session_id: session_id.0,
+                            event_type: "session_title_changed".to_owned(),
+                            protected_payload: protected_inbox_event,
+                            created_at: now,
+                        },
+                    )
+                    .await?;
+                    Ok(updated)
+                })
+            })
+            .await
+            .map_err(map_transaction)?;
+        Ok(session_view(&record))
     }
 
     async fn archive_session(
@@ -939,7 +1139,7 @@ impl AiSessionService for OrmAiSessionService {
                         id: run_id,
                         session_id,
                         input_message_id: message_id,
-                        principal_reference,
+                        principal_reference: principal_reference.clone(),
                         state: "queued".to_owned(),
                         attempt_id: None,
                         lease_owner: None,
@@ -953,6 +1153,28 @@ impl AiSessionService for OrmAiSessionService {
                     })
                     .await
                     .map_err(OrmPublicError::from)?;
+                    if current.message_head == 0 {
+                        tx.insert::<AiSessionTitleWorkRecord>(
+                            CreateAiSessionTitleWorkRecordInput {
+                                id: session_id,
+                                session_id,
+                                input_message_id: message_id,
+                                principal_reference,
+                                expected_title_revision: current.title_revision,
+                                state: "queued".to_owned(),
+                                lease_owner: None,
+                                lease_generation: 0,
+                                lease_expires_at: None,
+                                retry_count: 0,
+                                next_attempt_at: Some(now),
+                                error_code: None,
+                                result_title_hash: None,
+                                completed_at: None,
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    }
                     tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
                         id: event_id,
                         session_id,
@@ -1106,7 +1328,7 @@ impl OrmAiSessionService {
     }
 }
 
-fn principal_identity(principal: &AuthPrincipal) -> (String, &str) {
+pub(crate) fn principal_identity(principal: &AuthPrincipal) -> (String, &str) {
     let kind = match principal {
         AuthPrincipal::User(_) => "user".to_owned(),
         AuthPrincipal::ApiToken(token) => {
@@ -1121,7 +1343,7 @@ fn is_owner(principal: &AuthPrincipal, session: &AiSessionRecord) -> bool {
     session.owner_principal_kind == kind && session.owner_subject == subject
 }
 
-fn record_scope(session: &AiSessionRecord) -> AiScope {
+pub(crate) fn record_scope(session: &AiSessionRecord) -> AiScope {
     AiScope {
         kind: session.scope_kind.clone(),
         id: session.scope_id.clone(),
@@ -1144,17 +1366,34 @@ fn validate_scope(scope: &AiScope) -> Result<(), AiError> {
     Ok(())
 }
 
-fn session_view(record: &AiSessionRecord) -> AiSessionView {
+pub(crate) fn session_view(record: &AiSessionRecord) -> AiSessionView {
     AiSessionView {
         id: record.id,
         scope_kind: record.scope_kind.clone(),
         scope_id: record.scope_id.clone(),
         title: record.title.clone(),
+        title_revision: record.title_revision,
         state: record.state.clone(),
         stream_head: record.stream_head,
         last_activity_at: record.last_activity_at,
         archived_at: record.archived_at,
     }
+}
+
+pub(crate) fn normalize_title(title: String, maximum_bytes: usize) -> Result<String, AiError> {
+    let title = title.trim().to_owned();
+    if title.is_empty() || title.len() > maximum_bytes || title.chars().any(char::is_control) {
+        return Err(AiError::InvalidInput("invalid session title".to_owned()));
+    }
+    Ok(title)
+}
+
+pub(crate) fn session_title_hash(title: &str, actor: AiSessionTitleActor) -> String {
+    let value = format!(
+        "graphql-orm-ai-session-title-v1\0{}\0{title}",
+        actor.as_str()
+    );
+    hex::encode(Sha256::digest(value.as_bytes()))
 }
 
 fn message_view(record: &AiMessageRecord, preview: String, content_purged: bool) -> AiMessageView {
@@ -1193,7 +1432,7 @@ fn page_input(
     }
 }
 
-fn content_context(
+pub(crate) fn content_context(
     entity: &str,
     row_id: Uuid,
     field: &str,
@@ -1233,18 +1472,18 @@ fn unix_seconds() -> i64 {
     time::OffsetDateTime::now_utc().unix_timestamp()
 }
 
-fn map_protection(error: crate::ContentProtectionError) -> AiError {
+pub(crate) fn map_protection(error: crate::ContentProtectionError) -> AiError {
     match error {
         crate::ContentProtectionError::PolicyNotReady => AiError::RuntimeNotReady,
         _ => AiError::PersistenceFailed,
     }
 }
 
-fn map_transaction(error: TransactionError) -> AiError {
+pub(crate) fn map_transaction(error: TransactionError) -> AiError {
     map_orm(error.public_error().clone())
 }
 
-fn map_orm(error: OrmPublicError) -> AiError {
+pub(crate) fn map_orm(error: OrmPublicError) -> AiError {
     match error.code {
         OrmErrorCode::InvalidInput
         | OrmErrorCode::CursorInvalid

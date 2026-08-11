@@ -3,15 +3,15 @@ title: "Implementation Status"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-11
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.64.0` with AI schema module
-`0.51.0`. It uses workspace `graphql-orm` `0.20.0` and external `agql-auth`
+`graphql-orm-ai` is at crate version `0.65.0` with AI schema module
+`0.52.0`. It uses workspace `graphql-orm` `0.20.0` and external `agql-auth`
 `0.14.0` at `413fda3435f060604cd653c11e2cc18a668aace1`.
 
 The active work order, dependencies, and exit gates are maintained in the
@@ -39,6 +39,11 @@ verification evidence belongs in the focused guides.
   It retains current rule/provider/egress/budget/output checks but has no
   application or built-in tool exposure, tool-result route, tool checkpoint,
   or continuation authority.
+- Session titles support owner-authorized idempotent GraphQL rename and a
+  private durable first-message work queue. The host owns provider selection;
+  the library owns current-principal disclosure checks, lease fencing,
+  protected events, and the conditional commit that preserves manual and
+  pre-upgrade titles.
 - Provider-persistent upload, indexing, and search remain closed. Inline
   attachment input and exact deletion of known provider artifacts are separate
   implemented seams.

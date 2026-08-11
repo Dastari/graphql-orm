@@ -2135,6 +2135,8 @@ mod tests {
                 scope_kind: fixture.scope.kind.clone(),
                 scope_id: fixture.scope.id.clone(),
                 title: "Approval test".to_owned(),
+                title_revision: 0,
+                title_source: "default".to_owned(),
                 state: "active".to_owned(),
                 stream_head: 0,
                 message_head: 0,

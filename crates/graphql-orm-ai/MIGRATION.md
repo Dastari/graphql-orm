@@ -19,6 +19,41 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased: durable session titles (crate 0.64.0 to 0.65.0; schema 0.51.0 to 0.52.0)
+
+Apply AI schema module 0.52.0 before starting a 0.65.0 session or title worker.
+The migration adds `title_revision` and `title_source` to the private session
+record, plus private title-mutation and title-work tables and their bounded
+lookup indexes. Existing rows receive revision zero and the closed `user`
+source. This deliberately prevents the automatic worker from replacing a
+pre-upgrade title whose original default-versus-user intent cannot be proven.
+No existing session, message, event, or protected content is rewritten.
+
+Hosts may expose the new `RenameAiSession(Input:)` mutation through the
+composable AI mutation root. Clients should generate one
+`ClientMutationId`, optionally send the last observed `TitleRevision`, and
+replace their shell with the authoritative returned value. Retrying the same
+normalized title and mutation ID is effect-idempotent. Reusing the ID for a
+different session or title, or supplying a stale expected revision, fails with
+a conflict.
+
+To generate first-message titles, construct `OrmAiSessionTitleWorkService`
+with the same database, access/content-protection policies, durable current-
+principal resolver, trusted clock, and validated
+`AiSessionTitleWorkLimits`. A managed host worker claims work, calls
+`open_first_message`, invokes its fixed reviewed provider without tools, and
+calls `complete`. Provider selection and output generation stay host-owned;
+the library stores only scheduling/fencing facts and the accepted bounded
+title. Use `schedule_retry` or `fail` with redacted stable error codes. A
+manual, custom, or pre-upgrade title is never automatically replaced.
+
+This is an additive Rust and GraphQL API change with a required additive
+database migration and persistent-semantic change. The two new records remain
+private and do not create generated GraphQL CRUD roots. Backup/restore includes
+their ordinary ORM rows; first-message text and title event payloads retain
+their existing content-protection contexts. Update all monorepo dependencies
+to one reviewed revision before enabling the worker.
+
 ## Unreleased: generated GraphQL tool profiles (crate 0.63.0 to 0.64.0; schema remains 0.51.0)
 
 Hosts may replace hand-maintained GraphQL tool documents with

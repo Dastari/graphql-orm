@@ -35,13 +35,19 @@ waits without polling, resuming, or executing them.
 
 ## What it provides
 
-- An ORM-owned `AiSchemaModule` with 40 private records for configuration,
+- An ORM-owned `AiSchemaModule` with 42 private records for configuration,
   protected chat history, runs, attempts, tool calls, proposals, approvals,
   budgets, usage, provider background bindings, egress, audit, skills, and
   restore readiness.
 - Multiple owner-isolated, archivable chat sessions per principal with
   protected message blocks, stable pagination, idempotent send, and resumable
   session-event subscriptions designed for virtualized frontends.
+- Owner-authorized idempotent session renames with a monotonic title revision,
+  protected session/inbox events, and a provider-neutral durable first-message
+  title-work queue. Hosts choose a fixed reviewed tool-free provider; current
+  owner/scope authority and lease fences are rechecked before protected input
+  disclosure and conditional commit, so manual and pre-upgrade titles win
+  races.
 - Protected bounded context compaction that renews the run fence, rehydrates
   authority, opens only a contiguous prefix segment, binds exact
   message/block/parent provenance and a chained source hash, and persists only
@@ -171,7 +177,7 @@ waits without polling, resuming, or executing them.
   that treats uncertain external effects as uncertain rather than replayable.
 - A workspace-resolved `graphql-orm-backup` 0.7.0 compatibility dependency for
   SQLite and PostgreSQL in the same reviewed ORM/storage type universe. Schema
-  module 0.51.0 preserves finalized local attachment and artifact object keys
+  module 0.52.0 preserves finalized local attachment and artifact object keys
   in confidential backups while keeping quarantine, upload-token, provider,
   credential, and secret references redacted. The generated-ORM restore
   collector now derives bounded conservative run classifications plus
@@ -323,7 +329,7 @@ Add the crate from a reviewed monorepo revision:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.64.0", features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.65.0", features = ["sqlite"] }
 ```
 
 > **Pre-release dependency note:** this source snapshot resolves

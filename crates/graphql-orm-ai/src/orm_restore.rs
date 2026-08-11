@@ -1803,6 +1803,8 @@ mod tests {
                 scope_kind: "project".to_owned(),
                 scope_id: "restore-attachments".to_owned(),
                 title: "Restore attachment test".to_owned(),
+                title_revision: 0,
+                title_source: "default".to_owned(),
                 state: "active".to_owned(),
                 stream_head: 0,
                 message_head: 1,

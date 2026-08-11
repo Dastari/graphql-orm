@@ -541,6 +541,14 @@ pub(crate) struct AiSessionRecord {
     pub scope_id: String,
     /// User-visible title.
     pub title: String,
+    /// Monotonic title compare-and-set revision.
+    #[graphql_orm(default = "0")]
+    pub title_revision: i64,
+    /// Closed source of the current title (`default`, `user`, or reviewed title
+    /// worker). The database default conservatively treats pre-0.52 titles as
+    /// user-authored so their original intent cannot be auto-overwritten.
+    #[graphql_orm(default = "'user'")]
+    pub title_source: String,
     /// Lifecycle state.
     #[filterable(type = "string")]
     pub state: String,
@@ -555,6 +563,109 @@ pub(crate) struct AiSessionRecord {
     pub archived_at: Option<i64>,
     /// Deletion timestamp.
     pub deleted_at: Option<i64>,
+    /// CAS version.
+    #[graphql_orm(version, default = "0")]
+    pub row_version: i64,
+}
+
+/// Durable idempotency fact for one owner-authored session rename.
+#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
+#[cfg_attr(
+    any(feature = "sqlite", feature = "postgres"),
+    derive(GraphQLEntity, GraphQLOperations)
+)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[graphql_entity(
+    table = "graphql_orm_ai_session_title_mutations",
+    plural = "GraphqlOrmAiSessionTitleMutations",
+    default_sort = "created_at ASC, id ASC",
+    index(
+        name = "idx_graphql_orm_ai_session_title_mutations_session",
+        columns = ["session_id", "created_at", "id"],
+        directions = ["asc", "asc", "asc"]
+    )
+)]
+pub(crate) struct AiSessionTitleMutationRecord {
+    /// Client mutation UUID and globally unique idempotency identity.
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    pub id: graphql_orm::uuid::Uuid,
+    /// Exact owned session.
+    #[filterable(type = "uuid")]
+    pub session_id: graphql_orm::uuid::Uuid,
+    /// SHA-256 of the normalized title and closed actor.
+    pub title_hash: String,
+    /// Revision committed by this mutation.
+    pub title_revision: i64,
+    /// Closed actor source.
+    pub actor: String,
+    /// Trusted commit timestamp.
+    #[sortable]
+    pub created_at: i64,
+}
+
+/// Durable provider-neutral first-message title work item.
+#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
+#[cfg_attr(
+    any(feature = "sqlite", feature = "postgres"),
+    derive(GraphQLEntity, GraphQLOperations)
+)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[graphql_entity(
+    table = "graphql_orm_ai_session_title_work",
+    plural = "GraphqlOrmAiSessionTitleWork",
+    default_sort = "created_at ASC, id ASC",
+    index(
+        name = "idx_graphql_orm_ai_session_title_work_ready",
+        columns = ["state", "next_attempt_at", "created_at", "id"],
+        directions = ["asc", "asc", "asc", "asc"]
+    ),
+    index(
+        name = "idx_graphql_orm_ai_session_title_work_expired_lease",
+        columns = ["state", "lease_expires_at", "created_at", "id"],
+        directions = ["asc", "asc", "asc", "asc"]
+    )
+)]
+pub(crate) struct AiSessionTitleWorkRecord {
+    /// Work identity. The first-message producer uses the session UUID.
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    pub id: graphql_orm::uuid::Uuid,
+    /// Exact owned session.
+    #[unique]
+    #[filterable(type = "uuid")]
+    pub session_id: graphql_orm::uuid::Uuid,
+    /// First user message to open after current-principal authorization.
+    pub input_message_id: graphql_orm::uuid::Uuid,
+    /// Safe principal reference; never bearer credentials.
+    #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
+    pub principal_reference: serde_json::Value,
+    /// Initial title revision the automatic commit may replace.
+    pub expected_title_revision: i64,
+    /// Durable work lifecycle state.
+    #[filterable(type = "string")]
+    pub state: String,
+    /// Current lease owner.
+    pub lease_owner: Option<String>,
+    /// Monotonic fencing generation.
+    pub lease_generation: i64,
+    /// Lease expiry timestamp.
+    #[filterable(type = "number")]
+    pub lease_expires_at: Option<i64>,
+    /// Number of scheduled retries.
+    pub retry_count: i64,
+    /// Earliest next eligible attempt.
+    #[filterable(type = "number")]
+    pub next_attempt_at: Option<i64>,
+    /// Redacted stable error code.
+    pub error_code: Option<String>,
+    /// SHA-256 of the title accepted by a completed attempt.
+    pub result_title_hash: Option<String>,
+    /// Creation timestamp.
+    #[sortable]
+    pub created_at: i64,
+    /// Terminal timestamp.
+    pub completed_at: Option<i64>,
     /// CAS version.
     #[graphql_orm(version, default = "0")]
     pub row_version: i64,
@@ -1978,7 +2089,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.51.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.52.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 
@@ -2033,6 +2144,8 @@ impl OrmSchemaModule for AiSchemaModule {
                 AiBudgetCounterRecord::metadata(),
                 AiBudgetReservationRecord::metadata(),
                 AiSessionRecord::metadata(),
+                AiSessionTitleMutationRecord::metadata(),
+                AiSessionTitleWorkRecord::metadata(),
                 AiSessionParticipantRecord::metadata(),
                 AiSessionEventRecord::metadata(),
                 AiInboxStreamRecord::metadata(),

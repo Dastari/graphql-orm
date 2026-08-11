@@ -52,6 +52,7 @@ fn configured_graphql_case_is_coherent_without_aliases() {
         assert!(sdl.contains("AiMessages(SessionId:"));
         assert!(sdl.contains("ContentPurged: Boolean!"));
         assert!(sdl.contains("CreateAiSession(Input:"));
+        assert!(sdl.contains("RenameAiSession(Input:"));
         assert!(sdl.contains("AiSessionEvents(SessionId:"));
         assert!(sdl.contains("AiInboxEventPage("));
         assert!(sdl.contains("AiInboxEvents("));

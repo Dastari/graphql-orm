@@ -20,8 +20,8 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.64.0` and keeps
-AI schema module `0.51.0`. It begins the applied-restore implementation with
+This development line advances the pre-1.0 crate version to `0.65.0` and AI
+schema module `0.52.0`. It begins the applied-restore implementation with
 bounded database-derived facts, aligns the reviewed dependency universe,
 integrates generated resolver-operation metadata, completes the durable OpenAI
 background terminal-reconciliation runtime, and closes raw provider
@@ -45,6 +45,26 @@ file-search IDs behind the reviewed persistent-file design.
   not applied-restore authority; restored deployments must keep it closed.
 
 ### Added
+
+- `RenameAiSession` and `AiSessionService::rename_session` now provide an
+  owner-authorized, bounded, revision-fenced, idempotent session-title update.
+  The ORM service atomically advances the session stream, appends one protected
+  `session_title_changed` event, and appends the corresponding protected owner
+  inbox event. `AiSessionView.title_revision` exposes the authoritative CAS
+  revision; browser input cannot select the closed persisted actor source.
+- `AiSessionTitleWorkService` and `OrmAiSessionTitleWorkService` add one
+  provider-neutral durable title job for the first successfully persisted user
+  message. Bounded claims, expiring leases, generation/row-version fences,
+  current-principal rehydration, owner/scope reauthorization, protected
+  first-message opening, retry/failure states, and an idempotent conditional
+  completion let a host use a separately reviewed tool-free provider. A manual
+  rename, custom or pre-upgrade title, or deletion state wins
+  without being overwritten. The contract grants no provider, tool, URL,
+  shell, file, screenshot, remote-control, or GraphQL authority.
+- AI schema module 0.52.0 adds private title-mutation and title-work records,
+  claim/session indexes, and session title revision/source columns. Existing
+  rows receive the closed `user` source so migration cannot mistake an unknown
+  pre-upgrade custom title for an untouched default title.
 
 - `AiGraphqlToolManifestBuilder` now compiles reviewed generated-resolver and
   handwritten-root profiles against the owning subgraph's finished SDL. A

@@ -28,6 +28,7 @@ const PROTECTED_RUN_CHECKPOINT_KINDS: [&str; 3] = [
     "tool_batch_persisted",
     "supervised_tool_batch_persisted",
 ];
+const MAXIMUM_TITLE_MUTATION_DELETES_PER_PASS: i64 = 5_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ToolPayloadRetentionMode {
@@ -2193,6 +2194,61 @@ impl OrmAiSessionRetentionService {
                             return Ok(false);
                         }
                     }
+
+                    let title_work = tx
+                        .query::<AiSessionTitleWorkRecord>()
+                        .filter(AiSessionTitleWorkRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if title_work.len() > 1 {
+                        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                    }
+                    for work in title_work {
+                        if !tx
+                            .delete_by_id::<AiSessionTitleWorkRecord>(&work.id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                        }
+                    }
+
+                    let title_mutations = tx
+                        .query::<AiSessionTitleMutationRecord>()
+                        .filter(AiSessionTitleMutationRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .default_order()
+                        .limit(MAXIMUM_TITLE_MUTATION_DELETES_PER_PASS)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let mutation_page_was_full = i64::try_from(title_mutations.len()).ok()
+                        == Some(MAXIMUM_TITLE_MUTATION_DELETES_PER_PASS);
+                    for mutation in title_mutations {
+                        if !tx
+                            .delete_by_id::<AiSessionTitleMutationRecord>(&mutation.id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                        }
+                    }
+                    if mutation_page_was_full {
+                        return Ok(false);
+                    }
                     if session.title.trim().is_empty() {
                         return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                     }
@@ -3666,6 +3722,13 @@ pub(crate) fn validate_session(session: &AiSessionRecord) -> Result<(), OrmPubli
         || session.owner_principal_kind.trim().is_empty()
         || session.owner_subject.trim().is_empty()
         || !lifecycle_is_valid
+        || session.title_revision < 0
+        || !matches!(
+            session.title_source.as_str(),
+            "default" | "user" | "reviewed_title_worker"
+        )
+        || (!session.title.is_empty()
+            && (session.title.len() > 4_096 || session.title.chars().any(char::is_control)))
         || session.stream_head < 0
         || session.message_head < 0
         || scope.kind.trim().is_empty()
@@ -4499,6 +4562,8 @@ mod tests {
                 scope_kind: scope.kind.clone(),
                 scope_id: scope.id.clone(),
                 title: "Retention test".to_owned(),
+                title_revision: 0,
+                title_source: "default".to_owned(),
                 state: "active".to_owned(),
                 stream_head: 3,
                 message_head: 1,
