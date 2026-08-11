@@ -19,6 +19,34 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased: strict Codex lifecycle envelopes (crate 0.72.0 to 0.73.0; schema remains 0.55.0)
+
+The `provider-codex-app-server` protocol actor now requires the complete Codex
+CLI 0.147.0 notification envelope for every admitted lifecycle event. The
+signed `emittedAtMs` value must be present, positive, and representable as an
+`i64`; it is validated and discarded rather than exposed through
+`AiCodexAppServerInbound`. Missing, negative, zero, overflowing, duplicate, or
+extra-field envelopes fail closed.
+
+Thread and turn starts now track the correlated response and authoritative
+notification independently, so either wire ordering is accepted while IDs,
+duplicates, and late frames remain rejected. Ordinary agent-message item
+start/completion pairs are also lifecycle-fenced. A generated
+`thread/status/changed` notification is accepted only when it reports exactly
+`notLoaded` for the same thread already under a delete request; other status
+values and unsolicited status traffic remain unsupported.
+
+Host process implementations must pass each complete app-server frame to the
+actor unchanged. Continue waiting until both the `thread/start` or
+`thread/resume` response and `thread/started` notification have been admitted.
+Ignore `emittedAtMs` for application behavior and treat deletion-bound
+`thread/status/changed` as lifecycle evidence only. No generic notification,
+remote-control, command, filesystem, MCP, browser, hosted-web, or tool
+authority is added.
+
+No database or GraphQL schema migration, table/index/constraint change,
+backfill, or row rewrite is required. AI schema module 0.55.0 remains current.
+
 ## Unreleased: strict Codex 0.147.0 initialization (crate 0.71.0 to 0.72.0; schema remains 0.55.0)
 
 The `provider-codex-app-server` adapter admits Codex CLI 0.147.0's

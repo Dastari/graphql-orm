@@ -20,7 +20,7 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.72.0` and AI
+This development line advances the pre-1.0 crate version to `0.73.0` and AI
 schema module `0.55.0`. It begins the applied-restore implementation with
 bounded database-derived facts, aligns the reviewed dependency universe,
 integrates generated resolver-operation metadata, completes the durable OpenAI
@@ -29,6 +29,15 @@ file-search IDs behind the reviewed persistent-file design.
 
 ### Fixed
 
+- Codex app-server lifecycle notifications now use one strict generated-wire
+  envelope requiring a positive signed `emittedAtMs`. The actor validates and
+  discards that timestamp, rejects duplicate, missing, malformed, overflowing,
+  extra-field, mismatched, duplicate-lifecycle, and late frames, and preserves
+  response/notification ordering for thread and turn starts.
+- The exact `thread/status/changed` transition to `notLoaded` is admitted only
+  for the same thread already under a correlated delete request. This permits
+  a complete Codex CLI 0.147.0 persistent create/delete handshake without
+  admitting general status traffic or any new provider capability.
 - The strict Codex app-server actor now admits only the complete bounded
   `remoteControl/status/changed` notification whose status is exactly
   `disabled`, without exposing any remote-control method or identity. Codex

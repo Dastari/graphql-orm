@@ -8,7 +8,7 @@
 //! ordinary coordinator. Every other server-initiated request remains
 //! forbidden.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
@@ -1801,8 +1801,11 @@ impl std::fmt::Debug for AiCodexAppServerInbound {
 /// There is intentionally no generic request builder. The provider-specific
 /// process actor may emit only the explicitly typed initialization, thread,
 /// turn, interruption, deletion, and dynamic-tool response methods represented
-/// here. All other server-initiated requests and non-allowlisted notifications
-/// fail closed.
+/// here. Admitted server notifications require the complete positive signed
+/// `emittedAtMs` envelope and exact lifecycle correlation. The only admitted
+/// thread-status transition is `notLoaded` for the exact thread already being
+/// deleted. All other server-initiated requests and non-allowlisted
+/// notifications fail closed.
 #[derive(Debug)]
 pub struct AiCodexAppServerProtocolActor {
     next_id: u64,
@@ -1815,8 +1818,16 @@ pub struct AiCodexAppServerProtocolActor {
     pending_dynamic_requests: BTreeMap<u64, (String, String)>,
     started_dynamic_calls: BTreeMap<String, String>,
     responded_dynamic_calls: BTreeMap<String, String>,
+    started_items: BTreeMap<String, String>,
+    completed_items: BTreeSet<String>,
     initialization_complete: bool,
     thread_response_observed: bool,
+    thread_started_observed: bool,
+    thread_deleted: bool,
+    deleting_thread_id: Option<String>,
+    thread_not_loaded_observed: bool,
+    turn_response_observed: bool,
+    turn_started_observed: bool,
     remote_control_disabled_observed: bool,
     maximum_frame_bytes: usize,
 }
@@ -1846,8 +1857,16 @@ impl AiCodexAppServerProtocolActor {
             pending_dynamic_requests: BTreeMap::new(),
             started_dynamic_calls: BTreeMap::new(),
             responded_dynamic_calls: BTreeMap::new(),
+            started_items: BTreeMap::new(),
+            completed_items: BTreeSet::new(),
             initialization_complete: false,
             thread_response_observed: false,
+            thread_started_observed: false,
+            thread_deleted: false,
+            deleting_thread_id: None,
+            thread_not_loaded_observed: false,
+            turn_response_observed: false,
+            turn_started_observed: false,
             remote_control_disabled_observed: false,
             maximum_frame_bytes,
         })
@@ -2098,6 +2117,7 @@ impl AiCodexAppServerProtocolActor {
             || !valid_reference(cursor.expose_to_provider_adapter())
             || self.pending_turn_thread_id.is_some()
             || self.active_turn_id.is_some()
+            || self.deleting_thread_id.is_some()
             || self
                 .active_thread_id
                 .as_deref()
@@ -2105,11 +2125,14 @@ impl AiCodexAppServerProtocolActor {
         {
             return Err(ProviderError::Rejected);
         }
-        self.request(
+        let frame = self.request(
             ClientMethod::ThreadDelete,
             "thread/delete",
             json!({"threadId": cursor.expose_to_provider_adapter()}),
-        )
+        )?;
+        self.deleting_thread_id = Some(cursor.expose_to_provider_adapter().to_owned());
+        self.thread_not_loaded_observed = false;
+        Ok(frame)
     }
 
     /// Encodes one ephemeral thread start with the exact reviewed dynamic
@@ -2238,8 +2261,15 @@ impl AiCodexAppServerProtocolActor {
         input.validate()?;
         if !valid_reference(thread_id)
             || self.active_thread_id.as_deref() != Some(thread_id)
+            || !self.thread_response_observed
+            || !self.thread_started_observed
+            || self.thread_deleted
             || self.pending_turn_thread_id.is_some()
             || self.active_turn_id.is_some()
+            || self.turn_response_observed
+            || self.turn_started_observed
+            || !self.started_items.is_empty()
+            || !self.completed_items.is_empty()
         {
             return Err(ProviderError::InvalidRequest);
         }
@@ -2422,27 +2452,16 @@ impl AiCodexAppServerProtocolActor {
                 result,
             });
         }
-        let method = object
-            .get("method")
-            .and_then(Value::as_str)
-            .ok_or(ProviderError::Rejected)?;
-        if method == REMOTE_CONTROL_STATUS_CHANGED {
-            return self.accept_disabled_remote_control_status(value);
+        let notification: CodexAppServerNotificationEnvelope =
+            serde_json::from_slice(frame).map_err(|_| ProviderError::Rejected)?;
+        notification.validate()?;
+        if notification.method == REMOTE_CONTROL_STATUS_CHANGED {
+            return self.accept_disabled_remote_control_status(notification);
         }
-        if object
-            .keys()
-            .any(|key| !matches!(key.as_str(), "method" | "params"))
-        {
-            return Err(ProviderError::Rejected);
-        }
-        let method = Some(method)
+        let method = Some(notification.method.as_str())
             .filter(|method| allowed_notification(method))
             .ok_or(ProviderError::Rejected)?;
-        let params = object
-            .get("params")
-            .filter(|params| params.is_object())
-            .cloned()
-            .ok_or(ProviderError::Rejected)?;
+        let params = notification.params;
         if matches!(method, "item/started" | "item/completed")
             && params
                 .get("item")
@@ -2465,6 +2484,10 @@ impl AiCodexAppServerProtocolActor {
             self.dynamic_tools.clear();
             self.pending_turn_thread_id = None;
             self.active_turn_id = None;
+            self.turn_response_observed = false;
+            self.turn_started_observed = false;
+            self.started_items.clear();
+            self.completed_items.clear();
         }
         Ok(AiCodexAppServerInbound::Notification {
             method: method.to_owned(),
@@ -2584,10 +2607,12 @@ impl AiCodexAppServerProtocolActor {
         match method {
             ClientMethod::ThreadStart | ClientMethod::ThreadResume => {
                 let thread_id = nested_reference(result, "thread", "id")?;
-                if self
-                    .active_thread_id
-                    .as_deref()
-                    .is_some_and(|expected| expected != thread_id)
+                if self.thread_response_observed
+                    || self.thread_deleted
+                    || self
+                        .active_thread_id
+                        .as_deref()
+                        .is_some_and(|expected| expected != thread_id)
                 {
                     return Err(ProviderError::Rejected);
                 }
@@ -2596,7 +2621,8 @@ impl AiCodexAppServerProtocolActor {
             }
             ClientMethod::TurnStart => {
                 let turn_id = nested_reference(result, "turn", "id")?;
-                if self.pending_turn_thread_id.as_deref() != self.active_thread_id.as_deref()
+                if self.turn_response_observed
+                    || self.pending_turn_thread_id.as_deref() != self.active_thread_id.as_deref()
                     || self
                         .active_turn_id
                         .as_deref()
@@ -2605,27 +2631,31 @@ impl AiCodexAppServerProtocolActor {
                     return Err(ProviderError::Rejected);
                 }
                 self.active_turn_id = Some(turn_id.to_owned());
+                self.turn_response_observed = true;
             }
-            ClientMethod::Initialize | ClientMethod::ThreadDelete | ClientMethod::TurnInterrupt => {
-                if method == ClientMethod::Initialize {
-                    self.initialization_complete = true;
-                }
+            ClientMethod::Initialize => {
+                self.initialization_complete = true;
             }
+            ClientMethod::ThreadDelete => {
+                self.thread_deleted = true;
+                self.active_thread_id = None;
+                self.thread_response_observed = false;
+                self.thread_started_observed = false;
+            }
+            ClientMethod::TurnInterrupt => {}
         }
         Ok(())
     }
 
     fn accept_disabled_remote_control_status(
         &mut self,
-        value: Value,
+        notification: CodexAppServerNotificationEnvelope,
     ) -> Result<AiCodexAppServerInbound, ProviderError> {
-        let notification: DisabledRemoteControlStatusChanged =
-            serde_json::from_value(value).map_err(|_| ProviderError::Rejected)?;
+        let params: DisabledRemoteControlStatusParams =
+            serde_json::from_value(notification.params).map_err(|_| ProviderError::Rejected)?;
         if notification.method != REMOTE_CONTROL_STATUS_CHANGED
-            || notification.emitted_at_ms == 0
-            || notification.emitted_at_ms > i64::MAX as u64
-            || !valid_identifier(&notification.params.server_name)
-            || !valid_identifier(&notification.params.installation_id)
+            || !valid_identifier(&params.server_name)
+            || !valid_identifier(&params.installation_id)
             || !self.initialization_complete
             || self.remote_control_disabled_observed
             || self.thread_response_observed
@@ -2646,21 +2676,62 @@ impl AiCodexAppServerProtocolActor {
         match method {
             "thread/started" => {
                 let thread_id = nested_reference(params, "thread", "id")?;
-                if self
-                    .active_thread_id
-                    .as_deref()
-                    .is_some_and(|expected| expected != thread_id)
+                if !self.initialization_complete
+                    || self.thread_started_observed
+                    || self.thread_deleted
+                    || self.pending_turn_thread_id.is_some()
+                    || self.active_turn_id.is_some()
+                    || self
+                        .pending
+                        .values()
+                        .any(|method| *method == ClientMethod::ThreadDelete)
+                    || (!self.thread_response_observed
+                        && !self.pending.values().any(|method| {
+                            matches!(
+                                method,
+                                ClientMethod::ThreadStart | ClientMethod::ThreadResume
+                            )
+                        }))
+                    || self
+                        .active_thread_id
+                        .as_deref()
+                        .is_some_and(|expected| expected != thread_id)
                 {
                     return Err(ProviderError::Rejected);
                 }
                 self.active_thread_id = Some(thread_id.to_owned());
-                self.thread_response_observed = true;
+                self.thread_started_observed = true;
+            }
+            "thread/status/changed" => {
+                let status: ThreadNotLoadedStatusChangedParams =
+                    serde_json::from_value(params.clone()).map_err(|_| ProviderError::Rejected)?;
+                if !self.initialization_complete
+                    || !valid_reference(&status.thread_id)
+                    || self.deleting_thread_id.as_deref() != Some(status.thread_id.as_str())
+                    || self.thread_not_loaded_observed
+                    || (!self.thread_deleted
+                        && !self
+                            .pending
+                            .values()
+                            .any(|method| *method == ClientMethod::ThreadDelete))
+                    || self.pending_turn_thread_id.is_some()
+                    || self.active_turn_id.is_some()
+                {
+                    return Err(ProviderError::Rejected);
+                }
+                self.thread_not_loaded_observed = true;
             }
             "turn/started" => {
                 let thread_id = direct_reference(params, "threadId")?;
                 let turn_id = nested_reference(params, "turn", "id")?;
-                if self.pending_turn_thread_id.as_deref() != Some(thread_id)
+                if self.turn_started_observed
+                    || self.pending_turn_thread_id.as_deref() != Some(thread_id)
                     || self.active_thread_id.as_deref() != Some(thread_id)
+                    || (!self.turn_response_observed
+                        && !self
+                            .pending
+                            .values()
+                            .any(|method| *method == ClientMethod::TurnStart))
                     || self
                         .active_turn_id
                         .as_deref()
@@ -2669,16 +2740,65 @@ impl AiCodexAppServerProtocolActor {
                     return Err(ProviderError::Rejected);
                 }
                 self.active_turn_id = Some(turn_id.to_owned());
+                self.turn_started_observed = true;
             }
             "turn/completed" => {
                 let thread_id = direct_reference(params, "threadId")?;
                 let turn_id = nested_reference(params, "turn", "id")?;
+                if !self.turn_response_observed || !self.turn_started_observed {
+                    return Err(ProviderError::Rejected);
+                }
                 self.validate_active_turn(thread_id, turn_id)?;
             }
-            "item/started"
-            | "item/completed"
-            | "item/agentMessage/delta"
-            | "thread/tokenUsage/updated" => {
+            "item/started" | "item/completed" => {
+                self.validate_active_turn(
+                    direct_reference(params, "threadId")?,
+                    direct_reference(params, "turnId")?,
+                )?;
+                let item = params
+                    .get("item")
+                    .and_then(Value::as_object)
+                    .ok_or(ProviderError::Rejected)?;
+                let item_id = item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|value| valid_reference(value))
+                    .ok_or(ProviderError::Rejected)?;
+                let item_type = item
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .ok_or(ProviderError::Rejected)?;
+                if method == "item/started" {
+                    if self.completed_items.contains(item_id)
+                        || self.started_items.contains_key(item_id)
+                        || self.started_items.len() >= MAXIMUM_TEXT_BLOCKS
+                    {
+                        return Err(ProviderError::Rejected);
+                    }
+                    self.started_items
+                        .insert(item_id.to_owned(), item_type.to_owned());
+                } else {
+                    if self.started_items.get(item_id).map(String::as_str) != Some(item_type)
+                        || self.completed_items.contains(item_id)
+                        || self.completed_items.len() >= MAXIMUM_TEXT_BLOCKS
+                    {
+                        return Err(ProviderError::Rejected);
+                    }
+                    self.completed_items.insert(item_id.to_owned());
+                    self.started_items.remove(item_id);
+                }
+            }
+            "item/agentMessage/delta" => {
+                self.validate_active_turn(
+                    direct_reference(params, "threadId")?,
+                    direct_reference(params, "turnId")?,
+                )?;
+                let item_id = direct_reference(params, "itemId")?;
+                if self.started_items.get(item_id).map(String::as_str) != Some("agentMessage") {
+                    return Err(ProviderError::Rejected);
+                }
+            }
+            "thread/tokenUsage/updated" => {
                 self.validate_active_turn(
                     direct_reference(params, "threadId")?,
                     direct_reference(params, "turnId")?,
@@ -2692,6 +2812,9 @@ impl AiCodexAppServerProtocolActor {
     fn validate_active_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), ProviderError> {
         if self.active_thread_id.as_deref() != Some(thread_id)
             || self.active_turn_id.as_deref() != Some(turn_id)
+            || !self.thread_response_observed
+            || !self.thread_started_observed
+            || !self.turn_started_observed
         {
             return Err(ProviderError::Rejected);
         }
@@ -2701,11 +2824,20 @@ impl AiCodexAppServerProtocolActor {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DisabledRemoteControlStatusChanged {
+struct CodexAppServerNotificationEnvelope {
     method: String,
-    params: DisabledRemoteControlStatusParams,
+    params: Value,
     #[serde(rename = "emittedAtMs")]
-    emitted_at_ms: u64,
+    emitted_at_ms: i64,
+}
+
+impl CodexAppServerNotificationEnvelope {
+    fn validate(&self) -> Result<(), ProviderError> {
+        if self.emitted_at_ms <= 0 || !self.params.is_object() {
+            return Err(ProviderError::Rejected);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
@@ -2723,6 +2855,27 @@ struct DisabledRemoteControlStatusParams {
 enum DisabledRemoteControlStatus {
     #[serde(rename = "disabled")]
     Disabled,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ThreadNotLoadedStatusChangedParams {
+    thread_id: String,
+    #[serde(rename = "status")]
+    _status: ThreadNotLoadedStatus,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThreadNotLoadedStatus {
+    #[serde(rename = "type")]
+    _kind: ThreadNotLoadedStatusKind,
+}
+
+#[derive(Deserialize)]
+enum ThreadNotLoadedStatusKind {
+    #[serde(rename = "notLoaded")]
+    NotLoaded,
 }
 
 fn direct_reference<'a>(value: &'a Value, key: &str) -> Result<&'a str, ProviderError> {
@@ -2762,6 +2915,7 @@ fn allowed_notification(method: &str) -> bool {
     matches!(
         method,
         "thread/started"
+            | "thread/status/changed"
             | "turn/started"
             | "item/started"
             | "item/completed"
@@ -2845,7 +2999,13 @@ fn registration_identity(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::io::{BufRead, BufReader, Write};
+    use std::path::PathBuf;
+    use std::process::{Child, ChildStdin, Command, Stdio};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::{self, Receiver};
+    use std::thread::{self, JoinHandle};
 
     use agql_auth::{
         AccessTokenMetadata, AuthPrincipal, AuthUser, PrincipalReference, SessionContext,
@@ -2855,6 +3015,78 @@ mod tests {
     use super::*;
     use crate::{AiRunId, AiSessionId, ProviderDynamicToolResult, ProviderEvent};
     use uuid::Uuid;
+
+    struct LiveCodexProcess {
+        child: Child,
+        stdin: ChildStdin,
+        frames: Receiver<Vec<u8>>,
+        reader: Option<JoinHandle<()>>,
+        root: PathBuf,
+    }
+
+    impl LiveCodexProcess {
+        fn launch(executable: &str) -> Self {
+            let root =
+                std::env::temp_dir().join(format!("graphql-orm-ai-codex-0147-{}", Uuid::new_v4()));
+            fs::create_dir(&root).expect("isolated Codex home should be created");
+            let mut child = Command::new(executable)
+                .args(["app-server", "--stdio"])
+                .env_clear()
+                .env("CODEX_HOME", &root)
+                .env("HOME", &root)
+                .env("PATH", "/usr/bin:/bin")
+                .current_dir(&root)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("reviewed Codex app-server should launch");
+            let stdin = child.stdin.take().expect("stdin should be piped");
+            let stdout = child.stdout.take().expect("stdout should be piped");
+            let (sender, frames) = mpsc::channel();
+            let reader = thread::spawn(move || {
+                for line in BufReader::new(stdout).split(b'\n') {
+                    let Ok(line) = line else {
+                        break;
+                    };
+                    if sender.send(line).is_err() {
+                        break;
+                    }
+                }
+            });
+            Self {
+                child,
+                stdin,
+                frames,
+                reader: Some(reader),
+                root,
+            }
+        }
+
+        fn send(&mut self, frame: &[u8]) {
+            self.stdin
+                .write_all(frame)
+                .expect("protocol frame should write");
+            self.stdin.flush().expect("protocol frame should flush");
+        }
+
+        fn receive(&self) -> Vec<u8> {
+            self.frames
+                .recv_timeout(Duration::from_secs(10))
+                .expect("app-server should answer within the live-test bound")
+        }
+    }
+
+    impl Drop for LiveCodexProcess {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            if let Some(reader) = self.reader.take() {
+                let _ = reader.join();
+            }
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
 
     struct Counters {
         launches: AtomicUsize,
@@ -3262,6 +3494,76 @@ mod tests {
             "emittedAtMs": 1_786_484_733_704_u64,
         }))
         .expect("status notification should encode")
+    }
+
+    fn lifecycle_notification(method: &str, params: Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "emittedAtMs": 1_786_484_733_705_i64,
+            "method": method,
+            "params": params,
+        }))
+        .expect("lifecycle notification should encode")
+    }
+
+    fn thread_started_notification(thread_id: &str) -> Vec<u8> {
+        lifecycle_notification("thread/started", json!({"thread": {"id": thread_id}}))
+    }
+
+    fn thread_not_loaded_notification(thread_id: &str) -> Vec<u8> {
+        lifecycle_notification(
+            "thread/status/changed",
+            json!({"threadId": thread_id, "status": {"type": "notLoaded"}}),
+        )
+    }
+
+    fn turn_started_notification(thread_id: &str, turn_id: &str) -> Vec<u8> {
+        lifecycle_notification(
+            "turn/started",
+            json!({
+                "threadId": thread_id,
+                "turn": {"id": turn_id, "items": [], "status": "inProgress"},
+            }),
+        )
+    }
+
+    fn active_protocol_actor() -> AiCodexAppServerProtocolActor {
+        let mut actor = initialized_protocol_actor();
+        actor
+            .start_fresh_thread(&turn())
+            .expect("thread start should encode");
+        actor
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
+            .expect("thread response should bind");
+        actor
+            .accept(&thread_started_notification("thread-1"))
+            .expect("thread notification should bind");
+        actor
+            .start_turn("thread-1", &turn())
+            .expect("turn start should encode");
+        actor
+            .accept(br#"{"id":3,"result":{"turn":{"id":"turn-1"}}}"#)
+            .expect("turn response should bind");
+        actor
+            .accept(&turn_started_notification("thread-1", "turn-1"))
+            .expect("turn notification should bind");
+        actor
+    }
+
+    fn deleting_protocol_actor() -> AiCodexAppServerProtocolActor {
+        let mut actor = initialized_protocol_actor();
+        actor
+            .start_fresh_thread(&turn())
+            .expect("thread start should encode");
+        actor
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
+            .expect("thread response should bind");
+        actor
+            .accept(&thread_started_notification("thread-1"))
+            .expect("thread notification should bind");
+        let cursor = crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", "thread-1")
+            .expect("cursor should validate");
+        actor.delete_thread(&cursor).expect("delete should encode");
+        actor
     }
 
     fn provider_context(profile_id: &str, request: &ModelRequest) -> ProviderRequestContext {
@@ -3744,6 +4046,9 @@ mod tests {
                 .expect("initialize should encode"),
         )
         .expect("frame should be UTF-8");
+        guard
+            .accept(br#"{"id":1,"result":{"userAgent":"test"}}"#)
+            .expect("initialize response should bind");
         let thread = String::from_utf8(
             guard
                 .start_fresh_thread(&turn())
@@ -3753,6 +4058,9 @@ mod tests {
         guard
             .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
             .expect("thread response should bind the exact thread");
+        guard
+            .accept(&thread_started_notification("thread-1"))
+            .expect("thread notification should bind the exact thread");
         let turn = String::from_utf8(
             guard
                 .start_turn("thread-1", &turn())
@@ -3927,6 +4235,160 @@ mod tests {
     }
 
     #[test]
+    fn protocol_accepts_timestamped_thread_started_in_either_correlated_order() {
+        let mut response_first = initialized_protocol_actor();
+        response_first
+            .start_fresh_thread(&turn())
+            .expect("thread start should encode");
+        response_first
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
+            .expect("thread response should bind");
+        let started = thread_started_notification("thread-1");
+        assert!(matches!(
+            response_first.accept(&started),
+            Ok(AiCodexAppServerInbound::Notification { method, params })
+                if method == "thread/started"
+                    && params.pointer("/thread/id").and_then(Value::as_str) == Some("thread-1")
+                    && params.get("emittedAtMs").is_none()
+        ));
+        assert!(matches!(
+            response_first.accept(&started),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut notification_first = initialized_protocol_actor();
+        notification_first
+            .start_fresh_thread(&turn())
+            .expect("thread start should encode");
+        notification_first
+            .accept(&thread_started_notification("thread-2"))
+            .expect("notification may precede its correlated response");
+        notification_first
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-2"}}}"#)
+            .expect("matching response should bind after the notification");
+
+        let cursor =
+            crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", "thread-retained-1")
+                .expect("retained cursor should validate");
+        let mut resumed = initialized_protocol_actor();
+        resumed
+            .resume_thread(&cursor, &turn())
+            .expect("thread resume should encode");
+        resumed
+            .accept(&thread_started_notification("thread-retained-1"))
+            .expect("resume notification may precede its response");
+        resumed
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("resume response should match the protected cursor");
+    }
+
+    #[test]
+    fn protocol_rejects_invalid_lifecycle_envelopes_and_thread_correlation() {
+        let invalid_frames: [&[u8]; 7] = [
+            br#"{"method":"thread/started","params":{"thread":{"id":"thread-1"}}}"#,
+            br#"{"emittedAtMs":0,"method":"thread/started","params":{"thread":{"id":"thread-1"}}}"#,
+            br#"{"emittedAtMs":-1,"method":"thread/started","params":{"thread":{"id":"thread-1"}}}"#,
+            br#"{"emittedAtMs":9223372036854775808,"method":"thread/started","params":{"thread":{"id":"thread-1"}}}"#,
+            br#"{"emittedAtMs":"1","method":"thread/started","params":{"thread":{"id":"thread-1"}}}"#,
+            br#"{"emittedAtMs":1,"emittedAtMs":2,"method":"thread/started","params":{"thread":{"id":"thread-1"}}}"#,
+            br#"{"emittedAtMs":1,"method":"thread/started","params":{"thread":{"id":"thread-1"}},"unexpected":true}"#,
+        ];
+        for frame in invalid_frames {
+            let mut actor = initialized_protocol_actor();
+            actor
+                .start_fresh_thread(&turn())
+                .expect("thread start should encode");
+            assert!(matches!(actor.accept(frame), Err(ProviderError::Rejected)));
+        }
+
+        let mut unknown = initialized_protocol_actor();
+        assert!(matches!(
+            unknown.accept(&lifecycle_notification("thread/unknown", json!({}))),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut response_first_mismatch = initialized_protocol_actor();
+        response_first_mismatch
+            .start_fresh_thread(&turn())
+            .expect("thread start should encode");
+        response_first_mismatch
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
+            .expect("thread response should bind");
+        assert!(matches!(
+            response_first_mismatch.accept(&thread_started_notification("thread-other")),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut notification_first_mismatch = initialized_protocol_actor();
+        notification_first_mismatch
+            .start_fresh_thread(&turn())
+            .expect("thread start should encode");
+        notification_first_mismatch
+            .accept(&thread_started_notification("thread-other"))
+            .expect("first notification binds its claimed thread");
+        assert!(matches!(
+            notification_first_mismatch
+                .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut after_delete = initialized_protocol_actor();
+        after_delete
+            .start_fresh_thread(&turn())
+            .expect("thread start should encode");
+        after_delete
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
+            .expect("thread response should bind");
+        after_delete
+            .accept(&thread_started_notification("thread-1"))
+            .expect("thread notification should bind");
+        let cursor = crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", "thread-1")
+            .expect("cursor should validate");
+        after_delete
+            .delete_thread(&cursor)
+            .expect("thread delete should encode");
+        after_delete
+            .accept(br#"{"id":3,"result":{}}"#)
+            .expect("thread delete response should bind");
+        assert!(matches!(
+            after_delete.accept(&thread_started_notification("thread-1")),
+            Err(ProviderError::Rejected)
+        ));
+
+        for status in ["idle", "systemError", "active", "unknown"] {
+            let mut deleting = deleting_protocol_actor();
+            let status = if status == "active" {
+                json!({"type": status, "activeFlags": []})
+            } else {
+                json!({"type": status})
+            };
+            assert!(matches!(
+                deleting.accept(&lifecycle_notification(
+                    "thread/status/changed",
+                    json!({"threadId": "thread-1", "status": status}),
+                )),
+                Err(ProviderError::Rejected)
+            ));
+        }
+        let mut wrong_status_thread = deleting_protocol_actor();
+        assert!(matches!(
+            wrong_status_thread.accept(&thread_not_loaded_notification("thread-other")),
+            Err(ProviderError::Rejected)
+        ));
+        let mut extra_status_field = deleting_protocol_actor();
+        assert!(matches!(
+            extra_status_field.accept(&lifecycle_notification(
+                "thread/status/changed",
+                json!({
+                    "threadId": "thread-1",
+                    "status": {"type": "notLoaded", "activeFlags": []},
+                }),
+            )),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[test]
     fn protocol_rejects_every_forbidden_item_and_server_request() {
         let forbidden_items = [
             "commandExecution",
@@ -3939,13 +4401,16 @@ mod tests {
             "reasoning",
         ];
         for item_type in forbidden_items {
-            let mut guard =
-                AiCodexAppServerProtocolActor::new(16 * 1024).expect("test guard should validate");
-            let frame = serde_json::to_vec(&json!({
-                "method": "item/started",
-                "params": {"item": {"type": item_type, "id": "item-1"}}
-            }))
-            .expect("test frame should encode");
+            let mut guard = active_protocol_actor();
+            let frame = lifecycle_notification(
+                "item/started",
+                json!({
+                    "item": {"type": item_type, "id": "item-1"},
+                    "startedAtMs": 1,
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                }),
+            );
             assert!(matches!(guard.accept(&frame), Err(ProviderError::Rejected)));
         }
 
@@ -3962,9 +4427,17 @@ mod tests {
     fn protocol_accepts_only_correlated_responses_and_allowlisted_notifications() {
         let mut unbound =
             AiCodexAppServerProtocolActor::new(16 * 1024).expect("test guard should validate");
-        let delta = br#"{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"hello"}}"#;
+        let delta = lifecycle_notification(
+            "item/agentMessage/delta",
+            json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "itemId": "item-1",
+                "delta": "hello",
+            }),
+        );
         assert!(matches!(
-            unbound.accept(delta),
+            unbound.accept(&delta),
             Err(ProviderError::Rejected)
         ));
 
@@ -3993,18 +4466,176 @@ mod tests {
             .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
             .expect("thread response should bind");
         guard
+            .accept(&thread_started_notification("thread-1"))
+            .expect("thread notification should bind");
+        guard
             .start_turn("thread-1", &turn())
             .expect("turn request should encode");
         guard
             .accept(br#"{"id":3,"result":{"turn":{"id":"turn-1"}}}"#)
             .expect("turn response should bind");
+        guard
+            .accept(&turn_started_notification("thread-1", "turn-1"))
+            .expect("turn notification should bind");
+        guard
+            .accept(&lifecycle_notification(
+                "item/started",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "startedAtMs": 1,
+                    "item": {"id": "item-1", "type": "agentMessage", "text": ""},
+                }),
+            ))
+            .expect("agent message lifecycle should bind");
         assert!(matches!(
-            guard.accept(delta),
+            guard.accept(&delta),
             Ok(AiCodexAppServerInbound::Notification { .. })
         ));
-        let unknown = br#"{"method":"turn/steer","params":{}}"#;
+        let unknown = lifecycle_notification("turn/steer", json!({}));
         assert!(matches!(
-            guard.accept(unknown),
+            guard.accept(&unknown),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[test]
+    fn protocol_fences_timestamped_turn_item_usage_completion_and_interruption() {
+        let mut actor = active_protocol_actor();
+        assert!(matches!(
+            actor.accept(&turn_started_notification("thread-1", "turn-1")),
+            Err(ProviderError::Rejected)
+        ));
+
+        let item_started = lifecycle_notification(
+            "item/started",
+            json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "startedAtMs": 1,
+                "item": {"id": "item-1", "type": "agentMessage", "text": ""},
+            }),
+        );
+        actor
+            .accept(&item_started)
+            .expect("first exact item lifecycle should be admitted");
+        assert!(matches!(
+            actor.accept(&item_started),
+            Err(ProviderError::Rejected)
+        ));
+
+        actor
+            .accept(&lifecycle_notification(
+                "item/agentMessage/delta",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "item-1",
+                    "delta": "hello",
+                }),
+            ))
+            .expect("delta should bind to the active agent-message item");
+        actor
+            .accept(&lifecycle_notification(
+                "thread/tokenUsage/updated",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "tokenUsage": {
+                        "last": {
+                            "cachedInputTokens": 0,
+                            "inputTokens": 1,
+                            "outputTokens": 1,
+                            "reasoningOutputTokens": 0,
+                            "totalTokens": 2,
+                        },
+                        "total": {
+                            "cachedInputTokens": 0,
+                            "inputTokens": 1,
+                            "outputTokens": 1,
+                            "reasoningOutputTokens": 0,
+                            "totalTokens": 2,
+                        },
+                    },
+                }),
+            ))
+            .expect("usage should remain bound to the active turn");
+
+        let item_completed = lifecycle_notification(
+            "item/completed",
+            json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "completedAtMs": 2,
+                "item": {"id": "item-1", "type": "agentMessage", "text": "hello"},
+            }),
+        );
+        actor
+            .accept(&item_completed)
+            .expect("matching item completion should be admitted");
+        assert!(matches!(
+            actor.accept(&item_completed),
+            Err(ProviderError::Rejected)
+        ));
+
+        actor
+            .interrupt_turn("thread-1", "turn-1")
+            .expect("exact turn interruption should encode");
+        actor
+            .accept(br#"{"id":4,"result":{}}"#)
+            .expect("interruption response should correlate");
+        let completed = lifecycle_notification(
+            "turn/completed",
+            json!({
+                "threadId": "thread-1",
+                "turn": {
+                    "id": "turn-1",
+                    "items": [],
+                    "status": "interrupted",
+                },
+            }),
+        );
+        actor
+            .accept(&completed)
+            .expect("interrupted terminal turn should be admitted once");
+        assert!(matches!(
+            actor.accept(&completed),
+            Err(ProviderError::Rejected)
+        ));
+        assert!(matches!(
+            actor.accept(&lifecycle_notification(
+                "item/agentMessage/delta",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "item-1",
+                    "delta": "late",
+                }),
+            )),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut mismatched = active_protocol_actor();
+        assert!(matches!(
+            mismatched.accept(&lifecycle_notification(
+                "thread/tokenUsage/updated",
+                json!({
+                    "threadId": "thread-other",
+                    "turnId": "turn-1",
+                    "tokenUsage": {},
+                }),
+            )),
+            Err(ProviderError::Rejected)
+        ));
+        assert!(matches!(
+            mismatched.accept(&lifecycle_notification(
+                "thread/tokenUsage/updated",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-other",
+                    "tokenUsage": {},
+                }),
+            )),
             Err(ProviderError::Rejected)
         ));
     }
@@ -4020,6 +4651,12 @@ mod tests {
         )
         .expect("frame should be UTF-8");
         assert!(initialize.contains("\"experimentalApi\":true"));
+        guard
+            .accept(br#"{"id":1,"result":{"userAgent":"test"}}"#)
+            .expect("initialize response should bind");
+        guard
+            .initialized()
+            .expect("initialized notification should encode");
         let input = AiCodexAppServerTurnInput::try_from_dynamic_request(dynamic_model_request())
             .expect("dynamic request should convert");
         let start = String::from_utf8(
@@ -4037,15 +4674,21 @@ mod tests {
             .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
             .expect("thread response should bind");
         guard
+            .accept(&thread_started_notification("thread-1"))
+            .expect("thread notification should bind");
+        guard
             .start_turn("thread-1", &input)
             .expect("turn request should encode");
         guard
             .accept(br#"{"id":3,"result":{"turn":{"id":"turn-dynamic-1"}}}"#)
             .expect("turn response should bind");
+        guard
+            .accept(&turn_started_notification("thread-1", "turn-dynamic-1"))
+            .expect("turn notification should bind");
 
-        let started = serde_json::to_vec(&json!({
-            "method": "item/started",
-            "params": {
+        let started = lifecycle_notification(
+            "item/started",
+            json!({
                 "item": {
                     "arguments": {"query": "bounded"},
                     "id": "call-dynamic-1",
@@ -4057,9 +4700,8 @@ mod tests {
                 "startedAtMs": 1,
                 "threadId": "thread-1",
                 "turnId": "turn-dynamic-1"
-            }
-        }))
-        .expect("lifecycle should encode");
+            }),
+        );
         assert!(matches!(
             guard.accept(&started),
             Ok(AiCodexAppServerInbound::DynamicToolLifecycle {
@@ -4108,9 +4750,9 @@ mod tests {
         .expect("response should be UTF-8");
         assert!(response.contains("\"success\":true"));
         assert!(response.contains("\\\"count\\\":3"));
-        let completed = serde_json::to_vec(&json!({
-            "method": "item/completed",
-            "params": {
+        let completed = lifecycle_notification(
+            "item/completed",
+            json!({
                 "item": {
                     "arguments": {"query": "bounded"},
                     "contentItems": [{"type": "inputText", "text": "{\"count\":3}"}],
@@ -4125,9 +4767,8 @@ mod tests {
                 "completedAtMs": 3,
                 "threadId": "thread-1",
                 "turnId": "turn-dynamic-1"
-            }
-        }))
-        .expect("lifecycle should encode");
+            }),
+        );
         assert!(matches!(
             guard.accept(&completed),
             Ok(AiCodexAppServerInbound::DynamicToolLifecycle {
@@ -4179,8 +4820,7 @@ mod tests {
 
     #[test]
     fn retained_thread_protocol_creates_empty_resumes_exact_and_deletes_exact_cursor() {
-        let mut empty_guard =
-            AiCodexAppServerProtocolActor::new(64 * 1024).expect("test guard should validate");
+        let mut empty_guard = initialized_protocol_actor();
         let create = String::from_utf8(
             empty_guard
                 .start_persistent_empty_thread("codex-test-model", &[])
@@ -4194,13 +4834,36 @@ mod tests {
         assert!(create.contains("\"sandbox\":\"read-only\""));
         assert!(!create.contains("dynamicTools"));
         assert!(!create.contains("turn/start"));
+        empty_guard
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-empty"}}}"#)
+            .expect("persistent create response should bind");
+        empty_guard
+            .accept(&thread_started_notification("thread-retained-empty"))
+            .expect("persistent create notification should bind");
+        let empty_cursor = crate::AiProviderSessionCursor::new(
+            "codex.app_server.thread.v2",
+            "thread-retained-empty",
+        )
+        .expect("empty cursor should validate");
+        empty_guard
+            .delete_thread(&empty_cursor)
+            .expect("persistent readiness thread should delete");
+        empty_guard
+            .accept(&thread_not_loaded_notification("thread-retained-empty"))
+            .expect("not-loaded status may precede its delete response");
+        empty_guard
+            .accept(br#"{"id":3,"result":{}}"#)
+            .expect("persistent delete response should bind");
+        assert!(matches!(
+            empty_guard.accept(&thread_not_loaded_notification("thread-retained-empty")),
+            Err(ProviderError::Rejected)
+        ));
 
-        let mut guard =
-            AiCodexAppServerProtocolActor::new(64 * 1024).expect("test guard should validate");
         let input = AiCodexAppServerTurnInput::try_from_dynamic_request(dynamic_model_request())
             .expect("dynamic request should convert");
+        let mut dynamic_create = initialized_protocol_actor();
         let create = String::from_utf8(
-            guard
+            dynamic_create
                 .start_persistent_empty_thread("model-1", input.tools())
                 .expect("empty dynamic retained thread should encode"),
         )
@@ -4217,9 +4880,11 @@ mod tests {
         let swapped_input = AiCodexAppServerTurnInput::try_from_dynamic_request(swapped_request)
             .expect("bounded swapped request should convert");
         assert!(matches!(
-            guard.resume_thread(&cursor, &swapped_input),
+            dynamic_create.resume_thread(&cursor, &swapped_input),
             Err(ProviderError::Rejected)
         ));
+
+        let mut guard = initialized_protocol_actor();
         let resume = String::from_utf8(
             guard
                 .resume_thread(&cursor, &input)
@@ -4233,6 +4898,12 @@ mod tests {
         assert!(resume.contains("\"sandbox\":\"read-only\""));
         assert!(!resume.contains("dynamicTools"));
         assert!(!resume.contains("\"input\""));
+        guard
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("resume response should bind");
+        guard
+            .accept(&thread_started_notification("thread-retained-1"))
+            .expect("resume notification should bind");
 
         let delete = String::from_utf8(
             guard
@@ -4242,6 +4913,12 @@ mod tests {
         .expect("frame should be UTF-8");
         assert!(delete.contains("\"method\":\"thread/delete\""));
         assert!(delete.contains("\"threadId\":\"thread-retained-1\""));
+        guard
+            .accept(br#"{"id":3,"result":{}}"#)
+            .expect("delete response should bind");
+        guard
+            .accept(&thread_not_loaded_notification("thread-retained-1"))
+            .expect("not-loaded status may follow its delete response");
 
         let swapped = crate::AiProviderSessionCursor::new("other.thread", "thread-retained-1")
             .expect("bounded swapped cursor should construct");
@@ -4253,5 +4930,149 @@ mod tests {
             guard.delete_thread(&swapped),
             Err(ProviderError::Rejected)
         ));
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly selected reviewed Codex CLI 0.147.0 binary"]
+    fn live_codex_0147_persistent_create_delete_uses_the_strict_actor() {
+        let executable = std::env::var("GRAPHQL_ORM_AI_CODEX_0147_BIN")
+            .expect("set GRAPHQL_ORM_AI_CODEX_0147_BIN to the reviewed absolute binary path");
+        assert!(PathBuf::from(&executable).is_absolute());
+        let version = Command::new(&executable)
+            .arg("--version")
+            .env_clear()
+            .output()
+            .expect("reviewed Codex version should execute");
+        assert!(version.status.success());
+        assert_eq!(
+            String::from_utf8(version.stdout)
+                .expect("version should be UTF-8")
+                .trim(),
+            "codex-cli 0.147.0"
+        );
+
+        let mut process = LiveCodexProcess::launch(&executable);
+        let mut actor =
+            AiCodexAppServerProtocolActor::new(MAXIMUM_FRAME_BYTES).expect("actor should validate");
+        process.send(
+            &actor
+                .initialize(
+                    "graphql_orm_ai_live_test",
+                    "GraphQL ORM AI live test",
+                    "0.147.0",
+                )
+                .expect("initialize should encode"),
+        );
+        loop {
+            match actor
+                .accept(&process.receive())
+                .expect("initialization frame should be strictly admitted")
+            {
+                AiCodexAppServerInbound::Response {
+                    method: "initialize",
+                    ..
+                } => break,
+                AiCodexAppServerInbound::RemoteControlDisabled => {}
+                other => panic!("unexpected initialization frame: {other:?}"),
+            }
+        }
+        process.send(
+            &actor
+                .initialized()
+                .expect("initialized notification should encode"),
+        );
+        process.send(
+            &actor
+                .start_persistent_empty_thread("gpt-5.6-sol", &[])
+                .expect("persistent thread start should encode"),
+        );
+
+        let mut response_thread_id = None;
+        let mut notification_thread_id = None;
+        for _ in 0..8 {
+            let frame = process.receive();
+            let inbound = actor.accept(&frame).unwrap_or_else(|error| {
+                let envelope: Value = serde_json::from_slice(&frame)
+                    .expect("rejected live frame should remain valid JSON");
+                let keys = envelope
+                    .as_object()
+                    .map(|object| object.keys().cloned().collect::<Vec<_>>());
+                panic!(
+                    "thread lifecycle frame was rejected: {error:?}; method={:?}; keys={keys:?}",
+                    envelope.get("method").and_then(Value::as_str),
+                );
+            });
+            match inbound {
+                AiCodexAppServerInbound::RemoteControlDisabled => {}
+                AiCodexAppServerInbound::Response {
+                    method: "thread/start",
+                    result,
+                    ..
+                } => {
+                    response_thread_id = Some(
+                        nested_reference(&result, "thread", "id")
+                            .expect("response thread should be valid")
+                            .to_owned(),
+                    );
+                }
+                AiCodexAppServerInbound::Notification { method, params }
+                    if method == "thread/started" =>
+                {
+                    notification_thread_id = Some(
+                        nested_reference(&params, "thread", "id")
+                            .expect("notification thread should be valid")
+                            .to_owned(),
+                    );
+                }
+                other => panic!("unexpected thread lifecycle frame: {other:?}"),
+            }
+            if response_thread_id.is_some() && notification_thread_id.is_some() {
+                break;
+            }
+        }
+        assert_eq!(response_thread_id, notification_thread_id);
+        let thread_id = response_thread_id.expect("both thread lifecycle frames should arrive");
+        let cursor = crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", thread_id)
+            .expect("live thread cursor should validate");
+        process.send(
+            &actor
+                .delete_thread(&cursor)
+                .expect("live readiness thread delete should encode"),
+        );
+        let mut delete_response_observed = false;
+        let mut not_loaded_observed = false;
+        for _ in 0..4 {
+            let frame = process.receive();
+            let inbound = actor.accept(&frame).unwrap_or_else(|error| {
+                let envelope: Value = serde_json::from_slice(&frame)
+                    .expect("rejected delete frame should remain valid JSON");
+                let keys = envelope
+                    .as_object()
+                    .map(|object| object.keys().cloned().collect::<Vec<_>>());
+                panic!(
+                    "delete frame was rejected: {error:?}; method={:?}; keys={keys:?}",
+                    envelope.get("method").and_then(Value::as_str),
+                );
+            });
+            match inbound {
+                AiCodexAppServerInbound::Response {
+                    method: "thread/delete",
+                    ..
+                } => delete_response_observed = true,
+                AiCodexAppServerInbound::Notification { method, params }
+                    if method == "thread/status/changed"
+                        && params.pointer("/status/type").and_then(Value::as_str)
+                            == Some("notLoaded") =>
+                {
+                    not_loaded_observed = true;
+                }
+                other => panic!("unexpected delete frame: {other:?}"),
+            }
+            if delete_response_observed && not_loaded_observed {
+                break;
+            }
+        }
+        assert!(delete_response_observed);
+        assert!(not_loaded_observed);
     }
 }
