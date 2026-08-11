@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -18,6 +18,45 @@ Migration entries preserve the dependency and schema facts for the checkpoint
 they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## Unreleased: generated GraphQL tool profiles (crate 0.63.0 to 0.64.0; schema remains 0.51.0)
+
+Hosts may replace hand-maintained GraphQL tool documents with
+`AiGraphqlToolManifestBuilder`. Construct it inside the owning subgraph from
+the complete finished SDL, stable public subgraph identity, and registered
+logical execution target. Add `AiGraphqlToolProfile::read_only` profiles for
+queries through `add_generated_profile` or `add_custom_profile`.
+
+Every profile must explicitly provide bounded model inputs, a closed typed
+argument plan, selected output fields, list bounds, an exact disclosure
+schema, and byte/record ceilings. Fixed values and semantic variable aliases
+are compiled into the generated document. Unused/unknown inputs, missing
+required arguments, invalid nested input fields, conflicting aliases,
+unbounded lists, projection/disclosure mismatch, schema drift, and stale ORM
+catalog bindings fail during construction or registration. One root may have
+multiple profile IDs. Existing manually authored descriptors continue to
+work.
+
+Handwritten mutations are not accepted through the read-only constructor.
+Use `AiGraphqlToolProfile::supervised_mutation`, an explicit write risk, and
+the existing one-shot approval path. The compiler never discovers or enables
+shells, remote control, screenshots, arbitrary GraphQL, arbitrary URLs, or
+unregistered operations.
+
+For federated transport, encode `manifest.extension_payload()` inside the
+optional generic router descriptor extension named by
+`AI_GRAPHQL_TOOL_MANIFEST_EXTENSION_NAME`, version 1. Consumers decode through
+`AiGraphqlToolManifest::from_extension_payload`, aggregate against exact
+active SDL values, and then register through
+`AiGraphqlToolManifestSet::register_into`. The owning subgraph supplies its ORM
+operation catalogue and application-operation policy to
+`add_generated_profile`; the federated AI consumer does not import the owning
+service crate. Unknown/incomplete versions and roots advertised by multiple
+subgraphs fail closed.
+
+This is an additive Rust/wire API change. AI schema module 0.51.0 and all
+database entities, columns, indexes, constraints, backup/restore contracts,
+and stored rows are unchanged; no data migration is required.
 
 ## Unreleased: tool-free coordinator turns (crate 0.62.1 to 0.63.0; schema remains 0.51.0)
 

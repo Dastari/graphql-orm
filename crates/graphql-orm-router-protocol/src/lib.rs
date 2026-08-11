@@ -16,8 +16,9 @@ pub use error::{ProtocolError, ProtocolErrorKind};
 pub use fingerprint::Fingerprint;
 pub use model::{
     AdvertisedEndpoint, ArgumentDescriptor, AuthorizationRequirement, CapabilitySet,
-    DescriptorFingerprints, GraphqlEndpoints, OperationDescriptor, RootOperationType,
-    SchemaAdvertisement, ScopeSet, ScopeTemplate, SubgraphDescriptor, SubgraphDescriptorBuilder,
-    SubgraphId, SubgraphIdentity, SubgraphName, UnrepresentablePolicy, UnrepresentablePolicyCode,
+    DescriptorExtension, DescriptorFingerprints, GraphqlEndpoints, OperationDescriptor,
+    RootOperationType, SchemaAdvertisement, ScopeSet, ScopeTemplate, SubgraphDescriptor,
+    SubgraphDescriptorBuilder, SubgraphId, SubgraphIdentity, SubgraphName, UnrepresentablePolicy,
+    UnrepresentablePolicyCode,
 };
 pub use version::{ProtocolVersion, SUPPORTED_PROTOCOL_VERSION};

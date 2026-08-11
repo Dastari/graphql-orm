@@ -11,6 +11,7 @@ pub(crate) struct EntityMetadata {
     pub(crate) backend: Option<String>,
     pub(crate) table_name: Option<String>,
     pub(crate) plural_name: Option<String>,
+    pub(crate) description: Option<String>,
     pub(crate) default_sort: Option<String>,
     pub(crate) schema_policy: Option<String>,
     pub(crate) auth: Option<String>,
@@ -141,6 +142,11 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
                     metadata.plural_name = Some(lit.value());
+                } else if meta.path.is_ident("description") {
+                    let value = meta.value()?;
+                    let lit: syn::LitStr = value.parse()?;
+                    validate_semantic_description(&lit.value(), lit.span())?;
+                    metadata.description = Some(lit.value());
                 } else if meta.path.is_ident("default_sort") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
@@ -845,6 +851,7 @@ pub(crate) struct FieldMetadata {
     pub(crate) graphql_name: Option<String>,
     pub(crate) serde_name: Option<String>,
     pub(crate) db_column: Option<String>,
+    pub(crate) description: Option<String>,
     pub(crate) filterable: Option<String>,
     pub(crate) sortable: bool,
     pub(crate) unique: bool,
@@ -989,6 +996,7 @@ impl Default for FieldMetadata {
             graphql_name: None,
             serde_name: None,
             db_column: None,
+            description: None,
             filterable: None,
             sortable: false,
             unique: false,
@@ -1205,6 +1213,16 @@ fn validate_spatial_geometry_type(value: &str, span: proc_macro2::Span) -> syn::
     }
 }
 
+fn validate_semantic_description(value: &str, span: proc_macro2::Span) -> syn::Result<()> {
+    if value.trim().is_empty() || value.len() > 1024 || value.chars().any(char::is_control) {
+        return Err(syn::Error::new(
+            span,
+            "semantic descriptions must be non-empty, at most 1024 bytes, and contain no control characters",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn spatial_geometry_type_tokens(
     value: &str,
     span: proc_macro2::Span,
@@ -1264,6 +1282,11 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             meta.skip_input = true;
                         } else if nested.path.is_ident("sensitive") {
                             meta.sensitive = true;
+                        } else if nested.path.is_ident("description") {
+                            let value = nested.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            validate_semantic_description(&lit.value(), lit.span())?;
+                            meta.description = Some(lit.value());
                         } else if nested.path.is_ident("version") {
                             meta.is_version = true;
                             meta.skip_input = true;
@@ -2152,6 +2175,7 @@ fn generate_entity_impl(
         .unwrap_or_else(|| quote! { None });
     let graphql_rename_fields = entity_meta.graphql_rename_fields.as_deref();
     let serde_rename_all = entity_meta.serde_rename_all.as_deref();
+    let entity_description = entity_meta.description.as_deref().unwrap_or("");
     let field_case_rule = selected_field_case_rule();
     let read_policy = entity_meta
         .read_policy
@@ -2372,6 +2396,7 @@ fn generate_entity_impl(
     let mut sortable_columns: Vec<(syn::Ident, String)> = Vec::new();
     let mut object_field_methods = Vec::new();
     let mut repository_field_policy_defs = Vec::new();
+    let mut semantic_field_defs = Vec::new();
     let parsed_fields = collect_parsed_fields(fields.iter())?;
 
     for parsed_field in &parsed_fields {
@@ -2414,6 +2439,19 @@ fn generate_entity_impl(
                     .relation_target
                     .clone()
                     .unwrap_or_else(|| "Unknown".to_string());
+                if field_meta.read && !field_meta.is_private {
+                    let description = field_meta.description.as_deref().unwrap_or("");
+                    let is_multiple = field_meta.relation_multiple;
+                    semantic_field_defs.push(quote! {
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFieldMetadata {
+                            field_name: #graphql_name,
+                            description: #description,
+                            is_relationship: true,
+                            relationship_target: Some(#target_type),
+                            is_multiple: #is_multiple,
+                        }
+                    });
+                }
                 let source_columns = field_meta.relation_from_fields.clone().unwrap_or_else(|| {
                     vec![
                         field_meta
@@ -2549,6 +2587,18 @@ fn generate_entity_impl(
             graphql_rename_fields,
             serde_rename_all,
         );
+        if field_meta.read && !field_meta.is_private {
+            let description = field_meta.description.as_deref().unwrap_or("");
+            semantic_field_defs.push(quote! {
+                ::graphql_orm::graphql::orm::GraphqlSemanticFieldMetadata {
+                    field_name: #graphql_name,
+                    description: #description,
+                    is_relationship: false,
+                    relationship_target: None,
+                    is_multiple: false,
+                }
+            });
+        }
         if !field_meta.is_relation && !field_meta.skip_db {
             let read_policy = field_meta
                 .read_policy
@@ -3382,6 +3432,19 @@ fn generate_entity_impl(
                     })
                 }
 
+                fn graphql_semantic_metadata() -> Option<&'static ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata> {
+                    static FIELDS: &[::graphql_orm::graphql::orm::GraphqlSemanticFieldMetadata] = &[
+                        #(#semantic_field_defs),*
+                    ];
+                    static METADATA: ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata =
+                        ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata {
+                            entity_name: #struct_name_str,
+                            description: #entity_description,
+                            fields: FIELDS,
+                        };
+                    Some(&METADATA)
+                }
+
                 fn repository_field_policies() -> &'static [::graphql_orm::graphql::orm::RepositoryFieldPolicyDef] {
                     static FIELDS: &[::graphql_orm::graphql::orm::RepositoryFieldPolicyDef] = &[
                         #(#repository_field_policy_defs),*
@@ -3759,6 +3822,19 @@ fn generate_entity_impl(
                         #retention_policy,
                     )
                 })
+            }
+
+            fn graphql_semantic_metadata() -> Option<&'static ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata> {
+                static FIELDS: &[::graphql_orm::graphql::orm::GraphqlSemanticFieldMetadata] = &[
+                    #(#semantic_field_defs),*
+                ];
+                static METADATA: ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata =
+                    ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata {
+                        entity_name: #struct_name_str,
+                        description: #entity_description,
+                        fields: FIELDS,
+                    };
+                Some(&METADATA)
             }
 
 

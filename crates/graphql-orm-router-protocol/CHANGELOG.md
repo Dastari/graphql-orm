@@ -3,12 +3,24 @@ title: graphql-orm-router-protocol changelog
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-11
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # Changelog
+
+## 0.2.0 - 2026-08-11
+
+- Added optional project-neutral `DescriptorExtension` values. Each extension
+  has a lower-case identity, positive extension-owned version, bounded
+  canonical JSON payload, and SHA-256 fingerprint.
+- Extensions are canonically ordered and participate in the descriptor
+  combined fingerprint but not its authorization fingerprint. An empty
+  extension list retains the established protocol-v1 combined fingerprint.
+- Protocol wire major 1 remains current. Old JSON without `extensions`
+  decodes unchanged; consumers of a named extension are responsible for
+  rejecting unsupported or incomplete extension versions.
 
 ## 0.1.0 - 2026-08-07
 

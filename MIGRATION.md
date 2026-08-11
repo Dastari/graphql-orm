@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -12,6 +12,37 @@ supersedes: []
 
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
+
+## 0.20.0 Semantic entity descriptions
+
+Update `graphql-orm` and `graphql-orm-macros` together to 0.20.0 at one
+reviewed full Git revision. Existing derives and handwritten `Entity`
+implementations require no source changes.
+
+Hosts may add a public entity description and public field descriptions:
+
+```rust
+#[graphql_entity(
+    table = "records",
+    plural = "Records",
+    description = "Records visible in reviewed application workflows"
+)]
+struct Record {
+    #[primary_key]
+    #[graphql_orm(description = "Stable public record identity")]
+    id: String,
+}
+```
+
+Read the resulting `GraphqlEntitySemanticMetadata` through
+`Entity::graphql_semantic_metadata`. The derive omits private/non-readable
+fields and never includes physical column identities or policy keys. This is
+descriptive metadata only; consumers must still explicitly select fields,
+assign disclosure classification, and perform ordinary authorization.
+
+There is no database, SDL, backup, or stored-data migration. The optional
+`router-protocol` feature now resolves protocol crate 0.2.0, whose wire payload
+remains protocol major 1.
 
 ## 0.19.0 Compound foreign keys and directional indexes
 

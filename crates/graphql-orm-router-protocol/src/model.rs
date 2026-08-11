@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{
     ProtocolError, ProtocolErrorKind, ProtocolVersion, SUPPORTED_PROTOCOL_VERSION,
@@ -294,6 +295,81 @@ pub struct OperationDescriptor {
     pub authorization: AuthorizationRequirement,
 }
 
+/// One optional, project-neutral descriptor extension.
+///
+/// The protocol validates identity, version, canonical JSON, and fingerprint
+/// but deliberately does not interpret the payload. A consumer of a named
+/// extension must reject unsupported or incomplete extension versions.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DescriptorExtension {
+    /// Stable lower-case extension identity.
+    pub name: String,
+    /// Extension-owned wire version. Zero is invalid.
+    pub version: u16,
+    /// Extension-owned JSON payload.
+    pub payload: Value,
+    /// Canonical fingerprint over name, version, and payload.
+    pub fingerprint: Fingerprint,
+}
+
+impl DescriptorExtension {
+    /// Creates and fingerprints a validated optional extension.
+    pub fn new(
+        name: impl Into<String>,
+        version: u16,
+        payload: Value,
+    ) -> Result<Self, ProtocolError> {
+        let mut extension = Self {
+            name: name.into(),
+            version,
+            payload,
+            fingerprint: Fingerprint::sha256("pending descriptor extension"),
+        };
+        extension.canonicalize();
+        extension.validate_shape()?;
+        extension.fingerprint = extension.compute_fingerprint();
+        Ok(extension)
+    }
+
+    /// Returns the canonical fingerprint over this extension's contract.
+    pub fn compute_fingerprint(&self) -> Fingerprint {
+        fingerprint_json(&DescriptorExtensionInput {
+            name: &self.name,
+            version: self.version,
+            payload: &canonical_json_value(self.payload.clone()),
+        })
+    }
+
+    fn canonicalize(&mut self) {
+        self.payload = canonical_json_value(std::mem::take(&mut self.payload));
+    }
+
+    fn validate_shape(&self) -> Result<(), ProtocolError> {
+        validate_token(&self.name, "descriptor extension name")
+            .map_err(|detail| ProtocolError::new(ProtocolErrorKind::InvalidDescriptor, detail))?;
+        if self.name.bytes().any(|byte| byte.is_ascii_uppercase()) || self.version == 0 {
+            return Err(ProtocolError::new(
+                ProtocolErrorKind::InvalidDescriptor,
+                "descriptor extension name must be lower-case and version must be positive",
+            ));
+        }
+        let payload_bytes = serde_json::to_vec(&self.payload).map_err(|_| {
+            ProtocolError::new(
+                ProtocolErrorKind::InvalidDescriptor,
+                "descriptor extension payload is not valid JSON",
+            )
+        })?;
+        if payload_bytes.len() > 1024 * 1024 {
+            return Err(ProtocolError::new(
+                ProtocolErrorKind::InvalidDescriptor,
+                "descriptor extension payload exceeds one mebibyte",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Independently meaningful fingerprints for one subgraph advertisement.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -327,6 +403,9 @@ pub struct SubgraphDescriptor {
     /// Declared root operation metadata.
     #[serde(default)]
     pub operations: Vec<OperationDescriptor>,
+    /// Optional versioned project-neutral extension payloads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<DescriptorExtension>,
     /// Schema, authorization, and router-export fingerprints.
     pub fingerprints: DescriptorFingerprints,
 }
@@ -371,6 +450,7 @@ impl SubgraphDescriptorBuilder {
                 capabilities: CapabilitySet::default(),
                 required_semantics: Vec::new(),
                 operations: Vec::new(),
+                extensions: Vec::new(),
                 fingerprints: DescriptorFingerprints {
                     schema: schema_fingerprint,
                     authorization: Fingerprint::sha256("pending authorization"),
@@ -411,6 +491,13 @@ impl SubgraphDescriptorBuilder {
         self
     }
 
+    /// Adds one optional versioned descriptor extension.
+    #[must_use]
+    pub fn extension(mut self, extension: DescriptorExtension) -> Self {
+        self.descriptor.extensions.push(extension);
+        self
+    }
+
     /// Canonicalizes, fingerprints, and validates the complete descriptor.
     pub fn build(mut self) -> Result<SubgraphDescriptor, ProtocolError> {
         self.descriptor.canonicalize();
@@ -437,6 +524,7 @@ impl SubgraphDescriptor {
             .ensure_compatible_with(SUPPORTED_PROTOCOL_VERSION)?;
         self.validate_required_semantics()?;
         self.validate_operations()?;
+        self.validate_extensions()?;
         self.validate_fingerprints()
     }
 
@@ -451,6 +539,11 @@ impl SubgraphDescriptor {
                 .sort_by(|left, right| left.name.cmp(&right.name));
             canonicalize_authorization(&mut operation.authorization);
         }
+        for extension in &mut self.extensions {
+            extension.canonicalize();
+        }
+        self.extensions
+            .sort_by(|left, right| left.name.cmp(&right.name));
     }
 
     /// Returns the canonical authorization fingerprint for `operations`.
@@ -488,6 +581,7 @@ impl SubgraphDescriptor {
             capabilities: &canonical.capabilities,
             required_semantics: &canonical.required_semantics,
             operations: &canonical.operations,
+            extensions: &canonical.extensions,
             schema_fingerprint: &canonical.fingerprints.schema,
             authorization_fingerprint: &canonical.authorization_fingerprint(),
         })
@@ -545,6 +639,26 @@ impl SubgraphDescriptor {
         Ok(())
     }
 
+    fn validate_extensions(&self) -> Result<(), ProtocolError> {
+        let mut names = BTreeSet::new();
+        for extension in &self.extensions {
+            extension.validate_shape()?;
+            if !names.insert(extension.name.as_str()) {
+                return Err(ProtocolError::new(
+                    ProtocolErrorKind::InvalidDescriptor,
+                    "descriptor contains duplicate extension identities",
+                ));
+            }
+            if extension.fingerprint != extension.compute_fingerprint() {
+                return Err(ProtocolError::new(
+                    ProtocolErrorKind::FingerprintMismatch,
+                    "descriptor extension fingerprint does not match its payload",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn validate_fingerprints(&self) -> Result<(), ProtocolError> {
         let authorization = self.authorization_fingerprint();
         if self.fingerprints.authorization != authorization {
@@ -586,13 +700,42 @@ struct CombinedInput<'a> {
     capabilities: &'a CapabilitySet,
     required_semantics: &'a [String],
     operations: &'a [OperationDescriptor],
+    #[serde(skip_serializing_if = "<[DescriptorExtension]>::is_empty")]
+    extensions: &'a [DescriptorExtension],
     schema_fingerprint: &'a Fingerprint,
     authorization_fingerprint: &'a Fingerprint,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DescriptorExtensionInput<'a> {
+    name: &'a str,
+    version: u16,
+    payload: &'a Value,
 }
 
 fn fingerprint_json(value: &impl Serialize) -> Fingerprint {
     let bytes = serde_json::to_vec(value).expect("protocol fingerprint inputs always serialize");
     Fingerprint::sha256(bytes)
+}
+
+fn canonical_json_value(value: Value) -> Value {
+    match value {
+        Value::Array(values) => {
+            Value::Array(values.into_iter().map(canonical_json_value).collect())
+        }
+        Value::Object(values) => {
+            let mut entries = values.into_iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(name, value)| (name, canonical_json_value(value)))
+                    .collect(),
+            )
+        }
+        scalar => scalar,
+    }
 }
 
 fn canonicalize_authorization(authorization: &mut AuthorizationRequirement) {

@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -20,7 +20,7 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.63.0` and keeps
+This development line advances the pre-1.0 crate version to `0.64.0` and keeps
 AI schema module `0.51.0`. It begins the applied-restore implementation with
 bounded database-derived facts, aligns the reviewed dependency universe,
 integrates generated resolver-operation metadata, completes the durable OpenAI
@@ -45,6 +45,28 @@ file-search IDs behind the reviewed persistent-file design.
   not applied-restore authority; restored deployments must keep it closed.
 
 ### Added
+
+- `AiGraphqlToolManifestBuilder` now compiles reviewed generated-resolver and
+  handwritten-root profiles against the owning subgraph's finished SDL. A
+  profile supplies a closed typed argument adapter, fixed arguments, semantic
+  aliases, explicit bounded projection, disclosure schema, and output limits;
+  the library generates the GraphQL document, JSON Schema, public-coordinate
+  tool identity, exact contracts, and a versioned fingerprinted manifest.
+  Multiple least-disclosure profiles may bind one root. Relationships remain
+  absent unless explicitly selected with bounded depth and list cardinality.
+  Query profiles are read-only; mutations require the separate supervised
+  constructor and one-shot approval semantics.
+- `AiGraphqlToolManifestSet` rejects active-schema drift, unsupported manifest
+  versions, duplicate tool IDs, and a root advertised by multiple subgraphs.
+  The optional `graphql-orm-ai.tool-manifest` router-extension payload is
+  project-neutral and remains discovery only. Owning subgraphs validate ORM
+  generated-operation fingerprints and host classification during manifest
+  compilation; schema-validated federated consumers can register the active
+  set without importing service crates. Custom roots retain their
+  authoritative resolver policies.
+- Tool descriptor setters now safely refresh classification, idempotency, and
+  complete descriptor fingerprints. Catalog registration rejects a stale
+  descriptor fingerprint.
 
 - `AiReadOnlyAgentTurnPlan::new_chat` now binds an initial provider call with
   no application or provider-built-in tools, tool-result input, continuation,

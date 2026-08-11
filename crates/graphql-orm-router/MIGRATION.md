@@ -3,12 +3,24 @@ title: graphql-orm-router migration guide
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-08
+last_reviewed: 2026-08-11
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router migration guide
+
+## 0.1.2 to 0.1.3
+
+Replace the reviewed full-revision pin and rebuild the router. Protocol crate
+0.2.0 adds optional fingerprinted descriptor extensions while keeping
+protocol wire major 1. Existing subgraphs may continue omitting `extensions`.
+No configuration, GraphQL schema, token, or stored-data migration is required.
+
+If a subgraph begins advertising an extension, its payload participates in
+canonical candidate identity and any change follows the ordinary complete
+composition/last-known-good path. The router deliberately does not interpret
+extension payloads or derive authorization from them.
 
 ## 0.1.1 to 0.1.2
 

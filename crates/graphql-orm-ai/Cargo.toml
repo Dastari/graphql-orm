@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-ai"
-version = "0.63.0"
+version = "0.64.0"
 edition = "2024"
 authors = ["Toby Martin <toby@dastari.net>"]
 description = "Project-agnostic AI agent runtime for graphql-orm applications"
@@ -43,6 +43,7 @@ graphql-case-pascal = [
 [dependencies]
 agql-auth = { workspace = true }
 async-graphql = { version = "7", features = ["uuid"] }
+async-graphql-parser = { workspace = true }
 async-stream = "0.3"
 async-trait = "0.1"
 base64 = { version = "0.22", optional = true }

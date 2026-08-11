@@ -70,6 +70,12 @@ pub trait Entity: DatabaseEntity + DatabaseSchema + EntityRelations + DatabaseSe
     fn entity_name() -> &'static str;
     fn metadata() -> &'static EntityMetadata;
 
+    /// Returns optional public semantic descriptions emitted by the derive.
+    /// Handwritten implementations remain source-compatible and return none.
+    fn graphql_semantic_metadata() -> Option<&'static super::core::GraphqlEntitySemanticMetadata> {
+        None
+    }
+
     /// Persisted field policy metadata used by non-GraphQL repository paths.
     fn repository_field_policies() -> &'static [RepositoryFieldPolicyDef] {
         &[]

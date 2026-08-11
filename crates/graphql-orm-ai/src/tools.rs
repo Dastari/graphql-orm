@@ -282,11 +282,33 @@ impl AiToolDescriptor {
         self
     }
 
+    /// Sets the maximum model-facing classification and refreshes the
+    /// immutable descriptor fingerprint.
+    pub fn with_maximum_classification(mut self, classification: DataClassification) -> Self {
+        self.maximum_classification = classification;
+        self.refresh_fingerprint();
+        self
+    }
+
+    /// Sets whether stable-key retries are safe and refreshes the immutable
+    /// descriptor fingerprint.
+    pub fn with_idempotent(mut self, idempotent: bool) -> Self {
+        self.idempotent = idempotent;
+        self.refresh_fingerprint();
+        self
+    }
+
     fn refresh_fingerprint(&mut self) {
         self.fingerprint.clear();
         let encoded = serde_json::to_vec(self)
             .expect("AiToolDescriptor consists only of serializable values");
         self.fingerprint = hex::encode(Sha256::digest(encoded));
+    }
+
+    pub(crate) fn has_valid_fingerprint(&self) -> bool {
+        let mut canonical = self.clone();
+        canonical.refresh_fingerprint();
+        canonical.fingerprint == self.fingerprint
     }
 }
 
@@ -428,16 +450,25 @@ impl AiToolCatalog {
         self.register_validated(descriptor, Some(disclosure_schema))
     }
 
+    pub(crate) fn register_compiled_manifest_entry(
+        &mut self,
+        descriptor: AiToolDescriptor,
+        disclosure_schema: AiDisclosureSchema,
+    ) -> Result<(), AiError> {
+        self.register_disclosed(descriptor, disclosure_schema)
+    }
+
     fn register_validated(
         &mut self,
         descriptor: AiToolDescriptor,
         disclosure_schema: Option<AiDisclosureSchema>,
     ) -> Result<(), AiError> {
-        if descriptor
-            .argument_schema
-            .get("$schema")
-            .and_then(serde_json::Value::as_str)
-            != Some(JSON_SCHEMA_2020_12)
+        if !descriptor.has_valid_fingerprint()
+            || descriptor
+                .argument_schema
+                .get("$schema")
+                .and_then(serde_json::Value::as_str)
+                != Some(JSON_SCHEMA_2020_12)
             || jsonschema::validator_for(&descriptor.argument_schema).is_err()
         {
             return Err(AiError::InvalidConfiguration(

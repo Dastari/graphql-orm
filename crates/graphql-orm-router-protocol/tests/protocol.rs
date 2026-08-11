@@ -2,10 +2,10 @@ use std::{fs, path::PathBuf};
 
 use graphql_orm_router_protocol::{
     AdvertisedEndpoint, ArgumentDescriptor, AuthorizationRequirement, CapabilitySet,
-    DescriptorFingerprints, Fingerprint, GraphqlEndpoints, OperationDescriptor, ProtocolErrorKind,
-    ProtocolVersion, RootOperationType, SchemaAdvertisement, ScopeSet, ScopeTemplate,
-    SubgraphDescriptor, SubgraphDescriptorBuilder, SubgraphId, SubgraphIdentity, SubgraphName,
-    UnrepresentablePolicy, UnrepresentablePolicyCode,
+    DescriptorExtension, DescriptorFingerprints, Fingerprint, GraphqlEndpoints,
+    OperationDescriptor, ProtocolErrorKind, ProtocolVersion, RootOperationType,
+    SchemaAdvertisement, ScopeSet, ScopeTemplate, SubgraphDescriptor, SubgraphDescriptorBuilder,
+    SubgraphId, SubgraphIdentity, SubgraphName, UnrepresentablePolicy, UnrepresentablePolicyCode,
 };
 
 fn endpoint(value: &str) -> AdvertisedEndpoint {
@@ -72,6 +72,7 @@ fn descriptor() -> SubgraphDescriptor {
                 },
             },
         ],
+        extensions: Vec::new(),
         fingerprints: DescriptorFingerprints {
             schema: Fingerprint::sha256("inventory SDL v1"),
             authorization: Fingerprint::sha256("placeholder"),
@@ -170,6 +171,64 @@ fn additive_fields_and_later_minors_are_compatible() {
     value["graphql"]["futureTransport"] = serde_json::json!("quic");
     let decoded = SubgraphDescriptor::from_json_compatible(&value.to_string()).unwrap();
     assert_eq!(decoded.protocol_version.minor, 9);
+}
+
+#[test]
+fn optional_extensions_are_canonical_fingerprinted_and_fail_closed_on_drift() {
+    let extension = DescriptorExtension::new(
+        "example.tool-manifest",
+        1,
+        serde_json::json!({ "z": 2, "a": { "enabled": true } }),
+    )
+    .unwrap();
+    let built = SubgraphDescriptorBuilder::new(
+        "extension-service",
+        "Extension",
+        "http://extension.internal/graphql",
+        "http://extension.internal/sdl",
+        Fingerprint::sha256("extension SDL"),
+    )
+    .unwrap()
+    .extension(extension.clone())
+    .build()
+    .unwrap();
+    assert_eq!(built.extensions, vec![extension]);
+    assert!(built.validate_compatible().is_ok());
+
+    let mut drifted = built;
+    drifted.extensions[0].payload["a"]["enabled"] = serde_json::json!(false);
+    assert_eq!(
+        drifted.validate_compatible().unwrap_err().kind(),
+        ProtocolErrorKind::FingerprintMismatch
+    );
+}
+
+#[test]
+fn extension_order_and_json_object_order_do_not_change_combined_fingerprints() {
+    let first = DescriptorExtension::new(
+        "example.alpha",
+        1,
+        serde_json::json!({ "second": 2, "first": 1 }),
+    )
+    .unwrap();
+    let second = DescriptorExtension::new(
+        "example.beta",
+        2,
+        serde_json::json!({ "nested": { "z": false, "a": true } }),
+    )
+    .unwrap();
+    let mut original = descriptor();
+    original.extensions = vec![first.clone(), second.clone()];
+    original.fingerprints.combined = original.combined_fingerprint();
+    let mut reversed = descriptor();
+    reversed.extensions = vec![second, first];
+    reversed.fingerprints.combined = reversed.combined_fingerprint();
+    assert_eq!(
+        original.combined_fingerprint(),
+        reversed.combined_fingerprint()
+    );
+    assert!(original.validate_compatible().is_ok());
+    assert!(reversed.validate_compatible().is_ok());
 }
 
 #[test]

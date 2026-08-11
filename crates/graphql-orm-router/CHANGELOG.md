@@ -3,12 +3,23 @@ title: graphql-orm-router changelog
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-08
+last_reviewed: 2026-08-11
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # Changelog
+
+## 0.1.3 - 2026-08-11
+
+- Updated `graphql-orm-router-protocol` to 0.2.0 and retained optional
+  descriptor extensions through registration, canonical admission hashing,
+  last-known-good candidate state, and atomic publication. The router binds
+  extension drift into the graph input fingerprint but does not interpret or
+  authorize from extension payloads.
+- Existing descriptors without extensions, router configuration, GraphQL
+  execution, authorization preflight, and authoritative subgraph policies are
+  unchanged.
 
 ## 0.1.2 - 2026-08-08
 

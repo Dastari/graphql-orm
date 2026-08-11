@@ -3,7 +3,7 @@ title: graphql-orm-router
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-08
+last_reviewed: 2026-08-11
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -94,6 +94,12 @@ bounded configuration. Router-relevant SDL is parsed and deterministically
 sorted before hashing; authorization metadata is canonicalized separately, and
 advertised deployment endpoints are excluded from the admission fingerprint.
 An unchanged accepted or rejected fingerprint skips composition.
+
+Optional protocol descriptor extensions are retained as inert, canonically
+fingerprinted candidate metadata. Extension changes therefore enter the same
+complete last-known-good admission path, but the router does not interpret an
+extension, expose its payload as authority, or change resolver authorization
+from it.
 
 A changed input is composed with every other active subgraph's last-known-good
 input. Federation composition, executable runtime construction, subscription

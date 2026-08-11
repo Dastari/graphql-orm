@@ -846,6 +846,7 @@ mod tests {
             },
             required_semantics: Vec::new(),
             operations,
+            extensions: Vec::new(),
             fingerprints: DescriptorFingerprints {
                 schema: Fingerprint::sha256(POLICY_SDL),
                 authorization: Fingerprint::sha256("placeholder"),

@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,28 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## 0.20.0 - 2026-08-11
+
+Companion macros crate: `graphql-orm-macros` **0.20.0** under the aligned
+Git-only version policy. This additive pre-1.0 minor exposes semantic entity
+metadata and aligns the optional router protocol dependency to 0.2.0.
+
+- `#[graphql_entity(description = "...")]` and
+  `#[graphql_orm(description = "...")]` now emit bounded public semantic
+  descriptions through `Entity::graphql_semantic_metadata`. The projection
+  contains public GraphQL field identities and explicit relationship shape,
+  but no physical table/column names or authorization policy. It remains
+  discovery/documentation metadata and grants no field, resolver, row, or AI
+  authority.
+- Handwritten `Entity` implementations remain source compatible through the
+  default `None` semantic-metadata method.
+- The optional `router-protocol` adapter now resolves
+  `graphql-orm-router-protocol` 0.2.0. Existing protocol v1 operation exports
+  are unchanged.
+
+No database, GraphQL SDL, migration-history, backup, or stored-data migration
+is required. Description changes do not alter physical schema hashes.
 
 ## 0.19.0 - 2026-08-10
 

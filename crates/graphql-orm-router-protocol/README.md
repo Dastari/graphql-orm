@@ -3,7 +3,7 @@ title: graphql-orm-router-protocol
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-11
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -34,6 +34,13 @@ authorization metadata and the argument declarations referenced by scope
 templates, including argument type and requiredness. Other argument drift is
 detected by the schema and combined fingerprints without changing the
 authorization fingerprint.
+
+Optional `DescriptorExtension` values carry project-neutral, extension-owned
+JSON payloads. The protocol bounds and canonicalizes each payload, validates a
+positive version and lower-case identity, and binds it into the combined
+fingerprint without interpreting it. Consumers of a named extension must
+reject unsupported or incomplete inner versions; an extension never changes
+router authorization semantics by itself.
 
 ## Compatibility
 
@@ -76,6 +83,7 @@ The service's chosen HTTP framework owns routing and response construction;
 the protocol package intentionally does not. Operation declarations can be
 added with `SubgraphDescriptorBuilder::operation`, and the builder canonicalizes
 them and calculates authorization and combined fingerprints before validation.
+Optional extensions are added with `SubgraphDescriptorBuilder::extension`.
 
 See the golden generated-style and hand-written descriptors under
 [`tests/fixtures`](tests/fixtures).

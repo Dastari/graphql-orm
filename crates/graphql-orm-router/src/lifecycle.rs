@@ -1056,6 +1056,7 @@ fn canonical_input_fingerprint(
             "capabilities": canonical.capabilities,
             "required_semantics": canonical.required_semantics,
             "operations": canonical.operations,
+            "extensions": canonical.extensions,
         }))
         .expect("canonical protocol metadata always serializes");
         write_fingerprint_part(&mut hasher, &metadata);
@@ -1224,6 +1225,7 @@ mod tests {
                 arguments: Vec::new(),
                 authorization: AuthorizationRequirement::Public,
             }],
+            extensions: Vec::new(),
             fingerprints: DescriptorFingerprints {
                 schema: Fingerprint::sha256("schema"),
                 authorization: Fingerprint::sha256("authorization"),

@@ -2873,6 +2873,7 @@ fn protocol_descriptor(
             "scopeTemplates".to_owned(),
         ],
         operations,
+        extensions: Vec::new(),
         fingerprints: DescriptorFingerprints {
             schema: Fingerprint::sha256(format!("{name} schema")),
             authorization: Fingerprint::sha256("placeholder"),

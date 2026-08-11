@@ -3,7 +3,7 @@ title: "graphql-orm-ai"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -323,11 +323,11 @@ Add the crate from a reviewed monorepo revision:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.63.0", features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.64.0", features = ["sqlite"] }
 ```
 
 > **Pre-release dependency note:** this source snapshot resolves
-> `graphql-orm` 0.19.0, `graphql-orm-backup` 0.7.0, and
+> `graphql-orm` 0.20.0, `graphql-orm-backup` 0.7.0, and
 > `graphql-orm-storage` 0.6.0 from one workspace revision. `agql-auth` 0.14.0
 > at `413fda3435f060604cd653c11e2cc18a668aace1` remains an exact external
 > dependency. Direct Git consumers of more than one workspace package must
@@ -343,16 +343,60 @@ A host then:
    principal-aware tool authorization, egress policy, provider, and
    restore-readiness implementations.
 4. Registers immutable logical GraphQL targets and reviewed application tools
-   with exact operation and disclosure contracts. Derive-generated operations
-   bind the current `graphql_orm_operation_catalog()` through
-   `GraphqlOperationContract::with_generated_operation` and
-   `register_generated_with_disclosure`; custom roots retain the explicit
-   reviewed registration path.
+   with exact operation and disclosure contracts. Hosts may keep manually
+   authored descriptors, or compile generated and custom resolver profiles
+   against the owning subgraph's finished SDL with
+   `AiGraphqlToolManifestBuilder`.
 5. Composes `AiQueryRoot`, `AiMutationRoot`, and `AiSubscriptionRoot`, plus
    separately composable configuration, proposal, attachment, and skill roots
    as required, into the application or dedicated AI subgraph.
 6. Opens the runtime start gate only after managed migration validation and
    restore reconciliation succeed.
+
+### Generated GraphQL tool manifests
+
+`AiGraphqlToolManifestBuilder` removes duplicated raw GraphQL documents
+without turning resolver discovery into authority. The owning subgraph builds
+the compiler from its complete finished SDL, public subgraph identity, and one
+registered logical target. It then supplies reviewed profiles for either an
+exact ORM catalog operation or a handwritten root.
+
+Each profile explicitly defines:
+
+- a stable profile ID and bounded model-safe tool description;
+- closed, typed, bounded model inputs;
+- a total argument adapter with semantic aliases and server-owned fixed
+  values;
+- an exact field projection, with relationships absent by default and every
+  list explicitly bounded;
+- an exact disclosure schema and byte/record ceilings.
+
+The compiler validates the plan locally against the finished schema and
+generates the immutable GraphQL document, JSON Schema, operation contract,
+public-coordinate tool identity, and manifest fingerprints. It accepts
+multiple profiles for one resolver, such as count-only and bounded-list views.
+It rejects unknown or missing arguments, invalid nesting, unused inputs,
+conflicting aliases, projection/disclosure mismatch, unsupported manifest
+versions, schema drift, and duplicate federated root ownership. Generated
+entries are revalidated against `graphql_orm_operation_catalog()` and the
+host's application-operation classifier while the owning subgraph compiles
+the manifest. Handwritten roots continue through their authoritative resolver
+policies.
+
+Read-only query profiles use `AiGraphqlToolProfile::read_only`. Mutations have
+no implicit path and require `AiGraphqlToolProfile::supervised_mutation`, an
+explicit write risk, and the existing one-shot approval controls. Compilation
+does not discover or enable arbitrary GraphQL, relationships, URLs, shells,
+screenshots, remote control, or any unregistered operation.
+
+Federated hosts may place `manifest.extension_payload()` in the generic
+optional router descriptor extension named
+`AI_GRAPHQL_TOOL_MANIFEST_EXTENSION_NAME`. The router treats it as inert,
+fingerprint-bound metadata. AI consumers decode and version-check the payload,
+bind it to active finished-schema fingerprints, reject ambiguous root
+ownership, and only then call `AiGraphqlToolManifestSet::register_into`. That
+consumer path does not import the owning service crates or their ORM operation
+catalogues. Runtime introspection is not used.
 
 Deployments with immutable process-owned AI constraints and no editable rule
 hierarchy construct `DeploymentAiCurrentRuleResolver` from the durable

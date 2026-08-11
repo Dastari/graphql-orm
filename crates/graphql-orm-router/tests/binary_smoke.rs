@@ -324,6 +324,7 @@ fn descriptor_document(address: SocketAddr) -> Vec<u8> {
                 authorization: AuthorizationRequirement::Authenticated,
             },
         ],
+        extensions: Vec::new(),
         fingerprints: DescriptorFingerprints {
             schema: Fingerprint::sha256(SDL),
             authorization: Fingerprint::sha256("pending"),

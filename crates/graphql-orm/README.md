@@ -3,7 +3,7 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -40,16 +40,28 @@ the package page points at the maintained project documentation.
 use graphql_orm::prelude::*;
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
-#[graphql_entity(table = "users", plural = "Users")]
+#[graphql_entity(
+    table = "users",
+    plural = "Users",
+    description = "People visible in the application directory"
+)]
 pub struct User {
     #[primary_key]
+    #[graphql_orm(description = "Stable public user identity")]
     pub id: i64,
 
     #[filterable]
     #[sortable]
+    #[graphql_orm(description = "Display name used in the directory")]
     pub name: String,
 }
 ```
+
+`Entity::graphql_semantic_metadata` exposes these explicit public descriptions
+and relationship shapes for generated documentation and reviewed tool-profile
+authoring. It excludes private/non-readable fields and physical database and
+policy identities. The metadata is descriptive only: it never authorizes a
+resolver or selects/discloses a field.
 
 ## Generated operation authorization
 
