@@ -16,6 +16,7 @@ use std::time::Duration;
 use agql_auth::Clock;
 use async_trait::async_trait;
 use futures::StreamExt;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
@@ -36,6 +37,7 @@ const MAXIMUM_TEXT_BLOCKS: usize = 256;
 const MAXIMUM_IDENTIFIER_BYTES: usize = 200;
 const MAXIMUM_VERSION_BYTES: usize = 200;
 const MAXIMUM_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+const REMOTE_CONTROL_STATUS_CHANGED: &str = "remoteControl/status/changed";
 
 /// Exact reviewed Codex app-server protocol contract supported by this
 /// adapter.
@@ -572,6 +574,7 @@ impl AiProvider for AiCodexAppServerProvider {
         ProviderCapabilities {
             streaming: true,
             custom_tools: self.registration.experimental_dynamic_tools(),
+            provider_retained_continuation: true,
             local: true,
             ..ProviderCapabilities::default()
         }
@@ -1715,6 +1718,14 @@ pub enum AiCodexAppServerInbound {
         /// Bounded object parameters after notification validation.
         params: Value,
     },
+    /// Content-free notice that app-server reported remote control disabled
+    /// during protocol initialization.
+    ///
+    /// The installation, server, environment, and timestamp fields are
+    /// validated but deliberately not exposed through this boundary. This is
+    /// protocol compatibility evidence only and grants no remote-control
+    /// method or capability.
+    RemoteControlDisabled,
     /// Exact experimental dynamic-tool server request matched to one offered
     /// definition. No other server request is admitted.
     DynamicToolCall {
@@ -1754,6 +1765,9 @@ impl std::fmt::Debug for AiCodexAppServerInbound {
                 .field("method", method)
                 .field("params", &"<provider-content>")
                 .finish(),
+            Self::RemoteControlDisabled => {
+                formatter.write_str("AiCodexAppServerInbound::RemoteControlDisabled")
+            }
             Self::DynamicToolCall {
                 request_id,
                 thread_id,
@@ -1801,6 +1815,9 @@ pub struct AiCodexAppServerProtocolActor {
     pending_dynamic_requests: BTreeMap<u64, (String, String)>,
     started_dynamic_calls: BTreeMap<String, String>,
     responded_dynamic_calls: BTreeMap<String, String>,
+    initialization_complete: bool,
+    thread_response_observed: bool,
+    remote_control_disabled_observed: bool,
     maximum_frame_bytes: usize,
 }
 
@@ -1829,6 +1846,9 @@ impl AiCodexAppServerProtocolActor {
             pending_dynamic_requests: BTreeMap::new(),
             started_dynamic_calls: BTreeMap::new(),
             responded_dynamic_calls: BTreeMap::new(),
+            initialization_complete: false,
+            thread_response_observed: false,
+            remote_control_disabled_observed: false,
             maximum_frame_bytes,
         })
     }
@@ -1944,6 +1964,8 @@ impl AiCodexAppServerProtocolActor {
                 "model": input.model(),
                 "developerInstructions": developer_instructions,
                 "ephemeral": true,
+                "approvalPolicy": "never",
+                "sandbox": "read-only",
             }),
         )
     }
@@ -1992,6 +2014,8 @@ impl AiCodexAppServerProtocolActor {
             "model": model,
             "developerInstructions": null,
             "ephemeral": false,
+            "approvalPolicy": "never",
+            "sandbox": "read-only",
         });
         if !dynamic_tools.is_empty() {
             params
@@ -2055,6 +2079,8 @@ impl AiCodexAppServerProtocolActor {
                 "threadId": cursor.expose_to_provider_adapter(),
                 "model": input.model(),
                 "developerInstructions": developer_instructions,
+                "approvalPolicy": "never",
+                "sandbox": "read-only",
             }),
         )?;
         self.active_thread_id = Some(cursor.expose_to_provider_adapter().to_owned());
@@ -2139,6 +2165,8 @@ impl AiCodexAppServerProtocolActor {
                 "developerInstructions": developer_instructions,
                 "ephemeral": true,
                 "dynamicTools": dynamic_tools,
+                "approvalPolicy": "never",
+                "sandbox": "read-only",
             }),
         )?;
         self.dynamic_tools = definitions;
@@ -2394,15 +2422,20 @@ impl AiCodexAppServerProtocolActor {
                 result,
             });
         }
+        let method = object
+            .get("method")
+            .and_then(Value::as_str)
+            .ok_or(ProviderError::Rejected)?;
+        if method == REMOTE_CONTROL_STATUS_CHANGED {
+            return self.accept_disabled_remote_control_status(value);
+        }
         if object
             .keys()
             .any(|key| !matches!(key.as_str(), "method" | "params"))
         {
             return Err(ProviderError::Rejected);
         }
-        let method = object
-            .get("method")
-            .and_then(Value::as_str)
+        let method = Some(method)
             .filter(|method| allowed_notification(method))
             .ok_or(ProviderError::Rejected)?;
         let params = object
@@ -2559,6 +2592,7 @@ impl AiCodexAppServerProtocolActor {
                     return Err(ProviderError::Rejected);
                 }
                 self.active_thread_id = Some(thread_id.to_owned());
+                self.thread_response_observed = true;
             }
             ClientMethod::TurnStart => {
                 let turn_id = nested_reference(result, "turn", "id")?;
@@ -2573,9 +2607,35 @@ impl AiCodexAppServerProtocolActor {
                 self.active_turn_id = Some(turn_id.to_owned());
             }
             ClientMethod::Initialize | ClientMethod::ThreadDelete | ClientMethod::TurnInterrupt => {
+                if method == ClientMethod::Initialize {
+                    self.initialization_complete = true;
+                }
             }
         }
         Ok(())
+    }
+
+    fn accept_disabled_remote_control_status(
+        &mut self,
+        value: Value,
+    ) -> Result<AiCodexAppServerInbound, ProviderError> {
+        let notification: DisabledRemoteControlStatusChanged =
+            serde_json::from_value(value).map_err(|_| ProviderError::Rejected)?;
+        if notification.method != REMOTE_CONTROL_STATUS_CHANGED
+            || notification.emitted_at_ms == 0
+            || notification.emitted_at_ms > i64::MAX as u64
+            || !valid_identifier(&notification.params.server_name)
+            || !valid_identifier(&notification.params.installation_id)
+            || !self.initialization_complete
+            || self.remote_control_disabled_observed
+            || self.thread_response_observed
+            || self.pending_turn_thread_id.is_some()
+            || self.active_turn_id.is_some()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        self.remote_control_disabled_observed = true;
+        Ok(AiCodexAppServerInbound::RemoteControlDisabled)
     }
 
     fn accept_notification_binding(
@@ -2594,6 +2654,7 @@ impl AiCodexAppServerProtocolActor {
                     return Err(ProviderError::Rejected);
                 }
                 self.active_thread_id = Some(thread_id.to_owned());
+                self.thread_response_observed = true;
             }
             "turn/started" => {
                 let thread_id = direct_reference(params, "threadId")?;
@@ -2636,6 +2697,32 @@ impl AiCodexAppServerProtocolActor {
         }
         Ok(())
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DisabledRemoteControlStatusChanged {
+    method: String,
+    params: DisabledRemoteControlStatusParams,
+    #[serde(rename = "emittedAtMs")]
+    emitted_at_ms: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct DisabledRemoteControlStatusParams {
+    #[serde(rename = "status")]
+    _status: DisabledRemoteControlStatus,
+    server_name: String,
+    installation_id: String,
+    #[serde(rename = "environmentId")]
+    _environment_id: (),
+}
+
+#[derive(Deserialize)]
+enum DisabledRemoteControlStatus {
+    #[serde(rename = "disabled")]
+    Disabled,
 }
 
 fn direct_reference<'a>(value: &'a Value, key: &str) -> Result<&'a str, ProviderError> {
@@ -3083,6 +3170,31 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn provider_advertises_only_implemented_retained_local_capabilities() {
+        let counters = Arc::new(Counters::new());
+        let provider = AiCodexAppServerProvider::new(registration("1.0.0"), pool(counters, 1, 2));
+        let capabilities = provider.capabilities();
+        assert!(capabilities.streaming);
+        assert!(capabilities.local);
+        assert!(capabilities.provider_retained_continuation);
+        assert!(!capabilities.custom_tools);
+        assert!(!capabilities.stateless_continuation);
+        assert!(!capabilities.web_search);
+        assert!(!capabilities.code_execution);
+
+        let dynamic_provider = AiCodexAppServerProvider::new(
+            dynamic_registration("1.0.0"),
+            pool(Arc::new(Counters::new()), 1, 2),
+        );
+        assert!(dynamic_provider.capabilities().custom_tools);
+        assert!(
+            dynamic_provider
+                .capabilities()
+                .provider_retained_continuation
+        );
+    }
+
     fn turn() -> AiCodexAppServerTurnInput {
         AiCodexAppServerTurnInput::new(
             "model-1",
@@ -3117,6 +3229,39 @@ mod tests {
             tools: vec![dynamic_tool()],
             ..model_request()
         }
+    }
+
+    fn initialized_protocol_actor() -> AiCodexAppServerProtocolActor {
+        let mut actor =
+            AiCodexAppServerProtocolActor::new(64 * 1024).expect("test guard should validate");
+        actor
+            .initialize("test_client", "Test Client", "0.147.0")
+            .expect("initialize should encode");
+        assert!(matches!(
+            actor.accept(br#"{"id":1,"result":{"userAgent":"test"}}"#),
+            Ok(AiCodexAppServerInbound::Response {
+                method: "initialize",
+                ..
+            })
+        ));
+        actor
+            .initialized()
+            .expect("initialized notification should encode");
+        actor
+    }
+
+    fn remote_control_status(status: &str) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "method": REMOTE_CONTROL_STATUS_CHANGED,
+            "params": {
+                "status": status,
+                "serverName": "development",
+                "installationId": "84b5c758-086b-41ec-832e-3cfb72779186",
+                "environmentId": null,
+            },
+            "emittedAtMs": 1_786_484_733_704_u64,
+        }))
+        .expect("status notification should encode")
     }
 
     fn provider_context(profile_id: &str, request: &ModelRequest) -> ProviderRequestContext {
@@ -3618,9 +3763,167 @@ mod tests {
         assert!(!initialize.contains("experimentalApi"));
         assert!(thread.contains("\"ephemeral\":true"));
         assert!(thread.contains("\"developerInstructions\":\"trusted\""));
+        assert!(thread.contains("\"approvalPolicy\":\"never\""));
+        assert!(thread.contains("\"sandbox\":\"read-only\""));
         assert!(!thread.contains("dynamicTools"));
         assert!(!turn.contains("trusted"));
         assert!(!turn.contains("\"model\""));
+    }
+
+    #[test]
+    fn protocol_admits_only_disabled_remote_control_status_during_initialization() {
+        let mut before_initialize =
+            AiCodexAppServerProtocolActor::new(64 * 1024).expect("test guard should validate");
+        assert!(matches!(
+            before_initialize.accept(&remote_control_status("disabled")),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut actor = initialized_protocol_actor();
+        assert!(matches!(
+            actor.accept(&remote_control_status("disabled")),
+            Ok(AiCodexAppServerInbound::RemoteControlDisabled)
+        ));
+        let thread = String::from_utf8(
+            actor
+                .start_fresh_thread(&turn())
+                .expect("locked-down thread start should encode"),
+        )
+        .expect("thread request should be UTF-8");
+        assert!(thread.contains("\"approvalPolicy\":\"never\""));
+        assert!(thread.contains("\"sandbox\":\"read-only\""));
+        assert!(matches!(
+            actor.accept(&remote_control_status("disabled")),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut read_after_start_request = initialized_protocol_actor();
+        read_after_start_request
+            .start_fresh_thread(&turn())
+            .expect("thread start should encode");
+        assert!(matches!(
+            read_after_start_request.accept(&remote_control_status("disabled")),
+            Ok(AiCodexAppServerInbound::RemoteControlDisabled)
+        ));
+        read_after_start_request
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
+            .expect("thread response should bind");
+        assert!(matches!(
+            read_after_start_request.accept(&remote_control_status("disabled")),
+            Err(ProviderError::Rejected)
+        ));
+
+        let cursor =
+            crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", "thread-retained-1")
+                .expect("retained cursor should validate");
+        let mut read_after_resume_request = initialized_protocol_actor();
+        read_after_resume_request
+            .resume_thread(&cursor, &turn())
+            .expect("thread resume should encode");
+        assert!(matches!(
+            read_after_resume_request.accept(&remote_control_status("disabled")),
+            Ok(AiCodexAppServerInbound::RemoteControlDisabled)
+        ));
+        read_after_resume_request
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("resume response should bind");
+    }
+
+    #[test]
+    fn protocol_rejects_non_disabled_or_malformed_remote_control_status() {
+        for status in [
+            "connecting",
+            "connected",
+            "errored",
+            "enabled",
+            "error",
+            "unknown",
+        ] {
+            let mut actor = initialized_protocol_actor();
+            assert!(matches!(
+                actor.accept(&remote_control_status(status)),
+                Err(ProviderError::Rejected)
+            ));
+        }
+
+        let invalid_values = [
+            json!({
+                "method": REMOTE_CONTROL_STATUS_CHANGED,
+                "params": {
+                    "status": "disabled",
+                    "serverName": "development",
+                    "installationId": "installation-1",
+                    "environmentId": "remote-environment",
+                },
+                "emittedAtMs": 1,
+            }),
+            json!({
+                "method": REMOTE_CONTROL_STATUS_CHANGED,
+                "params": {
+                    "status": "disabled",
+                    "serverName": "development",
+                    "installationId": "installation-1",
+                    "environmentId": null,
+                    "enabled": false,
+                },
+                "emittedAtMs": 1,
+            }),
+            json!({
+                "method": REMOTE_CONTROL_STATUS_CHANGED,
+                "params": {
+                    "status": "disabled",
+                    "serverName": "development",
+                    "installationId": "installation-1",
+                    "environmentId": null,
+                },
+                "emittedAtMs": 1,
+                "remoteControl": false,
+            }),
+            json!({
+                "method": REMOTE_CONTROL_STATUS_CHANGED,
+                "params": {
+                    "status": "disabled",
+                    "serverName": "not a bounded identifier",
+                    "installationId": "installation-1",
+                    "environmentId": null,
+                },
+                "emittedAtMs": 1,
+            }),
+            json!({
+                "method": REMOTE_CONTROL_STATUS_CHANGED,
+                "params": {
+                    "status": "disabled",
+                    "serverName": "development",
+                    "installationId": "x".repeat(MAXIMUM_IDENTIFIER_BYTES + 1),
+                    "environmentId": null,
+                },
+                "emittedAtMs": 1,
+            }),
+            json!({
+                "method": REMOTE_CONTROL_STATUS_CHANGED,
+                "params": {
+                    "status": "disabled",
+                    "serverName": "development",
+                    "installationId": "installation-1",
+                    "environmentId": null,
+                },
+                "emittedAtMs": 0,
+            }),
+            json!({
+                "method": REMOTE_CONTROL_STATUS_CHANGED,
+                "params": {
+                    "status": "disabled",
+                    "serverName": "development",
+                    "installationId": "installation-1",
+                },
+                "emittedAtMs": 1,
+            }),
+        ];
+        for invalid in invalid_values {
+            let mut actor = initialized_protocol_actor();
+            let frame = serde_json::to_vec(&invalid).expect("invalid fixture should encode");
+            assert!(matches!(actor.accept(&frame), Err(ProviderError::Rejected)));
+        }
     }
 
     #[test]
@@ -3728,6 +4031,8 @@ mod tests {
         assert!(start.contains("\"dynamicTools\""));
         assert!(start.contains("\"inventory_count\""));
         assert!(start.contains("\"ephemeral\":true"));
+        assert!(start.contains("\"approvalPolicy\":\"never\""));
+        assert!(start.contains("\"sandbox\":\"read-only\""));
         guard
             .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
             .expect("thread response should bind");
@@ -3885,6 +4190,8 @@ mod tests {
         assert!(create.contains("\"method\":\"thread/start\""));
         assert!(create.contains("\"ephemeral\":false"));
         assert!(create.contains("\"developerInstructions\":null"));
+        assert!(create.contains("\"approvalPolicy\":\"never\""));
+        assert!(create.contains("\"sandbox\":\"read-only\""));
         assert!(!create.contains("dynamicTools"));
         assert!(!create.contains("turn/start"));
 
@@ -3922,6 +4229,8 @@ mod tests {
         assert!(resume.contains("\"method\":\"thread/resume\""));
         assert!(resume.contains("\"threadId\":\"thread-retained-1\""));
         assert!(resume.contains("\"model\":\"model-1\""));
+        assert!(resume.contains("\"approvalPolicy\":\"never\""));
+        assert!(resume.contains("\"sandbox\":\"read-only\""));
         assert!(!resume.contains("dynamicTools"));
         assert!(!resume.contains("\"input\""));
 

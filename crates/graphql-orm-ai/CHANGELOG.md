@@ -20,7 +20,7 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.71.0` and AI
+This development line advances the pre-1.0 crate version to `0.72.0` and AI
 schema module `0.55.0`. It begins the applied-restore implementation with
 bounded database-derived facts, aligns the reviewed dependency universe,
 integrates generated resolver-operation metadata, completes the durable OpenAI
@@ -29,6 +29,16 @@ file-search IDs behind the reviewed persistent-file design.
 
 ### Fixed
 
+- The strict Codex app-server actor now admits only the complete bounded
+  `remoteControl/status/changed` notification whose status is exactly
+  `disabled`, without exposing any remote-control method or identity. Codex
+  CLI 0.147.0 readiness no longer fails on that content-free initialization
+  signal; connecting, connected, errored, malformed, repeated, late, and
+  unknown remote-control traffic remains rejected.
+- Codex app-server capabilities now truthfully advertise implemented protected
+  provider-session continuation. Every new and resumed thread explicitly fixes
+  approval policy to `never` and sandbox mode to `read-only` rather than
+  inheriting operator configuration.
 - Re-exported GraphQL tool manifest version 2 recursively canonicalizes JSON
   object keys for manifest and nested descriptor fingerprints. Router
   `DescriptorExtension` normalization now round-trips unchanged complex

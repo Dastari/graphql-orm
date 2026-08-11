@@ -319,8 +319,9 @@ This work remains back-burner and is not a dependency of hosted web search.
 ## Current checkpoint
 
 Phases 1 through 4 have project-neutral upstream contracts from the 0.69.0
-development line, the retained Codex milestone is implemented in 0.70.0, and
-0.71.0 corrects canonical router transport of its tool manifests:
+development line, the retained Codex milestone is implemented in 0.70.0,
+0.71.0 corrects canonical router transport of its tool manifests, and 0.72.0
+aligns the strict adapter with Codex CLI 0.147.0 initialization:
 
 - a strict fresh-turn Codex app-server adapter with exact-run reuse, global and
   per-owner admission, cancellation/terminal cleanup, protocol allowlisting,
@@ -337,11 +338,14 @@ development line, the retained Codex milestone is implemented in 0.70.0, and
 - exact protected Codex thread create/resume/interrupt/delete, with process and
   provider retention governed independently; and
 - default-off experimental app-server dynamic tools that route only through
-  the existing coordinator-owned registered GraphQL tool boundary.
+  the existing coordinator-owned registered GraphQL tool boundary; and
+- exact disabled-only remote-control status admission, truthful retained
+  continuation capability negotiation, and explicit never-approval/read-only
+  policy on every Codex thread create or resume.
 
 Phase 5 multiplexing and the visual-browser broker remain deferred
 investigations. The current review boundary is full backend/provider,
-documentation, SemVer, and release-policy verification for 0.71.0 / schema
+documentation, SemVer, and release-policy verification for 0.72.0 / schema
 module 0.55.0.
 
 ## Current milestone: retained Codex threads

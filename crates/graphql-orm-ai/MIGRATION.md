@@ -19,6 +19,29 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased: strict Codex 0.147.0 initialization (crate 0.71.0 to 0.72.0; schema remains 0.55.0)
+
+The `provider-codex-app-server` adapter admits Codex CLI 0.147.0's
+`remoteControl/status/changed` initialization notification only when its full
+bounded payload reports exactly `disabled`, contains valid server and
+installation identifiers, has a null environment, and carries a valid
+emission timestamp. The public non-exhaustive
+`AiCodexAppServerInbound::RemoteControlDisabled` variant carries no identifiers
+or payload. Process implementations should continue waiting for the correlated
+initialization or thread response when they observe it. They must not turn it
+into provider output or model-visible activity.
+
+`AiCodexAppServerProvider::capabilities()` now advertises
+`provider_retained_continuation: true`, matching its implemented
+`AiProviderSessionTurnPlan` path. Every encoded `thread/start` and
+`thread/resume` now supplies `approvalPolicy: "never"` and
+`sandbox: "read-only"`. Hosts should align immutable provider-profile
+capability declarations with the corrected adapter value; dynamic tools remain
+separately default-off and coordinator-owned.
+
+No database or GraphQL schema migration, table/index/constraint change,
+backfill, or row rewrite is required. AI schema module 0.55.0 remains current.
+
 ## Unreleased: canonical GraphQL tool manifests (crate 0.70.0 to 0.71.0; schema remains 0.55.0)
 
 The re-exported `graphql-orm-ai-tool-profiles` package moves from 0.2.0 to
