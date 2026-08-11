@@ -7,19 +7,22 @@ use std::time::Instant;
 use agql_auth::{Clock, ResolvedPrincipal};
 use async_trait::async_trait;
 use futures::StreamExt;
+use sha2::{Digest, Sha256};
+use tokio::sync::Mutex;
 
 use crate::{
     AiAgentRuleResolution, AiApprovalRule, AiBudgetAmounts, AiBudgetReconciliation,
     AiBudgetReconciliationOutcome, AiBudgetReservation, AiBudgetReservationId,
     AiBudgetReservationRequest, AiBudgetService, AiEgressCapability, AiEgressDecisionAudit,
     AiEgressManifest, AiError, AiLiveDeltaBatch, AiLiveDeltaCoalescer, AiLiveDeltaCoalescerLimits,
-    AiLiveDeltaPersistenceContext, AiLiveDeltaSink, AiProviderActivity,
-    AiProviderActivityCoalescer, AiProviderActivitySink, AiProviderAttachmentRequest,
-    AiProviderAttachmentResolver, AiResolvedProviderAttachment, AiRuleProviderCapability,
-    AiRuleRunUsage, AiRunLease, AiRunState, AiRuntime, AiScope, AiSessionAction, AiToolPolicySet,
-    ModelBuiltinTool, ModelContinuation, ModelContinuationMode, ModelConversationMessage,
-    ModelConversationToolCall, ModelInputBlock, ModelRequest, ProviderEvent, ProviderKind,
-    ProviderRequestContext, ToolMaturity,
+    AiLiveDeltaPersistenceContext, AiLiveDeltaSink, AiPersistedApplicationToolCall,
+    AiProviderActivity, AiProviderActivityCoalescer, AiProviderActivitySink,
+    AiProviderAttachmentRequest, AiProviderAttachmentResolver, AiResolvedProviderAttachment,
+    AiRuleProviderCapability, AiRuleRunUsage, AiRunLease, AiRunState, AiRuntime, AiScope,
+    AiSessionAction, AiToolPolicySet, ModelBuiltinTool, ModelContinuation, ModelContinuationMode,
+    ModelConversationMessage, ModelConversationToolCall, ModelInputBlock, ModelRequest,
+    ProviderDynamicToolCall, ProviderDynamicToolResponder, ProviderDynamicToolResult,
+    ProviderError, ProviderEvent, ProviderKind, ProviderRequestContext, ToolMaturity,
 };
 
 const MAXIMUM_PROVIDER_TRANSFERS: usize = 288;
@@ -539,6 +542,20 @@ impl AiProviderCallPlan {
         &self.correlation_id
     }
 
+    pub(crate) fn matches_provider_session_descriptor(
+        &self,
+        descriptor: &crate::AiProviderSessionDescriptor,
+    ) -> bool {
+        descriptor.provider_kind() == &self.provider_kind
+            && descriptor.provider_model() == self.request.model
+            && self.transfers.iter().any(|manifest| {
+                manifest.capability == AiEgressCapability::ModelInference
+                    && manifest.provider_profile_id == descriptor.provider_profile_id()
+                    && manifest.provider_kind == self.provider_kind.as_str()
+                    && manifest.model == self.request.model
+            })
+    }
+
     #[cfg(all(
         any(feature = "sqlite", feature = "postgres"),
         feature = "provider-openai"
@@ -586,6 +603,21 @@ impl AiProviderCallPlan {
                 .input
                 .iter()
                 .any(|block| matches!(block, ModelInputBlock::ToolResult { .. }))
+    }
+
+    pub(crate) fn is_dynamic_tool_initial(&self) -> bool {
+        !self.request.tools.is_empty()
+            && self.request.continuation.is_none()
+            && self.request.continuation_mode == ModelContinuationMode::ProviderRetained
+            && self.request.builtin_tools.is_empty()
+            && self.request.reasoning_summary.maximum_bytes().is_none()
+            && self.request.output_schema.is_none()
+            && !self.request.input.iter().any(|block| {
+                matches!(
+                    block,
+                    ModelInputBlock::ToolResult { .. } | ModelInputBlock::Attachment { .. }
+                )
+            })
     }
 
     pub(crate) fn has_only_supervised_tools(&self) -> bool {
@@ -1010,6 +1042,8 @@ pub struct AiProviderCallResult {
     request_snapshot: ModelRequest,
     model_inference_manifest: AiEgressManifest,
     replay_tool_transfers: Vec<AiEgressManifest>,
+    interactive_tool_results: Vec<AiPersistedApplicationToolCall>,
+    provider_session_claim: Option<crate::AiProviderSessionClaim>,
 }
 
 /// Authoritative completed provider-hosted tool counts for one turn.
@@ -1208,6 +1242,140 @@ pub trait AiProviderUsageAccounting: Send + Sync {
     ) -> Result<AiBudgetAmounts, AiError>;
 }
 
+/// Coordinator-owned execution boundary for one provider-native in-flight
+/// application-tool request.
+///
+/// Implementations must apply the same current rule, cancellation, registered
+/// tool, resolver, disclosure, egress, and durable fencing checks as the
+/// ordinary completed-turn tool loop. The provider adapter receives only the
+/// returned [`AiPersistedApplicationToolCall::model_input`] value.
+#[async_trait]
+pub trait AiProviderDynamicToolExecution: Send + Sync {
+    /// Executes one exact normalized call from a still-active provider turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe library error for stale authority, cancellation,
+    /// execution, disclosure, egress, budget, or persistence failure.
+    async fn execute_dynamic_tool(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        tool_call_index: usize,
+    ) -> Result<AiPersistedApplicationToolCall, AiError>;
+}
+
+struct DynamicToolResponder {
+    lease: Arc<Mutex<AiRunLease>>,
+    execution: Arc<dyn AiProviderDynamicToolExecution>,
+    session_id: crate::AiSessionId,
+    run_id: crate::AiRunId,
+    attempt_id: uuid::Uuid,
+    lease_generation: i64,
+    provider_kind: ProviderKind,
+    provider_model: String,
+    budget_reservation_id: AiBudgetReservationId,
+    previous_response_id: Option<String>,
+    previous_continuation_reference: Option<String>,
+    request_snapshot: ModelRequest,
+    model_inference_manifest: AiEgressManifest,
+    calls: Mutex<Vec<AiProviderToolCall>>,
+    results: Mutex<Vec<AiPersistedApplicationToolCall>>,
+}
+
+impl DynamicToolResponder {
+    async fn results(&self) -> Vec<AiPersistedApplicationToolCall> {
+        self.results.lock().await.clone()
+    }
+}
+
+#[async_trait]
+impl ProviderDynamicToolResponder for DynamicToolResponder {
+    async fn respond(
+        &self,
+        call: ProviderDynamicToolCall,
+    ) -> Result<ProviderDynamicToolResult, ProviderError> {
+        let definition = self
+            .request_snapshot
+            .tools
+            .iter()
+            .find(|definition| definition.tool_id == call.tool_id())
+            .filter(|definition| {
+                definition.provider_name == call.provider_name()
+                    && definition.fingerprint == call.tool_fingerprint()
+            })
+            .ok_or(ProviderError::Rejected)?;
+        let validator = jsonschema::validator_for(&definition.parameters)
+            .map_err(|_| ProviderError::Rejected)?;
+        if !validator.is_valid(call.arguments()) {
+            return Err(ProviderError::Rejected);
+        }
+        let (tool_call_index, tool_calls) = {
+            let mut calls = self.calls.lock().await;
+            if calls
+                .iter()
+                .any(|existing| existing.call_id() == call.call_id())
+                || calls.len() >= 64
+            {
+                return Err(ProviderError::Rejected);
+            }
+            calls.push(AiProviderToolCall {
+                call_id: call.call_id().to_owned(),
+                tool_id: crate::AiToolId::parse(call.tool_id().to_owned())
+                    .map_err(|_| ProviderError::Rejected)?,
+                provider_name: call.provider_name().to_owned(),
+                tool_fingerprint: call.tool_fingerprint().to_owned(),
+                arguments: call.arguments().clone(),
+            });
+            (calls.len() - 1, calls.clone())
+        };
+        // Keep the exact lease snapshot locked across execution. The
+        // coordinator heartbeat shares this mutex, so it cannot advance the
+        // durable run row while the ordinary tool service is using an older
+        // row-version/fence snapshot.
+        let mut lease = self.lease.lock().await;
+        let provisional = AiProviderCallResult {
+            session_id: self.session_id,
+            run_id: self.run_id,
+            attempt_id: self.attempt_id,
+            lease_generation: self.lease_generation,
+            provider_kind: self.provider_kind.clone(),
+            provider_model: self.provider_model.clone(),
+            events: Vec::new(),
+            usage: AiBudgetAmounts::default(),
+            cached_input_tokens: 0,
+            builtin_usage: AiProviderBuiltinUsage::default(),
+            provider_response_id: Some(call.response_id().to_owned()),
+            budget_reservation_id: self.budget_reservation_id,
+            previous_response_id: self.previous_response_id.clone(),
+            previous_continuation_reference: self.previous_continuation_reference.clone(),
+            tool_calls,
+            request_snapshot: self.request_snapshot.clone(),
+            model_inference_manifest: self.model_inference_manifest.clone(),
+            replay_tool_transfers: Vec::new(),
+            interactive_tool_results: Vec::new(),
+            provider_session_claim: None,
+        };
+        let persisted = self
+            .execution
+            .execute_dynamic_tool(&lease, &provisional, tool_call_index)
+            .await
+            .map_err(|_| ProviderError::Rejected)?;
+        let output = match persisted.model_input() {
+            Some(ModelInputBlock::ToolResult {
+                call_id,
+                tool_id,
+                output,
+            }) if call_id == call.call_id() && tool_id == call.tool_id() => output.clone(),
+            _ => return Err(ProviderError::Rejected),
+        };
+        *lease = persisted.lease().clone();
+        drop(lease);
+        self.results.lock().await.push(persisted);
+        ProviderDynamicToolResult::new(&call, output)
+    }
+}
+
 impl AiProviderCallResult {
     pub(crate) fn checkpoint_value(&self) -> serde_json::Value {
         serde_json::json!({
@@ -1323,6 +1491,78 @@ impl AiProviderCallResult {
     /// Exact normalized custom application-tool requests in arrival order.
     pub fn tool_calls(&self) -> &[AiProviderToolCall] {
         &self.tool_calls
+    }
+
+    /// Durable results already executed through a provider-native in-flight
+    /// dynamic-tool bridge during this turn.
+    pub fn interactive_tool_results(&self) -> &[AiPersistedApplicationToolCall] {
+        &self.interactive_tool_results
+    }
+
+    pub(crate) fn provider_session_claim(&self) -> Option<&crate::AiProviderSessionClaim> {
+        self.provider_session_claim.as_ref()
+    }
+
+    pub(crate) fn provider_session_commit(
+        &self,
+        assistant_message_id: uuid::Uuid,
+    ) -> Result<Option<crate::AiProviderSessionCommit>, AiError> {
+        let Some(claim) = &self.provider_session_claim else {
+            return Ok(None);
+        };
+        let through_message_sequence = claim
+            .through_message_sequence()
+            .checked_add(2)
+            .ok_or(AiError::PersistenceFailed)?;
+        let request =
+            serde_json::to_vec(&self.request_snapshot).map_err(|_| AiError::PersistenceFailed)?;
+        let events = serde_json::to_vec(&self.events).map_err(|_| AiError::PersistenceFailed)?;
+        let tool_results = self
+            .interactive_tool_results
+            .iter()
+            .map(AiPersistedApplicationToolCall::checkpoint_value)
+            .collect::<Option<Vec<_>>>()
+            .ok_or(AiError::EgressDenied)?;
+        let tool_results =
+            serde_json::to_vec(&tool_results).map_err(|_| AiError::PersistenceFailed)?;
+        let mut digest = Sha256::new();
+        digest.update(b"graphql-orm-ai/provider-session-transcript/v1\0");
+        digest.update(claim.transcript_fingerprint().as_bytes());
+        digest.update(self.session_id.0.as_bytes());
+        digest.update(self.run_id.0.as_bytes());
+        digest.update(assistant_message_id.as_bytes());
+        digest.update(through_message_sequence.to_be_bytes());
+        for value in [&request, &events, &tool_results] {
+            digest.update((value.len() as u64).to_be_bytes());
+            digest.update(value);
+        }
+        crate::AiProviderSessionCommit::new(
+            assistant_message_id,
+            through_message_sequence,
+            hex::encode(digest.finalize()),
+        )
+        .map(Some)
+    }
+
+    pub(crate) fn completes_interactive_tool_calls(&self) -> bool {
+        if self.tool_calls.is_empty() {
+            return self.interactive_tool_results.is_empty();
+        }
+        self.tool_calls.len() == self.interactive_tool_results.len()
+            && self
+                .tool_calls
+                .iter()
+                .zip(&self.interactive_tool_results)
+                .all(|(call, result)| {
+                    result.provider_call_id() == call.call_id()
+                        && result.egress_manifest().is_some()
+                        && matches!(
+                            result.model_input(),
+                            Some(ModelInputBlock::ToolResult { call_id, tool_id, .. })
+                                if call_id == call.call_id()
+                                    && tool_id == call.tool_id().as_str()
+                        )
+                })
     }
 
     /// Returns an explicit stateful continuation for a tool-requesting turn.
@@ -1518,7 +1758,27 @@ impl AiProviderCallResult {
                 "coordinator-test-model",
             ),
             replay_tool_transfers: Vec::new(),
+            interactive_tool_results: Vec::new(),
+            provider_session_claim: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_with_interactive_tool_results(
+        mut self,
+        results: Vec<AiPersistedApplicationToolCall>,
+    ) -> Self {
+        self.interactive_tool_results = results;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_with_provider_session_claim(
+        mut self,
+        claim: crate::AiProviderSessionClaim,
+    ) -> Self {
+        self.provider_session_claim = Some(claim);
+        self
     }
 
     #[cfg(test)]
@@ -1579,6 +1839,8 @@ impl AiProviderCallResult {
             },
             model_inference_manifest: test_model_inference_manifest(lease, "ui-intent-test-model"),
             replay_tool_transfers: Vec::new(),
+            interactive_tool_results: Vec::new(),
+            provider_session_claim: None,
         }
     }
 
@@ -1630,6 +1892,8 @@ impl AiProviderCallResult {
             request_snapshot: request,
             model_inference_manifest,
             replay_tool_transfers: Vec::new(),
+            interactive_tool_results: Vec::new(),
+            provider_session_claim: None,
         }
     }
 }
@@ -1800,6 +2064,171 @@ impl AiProviderCallExecutor {
         lease: &AiRunLease,
         plan: AiProviderCallPlan,
     ) -> Result<AiProviderCallResult, AiError> {
+        self.execute_inner(Arc::new(Mutex::new(lease.clone())), plan, None, None)
+            .await
+    }
+
+    /// Executes one provider turn whose application tools are answered by an
+    /// explicit coordinator-owned in-flight bridge.
+    ///
+    /// This path is intended for reviewed provider-native synchronous tool
+    /// protocols. It does not let the provider adapter execute a tool or
+    /// receive application credentials, and it leaves all ordinary
+    /// authorization, persistence, egress, and resolver checks to
+    /// `execution`.
+    ///
+    /// # Errors
+    ///
+    /// In addition to the ordinary provider-turn errors, fails closed unless
+    /// the request is a provider-retained initial turn with at least one exact
+    /// registered application tool.
+    pub async fn execute_with_dynamic_tools(
+        &self,
+        lease: Arc<Mutex<AiRunLease>>,
+        plan: AiProviderCallPlan,
+        execution: Arc<dyn AiProviderDynamicToolExecution>,
+    ) -> Result<AiProviderCallResult, AiError> {
+        if plan.request.tools.is_empty()
+            || plan.request.continuation.is_some()
+            || plan.request.continuation_mode != ModelContinuationMode::ProviderRetained
+        {
+            return Err(AiError::Conflict);
+        }
+        self.execute_inner(lease, plan, Some(execution), None).await
+    }
+
+    /// Executes through one exact durable provider-session binding.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_with_provider_session(
+        &self,
+        lease_state: Arc<Mutex<AiRunLease>>,
+        plan: AiProviderCallPlan,
+        session_plan: crate::AiProviderSessionTurnPlan,
+        session_service: Arc<dyn crate::AiProviderSessionService>,
+        dynamic_execution: Option<Arc<dyn AiProviderDynamicToolExecution>>,
+    ) -> Result<AiProviderCallResult, AiError> {
+        if !plan.matches_provider_session_descriptor(session_plan.descriptor())
+            || !plan.uses_provider_retained_continuation()
+            || dynamic_execution.is_some() != plan.is_dynamic_tool_initial()
+        {
+            return Err(AiError::Conflict);
+        }
+        let lease = lease_state.lock().await.clone();
+        let binding = crate::AiProviderRunBinding::from_lease(&lease)?;
+        let claim = match session_service.inspect_for_run(&lease).await? {
+            Some(existing)
+                if existing.state() == crate::AiProviderSessionState::Active
+                    && existing.descriptor() == session_plan.descriptor()
+                    && existing.transcript_fingerprint()
+                        == session_plan.transcript_fingerprint() =>
+            {
+                session_service
+                    .claim_for_run(
+                        &lease,
+                        session_plan.descriptor(),
+                        session_plan.transcript_fingerprint(),
+                    )
+                    .await?
+            }
+            Some(_) => return Err(AiError::Conflict),
+            None => {
+                let cursor = self
+                    .runtime
+                    .create_empty_provider_session(
+                        session_plan.descriptor().provider_kind(),
+                        &binding,
+                        session_plan.descriptor(),
+                        &plan.request,
+                    )
+                    .await
+                    .map_err(|_| AiError::ProviderFailed)?;
+                let request = crate::AiProviderSessionBindRequest::new(
+                    session_plan.descriptor().clone(),
+                    cursor.clone(),
+                    session_plan.transcript_fingerprint(),
+                    None,
+                )?;
+                match session_service.bind_for_run(&lease, request).await {
+                    Ok(claim) => claim,
+                    Err(error) => {
+                        let _ = self
+                            .runtime
+                            .discard_empty_provider_session(
+                                session_plan.descriptor().provider_kind(),
+                                &binding,
+                                session_plan.descriptor(),
+                                &cursor,
+                            )
+                            .await;
+                        return Err(error);
+                    }
+                }
+            }
+        };
+        let opened = match session_service.open_for_run(&lease, &claim).await {
+            Ok(opened) => opened,
+            Err(error) => {
+                let _ = session_service
+                    .require_cleanup(&claim, "provider_session_open_failed")
+                    .await;
+                return Err(error);
+            }
+        };
+        let turn = self.execute_inner(lease_state.clone(), plan, dynamic_execution, Some(opened));
+        tokio::pin!(turn);
+        let mut current_claim = claim;
+        let outcome = loop {
+            let remaining = current_claim.claim_expires_at() - self.clock.now();
+            let delay_seconds = (remaining.whole_seconds() / 2).clamp(1, 30);
+            let delay = std::time::Duration::from_secs(
+                u64::try_from(delay_seconds).map_err(|_| AiError::Conflict)?,
+            );
+            tokio::select! {
+                result = &mut turn => break result,
+                () = tokio::time::sleep(delay) => {
+                    let current_lease = lease_state.lock().await;
+                    current_claim = match session_service
+                        .heartbeat(&current_lease, &current_claim)
+                        .await
+                    {
+                        Ok(claim) => claim,
+                        Err(error) => {
+                            drop(current_lease);
+                            let _ = self.interrupt_run(&lease_state.lock().await.clone()).await;
+                            let _ = session_service
+                                .require_cleanup(
+                                    &current_claim,
+                                    "provider_session_heartbeat_failed",
+                                )
+                                .await;
+                            return Err(error);
+                        }
+                    };
+                }
+            }
+        };
+        match outcome {
+            Ok(mut result) => {
+                result.provider_session_claim = Some(current_claim);
+                Ok(result)
+            }
+            Err(error) => {
+                let _ = session_service
+                    .require_cleanup(&current_claim, "provider_session_turn_ambiguous")
+                    .await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn execute_inner(
+        &self,
+        lease_state: Arc<Mutex<AiRunLease>>,
+        plan: AiProviderCallPlan,
+        dynamic_execution: Option<Arc<dyn AiProviderDynamicToolExecution>>,
+        provider_session: Option<crate::AiOpenedProviderSession>,
+    ) -> Result<AiProviderCallResult, AiError> {
+        let lease = lease_state.lock().await.clone();
         if !self.runtime.start_gate().is_ready()
             || lease.state() != AiRunState::Running
             || plan.budget.session_id != lease.session_id()
@@ -1858,12 +2287,12 @@ impl AiProviderCallExecutor {
             .map_err(|_| AiError::BudgetDenied)?;
 
         let mut context = match self
-            .authorize_and_audit_transfers(lease, &plan, authorized_budget)
+            .authorize_and_audit_transfers(&lease, &plan, authorized_budget)
             .await
         {
             Ok(context) => context,
             Err(error) => {
-                self.release_unstarted(lease, &reservation).await?;
+                self.release_unstarted(&lease, &reservation).await?;
                 return Err(error);
             }
         };
@@ -1875,7 +2304,7 @@ impl AiProviderCallExecutor {
         {
             Ok(current) => current,
             Err(error) => {
-                self.release_unstarted(lease, &reservation).await?;
+                self.release_unstarted(&lease, &reservation).await?;
                 return Err(error);
             }
         };
@@ -1900,7 +2329,7 @@ impl AiProviderCallExecutor {
                 .await
                 .is_allowed()
         {
-            self.release_unstarted(lease, &reservation).await?;
+            self.release_unstarted(&lease, &reservation).await?;
             return Err(AiError::Forbidden);
         }
         if plan
@@ -1910,14 +2339,14 @@ impl AiProviderCallExecutor {
             .any(|block| matches!(block, ModelInputBlock::Attachment { .. }))
         {
             let Some(resolver) = &self.attachment_resolver else {
-                self.release_unstarted(lease, &reservation).await?;
+                self.release_unstarted(&lease, &reservation).await?;
                 return Err(AiError::RuntimeNotReady);
             };
             let resolved = match self
                 .resolve_provider_attachments(
                     resolver.as_ref(),
                     &current,
-                    lease,
+                    &lease,
                     &plan.budget.scope,
                     &plan.request,
                 )
@@ -1925,14 +2354,14 @@ impl AiProviderCallExecutor {
             {
                 Ok(resolved) => resolved,
                 Err(error) => {
-                    self.release_unstarted(lease, &reservation).await?;
+                    self.release_unstarted(&lease, &reservation).await?;
                     return Err(error);
                 }
             };
             context = match context.with_resolved_attachments(&plan.request, resolved) {
                 Ok(context) => context,
                 Err(_) => {
-                    self.release_unstarted(lease, &reservation).await?;
+                    self.release_unstarted(&lease, &reservation).await?;
                     return Err(AiError::ReauthorizationFailed);
                 }
             };
@@ -1943,7 +2372,7 @@ impl AiProviderCallExecutor {
             {
                 Ok(current) => current,
                 Err(error) => {
-                    self.release_unstarted(lease, &reservation).await?;
+                    self.release_unstarted(&lease, &reservation).await?;
                     return Err(error);
                 }
             };
@@ -1968,9 +2397,18 @@ impl AiProviderCallExecutor {
                     .await
                     .is_allowed()
             {
-                self.release_unstarted(lease, &reservation).await?;
+                self.release_unstarted(&lease, &reservation).await?;
                 return Err(AiError::Forbidden);
             }
+        }
+        if let Some(provider_session) = provider_session {
+            context = match context.with_provider_session(provider_session) {
+                Ok(context) => context,
+                Err(error) => {
+                    self.release_unstarted(&lease, &reservation).await?;
+                    return Err(error);
+                }
+            };
         }
         self.budget_service
             .reconcile(
@@ -2049,11 +2487,41 @@ impl AiProviderCallExecutor {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let mut stream = self
-            .runtime
-            .stream_provider(&plan.provider_kind, plan.request, context)
-            .await
-            .map_err(|_| AiError::ProviderFailed)?;
+        let dynamic_responder = dynamic_execution.map(|execution| {
+            Arc::new(DynamicToolResponder {
+                lease: lease_state.clone(),
+                execution,
+                session_id: lease.session_id(),
+                run_id: lease.run_id(),
+                attempt_id: lease.attempt_id(),
+                lease_generation: lease.lease_generation(),
+                provider_kind: plan.provider_kind.clone(),
+                provider_model: provider_model.clone(),
+                budget_reservation_id: reservation.id(),
+                previous_response_id: previous_response_id.clone(),
+                previous_continuation_reference: previous_continuation_reference.clone(),
+                request_snapshot: request_snapshot.clone(),
+                model_inference_manifest: model_inference_manifest.clone(),
+                calls: Mutex::new(Vec::new()),
+                results: Mutex::new(Vec::new()),
+            })
+        });
+        let mut stream = if let Some(responder) = &dynamic_responder {
+            let responder: Arc<dyn ProviderDynamicToolResponder> = responder.clone();
+            self.runtime
+                .stream_provider_with_dynamic_tools(
+                    &plan.provider_kind,
+                    plan.request,
+                    context,
+                    responder,
+                )
+                .await
+        } else {
+            self.runtime
+                .stream_provider(&plan.provider_kind, plan.request, context)
+                .await
+        }
+        .map_err(|_| AiError::ProviderFailed)?;
         let mut events = Vec::new();
         let mut total_bytes = 0usize;
         let mut usage = None;
@@ -2081,8 +2549,9 @@ impl AiProviderCallExecutor {
                     () = tokio::time::sleep(self.live_delta_limits.maximum_delay()) => {
                         if let Some(coalescer) = live_coalescer.as_mut() {
                             let batches = coalescer.flush_due(Instant::now())?;
+                            let active_lease = lease_state.lock().await.clone();
                             self.persist_live_batches(
-                                lease,
+                                &active_lease,
                                 &live_scope,
                                 &live_correlation_id,
                                 &live_provider_kind,
@@ -2095,8 +2564,9 @@ impl AiProviderCallExecutor {
                         }
                         if let Some(coalescer) = activity_coalescer.as_mut() {
                             let activities = coalescer.flush_due(Instant::now())?;
+                            let active_lease = lease_state.lock().await.clone();
                             self.persist_provider_activities(
-                                lease,
+                                &active_lease,
                                 &live_scope,
                                 &live_correlation_id,
                                 &live_provider_kind,
@@ -2239,8 +2709,9 @@ impl AiProviderCallExecutor {
             }
             if let Some(coalescer) = live_coalescer.as_mut() {
                 let batches = coalescer.push_event(&event, Instant::now())?;
+                let active_lease = lease_state.lock().await.clone();
                 self.persist_live_batches(
-                    lease,
+                    &active_lease,
                     &live_scope,
                     &live_correlation_id,
                     &live_provider_kind,
@@ -2253,8 +2724,9 @@ impl AiProviderCallExecutor {
             }
             if let Some(coalescer) = activity_coalescer.as_mut() {
                 let activities = coalescer.push_event(&event, Instant::now())?;
+                let active_lease = lease_state.lock().await.clone();
                 self.persist_provider_activities(
-                    lease,
+                    &active_lease,
                     &live_scope,
                     &live_correlation_id,
                     &live_provider_kind,
@@ -2269,8 +2741,9 @@ impl AiProviderCallExecutor {
         }
         if let Some(coalescer) = live_coalescer.as_mut() {
             let batches = coalescer.flush_all()?;
+            let active_lease = lease_state.lock().await.clone();
             self.persist_live_batches(
-                lease,
+                &active_lease,
                 &live_scope,
                 &live_correlation_id,
                 &live_provider_kind,
@@ -2283,8 +2756,9 @@ impl AiProviderCallExecutor {
         }
         if let Some(coalescer) = activity_coalescer.as_mut() {
             let activities = coalescer.flush_all()?;
+            let active_lease = lease_state.lock().await.clone();
             self.persist_provider_activities(
-                lease,
+                &active_lease,
                 &live_scope,
                 &live_correlation_id,
                 &live_provider_kind,
@@ -2322,6 +2796,38 @@ impl AiProviderCallExecutor {
                     .ok_or(AiError::ProviderFailed)?,
             );
         }
+        let interactive_tool_results = if let Some(responder) = &dynamic_responder {
+            let results = responder.results().await;
+            if results.len() != tool_calls.len() {
+                return Err(AiError::ProviderFailed);
+            }
+            let by_call = results
+                .into_iter()
+                .map(|result| (result.provider_call_id().to_owned(), result))
+                .collect::<BTreeMap<_, _>>();
+            if by_call.len() != tool_calls.len() {
+                return Err(AiError::ProviderFailed);
+            }
+            tool_calls
+                .iter()
+                .map(|call| {
+                    let result = by_call
+                        .get(call.call_id())
+                        .cloned()
+                        .ok_or(AiError::ProviderFailed)?;
+                    match result.model_input() {
+                        Some(ModelInputBlock::ToolResult {
+                            call_id, tool_id, ..
+                        }) if call_id == call.call_id() && tool_id == call.tool_id().as_str() => {
+                            Ok(result)
+                        }
+                        _ => Err(AiError::ProviderFailed),
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
         if (request_snapshot.continuation_mode == ModelContinuationMode::StatelessReplay
             && provider_response_id.is_some())
             || (request_snapshot.continuation_mode == ModelContinuationMode::ProviderRetained
@@ -2385,6 +2891,8 @@ impl AiProviderCallExecutor {
             request_snapshot,
             model_inference_manifest,
             replay_tool_transfers,
+            interactive_tool_results,
+            provider_session_claim: None,
         })
     }
 

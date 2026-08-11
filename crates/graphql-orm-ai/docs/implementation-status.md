@@ -10,8 +10,8 @@ supersedes: []
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.69.0` with AI schema module
-`0.54.0`. It uses workspace `graphql-orm` `0.21.0`, backend-neutral
+`graphql-orm-ai` is at crate version `0.70.0` with AI schema module
+`0.55.0`. It uses workspace `graphql-orm` `0.21.0`, backend-neutral
 `graphql-orm-ai-tool-profiles` `0.2.0`, and external `agql-auth`
 `0.14.0` at `413fda3435f060604cd653c11e2cc18a668aace1`.
 
@@ -35,10 +35,13 @@ verification evidence belongs in the focused guides.
   distinct cumulative rule ceilings, pricing/usage settlement, protected
   lifecycle activity, and validated provider citation provenance.
 - The optional Codex app-server adapter retains one strictly allowlisted
-  process per exact claimed run for fresh text-only turns. It is globally and
-  per-owner bounded, cancellation-aware, kill-on-drop, and exposes neither a
-  generic protocol bridge nor dynamic tools, shell, files, web, MCP, browser,
-  retained threads, or application-tool continuations.
+  process per exact claimed run and may resume one exact protected provider
+  thread. It is globally and per-owner bounded, cancellation-aware, and
+  kill-on-drop. Experimental native dynamic tools require an immutable
+  default-off registration flag and remain coordinator-owned; every exact call
+  rechecks current rules and uses the ordinary registered GraphQL tool,
+  disclosure, egress, budget, and resolver authorization path. Generic
+  protocol bridging, shell, files, hosted web, MCP, and browser remain closed.
 - The provider-neutral durable session service protects opaque retained-thread
   cursors under exact owner/scope/run/descriptor/transcript fencing and an
   exact deletion/absence lifecycle. Cursor state is separate from warm

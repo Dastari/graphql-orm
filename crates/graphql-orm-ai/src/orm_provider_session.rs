@@ -104,7 +104,7 @@ mod service {
     use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
     use graphql_orm::graphql::filters::{IntFilter, StringFilter, UuidFilter};
     use graphql_orm::graphql::orm::{
-        ConditionalUpdateOutcome, DefaultWriteBackend, TransactionMode,
+        ConditionalUpdateOutcome, DefaultWriteBackend, MutationContext, TransactionMode,
     };
     use serde::{Deserialize, Serialize};
     use sha2::Digest;
@@ -118,7 +118,8 @@ mod service {
     };
     use crate::persistence::{
         AiAuditEventRecord, AiMessageRecord, AiRunCheckpointRecord,
-        AiRunCheckpointRecordWhereInput, AiSessionRecord, CreateAiAuditEventRecordInput,
+        AiRunCheckpointRecordWhereInput, AiRunRecord, AiSessionRecord,
+        CreateAiAuditEventRecordInput,
     };
     use crate::{
         AiAccessPolicy, AiContentProtectionPolicy, AiContentProtectionPolicyResolver,
@@ -384,6 +385,40 @@ mod service {
 
     #[async_trait]
     impl AiProviderSessionService for OrmAiProviderSessionService {
+        async fn inspect_for_run(
+            &self,
+            lease: &AiRunLease,
+        ) -> Result<Option<AiProviderSessionBindingView>, AiError> {
+            let (current, session, scope) = self.load_owned_active_context(lease).await?;
+            self.protection_policy(current.principal(), &scope).await?;
+            let records = AiProviderSessionBindingRecord::query(self.database.pool())
+                .filter(AiProviderSessionBindingRecordWhereInput {
+                    session_id: Some(UuidFilter {
+                        eq: Some(session.id),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .limit(2)
+                .fetch_all()
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?;
+            if records.len() > 1 {
+                return Err(AiError::PersistenceFailed);
+            }
+            let Some(record) = records.first() else {
+                return Ok(None);
+            };
+            let (owner_kind, owner_subject) = principal_identity(current.principal());
+            if record.owner_principal_kind != owner_kind
+                || record.owner_subject != owner_subject
+                || record_scope_from_binding(record) != scope
+            {
+                return Err(AiError::Conflict);
+            }
+            binding_view(record).map(Some)
+        }
+
         async fn bind_for_run(
             &self,
             lease: &AiRunLease,
@@ -797,7 +832,7 @@ mod service {
                 .database
                 .transaction(TransactionMode::StateMachine, move |tx| {
                     Box::pin(async move {
-                        let run = load_and_validate_active_lease(tx, &lease, now).await?;
+                        let run = load_and_validate_completed_run(tx, &lease).await?;
                         let binding = tx
                             .find_by_id::<AiProviderSessionBindingRecord>(&claim.binding_id)
                             .await
@@ -1277,6 +1312,35 @@ mod service {
             cleanup_reason_code: Some(Some(reason_code)),
             ..Default::default()
         }
+    }
+
+    async fn load_and_validate_completed_run(
+        tx: &mut MutationContext<'_, DefaultWriteBackend>,
+        lease: &AiRunLease,
+    ) -> Result<AiRunRecord, OrmPublicError> {
+        let run = tx
+            .find_by_id::<AiRunRecord>(&lease.run_id().0)
+            .await
+            .map_err(OrmPublicError::from)?
+            .ok_or_else(OrmPublicError::not_found)?;
+        let stored_reference: PrincipalReference =
+            serde_json::from_value(run.principal_reference.clone())
+                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+        if lease.state() != AiRunState::Running
+            || run.session_id != lease.session_id().0
+            || run.input_message_id != lease.input_message_id()
+            || stored_reference != *lease.principal_reference()
+            || run.attempt_id != Some(lease.attempt_id())
+            || run.lease_generation != lease.lease_generation()
+            || run.retry_count != i64::from(lease.retry_count())
+            || run.latest_checkpoint_id != lease.latest_checkpoint_id()
+            || run.state != AiRunState::Completed.as_str()
+            || run.lease_owner.is_some()
+            || run.lease_expires_at.is_some()
+        {
+            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+        }
+        Ok(run)
     }
 
     fn validate_active_claim(

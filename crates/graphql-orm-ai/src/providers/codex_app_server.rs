@@ -1,16 +1,19 @@
-//! Strict run-scoped Codex app-server process boundary.
+//! Strict run-scoped Codex app-server process and retained-thread boundary.
 //!
-//! This module deliberately models process reuse without claiming durable
-//! provider-thread resumption or application-tool execution. Each turn starts
-//! a fresh bounded thread on the already-admitted process. Dynamic tools and
-//! every other server-initiated request remain forbidden because the ordinary
-//! coordinator executes application tools only after a provider turn ends.
+//! The default path reuses one bounded process while starting a fresh ephemeral
+//! thread per call. A separately planned provider-session path may resume one
+//! exact protected thread cursor. Experimental dynamic tools are disabled by
+//! default; when a registration explicitly enables them, the adapter admits
+//! only exact reviewed definitions and delegates execution back to the
+//! ordinary coordinator. Every other server-initiated request remains
+//! forbidden.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
+use agql_auth::Clock;
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -20,8 +23,9 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use crate::{
     AiProvider, AiProviderRunBinding, AiProviderRunCloseOutcome, AiProviderRunCloseReason,
     AiProviderRunInterruptOutcome, ModelContinuationMode, ModelInputBlock,
-    ModelReasoningSummaryRequest, ModelRequest, ProviderCapabilities, ProviderError,
-    ProviderEventStream, ProviderKind, ProviderRequestContext,
+    ModelReasoningSummaryRequest, ModelRequest, ModelToolDefinition, ProviderCapabilities,
+    ProviderDynamicToolCall, ProviderDynamicToolResponder, ProviderError, ProviderEventStream,
+    ProviderKind, ProviderRequestContext,
 };
 
 const MAXIMUM_PROCESSES: usize = 4_096;
@@ -52,6 +56,7 @@ pub struct AiCodexAppServerRegistration {
     executable_version: String,
     sandbox_profile: String,
     protocol_version: String,
+    experimental_dynamic_tools: bool,
     identity: String,
 }
 
@@ -94,6 +99,7 @@ impl AiCodexAppServerRegistration {
             &executable_version,
             &sandbox_profile,
             &protocol_version,
+            false,
         );
         Ok(Self {
             provider_profile_id,
@@ -102,8 +108,29 @@ impl AiCodexAppServerRegistration {
             executable_version,
             sandbox_profile,
             protocol_version,
+            experimental_dynamic_tools: false,
             identity,
         })
+    }
+
+    /// Enables the reviewed experimental native dynamic-tool protocol.
+    ///
+    /// This changes the immutable registration identity. It only permits the
+    /// adapter to forward an exact provider request to a coordinator-owned
+    /// responder; it grants no application-tool or resolver authority.
+    #[must_use]
+    pub fn with_experimental_dynamic_tools(mut self) -> Self {
+        self.experimental_dynamic_tools = true;
+        self.identity = registration_identity(
+            &self.provider_profile_id,
+            &self.logical_model,
+            &self.executable_sha256,
+            &self.executable_version,
+            &self.sandbox_profile,
+            &self.protocol_version,
+            true,
+        );
+        self
     }
 
     /// Deployment-owned provider profile identifier.
@@ -136,6 +163,12 @@ impl AiCodexAppServerRegistration {
         &self.protocol_version
     }
 
+    /// Whether experimental app-server dynamic tools are enabled for this
+    /// immutable registration.
+    pub const fn experimental_dynamic_tools(&self) -> bool {
+        self.experimental_dynamic_tools
+    }
+
     /// Stable content-free registration identity used to prevent configuration
     /// swaps inside one claimed run.
     pub fn identity(&self) -> &str {
@@ -148,11 +181,12 @@ impl AiCodexAppServerRegistration {
 /// This type has no tool, URL, path, shell, environment, browser, image, MCP,
 /// app, credential, or generic JSON-RPC field. It intentionally cannot model
 /// coordinator-managed application tools.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq)]
 pub struct AiCodexAppServerTurnInput {
     model: String,
     instructions: Vec<String>,
     input: Vec<String>,
+    tools: Vec<ModelToolDefinition>,
     maximum_output_tokens: u64,
 }
 
@@ -165,6 +199,7 @@ impl std::fmt::Debug for AiCodexAppServerTurnInput {
             .field("instruction_count", &self.instructions.len())
             .field("input", &"<protected>")
             .field("input_count", &self.input.len())
+            .field("tool_count", &self.tools.len())
             .field("maximum_output_tokens", &self.maximum_output_tokens)
             .finish()
     }
@@ -188,6 +223,7 @@ impl AiCodexAppServerTurnInput {
             model: model.into(),
             instructions,
             input,
+            tools: Vec::new(),
             maximum_output_tokens,
         };
         turn.validate()?;
@@ -205,6 +241,7 @@ impl AiCodexAppServerTurnInput {
             || self.instructions.len() > 32
             || self.input.is_empty()
             || self.input.len() > MAXIMUM_TEXT_BLOCKS
+            || self.tools.len() > 128
             || text_bytes > MAXIMUM_TEXT_BYTES
             || self
                 .instructions
@@ -232,6 +269,11 @@ impl AiCodexAppServerTurnInput {
     /// Bounded text input blocks.
     pub fn input(&self) -> &[String] {
         &self.input
+    }
+
+    /// Exact reviewed application-tool definitions for this turn.
+    pub fn tools(&self) -> &[ModelToolDefinition] {
+        &self.tools
     }
 
     /// Requested output-token ceiling.
@@ -269,6 +311,44 @@ impl AiCodexAppServerTurnInput {
                 .maximum_output_tokens
                 .ok_or(ProviderError::InvalidRequest)?,
         )
+    }
+
+    fn try_from_dynamic_request(request: ModelRequest) -> Result<Self, ProviderError> {
+        request.validate()?;
+        if request.tools.is_empty()
+            || request.continuation.is_some()
+            || request.continuation_mode != ModelContinuationMode::ProviderRetained
+            || !request.builtin_tools.is_empty()
+            || request.maximum_builtin_tool_calls.is_some()
+            || request.reasoning_summary != ModelReasoningSummaryRequest::Disabled
+            || request.output_schema.is_some()
+        {
+            return Err(ProviderError::Unsupported);
+        }
+        let input = request
+            .input
+            .iter()
+            .map(|block| match block {
+                ModelInputBlock::Text { text } => Ok(text.clone()),
+                ModelInputBlock::Json { value } => {
+                    serde_json::to_string(value).map_err(|_| ProviderError::InvalidRequest)
+                }
+                ModelInputBlock::ToolResult { .. } | ModelInputBlock::Attachment { .. } => {
+                    Err(ProviderError::Unsupported)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut turn = Self::new(
+            request.model,
+            request.instructions,
+            input,
+            request
+                .maximum_output_tokens
+                .ok_or(ProviderError::InvalidRequest)?,
+        )?;
+        turn.tools = request.tools;
+        turn.validate()?;
+        Ok(turn)
     }
 }
 
@@ -396,14 +476,14 @@ impl Default for AiCodexAppServerRunLimits {
     }
 }
 
-/// Strict tool-free Codex app-server provider adapter.
+/// Strict Codex app-server provider adapter.
 ///
-/// This first-phase adapter reuses one admitted process for the exact claimed
-/// run while starting a fresh ephemeral provider thread for each call. It does
-/// not advertise or accept application tools, provider built-ins, retained or
-/// stateless conversation continuations, attachments, structured output, or
-/// reasoning. Later phases must add those capabilities through separate
-/// reviewed contracts rather than widening this adapter implicitly.
+/// The default registration is tool-free and starts fresh ephemeral threads.
+/// An exact provider-session turn may instead resume a protected cursor, and
+/// an explicit experimental registration may offer reviewed dynamic tools
+/// whose execution remains coordinator-owned. Provider built-ins, stateless
+/// conversation continuations, attachments, structured output, and raw
+/// reasoning remain unavailable.
 #[derive(Clone, Debug)]
 pub struct AiCodexAppServerProvider {
     registration: Arc<AiCodexAppServerRegistration>,
@@ -424,6 +504,62 @@ impl AiCodexAppServerProvider {
     pub fn registration(&self) -> &AiCodexAppServerRegistration {
         &self.registration
     }
+
+    /// Creates the exact retained-thread cleanup adapter using the host's
+    /// trusted clock.
+    pub fn provider_session_deletion_service(
+        &self,
+        clock: Arc<dyn Clock>,
+    ) -> AiCodexAppServerProviderSessionDeletionService {
+        AiCodexAppServerProviderSessionDeletionService {
+            registration: self.registration.clone(),
+            pool: self.pool.clone(),
+            clock,
+        }
+    }
+}
+
+/// Bounded deletion/absence adapter for retained Codex app-server threads.
+#[derive(Clone)]
+pub struct AiCodexAppServerProviderSessionDeletionService {
+    registration: Arc<AiCodexAppServerRegistration>,
+    pool: AiCodexAppServerRunPool,
+    clock: Arc<dyn Clock>,
+}
+
+impl std::fmt::Debug for AiCodexAppServerProviderSessionDeletionService {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiCodexAppServerProviderSessionDeletionService")
+            .field("registration", &self.registration.identity())
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl crate::AiProviderSessionDeletionService for AiCodexAppServerProviderSessionDeletionService {
+    async fn delete_or_confirm_absent(
+        &self,
+        request: &crate::AiProviderSessionDeletionRequest,
+    ) -> Result<crate::AiProviderSessionAbsenceProof, ProviderError> {
+        let descriptor = request.claim().descriptor();
+        if descriptor.provider_kind() != &ProviderKind::LocalHarness
+            || descriptor.provider_profile_id() != self.registration.provider_profile_id()
+            || descriptor.provider_model() != self.registration.logical_model()
+            || descriptor.registration_fingerprint() != self.registration.identity()
+            || descriptor.protocol_version() != self.registration.protocol_version()
+            || request.cursor().kind() != "codex.app_server.thread.v2"
+        {
+            return Err(ProviderError::Rejected);
+        }
+        self.pool
+            .delete_detached_thread(self.registration.clone(), request.cursor())
+            .await?;
+        Ok(crate::AiProviderSessionAbsenceProof::for_request(
+            request,
+            self.clock.now(),
+        ))
+    }
 }
 
 #[async_trait]
@@ -435,6 +571,7 @@ impl AiProvider for AiCodexAppServerProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             streaming: true,
+            custom_tools: self.registration.experimental_dynamic_tools(),
             local: true,
             ..ProviderCapabilities::default()
         }
@@ -452,10 +589,52 @@ impl AiProvider for AiCodexAppServerProvider {
             self.registration.provider_profile_id(),
         )?;
         let binding = context.run_binding().ok_or(ProviderError::Rejected)?;
+        let retained = context.provider_session().cloned();
         let input = AiCodexAppServerTurnInput::try_from_model_request(request)?;
-        self.pool
-            .start_fresh_turn(binding, self.registration.clone(), input)
-            .await
+        if let Some(session) = retained {
+            self.pool
+                .start_retained_turn(binding, self.registration.clone(), session, input)
+                .await
+        } else {
+            self.pool
+                .start_fresh_turn(binding, self.registration.clone(), input)
+                .await
+        }
+    }
+
+    async fn stream_with_dynamic_tools(
+        &self,
+        request: ModelRequest,
+        context: ProviderRequestContext,
+        responder: Arc<dyn ProviderDynamicToolResponder>,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        if !self.registration.experimental_dynamic_tools() {
+            return Err(ProviderError::Unsupported);
+        }
+        context.validate_request(&ProviderKind::LocalHarness, &request)?;
+        context.validate_provider_profile(
+            &ProviderKind::LocalHarness,
+            &request,
+            self.registration.provider_profile_id(),
+        )?;
+        let binding = context.run_binding().ok_or(ProviderError::Rejected)?;
+        let retained = context.provider_session().cloned();
+        let input = AiCodexAppServerTurnInput::try_from_dynamic_request(request)?;
+        if let Some(session) = retained {
+            self.pool
+                .start_retained_dynamic_turn(
+                    binding,
+                    self.registration.clone(),
+                    session,
+                    input,
+                    responder,
+                )
+                .await
+        } else {
+            self.pool
+                .start_dynamic_turn(binding, self.registration.clone(), input, responder)
+                .await
+        }
     }
 
     async fn interrupt_run(
@@ -472,6 +651,52 @@ impl AiProvider for AiCodexAppServerProvider {
     ) -> Result<AiProviderRunCloseOutcome, ProviderError> {
         self.pool.close_run(binding, reason).await
     }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    async fn create_empty_session(
+        &self,
+        binding: &AiProviderRunBinding,
+        descriptor: &crate::AiProviderSessionDescriptor,
+        request: &ModelRequest,
+    ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
+        if descriptor.provider_kind() != &ProviderKind::LocalHarness
+            || descriptor.provider_profile_id() != self.registration.provider_profile_id()
+            || descriptor.provider_model() != self.registration.logical_model()
+            || descriptor.registration_fingerprint() != self.registration.identity()
+            || descriptor.protocol_version() != self.registration.protocol_version()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let input = if request.tools.is_empty() {
+            AiCodexAppServerTurnInput::try_from_model_request(request.clone())?
+        } else {
+            if !self.registration.experimental_dynamic_tools() {
+                return Err(ProviderError::Unsupported);
+            }
+            AiCodexAppServerTurnInput::try_from_dynamic_request(request.clone())?
+        };
+        self.pool
+            .create_empty_thread(*binding, self.registration.clone(), input.tools().to_vec())
+            .await
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    async fn discard_empty_session(
+        &self,
+        binding: &AiProviderRunBinding,
+        descriptor: &crate::AiProviderSessionDescriptor,
+        cursor: &crate::AiProviderSessionCursor,
+    ) -> Result<(), ProviderError> {
+        if descriptor.provider_kind() != &ProviderKind::LocalHarness
+            || descriptor.provider_profile_id() != self.registration.provider_profile_id()
+            || descriptor.provider_model() != self.registration.logical_model()
+            || descriptor.registration_fingerprint() != self.registration.identity()
+            || descriptor.protocol_version() != self.registration.protocol_version()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        self.pool.discard_empty_thread(*binding, cursor).await
+    }
 }
 
 /// One launched app-server process owned by an exact run binding.
@@ -482,6 +707,21 @@ impl AiProvider for AiCodexAppServerProvider {
 /// [`AiCodexAppServerLaunchedProcess`] with an exact process-tree kill action.
 #[async_trait]
 pub trait AiCodexAppServerRunProcess: Send + Sync {
+    /// Creates one durable empty provider thread and returns its opaque cursor.
+    ///
+    /// No developer instruction, user input, or other business content may
+    /// enter the thread before the caller durably binds it. Reviewed dynamic
+    /// tool definitions may be installed because app-server cannot add them
+    /// during `thread/resume`; implementations must transmit exactly the
+    /// supplied definitions or reject them.
+    async fn create_empty_thread(
+        &self,
+        _model: &str,
+        _dynamic_tools: Vec<ModelToolDefinition>,
+    ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
+        Err(ProviderError::Unsupported)
+    }
+
     /// Starts one fresh, text-only thread/turn on the retained process.
     ///
     /// The implementation must enforce the supplied output-token ceiling or
@@ -497,6 +737,51 @@ pub trait AiCodexAppServerRunProcess: Send + Sync {
         &self,
         input: AiCodexAppServerTurnInput,
     ) -> Result<ProviderEventStream, ProviderError>;
+
+    /// Starts one fresh thread/turn with experimental native dynamic tools.
+    ///
+    /// The process must advertise only `input.tools()`, forward each exact
+    /// `item/tool/call` request to `responder`, and write only the returned
+    /// response to app-server. It must not execute, route, or discover tools
+    /// itself. Implementations that have not reviewed this protocol remain
+    /// fail-closed.
+    async fn start_dynamic_turn(
+        &self,
+        _input: AiCodexAppServerTurnInput,
+        _responder: Arc<dyn ProviderDynamicToolResponder>,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        Err(ProviderError::Unsupported)
+    }
+
+    /// Resumes one exact opened provider-session cursor and starts a text-only
+    /// turn on it.
+    async fn start_retained_turn(
+        &self,
+        _session: crate::AiOpenedProviderSession,
+        _input: AiCodexAppServerTurnInput,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        Err(ProviderError::Unsupported)
+    }
+
+    /// Resumes one exact opened provider-session cursor and starts an
+    /// experimental dynamic-tool turn on it.
+    async fn start_retained_dynamic_turn(
+        &self,
+        _session: crate::AiOpenedProviderSession,
+        _input: AiCodexAppServerTurnInput,
+        _responder: Arc<dyn ProviderDynamicToolResponder>,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        Err(ProviderError::Unsupported)
+    }
+
+    /// Deletes or authoritatively confirms absence of one exact provider
+    /// thread cursor.
+    async fn delete_thread(
+        &self,
+        _cursor: &crate::AiProviderSessionCursor,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::Unsupported)
+    }
 
     /// Interrupts the exact active turn.
     ///
@@ -566,11 +851,53 @@ impl AiCodexAppServerLaunchedProcess {
         }
     }
 
+    async fn create_empty_thread(
+        &self,
+        model: &str,
+        dynamic_tools: Vec<ModelToolDefinition>,
+    ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
+        self.process.create_empty_thread(model, dynamic_tools).await
+    }
+
     async fn start_fresh_turn(
         &self,
         input: AiCodexAppServerTurnInput,
     ) -> Result<ProviderEventStream, ProviderError> {
         self.process.start_fresh_turn(input).await
+    }
+
+    async fn start_dynamic_turn(
+        &self,
+        input: AiCodexAppServerTurnInput,
+        responder: Arc<dyn ProviderDynamicToolResponder>,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        self.process.start_dynamic_turn(input, responder).await
+    }
+
+    async fn start_retained_turn(
+        &self,
+        session: crate::AiOpenedProviderSession,
+        input: AiCodexAppServerTurnInput,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        self.process.start_retained_turn(session, input).await
+    }
+
+    async fn start_retained_dynamic_turn(
+        &self,
+        session: crate::AiOpenedProviderSession,
+        input: AiCodexAppServerTurnInput,
+        responder: Arc<dyn ProviderDynamicToolResponder>,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        self.process
+            .start_retained_dynamic_turn(session, input, responder)
+            .await
+    }
+
+    async fn delete_thread(
+        &self,
+        cursor: &crate::AiProviderSessionCursor,
+    ) -> Result<(), ProviderError> {
+        self.process.delete_thread(cursor).await
     }
 
     async fn interrupt(&self) -> Result<(), ProviderError> {
@@ -678,6 +1005,118 @@ impl AiCodexAppServerRunPool {
         }
     }
 
+    async fn create_empty_thread(
+        &self,
+        binding: AiProviderRunBinding,
+        registration: Arc<AiCodexAppServerRegistration>,
+        dynamic_tools: Vec<ModelToolDefinition>,
+    ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
+        if !dynamic_tools.is_empty() && !registration.experimental_dynamic_tools() {
+            return Err(ProviderError::Unsupported);
+        }
+        for tool in &dynamic_tools {
+            tool.validate()?;
+        }
+        let entry = self.entry(binding, registration.clone()).await?;
+        if entry
+            .turn_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let outcome = tokio::time::timeout(
+            self.inner.limits.startup_timeout,
+            entry
+                .process
+                .create_empty_thread(registration.logical_model(), dynamic_tools),
+        )
+        .await;
+        entry.turn_active.store(false, Ordering::Release);
+        match outcome {
+            Ok(Ok(cursor)) if cursor.kind() == "codex.app_server.thread.v2" => Ok(cursor),
+            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {
+                self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
+                    .await;
+                Err(ProviderError::Rejected)
+            }
+        }
+    }
+
+    async fn discard_empty_thread(
+        &self,
+        binding: AiProviderRunBinding,
+        cursor: &crate::AiProviderSessionCursor,
+    ) -> Result<(), ProviderError> {
+        let entry = self
+            .inner
+            .entries
+            .lock()
+            .await
+            .get(&binding)
+            .cloned()
+            .ok_or(ProviderError::Rejected)?;
+        if entry
+            .turn_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let result = tokio::time::timeout(
+            self.inner.limits.shutdown_timeout,
+            entry.process.delete_thread(cursor),
+        )
+        .await;
+        entry.turn_active.store(false, Ordering::Release);
+        match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => {
+                self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
+                    .await;
+                Err(error)
+            }
+            Err(_) => {
+                self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
+                    .await;
+                Err(ProviderError::Cancelled)
+            }
+        }
+    }
+
+    async fn delete_detached_thread(
+        &self,
+        registration: Arc<AiCodexAppServerRegistration>,
+        cursor: &crate::AiProviderSessionCursor,
+    ) -> Result<(), ProviderError> {
+        let permit = self
+            .inner
+            .admission
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ProviderError::RateLimited)?;
+        let process = tokio::time::timeout(
+            self.inner.limits.startup_timeout,
+            self.inner.factory.launch(registration),
+        )
+        .await
+        .map_err(|_| ProviderError::Cancelled)??;
+        let result = tokio::time::timeout(
+            self.inner.limits.shutdown_timeout,
+            process.delete_thread(cursor),
+        )
+        .await
+        .map_err(|_| ProviderError::Cancelled)?;
+        let _ = tokio::time::timeout(
+            self.inner.limits.shutdown_timeout,
+            process.shutdown(AiProviderRunCloseReason::Completed),
+        )
+        .await;
+        drop(process);
+        drop(permit);
+        result
+    }
+
     /// Starts one fresh turn, reusing the exact run's existing process.
     ///
     /// This operation does not retain or resume a provider thread. It offers no
@@ -732,6 +1171,316 @@ impl AiCodexAppServerRunPool {
                     return Err(ProviderError::Cancelled);
                 }
             };
+        let guard = ActiveTurnGuard {
+            entry,
+            completed: false,
+        };
+        let pool = self.clone();
+        Ok(Box::pin(async_stream::try_stream! {
+            let mut guard = guard;
+            let mut stream = stream;
+            let turn_timeout = tokio::time::sleep_until(turn_deadline);
+            tokio::pin!(turn_timeout);
+            loop {
+                let next = tokio::select! {
+                    _ = &mut turn_timeout => {
+                        pool.invalidate(
+                            binding,
+                            &guard.entry,
+                            AiProviderRunCloseReason::ProtocolViolation,
+                        ).await;
+                        guard.completed = true;
+                        Err(ProviderError::Cancelled)
+                    }
+                    event = stream.next() => match event {
+                        Some(Ok(event)) => Ok(Some(event)),
+                        Some(Err(error)) => {
+                            pool.invalidate(
+                                binding,
+                                &guard.entry,
+                                AiProviderRunCloseReason::ProtocolViolation,
+                            ).await;
+                            guard.completed = true;
+                            Err(error)
+                        }
+                        None => Ok(None),
+                    }
+                };
+                match next? {
+                    Some(event) => yield event,
+                    None => {
+                        guard.completed = true;
+                        break;
+                    }
+                }
+            }
+        }))
+    }
+
+    pub(crate) async fn start_retained_turn(
+        &self,
+        binding: AiProviderRunBinding,
+        registration: Arc<AiCodexAppServerRegistration>,
+        session: crate::AiOpenedProviderSession,
+        input: AiCodexAppServerTurnInput,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        input.validate()?;
+        if input.model() != registration.logical_model()
+            || session.claim().session_id() != binding.session_id()
+            || session.claim().run_id() != binding.run_id()
+            || session.claim().attempt_id() != binding.attempt_id()
+            || session.claim().run_lease_generation() != binding.lease_generation()
+            || session.claim().descriptor().provider_profile_id()
+                != registration.provider_profile_id()
+            || session.claim().descriptor().provider_model() != registration.logical_model()
+            || session.claim().descriptor().registration_fingerprint() != registration.identity()
+            || session.claim().descriptor().protocol_version() != registration.protocol_version()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let entry = self.entry(binding, registration).await?;
+        if entry
+            .turn_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let previous = entry.turn_count.fetch_add(1, Ordering::AcqRel);
+        if previous >= self.inner.limits.maximum_turns_per_run {
+            entry.turn_count.fetch_sub(1, Ordering::AcqRel);
+            entry.turn_active.store(false, Ordering::Release);
+            return Err(ProviderError::RateLimited);
+        }
+        let turn_deadline = tokio::time::Instant::now() + self.inner.limits.turn_timeout;
+        let stream = match tokio::time::timeout_at(
+            turn_deadline,
+            entry.process.start_retained_turn(session, input),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                entry.turn_active.store(false, Ordering::Release);
+                self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
+                    .await;
+                return Err(error);
+            }
+            Err(_) => {
+                entry.turn_active.store(false, Ordering::Release);
+                self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
+                    .await;
+                return Err(ProviderError::Cancelled);
+            }
+        };
+        let guard = ActiveTurnGuard {
+            entry,
+            completed: false,
+        };
+        let pool = self.clone();
+        Ok(Box::pin(async_stream::try_stream! {
+            let mut guard = guard;
+            let mut stream = stream;
+            let turn_timeout = tokio::time::sleep_until(turn_deadline);
+            tokio::pin!(turn_timeout);
+            loop {
+                let next = tokio::select! {
+                    _ = &mut turn_timeout => {
+                        pool.invalidate(
+                            binding,
+                            &guard.entry,
+                            AiProviderRunCloseReason::ProtocolViolation,
+                        ).await;
+                        guard.completed = true;
+                        Err(ProviderError::Cancelled)
+                    }
+                    event = stream.next() => match event {
+                        Some(Ok(event)) => Ok(Some(event)),
+                        Some(Err(error)) => {
+                            pool.invalidate(
+                                binding,
+                                &guard.entry,
+                                AiProviderRunCloseReason::ProtocolViolation,
+                            ).await;
+                            guard.completed = true;
+                            Err(error)
+                        }
+                        None => Ok(None),
+                    }
+                };
+                match next? {
+                    Some(event) => yield event,
+                    None => {
+                        guard.completed = true;
+                        break;
+                    }
+                }
+            }
+        }))
+    }
+
+    /// Starts one experimental dynamic-tool turn on the exact run process.
+    ///
+    /// The responder is coordinator-owned and is the only path by which a
+    /// provider request can receive application data. Capacity, registration,
+    /// concurrency, timeout, poisoning, and kill behavior are identical to a
+    /// tool-free turn.
+    pub(crate) async fn start_dynamic_turn(
+        &self,
+        binding: AiProviderRunBinding,
+        registration: Arc<AiCodexAppServerRegistration>,
+        input: AiCodexAppServerTurnInput,
+        responder: Arc<dyn ProviderDynamicToolResponder>,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        input.validate()?;
+        if input.model() != registration.logical_model()
+            || input.tools().is_empty()
+            || !registration.experimental_dynamic_tools()
+        {
+            return Err(ProviderError::Unsupported);
+        }
+        let entry = self.entry(binding, registration).await?;
+        if entry
+            .turn_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let previous = entry.turn_count.fetch_add(1, Ordering::AcqRel);
+        if previous >= self.inner.limits.maximum_turns_per_run {
+            entry.turn_count.fetch_sub(1, Ordering::AcqRel);
+            entry.turn_active.store(false, Ordering::Release);
+            return Err(ProviderError::RateLimited);
+        }
+        let turn_deadline = tokio::time::Instant::now() + self.inner.limits.turn_timeout;
+        let stream = match tokio::time::timeout_at(
+            turn_deadline,
+            entry.process.start_dynamic_turn(input, responder),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                entry.turn_active.store(false, Ordering::Release);
+                self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
+                    .await;
+                return Err(error);
+            }
+            Err(_) => {
+                entry.turn_active.store(false, Ordering::Release);
+                self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
+                    .await;
+                return Err(ProviderError::Cancelled);
+            }
+        };
+        let guard = ActiveTurnGuard {
+            entry,
+            completed: false,
+        };
+        let pool = self.clone();
+        Ok(Box::pin(async_stream::try_stream! {
+            let mut guard = guard;
+            let mut stream = stream;
+            let turn_timeout = tokio::time::sleep_until(turn_deadline);
+            tokio::pin!(turn_timeout);
+            loop {
+                let next = tokio::select! {
+                    _ = &mut turn_timeout => {
+                        pool.invalidate(
+                            binding,
+                            &guard.entry,
+                            AiProviderRunCloseReason::ProtocolViolation,
+                        ).await;
+                        guard.completed = true;
+                        Err(ProviderError::Cancelled)
+                    }
+                    event = stream.next() => match event {
+                        Some(Ok(event)) => Ok(Some(event)),
+                        Some(Err(error)) => {
+                            pool.invalidate(
+                                binding,
+                                &guard.entry,
+                                AiProviderRunCloseReason::ProtocolViolation,
+                            ).await;
+                            guard.completed = true;
+                            Err(error)
+                        }
+                        None => Ok(None),
+                    }
+                };
+                match next? {
+                    Some(event) => yield event,
+                    None => {
+                        guard.completed = true;
+                        break;
+                    }
+                }
+            }
+        }))
+    }
+
+    pub(crate) async fn start_retained_dynamic_turn(
+        &self,
+        binding: AiProviderRunBinding,
+        registration: Arc<AiCodexAppServerRegistration>,
+        session: crate::AiOpenedProviderSession,
+        input: AiCodexAppServerTurnInput,
+        responder: Arc<dyn ProviderDynamicToolResponder>,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        input.validate()?;
+        if input.model() != registration.logical_model()
+            || input.tools().is_empty()
+            || !registration.experimental_dynamic_tools()
+            || session.claim().session_id() != binding.session_id()
+            || session.claim().run_id() != binding.run_id()
+            || session.claim().attempt_id() != binding.attempt_id()
+            || session.claim().run_lease_generation() != binding.lease_generation()
+            || session.claim().descriptor().provider_profile_id()
+                != registration.provider_profile_id()
+            || session.claim().descriptor().provider_model() != registration.logical_model()
+            || session.claim().descriptor().registration_fingerprint() != registration.identity()
+            || session.claim().descriptor().protocol_version() != registration.protocol_version()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let entry = self.entry(binding, registration).await?;
+        if entry
+            .turn_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let previous = entry.turn_count.fetch_add(1, Ordering::AcqRel);
+        if previous >= self.inner.limits.maximum_turns_per_run {
+            entry.turn_count.fetch_sub(1, Ordering::AcqRel);
+            entry.turn_active.store(false, Ordering::Release);
+            return Err(ProviderError::RateLimited);
+        }
+        let turn_deadline = tokio::time::Instant::now() + self.inner.limits.turn_timeout;
+        let stream = match tokio::time::timeout_at(
+            turn_deadline,
+            entry
+                .process
+                .start_retained_dynamic_turn(session, input, responder),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                entry.turn_active.store(false, Ordering::Release);
+                self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
+                    .await;
+                return Err(error);
+            }
+            Err(_) => {
+                entry.turn_active.store(false, Ordering::Release);
+                self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
+                    .await;
+                return Err(ProviderError::Cancelled);
+            }
+        };
         let guard = ActiveTurnGuard {
             entry,
             completed: false,
@@ -935,6 +1684,8 @@ impl AiCodexAppServerRunPool {
 enum ClientMethod {
     Initialize,
     ThreadStart,
+    ThreadResume,
+    ThreadDelete,
     TurnStart,
     TurnInterrupt,
 }
@@ -964,6 +1715,29 @@ pub enum AiCodexAppServerInbound {
         /// Bounded object parameters after notification validation.
         params: Value,
     },
+    /// Exact experimental dynamic-tool server request matched to one offered
+    /// definition. No other server request is admitted.
+    DynamicToolCall {
+        /// JSON-RPC request identifier to use only for the matching response.
+        request_id: u64,
+        /// Exact provider thread reference.
+        thread_id: String,
+        /// Exact active provider turn reference.
+        turn_id: String,
+        /// Schema-validated application-tool request.
+        call: ProviderDynamicToolCall,
+    },
+    /// Content-free lifecycle for one exact experimental dynamic-tool item.
+    DynamicToolLifecycle {
+        /// Exact provider turn reference.
+        turn_id: String,
+        /// Opaque dynamic-tool call/item identifier.
+        call_id: String,
+        /// Exact offered provider-facing tool name.
+        provider_name: String,
+        /// Whether this is the pre-execution start or terminal completion.
+        completed: bool,
+    },
 }
 
 impl std::fmt::Debug for AiCodexAppServerInbound {
@@ -980,6 +1754,30 @@ impl std::fmt::Debug for AiCodexAppServerInbound {
                 .field("method", method)
                 .field("params", &"<provider-content>")
                 .finish(),
+            Self::DynamicToolCall {
+                request_id,
+                thread_id,
+                turn_id,
+                call,
+            } => formatter
+                .debug_struct("AiCodexAppServerInbound::DynamicToolCall")
+                .field("request_id", request_id)
+                .field("thread_id", thread_id)
+                .field("turn_id", turn_id)
+                .field("call", call)
+                .finish(),
+            Self::DynamicToolLifecycle {
+                turn_id,
+                call_id,
+                provider_name,
+                completed,
+            } => formatter
+                .debug_struct("AiCodexAppServerInbound::DynamicToolLifecycle")
+                .field("turn_id", turn_id)
+                .field("call_id", call_id)
+                .field("provider_name", provider_name)
+                .field("completed", completed)
+                .finish(),
         }
     }
 }
@@ -987,12 +1785,22 @@ impl std::fmt::Debug for AiCodexAppServerInbound {
 /// Closed app-server JSON-RPC encoder/guard.
 ///
 /// There is intentionally no generic request builder. The provider-specific
-/// process actor may emit only the four methods represented here. All
-/// server-initiated requests and non-allowlisted notifications fail closed.
+/// process actor may emit only the explicitly typed initialization, thread,
+/// turn, interruption, deletion, and dynamic-tool response methods represented
+/// here. All other server-initiated requests and non-allowlisted notifications
+/// fail closed.
 #[derive(Debug)]
 pub struct AiCodexAppServerProtocolActor {
     next_id: u64,
     pending: BTreeMap<u64, ClientMethod>,
+    active_thread_id: Option<String>,
+    pending_turn_thread_id: Option<String>,
+    active_turn_id: Option<String>,
+    retained_model: Option<String>,
+    dynamic_tools: BTreeMap<String, ModelToolDefinition>,
+    pending_dynamic_requests: BTreeMap<u64, (String, String)>,
+    started_dynamic_calls: BTreeMap<String, String>,
+    responded_dynamic_calls: BTreeMap<String, String>,
     maximum_frame_bytes: usize,
 }
 
@@ -1013,6 +1821,14 @@ impl AiCodexAppServerProtocolActor {
         Ok(Self {
             next_id: 1,
             pending: BTreeMap::new(),
+            active_thread_id: None,
+            pending_turn_thread_id: None,
+            active_turn_id: None,
+            retained_model: None,
+            dynamic_tools: BTreeMap::new(),
+            pending_dynamic_requests: BTreeMap::new(),
+            started_dynamic_calls: BTreeMap::new(),
+            responded_dynamic_calls: BTreeMap::new(),
             maximum_frame_bytes,
         })
     }
@@ -1051,6 +1867,42 @@ impl AiCodexAppServerProtocolActor {
         )
     }
 
+    /// Encodes initialization with only the experimental API capability
+    /// required by app-server dynamic tools.
+    ///
+    /// # Errors
+    ///
+    /// Returns a non-sensitive error for invalid client identity, ID
+    /// exhaustion, or frame-size overflow.
+    pub fn initialize_with_dynamic_tools(
+        &mut self,
+        client_name: &str,
+        client_title: &str,
+        client_version: &str,
+    ) -> Result<Vec<u8>, ProviderError> {
+        if !valid_identifier(client_name)
+            || client_title.trim().is_empty()
+            || client_title.len() > MAXIMUM_VERSION_BYTES
+            || !valid_version(client_version)
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "invalid Codex app-server client identity".to_owned(),
+            ));
+        }
+        self.request(
+            ClientMethod::Initialize,
+            "initialize",
+            json!({
+                "clientInfo": {
+                    "name": client_name,
+                    "title": client_title,
+                    "version": client_version,
+                },
+                "capabilities": {"experimentalApi": true},
+            }),
+        )
+    }
+
     /// Encodes the one allowed post-initialization notification.
     ///
     /// # Errors
@@ -1073,6 +1925,13 @@ impl AiCodexAppServerProtocolActor {
         input: &AiCodexAppServerTurnInput,
     ) -> Result<Vec<u8>, ProviderError> {
         input.validate()?;
+        if !self.dynamic_tools.is_empty()
+            || !self.pending_dynamic_requests.is_empty()
+            || !self.started_dynamic_calls.is_empty()
+            || !self.responded_dynamic_calls.is_empty()
+        {
+            return Err(ProviderError::Rejected);
+        }
         let developer_instructions = if input.instructions().is_empty() {
             Value::Null
         } else {
@@ -1087,6 +1946,250 @@ impl AiCodexAppServerProtocolActor {
                 "ephemeral": true,
             }),
         )
+    }
+
+    /// Creates a durable empty thread before any business content is sent.
+    ///
+    /// The caller must durably protect and bind the returned thread cursor
+    /// before calling [`Self::start_turn`]. Reviewed dynamic-tool definitions
+    /// may be installed because app-server cannot add them at resume time, but
+    /// no developer or user instructions are included in this request.
+    pub fn start_persistent_empty_thread(
+        &mut self,
+        model: &str,
+        dynamic_tools: &[ModelToolDefinition],
+    ) -> Result<Vec<u8>, ProviderError> {
+        if !valid_identifier(model)
+            || self.retained_model.is_some()
+            || !self.dynamic_tools.is_empty()
+            || !self.pending_dynamic_requests.is_empty()
+            || !self.started_dynamic_calls.is_empty()
+            || !self.responded_dynamic_calls.is_empty()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let mut definitions = BTreeMap::new();
+        let dynamic_tools = dynamic_tools
+            .iter()
+            .map(|tool| {
+                tool.validate()?;
+                if definitions
+                    .insert(tool.provider_name.clone(), tool.clone())
+                    .is_some()
+                {
+                    return Err(ProviderError::Rejected);
+                }
+                Ok(json!({
+                    "type": "function",
+                    "name": tool.provider_name,
+                    "description": tool.description,
+                    "inputSchema": tool.parameters,
+                    "deferLoading": false,
+                }))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut params = json!({
+            "model": model,
+            "developerInstructions": null,
+            "ephemeral": false,
+        });
+        if !dynamic_tools.is_empty() {
+            params
+                .as_object_mut()
+                .ok_or(ProviderError::Rejected)?
+                .insert("dynamicTools".to_owned(), Value::Array(dynamic_tools));
+        }
+        let frame = self.request(ClientMethod::ThreadStart, "thread/start", params)?;
+        self.retained_model = Some(model.to_owned());
+        self.dynamic_tools = definitions;
+        Ok(frame)
+    }
+
+    /// Resumes one exact protected thread cursor with immutable model and
+    /// trusted instruction overrides.
+    ///
+    /// Dynamic definitions are installed only in the local protocol guard so
+    /// later server requests can be matched to the binding's already-frozen
+    /// tool/policy fingerprint. The current app-server resume method has no
+    /// dynamic-tools field and therefore cannot change the provider-retained
+    /// definition set.
+    pub fn resume_thread(
+        &mut self,
+        cursor: &crate::AiProviderSessionCursor,
+        input: &AiCodexAppServerTurnInput,
+    ) -> Result<Vec<u8>, ProviderError> {
+        input.validate()?;
+        if cursor.kind() != "codex.app_server.thread.v2"
+            || !valid_reference(cursor.expose_to_provider_adapter())
+            || self
+                .retained_model
+                .as_deref()
+                .is_some_and(|model| model != input.model())
+            || !self.pending_dynamic_requests.is_empty()
+            || !self.started_dynamic_calls.is_empty()
+            || !self.responded_dynamic_calls.is_empty()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let mut definitions = BTreeMap::new();
+        for tool in input.tools() {
+            if definitions
+                .insert(tool.provider_name.clone(), tool.clone())
+                .is_some()
+            {
+                return Err(ProviderError::Rejected);
+            }
+        }
+        let developer_instructions = if input.instructions().is_empty() {
+            Value::Null
+        } else {
+            Value::String(input.instructions().join("\n\n"))
+        };
+        if !self.dynamic_tools.is_empty() && self.dynamic_tools != definitions {
+            return Err(ProviderError::Rejected);
+        }
+        let frame = self.request(
+            ClientMethod::ThreadResume,
+            "thread/resume",
+            json!({
+                "threadId": cursor.expose_to_provider_adapter(),
+                "model": input.model(),
+                "developerInstructions": developer_instructions,
+            }),
+        )?;
+        self.active_thread_id = Some(cursor.expose_to_provider_adapter().to_owned());
+        self.retained_model = Some(input.model().to_owned());
+        self.dynamic_tools = definitions;
+        Ok(frame)
+    }
+
+    /// Deletes one exact protected thread cursor.
+    pub fn delete_thread(
+        &mut self,
+        cursor: &crate::AiProviderSessionCursor,
+    ) -> Result<Vec<u8>, ProviderError> {
+        if cursor.kind() != "codex.app_server.thread.v2"
+            || !valid_reference(cursor.expose_to_provider_adapter())
+            || self.pending_turn_thread_id.is_some()
+            || self.active_turn_id.is_some()
+            || self
+                .active_thread_id
+                .as_deref()
+                .is_some_and(|thread_id| thread_id != cursor.expose_to_provider_adapter())
+        {
+            return Err(ProviderError::Rejected);
+        }
+        self.request(
+            ClientMethod::ThreadDelete,
+            "thread/delete",
+            json!({"threadId": cursor.expose_to_provider_adapter()}),
+        )
+    }
+
+    /// Encodes one ephemeral thread start with the exact reviewed dynamic
+    /// tools from this turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for an empty/duplicate tool set, invalid input,
+    /// ID exhaustion, or frame-size overflow.
+    pub fn start_dynamic_thread(
+        &mut self,
+        input: &AiCodexAppServerTurnInput,
+    ) -> Result<Vec<u8>, ProviderError> {
+        input.validate()?;
+        if input.tools().is_empty()
+            || !self.dynamic_tools.is_empty()
+            || !self.pending_dynamic_requests.is_empty()
+            || !self.started_dynamic_calls.is_empty()
+            || !self.responded_dynamic_calls.is_empty()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let mut definitions = BTreeMap::new();
+        let dynamic_tools = input
+            .tools()
+            .iter()
+            .map(|tool| {
+                if definitions
+                    .insert(tool.provider_name.clone(), tool.clone())
+                    .is_some()
+                {
+                    return Err(ProviderError::Rejected);
+                }
+                Ok(json!({
+                    "type": "function",
+                    "name": tool.provider_name,
+                    "description": tool.description,
+                    "inputSchema": tool.parameters,
+                    "deferLoading": false,
+                }))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let developer_instructions = if input.instructions().is_empty() {
+            Value::Null
+        } else {
+            Value::String(input.instructions().join("\n\n"))
+        };
+        let frame = self.request(
+            ClientMethod::ThreadStart,
+            "thread/start",
+            json!({
+                "model": input.model(),
+                "developerInstructions": developer_instructions,
+                "ephemeral": true,
+                "dynamicTools": dynamic_tools,
+            }),
+        )?;
+        self.dynamic_tools = definitions;
+        Ok(frame)
+    }
+
+    /// Encodes the only allowed successful response to an admitted dynamic
+    /// tool request.
+    ///
+    /// The result is serialized as one text content item because arbitrary
+    /// image/audio URLs are outside this integration.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for an unknown/swapped request, oversized output,
+    /// or frame-size overflow.
+    pub fn dynamic_tool_response(
+        &mut self,
+        request_id: u64,
+        result: &crate::ProviderDynamicToolResult,
+    ) -> Result<Vec<u8>, ProviderError> {
+        let Some((call_id, tool_id)) = self.pending_dynamic_requests.remove(&request_id) else {
+            return Err(ProviderError::Rejected);
+        };
+        if call_id != result.call_id() || tool_id != result.tool_id() {
+            return Err(ProviderError::Rejected);
+        }
+        let text = serde_json::to_string(result.output()).map_err(|_| ProviderError::Rejected)?;
+        if text.len() > MAXIMUM_TEXT_BYTES {
+            return Err(ProviderError::Rejected);
+        }
+        let frame = self.encode(json!({
+            "id": request_id,
+            "result": {
+                "contentItems": [{"type": "inputText", "text": text}],
+                "success": true,
+            }
+        }))?;
+        let definition = self
+            .dynamic_tools
+            .values()
+            .find(|definition| definition.tool_id == tool_id)
+            .ok_or(ProviderError::Rejected)?;
+        if self
+            .responded_dynamic_calls
+            .insert(call_id, definition.provider_name.clone())
+            .is_some()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        Ok(frame)
     }
 
     /// Encodes text-only user input for one exact fresh thread.
@@ -1105,17 +2208,23 @@ impl AiCodexAppServerProtocolActor {
         input: &AiCodexAppServerTurnInput,
     ) -> Result<Vec<u8>, ProviderError> {
         input.validate()?;
-        if !valid_reference(thread_id) {
+        if !valid_reference(thread_id)
+            || self.active_thread_id.as_deref() != Some(thread_id)
+            || self.pending_turn_thread_id.is_some()
+            || self.active_turn_id.is_some()
+        {
             return Err(ProviderError::InvalidRequest);
         }
-        self.request(
+        let frame = self.request(
             ClientMethod::TurnStart,
             "turn/start",
             json!({
                 "threadId": thread_id,
                 "input": input.input().iter().map(|text| json!({"type": "text", "text": text})).collect::<Vec<_>>(),
             }),
-        )
+        )?;
+        self.pending_turn_thread_id = Some(thread_id.to_owned());
+        Ok(frame)
     }
 
     /// Encodes interruption for one exact active thread and turn.
@@ -1129,7 +2238,11 @@ impl AiCodexAppServerProtocolActor {
         thread_id: &str,
         turn_id: &str,
     ) -> Result<Vec<u8>, ProviderError> {
-        if !valid_reference(thread_id) || !valid_reference(turn_id) {
+        if !valid_reference(thread_id)
+            || !valid_reference(turn_id)
+            || self.active_thread_id.as_deref() != Some(thread_id)
+            || self.active_turn_id.as_deref() != Some(turn_id)
+        {
             return Err(ProviderError::InvalidRequest);
         }
         self.request(
@@ -1181,8 +2294,81 @@ impl AiCodexAppServerProtocolActor {
         let value: Value = serde_json::from_slice(frame).map_err(|_| ProviderError::Rejected)?;
         let object = value.as_object().ok_or(ProviderError::Rejected)?;
         if object.contains_key("method") && object.contains_key("id") {
-            // Every server-initiated request is forbidden in this phase.
-            return Err(ProviderError::Rejected);
+            if object
+                .keys()
+                .any(|key| !matches!(key.as_str(), "id" | "method" | "params"))
+                || object.get("method").and_then(Value::as_str) != Some("item/tool/call")
+            {
+                return Err(ProviderError::Rejected);
+            }
+            let request_id = object
+                .get("id")
+                .and_then(Value::as_u64)
+                .ok_or(ProviderError::Rejected)?;
+            let params = object
+                .get("params")
+                .and_then(Value::as_object)
+                .ok_or(ProviderError::Rejected)?;
+            if request_id == 0
+                || self.pending_dynamic_requests.contains_key(&request_id)
+                || params.keys().any(|key| {
+                    !matches!(
+                        key.as_str(),
+                        "arguments" | "callId" | "namespace" | "threadId" | "tool" | "turnId"
+                    )
+                })
+                || params
+                    .get("namespace")
+                    .is_some_and(|value| !value.is_null())
+            {
+                return Err(ProviderError::Rejected);
+            }
+            let call_id = params
+                .get("callId")
+                .and_then(Value::as_str)
+                .filter(|value| valid_reference(value))
+                .ok_or(ProviderError::Rejected)?;
+            let thread_id = params
+                .get("threadId")
+                .and_then(Value::as_str)
+                .filter(|value| valid_reference(value))
+                .ok_or(ProviderError::Rejected)?;
+            let turn_id = params
+                .get("turnId")
+                .and_then(Value::as_str)
+                .filter(|value| valid_reference(value))
+                .ok_or(ProviderError::Rejected)?;
+            let tool_name = params
+                .get("tool")
+                .and_then(Value::as_str)
+                .ok_or(ProviderError::Rejected)?;
+            let definition = self
+                .dynamic_tools
+                .get(tool_name)
+                .ok_or(ProviderError::Rejected)?;
+            if self.started_dynamic_calls.get(call_id).map(String::as_str) != Some(tool_name) {
+                return Err(ProviderError::Rejected);
+            }
+            let call = ProviderDynamicToolCall::from_definition(
+                turn_id,
+                call_id,
+                definition,
+                params
+                    .get("arguments")
+                    .cloned()
+                    .ok_or(ProviderError::Rejected)?,
+            )?;
+            self.validate_active_turn(thread_id, turn_id)?;
+            self.pending_dynamic_requests.insert(
+                request_id,
+                (call.call_id().to_owned(), call.tool_id().to_owned()),
+            );
+            return Ok(AiCodexAppServerInbound::DynamicToolCall {
+                request_id,
+                thread_id: thread_id.to_owned(),
+                turn_id: turn_id.to_owned(),
+                call,
+            });
         }
         if let Some(id) = object.get("id").and_then(Value::as_u64) {
             if object
@@ -1201,6 +2387,7 @@ impl AiCodexAppServerProtocolActor {
                 .filter(|result| result.is_object())
                 .cloned()
                 .ok_or(ProviderError::Rejected)?;
+            self.accept_correlated_response(method, &result)?;
             return Ok(AiCodexAppServerInbound::Response {
                 id,
                 method: client_method_name(method),
@@ -1223,18 +2410,262 @@ impl AiCodexAppServerProtocolActor {
             .filter(|params| params.is_object())
             .cloned()
             .ok_or(ProviderError::Rejected)?;
+        if matches!(method, "item/started" | "item/completed")
+            && params
+                .get("item")
+                .and_then(Value::as_object)
+                .and_then(|item| item.get("type"))
+                .and_then(Value::as_str)
+                == Some("dynamicToolCall")
+        {
+            return self.accept_dynamic_tool_lifecycle(method, &params);
+        }
         validate_allowed_notification(method, &params)?;
+        self.accept_notification_binding(method, &params)?;
+        if method == "turn/completed" {
+            if !self.pending_dynamic_requests.is_empty()
+                || !self.started_dynamic_calls.is_empty()
+                || !self.responded_dynamic_calls.is_empty()
+            {
+                return Err(ProviderError::Rejected);
+            }
+            self.dynamic_tools.clear();
+            self.pending_turn_thread_id = None;
+            self.active_turn_id = None;
+        }
         Ok(AiCodexAppServerInbound::Notification {
             method: method.to_owned(),
             params,
         })
     }
+
+    fn accept_dynamic_tool_lifecycle(
+        &mut self,
+        method: &str,
+        params: &Value,
+    ) -> Result<AiCodexAppServerInbound, ProviderError> {
+        if self.dynamic_tools.is_empty() {
+            return Err(ProviderError::Rejected);
+        }
+        let params = params.as_object().ok_or(ProviderError::Rejected)?;
+        let timestamp_key = if method == "item/started" {
+            "startedAtMs"
+        } else {
+            "completedAtMs"
+        };
+        if params.keys().any(|key| {
+            !matches!(key.as_str(), "item" | "threadId" | "turnId") && key != timestamp_key
+        }) || params.get(timestamp_key).and_then(Value::as_i64).is_none()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let thread_id = params
+            .get("threadId")
+            .and_then(Value::as_str)
+            .filter(|value| valid_reference(value))
+            .ok_or(ProviderError::Rejected)?;
+        let turn_id = params
+            .get("turnId")
+            .and_then(Value::as_str)
+            .filter(|value| valid_reference(value))
+            .ok_or(ProviderError::Rejected)?;
+        self.validate_active_turn(thread_id, turn_id)?;
+        let item = params
+            .get("item")
+            .and_then(Value::as_object)
+            .ok_or(ProviderError::Rejected)?;
+        if item.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "arguments"
+                    | "contentItems"
+                    | "durationMs"
+                    | "id"
+                    | "namespace"
+                    | "status"
+                    | "success"
+                    | "tool"
+                    | "type"
+            )
+        }) || item.get("type").and_then(Value::as_str) != Some("dynamicToolCall")
+            || item.get("namespace").is_some_and(|value| !value.is_null())
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let call_id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| valid_reference(value))
+            .ok_or(ProviderError::Rejected)?;
+        let provider_name = item
+            .get("tool")
+            .and_then(Value::as_str)
+            .ok_or(ProviderError::Rejected)?;
+        let definition = self
+            .dynamic_tools
+            .get(provider_name)
+            .ok_or(ProviderError::Rejected)?;
+        let arguments = item.get("arguments").ok_or(ProviderError::Rejected)?;
+        let validator = jsonschema::validator_for(&definition.parameters)
+            .map_err(|_| ProviderError::Rejected)?;
+        if !arguments.is_object() || !validator.is_valid(arguments) {
+            return Err(ProviderError::Rejected);
+        }
+        let completed = method == "item/completed";
+        if completed {
+            if item.get("status").and_then(Value::as_str) != Some("completed")
+                || item.get("success").and_then(Value::as_bool) != Some(true)
+                || self.started_dynamic_calls.get(call_id).map(String::as_str)
+                    != Some(provider_name)
+                || self.responded_dynamic_calls.remove(call_id).as_deref() != Some(provider_name)
+            {
+                return Err(ProviderError::Rejected);
+            }
+            self.started_dynamic_calls.remove(call_id);
+        } else if item.get("status").and_then(Value::as_str) != Some("inProgress")
+            || item.get("success").is_some_and(|value| !value.is_null())
+            || item
+                .get("contentItems")
+                .is_some_and(|value| !value.is_null())
+            || self
+                .started_dynamic_calls
+                .insert(call_id.to_owned(), provider_name.to_owned())
+                .is_some()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let _ = thread_id;
+        Ok(AiCodexAppServerInbound::DynamicToolLifecycle {
+            turn_id: turn_id.to_owned(),
+            call_id: call_id.to_owned(),
+            provider_name: provider_name.to_owned(),
+            completed,
+        })
+    }
+
+    fn accept_correlated_response(
+        &mut self,
+        method: ClientMethod,
+        result: &Value,
+    ) -> Result<(), ProviderError> {
+        match method {
+            ClientMethod::ThreadStart | ClientMethod::ThreadResume => {
+                let thread_id = nested_reference(result, "thread", "id")?;
+                if self
+                    .active_thread_id
+                    .as_deref()
+                    .is_some_and(|expected| expected != thread_id)
+                {
+                    return Err(ProviderError::Rejected);
+                }
+                self.active_thread_id = Some(thread_id.to_owned());
+            }
+            ClientMethod::TurnStart => {
+                let turn_id = nested_reference(result, "turn", "id")?;
+                if self.pending_turn_thread_id.as_deref() != self.active_thread_id.as_deref()
+                    || self
+                        .active_turn_id
+                        .as_deref()
+                        .is_some_and(|expected| expected != turn_id)
+                {
+                    return Err(ProviderError::Rejected);
+                }
+                self.active_turn_id = Some(turn_id.to_owned());
+            }
+            ClientMethod::Initialize | ClientMethod::ThreadDelete | ClientMethod::TurnInterrupt => {
+            }
+        }
+        Ok(())
+    }
+
+    fn accept_notification_binding(
+        &mut self,
+        method: &str,
+        params: &Value,
+    ) -> Result<(), ProviderError> {
+        match method {
+            "thread/started" => {
+                let thread_id = nested_reference(params, "thread", "id")?;
+                if self
+                    .active_thread_id
+                    .as_deref()
+                    .is_some_and(|expected| expected != thread_id)
+                {
+                    return Err(ProviderError::Rejected);
+                }
+                self.active_thread_id = Some(thread_id.to_owned());
+            }
+            "turn/started" => {
+                let thread_id = direct_reference(params, "threadId")?;
+                let turn_id = nested_reference(params, "turn", "id")?;
+                if self.pending_turn_thread_id.as_deref() != Some(thread_id)
+                    || self.active_thread_id.as_deref() != Some(thread_id)
+                    || self
+                        .active_turn_id
+                        .as_deref()
+                        .is_some_and(|expected| expected != turn_id)
+                {
+                    return Err(ProviderError::Rejected);
+                }
+                self.active_turn_id = Some(turn_id.to_owned());
+            }
+            "turn/completed" => {
+                let thread_id = direct_reference(params, "threadId")?;
+                let turn_id = nested_reference(params, "turn", "id")?;
+                self.validate_active_turn(thread_id, turn_id)?;
+            }
+            "item/started"
+            | "item/completed"
+            | "item/agentMessage/delta"
+            | "thread/tokenUsage/updated" => {
+                self.validate_active_turn(
+                    direct_reference(params, "threadId")?,
+                    direct_reference(params, "turnId")?,
+                )?;
+            }
+            _ => return Err(ProviderError::Rejected),
+        }
+        Ok(())
+    }
+
+    fn validate_active_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), ProviderError> {
+        if self.active_thread_id.as_deref() != Some(thread_id)
+            || self.active_turn_id.as_deref() != Some(turn_id)
+        {
+            return Err(ProviderError::Rejected);
+        }
+        Ok(())
+    }
+}
+
+fn direct_reference<'a>(value: &'a Value, key: &str) -> Result<&'a str, ProviderError> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| valid_reference(value))
+        .ok_or(ProviderError::Rejected)
+}
+
+fn nested_reference<'a>(
+    value: &'a Value,
+    object_key: &str,
+    value_key: &str,
+) -> Result<&'a str, ProviderError> {
+    value
+        .get(object_key)
+        .and_then(Value::as_object)
+        .and_then(|object| object.get(value_key))
+        .and_then(Value::as_str)
+        .filter(|value| valid_reference(value))
+        .ok_or(ProviderError::Rejected)
 }
 
 fn client_method_name(method: ClientMethod) -> &'static str {
     match method {
         ClientMethod::Initialize => "initialize",
         ClientMethod::ThreadStart => "thread/start",
+        ClientMethod::ThreadResume => "thread/resume",
+        ClientMethod::ThreadDelete => "thread/delete",
         ClientMethod::TurnStart => "turn/start",
         ClientMethod::TurnInterrupt => "turn/interrupt",
     }
@@ -1306,6 +2737,7 @@ fn registration_identity(
     executable_version: &str,
     sandbox_profile: &str,
     protocol_version: &str,
+    experimental_dynamic_tools: bool,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"graphql-orm-ai/codex-app-server-registration/v1\0");
@@ -1320,6 +2752,7 @@ fn registration_identity(
         hasher.update((value.len() as u64).to_be_bytes());
         hasher.update(value.as_bytes());
     }
+    hasher.update([u8::from(experimental_dynamic_tools)]);
     hex::encode(hasher.finalize())
 }
 
@@ -1327,10 +2760,13 @@ fn registration_identity(
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use agql_auth::{
+        AccessTokenMetadata, AuthPrincipal, AuthUser, PrincipalReference, SessionContext,
+    };
     use futures::stream;
 
     use super::*;
-    use crate::{AiRunId, AiSessionId, ProviderEvent};
+    use crate::{AiRunId, AiSessionId, ProviderDynamicToolResult, ProviderEvent};
     use uuid::Uuid;
 
     struct Counters {
@@ -1342,6 +2778,9 @@ mod tests {
         kills: AtomicUsize,
         pending: AtomicBool,
         stream_error: AtomicBool,
+        created_threads: AtomicUsize,
+        created_dynamic_tools: AtomicUsize,
+        deleted_threads: AtomicUsize,
     }
 
     impl Counters {
@@ -1355,6 +2794,9 @@ mod tests {
                 kills: AtomicUsize::new(0),
                 pending: AtomicBool::new(false),
                 stream_error: AtomicBool::new(false),
+                created_threads: AtomicUsize::new(0),
+                created_dynamic_tools: AtomicUsize::new(0),
+                deleted_threads: AtomicUsize::new(0),
             }
         }
     }
@@ -1395,6 +2837,22 @@ mod tests {
 
     #[async_trait]
     impl AiCodexAppServerRunProcess for FakeProcess {
+        async fn create_empty_thread(
+            &self,
+            _model: &str,
+            dynamic_tools: Vec<ModelToolDefinition>,
+        ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
+            self.counters.created_threads.fetch_add(1, Ordering::SeqCst);
+            self.counters
+                .created_dynamic_tools
+                .fetch_add(dynamic_tools.len(), Ordering::SeqCst);
+            crate::AiProviderSessionCursor::new(
+                "codex.app_server.thread.v2",
+                "thread-retained-test",
+            )
+            .map_err(|_| ProviderError::Rejected)
+        }
+
         async fn start_fresh_turn(
             &self,
             _input: AiCodexAppServerTurnInput,
@@ -1418,6 +2876,86 @@ mod tests {
                 }),
                 Ok(ProviderEvent::ResponseCompleted { response_id: None }),
             ])))
+        }
+
+        async fn start_dynamic_turn(
+            &self,
+            input: AiCodexAppServerTurnInput,
+            responder: Arc<dyn ProviderDynamicToolResponder>,
+        ) -> Result<ProviderEventStream, ProviderError> {
+            self.counters.turns.fetch_add(1, Ordering::SeqCst);
+            let definition = input.tools().first().ok_or(ProviderError::Rejected)?;
+            let call = ProviderDynamicToolCall::from_definition(
+                "turn-dynamic-1",
+                "call-dynamic-1",
+                definition,
+                json!({"query": "bounded"}),
+            )?;
+            let result = responder.respond(call).await?;
+            if result.call_id() != "call-dynamic-1"
+                || result.tool_id() != definition.tool_id
+                || result.output() != &json!({"count": 3})
+            {
+                return Err(ProviderError::Rejected);
+            }
+            Ok(Box::pin(stream::iter([
+                Ok(ProviderEvent::ResponseStarted {
+                    response_id: Some("turn-dynamic-1".to_owned()),
+                }),
+                Ok(ProviderEvent::ToolCallStarted {
+                    call_id: "call-dynamic-1".to_owned(),
+                    tool_id: definition.tool_id.clone(),
+                }),
+                Ok(ProviderEvent::ToolArgumentsDelta {
+                    call_id: "call-dynamic-1".to_owned(),
+                    delta: "{\"query\":\"bounded\"}".to_owned(),
+                }),
+                Ok(ProviderEvent::ToolCallCompleted {
+                    call_id: "call-dynamic-1".to_owned(),
+                    arguments: json!({"query": "bounded"}),
+                }),
+                Ok(ProviderEvent::TextDelta {
+                    text: "There are three.".to_owned(),
+                }),
+                Ok(ProviderEvent::Usage {
+                    input_tokens: 10,
+                    output_tokens: 4,
+                    cached_input_tokens: 0,
+                }),
+                Ok(ProviderEvent::ResponseCompleted {
+                    response_id: Some("turn-dynamic-1".to_owned()),
+                }),
+            ])))
+        }
+
+        async fn start_retained_turn(
+            &self,
+            _session: crate::AiOpenedProviderSession,
+            input: AiCodexAppServerTurnInput,
+        ) -> Result<ProviderEventStream, ProviderError> {
+            self.start_fresh_turn(input).await
+        }
+
+        async fn start_retained_dynamic_turn(
+            &self,
+            _session: crate::AiOpenedProviderSession,
+            input: AiCodexAppServerTurnInput,
+            responder: Arc<dyn ProviderDynamicToolResponder>,
+        ) -> Result<ProviderEventStream, ProviderError> {
+            self.start_dynamic_turn(input, responder).await
+        }
+
+        async fn delete_thread(
+            &self,
+            cursor: &crate::AiProviderSessionCursor,
+        ) -> Result<(), ProviderError> {
+            if cursor.kind() != "codex.app_server.thread.v2"
+                || cursor.expose_to_provider_adapter() != "thread-retained-test"
+            {
+                return Err(ProviderError::Rejected);
+            }
+            self.counters.deleted_threads.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
 
         async fn interrupt(&self) -> Result<(), ProviderError> {
@@ -1446,6 +2984,18 @@ mod tests {
         binding_for_owner(1)
     }
 
+    fn principal_reference() -> PrincipalReference {
+        AuthPrincipal::User(AuthUser {
+            user_id: "codex-provider-test".to_owned(),
+            session_id: Uuid::new_v4(),
+            roles: Vec::new(),
+            scopes: Vec::new(),
+            session: SessionContext::default(),
+            token_claims: AccessTokenMetadata::default(),
+        })
+        .reference()
+    }
+
     fn registration(version: &str) -> Arc<AiCodexAppServerRegistration> {
         Arc::new(
             AiCodexAppServerRegistration::new(
@@ -1460,6 +3010,58 @@ mod tests {
         )
     }
 
+    fn dynamic_registration(version: &str) -> Arc<AiCodexAppServerRegistration> {
+        Arc::new(
+            AiCodexAppServerRegistration::new(
+                "profile-1",
+                "model-1",
+                "a".repeat(64),
+                version,
+                "sandbox-empty",
+                AI_CODEX_APP_SERVER_PROTOCOL_V2,
+            )
+            .expect("test registration should validate")
+            .with_experimental_dynamic_tools(),
+        )
+    }
+
+    fn dynamic_tool() -> ModelToolDefinition {
+        ModelToolDefinition {
+            tool_id: "inventory.count".to_owned(),
+            provider_name: "inventory_count".to_owned(),
+            fingerprint: "b".repeat(64),
+            description: "Count a bounded reviewed inventory.".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"query": {"type": "string", "maxLength": 100}},
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+            strict: true,
+        }
+    }
+
+    struct FakeDynamicResponder;
+
+    #[async_trait]
+    impl ProviderDynamicToolResponder for FakeDynamicResponder {
+        async fn respond(
+            &self,
+            call: ProviderDynamicToolCall,
+        ) -> Result<ProviderDynamicToolResult, ProviderError> {
+            if call.response_id() != "turn-dynamic-1"
+                || call.call_id() != "call-dynamic-1"
+                || call.tool_id() != "inventory.count"
+                || call.provider_name() != "inventory_count"
+                || call.tool_fingerprint() != "b".repeat(64)
+                || call.arguments() != &json!({"query": "bounded"})
+            {
+                return Err(ProviderError::Rejected);
+            }
+            ProviderDynamicToolResult::new(&call, json!({"count": 3}))
+        }
+    }
+
     #[test]
     fn registration_binds_supported_protocol_and_all_immutable_identity_members() {
         let first = registration("1.0.0");
@@ -1467,6 +3069,7 @@ mod tests {
         let changed = registration("2.0.0");
         assert_eq!(first.identity(), same.identity());
         assert_ne!(first.identity(), changed.identity());
+        assert_ne!(first.identity(), dynamic_registration("1.0.0").identity());
         assert!(matches!(
             AiCodexAppServerRegistration::new(
                 "profile-1",
@@ -1505,6 +3108,14 @@ mod tests {
             reasoning_summary: ModelReasoningSummaryRequest::Disabled,
             output_schema: None,
             maximum_output_tokens: Some(128),
+        }
+    }
+
+    fn dynamic_model_request() -> ModelRequest {
+        ModelRequest {
+            continuation_mode: ModelContinuationMode::ProviderRetained,
+            tools: vec![dynamic_tool()],
+            ..model_request()
         }
     }
 
@@ -1612,6 +3223,84 @@ mod tests {
         assert_eq!(counters.turns.load(Ordering::SeqCst), 2);
     }
 
+    #[tokio::test]
+    async fn empty_retained_thread_binds_exact_dynamic_definitions_before_content() {
+        let counters = Arc::new(Counters::new());
+        let pool = pool(counters.clone(), 1, 2);
+        let binding = binding();
+        let cursor = pool
+            .create_empty_thread(binding, dynamic_registration("1.0.0"), vec![dynamic_tool()])
+            .await
+            .expect("empty retained thread should create");
+        assert_eq!(cursor.kind(), "codex.app_server.thread.v2");
+        assert_eq!(counters.created_threads.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.created_dynamic_tools.load(Ordering::SeqCst), 1);
+        pool.discard_empty_thread(binding, &cursor)
+            .await
+            .expect("failed durable bind should delete exact empty thread");
+        assert_eq!(counters.deleted_threads.load(Ordering::SeqCst), 1);
+
+        assert!(matches!(
+            pool.create_empty_thread(binding, registration("1.0.0"), vec![dynamic_tool()])
+                .await,
+            Err(ProviderError::Unsupported)
+        ));
+    }
+
+    #[tokio::test]
+    async fn retained_dynamic_turn_uses_exact_opened_cursor_and_coordinator_responder() {
+        let counters = Arc::new(Counters::new());
+        let pool = pool(counters.clone(), 1, 2);
+        let binding = binding();
+        let registration = dynamic_registration("1.0.0");
+        let cursor = pool
+            .create_empty_thread(binding, registration.clone(), vec![dynamic_tool()])
+            .await
+            .expect("retained dynamic thread should create");
+        let descriptor = crate::AiProviderSessionDescriptor::new(
+            ProviderKind::LocalHarness,
+            registration.provider_profile_id(),
+            registration.logical_model(),
+            registration.identity(),
+            registration.protocol_version(),
+            "d".repeat(64),
+        )
+        .expect("provider-session descriptor should validate");
+        let claim = crate::AiProviderSessionClaim {
+            binding_id: Uuid::new_v4(),
+            session_id: binding.session_id(),
+            run_id: binding.run_id(),
+            attempt_id: binding.attempt_id(),
+            run_lease_generation: binding.lease_generation(),
+            binding_claim_generation: 1,
+            binding_row_version: 1,
+            claim_expires_at: time::OffsetDateTime::now_utc() + time::Duration::minutes(1),
+            through_message_sequence: 0,
+            transcript_fingerprint: "c".repeat(64),
+            principal_reference: principal_reference(),
+            descriptor,
+        };
+        let opened = crate::AiOpenedProviderSession::new(claim, cursor);
+        let input = AiCodexAppServerTurnInput::try_from_dynamic_request(dynamic_model_request())
+            .expect("dynamic request should convert");
+        let events = pool
+            .start_retained_dynamic_turn(
+                binding,
+                registration,
+                opened,
+                input,
+                Arc::new(FakeDynamicResponder),
+            )
+            .await
+            .expect("retained dynamic turn should start")
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(events.len(), 7);
+        assert!(events.iter().all(Result::is_ok));
+        assert_eq!(counters.created_threads.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.turns.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn model_request_conversion_is_closed_and_preserves_authority_boundaries() {
         let converted = AiCodexAppServerTurnInput::try_from_model_request(model_request())
@@ -1658,6 +3347,41 @@ mod tests {
             Err(ProviderError::EgressDenied)
         ));
         assert_eq!(counters.launches.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn experimental_dynamic_tools_are_explicit_and_process_bounded() {
+        let counters = Arc::new(Counters::new());
+        let request = dynamic_model_request();
+        let context = provider_context("profile-1", &request);
+        let disabled =
+            AiCodexAppServerProvider::new(registration("1.0.0"), pool(counters.clone(), 1, 2));
+        assert!(matches!(
+            disabled
+                .stream_with_dynamic_tools(
+                    request.clone(),
+                    context.clone(),
+                    Arc::new(FakeDynamicResponder),
+                )
+                .await,
+            Err(ProviderError::Unsupported)
+        ));
+        assert_eq!(counters.launches.load(Ordering::SeqCst), 0);
+
+        let enabled = AiCodexAppServerProvider::new(
+            dynamic_registration("1.0.0"),
+            pool(counters.clone(), 1, 2),
+        );
+        let events = enabled
+            .stream_with_dynamic_tools(request, context, Arc::new(FakeDynamicResponder))
+            .await
+            .expect("explicit dynamic turn should start")
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(events.len(), 7);
+        assert!(events.iter().all(Result::is_ok));
+        assert_eq!(counters.launches.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.turns.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1881,6 +3605,9 @@ mod tests {
                 .expect("thread should encode"),
         )
         .expect("frame should be UTF-8");
+        guard
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
+            .expect("thread response should bind the exact thread");
         let turn = String::from_utf8(
             guard
                 .start_turn("thread-1", &turn())
@@ -1930,6 +3657,14 @@ mod tests {
 
     #[test]
     fn protocol_accepts_only_correlated_responses_and_allowlisted_notifications() {
+        let mut unbound =
+            AiCodexAppServerProtocolActor::new(16 * 1024).expect("test guard should validate");
+        let delta = br#"{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"hello"}}"#;
+        assert!(matches!(
+            unbound.accept(delta),
+            Err(ProviderError::Rejected)
+        ));
+
         let mut guard =
             AiCodexAppServerProtocolActor::new(16 * 1024).expect("test guard should validate");
         guard
@@ -1948,7 +3683,18 @@ mod tests {
             Err(ProviderError::Rejected)
         ));
 
-        let delta = br#"{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"hello"}}"#;
+        guard
+            .start_fresh_thread(&turn())
+            .expect("thread request should encode");
+        guard
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
+            .expect("thread response should bind");
+        guard
+            .start_turn("thread-1", &turn())
+            .expect("turn request should encode");
+        guard
+            .accept(br#"{"id":3,"result":{"turn":{"id":"turn-1"}}}"#)
+            .expect("turn response should bind");
         assert!(matches!(
             guard.accept(delta),
             Ok(AiCodexAppServerInbound::Notification { .. })
@@ -1956,6 +3702,246 @@ mod tests {
         let unknown = br#"{"method":"turn/steer","params":{}}"#;
         assert!(matches!(
             guard.accept(unknown),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[test]
+    fn experimental_protocol_admits_only_an_exact_offered_dynamic_call_and_response() {
+        let mut guard =
+            AiCodexAppServerProtocolActor::new(64 * 1024).expect("test guard should validate");
+        let initialize = String::from_utf8(
+            guard
+                .initialize_with_dynamic_tools("test_client", "Test Client", "1.0.0")
+                .expect("experimental initialize should encode"),
+        )
+        .expect("frame should be UTF-8");
+        assert!(initialize.contains("\"experimentalApi\":true"));
+        let input = AiCodexAppServerTurnInput::try_from_dynamic_request(dynamic_model_request())
+            .expect("dynamic request should convert");
+        let start = String::from_utf8(
+            guard
+                .start_dynamic_thread(&input)
+                .expect("dynamic thread should encode"),
+        )
+        .expect("frame should be UTF-8");
+        assert!(start.contains("\"dynamicTools\""));
+        assert!(start.contains("\"inventory_count\""));
+        assert!(start.contains("\"ephemeral\":true"));
+        guard
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
+            .expect("thread response should bind");
+        guard
+            .start_turn("thread-1", &input)
+            .expect("turn request should encode");
+        guard
+            .accept(br#"{"id":3,"result":{"turn":{"id":"turn-dynamic-1"}}}"#)
+            .expect("turn response should bind");
+
+        let started = serde_json::to_vec(&json!({
+            "method": "item/started",
+            "params": {
+                "item": {
+                    "arguments": {"query": "bounded"},
+                    "id": "call-dynamic-1",
+                    "namespace": null,
+                    "status": "inProgress",
+                    "tool": "inventory_count",
+                    "type": "dynamicToolCall"
+                },
+                "startedAtMs": 1,
+                "threadId": "thread-1",
+                "turnId": "turn-dynamic-1"
+            }
+        }))
+        .expect("lifecycle should encode");
+        assert!(matches!(
+            guard.accept(&started),
+            Ok(AiCodexAppServerInbound::DynamicToolLifecycle {
+                completed: false,
+                ..
+            })
+        ));
+
+        let request = serde_json::to_vec(&json!({
+            "id": 41,
+            "method": "item/tool/call",
+            "params": {
+                "arguments": {"query": "bounded"},
+                "callId": "call-dynamic-1",
+                "namespace": null,
+                "threadId": "thread-1",
+                "tool": "inventory_count",
+                "turnId": "turn-dynamic-1"
+            }
+        }))
+        .expect("request should encode");
+        let call = match guard
+            .accept(&request)
+            .expect("exact call should be admitted")
+        {
+            AiCodexAppServerInbound::DynamicToolCall {
+                request_id,
+                thread_id,
+                turn_id,
+                call,
+            } => {
+                assert_eq!(request_id, 41);
+                assert_eq!(thread_id, "thread-1");
+                assert_eq!(turn_id, "turn-dynamic-1");
+                call
+            }
+            _ => panic!("unexpected protocol value"),
+        };
+        let result = ProviderDynamicToolResult::new(&call, json!({"count": 3}))
+            .expect("result should validate");
+        let response = String::from_utf8(
+            guard
+                .dynamic_tool_response(41, &result)
+                .expect("exact response should encode"),
+        )
+        .expect("response should be UTF-8");
+        assert!(response.contains("\"success\":true"));
+        assert!(response.contains("\\\"count\\\":3"));
+        let completed = serde_json::to_vec(&json!({
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "arguments": {"query": "bounded"},
+                    "contentItems": [{"type": "inputText", "text": "{\"count\":3}"}],
+                    "durationMs": 2,
+                    "id": "call-dynamic-1",
+                    "namespace": null,
+                    "status": "completed",
+                    "success": true,
+                    "tool": "inventory_count",
+                    "type": "dynamicToolCall"
+                },
+                "completedAtMs": 3,
+                "threadId": "thread-1",
+                "turnId": "turn-dynamic-1"
+            }
+        }))
+        .expect("lifecycle should encode");
+        assert!(matches!(
+            guard.accept(&completed),
+            Ok(AiCodexAppServerInbound::DynamicToolLifecycle {
+                completed: true,
+                ..
+            })
+        ));
+        assert!(matches!(
+            guard.dynamic_tool_response(41, &result),
+            Err(ProviderError::Rejected)
+        ));
+
+        let unknown = serde_json::to_vec(&json!({
+            "id": 42,
+            "method": "item/tool/call",
+            "params": {
+                "arguments": {},
+                "callId": "call-2",
+                "namespace": null,
+                "threadId": "thread-1",
+                "tool": "unregistered",
+                "turnId": "turn-dynamic-1"
+            }
+        }))
+        .expect("request should encode");
+        assert!(matches!(
+            guard.accept(&unknown),
+            Err(ProviderError::Rejected)
+        ));
+
+        let swapped_thread = serde_json::to_vec(&json!({
+            "id": 43,
+            "method": "item/tool/call",
+            "params": {
+                "arguments": {"query": "bounded"},
+                "callId": "call-dynamic-2",
+                "namespace": null,
+                "threadId": "thread-other",
+                "tool": "inventory_count",
+                "turnId": "turn-dynamic-1"
+            }
+        }))
+        .expect("request should encode");
+        assert!(matches!(
+            guard.accept(&swapped_thread),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[test]
+    fn retained_thread_protocol_creates_empty_resumes_exact_and_deletes_exact_cursor() {
+        let mut empty_guard =
+            AiCodexAppServerProtocolActor::new(64 * 1024).expect("test guard should validate");
+        let create = String::from_utf8(
+            empty_guard
+                .start_persistent_empty_thread("codex-test-model", &[])
+                .expect("empty retained thread should encode"),
+        )
+        .expect("frame should be UTF-8");
+        assert!(create.contains("\"method\":\"thread/start\""));
+        assert!(create.contains("\"ephemeral\":false"));
+        assert!(create.contains("\"developerInstructions\":null"));
+        assert!(!create.contains("dynamicTools"));
+        assert!(!create.contains("turn/start"));
+
+        let mut guard =
+            AiCodexAppServerProtocolActor::new(64 * 1024).expect("test guard should validate");
+        let input = AiCodexAppServerTurnInput::try_from_dynamic_request(dynamic_model_request())
+            .expect("dynamic request should convert");
+        let create = String::from_utf8(
+            guard
+                .start_persistent_empty_thread("model-1", input.tools())
+                .expect("empty dynamic retained thread should encode"),
+        )
+        .expect("frame should be UTF-8");
+        assert!(create.contains("\"dynamicTools\""));
+        assert!(create.contains("\"inventory_count\""));
+        assert!(!create.contains("turn/start"));
+
+        let cursor =
+            crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", "thread-retained-1")
+                .expect("retained cursor should validate");
+        let mut swapped_request = dynamic_model_request();
+        swapped_request.model = "other-model".to_owned();
+        let swapped_input = AiCodexAppServerTurnInput::try_from_dynamic_request(swapped_request)
+            .expect("bounded swapped request should convert");
+        assert!(matches!(
+            guard.resume_thread(&cursor, &swapped_input),
+            Err(ProviderError::Rejected)
+        ));
+        let resume = String::from_utf8(
+            guard
+                .resume_thread(&cursor, &input)
+                .expect("exact retained thread should resume"),
+        )
+        .expect("frame should be UTF-8");
+        assert!(resume.contains("\"method\":\"thread/resume\""));
+        assert!(resume.contains("\"threadId\":\"thread-retained-1\""));
+        assert!(resume.contains("\"model\":\"model-1\""));
+        assert!(!resume.contains("dynamicTools"));
+        assert!(!resume.contains("\"input\""));
+
+        let delete = String::from_utf8(
+            guard
+                .delete_thread(&cursor)
+                .expect("exact retained thread should delete"),
+        )
+        .expect("frame should be UTF-8");
+        assert!(delete.contains("\"method\":\"thread/delete\""));
+        assert!(delete.contains("\"threadId\":\"thread-retained-1\""));
+
+        let swapped = crate::AiProviderSessionCursor::new("other.thread", "thread-retained-1")
+            .expect("bounded swapped cursor should construct");
+        assert!(matches!(
+            guard.resume_thread(&swapped, &input),
+            Err(ProviderError::Rejected)
+        ));
+        assert!(matches!(
+            guard.delete_thread(&swapped),
             Err(ProviderError::Rejected)
         ));
     }

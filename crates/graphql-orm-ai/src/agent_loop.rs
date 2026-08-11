@@ -504,6 +504,12 @@ impl AiAgentLoopGuard {
         self.provider_turns < self.limits.maximum_provider_turns
     }
 
+    pub(crate) fn remaining_tool_capacity(&self) -> u32 {
+        self.limits
+            .maximum_total_tool_calls
+            .saturating_sub(self.total_tool_calls)
+    }
+
     /// Accepts the next exactly chained provider result.
     ///
     /// # Errors
@@ -534,6 +540,40 @@ impl AiAgentLoopGuard {
             .provider_turns
             .checked_add(1)
             .ok_or(AiError::Conflict)?;
+        if !result.interactive_tool_results().is_empty() {
+            if result.interactive_tool_results().len() != result.tool_calls().len() {
+                return Err(AiError::Conflict);
+            }
+            let call_count =
+                u32::try_from(result.tool_calls().len()).map_err(|_| AiError::Conflict)?;
+            let next_total_tool_calls = self
+                .total_tool_calls
+                .checked_add(call_count)
+                .filter(|count| *count <= self.limits.maximum_total_tool_calls)
+                .ok_or(AiError::Conflict)?;
+            let mut call_ids = BTreeSet::new();
+            for (call, persisted) in result
+                .tool_calls()
+                .iter()
+                .zip(result.interactive_tool_results())
+            {
+                if !call_ids.insert(call.call_id())
+                    || persisted.provider_call_id() != call.call_id()
+                    || persisted.egress_manifest().is_none()
+                    || !matches!(
+                        persisted.model_input(),
+                        Some(ModelInputBlock::ToolResult { call_id, tool_id, .. })
+                            if call_id == call.call_id() && tool_id == call.tool_id().as_str()
+                    )
+                {
+                    return Err(AiError::Conflict);
+                }
+            }
+            self.provider_turns = next_provider_turns;
+            self.total_tool_calls = next_total_tool_calls;
+            self.terminal = true;
+            return Ok(AiAgentLoopTurn::Completed);
+        }
         if result.tool_calls().is_empty() {
             self.provider_turns = next_provider_turns;
             self.terminal = true;

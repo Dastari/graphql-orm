@@ -6,15 +6,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use time::Duration;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::{
     AiAgentContinuation, AiAgentLoopGuard, AiAgentLoopLimits, AiAgentLoopTurn,
     AiAgentRuleResolution, AiApplicationToolCallContext, AiError, AiPersistedApplicationToolCall,
     AiPersistedProviderOutput, AiProviderCallExecutor, AiProviderCallPlan, AiProviderCallResult,
-    AiReadOnlyAgentRunOutcome::*, AiResolvedRuleSet, AiRuleRunUsage, AiRunCompletion, AiRunLease,
-    AiRunState, AiScope, AiToolResultEgressRoute, OrmAiApplicationToolCallService,
-    OrmAiProviderOutputService, OrmAiRunService,
+    AiProviderDynamicToolExecution, AiReadOnlyAgentRunOutcome::*, AiResolvedRuleSet,
+    AiRuleRunUsage, AiRunCompletion, AiRunLease, AiRunState, AiScope, AiToolResultEgressRoute,
+    OrmAiApplicationToolCallService, OrmAiProviderOutputService, OrmAiRunService,
 };
 
 /// Deployment-owned bounds for a top-level read-only agent attempt.
@@ -63,11 +64,13 @@ pub struct AiReadOnlyAgentTurnPlan {
     mode: AiReadOnlyAgentTurnMode,
     rules: AiResolvedRuleSet,
     uses_byok: bool,
+    provider_session: Option<crate::AiProviderSessionTurnPlan>,
 }
 
 enum AiReadOnlyAgentTurnMode {
     ChatOnly,
     ApplicationTools(AiToolResultEgressRoute),
+    ExperimentalDynamicTools(AiToolResultEgressRoute),
 }
 
 impl AiReadOnlyAgentTurnPlan {
@@ -100,6 +103,7 @@ impl AiReadOnlyAgentTurnPlan {
             mode: AiReadOnlyAgentTurnMode::ApplicationTools(result_egress_route),
             rules,
             uses_byok,
+            provider_session: None,
         })
     }
 
@@ -131,7 +135,75 @@ impl AiReadOnlyAgentTurnPlan {
             mode: AiReadOnlyAgentTurnMode::ChatOnly,
             rules,
             uses_byok,
+            provider_session: None,
         })
+    }
+
+    /// Binds an initial provider-retained turn to the experimental
+    /// coordinator-owned in-flight application-tool bridge.
+    ///
+    /// This mode is explicit and does not change [`Self::new`]. The selected
+    /// provider must independently advertise and enable its reviewed dynamic
+    /// tool protocol. The provider receives definitions and disclosure-safe
+    /// results only; all execution remains under the ordinary coordinator.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidInput`] unless the plan contains at least one
+    /// application tool, is an initial provider-retained request without
+    /// built-ins, attachments, result input, reasoning summaries, or an output
+    /// schema, is exactly rule-bound, and has a valid result-egress route.
+    pub fn new_experimental_dynamic_tools(
+        provider_call: AiProviderCallPlan,
+        result_egress_route: AiToolResultEgressRoute,
+        rules: AiResolvedRuleSet,
+        uses_byok: bool,
+    ) -> Result<Self, AiError> {
+        if !provider_call.is_dynamic_tool_initial() || provider_call.scope() != rules.target_scope()
+        {
+            return Err(AiError::InvalidInput(
+                "experimental dynamic-tool plan is not a closed initial request or exactly rule-bound"
+                    .to_owned(),
+            ));
+        }
+        result_egress_route.validate()?;
+        Ok(Self {
+            provider_call,
+            mode: AiReadOnlyAgentTurnMode::ExperimentalDynamicTools(result_egress_route),
+            rules,
+            uses_byok,
+            provider_session: None,
+        })
+    }
+
+    /// Enables exact durable provider-session claim/create/resume for this
+    /// turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidInput`] unless the session descriptor exactly
+    /// matches a provider-retained chat-only or experimental dynamic-tool
+    /// provider call.
+    pub fn with_provider_session(
+        mut self,
+        session: crate::AiProviderSessionTurnPlan,
+    ) -> Result<Self, AiError> {
+        if !self
+            .provider_call
+            .matches_provider_session_descriptor(session.descriptor())
+            || !self.provider_call.uses_provider_retained_continuation()
+            || !matches!(
+                &self.mode,
+                AiReadOnlyAgentTurnMode::ChatOnly
+                    | AiReadOnlyAgentTurnMode::ExperimentalDynamicTools(_)
+            )
+        {
+            return Err(AiError::InvalidInput(
+                "provider-session plan does not match the exact provider call".to_owned(),
+            ));
+        }
+        self.provider_session = Some(session);
+        Ok(self)
     }
 
     fn into_parts(
@@ -143,6 +215,7 @@ impl AiReadOnlyAgentTurnPlan {
         AiReadOnlyAgentTurnMode,
         AiResolvedRuleSet,
         bool,
+        Option<crate::AiProviderSessionTurnPlan>,
     ) {
         let scope = self.provider_call.scope().clone();
         let correlation_id = self.provider_call.correlation_id().to_owned();
@@ -153,6 +226,7 @@ impl AiReadOnlyAgentTurnPlan {
             self.mode,
             self.rules,
             self.uses_byok,
+            self.provider_session,
         )
     }
 
@@ -317,6 +391,32 @@ pub trait AiAgentProviderTurnExecutor: Send + Sync {
         plan: AiProviderCallPlan,
     ) -> Result<AiProviderCallResult, AiError>;
 
+    /// Executes one explicitly planned experimental in-flight dynamic-tool
+    /// turn using a lease shared with coordinator heartbeats.
+    ///
+    /// The default remains unavailable so existing executors and providers do
+    /// not gain this capability implicitly.
+    async fn execute_dynamic_turn(
+        &self,
+        _lease: Arc<Mutex<AiRunLease>>,
+        _plan: AiProviderCallPlan,
+        _execution: Arc<dyn AiProviderDynamicToolExecution>,
+    ) -> Result<AiProviderCallResult, AiError> {
+        Err(AiError::RuntimeNotReady)
+    }
+
+    /// Executes one turn through an exact durable provider-session binding.
+    async fn execute_retained_turn(
+        &self,
+        _lease: Arc<Mutex<AiRunLease>>,
+        _plan: AiProviderCallPlan,
+        _session_plan: crate::AiProviderSessionTurnPlan,
+        _session_service: Arc<dyn crate::AiProviderSessionService>,
+        _execution: Option<Arc<dyn AiProviderDynamicToolExecution>>,
+    ) -> Result<AiProviderCallResult, AiError> {
+        Err(AiError::RuntimeNotReady)
+    }
+
     /// Interrupts an active run-scoped provider resource after durable
     /// cancellation or lease loss has already been observed.
     async fn interrupt_run(&self, _lease: &AiRunLease) -> Result<(), AiError> {
@@ -341,6 +441,28 @@ impl AiAgentProviderTurnExecutor for AiProviderCallExecutor {
         plan: AiProviderCallPlan,
     ) -> Result<AiProviderCallResult, AiError> {
         self.execute(lease, plan).await
+    }
+
+    async fn execute_dynamic_turn(
+        &self,
+        lease: Arc<Mutex<AiRunLease>>,
+        plan: AiProviderCallPlan,
+        execution: Arc<dyn AiProviderDynamicToolExecution>,
+    ) -> Result<AiProviderCallResult, AiError> {
+        self.execute_with_dynamic_tools(lease, plan, execution)
+            .await
+    }
+
+    async fn execute_retained_turn(
+        &self,
+        lease: Arc<Mutex<AiRunLease>>,
+        plan: AiProviderCallPlan,
+        session_plan: crate::AiProviderSessionTurnPlan,
+        session_service: Arc<dyn crate::AiProviderSessionService>,
+        execution: Option<Arc<dyn AiProviderDynamicToolExecution>>,
+    ) -> Result<AiProviderCallResult, AiError> {
+        self.execute_with_provider_session(lease, plan, session_plan, session_service, execution)
+            .await
     }
 
     async fn interrupt_run(&self, lease: &AiRunLease) -> Result<(), AiError> {
@@ -385,6 +507,117 @@ impl AiAgentReadOnlyToolExecutor for OrmAiApplicationToolCallService {
     ) -> Result<AiPersistedApplicationToolCall, AiError> {
         self.execute_read_only(lease, provider_result, context, route)
             .await
+    }
+}
+
+struct DynamicToolExecutionState {
+    rule_usage: AiRuleRunUsage,
+    accepted_calls: u32,
+}
+
+struct ReadOnlyDynamicToolExecution {
+    run_control: Arc<dyn AiAgentRunControl>,
+    tool_executor: Arc<dyn AiAgentReadOnlyToolExecutor>,
+    rule_resolver: Arc<dyn AiAgentRuleResolver>,
+    scope: AiScope,
+    correlation_id: String,
+    route: AiToolResultEgressRoute,
+    rule_fingerprint: String,
+    provider_turn_index: u32,
+    maximum_calls: u32,
+    state: Mutex<DynamicToolExecutionState>,
+}
+
+impl ReadOnlyDynamicToolExecution {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        run_control: Arc<dyn AiAgentRunControl>,
+        tool_executor: Arc<dyn AiAgentReadOnlyToolExecutor>,
+        rule_resolver: Arc<dyn AiAgentRuleResolver>,
+        scope: AiScope,
+        correlation_id: String,
+        route: AiToolResultEgressRoute,
+        rule_fingerprint: String,
+        provider_turn_index: u32,
+        maximum_calls: u32,
+        rule_usage: AiRuleRunUsage,
+    ) -> Self {
+        Self {
+            run_control,
+            tool_executor,
+            rule_resolver,
+            scope,
+            correlation_id,
+            route,
+            rule_fingerprint,
+            provider_turn_index,
+            maximum_calls,
+            state: Mutex::new(DynamicToolExecutionState {
+                rule_usage,
+                accepted_calls: 0,
+            }),
+        }
+    }
+
+    async fn rule_usage(&self) -> AiRuleRunUsage {
+        self.state.lock().await.rule_usage
+    }
+}
+
+#[async_trait]
+impl AiProviderDynamicToolExecution for ReadOnlyDynamicToolExecution {
+    async fn execute_dynamic_tool(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        tool_call_index: usize,
+    ) -> Result<AiPersistedApplicationToolCall, AiError> {
+        if self.run_control.cancellation(lease).await?.is_some() {
+            return Err(AiError::Conflict);
+        }
+        let current_rules = self.rule_resolver.resolve_rules(lease, &self.scope).await?;
+        let call = provider_result
+            .tool_calls()
+            .get(tool_call_index)
+            .ok_or(AiError::Conflict)?;
+        if current_rules.rules().fingerprint() != self.rule_fingerprint
+            || current_rules.rules().constrain_tool(
+                call.tool_fingerprint(),
+                crate::ToolMaturity::ReadOnly,
+                crate::AiApprovalRule::None,
+            ) != Some(crate::AiApprovalRule::None)
+        {
+            return Err(AiError::Forbidden);
+        }
+        {
+            let mut state = self.state.lock().await;
+            state.accepted_calls = state
+                .accepted_calls
+                .checked_add(1)
+                .filter(|calls| *calls <= self.maximum_calls)
+                .ok_or(AiError::BudgetDenied)?;
+            state.rule_usage = state.rule_usage.accept_tool_calls(1, &current_rules)?;
+        }
+        let context = AiApplicationToolCallContext::new(
+            self.provider_turn_index,
+            tool_call_index,
+            self.scope.clone(),
+            self.correlation_id.clone(),
+            provider_result.budget_reservation_id().0.to_string(),
+        )?;
+        let persisted = self
+            .tool_executor
+            .execute_tool(lease, provider_result, context, self.route.clone())
+            .await?;
+        if self
+            .run_control
+            .cancellation(persisted.lease())
+            .await?
+            .is_some()
+        {
+            return Err(AiError::Conflict);
+        }
+        Ok(persisted)
     }
 }
 
@@ -645,6 +878,7 @@ pub struct AiReadOnlyAgentCoordinator {
     rule_resolver: Arc<dyn AiAgentRuleResolver>,
     planner: Arc<dyn AiReadOnlyAgentTurnPlanner>,
     limits: AiReadOnlyAgentCoordinatorLimits,
+    provider_session_service: Option<Arc<dyn crate::AiProviderSessionService>>,
 }
 
 impl AiReadOnlyAgentCoordinator {
@@ -671,6 +905,31 @@ impl AiReadOnlyAgentCoordinator {
             rule_resolver,
             planner,
             limits,
+            provider_session_service: None,
+        }
+    }
+
+    /// Enables durable provider-session claim/create/resume for plans that
+    /// explicitly carry [`crate::AiProviderSessionTurnPlan`].
+    #[must_use]
+    pub fn with_provider_session_service(
+        mut self,
+        service: Arc<dyn crate::AiProviderSessionService>,
+    ) -> Self {
+        self.provider_session_service = Some(service);
+        self
+    }
+
+    async fn invalidate_result_provider_session(
+        &self,
+        result: &AiProviderCallResult,
+        reason: &str,
+    ) {
+        if let (Some(service), Some(claim)) = (
+            &self.provider_session_service,
+            result.provider_session_claim(),
+        ) {
+            let _ = service.require_cleanup(claim, reason).await;
         }
     }
 
@@ -866,8 +1125,15 @@ impl AiReadOnlyAgentCoordinator {
                     .finish_failed(&lease, &guard, "provider_turn_limit_reached")
                     .await;
             }
-            let (provider_plan, scope, correlation_id, mode, planned_rules, uses_byok) =
-                turn_plan.into_parts();
+            let (
+                provider_plan,
+                scope,
+                correlation_id,
+                mode,
+                planned_rules,
+                uses_byok,
+                provider_session_plan,
+            ) = turn_plan.into_parts();
             let resolution = match self.rule_resolver.resolve_rules(&lease, &scope).await {
                 Ok(resolution)
                     if resolution.rules().fingerprint() == planned_rules.fingerprint() =>
@@ -897,10 +1163,55 @@ impl AiReadOnlyAgentCoordinator {
                     .await;
             }
             rule_usage = started_rule_usage;
-            let result = match self
-                .execute_provider_with_heartbeats(&mut lease, provider_plan)
+            let dynamic_execution = match &mode {
+                AiReadOnlyAgentTurnMode::ExperimentalDynamicTools(route) => {
+                    Some(Arc::new(ReadOnlyDynamicToolExecution::new(
+                        self.run_control.clone(),
+                        self.tool_executor.clone(),
+                        self.rule_resolver.clone(),
+                        scope.clone(),
+                        correlation_id.clone(),
+                        route.clone(),
+                        planned_rules.fingerprint().to_owned(),
+                        guard.provider_turns(),
+                        guard.remaining_tool_capacity(),
+                        rule_usage,
+                    )))
+                }
+                AiReadOnlyAgentTurnMode::ChatOnly
+                | AiReadOnlyAgentTurnMode::ApplicationTools(_) => None,
+            };
+            let provider_result = if let Some(session_plan) = provider_session_plan {
+                let Some(session_service) = &self.provider_session_service else {
+                    return self
+                        .finish_failed(&lease, &guard, "provider_session_service_unavailable")
+                        .await;
+                };
+                let execution_for_provider = dynamic_execution
+                    .as_ref()
+                    .map(|execution| execution.clone() as Arc<dyn AiProviderDynamicToolExecution>);
+                self.execute_retained_provider_with_heartbeats(
+                    &mut lease,
+                    provider_plan,
+                    session_plan,
+                    session_service.clone(),
+                    execution_for_provider,
+                )
                 .await
-            {
+            } else if let Some(execution) = &dynamic_execution {
+                let execution_for_provider: Arc<dyn AiProviderDynamicToolExecution> =
+                    execution.clone();
+                self.execute_dynamic_provider_with_heartbeats(
+                    &mut lease,
+                    provider_plan,
+                    execution_for_provider,
+                )
+                .await
+            } else {
+                self.execute_provider_with_heartbeats(&mut lease, provider_plan)
+                    .await
+            };
+            let result = match provider_result {
                 Ok(result) => result,
                 Err(ProviderTurnFailure::Provider) => {
                     if self.run_control.cancellation(&lease).await?.is_some() {
@@ -927,8 +1238,16 @@ impl AiReadOnlyAgentCoordinator {
                     });
                 }
             };
+            if let Some(execution) = &dynamic_execution {
+                rule_usage = execution.rule_usage().await;
+            }
 
             if self.run_control.cancellation(&lease).await?.is_some() {
+                self.invalidate_result_provider_session(
+                    &result,
+                    "provider_session_cancelled_after_turn",
+                )
+                .await;
                 return Ok(Cancelled {
                     provider_turns: guard.provider_turns(),
                     total_tool_calls: guard.total_tool_calls(),
@@ -938,6 +1257,11 @@ impl AiReadOnlyAgentCoordinator {
             let observed = match guard.observe_provider_turn(&result) {
                 Ok(observed) => observed,
                 Err(_) => {
+                    self.invalidate_result_provider_session(
+                        &result,
+                        "provider_session_result_binding_failed",
+                    )
+                    .await;
                     return self
                         .finish_recovery(
                             &lease,
@@ -954,6 +1278,11 @@ impl AiReadOnlyAgentCoordinator {
                     current
                 }
                 _ => {
+                    self.invalidate_result_provider_session(
+                        &result,
+                        "provider_session_rule_changed",
+                    )
+                    .await;
                     return self
                         .finish_recovery(
                             &lease,
@@ -972,6 +1301,11 @@ impl AiReadOnlyAgentCoordinator {
             ) {
                 Ok(usage) => usage,
                 Err(_) => {
+                    self.invalidate_result_provider_session(
+                        &result,
+                        "provider_session_budget_exceeded",
+                    )
+                    .await;
                     return self
                         .finish_recovery(
                             &lease,
@@ -991,6 +1325,11 @@ impl AiReadOnlyAgentCoordinator {
                             .await;
                     }
                     AiAgentLoopTurn::ToolCalls { .. } => {
+                        self.invalidate_result_provider_session(
+                            &result,
+                            "provider_session_unexpected_tool_batch",
+                        )
+                        .await;
                         return self
                             .finish_recovery(
                                 &lease,
@@ -1003,6 +1342,29 @@ impl AiReadOnlyAgentCoordinator {
                     }
                 },
                 AiReadOnlyAgentTurnMode::ApplicationTools(route) => route,
+                AiReadOnlyAgentTurnMode::ExperimentalDynamicTools(_) => match observed {
+                    AiAgentLoopTurn::Completed => {
+                        return self
+                            .finish_completed_provider_turn(&lease, &guard, &result)
+                            .await;
+                    }
+                    AiAgentLoopTurn::ToolCalls { .. } => {
+                        self.invalidate_result_provider_session(
+                            &result,
+                            "provider_session_dynamic_turn_incomplete",
+                        )
+                        .await;
+                        return self
+                            .finish_recovery(
+                                &lease,
+                                &guard,
+                                AiAgentRecoveryPhase::ProviderTurn,
+                                "experimental_dynamic_tool_turn_incomplete",
+                                result.provider_response_id(),
+                            )
+                            .await;
+                    }
+                },
             };
             lease = match self
                 .checkpoint_writer
@@ -1284,6 +1646,118 @@ impl AiReadOnlyAgentCoordinator {
         }
     }
 
+    async fn execute_dynamic_provider_with_heartbeats(
+        &self,
+        lease: &mut AiRunLease,
+        plan: AiProviderCallPlan,
+        execution: Arc<dyn AiProviderDynamicToolExecution>,
+    ) -> Result<AiProviderCallResult, ProviderTurnFailure> {
+        let lease_state = Arc::new(Mutex::new(lease.clone()));
+        let provider =
+            self.provider_executor
+                .execute_dynamic_turn(lease_state.clone(), plan, execution);
+        tokio::pin!(provider);
+        let heartbeat_delay = self.limits.heartbeat_interval.unsigned_abs();
+        loop {
+            let cancellation_lease = lease_state.lock().await.clone();
+            let cancellation = self
+                .run_control
+                .wait_for_cancellation(&cancellation_lease, heartbeat_delay);
+            tokio::pin!(cancellation);
+            tokio::select! {
+                result = &mut provider => {
+                    *lease = lease_state.lock().await.clone();
+                    return result.map_err(|_| ProviderTurnFailure::Provider);
+                }
+                result = &mut cancellation => {
+                    match result.map_err(ProviderTurnFailure::LeaseLost)? {
+                        Some(_) => {
+                            let current = lease_state.lock().await.clone();
+                            let _ = self.provider_executor.interrupt_run(&current).await;
+                            *lease = current;
+                            return Err(ProviderTurnFailure::Cancelled);
+                        }
+                        None => {
+                            let mut current = lease_state.lock().await;
+                            match self.run_control.heartbeat(&current).await {
+                                Ok(renewed) => {
+                                    *current = renewed.clone();
+                                    *lease = renewed;
+                                }
+                                Err(error) => {
+                                    let lost = current.clone();
+                                    drop(current);
+                                    let _ = self.provider_executor.interrupt_run(&lost).await;
+                                    *lease = lost;
+                                    return Err(ProviderTurnFailure::LeaseLost(error));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn execute_retained_provider_with_heartbeats(
+        &self,
+        lease: &mut AiRunLease,
+        plan: AiProviderCallPlan,
+        session_plan: crate::AiProviderSessionTurnPlan,
+        session_service: Arc<dyn crate::AiProviderSessionService>,
+        execution: Option<Arc<dyn AiProviderDynamicToolExecution>>,
+    ) -> Result<AiProviderCallResult, ProviderTurnFailure> {
+        let lease_state = Arc::new(Mutex::new(lease.clone()));
+        let provider = self.provider_executor.execute_retained_turn(
+            lease_state.clone(),
+            plan,
+            session_plan,
+            session_service,
+            execution,
+        );
+        tokio::pin!(provider);
+        let heartbeat_delay = self.limits.heartbeat_interval.unsigned_abs();
+        loop {
+            let cancellation_lease = lease_state.lock().await.clone();
+            let cancellation = self
+                .run_control
+                .wait_for_cancellation(&cancellation_lease, heartbeat_delay);
+            tokio::pin!(cancellation);
+            tokio::select! {
+                result = &mut provider => {
+                    *lease = lease_state.lock().await.clone();
+                    return result.map_err(|_| ProviderTurnFailure::Provider);
+                }
+                result = &mut cancellation => {
+                    match result.map_err(ProviderTurnFailure::LeaseLost)? {
+                        Some(_) => {
+                            let current = lease_state.lock().await.clone();
+                            let _ = self.provider_executor.interrupt_run(&current).await;
+                            *lease = current;
+                            return Err(ProviderTurnFailure::Cancelled);
+                        }
+                        None => {
+                            let mut current = lease_state.lock().await;
+                            match self.run_control.heartbeat(&current).await {
+                                Ok(renewed) => {
+                                    *current = renewed.clone();
+                                    *lease = renewed;
+                                }
+                                Err(error) => {
+                                    let lost = current.clone();
+                                    drop(current);
+                                    let _ = self.provider_executor.interrupt_run(&lost).await;
+                                    *lease = lost;
+                                    return Err(ProviderTurnFailure::LeaseLost(error));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     async fn finish_completed_provider_turn(
         &self,
         lease: &AiRunLease,
@@ -1291,6 +1765,11 @@ impl AiReadOnlyAgentCoordinator {
         result: &AiProviderCallResult,
     ) -> Result<AiReadOnlyAgentRunOutcome, AiError> {
         if self.run_control.cancellation(lease).await?.is_some() {
+            self.invalidate_result_provider_session(
+                result,
+                "provider_session_cancelled_before_output",
+            )
+            .await;
             return Ok(Cancelled {
                 provider_turns: guard.provider_turns(),
                 total_tool_calls: guard.total_tool_calls(),
@@ -1299,6 +1778,11 @@ impl AiReadOnlyAgentCoordinator {
         let persisted = match self.output_writer.persist_output(lease, result).await {
             Ok(persisted) => persisted,
             Err(_) => {
+                self.invalidate_result_provider_session(
+                    result,
+                    "provider_session_output_uncertain",
+                )
+                .await;
                 return self
                     .finish_recovery(
                         lease,
@@ -1313,18 +1797,71 @@ impl AiReadOnlyAgentCoordinator {
         let message_id = persisted.message_id();
         let lease = persisted.into_lease();
         if self.run_control.cancellation(&lease).await?.is_some() {
+            if let (Some(service), Some(claim)) = (
+                &self.provider_session_service,
+                result.provider_session_claim(),
+            ) {
+                let _ = service
+                    .require_cleanup(claim, "provider_session_cancelled_after_output")
+                    .await;
+            }
             return Ok(Cancelled {
                 provider_turns: guard.provider_turns(),
                 total_tool_calls: guard.total_tool_calls(),
             });
         }
+        let provider_session_commit = match result.provider_session_commit(message_id) {
+            Ok(commit) => commit,
+            Err(_) => {
+                self.invalidate_result_provider_session(
+                    result,
+                    "provider_session_commit_proof_invalid",
+                )
+                .await;
+                None
+            }
+        };
+        let provider_session_commit = if let Some(commit) = provider_session_commit {
+            let Some(service) = &self.provider_session_service else {
+                return self
+                    .finish_recovery(
+                        &lease,
+                        guard,
+                        AiAgentRecoveryPhase::ProviderOutput,
+                        "provider_session_commit_service_unavailable",
+                        result.provider_response_id(),
+                    )
+                    .await;
+            };
+            let claim = result.provider_session_claim().ok_or(AiError::Conflict)?;
+            Some((service.clone(), claim.clone(), commit))
+        } else {
+            None
+        };
         let completion = AiRunCompletion::new(
             AiRunState::Completed,
             "agent_completed",
             None,
             result.provider_response_id().map(str::to_owned),
         )?;
-        self.run_control.finish(&lease, completion).await?;
+        if let Err(error) = self.run_control.finish(&lease, completion).await {
+            if let Some((service, claim, _)) = &provider_session_commit {
+                let _ = service
+                    .require_cleanup(claim, "provider_session_terminal_write_uncertain")
+                    .await;
+            }
+            return Err(error);
+        }
+        if let Some((service, claim, commit)) = provider_session_commit
+            && service.commit_turn(&lease, &claim, commit).await.is_err()
+        {
+            // The answer and canonical terminal run already won their fence.
+            // Provider retention is an optimization, so quarantine the cursor
+            // rather than changing the successful user-visible outcome.
+            let _ = service
+                .require_cleanup(&claim, "provider_session_commit_uncertain")
+                .await;
+        }
         Ok(Completed {
             message_id,
             provider_turns: guard.provider_turns(),
@@ -1511,6 +2048,185 @@ mod tests {
                 .pop_front()
                 .expect("test provider response should exist")
         }
+
+        async fn execute_dynamic_turn(
+            &self,
+            lease: Arc<tokio::sync::Mutex<AiRunLease>>,
+            _plan: AiProviderCallPlan,
+            execution: Arc<dyn AiProviderDynamicToolExecution>,
+        ) -> Result<AiProviderCallResult, AiError> {
+            if let Some(delay) = self.delay {
+                tokio::time::sleep(delay).await;
+            }
+            let mut result = self
+                .responses
+                .lock()
+                .expect("test response lock should not be poisoned")
+                .pop_front()
+                .expect("test provider response should exist")?;
+            let mut completed = Vec::new();
+            for tool_call_index in 0..result.tool_calls().len() {
+                let current = lease.lock().await.clone();
+                let persisted = execution
+                    .execute_dynamic_tool(&current, &result, tool_call_index)
+                    .await?;
+                *lease.lock().await = persisted.lease().clone();
+                completed.push(persisted);
+            }
+            result = result.test_with_interactive_tool_results(completed);
+            Ok(result)
+        }
+    }
+
+    struct RetainedTestProviderExecutor {
+        result: Mutex<Option<AiProviderCallResult>>,
+        claim: crate::AiProviderSessionClaim,
+    }
+
+    #[async_trait]
+    impl AiAgentProviderTurnExecutor for RetainedTestProviderExecutor {
+        async fn execute_turn(
+            &self,
+            _lease: &AiRunLease,
+            _plan: AiProviderCallPlan,
+        ) -> Result<AiProviderCallResult, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn execute_retained_turn(
+            &self,
+            _lease: Arc<tokio::sync::Mutex<AiRunLease>>,
+            _plan: AiProviderCallPlan,
+            _session_plan: crate::AiProviderSessionTurnPlan,
+            _session_service: Arc<dyn crate::AiProviderSessionService>,
+            _execution: Option<Arc<dyn AiProviderDynamicToolExecution>>,
+        ) -> Result<AiProviderCallResult, AiError> {
+            self.result
+                .lock()
+                .expect("retained result lock should not be poisoned")
+                .take()
+                .ok_or(AiError::Conflict)
+                .map(|result| result.test_with_provider_session_claim(self.claim.clone()))
+        }
+    }
+
+    struct TestProviderSessionService {
+        run: Arc<TestRunControl>,
+        commits: AtomicUsize,
+        cleanups: AtomicUsize,
+        fail_commit: bool,
+    }
+
+    #[async_trait]
+    impl crate::AiProviderSessionService for TestProviderSessionService {
+        async fn inspect_for_run(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Option<crate::AiProviderSessionBindingView>, AiError> {
+            Ok(None)
+        }
+
+        async fn bind_for_run(
+            &self,
+            _lease: &AiRunLease,
+            _request: crate::AiProviderSessionBindRequest,
+        ) -> Result<crate::AiProviderSessionClaim, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn claim_for_run(
+            &self,
+            _lease: &AiRunLease,
+            _expected: &crate::AiProviderSessionDescriptor,
+            _expected_transcript_fingerprint: &str,
+        ) -> Result<crate::AiProviderSessionClaim, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn open_for_run(
+            &self,
+            _lease: &AiRunLease,
+            _claim: &crate::AiProviderSessionClaim,
+        ) -> Result<crate::AiOpenedProviderSession, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn heartbeat(
+            &self,
+            _lease: &AiRunLease,
+            _claim: &crate::AiProviderSessionClaim,
+        ) -> Result<crate::AiProviderSessionClaim, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn commit_turn(
+            &self,
+            _lease: &AiRunLease,
+            claim: &crate::AiProviderSessionClaim,
+            commit: crate::AiProviderSessionCommit,
+        ) -> Result<crate::AiProviderSessionBindingView, AiError> {
+            if self.run.final_states() != [AiRunState::Completed] {
+                return Err(AiError::Conflict);
+            }
+            self.commits.fetch_add(1, Ordering::SeqCst);
+            if self.fail_commit {
+                return Err(AiError::PersistenceFailed);
+            }
+            Ok(crate::AiProviderSessionBindingView {
+                binding_id: claim.binding_id(),
+                session_id: claim.session_id(),
+                scope: test_scope(),
+                descriptor: claim.descriptor().clone(),
+                state: crate::AiProviderSessionState::Active,
+                through_message_sequence: commit.through_message_sequence(),
+                transcript_fingerprint: commit.transcript_fingerprint().to_owned(),
+                provider_expires_at: None,
+                idle_expires_at: time::OffsetDateTime::now_utc() + Duration::minutes(5),
+                absolute_expires_at: time::OffsetDateTime::now_utc() + Duration::hours(1),
+                row_version: 2,
+            })
+        }
+
+        async fn require_cleanup(
+            &self,
+            _claim: &crate::AiProviderSessionClaim,
+            _reason_code: &str,
+        ) -> Result<(), AiError> {
+            self.cleanups.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn claim_cleanup(
+            &self,
+            _worker_id: &str,
+        ) -> Result<Option<crate::AiProviderSessionCleanupClaim>, AiError> {
+            Ok(None)
+        }
+
+        async fn open_for_cleanup(
+            &self,
+            _claim: &crate::AiProviderSessionCleanupClaim,
+            _policy: &crate::AiContentProtectionPolicy,
+        ) -> Result<crate::AiProviderSessionDeletionRequest, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn complete_cleanup(
+            &self,
+            _claim: &crate::AiProviderSessionCleanupClaim,
+            _proof: crate::AiProviderSessionAbsenceProof,
+        ) -> Result<(), AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn schedule_cleanup_retry(
+            &self,
+            _claim: &crate::AiProviderSessionCleanupClaim,
+            _delay: Duration,
+            _reason_code: &str,
+        ) -> Result<(), AiError> {
+            Err(AiError::Conflict)
+        }
     }
 
     struct TestPlanner {
@@ -1522,6 +2238,17 @@ mod tests {
     struct TestChatPlanner {
         scope: AiScope,
         continuation_count: AtomicUsize,
+    }
+
+    struct TestDynamicPlanner {
+        scope: AiScope,
+        route: AiToolResultEgressRoute,
+        continuation_count: AtomicUsize,
+    }
+
+    struct TestRetainedChatPlanner {
+        scope: AiScope,
+        provider_session: crate::AiProviderSessionTurnPlan,
     }
 
     #[async_trait]
@@ -1574,6 +2301,55 @@ mod tests {
             _continuation: AiAgentContinuation,
         ) -> Result<AiReadOnlyAgentTurnPlan, AiError> {
             self.continuation_count.fetch_add(1, Ordering::SeqCst);
+            Err(AiError::Conflict)
+        }
+    }
+
+    #[async_trait]
+    impl AiReadOnlyAgentTurnPlanner for TestDynamicPlanner {
+        async fn initial_plan(
+            &self,
+            lease: &AiRunLease,
+        ) -> Result<AiReadOnlyAgentTurnPlan, AiError> {
+            AiReadOnlyAgentTurnPlan::new_experimental_dynamic_tools(
+                AiProviderCallPlan::test_plan(lease, self.scope.clone(), false),
+                self.route.clone(),
+                test_rules(self.scope.clone()),
+                false,
+            )
+        }
+
+        async fn continuation_plan(
+            &self,
+            _lease: &AiRunLease,
+            _provider_turns: u32,
+            _continuation: AiAgentContinuation,
+        ) -> Result<AiReadOnlyAgentTurnPlan, AiError> {
+            self.continuation_count.fetch_add(1, Ordering::SeqCst);
+            Err(AiError::Conflict)
+        }
+    }
+
+    #[async_trait]
+    impl AiReadOnlyAgentTurnPlanner for TestRetainedChatPlanner {
+        async fn initial_plan(
+            &self,
+            lease: &AiRunLease,
+        ) -> Result<AiReadOnlyAgentTurnPlan, AiError> {
+            AiReadOnlyAgentTurnPlan::new_chat(
+                AiProviderCallPlan::test_chat_plan(lease, self.scope.clone()),
+                test_rules(self.scope.clone()),
+                false,
+            )?
+            .with_provider_session(self.provider_session.clone())
+        }
+
+        async fn continuation_plan(
+            &self,
+            _lease: &AiRunLease,
+            _provider_turns: u32,
+            _continuation: AiAgentContinuation,
+        ) -> Result<AiReadOnlyAgentTurnPlan, AiError> {
             Err(AiError::Conflict)
         }
     }
@@ -1806,6 +2582,22 @@ mod tests {
         }
     }
 
+    struct CancellingOutputWriter {
+        run: Arc<TestRunControl>,
+    }
+
+    #[async_trait]
+    impl AiAgentProviderOutputWriter for CancellingOutputWriter {
+        async fn persist_output(
+            &self,
+            lease: &AiRunLease,
+            _result: &AiProviderCallResult,
+        ) -> Result<AiPersistedProviderOutput, AiError> {
+            self.run.cancelled.store(true, Ordering::SeqCst);
+            Ok(AiPersistedProviderOutput::test_output(lease.clone()))
+        }
+    }
+
     struct TestCheckpointWriter;
 
     #[async_trait]
@@ -2012,6 +2804,38 @@ mod tests {
         .expect("test route should validate")
     }
 
+    fn retained_descriptor() -> crate::AiProviderSessionDescriptor {
+        crate::AiProviderSessionDescriptor::new(
+            crate::ProviderKind::OpenAi,
+            "coordinator-test-profile",
+            "coordinator-test-model",
+            "a".repeat(64),
+            "test-provider-retained/v1",
+            "b".repeat(64),
+        )
+        .expect("retained test descriptor should validate")
+    }
+
+    fn retained_claim(
+        lease: &AiRunLease,
+        descriptor: crate::AiProviderSessionDescriptor,
+    ) -> crate::AiProviderSessionClaim {
+        crate::AiProviderSessionClaim {
+            binding_id: Uuid::new_v4(),
+            session_id: lease.session_id(),
+            run_id: lease.run_id(),
+            attempt_id: lease.attempt_id(),
+            run_lease_generation: lease.lease_generation(),
+            binding_claim_generation: 1,
+            binding_row_version: 1,
+            claim_expires_at: time::OffsetDateTime::now_utc() + Duration::minutes(5),
+            through_message_sequence: 0,
+            transcript_fingerprint: "c".repeat(64),
+            principal_reference: lease.principal_reference().clone(),
+            descriptor,
+        }
+    }
+
     fn test_manifest(lease: &AiRunLease, capability: AiEgressCapability) -> AiEgressManifest {
         AiEgressManifest {
             provider_profile_id: "test-provider-profile".to_owned(),
@@ -2131,7 +2955,7 @@ mod tests {
             false,
         )
         .expect("an exact initial tool-free plan should validate");
-        let (_, _, _, mode, _, _) = plan.into_parts();
+        let (_, _, _, mode, _, _, _) = plan.into_parts();
         assert!(matches!(mode, AiReadOnlyAgentTurnMode::ChatOnly));
 
         assert!(matches!(
@@ -2216,6 +3040,222 @@ mod tests {
         assert_eq!(forbidden.tool_batch_checkpoints.load(Ordering::SeqCst), 0);
         assert_eq!(planner.continuation_count.load(Ordering::SeqCst), 0);
         assert_eq!(run.final_states(), vec![AiRunState::Completed]);
+    }
+
+    #[tokio::test]
+    async fn retained_watermark_advances_only_after_terminal_completion_and_failure_quarantines() {
+        for fail_commit in [false, true] {
+            let lease = AiRunLease::test_running(principal_reference());
+            let run = Arc::new(TestRunControl::new());
+            let descriptor = retained_descriptor();
+            let claim = retained_claim(&lease, descriptor.clone());
+            let provider = Arc::new(RetainedTestProviderExecutor {
+                result: Mutex::new(Some(AiProviderCallResult::test_result(
+                    &lease,
+                    None,
+                    "response-retained-final",
+                    Vec::new(),
+                ))),
+                claim,
+            });
+            let planner = Arc::new(TestRetainedChatPlanner {
+                scope: test_scope(),
+                provider_session: crate::AiProviderSessionTurnPlan::new(descriptor, "c".repeat(64))
+                    .expect("retained turn plan should validate"),
+            });
+            let session_service = Arc::new(TestProviderSessionService {
+                run: run.clone(),
+                commits: AtomicUsize::new(0),
+                cleanups: AtomicUsize::new(0),
+                fail_commit,
+            });
+            let forbidden = Arc::new(ChatForbiddenBoundaries::default());
+            let coordinator = AiReadOnlyAgentCoordinator::new(
+                run.clone(),
+                provider,
+                forbidden.clone(),
+                Arc::new(TestOutputWriter),
+                forbidden.clone(),
+                Arc::new(TestCheckpointWriter),
+                Arc::new(TestRuleResolver),
+                planner,
+                limits(50),
+            )
+            .with_provider_session_service(session_service.clone());
+
+            let outcome = coordinator
+                .execute_claimed(&lease)
+                .await
+                .expect("retained terminal turn should preserve completed output");
+
+            assert!(matches!(outcome, Completed { .. }));
+            assert_eq!(run.final_states(), vec![AiRunState::Completed]);
+            assert_eq!(session_service.commits.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                session_service.cleanups.load(Ordering::SeqCst),
+                usize::from(fail_commit)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn retained_turn_cancelled_after_output_never_advances_and_requires_cleanup() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        let descriptor = retained_descriptor();
+        let provider = Arc::new(RetainedTestProviderExecutor {
+            result: Mutex::new(Some(AiProviderCallResult::test_result(
+                &lease,
+                None,
+                "response-retained-cancelled",
+                Vec::new(),
+            ))),
+            claim: retained_claim(&lease, descriptor.clone()),
+        });
+        let planner = Arc::new(TestRetainedChatPlanner {
+            scope: test_scope(),
+            provider_session: crate::AiProviderSessionTurnPlan::new(descriptor, "c".repeat(64))
+                .expect("retained turn plan should validate"),
+        });
+        let session_service = Arc::new(TestProviderSessionService {
+            run: run.clone(),
+            commits: AtomicUsize::new(0),
+            cleanups: AtomicUsize::new(0),
+            fail_commit: false,
+        });
+        let forbidden = Arc::new(ChatForbiddenBoundaries::default());
+        let coordinator = AiReadOnlyAgentCoordinator::new(
+            run.clone(),
+            provider,
+            forbidden.clone(),
+            Arc::new(CancellingOutputWriter { run: run.clone() }),
+            forbidden.clone(),
+            Arc::new(TestCheckpointWriter),
+            Arc::new(TestRuleResolver),
+            planner,
+            limits(50),
+        )
+        .with_provider_session_service(session_service.clone());
+
+        let outcome = coordinator
+            .execute_claimed(&lease)
+            .await
+            .expect("cancellation should retain its canonical outcome");
+
+        assert!(matches!(outcome, Cancelled { .. }));
+        assert!(run.final_states().is_empty());
+        assert_eq!(session_service.commits.load(Ordering::SeqCst), 0);
+        assert_eq!(session_service.cleanups.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn experimental_dynamic_turn_uses_ordinary_tool_boundary_and_no_continuation() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        let provider = Arc::new(TestProviderExecutor {
+            responses: Mutex::new(VecDeque::from([Ok(AiProviderCallResult::test_result(
+                &lease,
+                None,
+                "response-dynamic-final",
+                vec![("dynamic-call-1", "test.read", json!({}))],
+            ))])),
+            delay: None,
+        });
+        let planner = Arc::new(TestDynamicPlanner {
+            scope: test_scope(),
+            route: test_route(),
+            continuation_count: AtomicUsize::new(0),
+        });
+        let forbidden_checkpoints = Arc::new(ChatForbiddenBoundaries::default());
+        let coordinator = AiReadOnlyAgentCoordinator::new(
+            run.clone(),
+            provider,
+            Arc::new(TestToolExecutor {
+                expose_result: true,
+            }),
+            Arc::new(TestOutputWriter),
+            forbidden_checkpoints.clone(),
+            Arc::new(TestCheckpointWriter),
+            Arc::new(TestRuleResolver),
+            planner.clone(),
+            limits(50),
+        );
+
+        let outcome = coordinator
+            .execute_claimed(&lease)
+            .await
+            .expect("experimental dynamic turn should complete");
+
+        assert!(matches!(
+            outcome,
+            Completed {
+                provider_turns: 1,
+                total_tool_calls: 1,
+                ..
+            }
+        ));
+        assert_eq!(
+            forbidden_checkpoints
+                .provider_checkpoints
+                .load(Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            forbidden_checkpoints
+                .tool_batch_checkpoints
+                .load(Ordering::SeqCst),
+            0
+        );
+        assert_eq!(planner.continuation_count.load(Ordering::SeqCst), 0);
+        assert_eq!(run.final_states(), vec![AiRunState::Completed]);
+    }
+
+    #[tokio::test]
+    async fn experimental_dynamic_turn_denies_rule_change_before_tool_execution() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        let provider = Arc::new(TestProviderExecutor {
+            responses: Mutex::new(VecDeque::from([Ok(AiProviderCallResult::test_result(
+                &lease,
+                None,
+                "response-dynamic-stale-rule",
+                vec![("dynamic-call-stale", "test.read", json!({}))],
+            ))])),
+            delay: None,
+        });
+        let planner = Arc::new(TestDynamicPlanner {
+            scope: test_scope(),
+            route: test_route(),
+            continuation_count: AtomicUsize::new(0),
+        });
+        let forbidden = Arc::new(ChatForbiddenBoundaries::default());
+        let coordinator = AiReadOnlyAgentCoordinator::new(
+            run.clone(),
+            provider,
+            forbidden.clone(),
+            Arc::new(TestOutputWriter),
+            forbidden.clone(),
+            Arc::new(TestCheckpointWriter),
+            Arc::new(ChangingRuleResolver(AtomicUsize::new(0))),
+            planner,
+            limits(50),
+        );
+
+        let outcome = coordinator
+            .execute_claimed(&lease)
+            .await
+            .expect("stale dynamic-tool rules should close for recovery");
+
+        assert!(matches!(
+            outcome,
+            RecoveryRequired {
+                phase: AiAgentRecoveryPhase::ProviderTurn,
+                provider_turns: 0,
+                total_tool_calls: 0,
+            }
+        ));
+        assert_eq!(forbidden.tool_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(run.final_states(), vec![AiRunState::RecoveryRequired]);
     }
 
     #[tokio::test]

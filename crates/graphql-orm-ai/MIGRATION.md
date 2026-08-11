@@ -19,6 +19,58 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased: retained Codex threads and experimental dynamic tools (crate 0.69.0 to 0.70.0; schema 0.54.0 to 0.55.0)
+
+Apply AI schema module 0.55.0 before enabling retained provider turns. This is
+a persistent-semantic migration only: it adds no table, column, index,
+constraint, backfill, or row rewrite. Existing 0.54.0 provider-session rows
+remain structurally compatible. The new module version records that a provider
+watermark becomes reusable only after protected assistant output, its exact
+checkpoint, and canonical terminal run completion are durable.
+
+The Codex app-server adapter now implements protected empty-thread creation,
+exact resume, run interruption, and exact deletion/absence. A host:
+
+1. implements `AiCodexAppServerRunProcess` with the strict
+   `AiCodexAppServerProtocolActor`, including `create_empty_thread`, retained
+   turn methods, `interrupt`, and `delete_thread`;
+2. registers `AiCodexAppServerProvider` and its
+   `provider_session_deletion_service` under the immutable profile;
+3. constructs `OrmAiProviderSessionService` and attaches it with
+   `AiReadOnlyAgentCoordinator::with_provider_session_service`;
+4. computes the authoritative transcript-prefix fingerprint and an
+   `AiProviderSessionDescriptor` whose policy fingerprint changes with any
+   retention, rule, or offered-tool policy change;
+5. adds `AiProviderSessionTurnPlan` through
+   `AiReadOnlyAgentTurnPlan::with_provider_session`; and
+6. runs the existing cleanup worker so invalidated/expired cursors receive
+   exact provider deletion and absence proof.
+
+Experimental native dynamic tools are closed unless the immutable registration
+calls `with_experimental_dynamic_tools` and the planner uses
+`AiReadOnlyAgentTurnPlan::new_experimental_dynamic_tools`. The process installs
+the exact reviewed dynamic definitions while creating an otherwise empty
+persistent thread because app-server cannot add them through `thread/resume`.
+No instruction or user content is sent before durable binding. Each exact
+`item/tool/call` is answered only by the coordinator's ordinary registered
+read-only GraphQL tool service; the process receives no principal credential,
+delegated token, router transport, or generic callback.
+
+Public implementors of `AiProvider::create_empty_session` must accept the new
+`&ModelRequest` parameter and use it only for immutable model/tool binding.
+Public implementors of `AiCodexAppServerRunProcess::create_empty_thread` must
+accept the exact reviewed dynamic definitions and either install all of them
+or fail closed. Existing providers/process actors that do not support retained
+sessions may keep the default `Unsupported` implementation. Dynamic tools are
+experimental and require a live compatibility gate against the deployed Codex
+app-server version; shell, files, MCP, hosted web, browser, screenshots, raw
+reasoning, and generic JSON-RPC remain unavailable.
+
+After terminal assistant persistence the coordinator completes the run before
+calling `AiProviderSessionService::commit_turn`. A commit failure now calls
+`require_cleanup` but preserves the successful answer and `Completed` run;
+provider retention is an optimization, not user-visible completion authority.
+
 ## Unreleased: provider sessions, hosted activity, and run-scoped app-server (crate 0.68.0 to 0.69.0; schema 0.53.0 to 0.54.0)
 
 Apply AI schema module 0.54.0 before constructing an

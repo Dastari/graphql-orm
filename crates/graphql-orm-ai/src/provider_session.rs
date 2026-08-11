@@ -316,6 +316,53 @@ pub struct AiProviderSessionBindRequest {
     provider_expires_at: Option<OffsetDateTime>,
 }
 
+/// Host-planned durable provider-session identity for one provider turn.
+///
+/// The transcript fingerprint names the authoritative durable prefix before
+/// the current input message. The provider executor uses this value only to
+/// claim or create an exactly matching binding; it cannot widen provider,
+/// tool, egress, or retention policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiProviderSessionTurnPlan {
+    descriptor: AiProviderSessionDescriptor,
+    transcript_fingerprint: String,
+}
+
+impl AiProviderSessionTurnPlan {
+    /// Creates one exact provider-session turn binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidInput`] unless `transcript_fingerprint` is a
+    /// canonical lowercase SHA-256 fingerprint of the authoritative durable
+    /// message prefix before the current input.
+    pub fn new(
+        descriptor: AiProviderSessionDescriptor,
+        transcript_fingerprint: impl Into<String>,
+    ) -> Result<Self, AiError> {
+        let plan = Self {
+            descriptor,
+            transcript_fingerprint: transcript_fingerprint.into(),
+        };
+        if !crate::valid_sha256(&plan.transcript_fingerprint) {
+            return Err(AiError::InvalidInput(
+                "invalid provider-session transcript fingerprint".to_owned(),
+            ));
+        }
+        Ok(plan)
+    }
+
+    /// Exact immutable provider/runtime identity.
+    pub fn descriptor(&self) -> &AiProviderSessionDescriptor {
+        &self.descriptor
+    }
+
+    /// Canonical authoritative transcript prefix before current input.
+    pub fn transcript_fingerprint(&self) -> &str {
+        &self.transcript_fingerprint
+    }
+}
+
 impl AiProviderSessionBindRequest {
     /// Creates a validated bind request for an empty provider session.
     ///
@@ -570,6 +617,10 @@ impl AiProviderSessionClaim {
         self.through_message_sequence
     }
 
+    pub(crate) fn transcript_fingerprint(&self) -> &str {
+        &self.transcript_fingerprint
+    }
+
     /// Exact provider/runtime descriptor.
     pub const fn descriptor(&self) -> &AiProviderSessionDescriptor {
         &self.descriptor
@@ -577,6 +628,7 @@ impl AiProviderSessionClaim {
 }
 
 /// Authorized cursor opened for one exact provider-session claim.
+#[derive(Clone)]
 pub struct AiOpenedProviderSession {
     claim: AiProviderSessionClaim,
     cursor: AiProviderSessionCursor,
@@ -808,6 +860,17 @@ pub trait AiProviderSessionDeletionService: Send + Sync {
 #[async_trait]
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub trait AiProviderSessionService: Send + Sync {
+    /// Returns the current owner-visible binding shell, when one exists.
+    ///
+    /// Current principal, session, scope, and protection readiness are checked
+    /// even though the cursor remains unopened. This method distinguishes a
+    /// genuinely new session from a stale or incompatible binding; callers
+    /// must never treat a mismatched existing row as permission to replace it.
+    async fn inspect_for_run(
+        &self,
+        lease: &AiRunLease,
+    ) -> Result<Option<AiProviderSessionBindingView>, AiError>;
+
     /// Binds an already-created empty provider session and claims it for the
     /// exact current run.
     async fn bind_for_run(
@@ -846,7 +909,8 @@ pub trait AiProviderSessionService: Send + Sync {
     ) -> Result<AiProviderSessionClaim, AiError>;
 
     /// Advances the durable watermark only after exact protected assistant
-    /// output persistence and releases the binding for a future run.
+    /// output persistence and canonical terminal run completion, then releases
+    /// the binding for a future run.
     async fn commit_turn(
         &self,
         lease: &AiRunLease,

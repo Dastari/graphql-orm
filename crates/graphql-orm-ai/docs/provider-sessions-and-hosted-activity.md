@@ -28,7 +28,7 @@ operation whose resolver makes the final authorization decision.
 | Contract | Default | Durable provider state | Application tools |
 | --- | --- | --- | --- |
 | JSONL `local-harness` | disabled | none | exact stateless replay supported |
-| Codex app-server v1 | disabled | process memory for one run only | not supported |
+| Codex app-server v2 | disabled | run process plus optional protected thread cursor | default-off experimental dynamic tools through the coordinator |
 | Native OpenAI hosted search | absent from each request | Responses continuation only when selected | mixed retained continuation supported |
 | Visible reasoning summary | disabled | protected activity/final blocks | authority-neutral |
 | `AiProviderSessionService` | not constructed | protected opaque cursor | authority-neutral |
@@ -39,7 +39,7 @@ thread, and a retained thread may exist while no process is running.
 
 ## Exact run-scoped app-server
 
-Enable `provider-codex-app-server` to use the first-phase strict adapter. The
+Enable `provider-codex-app-server` to use the strict adapter. The
 host supplies:
 
 1. `AiCodexAppServerRegistration`, binding the logical profile/model,
@@ -48,6 +48,13 @@ host supplies:
    startup/turn/interrupt/shutdown ceilings;
 3. an `AiCodexAppServerRunProcessFactory`; and
 4. `AiCodexAppServerRunPool` and `AiCodexAppServerProvider`.
+
+The wire contract follows the official
+[Codex app-server protocol](https://developers.openai.com/codex/app-server).
+Dynamic tools remain explicitly experimental there: the client opts into
+`experimentalApi`, installs reviewed definitions on `thread/start`, and admits
+only the documented `item/started` → `item/tool/call` → client response →
+`item/completed` sequence for the exact active thread and turn.
 
 The factory is a trusted deployment boundary. It must execute the verified
 image directly, never through a shell or path search; clear inherited
@@ -58,18 +65,34 @@ process-tree kill callback. The wrapper invokes that callback on final drop,
 including an abandoned stream or failed graceful shutdown.
 
 The crate-owned protocol actor deliberately has no generic JSON-RPC send
-method. It admits only initialization, fresh thread start, fresh turn start,
-turn interruption, exact correlated responses, and the closed visible-event
-allowlist. Unknown notifications and server requests fail closed. Dynamic
-tools, commands, shell, files, patches, MCP, collaboration, images, web search,
-browser control, raw reasoning, and arbitrary methods are forbidden.
+method. It admits only initialization, exact thread start/resume/delete, turn
+start/interruption, correlated responses, the closed visible-event allowlist,
+and—only for an experimental registration—the exact documented
+`item/tool/call` server request. Commands, shell, files, patches, MCP,
+collaboration, images, hosted web search, browser control, raw reasoning, and
+arbitrary methods remain forbidden.
 
-The v1 adapter accepts an initial `StatelessReplay` request containing only
-bounded trusted instructions and text. Each call gets a fresh ephemeral Codex
-thread; only the process is reused for the exact session/run/attempt/lease
-generation. It does not yet support an application-tool continuation or a
-resumable Codex thread. The JSONL local harness remains the implemented local
-path for exact stateless application-tool loops.
+The closed default accepts an initial `StatelessReplay` request containing
+only bounded trusted instructions and text; each call gets a fresh ephemeral
+thread while the exact run process may be reused. A retained turn instead uses
+`ModelContinuationMode::ProviderRetained`, an exact
+`AiProviderSessionTurnPlan`, and a configured `AiProviderSessionService`.
+Creation sends only immutable model and reviewed dynamic-tool definitions to
+an empty persistent thread. It sends no developer instruction or user input
+until the opaque cursor is durably protected and claimed. Resume binds the
+cursor to the exact owner/session/scope/profile/model/executable/protocol/
+policy/transcript/run fence.
+
+Experimental dynamic tools require
+`AiCodexAppServerRegistration::with_experimental_dynamic_tools` and
+`AiReadOnlyAgentTurnPlan::new_experimental_dynamic_tools`. The provider process
+receives no application credential or resolver transport. An exact
+`item/tool/call` is schema/fingerprint matched to the current `ModelRequest`,
+then the coordinator rechecks cancellation, current rules, run budget, and the
+ordinary registered read-only GraphQL tool boundary. Only the already
+disclosure- and egress-approved result is returned to app-server. Unknown,
+duplicate, stale, over-limit, changed-policy, or incomplete calls poison the
+turn and make a retained cursor cleanup-only.
 
 Coordinator cancellation and terminal paths call `interrupt_run` and
 `close_run` through `AiRuntime`. The process binding includes a non-exported
@@ -177,16 +200,19 @@ stores a content-protected opaque cursor plus:
 - run/attempt/lease and binding claim generations; and
 - idle, absolute, provider, cleanup, and retry state.
 
-The safe creation order is:
+`AiProviderCallExecutor::execute_with_provider_session` and the coordinator
+enforce this creation order:
 
 1. create an empty provider thread and retain a provider-side deletion guard;
-2. construct the immutable `AiProviderSessionDescriptor` and canonical
+2. use the host-planned immutable `AiProviderSessionDescriptor` and canonical
    transcript-prefix fingerprint;
 3. call `bind_for_run` under the current run lease;
 4. only after the protected binding commits, send business content; and
-5. after protected assistant output and its matching
-   `assistant_output_persisted` checkpoint commit, call `commit_turn` with the
-   new authoritative watermark/fingerprint.
+5. after protected assistant output, its matching
+   `assistant_output_persisted` checkpoint, and canonical `Completed` run state
+   commit, call `commit_turn` with the new authoritative
+   watermark/fingerprint. If this retention-only update fails, quarantine the
+   cursor without changing the already-completed user answer.
 
 Resume uses `claim_for_run` and then `open_for_run`. Both require the exact
 descriptor and transcript evidence, current principal/session/scope access,

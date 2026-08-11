@@ -20,8 +20,8 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.69.0` and AI
-schema module `0.54.0`. It begins the applied-restore implementation with
+This development line advances the pre-1.0 crate version to `0.70.0` and AI
+schema module `0.55.0`. It begins the applied-restore implementation with
 bounded database-derived facts, aligns the reviewed dependency universe,
 integrates generated resolver-operation metadata, completes the durable OpenAI
 background terminal-reconciliation runtime, and closes raw provider
@@ -45,6 +45,17 @@ file-search IDs behind the reviewed persistent-file design.
   context, ownership, scope, retention, and content bounds remain enforced.
 
 ### Changed
+
+- Durable provider-session watermarks now become reusable only after protected
+  assistant output, its `assistant_output_persisted` checkpoint, and canonical
+  terminal run completion are durable. If the retention-only commit then
+  fails, the already-completed answer remains successful and the opaque cursor
+  is quarantined for exact deletion.
+- The provider empty-session hook now receives the exact validated
+  `ModelRequest` as a read-only binding input. Adapters may use only immutable
+  model and reviewed tool definitions required by their thread protocol and
+  must not transmit request instructions or user input before the cursor is
+  durably protected.
 
 - `ModelRequest` now carries an explicit host-selected visible-reasoning
   summary request, and web search uses an explicit `PublicWeb`, allowed-domain,
@@ -87,17 +98,35 @@ file-search IDs behind the reviewed persistent-file design.
 
 ### Added
 
+- The strict Codex app-server adapter now supports exact protected persistent
+  thread create/resume/interrupt/delete. `AiProviderSessionTurnPlan` couples a
+  provider call to the existing owner/scope/profile/model/executable/protocol/
+  policy/transcript/run-fenced binding while warm processes remain a separate
+  bounded in-memory concern.
+- Codex native dynamic tools are available as an explicit experimental,
+  default-off registration capability. The protocol actor admits only exact
+  reviewed `item/tool/call` requests and returns them through a typed responder
+  to the ordinary read-only coordinator. Current cancellation, rules, tool
+  registration, GraphQL resolver authorization, disclosure, egress, durable
+  tool lifecycle, and budgets remain authoritative; the adapter receives no
+  application credential or generic callback.
+- AI schema module 0.55.0 records the stricter terminal-before-provider-
+  watermark semantic. It adds no table, column, index, or row rewrite; existing
+  0.54.0 provider-session rows remain valid and the next migration plan records
+  only the new module version.
+
 - The `provider-codex-app-server` feature adds a strict project-neutral Codex
-  app-server adapter for fresh text-only turns. It keeps at most one process per
+  app-server foundation, initially for fresh text-only turns. It keeps at most one process per
   exact run/attempt/lease generation, freezes executable/profile/model/sandbox/
   protocol identity, applies global and per-owner admission, reuses the process
   across bounded turns, and exposes exact interrupt/close lifecycle hooks.
-  The protocol actor has no generic send method and rejects dynamic tools,
+  The protocol actor has no generic send method and rejects unenabled dynamic tools,
   shell/command/file/MCP/web/image/collaboration traffic, unknown server
   requests, and raw reasoning. A crate-owned launched-process wrapper always
   invokes the deployment's synchronous process-tree kill callback on final
-  drop. Provider-thread retention and application-tool continuations are not
-  claimed by this first adapter.
+  drop. The 0.70.0 additions above layer exact protected thread retention and
+  default-off coordinator-owned experimental dynamic tools onto this closed
+  foundation.
 - `AiProviderSessionService` and `OrmAiProviderSessionService` add a protected,
   provider-neutral durable opaque-cursor lifecycle. Bind, claim, open,
   heartbeat, commit, invalidate, cleanup, retry, and exact absence proof are

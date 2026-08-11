@@ -23,11 +23,12 @@ attachment, network, credential, arbitrary callback, or provider-retained
 continuation authority.
 
 The separate `provider-codex-app-server` feature adds a second local boundary:
-one strictly allowlisted process may be retained for an exact claimed run and
-used for several fresh text-only turns. That adapter is not a replacement for
-the JSONL application-tool path: it accepts no dynamic/application tools,
-continuation, structured output, reasoning, web, files, images, shell, MCP, or
-generic JSON-RPC. Its construction and exact limitations are in
+one strictly allowlisted process may be retained for an exact claimed run, and
+an explicitly planned turn may resume one protected provider-thread cursor.
+Experimental app-server dynamic tools are default-off and use only the
+ordinary coordinator-owned registered GraphQL tool path. Structured output,
+hosted web, files, images, shell, MCP, browser control, and generic JSON-RPC
+remain unavailable. Its construction and exact limitations are in
 [provider sessions, hosted search, and visible activity](provider-sessions-and-hosted-activity.md).
 
 ## Authority split

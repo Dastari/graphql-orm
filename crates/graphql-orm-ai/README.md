@@ -323,7 +323,7 @@ Exactly one persistence backend should be selected:
 | `provider-ollama` | no | Native Ollama chat: text, exact images, structured output, stateless application tools |
 | `provider-openai-compatible` | no | Profiled Responses/SSE: text/JSON and opt-in strict tools, structured output, retained continuation |
 | `local-harness` | no | Installed JSONL v2 text/structured/stateless-tool protocol over a trusted sandbox launcher |
-| `provider-codex-app-server` | no | Strict run-scoped Codex app-server process lifecycle for fresh text-only turns; no dynamic tools, retained thread, shell, filesystem, or generic JSON-RPC |
+| `provider-codex-app-server` | no | Strict run-scoped Codex app-server process lifecycle, protected retained threads, and default-off coordinator-owned experimental dynamic tools; no shell, filesystem, web, or generic JSON-RPC |
 | `graphql-case-pascal` | no | PascalCase roots, arguments, inputs, outputs, and ORM fields |
 
 Do not build with `--all-features`: the database backends are mutually
@@ -335,7 +335,7 @@ Add the crate from a reviewed monorepo revision:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.69.0", features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.70.0", features = ["sqlite"] }
 ```
 
 > **Pre-release dependency note:** this source snapshot resolves
@@ -556,8 +556,11 @@ callbacks remain separately gated; see the
 [local harness guide](docs/local-harness.md).
 
 The separate Codex app-server feature retains one strictly allowlisted process
-per exact claimed run for fresh text-only turns, while the provider-session
-service protects optional opaque retained-thread cursors independently. Native
+per exact claimed run and can resume an exact protected provider-session
+cursor. Experimental native dynamic tools are separately enabled on the
+immutable registration and execute only through the ordinary coordinator's
+current-rule, registered-GraphQL-tool, disclosure, egress, budget, and resolver
+authorization boundary. Native
 OpenAI can combine host-enabled hosted search with exact application tools in
 provider-retained mode and can stream provider-generated visible summaries and
 validated citations into the ordered protected activity feed. Defaults remain

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::Stream;
@@ -757,7 +758,7 @@ pub struct ModelToolDefinition {
 }
 
 impl ModelToolDefinition {
-    fn validate(&self) -> Result<(), ProviderError> {
+    pub(crate) fn validate(&self) -> Result<(), ProviderError> {
         let provider_name_valid = !self.provider_name.is_empty()
             && self.provider_name.len() <= 64
             && self
@@ -1023,6 +1024,8 @@ pub struct ProviderRequestContext {
     session_id: AiSessionId,
     run_id: AiRunId,
     run_binding: Option<crate::AiProviderRunBinding>,
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    provider_session: Option<crate::AiOpenedProviderSession>,
     correlation_id: String,
     budget: AuthorizedBudgetReservation,
     transfers: Vec<AuthorizedProviderTransfer>,
@@ -1048,6 +1051,8 @@ impl ProviderRequestContext {
             session_id,
             run_id,
             run_binding: None,
+            #[cfg(any(feature = "sqlite", feature = "postgres"))]
+            provider_session: None,
             correlation_id: correlation_id.into(),
             budget,
             transfers: Vec::new(),
@@ -1096,6 +1101,26 @@ impl ProviderRequestContext {
             return Err(AiError::Conflict);
         }
         self.run_binding = Some(binding);
+        Ok(self)
+    }
+
+    /// Installs one freshly opened retained provider session for this exact
+    /// request fence.
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn with_provider_session(
+        mut self,
+        session: crate::AiOpenedProviderSession,
+    ) -> Result<Self, AiError> {
+        let binding = self.run_binding.ok_or(AiError::Conflict)?;
+        let claim = session.claim();
+        if claim.session_id() != binding.session_id()
+            || claim.run_id() != binding.run_id()
+            || claim.attempt_id() != binding.attempt_id()
+            || claim.run_lease_generation() != binding.lease_generation()
+        {
+            return Err(AiError::Conflict);
+        }
+        self.provider_session = Some(session);
         Ok(self)
     }
 
@@ -1169,6 +1194,12 @@ impl ProviderRequestContext {
     /// budget, tool, cancellation, or persistence authority.
     pub const fn run_binding(&self) -> Option<crate::AiProviderRunBinding> {
         self.run_binding
+    }
+
+    /// Freshly authorized retained provider session for this exact request.
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub fn provider_session(&self) -> Option<&crate::AiOpenedProviderSession> {
+        self.provider_session.as_ref()
     }
 
     /// Correlation ID.
@@ -1567,6 +1598,177 @@ pub enum ProviderError {
 /// Provider event stream.
 pub type ProviderEventStream =
     Pin<Box<dyn Stream<Item = Result<ProviderEvent, ProviderError>> + Send + 'static>>;
+
+/// One exact provider-originated application-tool request awaiting a
+/// coordinator-owned response.
+///
+/// Construction is crate-owned. A provider adapter may create this value only
+/// after matching the provider-facing name to one exact tool definition in the
+/// current validated [`ModelRequest`]. The value is a request, not execution,
+/// resolver, egress, or delegation authority.
+#[derive(Clone, PartialEq)]
+pub struct ProviderDynamicToolCall {
+    response_id: String,
+    call_id: String,
+    tool_id: String,
+    provider_name: String,
+    tool_fingerprint: String,
+    arguments: serde_json::Value,
+}
+
+impl std::fmt::Debug for ProviderDynamicToolCall {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderDynamicToolCall")
+            .field("response_id", &self.response_id)
+            .field("call_id", &self.call_id)
+            .field("tool_id", &self.tool_id)
+            .field("provider_name", &self.provider_name)
+            .field("tool_fingerprint", &self.tool_fingerprint)
+            .field("arguments", &"<provider-content>")
+            .finish()
+    }
+}
+
+impl ProviderDynamicToolCall {
+    #[cfg(feature = "provider-codex-app-server")]
+    pub(crate) fn from_definition(
+        response_id: impl Into<String>,
+        call_id: impl Into<String>,
+        definition: &ModelToolDefinition,
+        arguments: serde_json::Value,
+    ) -> Result<Self, ProviderError> {
+        definition.validate()?;
+        let call = Self {
+            response_id: response_id.into(),
+            call_id: call_id.into(),
+            tool_id: definition.tool_id.clone(),
+            provider_name: definition.provider_name.clone(),
+            tool_fingerprint: definition.fingerprint.clone(),
+            arguments,
+        };
+        if !valid_provider_reference(&call.response_id)
+            || !valid_provider_reference(&call.call_id)
+            || !call.arguments.is_object()
+            || serde_json::to_vec(&call.arguments)
+                .map_or(true, |encoded| encoded.len() > 16 * 1024 * 1024)
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let validator = jsonschema::validator_for(&definition.parameters)
+            .map_err(|_| ProviderError::InvalidRequest)?;
+        if !validator.is_valid(&call.arguments) {
+            return Err(ProviderError::Rejected);
+        }
+        Ok(call)
+    }
+
+    /// Opaque provider response or turn identifier containing this call.
+    pub fn response_id(&self) -> &str {
+        &self.response_id
+    }
+
+    /// Opaque provider call identifier.
+    pub fn call_id(&self) -> &str {
+        &self.call_id
+    }
+
+    /// Stable registered tool identifier.
+    pub fn tool_id(&self) -> &str {
+        &self.tool_id
+    }
+
+    /// Exact provider-facing name offered in this request.
+    pub fn provider_name(&self) -> &str {
+        &self.provider_name
+    }
+
+    /// Exact registered descriptor fingerprint offered in this request.
+    pub fn tool_fingerprint(&self) -> &str {
+        &self.tool_fingerprint
+    }
+
+    /// Complete schema-validated provider arguments.
+    pub fn arguments(&self) -> &serde_json::Value {
+        &self.arguments
+    }
+}
+
+/// Disclosure-approved response to one exact dynamic application-tool call.
+///
+/// Fields are private so an adapter cannot swap the call/tool identity after
+/// the coordinator has persisted and authorized the result.
+#[derive(Clone, PartialEq)]
+pub struct ProviderDynamicToolResult {
+    call_id: String,
+    tool_id: String,
+    output: serde_json::Value,
+}
+
+impl std::fmt::Debug for ProviderDynamicToolResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderDynamicToolResult")
+            .field("call_id", &self.call_id)
+            .field("tool_id", &self.tool_id)
+            .field("output", &"<protected>")
+            .finish()
+    }
+}
+
+impl ProviderDynamicToolResult {
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn new(
+        call: &ProviderDynamicToolCall,
+        output: serde_json::Value,
+    ) -> Result<Self, ProviderError> {
+        if serde_json::to_vec(&output).map_or(true, |encoded| encoded.len() > 16 * 1024 * 1024) {
+            return Err(ProviderError::Rejected);
+        }
+        Ok(Self {
+            call_id: call.call_id.clone(),
+            tool_id: call.tool_id.clone(),
+            output,
+        })
+    }
+
+    /// Opaque provider call identifier.
+    pub fn call_id(&self) -> &str {
+        &self.call_id
+    }
+
+    /// Stable registered tool identifier.
+    pub fn tool_id(&self) -> &str {
+        &self.tool_id
+    }
+
+    /// Separately egress-authorized model-visible result.
+    pub fn output(&self) -> &serde_json::Value {
+        &self.output
+    }
+}
+
+/// Typed in-flight bridge for an experimental provider-native application
+/// tool request.
+///
+/// Implementations belong to the coordinator boundary. They must recheck the
+/// exact run fence, cancellation, current principal, current rules, registered
+/// descriptor, resolver authorization, result disclosure, and result egress
+/// before returning. A provider adapter must never implement this trait using
+/// direct GraphQL, database, shell, MCP, URL, or credential access.
+#[async_trait]
+pub trait ProviderDynamicToolResponder: Send + Sync {
+    /// Executes and persists one exact request through the coordinator.
+    ///
+    /// # Errors
+    ///
+    /// Returns a non-sensitive provider error when the request is denied,
+    /// cancelled, stale, ambiguous, or cannot be returned safely.
+    async fn respond(
+        &self,
+        call: ProviderDynamicToolCall,
+    ) -> Result<ProviderDynamicToolResult, ProviderError>;
+}
 
 /// Opaque durable binding embedded in one provider background request.
 ///
@@ -2097,6 +2299,26 @@ pub trait AiProvider: Send + Sync {
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError>;
 
+    /// Starts a streaming request with a coordinator-owned in-flight
+    /// application-tool responder.
+    ///
+    /// The default rejects every request containing application tools. An
+    /// adapter may override this only for a reviewed provider-native protocol
+    /// that cannot execute the tool itself and cannot access application
+    /// credentials. Tool-free requests continue through [`Self::stream`].
+    async fn stream_with_dynamic_tools(
+        &self,
+        request: ModelRequest,
+        context: ProviderRequestContext,
+        responder: Arc<dyn ProviderDynamicToolResponder>,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        let _ = responder;
+        if !request.tools.is_empty() {
+            return Err(ProviderError::Unsupported);
+        }
+        self.stream(request, context).await
+    }
+
     /// Interrupts one exact run-scoped provider resource.
     ///
     /// The default is inert for ordinary request-scoped adapters. This signal
@@ -2119,6 +2341,45 @@ pub trait AiProvider: Send + Sync {
         _reason: crate::AiProviderRunCloseReason,
     ) -> Result<crate::AiProviderRunCloseOutcome, ProviderError> {
         Ok(crate::AiProviderRunCloseOutcome::NotActive)
+    }
+
+    /// Creates one provider-retained session containing no business content.
+    ///
+    /// The default is unavailable. A caller must durably protect and bind the
+    /// returned cursor before sending instructions or user content. The
+    /// request is supplied only so an adapter can bind immutable model and
+    /// reviewed tool definitions required by its thread protocol; it must not
+    /// transmit request instructions or input during creation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a non-sensitive provider error when empty-session creation is
+    /// unsupported or the exact run, descriptor, model, or reviewed tool
+    /// binding cannot be honored.
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    async fn create_empty_session(
+        &self,
+        _binding: &crate::AiProviderRunBinding,
+        _descriptor: &crate::AiProviderSessionDescriptor,
+        _request: &ModelRequest,
+    ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
+        Err(ProviderError::Unsupported)
+    }
+
+    /// Deletes an empty cursor whose durable bind failed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a non-sensitive provider error when the exact empty session
+    /// cannot be deleted or confirmed absent.
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    async fn discard_empty_session(
+        &self,
+        _binding: &crate::AiProviderRunBinding,
+        _descriptor: &crate::AiProviderSessionDescriptor,
+        _cursor: &crate::AiProviderSessionCursor,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::Unsupported)
     }
 
     /// Starts provider background processing for one exactly bound request.

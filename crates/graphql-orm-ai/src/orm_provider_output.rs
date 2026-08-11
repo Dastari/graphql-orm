@@ -344,7 +344,7 @@ impl OrmAiProviderOutputService {
             || result.run_id() != lease.run_id()
             || result.attempt_id() != lease.attempt_id()
             || result.lease_generation() != lease.lease_generation()
-            || !result.tool_calls().is_empty()
+            || !result.completes_interactive_tool_calls()
         {
             return Err(AiError::Conflict);
         }

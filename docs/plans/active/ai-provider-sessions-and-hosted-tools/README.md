@@ -100,12 +100,12 @@ egress.
 Add a provider-neutral run-session interface and a provider-specific Codex
 app-server adapter. One process is admitted for one fenced claimed run and is
 reused for independently bounded fresh text-only provider turns in that run.
-Phase 1 does not claim application-tool continuation support and does not retain a Codex
-thread across those continuations: app-server dynamic tools are synchronous
+Phase 1 deliberately did not claim application-tool continuation support or
+retain a Codex thread across those continuations: app-server dynamic tools are synchronous
 server requests inside an in-flight turn, while the existing coordinator
 executes an application tool only after the provider turn finishes. Treating
 them as the same contract would deadlock or move authority into the adapter.
-Dynamic tools therefore remain forbidden. The existing JSONL harness remains
+Dynamic tools therefore remained forbidden in that phase. The existing JSONL harness remains
 the supported local stateless application-tool path, and each Phase 1
 app-server turn uses a fresh, bounded provider thread that is deleted before
 reuse of the process. The
@@ -318,8 +318,8 @@ This work remains back-burner and is not a dependency of hosted web search.
 
 ## Current checkpoint
 
-Phases 1 through 4 have project-neutral upstream contracts in the 0.69.0
-development line:
+Phases 1 through 4 have project-neutral upstream contracts from the 0.69.0
+development line, and the retained Codex milestone is implemented in 0.70.0:
 
 - a strict fresh-turn Codex app-server adapter with exact-run reuse, global and
   per-owner admission, cancellation/terminal cleanup, protocol allowlisting,
@@ -333,9 +333,61 @@ development line:
   transcript watermarks, current-principal/run fencing, exact cleanup/absence,
   session-retention dependency, and fail-closed portable restore audit.
 
-The Codex app-server v1 remains intentionally chat-only; retained Codex
-threads and local application-tool continuations require a later explicit
-adapter design. Phase 5 multiplexing and the visual-browser broker remain
-deferred investigations. The current review boundary is full backend/provider,
-documentation, SemVer, and release-policy verification for 0.69.0 / schema
-module 0.54.0.
+- exact protected Codex thread create/resume/interrupt/delete, with process and
+  provider retention governed independently; and
+- default-off experimental app-server dynamic tools that route only through
+  the existing coordinator-owned registered GraphQL tool boundary.
+
+Phase 5 multiplexing and the visual-browser broker remain deferred
+investigations. The current review boundary is full backend/provider,
+documentation, SemVer, and release-policy verification for 0.70.0 / schema
+module 0.55.0.
+
+## Current milestone: retained Codex threads
+
+This development line couples the existing provider-session persistence
+contract to the strict Codex app-server adapter without widening the app-server
+protocol into a generic bridge.
+
+The milestone delivers:
+
+- create a persistent Codex thread with no business content, bind its protected
+  cursor under the exact current run, and only then begin the first turn;
+- resume only an exact current owner/session/scope/profile/model/executable,
+  protocol, policy, transcript-watermark, attempt, and lease binding;
+- use `turn/interrupt` for durable cancellation and `thread/delete` for the
+  existing cleanup-worker absence proof;
+- keep one process per exact run while allowing the protected thread to outlive
+  that process under independent retention limits;
+- advance the durable provider-session watermark only after protected final
+  assistant output, its checkpoint, and terminal run completion are committed;
+  a retention-only commit failure quarantines the cursor without changing the
+  completed answer; and
+- invalidate the cursor after cancellation, transport ambiguity, stale policy,
+  protocol failure, or output-persistence uncertainty.
+
+Application-tool requests use app-server `dynamicTools` only through an
+explicit experimental provider capability that is disabled by default and
+bound into the registration, protocol, policy, request, and tool fingerprints.
+The strict protocol actor admits only the documented `item/tool/call` server
+request for an exact tool offered in the current `ModelRequest`. It forwards a
+typed, bounded request through a coordinator-owned in-flight bridge; the
+app-server adapter cannot answer it itself. The ordinary coordinator rechecks
+the run fence, cancellation, current principal, rules, tool policy, egress,
+budget, and resolver authorization, executes the exact registered GraphQL
+operation, and returns only the disclosure-approved result. No bearer token,
+delegated authority, raw router access, or generic request callback enters the
+provider process.
+
+Provider/tool ambiguity remains non-replayable. Cancellation, lease loss,
+protocol failure, a stale tool definition, or a failed result handoff poisons
+the process, invalidates the retained cursor, and moves the run through the
+existing recovery path. Experimental dynamic tools do not weaken the ordinary
+non-Codex provider continuation contract.
+
+The milestone remains closed to hosted app-server web search, arbitrary
+structured output, attachments, images, shell, filesystem, patches, MCP,
+skills, collaboration, screenshots, browser control, raw reasoning, and every
+server-initiated request other than the exact experimental dynamic-tool call.
+Provider-hosted search continues to use the native OpenAI Responses path until
+a separately reviewed Codex hosted-search protocol is available.

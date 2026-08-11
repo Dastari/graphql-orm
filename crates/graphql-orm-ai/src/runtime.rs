@@ -485,6 +485,90 @@ impl AiRuntime {
         provider.stream(request, context).await
     }
 
+    /// Calls a registered provider with a coordinator-owned in-flight dynamic
+    /// application-tool responder.
+    ///
+    /// The responder is authority only for the exact current tool request and
+    /// remains outside the provider process. Ordinary providers fail closed
+    /// through their default implementation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error for readiness, registration, egress, request,
+    /// capability, or adapter failure.
+    pub async fn stream_provider_with_dynamic_tools(
+        &self,
+        provider_kind: &ProviderKind,
+        request: ModelRequest,
+        context: ProviderRequestContext,
+        responder: Arc<dyn crate::ProviderDynamicToolResponder>,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        if !self.start_gate.is_ready() {
+            return Err(ProviderError::InvalidConfiguration(
+                "AI runtime is not ready".to_owned(),
+            ));
+        }
+        context.validate_request(provider_kind, &request)?;
+        let provider = self
+            .providers
+            .get(provider_kind)
+            .ok_or(ProviderError::Unsupported)?;
+        if provider.provider_kind() != *provider_kind {
+            return Err(ProviderError::InvalidConfiguration(
+                "provider registry kind mismatch".to_owned(),
+            ));
+        }
+        provider
+            .stream_with_dynamic_tools(request, context, responder)
+            .await
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) async fn create_empty_provider_session(
+        &self,
+        provider_kind: &ProviderKind,
+        binding: &crate::AiProviderRunBinding,
+        descriptor: &crate::AiProviderSessionDescriptor,
+        request: &ModelRequest,
+    ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
+        if !self.start_gate.is_ready() || descriptor.provider_kind() != provider_kind {
+            return Err(ProviderError::Rejected);
+        }
+        let provider = self
+            .providers
+            .get(provider_kind)
+            .ok_or(ProviderError::Unsupported)?;
+        if provider.provider_kind() != *provider_kind {
+            return Err(ProviderError::InvalidConfiguration(
+                "provider registry kind mismatch".to_owned(),
+            ));
+        }
+        provider
+            .create_empty_session(binding, descriptor, request)
+            .await
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) async fn discard_empty_provider_session(
+        &self,
+        provider_kind: &ProviderKind,
+        binding: &crate::AiProviderRunBinding,
+        descriptor: &crate::AiProviderSessionDescriptor,
+        cursor: &crate::AiProviderSessionCursor,
+    ) -> Result<(), ProviderError> {
+        let provider = self
+            .providers
+            .get(provider_kind)
+            .ok_or(ProviderError::Unsupported)?;
+        if provider.provider_kind() != *provider_kind || descriptor.provider_kind() != provider_kind
+        {
+            return Err(ProviderError::Rejected);
+        }
+        provider
+            .discard_empty_session(binding, descriptor, cursor)
+            .await
+    }
+
     /// Interrupts one exact run-scoped provider resource after the caller has
     /// observed authoritative durable cancellation or lease loss.
     ///
