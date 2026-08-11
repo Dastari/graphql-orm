@@ -16,7 +16,8 @@ ledgers, migration prompts, provider roadmaps, and agent briefs retained by the
 the [documentation index](../../README.md) links authoritative material.
 
 - [Consumer monorepo migration prompt](consumer-monorepo-migration-agent-prompt.md)
-- [Digitise native SMB integration brief](digitise-native-smb-integration-brief.md)
+- [Documentation disposition inventory](documentation-disposition-inventory.md)
+- [Native SMB host-integration brief](native-smb-integration-brief.md)
 - [`graphql-orm-ai` completion ledger](graphql-orm-ai-completion-ledger.md)
 - [`graphql-orm-ai` implementation ledger](graphql-orm-ai-implementation-ledger.md)
 - [`graphql-orm-backup` agent brief](graphql-orm-backup-agent-brief.md)

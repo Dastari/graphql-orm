@@ -19,11 +19,11 @@ fn sqlite_and_mssql_services_can_share_one_graphql_orm_build() {
             "-p",
             "auth-service",
             "-p",
-            "jim-service",
+            "legacy-service",
             "-p",
-            "fame-ai-runtime",
+            "ai-runtime",
             "--features",
-            "jim-service/graphql-orm-mssql-poc",
+            "legacy-service/graphql-orm-mssql-poc",
         ])
         .status()
         .expect("run backend coexistence fixture cargo check");

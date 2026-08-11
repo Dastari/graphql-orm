@@ -55,7 +55,10 @@ release/base branch. Persistent schema changes also require a new
    behavior, backup inclusion, and public error changes.
 6. Confirm no test used a live database or real consumer integration.
 7. Move `Unreleased` notes to the release version/date, update `Cargo.toml` and
-   `Cargo.lock`, commit, and create an annotated tag.
+   `Cargo.lock`, and commit. The protected workspace release workflow creates
+   the qualified `graphql-orm-ai-v<version>` tag and workspace release tag only
+   after the complete release matrix passes.
 
 Git consumers pin the reviewed full tag commit. Do not depend on a moving
-default branch.
+default branch. The canonical repository-wide procedure is the
+[workspace release process](../../../docs/operations/release/process.md).

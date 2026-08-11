@@ -23,6 +23,7 @@ unchanged and discoverable.
 - [ADR-0007: Seven-package workspace boundaries](ADR-0007-seven-package-workspace-boundaries.md)
 - [ADR-0008: Hive federation runtime and composition boundary](ADR-0008-hive-federation-runtime-and-composition-boundary.md)
 - [ADR-0009: Nine-package backend-neutral discovery boundaries](ADR-0009-nine-package-backend-neutral-discovery-boundaries.md)
+- [ADR-0010: Independent package and workspace release identities](ADR-0010-independent-package-and-workspace-release-identities.md)
 
 Use the [ADR template](../templates/adr.md) for a genuinely durable decision,
 not for feature chronology or implementation status.

@@ -12,7 +12,7 @@ supersedes: []
 
 - [PostgreSQL test runbook](runbooks/postgres-testing.md)
 - [Retention-maintenance runbook](runbooks/retention-maintenance.md)
-- [Release process](release/process.md)
+- [Workspace versioning and release process](release/process.md)
 - [Incident evidence index](incident/README.md)
 
 Runbooks contain repeatable commands, prerequisites, validation, rollback, and

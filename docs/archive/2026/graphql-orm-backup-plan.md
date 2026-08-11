@@ -37,7 +37,7 @@ Create a reusable backup and restore crate for applications using `graphql-orm`.
 - Application authentication.
 - Application authorization or row policy decisions.
 - UI or scheduling.
-- Digitise-specific entity names or workflow assumptions.
+- Host application-specific entity names or workflow assumptions.
 - Primary object storage implementation details beyond reading objects through `BackupObjectIndex`.
 
 ## Historical Initial Implementation Order

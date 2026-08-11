@@ -164,7 +164,7 @@ Cargo feature unification can enable more than one backend on the same `graphql-
 example, one workspace can have:
 
 - `auth-service` using SQLite
-- `jim-service` using SQL Server
+- `legacy-reporting-service` using SQL Server
 
 In that mode, backend selection must be explicit:
 

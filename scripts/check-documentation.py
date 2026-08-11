@@ -31,7 +31,6 @@ FENCE_RE = re.compile(r"```.*?```|~~~.*?~~~", re.DOTALL)
 HEADING_RE = re.compile(r"^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)
 STALE_PATTERNS = {
     "retired frontend path": re.compile(r"(?<![A-Za-z0-9_-])frontend/"),
-    "retired FAME client path": re.compile(r"crates/fame-client"),
     "old handoff directory": re.compile(r"\.handoffs/"),
     "old standalone checkout": re.compile(
         r"/home/[^/]+/dev/graphql-orm-(?:ai|backup|storage)(?:/|\b)"
@@ -39,6 +38,10 @@ STALE_PATTERNS = {
     "old standalone repository": re.compile(
         r"https://github\.com/Dastari/graphql-orm-(?:ai|backup|storage)(?:\.git)?"
     ),
+}
+CONSUMER_SPECIFIC_RE = re.compile(r"\b(?:GEMA|FAME|JIM|Digitise)\b", re.IGNORECASE)
+IMMUTABLE_HISTORICAL_EXCEPTIONS = {
+    Path("docs/decisions/ADR-0007-seven-package-workspace-boundaries.md"),
 }
 
 
@@ -190,6 +193,21 @@ def validate_stale_paths(path: Path, text: str, metadata: dict[str, str], errors
             errors.append(f"{path}:{line}: {label}: {match.group(0)!r}")
 
 
+def validate_project_neutrality(
+    path: Path, text: str, metadata: dict[str, str], errors: list[str]
+) -> None:
+    if metadata.get("status") in {"archived", "superseded"}:
+        return
+    if path in IMMUTABLE_HISTORICAL_EXCEPTIONS:
+        return
+    match = CONSUMER_SPECIFIC_RE.search(text)
+    if match:
+        line = text.count("\n", 0, match.start()) + 1
+        errors.append(
+            f"{path}:{line}: maintained documentation must use project-neutral examples"
+        )
+
+
 def validate_adrs(files: list[Path], metadata_by_path: dict[Path, dict[str, str]], base: str | None, errors: list[str]) -> None:
     numbers: dict[str, Path] = {}
     for path in files:
@@ -245,6 +263,7 @@ def main() -> int:
         metadata_by_path[path] = metadata
         validate_links(path, text, errors)
         validate_stale_paths(path, text, metadata, errors)
+        validate_project_neutrality(path, text, metadata, errors)
 
     validate_adrs(files, metadata_by_path, args.base, errors)
     if errors:

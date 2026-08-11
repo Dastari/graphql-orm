@@ -183,6 +183,6 @@ last-known-good retention, explicit validated removal, bounded downstream
 timeouts, and subscription recovery signals. The lifecycle-intent protocol,
 execution circuit breaker, stable transport-outage error contract, persistent
 cold-start recovery, and corrected multi-dimensional health reporting remain
-backlog work. GEMA's initial testing migration may require every static
+backlog work. An initial consumer migration may require every static
 subgraph to be reachable at router startup until this backlog is promoted and
 implemented.

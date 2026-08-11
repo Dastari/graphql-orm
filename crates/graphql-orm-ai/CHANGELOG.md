@@ -20,6 +20,10 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+No changes recorded after 0.73.0.
+
+## [0.73.0] - 2026-08-11
+
 This development line advances the pre-1.0 crate version to `0.73.0` and AI
 schema module `0.55.0`. It begins the applied-restore implementation with
 bounded database-derived facts, aligns the reviewed dependency universe,

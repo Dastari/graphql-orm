@@ -67,8 +67,7 @@ Investigations and incident evidence are archived rather than deleted.
 Temporary agent/session material belongs in the ignored `.handoff/` directory.
 
 The complete policy and exceptions are defined by
-[ADR-0001](decisions/ADR-0001-documentation-authority-and-lifecycle.md). The
-[disposition inventory](document-inventory.md) records the 2026 cleanup.
+[ADR-0001](decisions/ADR-0001-documentation-authority-and-lifecycle.md).
 
 ## Required metadata
 

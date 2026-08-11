@@ -3,8 +3,8 @@ use graphql_orm::prelude::*;
 use graphql_orm_ai_tool_profiles::{
     AiDisclosureRule, AiDisclosureSchema, AiDisclosureShape, AiGeneratedGraphqlOperationPolicy,
     AiGraphqlArgumentPlan, AiGraphqlArgumentValue, AiGraphqlProfileInput, AiGraphqlSelection,
-    AiGraphqlToolManifest, AiGraphqlToolManifestBuilder, AiGraphqlToolProfile,
-    DataClassification, GraphqlExecutionTargetId,
+    AiGraphqlToolManifest, AiGraphqlToolManifestBuilder, AiGraphqlToolProfile, DataClassification,
+    GraphqlExecutionTargetId,
 };
 
 #[derive(
@@ -42,7 +42,13 @@ pub struct Job {
     pub is_active: bool,
 
     #[graphql(skip)]
-    #[relation(target = "JobLabour", from = "job_id", to = "JobId", multiple, emit_fk = false)]
+    #[relation(
+        target = "JobLabour",
+        from = "job_id",
+        to = "JobId",
+        multiple,
+        emit_fk = false
+    )]
     pub labour_entries: Vec<JobLabour>,
 }
 
@@ -105,12 +111,12 @@ pub struct JobLabour {
 #[graphql(complex)]
 #[graphql_entity(
     backend = "mssql",
-    table = "dbo.JimCardFile",
-    plural = "JimCardFiles",
+    table = "dbo.LegacyCardFile",
+    plural = "LegacyCardFiles",
     schema_policy = "external_read_only",
     default_sort = "[CardNo] ASC"
 )]
-pub struct JimCardFile {
+pub struct LegacyCardFile {
     #[primary_key]
     #[graphql(name = "CardNo")]
     #[graphql_orm(db_column = "CardNo", write = false)]
@@ -130,13 +136,13 @@ pub struct JimCardFile {
 
     #[graphql(skip, name = "Contacts")]
     #[relation(
-        target = "JimCardFileContact",
+        target = "LegacyCardFileContact",
         from = "card_no",
         to = "CardNo",
         multiple,
         emit_fk = false
     )]
-    pub contacts: Vec<JimCardFileContact>,
+    pub contacts: Vec<LegacyCardFileContact>,
 }
 
 #[derive(
@@ -153,12 +159,12 @@ pub struct JimCardFile {
 #[graphql(complex)]
 #[graphql_entity(
     backend = "mssql",
-    table = "dbo.JimCardFileContacts",
-    plural = "JimCardFileContacts",
+    table = "dbo.LegacyCardFileContacts",
+    plural = "LegacyCardFileContacts",
     schema_policy = "external_read_only",
     default_sort = "[CardNo] ASC, [ContNo] ASC"
 )]
-pub struct JimCardFileContact {
+pub struct LegacyCardFileContact {
     #[primary_key]
     #[graphql(name = "CardNo")]
     #[graphql_orm(db_column = "CardNo", write = false)]
@@ -185,32 +191,25 @@ pub struct JimCardFileContact {
 
     #[graphql(skip, name = "Details")]
     #[relation(
-        target = "JimCardFileDetail",
+        target = "LegacyCardFileDetail",
         from = ["card_no", "cont_no"],
         to = ["CardNo", "ContNo"],
         multiple,
         emit_fk = false
     )]
-    pub details: Vec<JimCardFileDetail>,
+    pub details: Vec<LegacyCardFileDetail>,
 }
 
-#[derive(
-    GraphQLEntity,
-    GraphQLOperations,
-    Clone,
-    Debug,
-    serde::Serialize,
-    serde::Deserialize,
-)]
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[graphql(rename_fields = "PascalCase")]
 #[graphql_entity(
     backend = "mssql",
-    table = "dbo.JimCardFileDetails",
-    plural = "JimCardFileDetails",
+    table = "dbo.LegacyCardFileDetails",
+    plural = "LegacyCardFileDetails",
     schema_policy = "external_read_only",
     default_sort = "[CardNo] ASC, [ContNo] ASC, [LineNum] ASC"
 )]
-pub struct JimCardFileDetail {
+pub struct LegacyCardFileDetail {
     #[primary_key]
     #[graphql(name = "CardNo")]
     #[graphql_orm(db_column = "CardNo", write = false)]
@@ -256,7 +255,8 @@ impl graphql_orm::graphql::loaders::BatchLoadEntity<graphql_orm::MssqlBackend> f
     fn batch_key_from_row(
         row: &graphql_orm::db::mssql::MssqlRow,
     ) -> Result<String, graphql_orm::sqlx::Error> {
-        row.try_get::<i32, _>("JobId").map(|value| value.to_string())
+        row.try_get::<i32, _>("JobId")
+            .map(|value| value.to_string())
     }
 }
 
@@ -268,11 +268,14 @@ impl graphql_orm::graphql::loaders::BatchLoadEntity<graphql_orm::MssqlBackend> f
     fn batch_key_from_row(
         row: &graphql_orm::db::mssql::MssqlRow,
     ) -> Result<String, graphql_orm::sqlx::Error> {
-        row.try_get::<i32, _>("JobId").map(|value| value.to_string())
+        row.try_get::<i32, _>("JobId")
+            .map(|value| value.to_string())
     }
 }
 
-impl graphql_orm::graphql::loaders::BatchLoadEntity<graphql_orm::MssqlBackend> for JimCardFileContact {
+impl graphql_orm::graphql::loaders::BatchLoadEntity<graphql_orm::MssqlBackend>
+    for LegacyCardFileContact
+{
     fn batch_column() -> &'static str {
         "CardNo"
     }
@@ -280,11 +283,14 @@ impl graphql_orm::graphql::loaders::BatchLoadEntity<graphql_orm::MssqlBackend> f
     fn batch_key_from_row(
         row: &graphql_orm::db::mssql::MssqlRow,
     ) -> Result<String, graphql_orm::sqlx::Error> {
-        row.try_get::<i32, _>("CardNo").map(|value| value.to_string())
+        row.try_get::<i32, _>("CardNo")
+            .map(|value| value.to_string())
     }
 }
 
-impl graphql_orm::graphql::loaders::BatchLoadEntity<graphql_orm::MssqlBackend> for JimCardFileDetail {
+impl graphql_orm::graphql::loaders::BatchLoadEntity<graphql_orm::MssqlBackend>
+    for LegacyCardFileDetail
+{
     fn batch_column() -> &'static str {
         "CardNo"
     }
@@ -292,23 +298,24 @@ impl graphql_orm::graphql::loaders::BatchLoadEntity<graphql_orm::MssqlBackend> f
     fn batch_key_from_row(
         row: &graphql_orm::db::mssql::MssqlRow,
     ) -> Result<String, graphql_orm::sqlx::Error> {
-        row.try_get::<i32, _>("CardNo").map(|value| value.to_string())
+        row.try_get::<i32, _>("CardNo")
+            .map(|value| value.to_string())
     }
 }
 
 #[derive(Clone, Debug, SimpleObject)]
 #[graphql(rename_fields = "PascalCase")]
-pub struct JimComment {
+pub struct LegacyComment {
     pub line_no: i32,
     pub comment: String,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct JimCustomQuery;
+pub struct LegacyCustomQuery;
 
 #[Object(rename_fields = "PascalCase", rename_args = "PascalCase")]
-impl JimCustomQuery {
-    async fn jim_work_item_comments(&self, job_no: String, first: i32) -> Vec<JimComment> {
+impl LegacyCustomQuery {
+    async fn legacy_work_item_comments(&self, job_no: String, first: i32) -> Vec<LegacyComment> {
         let _ = (job_no, first);
         Vec::new()
     }
@@ -318,29 +325,28 @@ schema_roots! {
     backend: "mssql",
     schema_policy: "external_read_only",
     query_custom_ops: [],
-    extra_query_types: [JimCustomQuery],
-    entities: [Job, JobLabour, JimCardFile, JimCardFileContact, JimCardFileDetail],
+    extra_query_types: [LegacyCustomQuery],
+    entities: [Job, JobLabour, LegacyCardFile, LegacyCardFileContact, LegacyCardFileDetail],
 }
 
 pub fn build_schema(
     pool: graphql_orm::db::mssql::MssqlPool,
 ) -> graphql_orm::async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot> {
-    schema_builder(graphql_orm::db::Database::<graphql_orm::MssqlBackend>::new(pool)).finish()
+    schema_builder(graphql_orm::db::Database::<graphql_orm::MssqlBackend>::new(
+        pool,
+    ))
+    .finish()
 }
 
-struct AdmitJimGenerated;
+struct AdmitLegacyGenerated;
 
-impl AiGeneratedGraphqlOperationPolicy for AdmitJimGenerated {
+impl AiGeneratedGraphqlOperationPolicy for AdmitLegacyGenerated {
     fn is_application_operation(&self, operation: &GraphqlResolverOperationDescriptor) -> bool {
         operation.entity_name() == "Job"
     }
 }
 
-fn disclosure(
-    version: &str,
-    root: &str,
-    root_shape: AiDisclosureShape,
-) -> AiDisclosureSchema {
+fn disclosure(version: &str, root: &str, root_shape: AiDisclosureShape) -> AiDisclosureSchema {
     let rule = AiDisclosureRule::exportable(DataClassification::Confidential);
     AiDisclosureSchema::new(
         version,
@@ -354,8 +360,7 @@ pub fn ai_tool_manifest() -> Result<(String, AiGraphqlToolManifest), String> {
     config.host("fixture.invalid");
     config.port(1433);
     config.authentication(graphql_orm::tiberius::AuthMethod::sql_server(
-        "fixture",
-        "fixture",
+        "fixture", "fixture",
     ));
     let pool = graphql_orm::db::mssql::MssqlPool::new(config);
     let sdl = build_schema(pool).sdl();
@@ -375,13 +380,13 @@ pub fn ai_tool_manifest() -> Result<(String, AiGraphqlToolManifest), String> {
     let generated = AiGraphqlToolProfile::read_only(
         "details",
         operation.field_name(),
-        "Show a reviewed subset of one visible Jim job",
+        "Show a reviewed subset of one visible Legacy job",
         vec![
             AiGraphqlSelection::scalar("jobId"),
             AiGraphqlSelection::scalar("jobName"),
         ],
         disclosure(
-            "jim-job-details-v1",
+            "legacy-job-details-v1",
             operation.field_name(),
             AiDisclosureShape::object(
                 rule,
@@ -396,7 +401,7 @@ pub fn ai_tool_manifest() -> Result<(String, AiGraphqlToolManifest), String> {
     )
     .with_inputs([AiGraphqlProfileInput::integer(
         "JobNo",
-        "Public Jim job number",
+        "Public Legacy job number",
         true,
         1,
         i64::from(i32::MAX),
@@ -407,15 +412,15 @@ pub fn ai_tool_manifest() -> Result<(String, AiGraphqlToolManifest), String> {
     )]);
     let custom = AiGraphqlToolProfile::read_only(
         "comments",
-        "JimWorkItemComments",
-        "List a bounded reviewed set of comments for one Jim work item",
+        "LegacyWorkItemComments",
+        "List a bounded reviewed set of comments for one Legacy work item",
         vec![
             AiGraphqlSelection::scalar("LineNo"),
             AiGraphqlSelection::scalar("Comment"),
         ],
         disclosure(
-            "jim-comments-v1",
-            "JimWorkItemComments",
+            "legacy-comments-v1",
+            "LegacyWorkItemComments",
             AiDisclosureShape::list(
                 rule,
                 25,
@@ -433,7 +438,7 @@ pub fn ai_tool_manifest() -> Result<(String, AiGraphqlToolManifest), String> {
     )
     .with_root_list_bound(25)
     .with_inputs([
-        AiGraphqlProfileInput::string("JobNo", "Public Jim job number", true, 1, 64),
+        AiGraphqlProfileInput::string("JobNo", "Public Legacy job number", true, 1, 64),
         AiGraphqlProfileInput::integer("Limit", "Maximum comment count", true, 1, 25),
     ])
     .with_arguments([
@@ -441,11 +446,12 @@ pub fn ai_tool_manifest() -> Result<(String, AiGraphqlToolManifest), String> {
         AiGraphqlArgumentPlan::new("First", AiGraphqlArgumentValue::input("Limit")),
     ]);
 
-    let target = GraphqlExecutionTargetId::parse("jim-graph").map_err(|error| error.to_string())?;
-    let mut builder = AiGraphqlToolManifestBuilder::new("jim-service", target, &sdl)
+    let target =
+        GraphqlExecutionTargetId::parse("legacy-graph").map_err(|error| error.to_string())?;
+    let mut builder = AiGraphqlToolManifestBuilder::new("legacy-service", target, &sdl)
         .map_err(|error| error.to_string())?;
     builder
-        .add_generated_profile(generated, catalog, &AdmitJimGenerated)
+        .add_generated_profile(generated, catalog, &AdmitLegacyGenerated)
         .map_err(|error| error.to_string())?;
     builder
         .add_custom_profile(custom)

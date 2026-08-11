@@ -1,0 +1,11 @@
+format_version = 1
+repository = "Dastari/graphql-orm"
+distribution = "git"
+workspace_tag_prefix = "workspace-"
+package_tag_template = "{package}-v{version}"
+
+[router_artifact]
+package = "graphql-orm-router"
+binary = "graphql-orm-router"
+features = ["auth-agql"]
+target = "x86_64-unknown-linux-gnu"

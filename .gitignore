@@ -1,2 +1,5 @@
 /target
 /.handoff/
+*.cdx.json
+*.pyc
+__pycache__/

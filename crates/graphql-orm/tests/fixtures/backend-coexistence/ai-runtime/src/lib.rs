@@ -6,7 +6,7 @@ mod tests {
 
     #[test]
     fn mssql_producer_and_sqlite_runtime_share_the_canonical_manifest() {
-        let (sdl, produced) = jim_service::ai_tool_manifest().expect("compile Jim manifest");
+        let (sdl, produced) = legacy_service::ai_tool_manifest().expect("compile Legacy manifest");
         let payload = produced.extension_payload().expect("encode extension");
         let decoded = AiGraphqlToolManifest::from_extension_payload(payload)
             .expect("SQLite runtime decodes canonical producer payload");
@@ -19,7 +19,7 @@ mod tests {
 
         let set = AiGraphqlToolManifestSet::aggregate(
             [decoded],
-            &BTreeMap::from([("jim-service".to_owned(), sdl)]),
+            &BTreeMap::from([("legacy-service".to_owned(), sdl)]),
         )
         .expect("aggregate exact active schema");
         let mut catalog = AiToolCatalog::new();

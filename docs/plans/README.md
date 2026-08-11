@@ -12,9 +12,7 @@ supersedes: []
 
 ## Active
 
-- [AI provider sessions, hosted tools, and visible activity](active/ai-provider-sessions-and-hosted-tools/README.md)
 - [AI production readiness](active/ai-production-readiness/README.md)
-- [GraphQL ORM Router](active/graphql-orm-router/README.md)
 
 ## Backlog
 
@@ -24,6 +22,8 @@ supersedes: []
 
 ## Completed
 
+- [AI provider sessions, hosted tools, and visible activity](completed/ai-provider-sessions-and-hosted-tools/README.md)
+- [GraphQL ORM Router](completed/graphql-orm-router/README.md)
 - [Monorepo consolidation](completed/monorepo-consolidation/README.md)
 
 An active plan has one canonical file at

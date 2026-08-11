@@ -20,7 +20,8 @@ This crate is a reusable storage companion for applications that use `graphql-or
 ## Rules
 
 - Keep the crate generic and reusable.
-- Do not add Digitise-specific domain names, entity names, collection semantics, accession logic, record logic, media workflows, or policy assumptions.
+- Do not add consumer-specific domain names, entity names, collection
+  semantics, record workflows, or policy assumptions.
 - Do not store file bytes in a database.
 - Prefer traits and small adapters over application-specific coupling.
 - Keep provider-specific code behind feature flags.
@@ -31,7 +32,7 @@ This crate is a reusable storage companion for applications that use `graphql-or
 ## Current Agent Handoff
 
 - Current crate version is `0.6.0`.
-- The workspace resolves `graphql-orm` 0.19.0 and `graphql-orm-backup` 0.7.0
+- The workspace resolves `graphql-orm` 0.21.0 and `graphql-orm-backup` 0.7.0
   through workspace path dependencies and one root `Cargo.lock`. Keep
   downstream companion packages on one reviewed monorepo revision.
 - `graphql-orm` owns the optional `agql-auth` integration, pinned at

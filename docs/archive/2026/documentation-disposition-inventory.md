@@ -1,10 +1,10 @@
 ---
 title: Documentation disposition inventory
 kind: reference
-status: active
+status: archived
 owner: workspace-maintainers
 last_reviewed: 2026-08-01
-review_by: 2026-11-01
+review_by: none
 supersedes: []
 ---
 
@@ -28,7 +28,7 @@ No first-party document is deleted in this run. Historical release, plan,
 investigation, prompt, and handoff material is retained under `docs/archive/`
 or `docs/plans/completed/`.
 
-The source proposal also named FAME, frontend, `PrivilegedWrite`, and shell
+The source proposal also named consumer UI, privileged-write, and shell
 substrate decisions. This repository contains none of those systems or active
 requirements/design documents, so the cleanup does not fabricate authority for
 them. The initial ADR set instead covers the equivalent durable decisions that
@@ -110,7 +110,7 @@ guidance, and repaired links:
 | --- | --- | --- |
 | `crates/graphql-orm-ai/docs/completion-plan.md` | supersede/archive | `docs/archive/2026/graphql-orm-ai-completion-ledger.md` and `docs/plans/active/ai-production-readiness/README.md` |
 | `crates/graphql-orm-ai/docs/implementation-status.md` | split/rewrite | concise local current-state page plus `docs/archive/2026/graphql-orm-ai-implementation-ledger.md` |
-| `crates/graphql-orm-backup/docs/digitise-native-smb.md` | archive | `docs/archive/2026/digitise-native-smb-integration-brief.md` |
+| legacy host-specific native SMB brief | archive | `docs/archive/2026/native-smb-integration-brief.md` |
 | `crates/graphql-orm-backup/docs/graphql-orm-agent-brief.md` | archive | `docs/archive/2026/graphql-orm-backup-agent-brief.md` |
 | `crates/graphql-orm-backup/docs/plan.md` | supersede/archive | `docs/archive/2026/graphql-orm-backup-plan.md` |
 | `crates/graphql-orm-backup/docs/provider-roadmap.md` | supersede/archive | `docs/plans/backlog/backup-providers/README.md` plus `docs/archive/2026/graphql-orm-backup-provider-roadmap.md` |

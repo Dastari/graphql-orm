@@ -77,12 +77,12 @@ Composite primary keys are declared by marking more than one field:
 
 ```rust
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
-#[graphql_entity(table = "JimLabour", plural = "JimLabourEntries")]
-pub struct JimLabourEntry {
+#[graphql_entity(table = "LegacyLabour", plural = "LegacyLabourEntries")]
+pub struct LegacyLabourEntry {
     #[primary_key]
-    #[graphql(name = "JimObjectType")]
-    #[graphql_orm(db_column = "JimObjectType", write = false)]
-    pub jim_object_type: i32,
+    #[graphql(name = "LegacyObjectType")]
+    #[graphql_orm(db_column = "LegacyObjectType", write = false)]
+    pub legacy_object_type: i32,
 
     #[primary_key]
     #[graphql(name = "RefNo")]
@@ -100,8 +100,8 @@ Composite-key lookups use one argument per key field:
 
 ```graphql
 query {
-  jimLabourEntry(jimObjectType: 1, refNo: 12345, lineNum: 2) {
-    jimObjectType
+  legacyLabourEntry(legacyObjectType: 1, refNo: 12345, lineNum: 2) {
+    legacyObjectType
     refNo
     lineNum
   }
@@ -282,13 +282,13 @@ the `to` entries are target database columns:
 ```rust
 #[graphql(skip, name = "Details")]
 #[relation(
-    target = "JimCardFileDetail",
+    target = "LegacyCardFileDetail",
     from = ["card_no", "cont_no"],
     to = ["CardNo", "ContNo"],
     multiple,
     emit_fk = false
 )]
-pub details: Vec<JimCardFileDetail>,
+pub details: Vec<LegacyCardFileDetail>,
 ```
 
 The macro validates:
@@ -303,7 +303,7 @@ database when the generated query runs.
 ## Nested Relation Batching
 
 Selected relation fields are loaded in batches by relation layer. A query shaped like
-`JimCardFiles -> Contacts -> Details` performs:
+`LegacyCardFiles -> Contacts -> Details` performs:
 
 1. one parent query for card files
 2. one relation query for all selected contacts

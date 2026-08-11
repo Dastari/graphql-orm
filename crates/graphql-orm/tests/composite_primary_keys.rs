@@ -16,17 +16,17 @@ mod sqlite_fixture {
     )]
     #[graphql_entity(
         backend = "sqlite",
-        table = "jim_labour",
-        plural = "JimLabourEntries",
-        default_sort = "JimObjectType ASC, RefNo ASC, LineNum ASC"
+        table = "legacy_labour",
+        plural = "LegacyLabourEntries",
+        default_sort = "LegacyObjectType ASC, RefNo ASC, LineNum ASC"
     )]
-    pub struct JimLabourEntry {
+    pub struct LegacyLabourEntry {
         #[primary_key]
-        #[graphql(name = "JimObjectType")]
-        #[graphql_orm(db_column = "JimObjectType", write = false)]
+        #[graphql(name = "LegacyObjectType")]
+        #[graphql_orm(db_column = "LegacyObjectType", write = false)]
         #[filterable(type = "number")]
         #[sortable]
-        pub jim_object_type: i32,
+        pub legacy_object_type: i32,
 
         #[primary_key]
         #[graphql(name = "RefNo")]
@@ -74,7 +74,7 @@ mod sqlite_fixture {
     schema_roots! {
         backend: "sqlite",
         query_custom_ops: [],
-        entities: [JimLabourEntry, SingleKeyRecord],
+        entities: [LegacyLabourEntry, SingleKeyRecord],
     }
 
     async fn setup_pool() -> sqlx::SqlitePool {
@@ -85,17 +85,17 @@ mod sqlite_fixture {
 
     #[test]
     fn composite_primary_key_metadata_exposes_all_keys() {
-        assert_eq!(JimLabourEntry::PRIMARY_KEY, "JimObjectType");
+        assert_eq!(LegacyLabourEntry::PRIMARY_KEY, "LegacyObjectType");
         assert_eq!(
-            JimLabourEntry::PRIMARY_KEYS,
-            &["JimObjectType", "RefNo", "LineNum"]
+            LegacyLabourEntry::PRIMARY_KEYS,
+            &["LegacyObjectType", "RefNo", "LineNum"]
         );
 
-        let metadata = <JimLabourEntry as Entity>::metadata();
-        assert_eq!(metadata.primary_key, "JimObjectType");
+        let metadata = <LegacyLabourEntry as Entity>::metadata();
+        assert_eq!(metadata.primary_key, "LegacyObjectType");
         assert_eq!(
             metadata.primary_keys.as_ref(),
-            ["JimObjectType", "RefNo", "LineNum"]
+            ["LegacyObjectType", "RefNo", "LineNum"]
         );
 
         let primary_fields = metadata
@@ -106,7 +106,7 @@ mod sqlite_fixture {
             .collect::<Vec<_>>();
         assert_eq!(
             primary_fields,
-            vec!["jim_object_type", "ref_no", "line_num"]
+            vec!["legacy_object_type", "ref_no", "line_num"]
         );
     }
 
@@ -122,18 +122,18 @@ mod sqlite_fixture {
 
     #[test]
     fn sqlite_composite_lookup_uses_ordered_qmark_conditions_and_values() {
-        let key = JimLabourEntryKey {
-            jim_object_type: 1,
+        let key = LegacyLabourEntryKey {
+            legacy_object_type: 1,
             ref_no: 12_345,
             line_num: 2,
         };
 
         assert_eq!(
-            JimLabourEntry::__gom_key_where_clause(),
-            "\"JimObjectType\" = ? AND \"RefNo\" = ? AND \"LineNum\" = ?"
+            LegacyLabourEntry::__gom_key_where_clause(),
+            "\"LegacyObjectType\" = ? AND \"RefNo\" = ? AND \"LineNum\" = ?"
         );
         assert_eq!(
-            JimLabourEntry::__gom_key_values(&key),
+            LegacyLabourEntry::__gom_key_values(&key),
             vec![SqlValue::Int(1), SqlValue::Int(12_345), SqlValue::Int(2)]
         );
     }
@@ -145,12 +145,12 @@ mod sqlite_fixture {
         let sdl = schema.sdl();
 
         assert!(sdl.contains(
-            "jimLabourEntry(jimObjectType: Int!, refNo: Int!, lineNum: Int!): JimLabourEntry"
+            "legacyLabourEntry(legacyObjectType: Int!, refNo: Int!, lineNum: Int!): LegacyLabourEntry"
         ));
         assert!(sdl.contains("singleKeyRecord(id: String!): SingleKeyRecord"));
-        assert!(!sdl.contains("createJimLabourEntry("));
-        assert!(!sdl.contains("updateJimLabourEntry("));
-        assert!(!sdl.contains("deleteJimLabourEntry("));
+        assert!(!sdl.contains("createLegacyLabourEntry("));
+        assert!(!sdl.contains("updateLegacyLabourEntry("));
+        assert!(!sdl.contains("deleteLegacyLabourEntry("));
         assert!(sdl.contains(
             "createSingleKeyRecord(input: CreateSingleKeyRecordInput!): SingleKeyRecordResult!"
         ));
@@ -165,16 +165,16 @@ mod postgres_fixture {
     #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, PartialEq)]
     #[graphql_entity(
         backend = "postgres",
-        table = "jim_labour",
-        plural = "JimLabourEntries",
-        default_sort = "JimObjectType ASC, RefNo ASC, LineNum ASC"
+        table = "legacy_labour",
+        plural = "LegacyLabourEntries",
+        default_sort = "LegacyObjectType ASC, RefNo ASC, LineNum ASC"
     )]
-    pub struct JimLabourEntry {
+    pub struct LegacyLabourEntry {
         #[primary_key]
-        #[graphql(name = "JimObjectType")]
-        #[graphql_orm(db_column = "JimObjectType", write = false)]
+        #[graphql(name = "LegacyObjectType")]
+        #[graphql_orm(db_column = "LegacyObjectType", write = false)]
         #[sortable]
-        pub jim_object_type: i32,
+        pub legacy_object_type: i32,
 
         #[primary_key]
         #[graphql(name = "RefNo")]
@@ -191,18 +191,18 @@ mod postgres_fixture {
 
     #[test]
     fn postgres_composite_lookup_uses_ordered_numbered_conditions() {
-        let key = JimLabourEntryKey {
-            jim_object_type: 1,
+        let key = LegacyLabourEntryKey {
+            legacy_object_type: 1,
             ref_no: 12_345,
             line_num: 2,
         };
 
         assert_eq!(
-            JimLabourEntry::__gom_key_where_clause(),
-            "\"JimObjectType\" = $1 AND \"RefNo\" = $2 AND \"LineNum\" = $3"
+            LegacyLabourEntry::__gom_key_where_clause(),
+            "\"LegacyObjectType\" = $1 AND \"RefNo\" = $2 AND \"LineNum\" = $3"
         );
         assert_eq!(
-            JimLabourEntry::__gom_key_values(&key),
+            LegacyLabourEntry::__gom_key_values(&key),
             vec![SqlValue::Int(1), SqlValue::Int(12_345), SqlValue::Int(2)]
         );
     }
@@ -216,16 +216,16 @@ mod mssql_fixture {
     #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, PartialEq)]
     #[graphql_entity(
         backend = "mssql",
-        table = "dbo.JimLabour",
-        plural = "JimLabourEntries",
-        default_sort = "[JimObjectType] ASC, [RefNo] ASC, [LineNum] ASC"
+        table = "dbo.LegacyLabour",
+        plural = "LegacyLabourEntries",
+        default_sort = "[LegacyObjectType] ASC, [RefNo] ASC, [LineNum] ASC"
     )]
-    pub struct JimLabourEntry {
+    pub struct LegacyLabourEntry {
         #[primary_key]
-        #[graphql(name = "JimObjectType")]
-        #[graphql_orm(db_column = "JimObjectType", write = false)]
+        #[graphql(name = "LegacyObjectType")]
+        #[graphql_orm(db_column = "LegacyObjectType", write = false)]
         #[sortable]
-        pub jim_object_type: i32,
+        pub legacy_object_type: i32,
 
         #[primary_key]
         #[graphql(name = "RefNo")]
@@ -247,31 +247,31 @@ mod mssql_fixture {
     schema_roots! {
         backend: "mssql",
         query_custom_ops: [],
-        entities: [JimLabourEntry],
+        entities: [LegacyLabourEntry],
     }
 
     #[test]
     fn mssql_composite_lookup_uses_ordered_tiberius_conditions() {
-        let key = JimLabourEntryKey {
-            jim_object_type: 1,
+        let key = LegacyLabourEntryKey {
+            legacy_object_type: 1,
             ref_no: 12_345,
             line_num: 2,
         };
 
         assert_eq!(
-            JimLabourEntry::TABLE_NAME,
-            DatabaseBackend::Mssql.quote_identifier_path("dbo.JimLabour")
+            LegacyLabourEntry::TABLE_NAME,
+            DatabaseBackend::Mssql.quote_identifier_path("dbo.LegacyLabour")
         );
         assert_eq!(
-            JimLabourEntry::PRIMARY_KEYS,
-            &["[JimObjectType]", "[RefNo]", "[LineNum]"]
+            LegacyLabourEntry::PRIMARY_KEYS,
+            &["[LegacyObjectType]", "[RefNo]", "[LineNum]"]
         );
         assert_eq!(
-            JimLabourEntry::__gom_key_where_clause(),
-            "[JimObjectType] = @P1 AND [RefNo] = @P2 AND [LineNum] = @P3"
+            LegacyLabourEntry::__gom_key_where_clause(),
+            "[LegacyObjectType] = @P1 AND [RefNo] = @P2 AND [LineNum] = @P3"
         );
         assert_eq!(
-            JimLabourEntry::__gom_key_values(&key),
+            LegacyLabourEntry::__gom_key_values(&key),
             vec![SqlValue::Int(1), SqlValue::Int(12_345), SqlValue::Int(2)]
         );
     }
@@ -287,7 +287,7 @@ mod mssql_fixture {
         let sdl = schema.sdl();
 
         assert!(sdl.contains(
-            "jimLabourEntry(jimObjectType: Int!, refNo: Int!, lineNum: Int!): JimLabourEntry"
+            "legacyLabourEntry(legacyObjectType: Int!, refNo: Int!, lineNum: Int!): LegacyLabourEntry"
         ));
         assert!(!sdl.contains("type Mutation"));
         assert!(!sdl.contains("type Subscription"));
