@@ -172,6 +172,8 @@ pub enum AiRuleProviderCapability {
     ParallelToolCalls,
     /// JSON-schema structured output.
     StructuredOutput,
+    /// Provider-generated visible reasoning summaries, never hidden reasoning.
+    VisibleReasoningSummaries,
     /// Provider web search.
     WebSearch,
     /// Provider file search or retained file indexes.
@@ -200,6 +202,7 @@ impl AiRuleProviderCapability {
             Self::CustomTools => "custom_tools",
             Self::ParallelToolCalls => "parallel_tool_calls",
             Self::StructuredOutput => "structured_output",
+            Self::VisibleReasoningSummaries => "visible_reasoning_summaries",
             Self::WebSearch => "web_search",
             Self::FileSearch => "file_search",
             Self::CodeExecution => "code_execution",
@@ -231,6 +234,9 @@ pub struct AiRuleBudgetCeilings {
     pub maximum_provider_calls: Option<u64>,
     /// Maximum provider/application tool units.
     pub maximum_tool_units: Option<u64>,
+    /// Maximum completed provider-hosted web searches across one run.
+    #[serde(default)]
+    pub maximum_web_search_calls: Option<u64>,
     /// Maximum image units.
     pub maximum_image_units: Option<u64>,
 }
@@ -253,6 +259,9 @@ impl AiRuleBudgetCeilings {
             || self
                 .maximum_tool_units
                 .is_some_and(|value| value > 1_000_000)
+            || self
+                .maximum_web_search_calls
+                .is_some_and(|value| value > 10_000)
             || self
                 .maximum_image_units
                 .is_some_and(|value| value > 1_000_000)
@@ -284,6 +293,10 @@ impl AiRuleBudgetCeilings {
                 other.maximum_provider_calls,
             ),
             maximum_tool_units: minimum_optional(self.maximum_tool_units, other.maximum_tool_units),
+            maximum_web_search_calls: minimum_optional(
+                self.maximum_web_search_calls,
+                other.maximum_web_search_calls,
+            ),
             maximum_image_units: minimum_optional(
                 self.maximum_image_units,
                 other.maximum_image_units,
@@ -578,6 +591,8 @@ pub struct AiRuleRunUsage {
     output_tokens: u64,
     cost_microunits: u64,
     tool_units: u64,
+    #[serde(default)]
+    web_search_calls: u64,
     image_units: u64,
 }
 
@@ -612,27 +627,36 @@ impl AiRuleRunUsage {
         self.tool_units
     }
 
+    /// Authoritative cumulative completed provider-hosted web searches.
+    pub const fn web_search_calls(self) -> u64 {
+        self.web_search_calls
+    }
+
     /// Authoritative cumulative image billing units.
     pub const fn image_units(self) -> u64 {
         self.image_units
     }
 
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
-    pub(crate) fn projected_provider(
+    pub(crate) fn projected_provider_with_web_searches(
         self,
         estimated: crate::AiBudgetAmounts,
+        maximum_web_search_calls: u64,
         resolution: &AiAgentRuleResolution,
     ) -> Result<Self, AiError> {
-        self.add_provider(estimated, resolution)
+        self.add_provider(estimated, resolution)?
+            .add_web_searches(maximum_web_search_calls, resolution)
     }
 
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
-    pub(crate) fn accept_provider(
+    pub(crate) fn accept_provider_with_web_searches(
         self,
         actual: crate::AiBudgetAmounts,
+        web_search_calls: u64,
         resolution: &AiAgentRuleResolution,
     ) -> Result<Self, AiError> {
-        self.add_provider(actual, resolution)
+        self.add_provider(actual, resolution)?
+            .add_web_searches(web_search_calls, resolution)
     }
 
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -674,6 +698,10 @@ impl AiRuleRunUsage {
                 constraints.budget.maximum_cost_microunits,
             )
             || !within(self.tool_units, constraints.budget.maximum_tool_units)
+            || !within(
+                self.web_search_calls,
+                constraints.budget.maximum_web_search_calls,
+            )
             || !within(self.image_units, constraints.budget.maximum_image_units)
         {
             return Err(AiError::BudgetDenied);
@@ -716,6 +744,19 @@ impl AiRuleRunUsage {
     }
 
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    fn add_web_searches(
+        mut self,
+        calls: u64,
+        resolution: &AiAgentRuleResolution,
+    ) -> Result<Self, AiError> {
+        self.web_search_calls = self
+            .web_search_calls
+            .checked_add(calls)
+            .ok_or(AiError::BudgetDenied)?;
+        self.validate(resolution)
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     fn ensure_identity(&mut self, resolution: &AiAgentRuleResolution) -> Result<(), AiError> {
         let evaluated_at = resolution.evaluated_at().unix_timestamp();
         match self.started_at_unix {
@@ -726,6 +767,7 @@ impl AiRuleRunUsage {
                 && self.output_tokens == 0
                 && self.cost_microunits == 0
                 && self.tool_units == 0
+                && self.web_search_calls == 0
                 && self.image_units == 0 =>
             {
                 self.started_at_unix = Some(evaluated_at);
@@ -936,6 +978,8 @@ pub struct AiRuleBudgetInput {
     pub maximum_provider_calls: Option<i64>,
     /// Optional maximum tool units.
     pub maximum_tool_units: Option<i64>,
+    /// Optional maximum provider-hosted web searches across one run.
+    pub maximum_web_search_calls: Option<i64>,
     /// Optional maximum image units.
     pub maximum_image_units: Option<i64>,
 }
@@ -1000,6 +1044,7 @@ impl SetAiRulePolicyInput {
                 maximum_cost_microunits: nonnegative(self.budget.maximum_cost_microunits)?,
                 maximum_provider_calls: nonnegative(self.budget.maximum_provider_calls)?,
                 maximum_tool_units: nonnegative(self.budget.maximum_tool_units)?,
+                maximum_web_search_calls: nonnegative(self.budget.maximum_web_search_calls)?,
                 maximum_image_units: nonnegative(self.budget.maximum_image_units)?,
             },
         };
@@ -1055,6 +1100,8 @@ pub struct AiRulePolicyView {
     pub maximum_provider_calls: Option<u64>,
     /// Optional maximum tool units.
     pub maximum_tool_units: Option<u64>,
+    /// Optional maximum provider-hosted web searches across one run.
+    pub maximum_web_search_calls: Option<u64>,
     /// Optional maximum image units.
     pub maximum_image_units: Option<u64>,
     /// CAS version.
@@ -1195,6 +1242,10 @@ fn budget_is_no_broader(value: &AiRuleBudgetCeilings, ceiling: &AiRuleBudgetCeil
         )
         && within(value.maximum_provider_calls, ceiling.maximum_provider_calls)
         && within(value.maximum_tool_units, ceiling.maximum_tool_units)
+        && within(
+            value.maximum_web_search_calls,
+            ceiling.maximum_web_search_calls,
+        )
         && within(value.maximum_image_units, ceiling.maximum_image_units)
 }
 
@@ -1272,6 +1323,7 @@ mod tests {
                     maximum_cost_microunits: Some(1_000),
                     maximum_provider_calls: Some(1),
                     maximum_tool_units: Some(2),
+                    maximum_web_search_calls: Some(1),
                     maximum_image_units: Some(1),
                 },
             },
@@ -1474,7 +1526,7 @@ mod tests {
         };
         assert_eq!(
             started
-                .projected_provider(estimated, &first)
+                .projected_provider_with_web_searches(estimated, 0, &first)
                 .expect("estimate should fit")
                 .provider_calls(),
             1
@@ -1487,21 +1539,30 @@ mod tests {
             ..crate::AiBudgetAmounts::default()
         };
         let accepted = started
-            .accept_provider(actual, &resolution(1_800_000_004))
+            .accept_provider_with_web_searches(actual, 0, &resolution(1_800_000_004))
             .and_then(|usage| usage.accept_tool_calls(1, &resolution(1_800_000_005)))
             .expect("authoritative usage and one tool should fit");
         assert_eq!(accepted.steps(), 2);
+        let search_accepted = started
+            .accept_provider_with_web_searches(actual, 1, &resolution(1_800_000_004))
+            .expect("one completed search should fit the exact run ceiling");
+        assert_eq!(search_accepted.web_search_calls(), 1);
+        assert!(matches!(
+            started.projected_provider_with_web_searches(estimated, 2, &first),
+            Err(AiError::BudgetDenied)
+        ));
         assert!(matches!(
             accepted.validate(&resolution(1_800_000_011)),
             Err(AiError::BudgetDenied)
         ));
         assert!(matches!(
-            started.accept_provider(
+            started.accept_provider_with_web_searches(
                 crate::AiBudgetAmounts {
                     output_tokens: 101,
                     runs: 1,
                     ..crate::AiBudgetAmounts::default()
                 },
+                0,
                 &first,
             ),
             Err(AiError::BudgetDenied)

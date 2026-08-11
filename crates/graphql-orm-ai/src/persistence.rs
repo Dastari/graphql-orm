@@ -2142,7 +2142,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.53.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.54.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 
@@ -2222,6 +2222,7 @@ impl OrmSchemaModule for AiSchemaModule {
                 AiSkillVersionRecord::metadata(),
                 AiUsageEntryRecord::metadata(),
                 AiProviderBackgroundSubmissionRecord::metadata(),
+                crate::orm_provider_session::AiProviderSessionBindingRecord::metadata(),
                 AiProviderWebhookReceiptRecord::metadata(),
                 AiAuditEventRecord::metadata(),
                 AiSecretCleanupRecord::metadata(),

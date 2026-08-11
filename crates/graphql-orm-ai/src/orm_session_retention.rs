@@ -18,6 +18,10 @@ use graphql_orm::graphql::orm::{
 use graphql_orm::graphql::pagination::KeysetConnectionInput;
 use uuid::Uuid;
 
+use crate::orm_provider_session::{
+    AiProviderSessionBindingRecord, AiProviderSessionBindingRecordWhereInput,
+    UpdateAiProviderSessionBindingRecordInput,
+};
 use crate::persistence::*;
 use crate::{AiError, AiRunState, AiScope, AiSessionRetentionReport, AiSessionRetentionService};
 
@@ -34,6 +38,13 @@ const MAXIMUM_TITLE_MUTATION_DELETES_PER_PASS: i64 = 5_000;
 enum ToolPayloadRetentionMode {
     DeletingSession,
     ExpiredRaw,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProviderSessionCleanupOutcome {
+    Absent,
+    Requested,
+    Blocked,
 }
 
 /// Deployment hard bounds for one session-retention scan page.
@@ -591,7 +602,10 @@ impl OrmAiSessionRetentionService {
                                 ..Default::default()
                             }),
                             event_type: (!deletion_cutoff_reached).then(|| StringFilter {
-                                eq: Some("provider_live_delta".to_owned()),
+                                in_list: Some(vec![
+                                    "provider_live_delta".to_owned(),
+                                    "provider_activity".to_owned(),
+                                ]),
                                 ..Default::default()
                             }),
                             ..Default::default()
@@ -605,7 +619,11 @@ impl OrmAiSessionRetentionService {
                     let mut event_ids = Vec::new();
                     for row in event_rows {
                         if row.session_id != session.id
-                            || (!deletion_cutoff_reached && row.event_type != "provider_live_delta")
+                            || (!deletion_cutoff_reached
+                                && !matches!(
+                                    row.event_type.as_str(),
+                                    "provider_live_delta" | "provider_activity"
+                                ))
                             || row.sequence <= 0
                             || row.sequence > session.stream_head
                             || previous_event_sequence.is_some_and(|value| row.sequence <= value)
@@ -1957,6 +1975,112 @@ impl OrmAiSessionRetentionService {
         }
     }
 
+    async fn request_provider_session_cleanup(
+        &self,
+        session_id: Uuid,
+        now: i64,
+    ) -> Result<ProviderSessionCleanupOutcome, AiError> {
+        let result = self
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let session = tx
+                        .find_by_id::<AiSessionRecord>(&session_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    if session.state != "deleting" {
+                        return Ok(ProviderSessionCleanupOutcome::Absent);
+                    }
+                    let records = tx
+                        .query::<AiProviderSessionBindingRecord>()
+                        .filter(AiProviderSessionBindingRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if records.is_empty() {
+                        return Ok(ProviderSessionCleanupOutcome::Absent);
+                    }
+                    if records.len() != 1 {
+                        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                    }
+                    let record = &records[0];
+                    match record.state.as_str() {
+                        "active" | "claimed" => {
+                            let outcome = tx
+                                .compare_and_swap::<AiProviderSessionBindingRecord>(
+                                    &record.id,
+                                    record.row_version,
+                                    AiProviderSessionBindingRecordWhereInput {
+                                        state: Some(StringFilter {
+                                            eq: Some(record.state.clone()),
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    },
+                                    UpdateAiProviderSessionBindingRecordInput {
+                                        state: Some("cleanup_required".to_owned()),
+                                        claimed_run_id: Some(None),
+                                        claimed_attempt_id: Some(None),
+                                        claimed_run_lease_generation: Some(None),
+                                        claim_owner: Some(None),
+                                        claim_expires_at: Some(None),
+                                        cleanup_owner: Some(None),
+                                        cleanup_lease_expires_at: Some(None),
+                                        cleanup_next_attempt_at: Some(Some(now)),
+                                        cleanup_reason_code: Some(Some(
+                                            "owning_session_deleting".to_owned(),
+                                        )),
+                                        ..Default::default()
+                                    },
+                                )
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                            tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+                                actor_principal_kind: "system".to_owned(),
+                                actor_subject: "session-retention".to_owned(),
+                                action: "require_provider_session_cleanup".to_owned(),
+                                resource_kind: "ai_provider_session".to_owned(),
+                                resource_reference: record.id.to_string(),
+                                outcome: "allowed".to_owned(),
+                                reason_code: "owning_session_deleting".to_owned(),
+                                correlation_id: Uuid::new_v4().to_string(),
+                                causation_id: Some(session_id.to_string()),
+                                policy_version: None,
+                            })
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                            Ok(ProviderSessionCleanupOutcome::Requested)
+                        }
+                        "cleanup_required"
+                        | "cleanup_in_progress"
+                        | "cleanup_backoff"
+                        | "restore_quarantined"
+                        | "deleted" => Ok(ProviderSessionCleanupOutcome::Blocked),
+                        _ => Err(OrmPublicError::new(OrmErrorCode::InternalError)),
+                    }
+                })
+            })
+            .await;
+        match result {
+            Ok(outcome) => Ok(outcome),
+            Err(error) if error.public_error().code == OrmErrorCode::Conflict => {
+                Ok(ProviderSessionCleanupOutcome::Blocked)
+            }
+            Err(error) => Err(map_transaction(error)),
+        }
+    }
+
     async fn finalize_deleted_session(&self, session_id: Uuid, now: i64) -> Result<bool, AiError> {
         let run_limit = i64::try_from(self.limits.maximum_runs_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid run limit".to_owned()))?;
@@ -2008,6 +2132,23 @@ impl OrmAiSessionRetentionService {
                             .checked_add(policy.deleted_content_purge_seconds)
                             .is_none_or(|cutoff| cutoff > now)
                     {
+                        return Ok(false);
+                    }
+
+                    let remaining_provider_sessions = tx
+                        .query::<AiProviderSessionBindingRecord>()
+                        .filter(AiProviderSessionBindingRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(1)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if !remaining_provider_sessions.is_empty() {
                         return Ok(false);
                     }
 
@@ -3414,6 +3555,30 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
         let now = self.clock.now().unix_timestamp();
         for session in candidates.sessions {
             let session_id = session.id;
+            if session.state == "deleting" {
+                match self
+                    .request_provider_session_cleanup(session_id, now)
+                    .await?
+                {
+                    ProviderSessionCleanupOutcome::Absent => {}
+                    ProviderSessionCleanupOutcome::Requested => {
+                        report.deleting_session_provider_cleanups_requested = report
+                            .deleting_session_provider_cleanups_requested
+                            .checked_add(1)
+                            .ok_or(AiError::PersistenceFailed)?;
+                        report.provider_session_cleanups_blocked = report
+                            .provider_session_cleanups_blocked
+                            .checked_add(1)
+                            .ok_or(AiError::PersistenceFailed)?;
+                    }
+                    ProviderSessionCleanupOutcome::Blocked => {
+                        report.provider_session_cleanups_blocked = report
+                            .provider_session_cleanups_blocked
+                            .checked_add(1)
+                            .ok_or(AiError::PersistenceFailed)?;
+                    }
+                }
+            }
             let checkpoint_purge_ready;
             let mut session_changed = false;
             match self.prune_session(session, now).await? {

@@ -3,7 +3,7 @@ title: "Durable Worker and Provider Turn"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -23,6 +23,9 @@ of these contracts permits arbitrary provider calls or model-authored GraphQL.
 - `OrmAiEgressDecisionAudit` appends the exact redacted allow/deny decision ID
   and manifest hash. A failed audit write closes transport.
 - `AiProviderCallExecutor` performs one security-ordered provider turn.
+- `AiProviderActivitySink`, when installed, protects and durably orders visible
+  text/summary, hosted-tool lifecycle, and validated citations before those
+  normalized events are delivered onward.
 - `AiProviderAttachmentResolver` is required only for attachment turns. The
   ORM attachment service provides an exact current-authority implementation;
   deployment-owned limits bound reopened object count and raw bytes.
@@ -40,6 +43,11 @@ of these contracts permits arbitrary provider calls or model-authored GraphQL.
 - `AiReadOnlyAgentCoordinator` owns turn planning, provider heartbeats, exact
   tool sequencing, protected output, and safe terminal/recovery classification
   for one claimed read-only attempt.
+- Run-scoped provider adapters receive a crate-owned
+  `AiProviderRunBinding`. Durable cancellation and lease loss request exact
+  interruption; every terminal/recovery/error path requests exact close. A
+  stateless provider returns `NotActive`, while the Codex app-server adapter
+  terminates its exact retained process with a kill-on-drop fallback.
 
 All ORM services use generated repository/transaction operations. None accept a
 database URL or expose a driver connection.
@@ -112,8 +120,9 @@ the newly returned value. A cloned older value is expected to fail with
 ## Current bounded-output behavior
 
 The provider executor retains only a deployment-bounded normalized event list.
-The output service extracts visible text, visible reasoning summaries,
-citations, and redacted built-in results. It splits text on UTF-8 boundaries
+The output service preserves normalized provider order across visible text,
+provider-generated visible reasoning summaries, citations, and redacted
+built-in results. It splits text on UTF-8 boundaries
 into separately fetched blocks, keeps the message preview bounded, applies the
 current scope content-protection policy to every stored value, and emits one
 completed-message session event.
@@ -123,11 +132,12 @@ The session reader also accepts the exact bounded `{"text":"..."}` assistant
 preview written by crate 0.62.0 so those rows remain readable without a data
 rewrite; any other legacy shape fails closed.
 
-`AiLiveDeltaCoalescer` provides UTF-8-safe time/byte batching no weaker than the
+`AiProviderActivityCoalescer` provides UTF-8-safe time/byte batching no weaker than the
 50 ms / 4 KiB contract and accepts only visible text or visible reasoning
-summary events. When explicitly configured, `OrmAiLiveDeltaService` rechecks
+summary as batchable content, flushing it before hosted lifecycle and citation
+events. When explicitly configured, `OrmAiLiveDeltaService` rechecks
 current authority and protection policy for each batch and appends a protected
-`provider_live_delta` cursor event only through the exact live fence and
+`provider_activity` session/inbox cursor event only through the exact live fence and
 uncertain budget. The default executor has no live sink. These events are
 provisional; clients reconcile them with the final protected message as
 described in the [live-streaming guide](live-streaming.md).

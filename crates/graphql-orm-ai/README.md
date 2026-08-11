@@ -317,12 +317,13 @@ Exactly one persistence backend should be selected:
 | `sqlite` | yes | ORM persistence and in-memory automated tests |
 | `postgres` | no | ORM persistence plus test-owned disposable-Docker parity |
 | `mssql` | no | Schema/compile support pending ORM write parity |
-| `provider-openai` | no | Native OpenAI Responses/SSE and exact background submission, file deletion, and verified webhook intake |
+| `provider-openai` | no | Native OpenAI Responses/SSE, hosted web search, visible reasoning summaries, exact background submission, file deletion, and verified webhook intake |
 | `provider-anthropic` | no | Native Anthropic Messages/SSE: text/JSON, structured output, stateless application tools |
 | `provider-xai` | no | Native xAI Responses/SSE: text/JSON, structured output, strict parallel application tools |
 | `provider-ollama` | no | Native Ollama chat: text, exact images, structured output, stateless application tools |
 | `provider-openai-compatible` | no | Profiled Responses/SSE: text/JSON and opt-in strict tools, structured output, retained continuation |
 | `local-harness` | no | Installed JSONL v2 text/structured/stateless-tool protocol over a trusted sandbox launcher |
+| `provider-codex-app-server` | no | Strict run-scoped Codex app-server process lifecycle for fresh text-only turns; no dynamic tools, retained thread, shell, filesystem, or generic JSON-RPC |
 | `graphql-case-pascal` | no | PascalCase roots, arguments, inputs, outputs, and ORM fields |
 
 Do not build with `--all-features`: the database backends are mutually
@@ -334,7 +335,7 @@ Add the crate from a reviewed monorepo revision:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.68.0", features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.69.0", features = ["sqlite"] }
 ```
 
 > **Pre-release dependency note:** this source snapshot resolves
@@ -553,6 +554,14 @@ select an approved logical profile but can never configure a command. A
 concrete OS/container launcher, ACP, and general mediated coding-workspace
 callbacks remain separately gated; see the
 [local harness guide](docs/local-harness.md).
+
+The separate Codex app-server feature retains one strictly allowlisted process
+per exact claimed run for fresh text-only turns, while the provider-session
+service protects optional opaque retained-thread cursors independently. Native
+OpenAI can combine host-enabled hosted search with exact application tools in
+provider-retained mode and can stream provider-generated visible summaries and
+validated citations into the ordered protected activity feed. Defaults remain
+closed. See [provider sessions, hosted search, and visible activity](docs/provider-sessions-and-hosted-activity.md).
 
 ## Development safety and checks
 

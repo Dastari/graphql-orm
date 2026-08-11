@@ -3,7 +3,7 @@ title: "Security Model"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -35,7 +35,7 @@ resolver authorization, disclosure, egress, atomic budget, provider, and
 approval proofs at their actual side-effect boundaries.
 
 The read-only coordinator binds the exact rule fingerprint and cumulative
-provider/step/time/token/cost/tool/image usage into protected checkpoint v2.
+provider/step/time/token/cost/tool/web-search/image usage into protected checkpoint v2.
 It re-resolves current rules before provider egress, after transport, before
 every application resolver, around checkpoint protection, and at adoption.
 Changed rules fail before an external effect where possible; after transport,
@@ -82,8 +82,20 @@ non-cached. Rates are bounded non-negative integers; cached input cannot exceed
 ordinary input pricing; every dimension rounds up with checked arithmetic.
 Catalog reads and appends require separate current host decisions, appends
 require recent MFA and atomic redacted audit, and no mutation can alter or
-delete an existing version. It deliberately refuses provider built-ins because
-requested tools are not authoritative billable-unit observations.
+delete an existing version. Web/file-search quotes reserve the exact shared
+host ceiling conservatively and settlement accepts only normalized completed
+start/completion pairs. Code-interpreter and image-generation billing remains
+closed because their authoritative dimensions are not modeled.
+
+Hosted web search is a provider capability, not arbitrary URL fetching. The
+host selects disabled, explicit public web, or a canonical allow/block domain
+policy and a hard call ceiling. Search requires its own rule capability,
+egress decision, pricing quote, atomic budget, normalized lifecycle, and
+cumulative per-run search ceiling. Search content cannot add an application
+tool, change its target/document, create a credential/header/cookie, enable a
+shell/browser/file capability, or bypass the resolver's fresh authorization.
+Only provider annotation metadata that passes the exact HTTPS/output-span
+validator becomes an authoritative citation; Markdown links do not.
 
 The concrete ORM budget service checks every applicable policy before writing
 any counter, serializes competing starts, and accepts a reservation only while
@@ -221,6 +233,14 @@ events, and hidden reasoning never enter this path. Sink failure after
 transport remains uncertain and cannot trigger replay. A committed delta is
 provisional history, not proof of a completed assistant message; see the
 [live-streaming guide](live-streaming.md).
+
+Durable provider-session cursors are protected state, never authority. A row
+binds exact owner/scope/principal, provider profile/model/protocol/
+registration/policy identity, transcript watermark, and run claim generation.
+An ambiguous or cancelled turn is invalidated for cleanup rather than resumed.
+Session deletion waits for exact provider absence, portable backup redacts the
+cursor, and restore remains unready while any binding exists. Warm process
+memory is separate and carries no durable cursor proof.
 
 Attachment upload requires both the current authenticated owner and an
 expiring one-use high-entropy token stored only as a hash. Filenames never form

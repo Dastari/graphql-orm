@@ -17,6 +17,7 @@ fn request(model: &str) -> ModelRequest {
         tools: vec![],
         builtin_tools: vec![],
         maximum_builtin_tool_calls: None,
+        reasoning_summary: graphql_orm_ai::ModelReasoningSummaryRequest::Disabled,
         output_schema: None,
         maximum_output_tokens: Some(64),
     }
@@ -149,7 +150,9 @@ async fn each_provider_builtin_requires_its_own_egress_capability() {
     .expect("context should validate");
     let mut web_request = request("test-model");
     web_request.builtin_tools = vec![ModelBuiltinTool::WebSearch {
-        allowed_domains: vec!["example.com".to_owned()],
+        domains: ModelWebSearchDomainPolicy::AllowedDomains {
+            domains: vec!["example.com".to_owned()],
+        },
     }];
     web_request.maximum_builtin_tool_calls = Some(64);
     let provider = MockProvider::new(vec![ProviderEvent::ResponseCompleted {
@@ -205,7 +208,9 @@ async fn provider_metadata_is_bounded_unique_and_included_in_egress_size() {
     ));
 
     mismatched_ceiling.builtin_tools = vec![ModelBuiltinTool::WebSearch {
-        allowed_domains: vec!["example.com".to_owned()],
+        domains: ModelWebSearchDomainPolicy::AllowedDomains {
+            domains: vec!["example.com".to_owned()],
+        },
     }];
     mismatched_ceiling.maximum_builtin_tool_calls = None;
     assert!(matches!(
@@ -216,10 +221,14 @@ async fn provider_metadata_is_bounded_unique_and_included_in_egress_size() {
     let mut invalid = request("test-model");
     invalid.builtin_tools = vec![
         ModelBuiltinTool::WebSearch {
-            allowed_domains: vec!["example.com".to_owned()],
+            domains: ModelWebSearchDomainPolicy::AllowedDomains {
+                domains: vec!["example.com".to_owned()],
+            },
         },
         ModelBuiltinTool::WebSearch {
-            allowed_domains: vec!["other.example".to_owned()],
+            domains: ModelWebSearchDomainPolicy::AllowedDomains {
+                domains: vec!["other.example".to_owned()],
+            },
         },
     ];
     invalid.maximum_builtin_tool_calls = Some(2);
@@ -229,7 +238,9 @@ async fn provider_metadata_is_bounded_unique_and_included_in_egress_size() {
     ));
 
     invalid.builtin_tools = vec![ModelBuiltinTool::WebSearch {
-        allowed_domains: vec!["https://example.com/path".to_owned()],
+        domains: ModelWebSearchDomainPolicy::AllowedDomains {
+            domains: vec!["https://example.com/path".to_owned()],
+        },
     }];
     invalid.maximum_builtin_tool_calls = Some(1);
     assert!(matches!(
@@ -335,6 +346,7 @@ async fn stateless_replay_requires_one_unique_proof_for_every_tool_result() {
         tools: vec![definition],
         builtin_tools: Vec::new(),
         maximum_builtin_tool_calls: None,
+        reasoning_summary: graphql_orm_ai::ModelReasoningSummaryRequest::Disabled,
         output_schema: None,
         maximum_output_tokens: Some(64),
     };
@@ -426,6 +438,7 @@ async fn attachment_egress_is_bound_to_exact_id_checksum_and_bytes() {
         tools: vec![],
         builtin_tools: vec![],
         maximum_builtin_tool_calls: None,
+        reasoning_summary: graphql_orm_ai::ModelReasoningSummaryRequest::Disabled,
         output_schema: None,
         maximum_output_tokens: Some(64),
     };

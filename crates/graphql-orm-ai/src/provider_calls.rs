@@ -13,7 +13,8 @@ use crate::{
     AiBudgetReconciliationOutcome, AiBudgetReservation, AiBudgetReservationId,
     AiBudgetReservationRequest, AiBudgetService, AiEgressCapability, AiEgressDecisionAudit,
     AiEgressManifest, AiError, AiLiveDeltaBatch, AiLiveDeltaCoalescer, AiLiveDeltaCoalescerLimits,
-    AiLiveDeltaPersistenceContext, AiLiveDeltaSink, AiProviderAttachmentRequest,
+    AiLiveDeltaPersistenceContext, AiLiveDeltaSink, AiProviderActivity,
+    AiProviderActivityCoalescer, AiProviderActivitySink, AiProviderAttachmentRequest,
     AiProviderAttachmentResolver, AiResolvedProviderAttachment, AiRuleProviderCapability,
     AiRuleRunUsage, AiRunLease, AiRunState, AiRuntime, AiScope, AiSessionAction, AiToolPolicySet,
     ModelBuiltinTool, ModelContinuation, ModelContinuationMode, ModelConversationMessage,
@@ -699,6 +700,9 @@ impl AiProviderCallPlan {
         if self.request.output_schema.is_some() {
             capabilities.insert(AiRuleProviderCapability::StructuredOutput);
         }
+        if self.request.reasoning_summary.maximum_bytes().is_some() {
+            capabilities.insert(AiRuleProviderCapability::VisibleReasoningSummaries);
+        }
         for builtin in &self.request.builtin_tools {
             capabilities.insert(match builtin {
                 ModelBuiltinTool::WebSearch { .. } => AiRuleProviderCapability::WebSearch,
@@ -736,7 +740,23 @@ impl AiProviderCallPlan {
         ) {
             return Err(AiError::EgressDenied);
         }
-        usage.projected_provider(self.budget.estimate, resolution)
+        let offers_web_search = self
+            .request
+            .builtin_tools
+            .iter()
+            .any(|tool| matches!(tool, ModelBuiltinTool::WebSearch { .. }));
+        let projected_web_search_calls = if offers_web_search {
+            self.request
+                .maximum_builtin_tool_calls
+                .ok_or(AiError::BudgetDenied)?
+        } else {
+            0
+        };
+        usage.projected_provider_with_web_searches(
+            self.budget.estimate,
+            projected_web_search_calls,
+            resolution,
+        )
     }
 
     pub(crate) fn is_continuation(&self) -> bool {
@@ -776,6 +796,7 @@ impl AiProviderCallPlan {
                 }],
                 builtin_tools: Vec::new(),
                 maximum_builtin_tool_calls: None,
+                reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
                 output_schema: None,
                 maximum_output_tokens: Some(64),
             },
@@ -820,6 +841,7 @@ impl AiProviderCallPlan {
             tools: Vec::new(),
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
+            reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
             output_schema: None,
             maximum_output_tokens: Some(64),
         };
@@ -979,6 +1001,7 @@ pub struct AiProviderCallResult {
     events: Vec<ProviderEvent>,
     usage: AiBudgetAmounts,
     cached_input_tokens: u64,
+    builtin_usage: AiProviderBuiltinUsage,
     provider_response_id: Option<String>,
     budget_reservation_id: AiBudgetReservationId,
     previous_response_id: Option<String>,
@@ -993,7 +1016,7 @@ pub struct AiProviderCallResult {
 ///
 /// Counts come only from exact normalized start/completion pairs. They do not
 /// count advertised, requested, started-only, or model-proposed tools.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AiProviderBuiltinUsage {
     web_search_calls: u64,
     file_search_calls: u64,
@@ -1035,6 +1058,14 @@ impl AiProviderBuiltinUsage {
     /// Completed provider-hosted image-generation calls.
     pub const fn image_generation_calls(self) -> u64 {
         self.image_generation_calls
+    }
+
+    /// Total completed provider-hosted calls across all supported kinds.
+    pub const fn total_calls(self) -> u64 {
+        self.web_search_calls
+            .saturating_add(self.file_search_calls)
+            .saturating_add(self.code_interpreter_calls)
+            .saturating_add(self.image_generation_calls)
     }
 
     fn record(&mut self, kind: &str) -> Result<(), AiError> {
@@ -1190,6 +1221,7 @@ impl AiProviderCallResult {
             "events": self.events,
             "usage": self.usage,
             "cachedInputTokens": self.cached_input_tokens,
+            "builtinUsage": self.builtin_usage,
             "providerResponseId": self.provider_response_id,
             "budgetReservationId": self.budget_reservation_id.0,
             "previousResponseId": self.previous_response_id,
@@ -1246,6 +1278,11 @@ impl AiProviderCallResult {
     /// Provider-reported cached input tokens retained for usage accounting.
     pub const fn cached_input_tokens(&self) -> u64 {
         self.cached_input_tokens
+    }
+
+    /// Authoritative completed provider-hosted call counts for this turn.
+    pub const fn builtin_usage(&self) -> AiProviderBuiltinUsage {
+        self.builtin_usage
     }
 
     /// Safe provider response reference, when emitted.
@@ -1447,6 +1484,7 @@ impl AiProviderCallResult {
                 ..AiBudgetAmounts::default()
             },
             cached_input_tokens: 0,
+            builtin_usage: AiProviderBuiltinUsage::default(),
             provider_response_id: Some(provider_response_id.to_owned()),
             budget_reservation_id: AiBudgetReservationId::new(),
             previous_response_id: previous_response_id.clone(),
@@ -1471,6 +1509,7 @@ impl AiProviderCallResult {
                 tools: Vec::new(),
                 builtin_tools: Vec::new(),
                 maximum_builtin_tool_calls: None,
+                reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
                 output_schema: None,
                 maximum_output_tokens: Some(64),
             },
@@ -1519,6 +1558,7 @@ impl AiProviderCallResult {
                 ..AiBudgetAmounts::default()
             },
             cached_input_tokens: 0,
+            builtin_usage: AiProviderBuiltinUsage::default(),
             provider_response_id: Some("ui-intent-response".to_owned()),
             budget_reservation_id,
             previous_response_id: None,
@@ -1533,6 +1573,7 @@ impl AiProviderCallResult {
                 tools: Vec::new(),
                 builtin_tools: Vec::new(),
                 maximum_builtin_tool_calls: None,
+                reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
                 output_schema: None,
                 maximum_output_tokens: Some(256),
             },
@@ -1580,6 +1621,7 @@ impl AiProviderCallResult {
                 ..AiBudgetAmounts::default()
             },
             cached_input_tokens: 0,
+            builtin_usage: AiProviderBuiltinUsage::default(),
             provider_response_id: Some("context-compaction-test-response".to_owned()),
             budget_reservation_id: AiBudgetReservationId::new(),
             previous_response_id: None,
@@ -1636,6 +1678,7 @@ pub struct AiProviderCallExecutor {
     clock: Arc<dyn Clock>,
     limits: AiProviderCallLimits,
     live_delta_sink: Option<Arc<dyn AiLiveDeltaSink>>,
+    provider_activity_sink: Option<Arc<dyn AiProviderActivitySink>>,
     live_delta_limits: AiLiveDeltaCoalescerLimits,
     attachment_resolver: Option<Arc<dyn AiProviderAttachmentResolver>>,
     attachment_limits: AiProviderAttachmentResolutionLimits,
@@ -1659,6 +1702,7 @@ impl AiProviderCallExecutor {
             clock,
             limits,
             live_delta_sink: None,
+            provider_activity_sink: None,
             live_delta_limits: AiLiveDeltaCoalescerLimits::default(),
             attachment_resolver: None,
             attachment_limits: AiProviderAttachmentResolutionLimits::default(),
@@ -1678,6 +1722,26 @@ impl AiProviderCallExecutor {
         limits: AiLiveDeltaCoalescerLimits,
     ) -> Self {
         self.live_delta_sink = Some(sink);
+        self.provider_activity_sink = None;
+        self.live_delta_limits = limits;
+        self
+    }
+
+    /// Enables protected durable ordered provider activity persistence.
+    ///
+    /// This supersedes the legacy visible-delta sink for the executor and
+    /// additionally records validated hosted-tool lifecycle and citation
+    /// metadata in exact provider order. Raw provider frames, hosted-tool
+    /// result bodies, application-tool arguments, and hidden reasoning are
+    /// never passed to the sink.
+    #[must_use]
+    pub fn with_provider_activity_sink(
+        mut self,
+        sink: Arc<dyn AiProviderActivitySink>,
+        limits: AiLiveDeltaCoalescerLimits,
+    ) -> Self {
+        self.provider_activity_sink = Some(sink);
+        self.live_delta_sink = None;
         self.live_delta_limits = limits;
         self
     }
@@ -1695,6 +1759,28 @@ impl AiProviderCallExecutor {
         self.attachment_resolver = Some(resolver);
         self.attachment_limits = limits;
         self
+    }
+
+    pub(crate) async fn interrupt_run(&self, lease: &AiRunLease) -> Result<(), AiError> {
+        let binding = crate::AiProviderRunBinding::from_lease(lease)?;
+        self.runtime
+            .interrupt_all_provider_runs(&binding)
+            .await
+            .map(|_| ())
+            .map_err(|_| AiError::ProviderFailed)
+    }
+
+    pub(crate) async fn close_run(
+        &self,
+        lease: &AiRunLease,
+        reason: crate::AiProviderRunCloseReason,
+    ) -> Result<(), AiError> {
+        let binding = crate::AiProviderRunBinding::from_lease(lease)?;
+        self.runtime
+            .close_all_provider_runs(&binding, reason)
+            .await
+            .map(|_| ())
+            .map_err(|_| AiError::ProviderFailed)
     }
 
     /// Executes one exact provider turn for a current running lease.
@@ -1979,30 +2065,48 @@ impl AiProviderCallExecutor {
         let mut tool_argument_bytes = BTreeMap::<String, usize>::new();
         let mut started_builtin_calls = BTreeMap::<String, String>::new();
         let mut completed_builtin_calls = BTreeSet::new();
+        let mut reasoning_summary_bytes = 0_u64;
         let mut live_coalescer = self
             .live_delta_sink
             .as_ref()
             .map(|_| AiLiveDeltaCoalescer::new(self.live_delta_limits));
+        let mut activity_coalescer = self
+            .provider_activity_sink
+            .as_ref()
+            .map(|_| AiProviderActivityCoalescer::new(self.live_delta_limits));
         loop {
-            let item = if live_coalescer.is_some() {
+            let item = if live_coalescer.is_some() || activity_coalescer.is_some() {
                 tokio::select! {
                     item = stream.next() => item,
                     () = tokio::time::sleep(self.live_delta_limits.maximum_delay()) => {
-                        let batches = live_coalescer
-                            .as_mut()
-                            .ok_or(AiError::ProviderFailed)?
-                            .flush_due(Instant::now())?;
-                        self.persist_live_batches(
-                            lease,
-                            &live_scope,
-                            &live_correlation_id,
-                            &live_provider_kind,
-                            &provider_model,
-                            provider_response_id.as_deref(),
-                            reservation.id(),
-                            &batches,
-                        )
-                        .await?;
+                        if let Some(coalescer) = live_coalescer.as_mut() {
+                            let batches = coalescer.flush_due(Instant::now())?;
+                            self.persist_live_batches(
+                                lease,
+                                &live_scope,
+                                &live_correlation_id,
+                                &live_provider_kind,
+                                &provider_model,
+                                provider_response_id.as_deref(),
+                                reservation.id(),
+                                &batches,
+                            )
+                            .await?;
+                        }
+                        if let Some(coalescer) = activity_coalescer.as_mut() {
+                            let activities = coalescer.flush_due(Instant::now())?;
+                            self.persist_provider_activities(
+                                lease,
+                                &live_scope,
+                                &live_correlation_id,
+                                &live_provider_kind,
+                                &provider_model,
+                                provider_response_id.as_deref(),
+                                reservation.id(),
+                                &activities,
+                            )
+                            .await?;
+                        }
                         continue;
                     }
                 }
@@ -2046,6 +2150,21 @@ impl AiProviderCallExecutor {
                     output_tokens,
                     cached_input_tokens,
                 } => usage = Some((*input_tokens, *output_tokens, *cached_input_tokens)),
+                ProviderEvent::ReasoningSummaryDelta { text } => {
+                    let maximum = request_snapshot
+                        .reasoning_summary
+                        .maximum_bytes()
+                        .ok_or(AiError::ProviderFailed)?;
+                    reasoning_summary_bytes = reasoning_summary_bytes
+                        .checked_add(
+                            u64::try_from(text.len()).map_err(|_| AiError::ProviderFailed)?,
+                        )
+                        .filter(|bytes| *bytes <= maximum)
+                        .ok_or(AiError::ProviderFailed)?;
+                }
+                ProviderEvent::Citation { citation } => {
+                    citation.validate().map_err(|_| AiError::ProviderFailed)?;
+                }
                 ProviderEvent::ToolCallStarted { call_id, tool_id } => {
                     if !valid_provider_call_id(call_id)
                         || !offered_tools.contains_key(tool_id)
@@ -2132,6 +2251,20 @@ impl AiProviderCallExecutor {
                 )
                 .await?;
             }
+            if let Some(coalescer) = activity_coalescer.as_mut() {
+                let activities = coalescer.push_event(&event, Instant::now())?;
+                self.persist_provider_activities(
+                    lease,
+                    &live_scope,
+                    &live_correlation_id,
+                    &live_provider_kind,
+                    &provider_model,
+                    provider_response_id.as_deref(),
+                    reservation.id(),
+                    &activities,
+                )
+                .await?;
+            }
             events.push(event);
         }
         if let Some(coalescer) = live_coalescer.as_mut() {
@@ -2145,6 +2278,20 @@ impl AiProviderCallExecutor {
                 provider_response_id.as_deref(),
                 reservation.id(),
                 &batches,
+            )
+            .await?;
+        }
+        if let Some(coalescer) = activity_coalescer.as_mut() {
+            let activities = coalescer.flush_all()?;
+            self.persist_provider_activities(
+                lease,
+                &live_scope,
+                &live_correlation_id,
+                &live_provider_kind,
+                &provider_model,
+                provider_response_id.as_deref(),
+                reservation.id(),
+                &activities,
             )
             .await?;
         }
@@ -2229,6 +2376,7 @@ impl AiProviderCallExecutor {
             events,
             usage: actual,
             cached_input_tokens,
+            builtin_usage,
             provider_response_id,
             budget_reservation_id: reservation.id(),
             previous_response_id,
@@ -2318,6 +2466,36 @@ impl AiProviderCallExecutor {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn persist_provider_activities(
+        &self,
+        lease: &AiRunLease,
+        scope: &AiScope,
+        correlation_id: &str,
+        provider_kind: &ProviderKind,
+        provider_model: &str,
+        provider_response_id: Option<&str>,
+        budget_reservation_id: AiBudgetReservationId,
+        activities: &[AiProviderActivity],
+    ) -> Result<(), AiError> {
+        let Some(sink) = &self.provider_activity_sink else {
+            return Ok(());
+        };
+        for activity in activities {
+            let context = AiLiveDeltaPersistenceContext::new(
+                lease,
+                scope.clone(),
+                correlation_id.to_owned(),
+                provider_kind.clone(),
+                provider_model.to_owned(),
+                provider_response_id.map(str::to_owned),
+                budget_reservation_id,
+            );
+            sink.persist_activity(lease, &context, activity).await?;
+        }
+        Ok(())
+    }
+
     async fn authorize_and_audit_transfers(
         &self,
         lease: &AiRunLease,
@@ -2348,7 +2526,7 @@ impl AiProviderCallExecutor {
         for (manifest, proof) in authorized {
             context = context.with_authorized_transfer(manifest, proof)?;
         }
-        Ok(context)
+        context.with_run_binding(crate::AiProviderRunBinding::from_lease(lease)?)
     }
 
     async fn release_unstarted(
@@ -2390,18 +2568,24 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use super::*;
+    #[cfg(feature = "provider-openai")]
+    use agql_auth::FixedClock;
     use agql_auth::{
-        AccessTokenMetadata, AuthPrincipal, AuthUser, CurrentPrincipalResolver, FixedClock,
-        ResolvedPrincipal, SessionContext, SystemClock,
+        AccessTokenMetadata, AuthPrincipal, AuthUser, CurrentPrincipalResolver, ResolvedPrincipal,
+        SessionContext, SystemClock,
     };
     use async_trait::async_trait;
     use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
     use graphql_orm::graphql::filters::UuidFilter;
+    #[cfg(feature = "provider-openai")]
+    use graphql_orm::graphql::orm::Entity;
     use graphql_orm::graphql::orm::{
-        ApplyOptions, ConditionalUpdateOutcome, Entity, OrmSchemaModule, TransactionMode,
+        ApplyOptions, ConditionalUpdateOutcome, OrmSchemaModule, TransactionMode,
     };
     use graphql_orm::graphql::pagination::KeysetConnectionInput;
-    use graphql_orm::prelude::{Database, GraphQLEntity, GraphQLOperations, SqliteBackend};
+    use graphql_orm::prelude::{Database, SqliteBackend};
+    #[cfg(feature = "provider-openai")]
+    use graphql_orm::prelude::{GraphQLEntity, GraphQLOperations};
     use serde_json::json;
     use sha2::Digest;
     use time::{Duration, OffsetDateTime};
@@ -2505,8 +2689,10 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "provider-openai")]
     struct RevocableAccess(Arc<AtomicBool>);
 
+    #[cfg(feature = "provider-openai")]
     #[async_trait]
     impl AiAccessPolicy for RevocableAccess {
         async fn can_access_scope(
@@ -2717,11 +2903,13 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "provider-openai")]
     struct RevokeAccessAfterAudit {
         audit: Arc<OrmAiEgressDecisionAudit>,
         access_allowed: Arc<AtomicBool>,
     }
 
+    #[cfg(feature = "provider-openai")]
     #[async_trait]
     impl AiEgressDecisionAudit for RevokeAccessAfterAudit {
         async fn record(
@@ -2834,6 +3022,7 @@ mod tests {
                     maximum_cost_microunits: Some(100_000_000),
                     maximum_provider_calls: Some(16),
                     maximum_tool_units: Some(1_000),
+                    maximum_web_search_calls: Some(4),
                     maximum_image_units: Some(1_000),
                 },
             },
@@ -2853,7 +3042,7 @@ mod tests {
         let mut usage = AiRuleRunUsage::default();
         for result in results {
             usage = usage
-                .accept_provider(result.usage(), &resolution)
+                .accept_provider_with_web_searches(result.usage(), 0, &resolution)
                 .expect("provider usage should fit test rules");
         }
         usage = usage
@@ -3292,6 +3481,7 @@ mod tests {
             tools: vec![],
             builtin_tools: vec![],
             maximum_builtin_tool_calls: None,
+            reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
             output_schema: None,
             maximum_output_tokens: Some(100),
         };
@@ -3364,6 +3554,7 @@ mod tests {
             tools: vec![],
             builtin_tools: vec![],
             maximum_builtin_tool_calls: None,
+            reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
             output_schema: None,
             maximum_output_tokens: Some(100),
         };
@@ -5812,7 +6003,9 @@ mod tests {
     fn web_search_plan(fixture: &Fixture, maximum_builtin_tool_calls: u64) -> AiProviderCallPlan {
         let mut base = plan(fixture);
         base.request.builtin_tools = vec![ModelBuiltinTool::WebSearch {
-            allowed_domains: vec!["example.com".to_owned()],
+            domains: crate::ModelWebSearchDomainPolicy::AllowedDomains {
+                domains: vec!["example.com".to_owned()],
+            },
         }];
         base.request.maximum_builtin_tool_calls = Some(maximum_builtin_tool_calls);
         base.budget.estimate.tool_units = maximum_builtin_tool_calls;
@@ -6316,6 +6509,8 @@ mod tests {
             .await
             .expect("exact completed built-in pair should settle");
         assert_eq!(completed.usage().tool_units, 1);
+        assert_eq!(completed.builtin_usage().web_search_calls(), 1);
+        assert_eq!(completed.builtin_usage().total_calls(), 1);
         assert_eq!(
             reservation_state(&completed_fixture.database).await,
             "committed"
@@ -6348,6 +6543,8 @@ mod tests {
             .await
             .expect("unused advertised built-in should not create usage");
         assert_eq!(unused.usage().tool_units, 0);
+        assert_eq!(unused.builtin_usage().web_search_calls(), 0);
+        assert_eq!(unused.builtin_usage().total_calls(), 0);
         assert_eq!(
             reservation_state(&unused_fixture.database).await,
             "committed"
@@ -6981,6 +7178,7 @@ mod tests {
             }],
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
+            reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
             output_schema: None,
             maximum_output_tokens: Some(100),
         };
@@ -7307,6 +7505,7 @@ mod tests {
                 }],
                 builtin_tools: Vec::new(),
                 maximum_builtin_tool_calls: None,
+                reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
                 output_schema: None,
                 maximum_output_tokens: Some(100),
             },
@@ -7522,6 +7721,7 @@ mod tests {
             }],
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
+            reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
             output_schema: None,
             maximum_output_tokens: Some(100),
         };
@@ -8457,6 +8657,7 @@ mod tests {
             }],
             builtin_tools: vec![],
             maximum_builtin_tool_calls: None,
+            reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
             output_schema: None,
             maximum_output_tokens: Some(100),
         };

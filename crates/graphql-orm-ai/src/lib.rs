@@ -68,6 +68,7 @@ mod orm_pricing;
 mod orm_proposals;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_provider_output;
+mod orm_provider_session;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_restore;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -107,8 +108,12 @@ mod persistence;
 mod pricing;
 mod proposals;
 mod provider;
+mod provider_activity;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod provider_calls;
+mod provider_run;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod provider_session;
 mod providers;
 mod remote_execution;
 mod restore;
@@ -176,6 +181,8 @@ pub use orm_proposals::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_provider_output::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_provider_session::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_restore::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_rules::*;
@@ -216,8 +223,12 @@ pub use persistence::{
 pub use pricing::*;
 pub use proposals::*;
 pub use provider::*;
+pub use provider_activity::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use provider_calls::*;
+pub use provider_run::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use provider_session::*;
 pub use providers::*;
 pub use remote_execution::*;
 pub use restore::*;

@@ -20,8 +20,8 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.68.0` and AI
-schema module `0.53.0`. It begins the applied-restore implementation with
+This development line advances the pre-1.0 crate version to `0.69.0` and AI
+schema module `0.54.0`. It begins the applied-restore implementation with
 bounded database-derived facts, aligns the reviewed dependency universe,
 integrates generated resolver-operation metadata, completes the durable OpenAI
 background terminal-reconciliation runtime, and closes raw provider
@@ -29,6 +29,14 @@ file-search IDs behind the reviewed persistent-file design.
 
 ### Fixed
 
+- Provider-session cleanup canonicalizes trusted absence-observation times to
+  the durable second-resolution clock before freshness comparison, so a valid
+  same-instant proof with subsecond precision is not rejected as future-dated.
+- Streaming and background OpenAI citation normalization now share one strict
+  HTTPS, bounded-title, exact output-item/content-index/span contract. Unsafe,
+  wildcard, user-info-bearing, control-bearing, malformed, oversized, or
+  provenance-free citation metadata fails closed; assistant Markdown links
+  never become authoritative source records.
 - Synchronous and background provider-output persistence now protect assistant
   message previews using the same bounded top-level JSON string already used
   by user messages and required by `AiMessages`. The reader remains compatible
@@ -38,6 +46,23 @@ file-search IDs behind the reviewed persistent-file design.
 
 ### Changed
 
+- `ModelRequest` now carries an explicit host-selected visible-reasoning
+  summary request, and web search uses an explicit `PublicWeb`, allowed-domain,
+  or blocked-domain policy instead of an ambiguous empty filter. Provider
+  capabilities and hierarchical rules independently advertise/permit visible
+  summaries. These public request, capability, event, and rule-enum changes are
+  intentional pre-1.0 source breaks; missing serialized summary fields remain
+  backward compatible through a disabled default.
+- Final protected provider blocks preserve normalized provider order rather
+  than grouping all text, summaries, and structured metadata by kind. The
+  optional `AiProviderActivitySink` supersedes the text-only live sink when
+  enabled and persists one protected, cursor-addressable order for visible
+  text, visible reasoning summaries, hosted-tool lifecycle, and citations.
+- Hierarchical rule budgets now include a separately cumulative
+  `maximum_web_search_calls` ceiling. Requested maxima are checked before each
+  turn and exact normalized completed searches are carried through provider
+  results and coordinator checkpoints so a continuation cannot reset the
+  per-run limit.
 - The canonical GraphQL tool-profile/compiler/manifest surface now lives in
   the database-neutral `graphql-orm-ai-tool-profiles` package and is re-exported
   unchanged by `graphql-orm-ai`. Owning subgraphs can compile reviewed
@@ -62,6 +87,39 @@ file-search IDs behind the reviewed persistent-file design.
 
 ### Added
 
+- The `provider-codex-app-server` feature adds a strict project-neutral Codex
+  app-server adapter for fresh text-only turns. It keeps at most one process per
+  exact run/attempt/lease generation, freezes executable/profile/model/sandbox/
+  protocol identity, applies global and per-owner admission, reuses the process
+  across bounded turns, and exposes exact interrupt/close lifecycle hooks.
+  The protocol actor has no generic send method and rejects dynamic tools,
+  shell/command/file/MCP/web/image/collaboration traffic, unknown server
+  requests, and raw reasoning. A crate-owned launched-process wrapper always
+  invokes the deployment's synchronous process-tree kill callback on final
+  drop. Provider-thread retention and application-tool continuations are not
+  claimed by this first adapter.
+- `AiProviderSessionService` and `OrmAiProviderSessionService` add a protected,
+  provider-neutral durable opaque-cursor lifecycle. Bind, claim, open,
+  heartbeat, commit, invalidate, cleanup, retry, and exact absence proof are
+  fenced to session owner/scope, principal reference, run attempt/generation,
+  provider profile/model/protocol/registration/policy identity, and canonical
+  transcript watermark. Cursor material is private, content-protected,
+  backup-redacted, never exposed through GraphQL, and distinct from any
+  in-memory warm process. Session deletion waits for authoritative provider
+  absence; portable restore remains readiness-blocked while any binding exists.
+- `ModelReasoningSummaryRequest`, `ProviderCitation`, explicit web-search
+  domain policies, per-kind `AiProviderBuiltinUsage`, and the typed
+  `AiProviderActivity` stream provide reusable contracts for visible provider
+  summaries, hosted search, source attribution, ordered replay, and exact
+  accounting without exposing hidden chain-of-thought or raw hosted-tool
+  result bodies. Native OpenAI Responses maps `reasoning.summary=auto`, mixes
+  reviewed application tools with hosted search only in provider-retained
+  mode, and keeps the existing stateless mixed-tool prohibition closed.
+- AI schema module 0.54.0 adds only the private
+  `graphql_orm_ai_provider_session_bindings` table and its bounded claim/
+  cleanup indexes. Existing rows require no rewrite or backfill. The required
+  restore-audit set now includes provider-session bindings and fails closed
+  until retained provider state is drained and absence is proven.
 - Application tool descriptors and generated/custom profiles can now opt into
   a separately bounded, fingerprinted `AiBrowserResultPreviewPolicy`. The new
   owner-authorized `AiToolCallResultPreview` query rehydrates current

@@ -11,12 +11,13 @@ use serde_json::json;
 use time::Duration;
 use uuid::Uuid;
 
-use crate::orm_runs::PreparedLiveDeltaEvent;
+use crate::orm_runs::{PreparedLiveDeltaEvent, PreparedProviderActivityEvent};
 use crate::persistence::*;
 use crate::{
     AiContentProtectionPolicy, AiError, AiLiveDeltaBatch, AiLiveDeltaKind,
-    AiLiveDeltaPersistenceContext, AiLiveDeltaSink, AiRunLease, AiRuntime, AiScope,
-    AiSessionAction, ContentProtectionContext, OrmAiRunService,
+    AiLiveDeltaPersistenceContext, AiLiveDeltaSink, AiProviderActivity, AiProviderActivityPayload,
+    AiProviderActivitySink, AiRunLease, AiRuntime, AiScope, AiSessionAction,
+    ContentProtectionContext, OrmAiRunService,
 };
 
 /// Deployment bounds for protected provisional provider events.
@@ -254,6 +255,154 @@ impl AiLiveDeltaSink for OrmAiLiveDeltaService {
             )
             .await
     }
+}
+
+#[async_trait]
+impl AiProviderActivitySink for OrmAiLiveDeltaService {
+    async fn persist_activity(
+        &self,
+        lease: &AiRunLease,
+        context: &AiLiveDeltaPersistenceContext,
+        activity: &AiProviderActivity,
+    ) -> Result<(), AiError> {
+        if lease.session_id() != context.session_id()
+            || lease.run_id() != context.run_id()
+            || lease.attempt_id() != context.attempt_id()
+            || lease.lease_generation() != context.lease_generation()
+            || context.scope().kind.trim().is_empty()
+            || context.scope().id.trim().is_empty()
+            || !valid_reference(context.correlation_id())
+            || context.provider_model().trim().is_empty()
+            || context.provider_model().len() > 1_024
+            || context
+                .provider_response_id()
+                .is_some_and(|value| !valid_reference(value))
+            || !valid_activity(activity, self.limits.maximum_batch_bytes)
+        {
+            return Err(AiError::Conflict);
+        }
+        let session =
+            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        validate_session_binding(&session, lease, context.scope())?;
+        let (principal, policy) = self.current_policy(lease, context.scope()).await?;
+        let event_id = Uuid::new_v4();
+        let inbox_event_id = Uuid::new_v4();
+        let payload = activity_payload(lease, context, activity);
+        let protected_payload = self
+            .protect(
+                &policy,
+                ContentProtectionContext {
+                    entity: "graphql_orm_ai_session_events".to_owned(),
+                    row_id: event_id.to_string(),
+                    field: "protected_payload".to_owned(),
+                    scope: context.scope().clone(),
+                },
+                payload.clone(),
+            )
+            .await?;
+        let protected_inbox_payload = self
+            .protect(
+                &policy,
+                ContentProtectionContext {
+                    entity: "graphql_orm_ai_inbox_events".to_owned(),
+                    row_id: inbox_event_id.to_string(),
+                    field: "protected_payload".to_owned(),
+                    scope: context.scope().clone(),
+                },
+                payload,
+            )
+            .await?;
+        let (current, current_policy) = self.current_policy(lease, context.scope()).await?;
+        if current_policy != policy
+            || current.reference() != lease.principal_reference()
+            || principal.reference() != lease.principal_reference()
+        {
+            return Err(AiError::ReauthorizationFailed);
+        }
+        self.run_service
+            .append_provider_activity_event(
+                lease,
+                PreparedProviderActivityEvent {
+                    id: event_id,
+                    inbox_event_id,
+                    protected_payload,
+                    protected_inbox_payload,
+                    correlation_id: context.correlation_id().to_owned(),
+                    provider_kind: context.provider_kind().as_str().to_owned(),
+                    provider_model: context.provider_model().to_owned(),
+                    budget_reservation_id: context.budget_reservation_id().0,
+                    expected_owner_principal_kind: session.owner_principal_kind,
+                    expected_owner_subject: session.owner_subject,
+                    expected_scope_kind: session.scope_kind,
+                    expected_scope_id: session.scope_id,
+                    expected_tenant_id: session.tenant_id,
+                },
+            )
+            .await
+    }
+}
+
+fn valid_activity(activity: &AiProviderActivity, maximum_batch_bytes: usize) -> bool {
+    match activity.payload() {
+        AiProviderActivityPayload::Text { text }
+        | AiProviderActivityPayload::ReasoningSummary { text } => {
+            !text.is_empty() && text.len() <= maximum_batch_bytes
+        }
+        AiProviderActivityPayload::HostedToolStarted { call_id, kind }
+        | AiProviderActivityPayload::HostedToolCompleted { call_id, kind } => {
+            valid_reference(call_id)
+                && matches!(
+                    kind.as_str(),
+                    "web_search" | "file_search" | "code_interpreter" | "image_generation"
+                )
+        }
+        AiProviderActivityPayload::Citation { citation } => citation.validate().is_ok(),
+    }
+}
+
+fn activity_payload(
+    lease: &AiRunLease,
+    context: &AiLiveDeltaPersistenceContext,
+    activity: &AiProviderActivity,
+) -> serde_json::Value {
+    let detail = match activity.payload() {
+        AiProviderActivityPayload::Text { text }
+        | AiProviderActivityPayload::ReasoningSummary { text } => json!({
+            "text": text,
+            "byteCount": text.len(),
+        }),
+        AiProviderActivityPayload::HostedToolStarted { call_id, kind }
+        | AiProviderActivityPayload::HostedToolCompleted { call_id, kind } => json!({
+            "callId": call_id,
+            "hostedToolKind": kind,
+        }),
+        AiProviderActivityPayload::Citation { citation } => json!({
+            "sourceUrl": citation.source_url(),
+            "title": citation.title(),
+            "outputItemId": citation.output_item_id(),
+            "outputIndex": citation.output_index(),
+            "contentIndex": citation.content_index(),
+            "startIndex": citation.start_index(),
+            "endIndex": citation.end_index(),
+        }),
+    };
+    json!({
+        "formatVersion": 1,
+        "provisional": true,
+        "runId": lease.run_id().0,
+        "attemptId": lease.attempt_id(),
+        "leaseGeneration": lease.lease_generation(),
+        "providerKind": context.provider_kind().as_str(),
+        "providerModel": context.provider_model(),
+        "providerResponseId": context.provider_response_id(),
+        "budgetReservationId": context.budget_reservation_id().0,
+        "activitySequence": activity.sequence(),
+        "kind": activity.payload().kind(),
+        "detail": detail,
+    })
 }
 
 fn validate_session_binding(

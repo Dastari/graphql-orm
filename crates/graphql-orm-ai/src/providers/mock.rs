@@ -22,6 +22,7 @@ type MockEventBatches = Arc<Mutex<VecDeque<Arc<[ProviderEvent]>>>>;
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(feature = "provider-openai"), allow(dead_code))]
 pub(crate) enum MockBackgroundRetrievalFailure {
     RateLimited,
     Unavailable,
@@ -112,6 +113,7 @@ impl MockProvider {
     }
 
     #[cfg(test)]
+    #[cfg_attr(not(feature = "provider-openai"), allow(dead_code))]
     pub(crate) fn with_background_submission(
         mut self,
         response_id: impl Into<String>,
@@ -123,12 +125,14 @@ impl MockProvider {
     }
 
     #[cfg(test)]
+    #[cfg_attr(not(feature = "provider-openai"), allow(dead_code))]
     pub(crate) fn with_background_delay(mut self, delay: std::time::Duration) -> Self {
         self.background_delay = Some(delay);
         self
     }
 
     #[cfg(test)]
+    #[cfg_attr(not(feature = "provider-openai"), allow(dead_code))]
     pub(crate) fn with_background_binding(
         mut self,
         provider_model: impl Into<String>,
@@ -141,6 +145,7 @@ impl MockProvider {
     }
 
     #[cfg(test)]
+    #[cfg_attr(not(feature = "provider-openai"), allow(dead_code))]
     pub(crate) fn with_background_observation(
         mut self,
         observation: ProviderBackgroundObservation,
@@ -150,6 +155,7 @@ impl MockProvider {
     }
 
     #[cfg(test)]
+    #[cfg_attr(not(feature = "provider-openai"), allow(dead_code))]
     pub(crate) fn with_background_retrieval_failure(
         mut self,
         failure: MockBackgroundRetrievalFailure,

@@ -3,7 +3,7 @@ title: "Installed Local Harness Boundary"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -21,6 +21,14 @@ harness and may opt into exact stateless application tools. It deliberately
 does not grant coding-workspace, filesystem, terminal, MCP, provider built-in,
 attachment, network, credential, arbitrary callback, or provider-retained
 continuation authority.
+
+The separate `provider-codex-app-server` feature adds a second local boundary:
+one strictly allowlisted process may be retained for an exact claimed run and
+used for several fresh text-only turns. That adapter is not a replacement for
+the JSONL application-tool path: it accepts no dynamic/application tools,
+continuation, structured output, reasoning, web, files, images, shell, MCP, or
+generic JSON-RPC. Its construction and exact limitations are in
+[provider sessions, hosted search, and visible activity](provider-sessions-and-hosted-activity.md).
 
 ## Authority split
 

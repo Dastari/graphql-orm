@@ -139,6 +139,7 @@ fn deployment_limits() -> AiRuleDeploymentLimits {
                 maximum_cost_microunits: Some(10_000_000),
                 maximum_provider_calls: Some(100),
                 maximum_tool_units: Some(100),
+                maximum_web_search_calls: Some(4),
                 maximum_image_units: Some(10),
             },
         },
@@ -208,6 +209,7 @@ fn broad_input() -> SetAiRulePolicyInput {
             maximum_provider_calls: Some(20),
             maximum_tool_units: Some(20),
             maximum_image_units: Some(4),
+            maximum_web_search_calls: Some(4),
         },
         expected_version: None,
     }
@@ -236,6 +238,7 @@ fn narrow_input() -> SetAiRulePolicyInput {
             maximum_provider_calls: Some(5),
             maximum_tool_units: Some(2),
             maximum_image_units: Some(0),
+            maximum_web_search_calls: Some(0),
         },
         expected_version: None,
     }

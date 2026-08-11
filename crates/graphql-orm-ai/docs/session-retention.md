@@ -3,7 +3,7 @@ title: "Bounded Session Retention"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -17,7 +17,7 @@ gate are summarized in
 `OrmAiSessionRetentionService` is a trusted, host-scheduled maintenance service
 for narrowly defined classes of protected chat data:
 
-- expired provisional `provider_live_delta` session events;
+- expired provisional `provider_live_delta` and `provider_activity` session events;
 - age-expired protected tool arguments/results and approval resource
   bindings/action previews for exact terminal calls under the current
   `raw_payload_retention_seconds` policy;
@@ -43,7 +43,9 @@ for narrowly defined classes of protected chat data:
 - after all those protected sources are exhausted, immutable coordinator
   checkpoints belonging to a bounded, entirely terminal run set; and
 - after every checkpoint page is gone, the user-authored title and `deleting`
-  lifecycle state under one final complete proof.
+  lifecycle state under one final complete proof, but only after every durable
+  provider-session binding has been invalidated, authoritatively deleted, and
+  removed.
 
 It does not expose a GraphQL mutation and does not issue SQL. All reads, CAS
 updates, deletes, audit appends, keyset cursors, and transactions use generated
@@ -78,8 +80,9 @@ certificate. Persist worker scheduling/telemetry outside model-visible state,
 alert on repeated `sessions_not_ready`, `sessions_conflicted`,
 `messages_blocked`, `attachment_cleanups_blocked`, or
 `proposal_payload_purges_blocked`, `tool_payload_purges_blocked`,
-`raw_payload_purges_blocked`, `raw_checkpoint_purges_blocked`, or
-`run_checkpoint_purges_blocked`. Also alert on parent or artifact cleanup
+`raw_payload_purges_blocked`, `raw_checkpoint_purges_blocked`,
+`run_checkpoint_purges_blocked`, `provider_session_cleanups_blocked`, or
+nonzero `deleting_session_provider_cleanups_requested`. Also alert on parent or artifact cleanup
 failures/deferred claims and never treat a partial scan cycle as complete.
 
 ## Policy and deletion rules
@@ -90,7 +93,7 @@ fields against the scope key and all retention bounds. Missing, duplicated,
 legacy, or corrupt policy keeps content in place.
 
 Expired provisional deltas are selected only by the fixed
-`provider_live_delta` event kind. Their protected payloads are never opened.
+`provider_live_delta` and `provider_activity` event kinds. Their protected payloads are never opened.
 Deleting one may create a sequence gap; sequence heads never move backward and
 sequence values are never reused.
 
@@ -245,6 +248,18 @@ references under bounded backoff. Successful cleanup clears the references and
 records a deleted tombstone; only a later retention transaction deletes that
 metadata. Both levels can therefore leave an object-free tombstone after a
 crash, never a metadata deletion that merely assumes external success.
+
+Durable provider-session state follows the same external-absence principle.
+When an owning session is deleting, retention CAS-moves an `active` or
+`claimed` binding to `cleanup_required`, clears the run claim, increments its
+cleanup fence, appends redacted audit, and reports the request. It never opens
+the cursor or performs provider I/O. The separately managed provider-session
+cleanup worker opens the protected cursor only under its exact cleanup claim,
+calls the registered provider adapter, and deletes the binding row only after
+an exact cursor-bound absence proof. Bindings already in cleanup/backoff or
+restore quarantine remain blockers. Final session deletion requires the
+binding query to be empty; expiry, a redacted backup field, or a missing warm
+process is never accepted as provider absence.
 
 Message content is scrubbed only when all of these are true:
 

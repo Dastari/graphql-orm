@@ -43,6 +43,7 @@ fn deployment_constraints() -> AiRuleConstraints {
             maximum_cost_microunits: Some(1_000_000),
             maximum_provider_calls: Some(4),
             maximum_tool_units: Some(4),
+            maximum_web_search_calls: Some(4),
             maximum_image_units: Some(0),
         },
     }

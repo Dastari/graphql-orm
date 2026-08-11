@@ -12,6 +12,7 @@ supersedes: []
 
 ## Active
 
+- [AI provider sessions, hosted tools, and visible activity](active/ai-provider-sessions-and-hosted-tools/README.md)
 - [AI production readiness](active/ai-production-readiness/README.md)
 - [GraphQL ORM Router](active/graphql-orm-router/README.md)
 

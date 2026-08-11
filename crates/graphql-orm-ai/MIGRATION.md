@@ -19,6 +19,84 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased: provider sessions, hosted activity, and run-scoped app-server (crate 0.68.0 to 0.69.0; schema 0.53.0 to 0.54.0)
+
+Apply AI schema module 0.54.0 before constructing an
+`OrmAiProviderSessionService`. The additive migration creates the private
+`graphql_orm_ai_provider_session_bindings` table, its unique session binding,
+and bounded run-claim and cleanup indexes. There is no backfill and no existing
+session, message, run, event, protected block, budget, rule, or usage row is
+rewritten. Provider-session retention is disabled unless a host explicitly
+constructs and uses the new service.
+
+The durable provider-session contract is intentionally stricter than an
+in-memory process cache. A host creates an empty provider thread, retains a
+provider-side deletion guard, and calls `bind_for_run` before sending business
+content. Resume uses `claim_for_run` with the exact immutable
+`AiProviderSessionDescriptor` and canonical transcript fingerprint, then
+`open_for_run` under current principal/scope/run fencing. Advance the binding
+only through `commit_turn` after the assistant message and matching
+`assistant_output_persisted` checkpoint are durable. Cancellation, ambiguous
+transport, cursor rejection, policy/registration drift, or failed output
+commit calls `require_cleanup`. A managed cleanup worker uses
+`claim_cleanup`, `open_for_cleanup`, a registered
+`AiProviderSessionDeletionService`, and `complete_cleanup`; retryable provider
+failure uses `schedule_cleanup_retry`. Session final deletion now waits until
+the binding row has been removed after exact provider-absence proof.
+
+Portable backup/restore does not carry provider cursor material:
+`protected_cursor` is backup-redacted and any provider-session binding makes
+the new required `ProviderSessionBindings` restore audit fatal. Drain retained
+provider sessions and prove provider absence before taking a portable backup
+that must restore ready. Redaction or expiry is never treated as provider
+absence, and restored provider threads are never resumed automatically.
+
+Hosts enabling ordered progress should replace
+`AiProviderCallExecutor::with_live_delta_sink` with
+`with_provider_activity_sink` using the same `OrmAiLiveDeltaService`. The new
+protected `provider_activity` session/inbox events include typed visible text,
+provider-generated visible summary, hosted-tool start/completion, and validated
+citation metadata in provider order. They contain no hosted-tool result body,
+application-tool argument/result, raw provider frame, hidden reasoning, or
+credential. Existing `provider_live_delta` rows remain readable and retain
+their prior retention behavior.
+
+Public Rust request/profile code requires source updates:
+
+- add `reasoning_summary: ModelReasoningSummaryRequest::Disabled` to direct
+  `ModelRequest` literals unless a selected provider advertises
+  `visible_reasoning_summaries` and current rules permit
+  `VisibleReasoningSummaries`;
+- add `visible_reasoning_summaries` to exhaustive `ProviderCapabilities`
+  literals, normally through `..ProviderCapabilities::default()`;
+- replace `ModelBuiltinTool::WebSearch { allowed_domains }` with one explicit
+  `ModelWebSearchDomainPolicy::PublicWeb`, `allowed_domains(...)`, or
+  `blocked_domains(...)` value;
+- update exhaustive `ProviderEvent::Citation` matches to use the validated
+  `ProviderCitation` value; and
+- add `maximum_web_search_calls` to exhaustive rule budget/input literals.
+  Missing serialized budget/usage/summary fields decode to the closed default,
+  but Rust struct literals remain intentionally exhaustive.
+
+For native OpenAI Responses, a host may request a bounded automatic visible
+summary and may offer hosted web search beside exact reviewed application tools
+in `ProviderRetained` mode. Keep the existing `StatelessReplay` mixed-tool
+prohibition; do not remove it as a migration workaround. Web search remains
+absent by default, needs its own egress/rule capability, immutable per-call and
+per-run ceilings, pricing/budget reservation, and provider-normalized
+start/completion evidence. Assistant Markdown links are not citations.
+
+The optional `provider-codex-app-server` feature is a separate first-phase
+local adapter. Construct an immutable `AiCodexAppServerRegistration`, bounded
+`AiCodexAppServerRunLimits`, trusted
+`AiCodexAppServerRunProcessFactory`, `AiCodexAppServerRunPool`, and
+`AiCodexAppServerProvider`. The factory is responsible for direct verified
+execution, cleared environment, empty working directory, OS/container sandbox,
+and an effective process-tree kill callback. This release accepts only fresh
+text-only turns and does not replace the existing JSONL local harness for
+stateless application-tool loops. It exposes no dynamic tools, retained Codex
+thread, shell, files, web, images, MCP, collaboration, or generic JSON-RPC.
+
 ## Unreleased: protected tool lifecycle previews (crate 0.67.0 to 0.68.0; schema remains 0.53.0)
 
 Tool-profile producers should update to `graphql-orm-ai-tool-profiles` 0.2.0.

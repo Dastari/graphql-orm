@@ -553,59 +553,84 @@ fn normalize_blocks(
     events: &[ProviderEvent],
     limits: AiProviderOutputLimits,
 ) -> Result<Vec<RawBlock>, AiError> {
-    let mut text = String::new();
-    let mut reasoning = String::new();
-    let mut structured = Vec::new();
+    let mut blocks = Vec::new();
+    let mut pending_kind: Option<&'static str> = None;
+    let mut pending_text = String::new();
     for event in events {
         match event {
-            ProviderEvent::TextDelta { text: delta } => text.push_str(delta),
-            ProviderEvent::ReasoningSummaryDelta { text: delta } => reasoning.push_str(delta),
-            ProviderEvent::Citation { source, title } => {
-                structured.push(("citation", json!({"source": source, "title": title})))
+            ProviderEvent::TextDelta { text: delta } => {
+                append_ordered_text(
+                    &mut blocks,
+                    &mut pending_kind,
+                    &mut pending_text,
+                    "text",
+                    delta,
+                    limits.maximum_block_bytes,
+                );
             }
-            ProviderEvent::BuiltinToolCompleted { call_id, result } => structured.push((
-                "builtin_tool_result",
-                json!({"callId": call_id, "result": result}),
-            )),
+            ProviderEvent::ReasoningSummaryDelta { text: delta } => {
+                append_ordered_text(
+                    &mut blocks,
+                    &mut pending_kind,
+                    &mut pending_text,
+                    "reasoning_summary",
+                    delta,
+                    limits.maximum_block_bytes,
+                );
+            }
+            ProviderEvent::Citation { citation } => {
+                flush_ordered_text(
+                    &mut blocks,
+                    &mut pending_kind,
+                    &mut pending_text,
+                    limits.maximum_block_bytes,
+                );
+                append_structured_block(
+                    &mut blocks,
+                    "citation",
+                    json!({
+                        "sourceUrl": citation.source_url(),
+                        "title": citation.title(),
+                        "outputItemId": citation.output_item_id(),
+                        "outputIndex": citation.output_index(),
+                        "contentIndex": citation.content_index(),
+                        "startIndex": citation.start_index(),
+                        "endIndex": citation.end_index(),
+                    }),
+                    limits.maximum_block_bytes,
+                )?;
+            }
+            ProviderEvent::BuiltinToolCompleted { call_id, result } => {
+                flush_ordered_text(
+                    &mut blocks,
+                    &mut pending_kind,
+                    &mut pending_text,
+                    limits.maximum_block_bytes,
+                );
+                append_structured_block(
+                    &mut blocks,
+                    "builtin_tool_result",
+                    json!({"callId": call_id, "result": result}),
+                    limits.maximum_block_bytes,
+                )?;
+            }
             _ => {}
         }
     }
-    let total_bytes = text
-        .len()
-        .checked_add(reasoning.len())
-        .and_then(|value| {
-            structured.iter().try_fold(value, |total, (_, value)| {
-                total.checked_add(value.to_string().len())
-            })
-        })
+    flush_ordered_text(
+        &mut blocks,
+        &mut pending_kind,
+        &mut pending_text,
+        limits.maximum_block_bytes,
+    );
+    let total_bytes = blocks
+        .iter()
+        .try_fold(0_usize, |total, block| total.checked_add(block.byte_count))
         .ok_or_else(|| AiError::InvalidInput("provider output too large".to_owned()))?;
     if total_bytes > limits.maximum_total_bytes {
         return Err(AiError::InvalidInput(
             "provider output exceeds persistence limits".to_owned(),
         ));
-    }
-    let mut blocks = Vec::new();
-    append_text_blocks(&mut blocks, "text", &text, limits.maximum_block_bytes);
-    append_text_blocks(
-        &mut blocks,
-        "reasoning_summary",
-        &reasoning,
-        limits.maximum_block_bytes,
-    );
-    for (kind, value) in structured {
-        let encoded = serde_json::to_vec(&value).map_err(|_| AiError::ProviderFailed)?;
-        if encoded.len() > limits.maximum_block_bytes {
-            return Err(AiError::InvalidInput(
-                "structured provider output exceeds block limit".to_owned(),
-            ));
-        }
-        blocks.push(RawBlock {
-            kind: kind.to_owned(),
-            preview_text: String::new(),
-            value,
-            byte_count: encoded.len(),
-            line_count: 1,
-        });
     }
     if blocks.is_empty() {
         blocks.push(RawBlock {
@@ -622,6 +647,55 @@ fn normalize_blocks(
         ));
     }
     Ok(blocks)
+}
+
+fn append_ordered_text(
+    blocks: &mut Vec<RawBlock>,
+    pending_kind: &mut Option<&'static str>,
+    pending_text: &mut String,
+    kind: &'static str,
+    delta: &str,
+    maximum_bytes: usize,
+) {
+    if pending_kind.is_some_and(|pending| pending != kind) {
+        flush_ordered_text(blocks, pending_kind, pending_text, maximum_bytes);
+    }
+    *pending_kind = Some(kind);
+    pending_text.push_str(delta);
+}
+
+fn flush_ordered_text(
+    blocks: &mut Vec<RawBlock>,
+    pending_kind: &mut Option<&'static str>,
+    pending_text: &mut String,
+    maximum_bytes: usize,
+) {
+    if let Some(kind) = pending_kind.take() {
+        append_text_blocks(blocks, kind, pending_text, maximum_bytes);
+        pending_text.clear();
+    }
+}
+
+fn append_structured_block(
+    blocks: &mut Vec<RawBlock>,
+    kind: &str,
+    value: serde_json::Value,
+    maximum_bytes: usize,
+) -> Result<(), AiError> {
+    let encoded = serde_json::to_vec(&value).map_err(|_| AiError::ProviderFailed)?;
+    if encoded.len() > maximum_bytes {
+        return Err(AiError::InvalidInput(
+            "structured provider output exceeds block limit".to_owned(),
+        ));
+    }
+    blocks.push(RawBlock {
+        kind: kind.to_owned(),
+        preview_text: String::new(),
+        value,
+        byte_count: encoded.len(),
+        line_count: 1,
+    });
+    Ok(())
 }
 
 fn append_text_blocks(blocks: &mut Vec<RawBlock>, kind: &str, value: &str, maximum_bytes: usize) {
@@ -698,6 +772,55 @@ fn map_orm(error: OrmPublicError) -> AiError {
         OrmErrorCode::ServiceUnavailable
         | OrmErrorCode::InternalError
         | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
+    }
+}
+
+#[cfg(test)]
+mod normalized_block_tests {
+    use super::*;
+    use crate::ProviderCitation;
+
+    #[test]
+    fn final_blocks_preserve_provider_activity_order_and_citation_provenance() {
+        let citation = ProviderCitation::new(
+            "https://example.test/source".to_owned(),
+            Some("Example".to_owned()),
+            "output-1".to_owned(),
+            0,
+            0,
+            1,
+            8,
+        )
+        .expect("test citation should validate");
+        let blocks = normalize_blocks(
+            &[
+                ProviderEvent::ReasoningSummaryDelta {
+                    text: "checked".to_owned(),
+                },
+                ProviderEvent::Citation { citation },
+                ProviderEvent::TextDelta {
+                    text: "answer".to_owned(),
+                },
+            ],
+            AiProviderOutputLimits::new(4_096, 16, 256, 32_768, Duration::minutes(5))
+                .expect("test limits should validate"),
+        )
+        .expect("ordered provider blocks should normalize");
+
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| block.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["reasoning_summary", "citation", "text"]
+        );
+        assert_eq!(
+            blocks[1]
+                .value
+                .get("outputItemId")
+                .and_then(serde_json::Value::as_str),
+            Some("output-1")
+        );
     }
 }
 

@@ -19,7 +19,8 @@ pub struct AiSessionRetentionReport {
     /// Sessions whose protected content, attachment state, or checkpoint
     /// references changed.
     pub sessions_changed: u32,
-    /// Protected provisional `provider_live_delta` event rows deleted.
+    /// Protected provisional legacy live-delta or ordered provider-activity
+    /// event rows deleted.
     pub live_delta_events_deleted: u32,
     /// Protected event rows deleted after a session-deletion retention cutoff.
     pub deleting_session_events_deleted: u32,
@@ -68,6 +69,12 @@ pub struct AiSessionRetentionReport {
     /// Fully tombstoned attachment-artifact metadata rows physically deleted
     /// before their parent attachment was cleaned.
     pub deleting_session_attachment_artifacts_deleted: u32,
+    /// Durable provider-session bindings moved irreversibly into exact
+    /// provider cleanup after their owning session entered deletion.
+    pub deleting_session_provider_cleanups_requested: u32,
+    /// Deleting sessions still waiting for exact provider-session absence and
+    /// binding-row removal.
+    pub provider_session_cleanups_blocked: u32,
     /// Session shells atomically finalized as `deleted` after every bounded
     /// protected/external dependency and coordinator checkpoint was proved
     /// exhausted.

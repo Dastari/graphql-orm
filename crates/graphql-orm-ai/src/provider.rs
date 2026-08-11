@@ -72,6 +72,8 @@ pub struct ProviderCapabilities {
     pub parallel_tool_calls: bool,
     /// JSON-schema structured output.
     pub structured_output: bool,
+    /// Provider-generated visible reasoning summaries, never hidden reasoning.
+    pub visible_reasoning_summaries: bool,
     /// Provider web search.
     pub web_search: bool,
     /// Provider file search/retention.
@@ -94,6 +96,56 @@ pub struct ProviderCapabilities {
     pub maximum_context_tokens: Option<u64>,
     /// Maximum output tokens when known.
     pub maximum_output_tokens: Option<u64>,
+}
+
+/// Host-selected visible reasoning-summary request.
+///
+/// This contract requests only a provider-authored summary intended for end
+/// users. It never requests, represents, or authorizes hidden chain-of-thought.
+/// Providers that cannot make this distinction must reject [`Self::Auto`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ModelReasoningSummaryRequest {
+    /// Do not request or accept a visible reasoning summary.
+    #[default]
+    Disabled,
+    /// Ask the provider to generate its supported automatic visible summary.
+    Auto {
+        /// Maximum UTF-8 bytes accepted across all summary deltas in this turn.
+        maximum_bytes: u64,
+    },
+}
+
+impl ModelReasoningSummaryRequest {
+    /// Creates one bounded automatic visible-summary request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidRequest`] unless `maximum_bytes` is in
+    /// `1..=1 MiB`.
+    pub fn auto(maximum_bytes: u64) -> Result<Self, ProviderError> {
+        let request = Self::Auto { maximum_bytes };
+        request.validate()?;
+        Ok(request)
+    }
+
+    /// Returns the accepted summary byte ceiling, or `None` when disabled.
+    pub const fn maximum_bytes(self) -> Option<u64> {
+        match self {
+            Self::Disabled => None,
+            Self::Auto { maximum_bytes } => Some(maximum_bytes),
+        }
+    }
+
+    fn validate(self) -> Result<(), ProviderError> {
+        if self
+            .maximum_bytes()
+            .is_some_and(|maximum| !(1..=1024 * 1024).contains(&maximum))
+        {
+            return Err(ProviderError::InvalidRequest);
+        }
+        Ok(())
+    }
 }
 
 /// Canonical model input block.
@@ -286,6 +338,9 @@ pub struct ModelRequest {
     /// matching budget reservation can conservatively cover provider-hosted
     /// units without authorizing an unrelated wire ceiling.
     pub maximum_builtin_tool_calls: Option<u64>,
+    /// Host-selected visible reasoning-summary behavior.
+    #[serde(default)]
+    pub reasoning_summary: ModelReasoningSummaryRequest,
     /// Optional structured-output schema.
     pub output_schema: Option<serde_json::Value>,
     /// Maximum requested output tokens.
@@ -297,6 +352,7 @@ impl ModelRequest {
     ///
     /// Provider adapters still apply their own capability and protocol limits.
     pub fn validate(&self) -> Result<(), ProviderError> {
+        self.reasoning_summary.validate()?;
         if self.model.trim().is_empty() || self.model.len() > 200 {
             return Err(ProviderError::InvalidRequest);
         }
@@ -411,10 +467,8 @@ impl ModelRequest {
         let mut builtin_kinds = BTreeSet::new();
         for builtin in &self.builtin_tools {
             let valid = match builtin {
-                ModelBuiltinTool::WebSearch { allowed_domains } => {
-                    builtin_kinds.insert("web_search")
-                        && allowed_domains.len() <= 100
-                        && unique_valid_values(allowed_domains, valid_web_domain)
+                ModelBuiltinTool::WebSearch { domains } => {
+                    builtin_kinds.insert("web_search") && domains.validate()
                 }
                 // A caller-authored provider store ID is not durable creation,
                 // ownership, scope, retention, cost, or deletion authority.
@@ -480,7 +534,8 @@ impl ModelRequest {
             .checked_add(64_u64.saturating_mul(self.instructions.len() as u64))?
             .checked_add(64_u64.saturating_mul(self.input.len() as u64))?
             .checked_add(64_u64.saturating_mul(self.tools.len() as u64))?
-            .checked_add(64_u64.saturating_mul(self.builtin_tools.len() as u64))?;
+            .checked_add(64_u64.saturating_mul(self.builtin_tools.len() as u64))?
+            .checked_add(serialized_bytes(&self.reasoning_summary)?)?;
         for instruction in &self.instructions {
             total = total.checked_add(serialized_bytes(instruction)?)?;
         }
@@ -659,13 +714,6 @@ fn serialized_bytes(value: &impl Serialize) -> Option<u64> {
         .and_then(|encoded| u64::try_from(encoded.len()).ok())
 }
 
-fn unique_valid_values(values: &[String], valid: impl Fn(&str) -> bool) -> bool {
-    let mut unique = BTreeSet::new();
-    values
-        .iter()
-        .all(|value| valid(value) && unique.insert(value.as_str()))
-}
-
 fn valid_web_domain(value: &str) -> bool {
     let value = value.strip_prefix("*.").unwrap_or(value);
     !value.is_empty()
@@ -739,14 +787,95 @@ impl ModelToolDefinition {
     }
 }
 
+/// Explicit host-selected web-search domain policy.
+///
+/// An unrestricted public search is represented by [`Self::PublicWeb`], never
+/// by an empty allow/block collection. The provider tool remains disabled when
+/// no [`ModelBuiltinTool::WebSearch`] is present in the request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ModelWebSearchDomainPolicy {
+    /// Search the provider's public-web index without a domain filter.
+    PublicWeb,
+    /// Search only these host-approved domains and their subdomains.
+    AllowedDomains {
+        /// Non-empty normalized domain collection, without URL schemes.
+        domains: Vec<String>,
+    },
+    /// Search the public web while excluding these host-selected domains.
+    BlockedDomains {
+        /// Non-empty normalized domain collection, without URL schemes.
+        domains: Vec<String>,
+    },
+}
+
+impl ModelWebSearchDomainPolicy {
+    /// Creates one canonical allow-domain policy.
+    ///
+    /// Domains are converted to lowercase and sorted. Duplicate, wildcard,
+    /// malformed, empty, or over-bound input fails closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidRequest`] unless one to one hundred
+    /// distinct provider-compatible domains are supplied.
+    pub fn allowed_domains(domains: Vec<String>) -> Result<Self, ProviderError> {
+        Ok(Self::AllowedDomains {
+            domains: normalize_web_search_domains(domains)?,
+        })
+    }
+
+    /// Creates one canonical block-domain policy.
+    ///
+    /// Domains are converted to lowercase and sorted. Duplicate, wildcard,
+    /// malformed, empty, or over-bound input fails closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidRequest`] unless one to one hundred
+    /// distinct provider-compatible domains are supplied.
+    pub fn blocked_domains(domains: Vec<String>) -> Result<Self, ProviderError> {
+        Ok(Self::BlockedDomains {
+            domains: normalize_web_search_domains(domains)?,
+        })
+    }
+
+    fn validate(&self) -> bool {
+        match self {
+            Self::PublicWeb => true,
+            Self::AllowedDomains { domains } | Self::BlockedDomains { domains } => {
+                normalize_web_search_domains(domains.clone())
+                    .is_ok_and(|normalized| normalized == *domains)
+            }
+        }
+    }
+}
+
+fn normalize_web_search_domains(mut domains: Vec<String>) -> Result<Vec<String>, ProviderError> {
+    if domains.is_empty() || domains.len() > 100 {
+        return Err(ProviderError::InvalidRequest);
+    }
+    for domain in &mut domains {
+        if domain.starts_with("*.") || !valid_web_domain(domain) {
+            return Err(ProviderError::InvalidRequest);
+        }
+        domain.make_ascii_lowercase();
+    }
+    domains.sort_unstable();
+    if domains.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(ProviderError::InvalidRequest);
+    }
+    Ok(domains)
+}
+
 /// Provider-hosted tool requested for one model call.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ModelBuiltinTool {
     /// Provider-hosted web search.
     WebSearch {
-        /// Optional administrator-approved domain restriction.
-        allowed_domains: Vec<String>,
+        /// Explicit administrator-authored public/filtered domain policy.
+        domains: ModelWebSearchDomainPolicy,
     },
     /// Reserved provider-hosted file search shape.
     ///
@@ -766,6 +895,117 @@ pub enum ModelBuiltinTool {
     ImageGeneration,
 }
 
+/// One bounded provider-authored inline citation.
+///
+/// Construction validates safe HTTPS display metadata and retains the exact
+/// provider output-item/content span. This value is provenance metadata, not
+/// proof that a source is trustworthy or that following its URL is safe.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderCitation {
+    source_url: String,
+    title: Option<String>,
+    output_item_id: String,
+    output_index: u32,
+    content_index: u32,
+    start_index: u32,
+    end_index: u32,
+}
+
+impl ProviderCitation {
+    /// Creates validated provider-authored citation metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Rejected`] for a non-HTTPS or malformed URL,
+    /// unbounded/control-bearing title, malformed provider item reference, or
+    /// an empty/reversed source span.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        source_url: String,
+        title: Option<String>,
+        output_item_id: String,
+        output_index: u32,
+        content_index: u32,
+        start_index: u32,
+        end_index: u32,
+    ) -> Result<Self, ProviderError> {
+        let citation = Self {
+            source_url,
+            title,
+            output_item_id,
+            output_index,
+            content_index,
+            start_index,
+            end_index,
+        };
+        citation.validate()?;
+        Ok(citation)
+    }
+
+    /// Validated HTTPS source URL.
+    pub fn source_url(&self) -> &str {
+        &self.source_url
+    }
+
+    /// Optional bounded display title.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    /// Exact provider output item containing the annotated text.
+    pub fn output_item_id(&self) -> &str {
+        &self.output_item_id
+    }
+
+    /// Provider output-array index.
+    pub const fn output_index(&self) -> u32 {
+        self.output_index
+    }
+
+    /// Content-block index inside the provider output item.
+    pub const fn content_index(&self) -> u32 {
+        self.content_index
+    }
+
+    /// Provider-authored inclusive span start.
+    pub const fn start_index(&self) -> u32 {
+        self.start_index
+    }
+
+    /// Provider-authored exclusive span end.
+    pub const fn end_index(&self) -> u32 {
+        self.end_index
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ProviderError> {
+        let Some(authority_and_path) = self.source_url.strip_prefix("https://") else {
+            return Err(ProviderError::Rejected);
+        };
+        let authority = authority_and_path
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or_default();
+        if self.source_url.len() > 8_192
+            || authority.is_empty()
+            || authority.starts_with("*.")
+            || authority.contains('@')
+            || authority.contains('\\')
+            || !valid_web_domain(authority)
+            || self.source_url.bytes().any(|byte| !byte.is_ascii_graphic())
+            || !valid_provider_reference(&self.output_item_id)
+            || self.start_index >= self.end_index
+            || self.title.as_ref().is_some_and(|title| {
+                title.trim().is_empty()
+                    || title.len() > 4_096
+                    || title.chars().any(char::is_control)
+            })
+        {
+            return Err(ProviderError::Rejected);
+        }
+        Ok(())
+    }
+}
+
 /// One exact egress manifest paired with its unforgeable allow proof.
 #[derive(Clone, Debug)]
 struct AuthorizedProviderTransfer {
@@ -782,6 +1022,7 @@ struct AuthorizedProviderTransfer {
 pub struct ProviderRequestContext {
     session_id: AiSessionId,
     run_id: AiRunId,
+    run_binding: Option<crate::AiProviderRunBinding>,
     correlation_id: String,
     budget: AuthorizedBudgetReservation,
     transfers: Vec<AuthorizedProviderTransfer>,
@@ -806,6 +1047,7 @@ impl ProviderRequestContext {
         Self {
             session_id,
             run_id,
+            run_binding: None,
             correlation_id: correlation_id.into(),
             budget,
             transfers: Vec::new(),
@@ -832,6 +1074,28 @@ impl ProviderRequestContext {
         }
         self.transfers
             .push(AuthorizedProviderTransfer { manifest, proof });
+        Ok(self)
+    }
+
+    /// Installs the exact current provider-run fence identity.
+    ///
+    /// The binding enables a stateful adapter to isolate and interrupt its
+    /// run-scoped resource. It grants no provider, egress, budget, tool,
+    /// cancellation, or persistence authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::Conflict`] unless the binding belongs to this exact
+    /// request session and run.
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn with_run_binding(
+        mut self,
+        binding: crate::AiProviderRunBinding,
+    ) -> Result<Self, AiError> {
+        if binding.session_id() != self.session_id || binding.run_id() != self.run_id {
+            return Err(AiError::Conflict);
+        }
+        self.run_binding = Some(binding);
         Ok(self)
     }
 
@@ -897,6 +1161,14 @@ impl ProviderRequestContext {
     /// Run ID.
     pub fn run_id(&self) -> AiRunId {
         self.run_id
+    }
+
+    /// Exact current run-scoped provider resource binding, when installed.
+    ///
+    /// This identity grants no provider transport, interruption, egress,
+    /// budget, tool, cancellation, or persistence authority.
+    pub const fn run_binding(&self) -> Option<crate::AiProviderRunBinding> {
+        self.run_binding
     }
 
     /// Correlation ID.
@@ -1041,6 +1313,44 @@ impl ProviderRequestContext {
                 attachment_count,
                 estimated_bytes,
             )?;
+        }
+        Ok(())
+    }
+
+    /// Proves that every authorized transfer for this request is bound to one
+    /// exact deployment-owned provider profile.
+    ///
+    /// Stateful or locally registered adapters must call this in addition to
+    /// [`Self::validate_request`] before selecting an executable, endpoint, or
+    /// retained provider resource. This prevents an authorization decision for
+    /// one profile from being replayed through another profile that happens to
+    /// share a provider kind and model name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::EgressDenied`] when the profile identifier is
+    /// malformed, no transfer exists, or any authorized transfer is bound to a
+    /// different provider kind, model, or profile.
+    pub fn validate_provider_profile(
+        &self,
+        provider_kind: &ProviderKind,
+        request: &ModelRequest,
+        provider_profile_id: &str,
+    ) -> Result<(), ProviderError> {
+        if provider_profile_id.trim().is_empty()
+            || provider_profile_id.len() > 512
+            || provider_profile_id
+                .bytes()
+                .any(|byte| byte.is_ascii_control())
+            || self.transfers.is_empty()
+            || self.transfers.iter().any(|transfer| {
+                transfer.manifest.provider_kind != provider_kind.as_str()
+                    || transfer.manifest.model != request.model
+                    || transfer.manifest.provider_profile_id != provider_profile_id
+                    || transfer.manifest.stable_hash() != transfer.proof.manifest_hash()
+            })
+        {
+            return Err(ProviderError::EgressDenied);
         }
         Ok(())
     }
@@ -1193,10 +1503,8 @@ pub enum ProviderEvent {
     },
     /// Citation emitted by the provider.
     Citation {
-        /// Safe source URL/reference.
-        source: String,
-        /// Optional display title.
-        title: Option<String>,
+        /// Validated provider-authored source and span metadata.
+        citation: ProviderCitation,
     },
     /// Usage counters.
     Usage {
@@ -1788,6 +2096,30 @@ pub trait AiProvider: Send + Sync {
         request: ModelRequest,
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError>;
+
+    /// Interrupts one exact run-scoped provider resource.
+    ///
+    /// The default is inert for ordinary request-scoped adapters. This signal
+    /// contains no cancellation authority; the caller must first observe the
+    /// authoritative durable cancellation or lease-loss fence.
+    async fn interrupt_run(
+        &self,
+        _binding: &crate::AiProviderRunBinding,
+    ) -> Result<crate::AiProviderRunInterruptOutcome, ProviderError> {
+        Ok(crate::AiProviderRunInterruptOutcome::NotActive)
+    }
+
+    /// Closes one exact run-scoped provider resource.
+    ///
+    /// The default is inert for ordinary request-scoped adapters. The reason
+    /// is lifecycle metadata only and cannot alter the durable run outcome.
+    async fn close_run(
+        &self,
+        _binding: &crate::AiProviderRunBinding,
+        _reason: crate::AiProviderRunCloseReason,
+    ) -> Result<crate::AiProviderRunCloseOutcome, ProviderError> {
+        Ok(crate::AiProviderRunCloseOutcome::NotActive)
+    }
 
     /// Starts provider background processing for one exactly bound request.
     ///

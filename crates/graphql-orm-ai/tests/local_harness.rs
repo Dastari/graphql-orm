@@ -136,6 +136,7 @@ fn capabilities() -> ProviderCapabilities {
     ProviderCapabilities {
         streaming: true,
         structured_output: true,
+        visible_reasoning_summaries: false,
         custom_tools: true,
         parallel_tool_calls: true,
         stateless_continuation: true,
@@ -191,6 +192,7 @@ fn stateless_tool_request(model: &str) -> ModelRequest {
         }],
         builtin_tools: Vec::new(),
         maximum_builtin_tool_calls: None,
+        reasoning_summary: graphql_orm_ai::ModelReasoningSummaryRequest::Disabled,
         output_schema: None,
         maximum_output_tokens: Some(64),
     }
@@ -223,6 +225,7 @@ fn request(model: &str) -> ModelRequest {
         tools: vec![],
         builtin_tools: vec![],
         maximum_builtin_tool_calls: None,
+        reasoning_summary: graphql_orm_ai::ModelReasoningSummaryRequest::Disabled,
         output_schema: None,
         maximum_output_tokens: Some(64),
     }

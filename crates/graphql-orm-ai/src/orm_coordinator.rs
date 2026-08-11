@@ -316,6 +316,21 @@ pub trait AiAgentProviderTurnExecutor: Send + Sync {
         lease: &AiRunLease,
         plan: AiProviderCallPlan,
     ) -> Result<AiProviderCallResult, AiError>;
+
+    /// Interrupts an active run-scoped provider resource after durable
+    /// cancellation or lease loss has already been observed.
+    async fn interrupt_run(&self, _lease: &AiRunLease) -> Result<(), AiError> {
+        Ok(())
+    }
+
+    /// Closes all provider resources belonging to one exact run fence.
+    async fn close_run(
+        &self,
+        _lease: &AiRunLease,
+        _reason: crate::AiProviderRunCloseReason,
+    ) -> Result<(), AiError> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -326,6 +341,18 @@ impl AiAgentProviderTurnExecutor for AiProviderCallExecutor {
         plan: AiProviderCallPlan,
     ) -> Result<AiProviderCallResult, AiError> {
         self.execute(lease, plan).await
+    }
+
+    async fn interrupt_run(&self, lease: &AiRunLease) -> Result<(), AiError> {
+        AiProviderCallExecutor::interrupt_run(self, lease).await
+    }
+
+    async fn close_run(
+        &self,
+        lease: &AiRunLease,
+        reason: crate::AiProviderRunCloseReason,
+    ) -> Result<(), AiError> {
+        AiProviderCallExecutor::close_run(self, lease, reason).await
     }
 }
 
@@ -664,6 +691,32 @@ impl AiReadOnlyAgentCoordinator {
         &self,
         claimed: &AiRunLease,
     ) -> Result<AiReadOnlyAgentRunOutcome, AiError> {
+        let result = self.execute_claimed_inner(claimed).await;
+        let reason = match &result {
+            Ok(AiReadOnlyAgentRunOutcome::Completed { .. }) => {
+                crate::AiProviderRunCloseReason::Completed
+            }
+            Ok(AiReadOnlyAgentRunOutcome::Cancelled { .. }) => {
+                crate::AiProviderRunCloseReason::Cancelled
+            }
+            Ok(AiReadOnlyAgentRunOutcome::RecoveryRequired { .. }) => {
+                crate::AiProviderRunCloseReason::RecoveryRequired
+            }
+            Ok(AiReadOnlyAgentRunOutcome::Failed { .. }) => crate::AiProviderRunCloseReason::Failed,
+            Err(_) => crate::AiProviderRunCloseReason::LeaseLost,
+        };
+        // The durable outcome remains authoritative even if graceful provider
+        // cleanup reports an error. Stateful adapters must remove the exact
+        // resource from admission and retain a synchronous kill-on-drop
+        // fallback before returning that error.
+        let _ = self.provider_executor.close_run(claimed, reason).await;
+        result
+    }
+
+    async fn execute_claimed_inner(
+        &self,
+        claimed: &AiRunLease,
+    ) -> Result<AiReadOnlyAgentRunOutcome, AiError> {
         let mut lease = match self.run_control.start(claimed).await {
             Ok(lease) => lease,
             Err(error) => {
@@ -912,7 +965,11 @@ impl AiReadOnlyAgentCoordinator {
                         .await;
                 }
             };
-            rule_usage = match rule_usage.accept_provider(result.usage(), &current_rules) {
+            rule_usage = match rule_usage.accept_provider_with_web_searches(
+                result.usage(),
+                result.builtin_usage().web_search_calls(),
+                &current_rules,
+            ) {
                 Ok(usage) => usage,
                 Err(_) => {
                     return self
@@ -1208,13 +1265,18 @@ impl AiReadOnlyAgentCoordinator {
                 result = &mut provider => return result.map_err(|_| ProviderTurnFailure::Provider),
                 result = &mut cancellation => {
                     match result.map_err(ProviderTurnFailure::LeaseLost)? {
-                        Some(_) => return Err(ProviderTurnFailure::Cancelled),
+                        Some(_) => {
+                            let _ = self.provider_executor.interrupt_run(lease).await;
+                            return Err(ProviderTurnFailure::Cancelled);
+                        }
                         None => {
-                            *lease = self
-                                .run_control
-                                .heartbeat(lease)
-                                .await
-                                .map_err(ProviderTurnFailure::LeaseLost)?;
+                            match self.run_control.heartbeat(lease).await {
+                                Ok(renewed) => *lease = renewed,
+                                Err(error) => {
+                                    let _ = self.provider_executor.interrupt_run(lease).await;
+                                    return Err(ProviderTurnFailure::LeaseLost(error));
+                                }
+                            }
                         }
                     }
                 }
@@ -1899,6 +1961,7 @@ mod tests {
                     maximum_cost_microunits: Some(10_000_000),
                     maximum_provider_calls: Some(8),
                     maximum_tool_units: Some(100),
+                    maximum_web_search_calls: Some(4),
                     maximum_image_units: Some(100),
                 },
             },
@@ -2006,7 +2069,7 @@ mod tests {
             AiAgentRuleResolution::new(test_rules(test_scope()), time::OffsetDateTime::now_utc())
                 .expect("test rules should resolve");
         let rule_usage = AiRuleRunUsage::default()
-            .accept_provider(result.usage(), &resolution)
+            .accept_provider_with_web_searches(result.usage(), 0, &resolution)
             .and_then(|usage| usage.accept_tool_calls(1, &resolution))
             .expect("adopted usage should fit test rules");
         AiAdoptedReadOnlyToolBatch::new(
@@ -2387,7 +2450,7 @@ mod tests {
                 )
                 .expect("test rules should resolve");
                 let rule_usage = AiRuleRunUsage::default()
-                    .accept_provider(old_result.usage(), &resolution)
+                    .accept_provider_with_web_searches(old_result.usage(), 0, &resolution)
                     .and_then(|usage| usage.accept_tool_calls(1, &resolution))
                     .expect("adopted usage should fit test rules");
                 Mutex::new(Some(AiAdoptedReadOnlyToolBatch::new(

@@ -188,6 +188,21 @@ impl AiToolExecutionResult {
 }
 
 impl AiRuntime {
+    /// Returns the declared capabilities of one exact registered provider.
+    ///
+    /// This is negotiation metadata only. It grants no runtime readiness,
+    /// egress, budget, rule, tool, or provider-call authority. A host can use
+    /// it to omit optional features such as visible reasoning summaries when
+    /// the selected adapter does not support them.
+    pub fn provider_capabilities(
+        &self,
+        provider_kind: &ProviderKind,
+    ) -> Option<crate::ProviderCapabilities> {
+        self.providers.get(provider_kind).and_then(|provider| {
+            (provider.provider_kind() == *provider_kind).then(|| provider.capabilities())
+        })
+    }
+
     /// Starts constructing a runtime.
     pub fn builder() -> AiRuntimeBuilder {
         AiRuntimeBuilder::default()
@@ -468,6 +483,139 @@ impl AiRuntime {
             ));
         }
         provider.stream(request, context).await
+    }
+
+    /// Interrupts one exact run-scoped provider resource after the caller has
+    /// observed authoritative durable cancellation or lease loss.
+    ///
+    /// Ordinary stateless providers return an inert `NotActive` outcome. This
+    /// method deliberately remains available while the runtime start gate is
+    /// closing so managed shutdown can still terminate local process trees.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error when the registered kind is absent/mismatched
+    /// or bounded interruption fails.
+    pub async fn interrupt_provider_run(
+        &self,
+        provider_kind: &ProviderKind,
+        binding: &crate::AiProviderRunBinding,
+    ) -> Result<crate::AiProviderRunInterruptOutcome, ProviderError> {
+        let provider = self
+            .providers
+            .get(provider_kind)
+            .ok_or(ProviderError::Unsupported)?;
+        if provider.provider_kind() != *provider_kind {
+            return Err(ProviderError::InvalidConfiguration(
+                "provider registry kind mismatch".to_owned(),
+            ));
+        }
+        provider.interrupt_run(binding).await
+    }
+
+    /// Closes one exact run-scoped provider resource.
+    ///
+    /// The reason is process lifecycle metadata and cannot alter the durable
+    /// run state. Close remains callable after the runtime start gate closes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error when the registered kind is absent/mismatched
+    /// or bounded resource shutdown cannot be confirmed.
+    pub async fn close_provider_run(
+        &self,
+        provider_kind: &ProviderKind,
+        binding: &crate::AiProviderRunBinding,
+        reason: crate::AiProviderRunCloseReason,
+    ) -> Result<crate::AiProviderRunCloseOutcome, ProviderError> {
+        let provider = self
+            .providers
+            .get(provider_kind)
+            .ok_or(ProviderError::Unsupported)?;
+        if provider.provider_kind() != *provider_kind {
+            return Err(ProviderError::InvalidConfiguration(
+                "provider registry kind mismatch".to_owned(),
+            ));
+        }
+        provider.close_run(binding, reason).await
+    }
+
+    /// Requests interruption from every registered adapter for one exact run.
+    ///
+    /// Request-scoped adapters return `NotActive`; a stateful adapter may own
+    /// an exact process or provider thread for the binding. Every adapter is
+    /// visited even if an earlier adapter reports an error, so a configuration
+    /// fault cannot suppress cleanup of a later local process.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first non-sensitive provider error after attempting every
+    /// registered adapter.
+    pub async fn interrupt_all_provider_runs(
+        &self,
+        binding: &crate::AiProviderRunBinding,
+    ) -> Result<u64, ProviderError> {
+        let mut requested = 0_u64;
+        let mut first_error = None;
+        for (kind, provider) in &self.providers {
+            if provider.provider_kind() != *kind {
+                first_error.get_or_insert_with(|| {
+                    ProviderError::InvalidConfiguration(
+                        "provider registry kind mismatch".to_owned(),
+                    )
+                });
+                continue;
+            }
+            match provider.interrupt_run(binding).await {
+                Ok(crate::AiProviderRunInterruptOutcome::Requested) => {
+                    requested = requested.saturating_add(1);
+                }
+                Ok(crate::AiProviderRunInterruptOutcome::NotActive) => {}
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        first_error.map_or(Ok(requested), Err)
+    }
+
+    /// Closes every registered adapter resource for one exact run binding.
+    ///
+    /// This is the terminal cleanup counterpart to
+    /// [`Self::interrupt_all_provider_runs`]. Every adapter is visited and a
+    /// stateful adapter must retain its synchronous kill-on-drop fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first non-sensitive provider error after attempting every
+    /// registered adapter.
+    pub async fn close_all_provider_runs(
+        &self,
+        binding: &crate::AiProviderRunBinding,
+        reason: crate::AiProviderRunCloseReason,
+    ) -> Result<u64, ProviderError> {
+        let mut closed = 0_u64;
+        let mut first_error = None;
+        for (kind, provider) in &self.providers {
+            if provider.provider_kind() != *kind {
+                first_error.get_or_insert_with(|| {
+                    ProviderError::InvalidConfiguration(
+                        "provider registry kind mismatch".to_owned(),
+                    )
+                });
+                continue;
+            }
+            match provider.close_run(binding, reason).await {
+                Ok(crate::AiProviderRunCloseOutcome::Closed) => {
+                    closed = closed.saturating_add(1);
+                }
+                Ok(crate::AiProviderRunCloseOutcome::NotActive) => {}
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        first_error.map_or(Ok(closed), Err)
     }
 
     /// Starts a registered provider background response after runtime,

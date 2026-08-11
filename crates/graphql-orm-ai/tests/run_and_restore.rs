@@ -105,6 +105,7 @@ fn restore_never_replays_uncertain_external_effect() {
         invalid_provider_background_submission_count: 0,
         invalid_ui_intent_event_count: 0,
         invalid_session_retention_count: 0,
+        invalid_provider_session_binding_count: 0,
         duplicate_stream_sequence_count: 0,
         stream_gap_count: 1,
     });
@@ -222,11 +223,12 @@ fn restore_fatal_checks_keep_start_gate_closed() {
         invalid_provider_background_submission_count: 1,
         invalid_ui_intent_event_count: 1,
         invalid_session_retention_count: 1,
+        invalid_provider_session_binding_count: 1,
         duplicate_stream_sequence_count: 1,
         stream_gap_count: 0,
     });
 
-    assert_eq!(plan.fatal_issue_count(), 16);
+    assert_eq!(plan.fatal_issue_count(), 17);
 }
 
 #[test]
@@ -250,6 +252,7 @@ fn legacy_restore_facts_default_new_validation_counts_to_zero() {
         invalid_provider_background_submission_count: 0,
         invalid_ui_intent_event_count: 0,
         invalid_session_retention_count: 0,
+        invalid_provider_session_binding_count: 0,
         duplicate_stream_sequence_count: 0,
         stream_gap_count: 0,
     };
@@ -266,6 +269,10 @@ fn legacy_restore_facts_default_new_validation_counts_to_zero() {
         .as_object_mut()
         .expect("restore facts should be an object")
         .remove("invalid_provider_background_submission_count");
+    value
+        .as_object_mut()
+        .expect("restore facts should be an object")
+        .remove("invalid_provider_session_binding_count");
     let object = value
         .as_object_mut()
         .expect("restore facts should be an object");
@@ -279,6 +286,7 @@ fn legacy_restore_facts_default_new_validation_counts_to_zero() {
     assert_eq!(decoded.invalid_context_checkpoint_count, 0);
     assert_eq!(decoded.invalid_provider_webhook_receipt_count, 0);
     assert_eq!(decoded.invalid_provider_background_submission_count, 0);
+    assert_eq!(decoded.invalid_provider_session_binding_count, 0);
 
     let current = serde_json::to_value(&decoded).expect("current restore facts should serialize");
     let current_object = current

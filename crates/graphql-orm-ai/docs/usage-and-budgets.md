@@ -3,7 +3,7 @@ title: "Usage Ledger, Budgets, and Reporting"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -117,6 +117,16 @@ custom application-tool calls. Completed code-interpreter and image-generation
 calls remain unsupported by the concrete accountant because their complete
 authoritative billing dimensions are not modeled.
 
+Hierarchical AI rules add a separate cumulative
+`maximum_web_search_calls` ceiling. Before each provider turn the coordinator
+projects the request's entire host-authored built-in call maximum as web
+searches when search is offered; after transport it records only exact
+normalized completed web-search pairs. `AiRuleRunUsage` is protected in the
+coordinator checkpoint and carried into every continuation, so starting a new
+provider call cannot reset the per-run search ceiling. This rule ceiling is in
+addition to, and never a replacement for, the atomic pricing/budget
+reservation, `maximum_builtin_tool_calls`, or WebSearch egress decision.
+
 ## Reporting authorization
 
 Compose `AiQueryRoot` (or `AiUsageQueryRoot` separately) and install
@@ -176,7 +186,7 @@ failure closes the query.
 ## Migration, backup, and restore
 
 The usage ledger was introduced by schema module `0.17.0`; current deployments
-apply module `0.44.0`, whose append-only immutable pricing catalog includes
+apply module `0.54.0`, whose append-only immutable pricing catalog includes
 defaulted web/file-search per-call rates. Keep workers, configuration writes,
 and readers closed during each managed migration. Unsupported legacy private
 usage rows must be proven from

@@ -370,6 +370,7 @@ mod tests {
             tools: Vec::new(),
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
+            reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
             output_schema: None,
             maximum_output_tokens: Some(32),
         }

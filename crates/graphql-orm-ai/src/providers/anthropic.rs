@@ -246,6 +246,9 @@ impl AiProvider for AnthropicProvider {
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
         context.validate_request(&ProviderKind::Anthropic, &request)?;
+        if request.reasoning_summary.maximum_bytes().is_some() {
+            return Err(ProviderError::Unsupported);
+        }
         let body = self.request_body(&request)?;
         let secret = self
             .secrets
@@ -976,6 +979,7 @@ mod tests {
             tools: vec![definition()],
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
+            reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
             output_schema: None,
             maximum_output_tokens: Some(128),
         }
@@ -1153,6 +1157,7 @@ mod tests {
             tools: vec![tool],
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
+            reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
             output_schema: None,
             maximum_output_tokens: Some(256),
         };
@@ -1185,6 +1190,7 @@ mod tests {
             tools: Vec::new(),
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
+            reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
             output_schema: Some(json!({
                 "type": "object",
                 "properties": {"summary": {"type": "string"}},

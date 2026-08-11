@@ -10,8 +10,8 @@ supersedes: []
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.68.0` with AI schema module
-`0.53.0`. It uses workspace `graphql-orm` `0.21.0`, backend-neutral
+`graphql-orm-ai` is at crate version `0.69.0` with AI schema module
+`0.54.0`. It uses workspace `graphql-orm` `0.21.0`, backend-neutral
 `graphql-orm-ai-tool-profiles` `0.2.0`, and external `agql-auth`
 `0.14.0` at `413fda3435f060604cd653c11e2cc18a668aace1`.
 
@@ -28,6 +28,22 @@ verification evidence belongs in the focused guides.
 - The crate supplies bounded provider adapters, protected persistence,
   budgets, egress, current-principal rehydration, fencing, session lifecycle,
   and the implemented OpenAI background-reconciliation path.
+- Native OpenAI supports host-selected bounded visible reasoning summaries and
+  explicit public/allowed/blocked hosted web search. Provider-retained calls
+  may offer search beside exact registered application tools; stateless mixed
+  built-in/application-tool replay remains closed. Completed web searches have
+  distinct cumulative rule ceilings, pricing/usage settlement, protected
+  lifecycle activity, and validated provider citation provenance.
+- The optional Codex app-server adapter retains one strictly allowlisted
+  process per exact claimed run for fresh text-only turns. It is globally and
+  per-owner bounded, cancellation-aware, kill-on-drop, and exposes neither a
+  generic protocol bridge nor dynamic tools, shell, files, web, MCP, browser,
+  retained threads, or application-tool continuations.
+- The provider-neutral durable session service protects opaque retained-thread
+  cursors under exact owner/scope/run/descriptor/transcript fencing and an
+  exact deletion/absence lifecycle. Cursor state is separate from warm
+  processes, private from GraphQL, backup-redacted, and readiness-blocking on
+  portable restore until drained.
 - Current rule evidence supports both generated-ORM managed hierarchies and
   immutable deployment-only ceilings with no artificial per-resource policy
   rows. Both paths share exact-principal rehydration and canonical
@@ -54,7 +70,8 @@ verification evidence belongs in the focused guides.
   the library owns current-principal disclosure checks, lease fencing,
   protected events, and the conditional commit that preserves manual and
   pre-upgrade titles.
-- Provider-persistent upload, indexing, and search remain closed. Inline
+- Provider-persistent file upload, indexing, and file search remain closed.
+  This does not include provider-hosted public web search. Inline
   attachment input and exact deletion of known provider artifacts are separate
   implemented seams.
 - The first applied-restore prerequisite is implemented: bounded generated-ORM

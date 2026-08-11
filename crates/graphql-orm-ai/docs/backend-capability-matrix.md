@@ -3,7 +3,7 @@ title: "Backend and capability acceptance matrix"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -27,7 +27,8 @@ authorization, migration, restore, or deployment acceptance.
 | Capability | Implemented here | Host/consumer proof still required | Closed or unsupported |
 | --- | --- | --- | --- |
 | Session/message runtime and protected storage | Generated-ORM persistence, authorization bridge, content protection, fencing, bounded streaming/checkpoints, retention workers. | Schema composition, encryption/key deployment, migration and restore rehearsal, access-policy parity. | Runtime readiness after full restore remains closed until applied reconciliation succeeds. |
-| Native/provider adapters | OpenAI, Anthropic, xAI, Ollama, reviewed OpenAI-compatible profiles, and trusted local-harness interface under explicit features. | Real credentials, endpoint/network policy, provider account retention/residency settings, live opt-in tests. | Generic endpoint/model authority and arbitrary child-process launch are unsupported. |
+| Native/provider adapters | OpenAI, Anthropic, xAI, Ollama, reviewed OpenAI-compatible profiles, trusted JSONL local harness, and strict fresh-turn Codex app-server interface under explicit features. | Real credentials, endpoint/network policy, provider account retention/residency settings, OS/container sandbox and process-tree kill implementation, live opt-in tests. | Generic endpoint/model/JSON-RPC authority, arbitrary child-process launch, and Codex dynamic tools are unsupported. |
+| Provider sessions and activity | Private protected provider-session binding on SQLite/PostgreSQL; MSSQL schema compile; ordered protected text/visible-summary/hosted-tool/citation activity; exact cleanup and restore audit. | Registered provider resume/delete adapter, canonical host transcript fingerprint, managed cleanup lifecycle, portable-backup drain. | Warm-process state is never persisted; restored cursors never auto-resume; multiplexing and portable cursor restore are unsupported. |
 | OpenAI background runs | Exact submission, retrieval, webhook receipt, retry/deadline handling, terminal usage/budget/output reconciliation. | Worker scheduling/operations and provider-account configuration. | Ambiguous provider creation or conflicting terminal evidence enters recovery; it is never replayed. |
 | Application tools | Explicit catalog, disclosure contracts, read-only loop, sequential one-mutation supervised flow, fresh principal/tool policy/resolver authorization. | Application operation registration, policy, logical target transport, delegated credential issuer, disclosure classification. | Recursive control-plane/introspection, autonomous writes, mixed/partial/parallel/stateless supervised execution are closed; generic parallel consequential execution is unsupported. |
 | Provider-persistent files | Exact inline attachment input and deletion of already-known provider artifacts are independent implemented seams. | MIME/egress/storage policy for inline input and cleanup adapter behavior. | Provider upload/index/search and raw vector-store IDs are closed. |

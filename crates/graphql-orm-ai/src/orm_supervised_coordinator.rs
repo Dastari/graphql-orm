@@ -654,7 +654,11 @@ impl AiSupervisedAgentCoordinator {
                     .await;
             }
         };
-        rule_usage = match rule_usage.accept_provider(result.usage(), &current_rules) {
+        rule_usage = match rule_usage.accept_provider_with_web_searches(
+            result.usage(),
+            result.builtin_usage().web_search_calls(),
+            &current_rules,
+        ) {
             Ok(usage) => usage,
             Err(_) => {
                 return self
@@ -1258,6 +1262,7 @@ mod tests {
                     maximum_cost_microunits: Some(10_000_000),
                     maximum_provider_calls: Some(8),
                     maximum_tool_units: Some(100),
+                    maximum_web_search_calls: Some(4),
                     maximum_image_units: Some(100),
                 },
             },
@@ -1317,7 +1322,7 @@ mod tests {
             AiAgentRuleResolution::new(test_rules(test_scope()), time::OffsetDateTime::now_utc())
                 .expect("test rules should resolve");
         let usage = AiRuleRunUsage::default()
-            .accept_provider(old_result.usage(), &resolution)
+            .accept_provider_with_web_searches(old_result.usage(), 0, &resolution)
             .and_then(|usage| usage.accept_tool_calls(1, &resolution))
             .expect("adopted usage should fit test rules");
         let completed = AiPersistedApplicationToolCall::test_completed(

@@ -282,6 +282,9 @@ impl AiProvider for OllamaProvider {
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
         context.validate_request(&ProviderKind::Ollama, &request)?;
+        if request.reasoning_summary.maximum_bytes().is_some() {
+            return Err(ProviderError::Unsupported);
+        }
         let body = self.request_body(&request, &context)?;
         let expected_model = request.model;
         let offered_tools = request
@@ -661,6 +664,7 @@ mod tests {
             tools: vec![],
             builtin_tools: vec![],
             maximum_builtin_tool_calls: None,
+            reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
             output_schema: None,
             maximum_output_tokens: Some(64),
         }
@@ -827,6 +831,7 @@ mod tests {
             tools: vec![tool_definition()],
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
+            reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
             output_schema: None,
             maximum_output_tokens: Some(64),
         }

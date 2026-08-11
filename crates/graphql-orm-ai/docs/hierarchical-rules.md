@@ -3,7 +3,7 @@ title: "Hierarchical AI rules"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-09
+last_reviewed: 2026-08-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -38,7 +38,7 @@ in order. A layer can only:
 - intersect exact tool-descriptor, provider-family, and provider-capability
   allowlists;
 - disable provider retention or user-owned provider credentials; and
-- lower step, time, token, cost, provider-call, tool-unit, or image-unit
+- lower step, time, token, cost, provider-call, tool-unit, completed web-search, or image-unit
   ceilings.
 
 An absent allowlist or budget value means “add no narrower constraint at this
@@ -90,9 +90,18 @@ Any custom-tool turn requires both `CustomTools` and `ParallelToolCalls` in
 the effective capability allowlist because a provider can select one
 advertised definition multiple times in the same turn.
 
+A visible reasoning-summary request independently requires
+`VisibleReasoningSummaries`; hosted search independently requires `WebSearch`.
+When search is offered, the preflight conservatively projects the complete
+host-authored built-in call maximum against `maximum_web_search_calls`.
+Authoritative normalized completions then advance the cumulative count. This
+prevents a retained continuation or restarted worker from resetting the search
+ceiling while leaving pricing, atomic budget, and egress checks independent.
+
 Protected coordinator checkpoint v2 stores the exact fingerprint and
 `AiRuleRunUsage`: trusted start time, provider calls, provider/application-tool
-steps, output tokens, cost microunits, provider/tool units, and image units.
+steps, output tokens, cost microunits, provider/tool units, completed web
+searches, and image units.
 Completed tool-batch adoption reopens that state, proves all existing durable
 tool/budget/egress evidence, and re-resolves the current fingerprint. A changed
 lineage, expired duration, exceeded counter, or legacy v1 checkpoint remains

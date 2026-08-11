@@ -15,11 +15,11 @@ use serde_json::{Value, json};
 use crate::{AiError, AiProviderFileDeletionRequest, AiProviderFileDeletionService};
 use crate::{
     AiProvider, AiProviderAttachmentRequest, AiSecretStore, ModelBuiltinTool, ModelContinuation,
-    ModelInputBlock, ModelRequest, ProviderBackgroundBinding, ProviderBackgroundObservation,
-    ProviderBackgroundRetrievalBinding, ProviderBackgroundRetrievalContext,
-    ProviderBackgroundStatus, ProviderBackgroundSubmission, ProviderBackgroundUsage,
-    ProviderCapabilities, ProviderError, ProviderEvent, ProviderEventStream, ProviderKind,
-    ProviderRequestContext, SecretRef,
+    ModelInputBlock, ModelReasoningSummaryRequest, ModelRequest, ModelWebSearchDomainPolicy,
+    ProviderBackgroundBinding, ProviderBackgroundObservation, ProviderBackgroundRetrievalBinding,
+    ProviderBackgroundRetrievalContext, ProviderBackgroundStatus, ProviderBackgroundSubmission,
+    ProviderBackgroundUsage, ProviderCapabilities, ProviderCitation, ProviderError, ProviderEvent,
+    ProviderEventStream, ProviderKind, ProviderRequestContext, SecretRef,
 };
 
 #[cfg(feature = "provider-openai")]
@@ -400,6 +400,7 @@ impl OpenAiProvider {
                 capabilities.code_execution = true;
                 capabilities.image_generation = true;
                 capabilities.background = true;
+                capabilities.visible_reasoning_summaries = true;
             }
             capabilities
         });
@@ -534,6 +535,11 @@ impl OpenAiProvider {
         if request.continuation_mode != crate::ModelContinuationMode::ProviderRetained {
             return Err(ProviderError::Unsupported);
         }
+        if request.reasoning_summary.maximum_bytes().is_some()
+            && !self.capabilities.visible_reasoning_summaries
+        {
+            return Err(ProviderError::Unsupported);
+        }
         if request.input.is_empty()
             || (self.flavor != ResponsesFlavor::OpenAi
                 && (request.maximum_output_tokens.is_none()
@@ -662,6 +668,12 @@ impl OpenAiProvider {
         if let Some(maximum_builtin_tool_calls) = request.maximum_builtin_tool_calls {
             body["max_tool_calls"] = Value::from(maximum_builtin_tool_calls);
         }
+        if matches!(
+            request.reasoning_summary,
+            ModelReasoningSummaryRequest::Auto { .. }
+        ) {
+            body["reasoning"] = json!({"summary": "auto"});
+        }
         if let Some(schema) = &request.output_schema {
             body["text"] = json!({
                 "format": {
@@ -704,6 +716,7 @@ impl AiProvider for OpenAiProvider {
             || !request.builtin_tools.is_empty()
             || request.maximum_output_tokens.is_none()
             || request.continuation.is_some()
+            || request.reasoning_summary.maximum_bytes().is_some()
             || request
                 .input
                 .iter()
@@ -918,6 +931,7 @@ impl AiProvider for OpenAiProvider {
             .map(model_builtin_kind)
             .map(str::to_owned)
             .collect::<BTreeSet<_>>();
+        let maximum_reasoning_summary_bytes = request.reasoning_summary.maximum_bytes();
         let output = async_stream::try_stream! {
             let mut decoder = SseDecoder::default();
             let mut normalizer = OpenAiEventNormalizer::new(
@@ -925,6 +939,7 @@ impl AiProvider for OpenAiProvider {
                 request.maximum_output_tokens,
                 tool_ids,
                 allowed_builtin_kinds,
+                maximum_reasoning_summary_bytes,
             );
             while let Some(chunk) = bytes.next().await {
                 let chunk = chunk.map_err(|_| ProviderError::Unavailable)?;
@@ -1128,7 +1143,7 @@ fn normalize_background_output(
     let mut events = Vec::new();
     let mut visible_bytes = 0_usize;
     let mut content_items = 0_usize;
-    for item in output {
+    for (output_index, item) in output.iter().enumerate() {
         match item.get("type").and_then(Value::as_str) {
             Some("message") => {
                 if item.get("role").and_then(Value::as_str) != Some("assistant")
@@ -1149,6 +1164,12 @@ fn normalize_background_output(
                 {
                     return Err(ProviderError::Rejected);
                 }
+                let output_item_id = item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or(ProviderError::Rejected)?;
+                let output_index =
+                    u32::try_from(output_index).map_err(|_| ProviderError::Rejected)?;
                 let content = item
                     .get("content")
                     .and_then(Value::as_array)
@@ -1157,9 +1178,12 @@ fn normalize_background_output(
                     .checked_add(content.len())
                     .filter(|count| *count <= binding.maximum_content_items())
                     .ok_or(ProviderError::Rejected)?;
-                for content_item in content {
+                for (content_index, content_item) in content.iter().enumerate() {
                     normalize_background_content_item(
                         content_item,
+                        output_item_id,
+                        output_index,
+                        u32::try_from(content_index).map_err(|_| ProviderError::Rejected)?,
                         binding,
                         &mut visible_bytes,
                         &mut content_items,
@@ -1208,8 +1232,12 @@ fn normalize_background_output(
 }
 
 #[cfg(feature = "provider-openai")]
+#[allow(clippy::too_many_arguments)]
 fn normalize_background_content_item(
     item: &Value,
+    output_item_id: &str,
+    output_index: u32,
+    content_index: u32,
     binding: &ProviderBackgroundRetrievalBinding,
     visible_bytes: &mut usize,
     content_items: &mut usize,
@@ -1241,44 +1269,26 @@ fn normalize_background_content_item(
                 if annotation.get("type").and_then(Value::as_str) != Some("url_citation") {
                     return Err(ProviderError::Rejected);
                 }
-                let source = annotation
-                    .get("url")
-                    .and_then(Value::as_str)
-                    .filter(|value| {
-                        value.len() <= 8_192
-                            && (value.starts_with("https://") || value.starts_with("http://"))
-                            && value.bytes().all(|byte| byte.is_ascii_graphic())
-                    })
-                    .ok_or(ProviderError::Rejected)?;
-                let title = match annotation.get("title") {
-                    None | Some(Value::Null) => None,
-                    Some(Value::String(title)) if title.len() <= 4_096 => Some(title.clone()),
-                    _ => return Err(ProviderError::Rejected),
-                };
-                let start = annotation
-                    .get("start_index")
-                    .and_then(Value::as_u64)
-                    .ok_or(ProviderError::Rejected)?;
-                let end = annotation
-                    .get("end_index")
-                    .and_then(Value::as_u64)
-                    .ok_or(ProviderError::Rejected)?;
-                if start > end || end > text.chars().count() as u64 {
-                    return Err(ProviderError::Rejected);
-                }
-                let citation_bytes = source
+                let maximum_end =
+                    u32::try_from(text.chars().count()).map_err(|_| ProviderError::Rejected)?;
+                let citation = normalize_openai_citation(
+                    annotation,
+                    output_item_id,
+                    output_index,
+                    content_index,
+                    Some(maximum_end),
+                )?;
+                let citation_bytes = citation
+                    .source_url()
                     .len()
-                    .checked_add(title.as_ref().map_or(0, String::len))
+                    .checked_add(citation.title().map_or(0, str::len))
                     .ok_or(ProviderError::Rejected)?;
                 record_background_visible_bytes(
                     visible_bytes,
                     citation_bytes,
                     binding.maximum_visible_bytes(),
                 )?;
-                events.push(ProviderEvent::Citation {
-                    source: source.to_owned(),
-                    title,
-                });
+                events.push(ProviderEvent::Citation { citation });
             }
             Ok(())
         }
@@ -1375,23 +1385,17 @@ fn insert_optional_header(
 
 fn openai_builtin(tool: &ModelBuiltinTool) -> Result<Value, ProviderError> {
     match tool {
-        ModelBuiltinTool::WebSearch { allowed_domains } => {
-            if allowed_domains.len() > 100
-                || allowed_domains
-                    .iter()
-                    .any(|domain| domain.is_empty() || domain.len() > 253)
-            {
-                return Err(ProviderError::InvalidRequest);
-            }
-            if allowed_domains.is_empty() {
-                Ok(json!({"type": "web_search"}))
-            } else {
-                Ok(json!({
-                    "type": "web_search",
-                    "filters": {"allowed_domains": allowed_domains}
-                }))
-            }
-        }
+        ModelBuiltinTool::WebSearch { domains } => match domains {
+            ModelWebSearchDomainPolicy::PublicWeb => Ok(json!({"type": "web_search"})),
+            ModelWebSearchDomainPolicy::AllowedDomains { domains } => Ok(json!({
+                "type": "web_search",
+                "filters": {"allowed_domains": domains}
+            })),
+            ModelWebSearchDomainPolicy::BlockedDomains { domains } => Ok(json!({
+                "type": "web_search",
+                "filters": {"blocked_domains": domains}
+            })),
+        },
         ModelBuiltinTool::FileSearch {
             store_ids,
             maximum_results,
@@ -1493,14 +1497,17 @@ struct OpenAiEventNormalizer {
     maximum_output_tokens: Option<u64>,
     tool_ids: BTreeMap<String, String>,
     allowed_builtin_kinds: BTreeSet<String>,
+    maximum_reasoning_summary_bytes: Option<u64>,
     function_calls: BTreeMap<String, FunctionCallState>,
     builtin_calls: BTreeMap<String, (String, String)>,
+    message_output_indices: BTreeMap<String, u32>,
     seen_call_ids: BTreeSet<String>,
     completed_calls: BTreeSet<String>,
     response_id: Option<String>,
     started: bool,
     completed: bool,
     visible_bytes: usize,
+    reasoning_summary_bytes: u64,
     wire_events: usize,
 }
 
@@ -1510,20 +1517,24 @@ impl OpenAiEventNormalizer {
         maximum_output_tokens: Option<u64>,
         tool_ids: BTreeMap<String, String>,
         allowed_builtin_kinds: BTreeSet<String>,
+        maximum_reasoning_summary_bytes: Option<u64>,
     ) -> Self {
         Self {
             expected_model,
             maximum_output_tokens,
             tool_ids,
             allowed_builtin_kinds,
+            maximum_reasoning_summary_bytes,
             function_calls: BTreeMap::new(),
             builtin_calls: BTreeMap::new(),
+            message_output_indices: BTreeMap::new(),
             seen_call_ids: BTreeSet::new(),
             completed_calls: BTreeSet::new(),
             response_id: None,
             started: false,
             completed: false,
             visible_bytes: 0,
+            reasoning_summary_bytes: 0,
             wire_events: 0,
         }
     }
@@ -1552,6 +1563,14 @@ impl OpenAiEventNormalizer {
             }
             "response.reasoning_summary_text.delta" => {
                 let text = required_string(event, "delta")?;
+                let maximum = self
+                    .maximum_reasoning_summary_bytes
+                    .ok_or(ProviderError::Rejected)?;
+                self.reasoning_summary_bytes = self
+                    .reasoning_summary_bytes
+                    .checked_add(u64::try_from(text.len()).map_err(|_| ProviderError::Rejected)?)
+                    .filter(|bytes| *bytes <= maximum)
+                    .ok_or(ProviderError::Rejected)?;
                 self.record_visible_bytes(text.len())?;
                 Ok(vec![ProviderEvent::ReasoningSummaryDelta { text }])
             }
@@ -1583,12 +1602,19 @@ impl OpenAiEventNormalizer {
             "response.output_text.annotation.added" => {
                 let annotation = event.get("annotation").ok_or(ProviderError::Rejected)?;
                 if annotation.get("type").and_then(Value::as_str) == Some("url_citation") {
+                    let item_id = required_string(event, "item_id")?;
+                    let output_index = required_u32(event, "output_index")?;
+                    if self.message_output_indices.get(&item_id) != Some(&output_index) {
+                        return Err(ProviderError::Rejected);
+                    }
                     Ok(vec![ProviderEvent::Citation {
-                        source: required_string(annotation, "url")?,
-                        title: annotation
-                            .get("title")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
+                        citation: normalize_openai_citation(
+                            annotation,
+                            &item_id,
+                            output_index,
+                            required_u32(event, "content_index")?,
+                            None,
+                        )?,
                     }])
                 } else {
                     Ok(vec![ProviderEvent::Unknown {
@@ -1690,6 +1716,7 @@ impl OpenAiEventNormalizer {
         if !valid_responses_reference(&item_id)
             || self.function_calls.contains_key(&item_id)
             || self.builtin_calls.contains_key(&item_id)
+            || self.message_output_indices.contains_key(&item_id)
         {
             return Err(ProviderError::Rejected);
         }
@@ -1722,6 +1749,14 @@ impl OpenAiEventNormalizer {
                 },
             );
             return Ok(vec![ProviderEvent::ToolCallStarted { call_id, tool_id }]);
+        }
+        if item_type == "message" {
+            if item.get("role").and_then(Value::as_str) != Some("assistant") {
+                return Err(ProviderError::Rejected);
+            }
+            self.message_output_indices
+                .insert(item_id, required_u32(event, "output_index")?);
+            return Ok(Vec::new());
         }
         if let Some(kind) = builtin_kind(&item_type) {
             if !self.allowed_builtin_kinds.contains(kind) {
@@ -1837,6 +1872,39 @@ fn required_u64(value: &Value, field: &str) -> Result<u64, ProviderError> {
         .get(field)
         .and_then(Value::as_u64)
         .ok_or(ProviderError::Rejected)
+}
+
+fn required_u32(value: &Value, field: &str) -> Result<u32, ProviderError> {
+    let value = required_u64(value, field)?;
+    u32::try_from(value).map_err(|_| ProviderError::Rejected)
+}
+
+fn normalize_openai_citation(
+    annotation: &Value,
+    output_item_id: &str,
+    output_index: u32,
+    content_index: u32,
+    maximum_end: Option<u32>,
+) -> Result<ProviderCitation, ProviderError> {
+    let title = match annotation.get("title") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(title)) => Some(title.clone()),
+        _ => return Err(ProviderError::Rejected),
+    };
+    let start_index = required_u32(annotation, "start_index")?;
+    let end_index = required_u32(annotation, "end_index")?;
+    if maximum_end.is_some_and(|maximum| end_index > maximum) {
+        return Err(ProviderError::Rejected);
+    }
+    ProviderCitation::new(
+        required_string(annotation, "url")?,
+        title,
+        output_item_id.to_owned(),
+        output_index,
+        content_index,
+        start_index,
+        end_index,
+    )
 }
 
 fn optional_nested_u64(value: &Value, path: &[&str]) -> Result<u64, ProviderError> {
@@ -2376,6 +2444,7 @@ mod tests {
             tools: vec![],
             builtin_tools: vec![],
             maximum_builtin_tool_calls: None,
+            reasoning_summary: ModelReasoningSummaryRequest::Disabled,
             output_schema: None,
             maximum_output_tokens: Some(32),
         };
@@ -2433,6 +2502,7 @@ mod tests {
             tools: vec![],
             builtin_tools: vec![],
             maximum_builtin_tool_calls: None,
+            reasoning_summary: ModelReasoningSummaryRequest::Disabled,
             output_schema: None,
             maximum_output_tokens: Some(32),
         };
@@ -2539,8 +2609,16 @@ mod tests {
                     text: "Bound answer.".to_owned(),
                 },
                 ProviderEvent::Citation {
-                    source: "https://example.invalid/source".to_owned(),
-                    title: Some("Synthetic source".to_owned()),
+                    citation: ProviderCitation::new(
+                        "https://example.invalid/source".to_owned(),
+                        Some("Synthetic source".to_owned()),
+                        "msg_background_1".to_owned(),
+                        1,
+                        0,
+                        0,
+                        5,
+                    )
+                    .expect("background citation should validate"),
                 },
                 ProviderEvent::Usage {
                     input_tokens: 12,
@@ -2755,6 +2833,7 @@ mod tests {
             tools: Vec::new(),
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
+            reasoning_summary: ModelReasoningSummaryRequest::Disabled,
             output_schema: None,
             maximum_output_tokens: Some(64),
         };
@@ -2802,9 +2881,12 @@ mod tests {
             continuation_mode: crate::ModelContinuationMode::ProviderRetained,
             tools: vec![],
             builtin_tools: vec![ModelBuiltinTool::WebSearch {
-                allowed_domains: vec!["example.com".to_owned()],
+                domains: ModelWebSearchDomainPolicy::AllowedDomains {
+                    domains: vec!["example.com".to_owned()],
+                },
             }],
             maximum_builtin_tool_calls: Some(3),
+            reasoning_summary: ModelReasoningSummaryRequest::Disabled,
             output_schema: None,
             maximum_output_tokens: Some(32),
         };
@@ -2820,6 +2902,264 @@ mod tests {
             .expect("authorized web search should map");
         assert_eq!(body["max_tool_calls"], 3);
         assert_eq!(body["tools"][0]["type"], "web_search");
+        assert_eq!(
+            body["tools"][0]["filters"]["allowed_domains"],
+            json!(["example.com"])
+        );
+
+        let mut request = request;
+        request.builtin_tools = vec![ModelBuiltinTool::WebSearch {
+            domains: ModelWebSearchDomainPolicy::BlockedDomains {
+                domains: vec!["untrusted.example".to_owned()],
+            },
+        }];
+        request.reasoning_summary =
+            ModelReasoningSummaryRequest::auto(4_096).expect("summary bound should validate");
+        let body = provider
+            .request_body(&request, &provider_context)
+            .expect("blocked domains and visible summary should map");
+        assert_eq!(
+            body["tools"][0]["filters"]["blocked_domains"],
+            json!(["untrusted.example"])
+        );
+        assert_eq!(body["reasoning"]["summary"], "auto");
+
+        request.builtin_tools = vec![ModelBuiltinTool::WebSearch {
+            domains: ModelWebSearchDomainPolicy::PublicWeb,
+        }];
+        let body = provider
+            .request_body(&request, &provider_context)
+            .expect("explicit public web policy should map");
+        assert!(body["tools"][0].get("filters").is_none());
+    }
+
+    #[test]
+    fn web_policy_and_reasoning_bounds_fail_closed() {
+        assert_eq!(
+            ModelWebSearchDomainPolicy::allowed_domains(vec![
+                "WWW.OpenAI.COM".to_owned(),
+                "example.com".to_owned(),
+            ])
+            .expect("reviewed domains should canonicalize"),
+            ModelWebSearchDomainPolicy::AllowedDomains {
+                domains: vec!["example.com".to_owned(), "www.openai.com".to_owned()],
+            }
+        );
+        assert!(matches!(
+            ModelWebSearchDomainPolicy::blocked_domains(vec![
+                "example.com".to_owned(),
+                "EXAMPLE.COM".to_owned(),
+            ]),
+            Err(ProviderError::InvalidRequest)
+        ));
+        assert!(matches!(
+            ModelWebSearchDomainPolicy::allowed_domains(vec!["*.example.com".to_owned()]),
+            Err(ProviderError::InvalidRequest)
+        ));
+        let request = ModelRequest {
+            model: "test-model".to_owned(),
+            instructions: vec![],
+            input: vec![ModelInputBlock::Text {
+                text: "synthetic search".to_owned(),
+            }],
+            continuation: None,
+            continuation_mode: crate::ModelContinuationMode::ProviderRetained,
+            tools: vec![],
+            builtin_tools: vec![ModelBuiltinTool::WebSearch {
+                domains: ModelWebSearchDomainPolicy::AllowedDomains { domains: vec![] },
+            }],
+            maximum_builtin_tool_calls: Some(1),
+            reasoning_summary: ModelReasoningSummaryRequest::Disabled,
+            output_schema: None,
+            maximum_output_tokens: Some(32),
+        };
+        assert!(matches!(
+            request.validate(),
+            Err(ProviderError::InvalidRequest)
+        ));
+        assert!(matches!(
+            ModelReasoningSummaryRequest::auto(0),
+            Err(ProviderError::InvalidRequest)
+        ));
+        assert!(matches!(
+            ModelReasoningSummaryRequest::auto(1024 * 1024 + 1),
+            Err(ProviderError::InvalidRequest)
+        ));
+    }
+
+    #[test]
+    fn provider_retained_request_can_mix_web_and_exact_application_tools() {
+        let reference = SecretRef::parse("openai/mixed-tools-test")
+            .expect("test secret reference should parse");
+        let mut config = OpenAiProviderConfig::new(reference.clone());
+        config.store_responses = true;
+        let provider = OpenAiProvider::new(
+            config,
+            Arc::new(TestSecrets(reference, "not-a-real-key".to_owned())),
+        )
+        .expect("retained provider should build");
+        let request = ModelRequest {
+            model: "test-model".to_owned(),
+            instructions: vec![],
+            input: vec![ModelInputBlock::ToolResult {
+                call_id: "call-1".to_owned(),
+                tool_id: "records.read".to_owned(),
+                output: json!({"record": 1}),
+            }],
+            continuation: Some(ModelContinuation::ProviderResponse {
+                response_id: "resp-1".to_owned(),
+            }),
+            continuation_mode: crate::ModelContinuationMode::ProviderRetained,
+            tools: vec![crate::ModelToolDefinition {
+                tool_id: "records.read".to_owned(),
+                provider_name: "records_read".to_owned(),
+                fingerprint: "reviewed-fingerprint".to_owned(),
+                description: "Read one reviewed record.".to_owned(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}},
+                    "required": ["id"],
+                    "additionalProperties": false
+                }),
+                strict: true,
+            }],
+            builtin_tools: vec![ModelBuiltinTool::WebSearch {
+                domains: ModelWebSearchDomainPolicy::PublicWeb,
+            }],
+            maximum_builtin_tool_calls: Some(4),
+            reasoning_summary: ModelReasoningSummaryRequest::auto(4_096)
+                .expect("summary bound should validate"),
+            output_schema: None,
+            maximum_output_tokens: Some(128),
+        };
+        request
+            .validate()
+            .expect("mixed retained request should validate");
+        let body = provider
+            .request_body(
+                &request,
+                &context("test-model", request.conservative_egress_bytes()),
+            )
+            .expect("mixed retained request should map");
+        assert_eq!(body["previous_response_id"], "resp-1");
+        assert_eq!(body["tools"].as_array().map(Vec::len), Some(2));
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][1]["type"], "web_search");
+
+        let mut stateless = request;
+        stateless.continuation_mode = crate::ModelContinuationMode::StatelessReplay;
+        stateless.continuation = None;
+        stateless.input = vec![ModelInputBlock::Text {
+            text: "synthetic".to_owned(),
+        }];
+        assert!(matches!(
+            stateless.validate(),
+            Err(ProviderError::InvalidRequest)
+        ));
+    }
+
+    #[test]
+    fn stream_normalizer_bounds_requested_summaries_and_citation_provenance() {
+        let created = json!({
+            "type": "response.created",
+            "response": {"id": "resp-test", "model": "test-model"}
+        });
+        let summary = json!({
+            "type": "response.reasoning_summary_text.delta",
+            "delta": "brief"
+        });
+        let mut disabled = OpenAiEventNormalizer::new(
+            "test-model".to_owned(),
+            Some(32),
+            BTreeMap::new(),
+            BTreeSet::new(),
+            None,
+        );
+        disabled
+            .normalize(&created)
+            .expect("response start should normalize");
+        assert!(matches!(
+            disabled.normalize(&summary),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut bounded = OpenAiEventNormalizer::new(
+            "test-model".to_owned(),
+            Some(32),
+            BTreeMap::new(),
+            BTreeSet::new(),
+            Some(4),
+        );
+        bounded
+            .normalize(&created)
+            .expect("response start should normalize");
+        assert!(matches!(
+            bounded.normalize(&summary),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut citation_normalizer = OpenAiEventNormalizer::new(
+            "test-model".to_owned(),
+            Some(32),
+            BTreeMap::new(),
+            BTreeSet::new(),
+            None,
+        );
+        citation_normalizer
+            .normalize(&created)
+            .expect("response start should normalize");
+        citation_normalizer
+            .normalize(&json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "type": "message",
+                    "id": "msg-test",
+                    "role": "assistant"
+                }
+            }))
+            .expect("assistant item should bind citation provenance");
+        let invalid = json!({
+            "type": "response.output_text.annotation.added",
+            "item_id": "msg-test",
+            "output_index": 0,
+            "content_index": 0,
+            "annotation": {
+                "type": "url_citation",
+                "url": "http://example.com/source",
+                "title": "Unsafe source",
+                "start_index": 0,
+                "end_index": 5
+            }
+        });
+        assert!(matches!(
+            citation_normalizer.normalize(&invalid),
+            Err(ProviderError::Rejected)
+        ));
+        let valid = json!({
+            "type": "response.output_text.annotation.added",
+            "item_id": "msg-test",
+            "output_index": 0,
+            "content_index": 0,
+            "annotation": {
+                "type": "url_citation",
+                "url": "https://example.com/source",
+                "title": "Reviewed display source",
+                "start_index": 0,
+                "end_index": 5
+            }
+        });
+        let events = citation_normalizer
+            .normalize(&valid)
+            .expect("safe exact citation should normalize");
+        let [ProviderEvent::Citation { citation }] = events.as_slice() else {
+            panic!("expected one citation event");
+        };
+        assert_eq!(citation.source_url(), "https://example.com/source");
+        assert_eq!(citation.output_item_id(), "msg-test");
+        assert_eq!(citation.output_index(), 0);
+        assert_eq!(citation.content_index(), 0);
+        assert_eq!((citation.start_index(), citation.end_index()), (0, 5));
     }
 
     #[tokio::test]
@@ -3042,6 +3382,7 @@ mod tests {
             tools: vec![],
             builtin_tools: vec![],
             maximum_builtin_tool_calls: None,
+            reasoning_summary: ModelReasoningSummaryRequest::Disabled,
             output_schema: None,
             maximum_output_tokens: Some(32),
         };
@@ -3112,6 +3453,7 @@ mod tests {
             tools: vec![],
             builtin_tools: vec![],
             maximum_builtin_tool_calls: None,
+            reasoning_summary: ModelReasoningSummaryRequest::Disabled,
             output_schema: None,
             maximum_output_tokens: Some(32),
         };
@@ -3154,6 +3496,7 @@ mod tests {
             tools: vec![],
             builtin_tools: vec![],
             maximum_builtin_tool_calls: None,
+            reasoning_summary: ModelReasoningSummaryRequest::Disabled,
             output_schema: None,
             maximum_output_tokens: Some(32),
         };
@@ -3213,6 +3556,7 @@ mod tests {
             tools: vec![],
             builtin_tools: vec![],
             maximum_builtin_tool_calls: None,
+            reasoning_summary: ModelReasoningSummaryRequest::Disabled,
             output_schema: None,
             maximum_output_tokens: Some(64),
         };

@@ -12,6 +12,7 @@ use graphql_orm::graphql::orm::{
 use graphql_orm_storage::validate_blob_key;
 use sha2::{Digest, Sha256};
 
+use crate::orm_provider_session::AiProviderSessionBindingRecord;
 use crate::persistence::{
     AiApprovalRecord, AiApprovalRecordOrderByInput, AiAttachmentArtifactRecord,
     AiAttachmentArtifactRecordOrderByInput, AiAttachmentRecord, AiAttachmentRecordOrderByInput,
@@ -362,6 +363,17 @@ impl OrmAiRestoreFactCollector {
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
+                    // Portable backups redact opaque provider-session cursors.
+                    // Any binding therefore blocks restore readiness in this
+                    // release; reading one row is sufficient to prove the
+                    // required empty-set contract failed.
+                    let provider_sessions = tx
+                        .query::<AiProviderSessionBindingRecord>()
+                        .default_order()
+                        .limit(1)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
                     let policies = if let Some(policy_limits) = policy_audit_limits {
                         let budget_policies = tx
                             .query::<AiBudgetPolicyRecord>()
@@ -460,6 +472,7 @@ impl OrmAiRestoreFactCollector {
                         runs,
                         approvals,
                         egress_consents,
+                        provider_sessions,
                         policies,
                         attachments,
                     })
@@ -476,6 +489,7 @@ struct CollectedRows {
     runs: Vec<AiRunRecord>,
     approvals: Vec<AiApprovalRecord>,
     egress_consents: Vec<AiEgressConsentRecord>,
+    provider_sessions: Vec<AiProviderSessionBindingRecord>,
     policies: Option<CollectedPolicyRows>,
     attachments: Option<CollectedAttachmentMetadataRows>,
 }
@@ -664,6 +678,24 @@ impl CollectedRows {
             audit_status(consents_truncated, invalid_consents),
         );
 
+        let invalid_provider_session_binding_count =
+            u64::try_from(self.provider_sessions.len()).map_err(|_| AiError::PersistenceFailed)?;
+        let provider_session_evidence = self
+            .provider_sessions
+            .iter()
+            .map(|binding| (binding.id, binding.row_version, binding.state.clone()))
+            .collect::<Vec<_>>();
+        statuses.insert(
+            AiRestoreAuditKind::ProviderSessionBindings,
+            if invalid_provider_session_binding_count == 0 {
+                AiRestoreAuditStatus::Complete
+            } else {
+                AiRestoreAuditStatus::Invalid {
+                    count: invalid_provider_session_binding_count,
+                }
+            },
+        );
+
         let mut invalid_budget_policy_count = 0_u64;
         let mut invalid_pricing_policy_count = 0_u64;
         let policy_evidence = if let Some(policies) = self.policies {
@@ -691,6 +723,7 @@ impl CollectedRows {
             run_evidence,
             approval_evidence,
             consent_evidence,
+            provider_session_evidence,
             policy_evidence,
             attachment_metadata_evidence,
         ))
@@ -713,6 +746,7 @@ impl CollectedRows {
                 invalid_context_checkpoint_count: 0,
                 invalid_provider_webhook_receipt_count: 0,
                 invalid_provider_background_submission_count: 0,
+                invalid_provider_session_binding_count,
                 invalid_ui_intent_event_count: 0,
                 invalid_session_retention_count: 0,
                 duplicate_stream_sequence_count: 0,
@@ -2483,7 +2517,7 @@ mod tests {
         let missing_plan = crate::AiRestoreReconciler::new("module-fingerprint")
             .plan_collected(&missing_statuses)
             .expect("missing-status plan should hash");
-        assert_eq!(missing_plan.plan().fatal_issue_count(), 18);
+        assert_eq!(missing_plan.plan().fatal_issue_count(), 19);
     }
 
     #[tokio::test]

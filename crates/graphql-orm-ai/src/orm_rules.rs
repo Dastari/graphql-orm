@@ -499,6 +499,8 @@ struct StoredRuleBudget {
     maximum_cost_microunits: Option<u64>,
     maximum_provider_calls: Option<u64>,
     maximum_tool_units: Option<u64>,
+    #[serde(default)]
+    maximum_web_search_calls: Option<u64>,
     maximum_image_units: Option<u64>,
 }
 
@@ -511,6 +513,7 @@ impl From<&AiRuleBudgetCeilings> for StoredRuleBudget {
             maximum_cost_microunits: value.maximum_cost_microunits,
             maximum_provider_calls: value.maximum_provider_calls,
             maximum_tool_units: value.maximum_tool_units,
+            maximum_web_search_calls: value.maximum_web_search_calls,
             maximum_image_units: value.maximum_image_units,
         }
     }
@@ -525,6 +528,7 @@ impl From<StoredRuleBudget> for AiRuleBudgetCeilings {
             maximum_cost_microunits: value.maximum_cost_microunits,
             maximum_provider_calls: value.maximum_provider_calls,
             maximum_tool_units: value.maximum_tool_units,
+            maximum_web_search_calls: value.maximum_web_search_calls,
             maximum_image_units: value.maximum_image_units,
         }
     }
@@ -649,6 +653,7 @@ fn rule_view(record: &AiScopePolicyRecord, scope: &AiScope) -> Result<AiRulePoli
         maximum_cost_microunits: constraints.budget.maximum_cost_microunits,
         maximum_provider_calls: constraints.budget.maximum_provider_calls,
         maximum_tool_units: constraints.budget.maximum_tool_units,
+        maximum_web_search_calls: constraints.budget.maximum_web_search_calls,
         maximum_image_units: constraints.budget.maximum_image_units,
         row_version: record.row_version,
         updated_at: record.updated_at,
@@ -897,6 +902,7 @@ mod tests {
                 maximum_cost_microunits: Some(1_000_000),
                 maximum_provider_calls: Some(4),
                 maximum_tool_units: Some(4),
+                maximum_web_search_calls: Some(4),
                 maximum_image_units: Some(0),
             },
         }

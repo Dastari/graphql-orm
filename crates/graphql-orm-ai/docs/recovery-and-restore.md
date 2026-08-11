@@ -3,7 +3,7 @@ title: "Recovery, Retention, Backup, and Restore"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -111,7 +111,7 @@ declarations. `AiRestoreReconciler` already produces a side-effect-free plan:
 - provider continuations/files require re-verification;
 - pending approval/consent counts remain explicit; and
 - invalid encryption, attachment, usage, budget, pricing, skill, rule,
-  checkpoint, webhook, background, UI-intent, retention, or stream facts keep
+  checkpoint, webhook, background, provider-session, UI-intent, retention, or stream facts keep
   readiness closed.
 
 The collector foundation is now implemented. `OrmAiRestoreFactCollector` uses
@@ -135,6 +135,16 @@ for every required audit. Reaching a limit returns no partial evidence or
 candidate actions for that category; observing an invalid row/graph, missing
 deployment inputs, or an audit not yet implemented produces a fatal collected
 plan; a caller-supplied zero is not substituted.
+
+Provider-session cursors have a deliberately closed portable-restore rule.
+Their protected field is backup-redacted, and the required
+`ProviderSessionBindings` audit is complete only when the bounded database
+query proves that no binding row exists. Any active, claimed, cleanup,
+quarantined, or otherwise retained binding is invalid for portable restore and
+keeps readiness closed. A redaction marker, cursor loss, or provider expiry is
+not provider-absence proof. Hosts must drain retained sessions through the
+exact deletion service before a portable backup intended for ready restore;
+raw restore never resumes an external provider thread.
 
 Encryption and object recovery deliberately remain separate. A current
 content-protection policy row cannot prove historic application-encrypted
@@ -162,7 +172,7 @@ What remains missing from the production adapter chain is:
 
 `graphql-orm-backup` 0.7.0, ORM 0.21.0, and storage 0.6.0 resolve through one
 workspace and one database/metadata/storage type universe. AI schema module
-0.51.0 also includes finalized local attachment and artifact object keys in
+0.54.0 also includes finalized local attachment and artifact object keys in
 the confidential database export while continuing to redact quarantine,
 upload-token, provider, credential, and secret references.
 

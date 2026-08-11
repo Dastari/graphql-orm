@@ -430,6 +430,22 @@ pub(crate) struct PreparedLiveDeltaEvent {
     pub expected_tenant_id: Option<String>,
 }
 
+pub(crate) struct PreparedProviderActivityEvent {
+    pub id: Uuid,
+    pub inbox_event_id: Uuid,
+    pub protected_payload: serde_json::Value,
+    pub protected_inbox_payload: serde_json::Value,
+    pub correlation_id: String,
+    pub provider_kind: String,
+    pub provider_model: String,
+    pub budget_reservation_id: Uuid,
+    pub expected_owner_principal_kind: String,
+    pub expected_owner_subject: String,
+    pub expected_scope_kind: String,
+    pub expected_scope_id: String,
+    pub expected_tenant_id: Option<String>,
+}
+
 pub(crate) struct PreparedUiIntentEvent {
     pub id: Uuid,
     pub inbox_event_id: Uuid,
@@ -2163,6 +2179,143 @@ impl OrmAiRunService {
                     })
                     .await
                     .map_err(OrmPublicError::from)?;
+                    tx.queue_event(AiSessionWakeup {
+                        session_id: session.id,
+                        sequence: event_sequence,
+                    });
+                    Ok(())
+                })
+            })
+            .await
+            .map_err(map_transaction)
+    }
+
+    pub(crate) async fn append_provider_activity_event(
+        &self,
+        lease: &AiRunLease,
+        event: PreparedProviderActivityEvent,
+    ) -> Result<(), AiError> {
+        if !valid_provider_kind(&event.provider_kind)
+            || !valid_provider_reference(&event.provider_model)
+            || !valid_provider_reference(&event.correlation_id)
+            || event.expected_owner_principal_kind.trim().is_empty()
+            || event.expected_owner_subject.trim().is_empty()
+            || event.expected_scope_kind.trim().is_empty()
+            || event.expected_scope_id.trim().is_empty()
+        {
+            return Err(AiError::InvalidInput(
+                "invalid protected provider-activity event".to_owned(),
+            ));
+        }
+        let now = canonical_second(self.clock.now());
+        let lease = lease.clone();
+        self.database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let current = tx
+                        .find_by_id::<AiRunRecord>(&lease.run_id.0)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    let stored_reference: PrincipalReference =
+                        serde_json::from_value(current.principal_reference.clone())
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    if persisted_state(&current)? != AiRunState::Running
+                        || current.session_id != lease.session_id.0
+                        || current.input_message_id != lease.input_message_id
+                        || stored_reference != lease.principal_reference
+                        || current.attempt_id != Some(lease.attempt_id)
+                        || current.lease_owner.as_deref() != Some(lease.worker_id.as_str())
+                        || current.lease_generation != lease.lease_generation
+                        || current
+                            .lease_expires_at
+                            .is_none_or(|expires_at| expires_at <= now.unix_timestamp())
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let reservation = tx
+                        .find_by_id::<AiBudgetReservationRecord>(&event.budget_reservation_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    if reservation.session_id != lease.session_id.0
+                        || reservation.run_id != lease.run_id.0
+                        || reservation.attempt_id != lease.attempt_id
+                        || reservation.lease_generation != lease.lease_generation
+                        || reservation.provider_kind != event.provider_kind
+                        || reservation.provider_model != event.provider_model
+                        || reservation.state != "uncertain"
+                        || reservation.actual_runs.is_some()
+                        || reservation.reconciled_at.is_none()
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let session = tx
+                        .find_by_id::<AiSessionRecord>(&lease.session_id.0)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    if session.state != "active"
+                        || session.deleted_at.is_some()
+                        || session.owner_principal_kind != event.expected_owner_principal_kind
+                        || session.owner_subject != event.expected_owner_subject
+                        || session.scope_kind != event.expected_scope_kind
+                        || session.scope_id != event.expected_scope_id
+                        || session.tenant_id != event.expected_tenant_id
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let event_sequence = session
+                        .stream_head
+                        .checked_add(1)
+                        .filter(|sequence| *sequence <= i64::from(i32::MAX))
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let update = tx
+                        .compare_and_swap::<AiSessionRecord>(
+                            &session.id,
+                            session.row_version,
+                            AiSessionRecordWhereInput::default(),
+                            UpdateAiSessionRecordInput {
+                                stream_head: Some(event_sequence),
+                                last_activity_at: Some(now.unix_timestamp()),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if !matches!(update, ConditionalUpdateOutcome::Updated(_)) {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                        id: event.id,
+                        session_id: session.id,
+                        sequence: event_sequence,
+                        event_type: "provider_activity".to_owned(),
+                        run_id: Some(lease.run_id.0),
+                        causation_id: Some(lease.input_message_id.to_string()),
+                        correlation_id: event.correlation_id,
+                        protected_payload: event.protected_payload,
+                    })
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    append_inbox_event(
+                        tx,
+                        PreparedAiInboxEvent {
+                            id: event.inbox_event_id,
+                            principal_kind: event.expected_owner_principal_kind,
+                            principal_subject: event.expected_owner_subject,
+                            scope: AiScope {
+                                kind: event.expected_scope_kind,
+                                id: event.expected_scope_id,
+                                tenant_id: event.expected_tenant_id,
+                            },
+                            session_id: session.id,
+                            event_type: "provider_activity".to_owned(),
+                            protected_payload: event.protected_inbox_payload,
+                            created_at: now.unix_timestamp(),
+                        },
+                    )
+                    .await?;
                     tx.queue_event(AiSessionWakeup {
                         session_id: session.id,
                         sequence: event_sequence,

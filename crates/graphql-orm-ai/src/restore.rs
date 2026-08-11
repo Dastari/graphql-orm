@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{AiRunId, AiRunState};
 
-const REQUIRED_RESTORE_AUDITS: [AiRestoreAuditKind; 18] = [
+const REQUIRED_RESTORE_AUDITS: [AiRestoreAuditKind; 19] = [
     AiRestoreAuditKind::RunRecoveryClassification,
     AiRestoreAuditKind::ApprovalRevalidationCandidates,
     AiRestoreAuditKind::EgressConsentRevalidationCandidates,
@@ -23,6 +23,7 @@ const REQUIRED_RESTORE_AUDITS: [AiRestoreAuditKind; 18] = [
     AiRestoreAuditKind::ContextCheckpoints,
     AiRestoreAuditKind::ProviderWebhookReceipts,
     AiRestoreAuditKind::ProviderBackgroundSubmissions,
+    AiRestoreAuditKind::ProviderSessionBindings,
     AiRestoreAuditKind::UiIntentEvents,
     AiRestoreAuditKind::SessionRetention,
     AiRestoreAuditKind::StreamContinuity,
@@ -135,6 +136,13 @@ pub struct AiRestoreSnapshotFacts {
     /// graph, or preparation/acceptance/reconciliation audit linkage.
     #[serde(default)]
     pub invalid_provider_background_submission_count: u64,
+    /// Durable provider-session bindings present in a restored snapshot.
+    ///
+    /// Portable restore support is deliberately fail-closed in this release:
+    /// opaque cursors are backup-redacted and their loss is not provider
+    /// absence proof. Deployments must drain/delete bindings before backup.
+    #[serde(default)]
+    pub invalid_provider_session_binding_count: u64,
     /// UI-intent session/inbox event pairs with invalid protected payloads,
     /// source/binding evidence, owner/scope linkage, or committed budget proof.
     pub invalid_ui_intent_event_count: u64,
@@ -187,6 +195,8 @@ pub enum AiRestoreAuditKind {
     ProviderWebhookReceipts,
     /// Provider background-submission integrity.
     ProviderBackgroundSubmissions,
+    /// Protected provider-session binding absence before portable restore.
+    ProviderSessionBindings,
     /// UI-intent event integrity.
     UiIntentEvents,
     /// Session-retention and tombstone integrity.
@@ -219,6 +229,7 @@ impl AiRestoreAuditKind {
             Self::ContextCheckpoints => "context_checkpoints",
             Self::ProviderWebhookReceipts => "provider_webhook_receipts",
             Self::ProviderBackgroundSubmissions => "provider_background_submissions",
+            Self::ProviderSessionBindings => "provider_session_bindings",
             Self::UiIntentEvents => "ui_intent_events",
             Self::SessionRetention => "session_retention",
             Self::StreamContinuity => "stream_continuity",
@@ -530,6 +541,13 @@ impl AiRestoreReconciler {
         if facts.invalid_provider_background_submission_count > 0 {
             issues.push(AiRestoreIssue {
                 code: "AI_RESTORE_PROVIDER_BACKGROUND_SUBMISSION_INVALID".to_owned(),
+                severity: AiRestoreIssueSeverity::Fatal,
+                resource_ref: None,
+            });
+        }
+        if facts.invalid_provider_session_binding_count > 0 {
+            issues.push(AiRestoreIssue {
+                code: "AI_RESTORE_PROVIDER_SESSION_BINDING_PRESENT".to_owned(),
                 severity: AiRestoreIssueSeverity::Fatal,
                 resource_ref: None,
             });
