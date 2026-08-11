@@ -13,10 +13,10 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    AiApprovalRule, AiDisclosureDisposition, AiDisclosureSchema, AiDisclosureShape, AiError,
-    AiGeneratedGraphqlOperationPolicy, AiToolDescriptor, AiToolOperationDomain,
-    AiToolOperationKind, AiToolRisk, DataClassification, GraphqlExecutionTargetId,
-    GraphqlOperationContract, ToolMaturity,
+    AiApprovalRule, AiBrowserResultPreviewPolicy, AiDisclosureDisposition, AiDisclosureSchema,
+    AiDisclosureShape, AiError, AiGeneratedGraphqlOperationPolicy, AiToolDescriptor,
+    AiToolOperationDomain, AiToolOperationKind, AiToolRisk, DataClassification,
+    GraphqlExecutionTargetId, GraphqlOperationContract, ToolMaturity,
 };
 
 /// Current wire version for compiled GraphQL tool manifests.
@@ -412,6 +412,8 @@ pub struct AiGraphqlToolProfile {
     risk: AiToolRisk,
     approval: AiApprovalRule,
     idempotent: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    browser_result_preview: Option<AiBrowserResultPreviewPolicy>,
 }
 
 impl AiGraphqlToolProfile {
@@ -443,6 +445,7 @@ impl AiGraphqlToolProfile {
             risk: AiToolRisk::ReadOnly,
             approval: AiApprovalRule::None,
             idempotent: true,
+            browser_result_preview: None,
         }
     }
 
@@ -486,6 +489,7 @@ impl AiGraphqlToolProfile {
             risk,
             approval: AiApprovalRule::OneShot,
             idempotent,
+            browser_result_preview: None,
         })
     }
 
@@ -513,6 +517,16 @@ impl AiGraphqlToolProfile {
     #[must_use]
     pub fn with_root_list_bound(mut self, maximum_items: u32) -> Self {
         self.root_maximum_items = Some(maximum_items);
+        self
+    }
+
+    /// Enables a separately bounded owner-visible browser result preview.
+    ///
+    /// The browser path must still reauthorize current owner, scope, tool,
+    /// row, and field policy; this profile flag grants no read authority.
+    #[must_use]
+    pub fn with_browser_result_preview(mut self, policy: AiBrowserResultPreviewPolicy) -> Self {
+        self.browser_result_preview = Some(policy);
         self
     }
 
@@ -1021,6 +1035,10 @@ impl AiGraphqlToolManifestBuilder {
         })
         .with_risk(profile.risk, profile.approval)
         .with_idempotent(profile.idempotent);
+        let descriptor = match profile.browser_result_preview {
+            Some(policy) => descriptor.with_browser_result_preview(policy),
+            None => descriptor,
+        };
         Ok(AiGraphqlToolManifestEntry {
             root_type: profile.root_type,
             field_name: profile.field_name,
@@ -1464,6 +1482,10 @@ fn validate_profile_shape(profile: &AiGraphqlToolProfile) -> Result<(), AiError>
         || profile.maximum_result_records == 0
         || profile.disclosure_schema.maximum_list_bound() > profile.maximum_result_records
         || profile.selections.is_empty()
+        || profile.browser_result_preview.is_some_and(|preview| {
+            preview.maximum_bytes > profile.maximum_result_bytes
+                || preview.maximum_records > profile.maximum_result_records
+        })
     {
         return Err(configuration_error(
             "tool profile has invalid or empty bounds",
@@ -1554,6 +1576,12 @@ fn validate_compiled_descriptor(entry: &AiGraphqlToolManifestEntry) -> Result<()
         || descriptor.maximum_result_records == 0
         || descriptor.maximum_classification
             != maximum_classification(&entry.disclosure_schema.root)?
+        || descriptor.browser_result_preview.is_some_and(|preview| {
+            preview.maximum_bytes > descriptor.maximum_result_bytes
+                || preview.maximum_records > descriptor.maximum_result_records
+                || preview.maximum_classification > descriptor.maximum_classification
+                || preview.maximum_classification == DataClassification::Secret
+        })
         || !(safe_read || supervised_write)
     {
         return Err(configuration_error(

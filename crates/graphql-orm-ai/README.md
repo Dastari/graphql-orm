@@ -334,11 +334,11 @@ Add the crate from a reviewed monorepo revision:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.67.0", features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.68.0", features = ["sqlite"] }
 ```
 
 > **Pre-release dependency note:** this source snapshot resolves
-> `graphql-orm` 0.21.0, `graphql-orm-ai-tool-profiles` 0.1.0, and
+> `graphql-orm` 0.21.0, `graphql-orm-ai-tool-profiles` 0.2.0, and
 > `graphql-orm-storage` 0.6.0 from one workspace revision. Optional
 > `graphql-orm-backup` 0.7.0 is a direct host dependency. `agql-auth` 0.14.0
 > at `413fda3435f060604cd653c11e2cc18a668aace1` remains an exact external
@@ -381,7 +381,9 @@ Each profile explicitly defines:
   values;
 - an exact field projection, with relationships absent by default and every
   list explicitly bounded;
-- an exact disclosure schema and byte/record ceilings.
+- an exact disclosure schema and byte/record ceilings; and
+- an optional, separately bounded browser-result preview policy; omission is
+  the default-deny behavior.
 
 The compiler validates the plan locally against the finished schema and
 generates the immutable GraphQL document, JSON Schema, operation contract,
@@ -409,6 +411,17 @@ bind it to active finished-schema fingerprints, reject ambiguous root
 ownership, and only then call `AiGraphqlToolManifestSet::register_into`. That
 consumer path does not import the owning service crates or their ORM operation
 catalogues. Runtime introspection is not used.
+
+For an owner-visible completed-tool preview, install
+`OrmAiToolCallResultPreviewService` with a mandatory host
+`AiToolResultPreviewAuthorizer` and compose it beside `AiQueryRoot`. The host
+projection reapplies current row/field policy; the library independently
+rehydrates the owner, reruns session/scope and tool policy, verifies the exact
+descriptor/disclosure fingerprints and protected result, then enforces the
+profile's classification, bytes, records, depth, and disclosure schema. The
+query never executes a tool, and missing policy, denial, purge, or retention
+expiry returns no content. Tool lifecycle events carry identifiers/status
+only; result content is never placed in the session or inbox stream.
 
 Deployments with immutable process-owned AI constraints and no editable rule
 hierarchy construct `DeploymentAiCurrentRuleResolver` from the durable

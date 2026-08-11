@@ -136,6 +136,54 @@ pub enum AiApprovalRule {
     Never,
 }
 
+/// Explicit descriptor policy for an owner-visible browser result preview.
+///
+/// Tool results remain non-browser-disclosable unless this policy is present.
+/// The browser path is independently reauthorized and may only return a
+/// schema-valid subset of the already reviewed model disclosure projection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiBrowserResultPreviewPolicy {
+    /// Maximum serialized preview bytes.
+    pub maximum_bytes: u64,
+    /// Maximum aggregate list records in the preview.
+    pub maximum_records: u32,
+    /// Maximum JSON nesting depth accepted by the browser response.
+    pub maximum_depth: u16,
+    /// Highest classification that may be rendered in a browser.
+    pub maximum_classification: DataClassification,
+}
+
+impl AiBrowserResultPreviewPolicy {
+    /// Creates bounded browser-preview policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for zero or excessive byte, record, or depth bounds,
+    /// or when browser disclosure would permit `Secret` content.
+    pub fn new(
+        maximum_bytes: u64,
+        maximum_records: u32,
+        maximum_depth: u16,
+        maximum_classification: DataClassification,
+    ) -> Result<Self, AiError> {
+        if !(1..=1024 * 1024).contains(&maximum_bytes)
+            || !(1..=100_000).contains(&maximum_records)
+            || !(1..=32).contains(&maximum_depth)
+            || maximum_classification == DataClassification::Secret
+        {
+            return Err(AiError::InvalidConfiguration(
+                "invalid browser result preview limits".to_owned(),
+            ));
+        }
+        Ok(Self {
+            maximum_bytes,
+            maximum_records,
+            maximum_depth,
+            maximum_classification,
+        })
+    }
+}
+
 /// Server-authored application tool descriptor.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AiToolDescriptor {
@@ -169,6 +217,10 @@ pub struct AiToolDescriptor {
     pub maximum_classification: DataClassification,
     /// Whether retries are safe with a stable idempotency key.
     pub idempotent: bool,
+    /// Optional reviewed browser-preview policy. Missing means never expose a
+    /// stored result to an application frontend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_result_preview: Option<AiBrowserResultPreviewPolicy>,
     /// Stable fingerprint over the complete contract.
     pub fingerprint: String,
 }
@@ -221,6 +273,7 @@ impl AiToolDescriptor {
             maximum_result_records: 100,
             maximum_classification: DataClassification::Internal,
             idempotent: true,
+            browser_result_preview: None,
             fingerprint: String::new(),
         };
         descriptor.refresh_fingerprint();
@@ -283,6 +336,14 @@ impl AiToolDescriptor {
     /// descriptor fingerprint.
     pub fn with_idempotent(mut self, idempotent: bool) -> Self {
         self.idempotent = idempotent;
+        self.refresh_fingerprint();
+        self
+    }
+
+    /// Enables a separately bounded owner-visible result preview.
+    #[must_use]
+    pub fn with_browser_result_preview(mut self, policy: AiBrowserResultPreviewPolicy) -> Self {
+        self.browser_result_preview = Some(policy);
         self.refresh_fingerprint();
         self
     }

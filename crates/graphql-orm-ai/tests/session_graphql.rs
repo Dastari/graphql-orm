@@ -48,6 +48,34 @@ struct RecordingCancellationService {
     request: Mutex<Option<(String, CancelAiRunInput)>>,
 }
 
+#[derive(Default)]
+struct RecordingToolPreviewService {
+    request: Mutex<Option<(String, AiToolCallResultPreviewInput)>>,
+}
+
+#[async_trait]
+impl AiToolCallResultPreviewService for RecordingToolPreviewService {
+    async fn result_preview(
+        &self,
+        principal: &AuthPrincipal,
+        input: AiToolCallResultPreviewInput,
+    ) -> Result<Option<AiToolCallResultPreviewView>, AiError> {
+        *self
+            .request
+            .lock()
+            .expect("test mutex should not be poisoned") =
+            Some((principal.subject().to_owned(), input));
+        Ok(Some(AiToolCallResultPreviewView {
+            session_id: input.session_id,
+            run_id: Uuid::from_u128(73),
+            tool_call_id: input.tool_call_id,
+            tool_id: "records.read".to_owned(),
+            classification: "internal".to_owned(),
+            preview: async_graphql::Json(json!({"recordId": "54"})),
+        }))
+    }
+}
+
 #[async_trait]
 impl AiRunCancellationService for RecordingCancellationService {
     async fn request_cancellation(
@@ -403,6 +431,50 @@ async fn cancel_run_mutation_passes_exact_pair_and_current_principal() {
     assert_eq!(recorded.1.session_id, session_id);
     assert_eq!(recorded.1.run_id, run_id);
     assert_eq!(recorded.1.client_request_id, client_request_id);
+}
+
+#[tokio::test]
+async fn tool_result_preview_query_passes_exact_pair_and_current_principal() {
+    let session_service = Arc::new(RecordingSessionService::default());
+    let preview = Arc::new(RecordingToolPreviewService::default());
+    let schema = Schema::build(AiQueryRoot, AiMutationRoot, EmptySubscription)
+        .data(session_service as Arc<dyn AiSessionService>)
+        .data(preview.clone() as Arc<dyn AiToolCallResultPreviewService>)
+        .finish();
+    let session_id = Uuid::new_v4();
+    let tool_call_id = Uuid::new_v4();
+    let response = schema
+        .execute(
+            Request::new(format!(
+                "{{ aiToolCallResultPreview(input: {{ sessionId: \"{session_id}\", toolCallId: \"{tool_call_id}\" }}) {{ sessionId runId toolCallId toolId classification preview }} }}"
+            ))
+            .data(principal("preview-owner")),
+        )
+        .await;
+
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(
+        response.data.into_json().expect("response JSON"),
+        json!({
+            "aiToolCallResultPreview": {
+                "sessionId": session_id,
+                "runId": Uuid::from_u128(73),
+                "toolCallId": tool_call_id,
+                "toolId": "records.read",
+                "classification": "internal",
+                "preview": {"recordId": "54"},
+            }
+        })
+    );
+    let recorded = preview
+        .request
+        .lock()
+        .expect("test mutex should not be poisoned")
+        .clone()
+        .expect("preview service should receive a request");
+    assert_eq!(recorded.0, "preview-owner");
+    assert_eq!(recorded.1.session_id, session_id);
+    assert_eq!(recorded.1.tool_call_id, tool_call_id);
 }
 
 #[tokio::test]

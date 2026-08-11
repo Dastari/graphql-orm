@@ -10,9 +10,9 @@ supersedes: []
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.67.0` with AI schema module
+`graphql-orm-ai` is at crate version `0.68.0` with AI schema module
 `0.53.0`. It uses workspace `graphql-orm` `0.21.0`, backend-neutral
-`graphql-orm-ai-tool-profiles` `0.1.0`, and external `agql-auth`
+`graphql-orm-ai-tool-profiles` `0.2.0`, and external `agql-auth`
 `0.14.0` at `413fda3435f060604cd653c11e2cc18a668aace1`.
 
 The active work order, dependencies, and exit gates are maintained in the
@@ -40,6 +40,11 @@ verification evidence belongs in the focused guides.
   tool manifests through `graphql-orm-ai-tool-profiles` without selecting an
   AI persistence backend. The runtime consumes those exact wire values and
   fingerprints without transformation.
+- Application-tool lifecycle streams include protected, metadata-only start
+  and completion events. Browser result previews are independently
+  fingerprinted, opt-in, owner-authorized, current-policy checked, bounded,
+  protected at rest, and subject to a mandatory host row/field projection;
+  they never expose the raw stored result by default.
 - The read-only coordinator also accepts an exact initial tool-free chat plan.
   It retains current rule/provider/egress/budget/output checks but has no
   application or built-in tool exposure, tool-result route, tool checkpoint,

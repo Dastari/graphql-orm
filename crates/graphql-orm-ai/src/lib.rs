@@ -91,6 +91,8 @@ mod orm_supervised;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_supervised_coordinator;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_tool_result_preview;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_tools;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_ui_intents;
@@ -121,6 +123,7 @@ mod sessions;
 mod skills;
 mod subscriptions;
 mod telemetry;
+mod tool_result_preview;
 mod tools;
 mod ui_intents;
 mod usage;
@@ -195,6 +198,8 @@ pub use orm_supervised::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_supervised_coordinator::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_tool_result_preview::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_tools::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_ui_intents::*;
@@ -227,6 +232,7 @@ pub use sessions::*;
 pub use skills::*;
 pub use subscriptions::*;
 pub use telemetry::*;
+pub use tool_result_preview::*;
 pub use tools::*;
 pub use ui_intents::*;
 pub use usage::*;
@@ -237,10 +243,11 @@ pub mod prelude {
     pub use crate::{
         AiAccessPolicy, AiAgentRuleResolution, AiApprovalAccessPolicy, AiApprovalBinding,
         AiAttachmentAcceptancePolicy, AiAttachmentCleanupReport, AiAttachmentCleanupService,
-        AiAttachmentScanner, AiAttachmentService, AiAttachmentUploadService, AiBudgetReservation,
-        AiBudgetService, AiContentProtectionPolicy, AiDataSourceRef, AiDisclosureSchema,
-        AiEgressDecision, AiEgressDecisionAudit, AiEgressManifest, AiEgressPolicy, AiError,
-        AiInboxPruningService, AiInboxService, AiLiveDeltaCoalescerLimits, AiOperationalTelemetry,
+        AiAttachmentScanner, AiAttachmentService, AiAttachmentUploadService,
+        AiBrowserResultPreviewPolicy, AiBudgetReservation, AiBudgetService,
+        AiContentProtectionPolicy, AiDataSourceRef, AiDisclosureSchema, AiEgressDecision,
+        AiEgressDecisionAudit, AiEgressManifest, AiEgressPolicy, AiError, AiInboxPruningService,
+        AiInboxService, AiLiveDeltaCoalescerLimits, AiOperationalTelemetry,
         AiOperationalTelemetryEvent, AiOperationalTelemetrySink, AiPricingCatalogService,
         AiPricingQuoteService, AiProposalAccessPolicy, AiProposalCatalog, AiProposalTypeDescriptor,
         AiProvider, AiProviderAttachmentRequest, AiProviderAttachmentResolver,
@@ -252,9 +259,9 @@ pub mod prelude {
         AiRuleRunUsage, AiRunCancellationHub, AiRunCancellationService, AiRuntime,
         AiRuntimeBuilder, AiScope, AiSecretStore, AiSessionRetentionService,
         AiSessionTitleWorkService, AiSkillAccessPolicy, AiSkillCatalogService,
-        AiToolAuthorizationPolicy, AiToolCatalog, AiToolDescriptor, AiUiIntentCatalog,
-        AiUiIntentTypeDescriptor, AiUsageAccessPolicy, AiUsageService, DataClassification,
-        SecretRef, ToolMaturity,
+        AiToolAuthorizationPolicy, AiToolCallResultPreviewService, AiToolCatalog, AiToolDescriptor,
+        AiToolResultPreviewAuthorizer, AiUiIntentCatalog, AiUiIntentTypeDescriptor,
+        AiUsageAccessPolicy, AiUsageService, DataClassification, SecretRef, ToolMaturity,
     };
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub use crate::{
@@ -290,7 +297,8 @@ pub mod prelude {
         OrmAiProposalService, OrmAiProviderOutputService, OrmAiRestoreFactCollector,
         OrmAiRulePolicyService, OrmAiRunCancellationService, OrmAiRunService,
         OrmAiSessionRetentionService, OrmAiSessionTitleWorkService, OrmAiSkillCatalogService,
-        OrmAiSupervisedResumeService, OrmAiUiIntentDeliveryService, OrmAiUsageService,
+        OrmAiSupervisedResumeService, OrmAiToolCallResultPreviewService,
+        OrmAiUiIntentDeliveryService, OrmAiUsageService,
     };
     #[cfg(all(
         any(feature = "sqlite", feature = "postgres"),

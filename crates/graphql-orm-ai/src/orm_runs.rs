@@ -21,7 +21,7 @@ use crate::orm_inbox::{PreparedAiInboxEvent, append_inbox_event};
 use crate::persistence::*;
 use crate::{
     AiApprovalId, AiBudgetAmounts, AiError, AiRunCancellation, AiRunCancellationHub, AiRunId,
-    AiRunState, AiSessionId, AiSessionWakeup, AiToolCallId,
+    AiRunState, AiScope, AiSessionId, AiSessionWakeup, AiToolCallId,
 };
 
 const MAXIMUM_WORKER_ID_BYTES: usize = 256;
@@ -508,6 +508,7 @@ pub(crate) struct PreparedApprovalConsumption {
     pub expected_approval_version: i64,
     pub event_id: Uuid,
     pub protected_event: serde_json::Value,
+    pub started_event: PreparedToolLifecycleEvent,
     pub correlation_id: String,
     pub expected_owner_principal_kind: String,
     pub expected_owner_subject: String,
@@ -570,11 +571,19 @@ pub(crate) struct PreparedToolCallStart {
     pub correlation_id: String,
     pub causation_id: String,
     pub delegation_reference: Option<String>,
+    pub started_event: Option<PreparedToolLifecycleEvent>,
     pub expected_owner_principal_kind: String,
     pub expected_owner_subject: String,
     pub expected_scope_kind: String,
     pub expected_scope_id: String,
     pub expected_tenant_id: Option<String>,
+}
+
+pub(crate) struct PreparedToolLifecycleEvent {
+    pub event_id: Uuid,
+    pub inbox_event_id: Uuid,
+    pub protected_event: serde_json::Value,
+    pub protected_inbox_event: serde_json::Value,
 }
 
 pub(crate) struct PreparedToolCallFinish {
@@ -590,7 +599,9 @@ pub(crate) struct PreparedToolCallFinish {
     pub result_egress_manifest_hash: Option<String>,
     pub application_audit_ref: Option<String>,
     pub event_id: Uuid,
+    pub inbox_event_id: Uuid,
     pub protected_event: serde_json::Value,
+    pub protected_inbox_event: serde_json::Value,
     pub correlation_id: String,
     pub expected_provider_call_key: String,
     pub expected_tool_fingerprint: String,
@@ -2424,8 +2435,9 @@ impl OrmAiRunService {
         &self,
         lease: &AiRunLease,
         call: PreparedToolCallStart,
-    ) -> Result<(), AiError> {
+    ) -> Result<AiRunLease, AiError> {
         let now = canonical_second(self.clock.now());
+        let lease_ttl = self.limits.lease_ttl;
         let lease = lease.clone();
         self.database
             .transaction(TransactionMode::StateMachine, move |tx| {
@@ -2442,6 +2454,55 @@ impl OrmAiRunService {
                     if !session_matches_tool_start(&session, &call) {
                         return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                     }
+                    let (updated_run, event_sequence) = if call.started_event.is_some() {
+                        let event_sequence = session
+                            .stream_head
+                            .checked_add(1)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        if !matches!(
+                            tx.compare_and_swap::<AiSessionRecord>(
+                                &session.id,
+                                session.row_version,
+                                AiSessionRecordWhereInput::default(),
+                                UpdateAiSessionRecordInput {
+                                    stream_head: Some(event_sequence),
+                                    last_activity_at: Some(now.unix_timestamp()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                            ConditionalUpdateOutcome::Updated(_)
+                        ) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let expiry = now
+                            .checked_add(lease_ttl)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let updated_run = match tx
+                            .compare_and_swap::<AiRunRecord>(
+                                &current.id,
+                                current.row_version,
+                                exact_state(AiRunState::Running.as_str()),
+                                UpdateAiRunRecordInput {
+                                    lease_expires_at: Some(Some(expiry.unix_timestamp())),
+                                    lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?
+                        {
+                            ConditionalUpdateOutcome::Updated(updated) => updated,
+                            ConditionalUpdateOutcome::NotFound
+                            | ConditionalUpdateOutcome::Conflict => {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                        };
+                        (updated_run, Some(event_sequence))
+                    } else {
+                        (current, None)
+                    };
                     tx.insert::<AiRunStepRecord>(CreateAiRunStepRecordInput {
                         id: call.id,
                         run_id: lease.run_id.0,
@@ -2487,7 +2548,7 @@ impl OrmAiRunService {
                         application_audit_ref: None,
                         approval_id: None,
                         idempotency_key: call.idempotency_key,
-                        correlation_id: Some(call.correlation_id),
+                        correlation_id: Some(call.correlation_id.clone()),
                         causation_id: Some(call.causation_id),
                         delegation_reference: call.delegation_reference,
                         lease_generation: lease.lease_generation,
@@ -2496,7 +2557,45 @@ impl OrmAiRunService {
                     })
                     .await
                     .map_err(OrmPublicError::from)?;
-                    Ok(())
+                    if let (Some(event), Some(event_sequence)) =
+                        (call.started_event, event_sequence)
+                    {
+                        tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                            id: event.event_id,
+                            session_id: lease.session_id.0,
+                            sequence: event_sequence,
+                            event_type: "application_tool_started".to_owned(),
+                            run_id: Some(lease.run_id.0),
+                            causation_id: Some(call.id.to_string()),
+                            correlation_id: call.correlation_id.clone(),
+                            protected_payload: event.protected_event,
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        append_inbox_event(
+                            tx,
+                            PreparedAiInboxEvent {
+                                id: event.inbox_event_id,
+                                principal_kind: call.expected_owner_principal_kind,
+                                principal_subject: call.expected_owner_subject,
+                                scope: AiScope {
+                                    kind: call.expected_scope_kind,
+                                    id: call.expected_scope_id,
+                                    tenant_id: call.expected_tenant_id,
+                                },
+                                session_id: lease.session_id.0,
+                                event_type: "application_tool_started".to_owned(),
+                                protected_payload: event.protected_inbox_event,
+                                created_at: now.unix_timestamp(),
+                            },
+                        )
+                        .await?;
+                        tx.queue_event(AiSessionWakeup {
+                            session_id: lease.session_id.0,
+                            sequence: event_sequence,
+                        });
+                    }
+                    lease_from_record(&updated_run)
                 })
             })
             .await
@@ -2846,8 +2945,11 @@ impl OrmAiRunService {
                     {
                         return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                     }
-                    let event_sequence = session
+                    let approval_event_sequence = session
                         .stream_head
+                        .checked_add(1)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let started_event_sequence = approval_event_sequence
                         .checked_add(1)
                         .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
                     let session_update = tx
@@ -2856,7 +2958,7 @@ impl OrmAiRunService {
                             session.row_version,
                             AiSessionRecordWhereInput::default(),
                             UpdateAiSessionRecordInput {
-                                stream_head: Some(event_sequence),
+                                stream_head: Some(started_event_sequence),
                                 last_activity_at: Some(now.unix_timestamp()),
                                 ..Default::default()
                             },
@@ -2925,18 +3027,52 @@ impl OrmAiRunService {
                     tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
                         id: consumption.event_id,
                         session_id: session.id,
-                        sequence: event_sequence,
+                        sequence: approval_event_sequence,
                         event_type: "approval_consumed".to_owned(),
                         run_id: Some(lease.run_id.0),
                         causation_id: Some(consumption.approval_id.to_string()),
-                        correlation_id: consumption.correlation_id,
+                        correlation_id: consumption.correlation_id.clone(),
                         protected_payload: consumption.protected_event,
                     })
                     .await
                     .map_err(OrmPublicError::from)?;
+                    tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                        id: consumption.started_event.event_id,
+                        session_id: session.id,
+                        sequence: started_event_sequence,
+                        event_type: "application_tool_started".to_owned(),
+                        run_id: Some(lease.run_id.0),
+                        causation_id: Some(consumption.tool_call_id.to_string()),
+                        correlation_id: consumption.correlation_id.clone(),
+                        protected_payload: consumption.started_event.protected_event,
+                    })
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    append_inbox_event(
+                        tx,
+                        PreparedAiInboxEvent {
+                            id: consumption.started_event.inbox_event_id,
+                            principal_kind: consumption.expected_owner_principal_kind,
+                            principal_subject: consumption.expected_owner_subject,
+                            scope: AiScope {
+                                kind: consumption.expected_scope_kind,
+                                id: consumption.expected_scope_id,
+                                tenant_id: consumption.expected_tenant_id,
+                            },
+                            session_id: session.id,
+                            event_type: "application_tool_started".to_owned(),
+                            protected_payload: consumption.started_event.protected_inbox_event,
+                            created_at: now.unix_timestamp(),
+                        },
+                    )
+                    .await?;
                     tx.queue_event(AiSessionWakeup {
                         session_id: session.id,
-                        sequence: event_sequence,
+                        sequence: approval_event_sequence,
+                    });
+                    tx.queue_event(AiSessionWakeup {
+                        session_id: session.id,
+                        sequence: started_event_sequence,
                     });
                     lease_from_record(&updated_run)
                 })
@@ -3069,11 +3205,29 @@ impl OrmAiRunService {
                         event_type: "application_tool_completed".to_owned(),
                         run_id: Some(lease.run_id.0),
                         causation_id: Some(finish.id.to_string()),
-                        correlation_id: finish.correlation_id,
+                        correlation_id: finish.correlation_id.clone(),
                         protected_payload: finish.protected_event,
                     })
                     .await
                     .map_err(OrmPublicError::from)?;
+                    append_inbox_event(
+                        tx,
+                        PreparedAiInboxEvent {
+                            id: finish.inbox_event_id,
+                            principal_kind: finish.expected_owner_principal_kind.clone(),
+                            principal_subject: finish.expected_owner_subject.clone(),
+                            scope: AiScope {
+                                kind: finish.expected_scope_kind.clone(),
+                                id: finish.expected_scope_id.clone(),
+                                tenant_id: finish.expected_tenant_id.clone(),
+                            },
+                            session_id: lease.session_id.0,
+                            event_type: "application_tool_completed".to_owned(),
+                            protected_payload: finish.protected_inbox_event,
+                            created_at: now.unix_timestamp(),
+                        },
+                    )
+                    .await?;
                     tx.queue_event(AiSessionWakeup {
                         session_id: lease.session_id.0,
                         sequence: event_sequence,

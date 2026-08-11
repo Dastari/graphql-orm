@@ -2593,6 +2593,31 @@ mod tests {
 
     struct AllowTools(Arc<AtomicUsize>);
 
+    struct RecordIdPreviewAuthorizer(Arc<AtomicBool>);
+
+    #[async_trait]
+    impl AiToolResultPreviewAuthorizer for RecordIdPreviewAuthorizer {
+        async fn authorize_and_project(
+            &self,
+            _principal: &ResolvedPrincipal,
+            _scope: &AiScope,
+            _descriptor: &AiToolDescriptor,
+            request: &ToolGraphqlRequest,
+            result: &serde_json::Value,
+        ) -> Result<Option<serde_json::Value>, AiError> {
+            if !self.0.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
+            let result_id = result.get("recordId");
+            if result_id != request.variables.get("recordId") {
+                return Ok(None);
+            }
+            Ok(Some(json!({
+                "recordId": result_id.cloned().unwrap_or_default(),
+            })))
+        }
+    }
+
     #[async_trait]
     impl AiToolAuthorizationPolicy for AllowTools {
         async fn authorize(
@@ -2602,6 +2627,9 @@ mod tests {
             _descriptor: &AiToolDescriptor,
             _variables: &serde_json::Value,
         ) -> AiToolAuthorizationDecision {
+            if self.0.load(Ordering::SeqCst) == 0 {
+                return AiToolAuthorizationDecision::deny("test_read_denied", "tool-policy-v0");
+            }
             AiToolAuthorizationDecision::allow(
                 "test_read_allowed",
                 format!("tool-policy-v{}", self.0.load(Ordering::SeqCst)),
@@ -3075,7 +3103,11 @@ mod tests {
         )
         .expect("tool descriptor should validate")
         .with_result_projection("record-projection-v1")
-        .with_graphql_contract(contract);
+        .with_graphql_contract(contract)
+        .with_browser_result_preview(
+            AiBrowserResultPreviewPolicy::new(4_096, 10, 4, DataClassification::Internal)
+                .expect("preview limits should validate"),
+        );
         let mut tool_catalog = AiToolCatalog::new();
         tool_catalog
             .register_with_disclosure(descriptor, disclosure)
@@ -6664,6 +6696,55 @@ mod tests {
             )
             .await
             .expect("provider result should be durably checkpointed");
+        fixture.tool_policy_version.store(0, Ordering::SeqCst);
+        assert!(matches!(
+            service
+                .execute_read_only(
+                    &checkpointed_lease,
+                    &provider_result,
+                    call_context.clone(),
+                    route.clone(),
+                )
+                .await,
+            Err(AiError::Forbidden)
+        ));
+        assert!(
+            AiToolCallRecord::query(fixture.database.pool())
+                .filter(AiToolCallRecordWhereInput {
+                    run_id: Some(UuidFilter {
+                        eq: Some(fixture.lease.run_id().0),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .limit(1)
+                .fetch_all()
+                .await
+                .expect("denied tool records should be queryable")
+                .is_empty(),
+            "pre-execution policy denial must not adopt or advertise a tool call"
+        );
+        assert!(
+            AiSessionEventRecord::query(fixture.database.pool())
+                .filter(AiSessionEventRecordWhereInput {
+                    session_id: Some(UuidFilter {
+                        eq: Some(fixture.lease.session_id().0),
+                        ..Default::default()
+                    }),
+                    event_type: Some(graphql_orm::graphql::filters::StringFilter {
+                        eq: Some("application_tool_started".to_owned()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .limit(1)
+                .fetch_all()
+                .await
+                .expect("denied lifecycle events should be queryable")
+                .is_empty(),
+            "pre-execution denial must not emit a started event"
+        );
+        fixture.tool_policy_version.store(1, Ordering::SeqCst);
         let persisted = service
             .execute_read_only(
                 &checkpointed_lease,
@@ -6696,6 +6777,126 @@ mod tests {
                 .and_then(|value| value.get("protection"))
                 .and_then(serde_json::Value::as_str),
             Some("database_managed")
+        );
+
+        let lifecycle_events = AiSessionEventRecord::query(fixture.database.pool())
+            .filter(AiSessionEventRecordWhereInput {
+                session_id: Some(UuidFilter {
+                    eq: Some(fixture.lease.session_id().0),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .limit(100)
+            .fetch_all()
+            .await
+            .expect("session lifecycle events should load");
+        let started = lifecycle_events
+            .iter()
+            .filter(|event| event.event_type == "application_tool_started")
+            .collect::<Vec<_>>();
+        let completed = lifecycle_events
+            .iter()
+            .filter(|event| event.event_type == "application_tool_completed")
+            .collect::<Vec<_>>();
+        assert_eq!(started.len(), 1);
+        assert_eq!(completed.len(), 1);
+        assert!(started[0].sequence < completed[0].sequence);
+        let inbox_events = AiInboxEventRecord::query(fixture.database.pool())
+            .filter(AiInboxEventRecordWhereInput {
+                session_id: Some(UuidFilter {
+                    eq: Some(fixture.lease.session_id().0),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .limit(100)
+            .fetch_all()
+            .await
+            .expect("inbox lifecycle events should load");
+        assert_eq!(
+            inbox_events
+                .iter()
+                .filter(|event| event.event_type == "application_tool_started")
+                .count(),
+            1
+        );
+        assert_eq!(
+            inbox_events
+                .iter()
+                .filter(|event| event.event_type == "application_tool_completed")
+                .count(),
+            1
+        );
+
+        let preview_allowed = Arc::new(AtomicBool::new(true));
+        let preview_service = OrmAiToolCallResultPreviewService::new(
+            fixture.database.clone(),
+            fixture.runtime.clone(),
+            Arc::new(RecordIdPreviewAuthorizer(preview_allowed.clone())),
+        );
+        let preview = preview_service
+            .result_preview(
+                &fixture.principal,
+                AiToolCallResultPreviewInput {
+                    session_id: fixture.lease.session_id().0,
+                    tool_call_id: persisted.id().0,
+                },
+            )
+            .await
+            .expect("current owner preview should resolve")
+            .expect("reviewed browser preview should be present");
+        assert_eq!(preview.run_id, fixture.lease.run_id().0);
+        assert_eq!(preview.tool_id, "records.read");
+        assert_eq!(preview.preview.0, json!({"recordId": "54"}));
+        assert!(matches!(
+            preview_service
+                .result_preview(
+                    &fixture.principal,
+                    AiToolCallResultPreviewInput {
+                        session_id: Uuid::new_v4(),
+                        tool_call_id: persisted.id().0,
+                    },
+                )
+                .await,
+            Err(AiError::NotFound)
+        ));
+        let foreign_principal = AuthPrincipal::User(AuthUser {
+            user_id: "foreign-preview-user".to_owned(),
+            session_id: Uuid::new_v4(),
+            roles: vec![],
+            scopes: vec![],
+            session: SessionContext::default(),
+            token_claims: AccessTokenMetadata {
+                tenant_id: Some("other-tenant".to_owned()),
+                ..AccessTokenMetadata::default()
+            },
+        });
+        assert!(matches!(
+            preview_service
+                .result_preview(
+                    &foreign_principal,
+                    AiToolCallResultPreviewInput {
+                        session_id: fixture.lease.session_id().0,
+                        tool_call_id: persisted.id().0,
+                    },
+                )
+                .await,
+            Err(AiError::ReauthorizationFailed)
+        ));
+        preview_allowed.store(false, Ordering::SeqCst);
+        assert!(
+            preview_service
+                .result_preview(
+                    &fixture.principal,
+                    AiToolCallResultPreviewInput {
+                        session_id: fixture.lease.session_id().0,
+                        tool_call_id: persisted.id().0,
+                    },
+                )
+                .await
+                .expect("current policy denial should be non-disclosing")
+                .is_none()
         );
         assert_eq!(
             record
@@ -6862,6 +7063,48 @@ mod tests {
             )
             .await
             .expect("renewed tool fence should complete the run");
+        fixture
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let outcome = tx
+                        .compare_and_swap::<AiToolCallRecord>(
+                            &record.id,
+                            record.row_version,
+                            AiToolCallRecordWhereInput::default(),
+                            UpdateAiToolCallRecordInput {
+                                protected_arguments: Some(None),
+                                protected_result: Some(None),
+                                payload_purged_at: Some(Some(
+                                    OffsetDateTime::now_utc().unix_timestamp(),
+                                )),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .expect("tool payload should purge transactionally");
+        preview_allowed.store(true, Ordering::SeqCst);
+        assert!(
+            preview_service
+                .result_preview(
+                    &fixture.principal,
+                    AiToolCallResultPreviewInput {
+                        session_id: fixture.lease.session_id().0,
+                        tool_call_id: persisted.id().0,
+                    },
+                )
+                .await
+                .expect("purged preview should remain non-disclosing")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -7613,6 +7856,26 @@ mod tests {
             .expect("approval lookup should succeed")
             .expect("approval should exist");
         assert_eq!(pending.state, "pending");
+        assert!(
+            AiSessionEventRecord::query(fixture.database.pool())
+                .filter(AiSessionEventRecordWhereInput {
+                    session_id: Some(UuidFilter {
+                        eq: Some(fixture.lease.session_id().0),
+                        ..Default::default()
+                    }),
+                    event_type: Some(graphql_orm::graphql::filters::StringFilter {
+                        eq: Some("application_tool_started".to_owned()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .limit(1)
+                .fetch_all()
+                .await
+                .expect("staged tool lifecycle should be queryable")
+                .is_empty(),
+            "approval staging must not claim that execution started"
+        );
         let decided = approval_service
             .decide_approval(
                 &fixture.principal,
@@ -7691,6 +7954,29 @@ mod tests {
         );
         assert_eq!(call.provider_model.as_deref(), Some("mock-model"));
         assert_eq!(call.correlation_id.as_deref(), Some("supervised-tool-test"));
+        let lifecycle_events = AiSessionEventRecord::query(fixture.database.pool())
+            .filter(AiSessionEventRecordWhereInput {
+                session_id: Some(UuidFilter {
+                    eq: Some(fixture.lease.session_id().0),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .limit(100)
+            .fetch_all()
+            .await
+            .expect("supervised lifecycle should load");
+        let started = lifecycle_events
+            .iter()
+            .filter(|event| event.event_type == "application_tool_started")
+            .collect::<Vec<_>>();
+        let completed = lifecycle_events
+            .iter()
+            .filter(|event| event.event_type == "application_tool_completed")
+            .collect::<Vec<_>>();
+        assert_eq!(started.len(), 1);
+        assert_eq!(completed.len(), 1);
+        assert!(started[0].sequence < completed[0].sequence);
         let consumed = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
             .await
             .expect("approval lookup should succeed")

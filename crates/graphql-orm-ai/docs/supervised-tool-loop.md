@@ -3,7 +3,7 @@ title: "Supervised Mutation and Approval Execution"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -91,8 +91,10 @@ service:
    reconciled, and bound to this session/run/attempt/generation/provider/model.
 3. Rehydrates current access, opens and re-hashes the protected arguments,
    preauthorizes current host tool policy, and rebuilds the canonical preview.
-4. Atomically consumes the exact unexpired one-shot approval and returns the
-   run/tool call to `Running`/`executing` under a renewed fence.
+4. Atomically consumes the exact unexpired one-shot approval, returns the
+   run/tool call to `Running`/`executing` under a renewed fence, and appends a
+   metadata-only `application_tool_started` event to the session and owner
+   inbox. Merely staged, denied, expired, or revoked approvals never emit it.
 5. Rehydrates and authorizes yet again inside the authenticated bridge. The
    newly computed policy version and authorization-state digest must still
    equal the consumed binding before resolver context is built.
@@ -101,7 +103,8 @@ service:
    rate-limit, and application audit policy remain authoritative.
 7. Bounds and statically validates the result, rechecks current access,
    authorizes and immutably audits the exact provider disclosure, then protects
-   and fences the result/event/step.
+   and fences the result/step plus a metadata-only completion event in both
+   session and owner-inbox streams.
 
 For a different worker or process, use
 `OrmAiRunService::claim_next_approved`. One state-machine transaction changes

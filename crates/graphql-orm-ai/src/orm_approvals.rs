@@ -22,8 +22,8 @@ use uuid::Uuid;
 
 use crate::orm_runs::{
     PreparedApprovalConsumption, PreparedApprovalRequest, PreparedApprovalWaitCancellation,
-    PreparedApprovalWaitOutcome, PreparedApprovalWaitReconciliation, coordinator_checkpoint_hash,
-    validate_worker_id,
+    PreparedApprovalWaitOutcome, PreparedApprovalWaitReconciliation, PreparedToolLifecycleEvent,
+    coordinator_checkpoint_hash, validate_worker_id,
 };
 use crate::persistence::*;
 use crate::{
@@ -631,6 +631,42 @@ impl OrmAiApprovalService {
                 }),
             )
             .await?;
+        let call = AiToolCallRecord::find_by_id(&self.database, &binding.tool_call_id.0)
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .filter(|call| call.run_id == lease.run_id().0 && call.state == "waiting_approval")
+            .ok_or(AiError::Forbidden)?;
+        let started_event_id = Uuid::new_v4();
+        let started_inbox_event_id = Uuid::new_v4();
+        let started_payload = serde_json::json!({
+            "toolCallId": binding.tool_call_id.0,
+            "runId": lease.run_id().0,
+            "toolId": call.tool_id,
+        });
+        let protected_started_event = self
+            .protect_value(
+                &protection,
+                content_context(
+                    "graphql_orm_ai_session_events",
+                    started_event_id,
+                    "protected_payload",
+                    &binding.scope,
+                ),
+                started_payload.clone(),
+            )
+            .await?;
+        let protected_started_inbox_event = self
+            .protect_value(
+                &protection,
+                content_context(
+                    "graphql_orm_ai_inbox_events",
+                    started_inbox_event_id,
+                    "protected_payload",
+                    &binding.scope,
+                ),
+                started_payload,
+            )
+            .await?;
         let (owner_kind, owner_subject) = principal_identity(resolved.principal());
         let prepared = PreparedApprovalConsumption {
             approval_id: approval_id.0,
@@ -639,6 +675,12 @@ impl OrmAiApprovalService {
             expected_approval_version: record.row_version,
             event_id,
             protected_event,
+            started_event: PreparedToolLifecycleEvent {
+                event_id: started_event_id,
+                inbox_event_id: started_inbox_event_id,
+                protected_event: protected_started_event,
+                protected_inbox_event: protected_started_inbox_event,
+            },
             correlation_id: approval_id.0.to_string(),
             expected_owner_principal_kind: owner_kind,
             expected_owner_subject: owner_subject.to_owned(),
@@ -2279,6 +2321,7 @@ mod tests {
                     correlation_id: "approval-correlation".to_owned(),
                     causation_id: "approval-causation".to_owned(),
                     delegation_reference: None,
+                    started_event: None,
                     expected_owner_principal_kind: "user".to_owned(),
                     expected_owner_subject: fixture.principal.subject().to_owned(),
                     expected_scope_kind: fixture.scope.kind.clone(),

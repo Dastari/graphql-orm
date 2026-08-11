@@ -19,6 +19,38 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased: protected tool lifecycle previews (crate 0.67.0 to 0.68.0; schema remains 0.53.0)
+
+Tool-profile producers should update to `graphql-orm-ai-tool-profiles` 0.2.0.
+Profiles remain non-browser-disclosable by default. To permit a lazy UI
+preview, attach a validated `AiBrowserResultPreviewPolicy` to the exact
+generated or custom profile with `with_browser_result_preview`. The policy is
+part of the canonical descriptor and manifest fingerprint, so all owning
+subgraphs and consumers must update to one reviewed monorepo revision and
+republish/re-register their manifests together.
+
+Hosts that expose previews construct `OrmAiToolCallResultPreviewService` from
+the AI database, closed runtime, and a mandatory
+`AiToolResultPreviewAuthorizer` that reapplies current application row/field
+policy and returns a bounded subset. Compose it as
+`Arc<dyn AiToolCallResultPreviewService>` beside `AiQueryRoot`; clients may
+then call `AiToolCallResultPreview(Input:)` by exact session and tool-call ID.
+The service never executes a resolver and returns no protected content unless
+the current owner, session/scope policy, current tool policy, descriptor,
+disclosure, retention, classification, protection, host projection, and all
+limits still permit it.
+
+Session and owner-inbox consumers may now observe
+`application_tool_started` before the existing terminal tool event. Start is
+authoritative only after the call is fenced for execution; approval staging
+and pre-execution denial emit no start. Both lifecycle events contain metadata
+only. Existing event replay/watermark handling needs no cursor migration.
+
+This is an additive Rust, GraphQL, descriptor, and event-contract change.
+There are no entity, column, index, constraint, backup/restore, or stored-row
+changes, so AI schema module 0.53.0 remains current and no database/data
+migration is required.
+
 ## Unreleased: owner-authorized run cancellation (crate 0.66.0 to 0.67.0; schema 0.52.0 to 0.53.0)
 
 Apply AI schema module 0.53.0 before exposing `CancelAiRun` or starting a

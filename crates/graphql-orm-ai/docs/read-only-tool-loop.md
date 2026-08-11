@@ -3,7 +3,7 @@ title: "Read-Only Application-Tool Loop"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -47,23 +47,37 @@ For each normalized provider call, `OrmAiApplicationToolCallService`:
    generation, provider turn, and call position;
 2. rechecks the current active session owner/tenant/scope and freshly resolved
    principal access;
-3. protects and persists canonical arguments, their hash, descriptor
+3. constructs the exact registered `ToolGraphqlRequest` and performs current
+   principal/tool-policy preauthorization; denial emits no start event;
+4. protects and persists canonical arguments, their hash, descriptor
    fingerprint, provider call identity, and a running step behind the current
-   lease fence;
-4. constructs the exact registered `ToolGraphqlRequest` and invokes
+   lease fence, then appends metadata-only `application_tool_started` session
+   and owner-inbox events in the same transaction;
+5. invokes
    `AiRuntime::execute_tool` with a bounded timeout;
-5. rehydrates again inside the authenticated bridge, applies current host tool
+6. rehydrates again inside the authenticated bridge, applies current host tool
    policy, builds the ordinary GraphQL request context, and lets ordinary
    resolver/row/field/rate-limit authorization decide;
-6. bounds safe error codes and output bytes, applies the closed static
+7. bounds safe error codes and output bytes, applies the closed static
    disclosure schema, and excludes the application audit reference from model
    output;
-7. rehydrates/rechecks access again before building the exact result source,
+8. rehydrates/rechecks access again before building the exact result source,
    classification, byte count, destination, retention, purpose, session, run,
    provider, and model egress manifest;
-8. authorizes and immutably audits that exact `ToolResult` disclosure; and
-9. atomically protects the result, completes the tool-call and run-step rows,
-   appends a protected session event, and renews the run fence.
+9. authorizes and immutably audits that exact `ToolResult` disclosure; and
+10. atomically protects the result, completes the tool-call and run-step rows,
+    appends metadata-only completion session and owner-inbox events, and
+    renews the run fence.
+
+An optional browser preview is a separate read boundary. The descriptor must
+carry an explicit fingerprinted `AiBrowserResultPreviewPolicy`, and the host
+must install an `AiToolResultPreviewAuthorizer` that reapplies current row and
+field policy to a bounded subset. `AiToolCallResultPreview` rehydrates the
+owner, rechecks exact session/scope/tool policy, verifies all stored bindings,
+opens protected content only for that response, and applies disclosure,
+classification, byte, record, and depth limits. Purged, expired, denied,
+malformed, unregistered, or non-previewable results disclose no content and
+the query cannot re-execute a tool.
 
 Resolver/policy failures can produce only a generic, separately authorized
 model-visible error. An egress denial or failed egress audit produces no

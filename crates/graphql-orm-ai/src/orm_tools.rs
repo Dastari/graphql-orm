@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use time::Duration;
 use uuid::Uuid;
 
-use crate::orm_runs::{PreparedToolCallFinish, PreparedToolCallStart};
+use crate::orm_runs::{PreparedToolCallFinish, PreparedToolCallStart, PreparedToolLifecycleEvent};
 use crate::persistence::*;
 use crate::{
     AiApprovalBinding, AiApprovalId, AiApprovalRule, AiCanonicalActionPreview, AiDataSourceRef,
@@ -583,6 +583,29 @@ impl OrmAiApplicationToolCallService {
         let id = AiToolCallId::new();
         let provider_call_key = provider_call_key(lease, provider_call.call_id());
         let argument_hash = canonical_json_hash(provider_call.arguments())?;
+        let idempotency_key = format!("ai-tool:{provider_call_key}");
+        let contract = descriptor
+            .graphql_contract
+            .clone()
+            .ok_or(AiError::Forbidden)?;
+        let request = ToolGraphqlRequest {
+            document: descriptor.document.clone(),
+            operation_name: contract.operation_name.clone(),
+            contract,
+            variables: provider_call.arguments().clone(),
+            invocation: GraphqlInvocationContext {
+                run_id: lease.run_id(),
+                tool_call_id: id,
+                scope: context.scope.clone(),
+                correlation_id: context.correlation_id.clone(),
+                causation_id: context.causation_id.clone(),
+                delegation_reference: context.delegation_reference.clone(),
+                idempotency_key: Some(idempotency_key.clone()),
+            },
+        };
+        self.runtime
+            .preauthorize_tool(lease.principal_reference(), &descriptor.id, &request)
+            .await?;
         let protected_arguments = self
             .protect(
                 &policy,
@@ -595,8 +618,39 @@ impl OrmAiApplicationToolCallService {
                 provider_call.arguments().clone(),
             )
             .await?;
-        let idempotency_key = format!("ai-tool:{provider_call_key}");
-        self.run_service
+        let started_event_id = Uuid::new_v4();
+        let started_inbox_event_id = Uuid::new_v4();
+        let started_payload = json!({
+            "toolCallId": id.0,
+            "runId": lease.run_id().0,
+            "toolId": descriptor.id.as_str(),
+        });
+        let protected_started_event = self
+            .protect(
+                &policy,
+                protection_context(
+                    "graphql_orm_ai_session_events",
+                    started_event_id,
+                    "protected_payload",
+                    &context.scope,
+                ),
+                started_payload.clone(),
+            )
+            .await?;
+        let protected_started_inbox_event = self
+            .protect(
+                &policy,
+                protection_context(
+                    "graphql_orm_ai_inbox_events",
+                    started_inbox_event_id,
+                    "protected_payload",
+                    &context.scope,
+                ),
+                started_payload,
+            )
+            .await?;
+        let active_lease = self
+            .run_service
             .begin_tool_call(
                 lease,
                 PreparedToolCallStart {
@@ -620,6 +674,12 @@ impl OrmAiApplicationToolCallService {
                     correlation_id: context.correlation_id.clone(),
                     causation_id: context.causation_id.clone(),
                     delegation_reference: context.delegation_reference.clone(),
+                    started_event: Some(PreparedToolLifecycleEvent {
+                        event_id: started_event_id,
+                        inbox_event_id: started_inbox_event_id,
+                        protected_event: protected_started_event,
+                        protected_inbox_event: protected_started_inbox_event,
+                    }),
                     expected_owner_principal_kind: session.owner_principal_kind.clone(),
                     expected_owner_subject: session.owner_subject.clone(),
                     expected_scope_kind: context.scope.kind.clone(),
@@ -628,26 +688,8 @@ impl OrmAiApplicationToolCallService {
                 },
             )
             .await?;
+        let lease = &active_lease;
 
-        let contract = descriptor
-            .graphql_contract
-            .clone()
-            .ok_or(AiError::Forbidden)?;
-        let request = ToolGraphqlRequest {
-            document: descriptor.document.clone(),
-            operation_name: contract.operation_name.clone(),
-            contract,
-            variables: provider_call.arguments().clone(),
-            invocation: GraphqlInvocationContext {
-                run_id: lease.run_id(),
-                tool_call_id: id,
-                scope: context.scope.clone(),
-                correlation_id: context.correlation_id.clone(),
-                causation_id: context.causation_id.clone(),
-                delegation_reference: context.delegation_reference.clone(),
-                idempotency_key: Some(idempotency_key),
-            },
-        };
         let execution = tokio::time::timeout(
             self.limits.maximum_execution_time.unsigned_abs(),
             self.runtime
@@ -772,12 +814,30 @@ impl OrmAiApplicationToolCallService {
             )
             .await?;
         let event_id = Uuid::new_v4();
+        let inbox_event_id = Uuid::new_v4();
         let protected_event = self
             .protect(
                 &policy,
                 protection_context(
                     "graphql_orm_ai_session_events",
                     event_id,
+                    "protected_payload",
+                    &context.scope,
+                ),
+                json!({
+                    "toolCallId": id.0,
+                    "runId": lease.run_id().0,
+                    "toolId": descriptor.id.as_str(),
+                    "state": final_state.as_str(),
+                }),
+            )
+            .await?;
+        let protected_inbox_event = self
+            .protect(
+                &policy,
+                protection_context(
+                    "graphql_orm_ai_inbox_events",
+                    inbox_event_id,
                     "protected_payload",
                     &context.scope,
                 ),
@@ -806,7 +866,9 @@ impl OrmAiApplicationToolCallService {
                     result_egress_manifest_hash: manifest_hash,
                     application_audit_ref,
                     event_id,
+                    inbox_event_id,
                     protected_event,
+                    protected_inbox_event,
                     correlation_id: context.correlation_id,
                     expected_provider_call_key: provider_call_key,
                     expected_tool_fingerprint: descriptor.fingerprint,
@@ -1105,6 +1167,7 @@ impl OrmAiConsequentialToolCallService {
                     correlation_id: context.correlation_id,
                     causation_id: context.causation_id,
                     delegation_reference: context.delegation_reference,
+                    started_event: None,
                     expected_owner_principal_kind: session.owner_principal_kind,
                     expected_owner_subject: session.owner_subject,
                     expected_scope_kind: context.scope.kind,
@@ -1475,6 +1538,7 @@ impl OrmAiConsequentialToolCallService {
             }
         };
         let event_id = Uuid::new_v4();
+        let inbox_event_id = Uuid::new_v4();
         let protected_event = match self
             .application_tools
             .protect(
@@ -1482,6 +1546,37 @@ impl OrmAiConsequentialToolCallService {
                 protection_context(
                     "graphql_orm_ai_session_events",
                     event_id,
+                    "protected_payload",
+                    &scope,
+                ),
+                json!({
+                    "toolCallId": tool_call_id.0,
+                    "runId": running_lease.run_id().0,
+                    "toolId": descriptor.id.as_str(),
+                    "state": state.as_str(),
+                    "approvalId": approval_id.0,
+                }),
+            )
+            .await
+        {
+            Ok(event) => event,
+            Err(_) => {
+                return self
+                    .mark_consequential_recovery(
+                        &running_lease,
+                        tool_call_id,
+                        provider_response_id.clone(),
+                    )
+                    .await;
+            }
+        };
+        let protected_inbox_event = match self
+            .application_tools
+            .protect(
+                &policy,
+                protection_context(
+                    "graphql_orm_ai_inbox_events",
+                    inbox_event_id,
                     "protected_payload",
                     &scope,
                 ),
@@ -1526,7 +1621,9 @@ impl OrmAiConsequentialToolCallService {
                     result_egress_manifest_hash: manifest_hash,
                     application_audit_ref: result.response().application_audit_ref.clone(),
                     event_id,
+                    inbox_event_id,
                     protected_event,
+                    protected_inbox_event,
                     correlation_id,
                     expected_provider_call_key: call.provider_call_key,
                     expected_tool_fingerprint: descriptor.fingerprint,

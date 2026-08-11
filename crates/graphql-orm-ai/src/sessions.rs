@@ -354,6 +354,20 @@ pub struct AiQueryRoot;
 )]
 #[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
 impl AiQueryRoot {
+    /// Returns a lazily opened, current-policy, descriptor-bounded tool result
+    /// preview when the exact tool explicitly permits browser presentation.
+    async fn ai_tool_call_result_preview(
+        &self,
+        context: &Context<'_>,
+        input: crate::AiToolCallResultPreviewInput,
+    ) -> async_graphql::Result<Option<crate::AiToolCallResultPreviewView>> {
+        let principal = agql_auth::principal_from_ctx(context)?;
+        tool_result_preview_service(context)?
+            .result_preview(&principal, input)
+            .await
+            .map_err(extend)
+    }
+
     /// Returns a bounded keyset window of immutable provider usage.
     async fn ai_usage(
         &self,
@@ -612,6 +626,20 @@ fn cancellation_service(
         .ok_or_else(|| {
             AiError::InvalidConfiguration("AI run cancellation service is not installed".to_owned())
                 .extend()
+        })
+}
+
+fn tool_result_preview_service(
+    context: &Context<'_>,
+) -> async_graphql::Result<Arc<dyn crate::AiToolCallResultPreviewService>> {
+    context
+        .data_opt::<Arc<dyn crate::AiToolCallResultPreviewService>>()
+        .cloned()
+        .ok_or_else(|| {
+            AiError::InvalidConfiguration(
+                "AI tool result preview service is not installed".to_owned(),
+            )
+            .extend()
         })
 }
 

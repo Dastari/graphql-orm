@@ -12,7 +12,7 @@ use crate::{AiApprovalRule, AiToolRisk, ModelToolDefinition};
 use crate::{
     AiDisclosureSchema, AiError, AiGeneratedGraphqlOperationPolicy, AiGraphqlToolManifestCatalog,
     AiScope, AiToolDescriptor, AiToolId, AiToolOperationDomain, AiToolOperationKind,
-    ToolGraphqlRequest, ToolMaturity, contains_forbidden_graphql_name,
+    DataClassification, ToolGraphqlRequest, ToolMaturity, contains_forbidden_graphql_name,
 };
 
 const JSON_SCHEMA_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
@@ -175,6 +175,12 @@ impl AiToolCatalog {
                 .and_then(serde_json::Value::as_str)
                 != Some(JSON_SCHEMA_2020_12)
             || jsonschema::validator_for(&descriptor.argument_schema).is_err()
+            || descriptor.browser_result_preview.is_some_and(|preview| {
+                preview.maximum_bytes > descriptor.maximum_result_bytes
+                    || preview.maximum_records > descriptor.maximum_result_records
+                    || preview.maximum_classification > descriptor.maximum_classification
+                    || preview.maximum_classification == DataClassification::Secret
+            })
         {
             return Err(AiError::InvalidConfiguration(
                 "tool arguments must use a valid JSON Schema 2020-12 contract".to_owned(),

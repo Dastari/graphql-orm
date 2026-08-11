@@ -254,6 +254,74 @@ fn one_root_compiles_multiple_least_disclosure_profiles_without_raw_documents() 
 }
 
 #[test]
+fn browser_result_previews_are_explicit_bounded_and_fingerprinted() {
+    let mut default_builder =
+        AiGraphqlToolManifestBuilder::new("records-service", target(), CUSTOM_SDL).unwrap();
+    default_builder.add_custom_profile(list_profile()).unwrap();
+    let default_entry = default_builder
+        .build()
+        .unwrap()
+        .entries
+        .into_iter()
+        .next()
+        .unwrap();
+    assert!(default_entry.descriptor.browser_result_preview.is_none());
+    assert!(
+        serde_json::to_value(&default_entry.descriptor)
+            .unwrap()
+            .get("browser_result_preview")
+            .is_none(),
+        "default-deny descriptors preserve the previous optional wire shape"
+    );
+
+    let preview_policy =
+        AiBrowserResultPreviewPolicy::new(8 * 1024, 25, 8, DataClassification::Confidential)
+            .unwrap();
+    let mut preview_builder =
+        AiGraphqlToolManifestBuilder::new("records-service", target(), CUSTOM_SDL).unwrap();
+    preview_builder
+        .add_custom_profile(list_profile().with_browser_result_preview(preview_policy))
+        .unwrap();
+    let preview_entry = preview_builder
+        .build()
+        .unwrap()
+        .entries
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(
+        preview_entry.descriptor.browser_result_preview,
+        Some(preview_policy)
+    );
+    assert_ne!(
+        default_entry.descriptor.fingerprint,
+        preview_entry.descriptor.fingerprint
+    );
+
+    let mut invalid_builder =
+        AiGraphqlToolManifestBuilder::new("records-service", target(), CUSTOM_SDL).unwrap();
+    assert!(
+        invalid_builder
+            .add_custom_profile(
+                count_profile().with_browser_result_preview(
+                    AiBrowserResultPreviewPolicy::new(
+                        4_096,
+                        2,
+                        4,
+                        DataClassification::Confidential,
+                    )
+                    .unwrap(),
+                )
+            )
+            .is_err()
+    );
+    assert!(
+        AiBrowserResultPreviewPolicy::new(4_096, 1, 4, DataClassification::Secret).is_err(),
+        "secret-classified results can never become browser preview policy"
+    );
+}
+
+#[test]
 fn semantic_aliases_custom_roots_and_explicit_relationships_compile_safely() {
     let record = AiGraphqlToolProfile::read_only(
         "details",

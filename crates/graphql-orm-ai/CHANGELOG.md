@@ -20,7 +20,7 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.67.0` and AI
+This development line advances the pre-1.0 crate version to `0.68.0` and AI
 schema module `0.53.0`. It begins the applied-restore implementation with
 bounded database-derived facts, aligns the reviewed dependency universe,
 integrates generated resolver-operation metadata, completes the durable OpenAI
@@ -61,6 +61,23 @@ file-search IDs behind the reviewed persistent-file design.
   not applied-restore authority; restored deployments must keep it closed.
 
 ### Added
+
+- Application tool descriptors and generated/custom profiles can now opt into
+  a separately bounded, fingerprinted `AiBrowserResultPreviewPolicy`. The new
+  owner-authorized `AiToolCallResultPreview` query rehydrates current
+  authority, proves the exact session/run/call and descriptor/disclosure
+  bindings, reruns current tool policy, opens protected content only for the
+  response, and requires a host `AiToolResultPreviewAuthorizer` to apply
+  current row/field policy and return a least-disclosure projection. Missing
+  policy, denial, purge, retention expiry, classification excess, malformed
+  storage, or bound/schema failure discloses no result content.
+- Fenced application-tool execution now appends protected
+  `application_tool_started` and `application_tool_completed` events to both
+  the session stream and owner inbox. Start is committed only after read-only
+  preauthorization or approved consequential-call consumption, never while a
+  call is merely proposed, staged, or denied. Lifecycle events contain only
+  bounded identifiers and terminal state; arguments, results, errors,
+  provider details, and authorization internals remain protected elsewhere.
 
 - `CancelAiRun` and `AiRunCancellationService` add an owner-authorized,
   idempotent cancellation request for one exact session/run pair. The ORM
