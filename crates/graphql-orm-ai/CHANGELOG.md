@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-11
+last_reviewed: 2026-08-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -20,7 +20,29 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-No changes recorded after 0.73.1.
+No changes recorded after 0.73.2.
+
+## [0.73.2] - 2026-08-12
+
+### Fixed
+
+- Durable provider-session activation now distinguishes a newly created empty
+  thread from a previously committed retained thread. The first turn consumes
+  a crate-owned, run-fenced activation and starts directly on the exact
+  process and cursor that created the empty thread; later runs continue to use
+  the strict `thread/resume` lifecycle.
+- The Codex app-server run pool freezes the empty thread's cursor and reviewed
+  dynamic-tool definitions, rejects process, run, cursor, registration,
+  model, or tool swaps, and consumes initial activation once. Bind/open
+  failure, cancellation, lease loss, and abandoned streams retain exact
+  deletion and process-tree cleanup behavior.
+
+### Added
+
+- `AiCodexAppServerRunProcess` has typed `start_bound_turn` and
+  `start_bound_dynamic_turn` operations for the post-bind first turn. They do
+  not expose activation state or a reset flag and must not issue
+  `thread/resume`.
 
 ## [0.73.1] - 2026-08-12
 

@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-11
+last_reviewed: 2026-08-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -18,6 +18,34 @@ Migration entries preserve the dependency and schema facts for the checkpoint
 they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## 0.73.2: newly bound provider-session activation (schema remains 0.55.0)
+
+`AiProviderCallExecutor::execute_with_provider_session` now preserves whether
+the opened cursor was created empty and durably bound by the current run or
+claimed from a previously committed turn. This evidence is crate-owned and is
+not a host input, GraphQL value, model value, or public reset mechanism.
+
+Codex app-server process implementations should add the new typed
+`AiCodexAppServerRunProcess::start_bound_turn` and
+`start_bound_dynamic_turn` methods. These methods receive the first turn only
+after cursor protection, durable binding, current-principal reauthorization,
+and exact reopening have succeeded. Start `turn/start` directly on the loaded
+thread and do not issue `thread/resume`. Keep existing
+`start_retained_turn` and `start_retained_dynamic_turn` implementations for a
+cursor claimed by a later run; those paths must still perform the full
+`thread/resume` response/notification lifecycle before `turn/start`.
+
+The new trait methods have fail-closed default implementations, so unrelated
+providers remain source-compatible. A Codex host must implement them to use
+new persistent sessions. Do not infer activation from request order, local
+flags, cursor shape, or actor state, and do not recreate the actor or process
+between empty creation and the first bound turn.
+
+This is a provider/runtime lifecycle correction only. There is no GraphQL SDL,
+database entity, table, column, index, constraint, backup/restore, or durable
+semantic change. No data migration or row rewrite is required, and AI schema
+module `0.55.0` remains current.
 
 ## 0.73.1: repeatable retained Codex lifecycles (schema remains 0.55.0)
 

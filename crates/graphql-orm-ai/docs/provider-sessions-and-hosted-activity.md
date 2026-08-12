@@ -215,16 +215,21 @@ enforce this creation order:
 2. use the host-planned immutable `AiProviderSessionDescriptor` and canonical
    transcript-prefix fingerprint;
 3. call `bind_for_run` under the current run lease;
-4. only after the protected binding commits, send business content; and
-5. after protected assistant output, its matching
+4. call `open_for_run`, preserve the crate-owned newly-bound activation, and
+   consume it once on the exact process/cursor that created the empty thread;
+5. start the first `turn/start` directly on that already-loaded thread without
+   issuing `thread/resume`, then send business content; and
+6. after protected assistant output, its matching
    `assistant_output_persisted` checkpoint, and canonical `Completed` run state
    commit, call `commit_turn` with the new authoritative
    watermark/fingerprint. If this retention-only update fails, quarantine the
    cursor without changing the already-completed user answer.
 
-Resume uses `claim_for_run` and then `open_for_run`. Both require the exact
+Later-run resume uses `claim_for_run` and then `open_for_run`. Both require the exact
 descriptor and transcript evidence, current principal/session/scope access,
-and current run fence. A crash, cancellation, protocol error, ambiguous
+and current run fence. Its provider adapter performs the strict
+`thread/resume` response/notification lifecycle before `turn/start`; it cannot
+reuse the one-shot newly-bound activation. A crash, cancellation, protocol error, ambiguous
 provider state, output-persistence failure, policy/profile/model/executable
 drift, or rejected cursor calls `require_cleanup`; v1 never guesses provider
 state or advances a watermark from incomplete evidence.

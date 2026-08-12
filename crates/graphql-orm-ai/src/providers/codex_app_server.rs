@@ -284,9 +284,20 @@ impl AiCodexAppServerTurnInput {
     }
 
     fn try_from_model_request(request: ModelRequest) -> Result<Self, ProviderError> {
+        Self::try_from_tool_free_request(request, ModelContinuationMode::StatelessReplay)
+    }
+
+    fn try_from_retained_model_request(request: ModelRequest) -> Result<Self, ProviderError> {
+        Self::try_from_tool_free_request(request, ModelContinuationMode::ProviderRetained)
+    }
+
+    fn try_from_tool_free_request(
+        request: ModelRequest,
+        expected_mode: ModelContinuationMode,
+    ) -> Result<Self, ProviderError> {
         request.validate()?;
         if request.continuation.is_some()
-            || request.continuation_mode != ModelContinuationMode::StatelessReplay
+            || request.continuation_mode != expected_mode
             || !request.tools.is_empty()
             || !request.builtin_tools.is_empty()
             || request.maximum_builtin_tool_calls.is_some()
@@ -593,11 +604,24 @@ impl AiProvider for AiCodexAppServerProvider {
         )?;
         let binding = context.run_binding().ok_or(ProviderError::Rejected)?;
         let retained = context.provider_session().cloned();
-        let input = AiCodexAppServerTurnInput::try_from_model_request(request)?;
+        let input = if retained.is_some() {
+            AiCodexAppServerTurnInput::try_from_retained_model_request(request)?
+        } else {
+            AiCodexAppServerTurnInput::try_from_model_request(request)?
+        };
         if let Some(session) = retained {
-            self.pool
-                .start_retained_turn(binding, self.registration.clone(), session, input)
-                .await
+            match session.activation() {
+                crate::AiProviderSessionActivation::NewlyBoundEmpty => {
+                    self.pool
+                        .start_bound_turn(binding, self.registration.clone(), session, input)
+                        .await
+                }
+                crate::AiProviderSessionActivation::ExistingRetained => {
+                    self.pool
+                        .start_retained_turn(binding, self.registration.clone(), session, input)
+                        .await
+                }
+            }
         } else {
             self.pool
                 .start_fresh_turn(binding, self.registration.clone(), input)
@@ -624,15 +648,30 @@ impl AiProvider for AiCodexAppServerProvider {
         let retained = context.provider_session().cloned();
         let input = AiCodexAppServerTurnInput::try_from_dynamic_request(request)?;
         if let Some(session) = retained {
-            self.pool
-                .start_retained_dynamic_turn(
-                    binding,
-                    self.registration.clone(),
-                    session,
-                    input,
-                    responder,
-                )
-                .await
+            match session.activation() {
+                crate::AiProviderSessionActivation::NewlyBoundEmpty => {
+                    self.pool
+                        .start_bound_dynamic_turn(
+                            binding,
+                            self.registration.clone(),
+                            session,
+                            input,
+                            responder,
+                        )
+                        .await
+                }
+                crate::AiProviderSessionActivation::ExistingRetained => {
+                    self.pool
+                        .start_retained_dynamic_turn(
+                            binding,
+                            self.registration.clone(),
+                            session,
+                            input,
+                            responder,
+                        )
+                        .await
+                }
+            }
         } else {
             self.pool
                 .start_dynamic_turn(binding, self.registration.clone(), input, responder)
@@ -671,7 +710,7 @@ impl AiProvider for AiCodexAppServerProvider {
             return Err(ProviderError::Rejected);
         }
         let input = if request.tools.is_empty() {
-            AiCodexAppServerTurnInput::try_from_model_request(request.clone())?
+            AiCodexAppServerTurnInput::try_from_retained_model_request(request.clone())?
         } else {
             if !self.registration.experimental_dynamic_tools() {
                 return Err(ProviderError::Unsupported);
@@ -750,6 +789,45 @@ pub trait AiCodexAppServerRunProcess: Send + Sync {
     /// fail-closed.
     async fn start_dynamic_turn(
         &self,
+        _input: AiCodexAppServerTurnInput,
+        _responder: Arc<dyn ProviderDynamicToolResponder>,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        Err(ProviderError::Unsupported)
+    }
+
+    /// Starts the first text-only turn directly on the exact empty thread
+    /// created and durably bound for this run.
+    ///
+    /// Implementations must not issue `thread/resume`. The supplied opened
+    /// session is crate-fenced to the same run and cursor, and the process
+    /// pool admits this operation only once on the exact process that created
+    /// the empty thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns a non-sensitive error when the exact loaded thread, cursor,
+    /// frozen configuration, or turn cannot be honored.
+    async fn start_bound_turn(
+        &self,
+        _session: crate::AiOpenedProviderSession,
+        _input: AiCodexAppServerTurnInput,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        Err(ProviderError::Unsupported)
+    }
+
+    /// Starts the first experimental dynamic-tool turn directly on the exact
+    /// empty thread created and durably bound for this run.
+    ///
+    /// Implementations must not issue `thread/resume` and must preserve the
+    /// exact frozen tool definitions installed during empty-thread creation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a non-sensitive error when the exact loaded thread, cursor,
+    /// frozen tool definitions, responder, or turn cannot be honored.
+    async fn start_bound_dynamic_turn(
+        &self,
+        _session: crate::AiOpenedProviderSession,
         _input: AiCodexAppServerTurnInput,
         _responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
@@ -877,6 +955,25 @@ impl AiCodexAppServerLaunchedProcess {
         self.process.start_dynamic_turn(input, responder).await
     }
 
+    async fn start_bound_turn(
+        &self,
+        session: crate::AiOpenedProviderSession,
+        input: AiCodexAppServerTurnInput,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        self.process.start_bound_turn(session, input).await
+    }
+
+    async fn start_bound_dynamic_turn(
+        &self,
+        session: crate::AiOpenedProviderSession,
+        input: AiCodexAppServerTurnInput,
+        responder: Arc<dyn ProviderDynamicToolResponder>,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        self.process
+            .start_bound_dynamic_turn(session, input, responder)
+            .await
+    }
+
     async fn start_retained_turn(
         &self,
         session: crate::AiOpenedProviderSession,
@@ -974,6 +1071,32 @@ struct RunEntry {
     turn_count: AtomicU32,
     turn_active: AtomicBool,
     poisoned: AtomicBool,
+    empty_thread: Mutex<EmptyThreadActivation>,
+}
+
+enum EmptyThreadActivation {
+    Vacant,
+    Creating,
+    Available {
+        cursor_fingerprint: String,
+        dynamic_tools: Vec<ModelToolDefinition>,
+    },
+    Consumed,
+}
+
+fn opened_session_matches(
+    binding: AiProviderRunBinding,
+    registration: &AiCodexAppServerRegistration,
+    session: &crate::AiOpenedProviderSession,
+) -> bool {
+    session.claim().session_id() == binding.session_id()
+        && session.claim().run_id() == binding.run_id()
+        && session.claim().attempt_id() == binding.attempt_id()
+        && session.claim().run_lease_generation() == binding.lease_generation()
+        && session.claim().descriptor().provider_profile_id() == registration.provider_profile_id()
+        && session.claim().descriptor().provider_model() == registration.logical_model()
+        && session.claim().descriptor().registration_fingerprint() == registration.identity()
+        && session.claim().descriptor().protocol_version() == registration.protocol_version()
 }
 
 struct ActiveTurnGuard {
@@ -1021,6 +1144,9 @@ impl AiCodexAppServerRunPool {
             tool.validate()?;
         }
         let entry = self.entry(binding, registration.clone()).await?;
+        if entry.turn_count.load(Ordering::Acquire) != 0 {
+            return Err(ProviderError::Rejected);
+        }
         if entry
             .turn_active
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -1028,16 +1154,30 @@ impl AiCodexAppServerRunPool {
         {
             return Err(ProviderError::Rejected);
         }
+        {
+            let mut activation = entry.empty_thread.lock().await;
+            if !matches!(*activation, EmptyThreadActivation::Vacant) {
+                entry.turn_active.store(false, Ordering::Release);
+                return Err(ProviderError::Rejected);
+            }
+            *activation = EmptyThreadActivation::Creating;
+        }
         let outcome = tokio::time::timeout(
             self.inner.limits.startup_timeout,
             entry
                 .process
-                .create_empty_thread(registration.logical_model(), dynamic_tools),
+                .create_empty_thread(registration.logical_model(), dynamic_tools.clone()),
         )
         .await;
         entry.turn_active.store(false, Ordering::Release);
         match outcome {
-            Ok(Ok(cursor)) if cursor.kind() == "codex.app_server.thread.v2" => Ok(cursor),
+            Ok(Ok(cursor)) if cursor.kind() == "codex.app_server.thread.v2" => {
+                *entry.empty_thread.lock().await = EmptyThreadActivation::Available {
+                    cursor_fingerprint: cursor.fingerprint(),
+                    dynamic_tools,
+                };
+                Ok(cursor)
+            }
             Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {
                 self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
                     .await;
@@ -1066,6 +1206,22 @@ impl AiCodexAppServerRunPool {
         {
             return Err(ProviderError::Rejected);
         }
+        let cursor_matches = {
+            let activation = entry.empty_thread.lock().await;
+            matches!(
+                &*activation,
+                EmptyThreadActivation::Available {
+                    cursor_fingerprint,
+                    ..
+                } if cursor_fingerprint == &cursor.fingerprint()
+            )
+        };
+        if !cursor_matches {
+            entry.turn_active.store(false, Ordering::Release);
+            self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
+                .await;
+            return Err(ProviderError::Rejected);
+        }
         let result = tokio::time::timeout(
             self.inner.limits.shutdown_timeout,
             entry.process.delete_thread(cursor),
@@ -1073,7 +1229,10 @@ impl AiCodexAppServerRunPool {
         .await;
         entry.turn_active.store(false, Ordering::Release);
         match result {
-            Ok(Ok(())) => Ok(()),
+            Ok(Ok(())) => {
+                *entry.empty_thread.lock().await = EmptyThreadActivation::Consumed;
+                Ok(())
+            }
             Ok(Err(error)) => {
                 self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
                     .await;
@@ -1220,6 +1379,209 @@ impl AiCodexAppServerRunPool {
         }))
     }
 
+    /// Starts the first tool-free turn directly on the exact newly bound empty
+    /// thread without issuing `thread/resume`.
+    pub(crate) async fn start_bound_turn(
+        &self,
+        binding: AiProviderRunBinding,
+        registration: Arc<AiCodexAppServerRegistration>,
+        session: crate::AiOpenedProviderSession,
+        input: AiCodexAppServerTurnInput,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        input.validate()?;
+        if !input.tools().is_empty() {
+            return Err(ProviderError::Rejected);
+        }
+        let entry = self
+            .begin_bound_turn(binding, &registration, &session, &input)
+            .await?;
+        let turn_deadline = tokio::time::Instant::now() + self.inner.limits.turn_timeout;
+        let stream = match tokio::time::timeout_at(
+            turn_deadline,
+            entry.process.start_bound_turn(session, input),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                entry.turn_active.store(false, Ordering::Release);
+                self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
+                    .await;
+                return Err(error);
+            }
+            Err(_) => {
+                entry.turn_active.store(false, Ordering::Release);
+                self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
+                    .await;
+                return Err(ProviderError::Cancelled);
+            }
+        };
+        self.guard_turn_stream(binding, entry, turn_deadline, stream)
+    }
+
+    /// Starts the first experimental dynamic-tool turn directly on the exact
+    /// newly bound empty thread without issuing `thread/resume`.
+    pub(crate) async fn start_bound_dynamic_turn(
+        &self,
+        binding: AiProviderRunBinding,
+        registration: Arc<AiCodexAppServerRegistration>,
+        session: crate::AiOpenedProviderSession,
+        input: AiCodexAppServerTurnInput,
+        responder: Arc<dyn ProviderDynamicToolResponder>,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        input.validate()?;
+        if input.tools().is_empty() || !registration.experimental_dynamic_tools() {
+            return Err(ProviderError::Unsupported);
+        }
+        let entry = self
+            .begin_bound_turn(binding, &registration, &session, &input)
+            .await?;
+        let turn_deadline = tokio::time::Instant::now() + self.inner.limits.turn_timeout;
+        let stream = match tokio::time::timeout_at(
+            turn_deadline,
+            entry
+                .process
+                .start_bound_dynamic_turn(session, input, responder),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                entry.turn_active.store(false, Ordering::Release);
+                self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
+                    .await;
+                return Err(error);
+            }
+            Err(_) => {
+                entry.turn_active.store(false, Ordering::Release);
+                self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
+                    .await;
+                return Err(ProviderError::Cancelled);
+            }
+        };
+        self.guard_turn_stream(binding, entry, turn_deadline, stream)
+    }
+
+    async fn begin_bound_turn(
+        &self,
+        binding: AiProviderRunBinding,
+        registration: &AiCodexAppServerRegistration,
+        session: &crate::AiOpenedProviderSession,
+        input: &AiCodexAppServerTurnInput,
+    ) -> Result<Arc<RunEntry>, ProviderError> {
+        if session.activation() != crate::AiProviderSessionActivation::NewlyBoundEmpty
+            || !opened_session_matches(binding, registration, session)
+            || input.model() != registration.logical_model()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let entry = self
+            .inner
+            .entries
+            .lock()
+            .await
+            .get(&binding)
+            .cloned()
+            .filter(|entry| {
+                entry.registration_identity == registration.identity()
+                    && !entry.poisoned.load(Ordering::Acquire)
+            })
+            .ok_or(ProviderError::Rejected)?;
+        if entry
+            .turn_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let activation_matches = {
+            let mut activation = entry.empty_thread.lock().await;
+            match &*activation {
+                EmptyThreadActivation::Available {
+                    cursor_fingerprint,
+                    dynamic_tools,
+                } if cursor_fingerprint == &session.cursor().fingerprint()
+                    && dynamic_tools == input.tools() =>
+                {
+                    *activation = EmptyThreadActivation::Consumed;
+                    true
+                }
+                EmptyThreadActivation::Vacant
+                | EmptyThreadActivation::Creating
+                | EmptyThreadActivation::Available { .. }
+                | EmptyThreadActivation::Consumed => false,
+            }
+        };
+        if !activation_matches {
+            entry.turn_active.store(false, Ordering::Release);
+            self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
+                .await;
+            return Err(ProviderError::Rejected);
+        }
+        let previous = entry.turn_count.fetch_add(1, Ordering::AcqRel);
+        if previous >= self.inner.limits.maximum_turns_per_run {
+            entry.turn_count.fetch_sub(1, Ordering::AcqRel);
+            entry.turn_active.store(false, Ordering::Release);
+            self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
+                .await;
+            return Err(ProviderError::RateLimited);
+        }
+        Ok(entry)
+    }
+
+    fn guard_turn_stream(
+        &self,
+        binding: AiProviderRunBinding,
+        entry: Arc<RunEntry>,
+        turn_deadline: tokio::time::Instant,
+        stream: ProviderEventStream,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        let guard = ActiveTurnGuard {
+            entry,
+            completed: false,
+        };
+        let pool = self.clone();
+        Ok(Box::pin(async_stream::try_stream! {
+            let mut guard = guard;
+            let mut stream = stream;
+            let turn_timeout = tokio::time::sleep_until(turn_deadline);
+            tokio::pin!(turn_timeout);
+            loop {
+                let next = tokio::select! {
+                    _ = &mut turn_timeout => {
+                        pool.invalidate(
+                            binding,
+                            &guard.entry,
+                            AiProviderRunCloseReason::ProtocolViolation,
+                        ).await;
+                        guard.completed = true;
+                        Err(ProviderError::Cancelled)
+                    }
+                    event = stream.next() => match event {
+                        Some(Ok(event)) => Ok(Some(event)),
+                        Some(Err(error)) => {
+                            pool.invalidate(
+                                binding,
+                                &guard.entry,
+                                AiProviderRunCloseReason::ProtocolViolation,
+                            ).await;
+                            guard.completed = true;
+                            Err(error)
+                        }
+                        None => Ok(None),
+                    }
+                };
+                match next? {
+                    Some(event) => yield event,
+                    None => {
+                        guard.completed = true;
+                        break;
+                    }
+                }
+            }
+        }))
+    }
+
     pub(crate) async fn start_retained_turn(
         &self,
         binding: AiProviderRunBinding,
@@ -1229,15 +1591,8 @@ impl AiCodexAppServerRunPool {
     ) -> Result<ProviderEventStream, ProviderError> {
         input.validate()?;
         if input.model() != registration.logical_model()
-            || session.claim().session_id() != binding.session_id()
-            || session.claim().run_id() != binding.run_id()
-            || session.claim().attempt_id() != binding.attempt_id()
-            || session.claim().run_lease_generation() != binding.lease_generation()
-            || session.claim().descriptor().provider_profile_id()
-                != registration.provider_profile_id()
-            || session.claim().descriptor().provider_model() != registration.logical_model()
-            || session.claim().descriptor().registration_fingerprint() != registration.identity()
-            || session.claim().descriptor().protocol_version() != registration.protocol_version()
+            || session.activation() != crate::AiProviderSessionActivation::ExistingRetained
+            || !opened_session_matches(binding, &registration, &session)
         {
             return Err(ProviderError::Rejected);
         }
@@ -1435,15 +1790,8 @@ impl AiCodexAppServerRunPool {
         if input.model() != registration.logical_model()
             || input.tools().is_empty()
             || !registration.experimental_dynamic_tools()
-            || session.claim().session_id() != binding.session_id()
-            || session.claim().run_id() != binding.run_id()
-            || session.claim().attempt_id() != binding.attempt_id()
-            || session.claim().run_lease_generation() != binding.lease_generation()
-            || session.claim().descriptor().provider_profile_id()
-                != registration.provider_profile_id()
-            || session.claim().descriptor().provider_model() != registration.logical_model()
-            || session.claim().descriptor().registration_fingerprint() != registration.identity()
-            || session.claim().descriptor().protocol_version() != registration.protocol_version()
+            || session.activation() != crate::AiProviderSessionActivation::ExistingRetained
+            || !opened_session_matches(binding, &registration, &session)
         {
             return Err(ProviderError::Rejected);
         }
@@ -1583,6 +1931,7 @@ impl AiCodexAppServerRunPool {
             turn_count: AtomicU32::new(0),
             turn_active: AtomicBool::new(false),
             poisoned: AtomicBool::new(false),
+            empty_thread: Mutex::new(EmptyThreadActivation::Vacant),
         });
         if identity_is_new {
             identities.insert(binding, registration.identity().to_owned());
@@ -3187,6 +3536,8 @@ mod tests {
         stream_error: AtomicBool,
         created_threads: AtomicUsize,
         created_dynamic_tools: AtomicUsize,
+        bound_turns: AtomicUsize,
+        retained_turns: AtomicUsize,
         deleted_threads: AtomicUsize,
     }
 
@@ -3203,6 +3554,8 @@ mod tests {
                 stream_error: AtomicBool::new(false),
                 created_threads: AtomicUsize::new(0),
                 created_dynamic_tools: AtomicUsize::new(0),
+                bound_turns: AtomicUsize::new(0),
+                retained_turns: AtomicUsize::new(0),
                 deleted_threads: AtomicUsize::new(0),
             }
         }
@@ -3340,7 +3693,27 @@ mod tests {
             _session: crate::AiOpenedProviderSession,
             input: AiCodexAppServerTurnInput,
         ) -> Result<ProviderEventStream, ProviderError> {
+            self.counters.retained_turns.fetch_add(1, Ordering::SeqCst);
             self.start_fresh_turn(input).await
+        }
+
+        async fn start_bound_turn(
+            &self,
+            _session: crate::AiOpenedProviderSession,
+            input: AiCodexAppServerTurnInput,
+        ) -> Result<ProviderEventStream, ProviderError> {
+            self.counters.bound_turns.fetch_add(1, Ordering::SeqCst);
+            self.start_fresh_turn(input).await
+        }
+
+        async fn start_bound_dynamic_turn(
+            &self,
+            _session: crate::AiOpenedProviderSession,
+            input: AiCodexAppServerTurnInput,
+            responder: Arc<dyn ProviderDynamicToolResponder>,
+        ) -> Result<ProviderEventStream, ProviderError> {
+            self.counters.bound_turns.fetch_add(1, Ordering::SeqCst);
+            self.start_dynamic_turn(input, responder).await
         }
 
         async fn start_retained_dynamic_turn(
@@ -3349,6 +3722,7 @@ mod tests {
             input: AiCodexAppServerTurnInput,
             responder: Arc<dyn ProviderDynamicToolResponder>,
         ) -> Result<ProviderEventStream, ProviderError> {
+            self.counters.retained_turns.fetch_add(1, Ordering::SeqCst);
             self.start_dynamic_turn(input, responder).await
         }
 
@@ -3377,12 +3751,12 @@ mod tests {
     }
 
     fn binding_for_owner(owner: u8) -> AiProviderRunBinding {
-        AiProviderRunBinding::new(
+        AiProviderRunBinding::new_for_principal_reference(
             AiSessionId::new(),
             AiRunId::new(),
             Uuid::new_v4(),
             1,
-            [owner; 32],
+            &principal_reference_for_owner(owner),
         )
         .expect("test binding should validate")
     }
@@ -3392,8 +3766,12 @@ mod tests {
     }
 
     fn principal_reference() -> PrincipalReference {
+        principal_reference_for_owner(1)
+    }
+
+    fn principal_reference_for_owner(owner: u8) -> PrincipalReference {
         AuthPrincipal::User(AuthUser {
-            user_id: "codex-provider-test".to_owned(),
+            user_id: format!("codex-provider-test-{owner}"),
             session_id: Uuid::new_v4(),
             roles: Vec::new(),
             scopes: Vec::new(),
@@ -3401,6 +3779,37 @@ mod tests {
             token_claims: AccessTokenMetadata::default(),
         })
         .reference()
+    }
+
+    fn opened_session(
+        binding: AiProviderRunBinding,
+        registration: &AiCodexAppServerRegistration,
+        cursor: crate::AiProviderSessionCursor,
+    ) -> crate::AiOpenedProviderSession {
+        let descriptor = crate::AiProviderSessionDescriptor::new(
+            ProviderKind::LocalHarness,
+            registration.provider_profile_id(),
+            registration.logical_model(),
+            registration.identity(),
+            registration.protocol_version(),
+            "d".repeat(64),
+        )
+        .expect("provider-session descriptor should validate");
+        let claim = crate::AiProviderSessionClaim {
+            binding_id: Uuid::new_v4(),
+            session_id: binding.session_id(),
+            run_id: binding.run_id(),
+            attempt_id: binding.attempt_id(),
+            run_lease_generation: binding.lease_generation(),
+            binding_claim_generation: 1,
+            binding_row_version: 1,
+            claim_expires_at: time::OffsetDateTime::now_utc() + time::Duration::minutes(1),
+            through_message_sequence: 0,
+            transcript_fingerprint: "c".repeat(64),
+            principal_reference: principal_reference(),
+            descriptor,
+        };
+        crate::AiOpenedProviderSession::new(claim, cursor)
     }
 
     fn registration(version: &str) -> Arc<AiCodexAppServerRegistration> {
@@ -3727,8 +4136,14 @@ mod tests {
         ProviderRequestContext::new(session_id, run_id, "test", budget, manifest, proof)
             .expect("context should validate")
             .with_run_binding(
-                AiProviderRunBinding::new(session_id, run_id, attempt_id, 1, [1; 32])
-                    .expect("binding should validate"),
+                AiProviderRunBinding::new_for_principal_reference(
+                    session_id,
+                    run_id,
+                    attempt_id,
+                    1,
+                    &principal_reference(),
+                )
+                .expect("binding should validate"),
             )
             .expect("binding should match context")
     }
@@ -3793,7 +4208,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retained_dynamic_turn_uses_exact_opened_cursor_and_coordinator_responder() {
+    async fn newly_bound_dynamic_turn_uses_creating_process_without_resume() {
         let counters = Arc::new(Counters::new());
         let pool = pool(counters.clone(), 1, 2);
         let binding = binding();
@@ -3802,34 +4217,13 @@ mod tests {
             .create_empty_thread(binding, registration.clone(), vec![dynamic_tool()])
             .await
             .expect("retained dynamic thread should create");
-        let descriptor = crate::AiProviderSessionDescriptor::new(
-            ProviderKind::LocalHarness,
-            registration.provider_profile_id(),
-            registration.logical_model(),
-            registration.identity(),
-            registration.protocol_version(),
-            "d".repeat(64),
-        )
-        .expect("provider-session descriptor should validate");
-        let claim = crate::AiProviderSessionClaim {
-            binding_id: Uuid::new_v4(),
-            session_id: binding.session_id(),
-            run_id: binding.run_id(),
-            attempt_id: binding.attempt_id(),
-            run_lease_generation: binding.lease_generation(),
-            binding_claim_generation: 1,
-            binding_row_version: 1,
-            claim_expires_at: time::OffsetDateTime::now_utc() + time::Duration::minutes(1),
-            through_message_sequence: 0,
-            transcript_fingerprint: "c".repeat(64),
-            principal_reference: principal_reference(),
-            descriptor,
-        };
-        let opened = crate::AiOpenedProviderSession::new(claim, cursor);
+        let opened = opened_session(binding, &registration, cursor.clone())
+            .activate_newly_bound_empty(binding, &cursor)
+            .expect("executor activation should match the exact cursor and run");
         let input = AiCodexAppServerTurnInput::try_from_dynamic_request(dynamic_model_request())
             .expect("dynamic request should convert");
         let events = pool
-            .start_retained_dynamic_turn(
+            .start_bound_dynamic_turn(
                 binding,
                 registration,
                 opened,
@@ -3844,7 +4238,284 @@ mod tests {
         assert!(events.iter().all(Result::is_ok));
         assert_eq!(counters.launches.load(Ordering::SeqCst), 1);
         assert_eq!(counters.created_threads.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.bound_turns.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.retained_turns.load(Ordering::SeqCst), 0);
         assert_eq!(counters.turns.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn provider_dispatches_executor_marked_session_to_initial_direct_turn() {
+        let counters = Arc::new(Counters::new());
+        let registration = dynamic_registration("1.0.0");
+        let provider =
+            AiCodexAppServerProvider::new(registration.clone(), pool(counters.clone(), 1, 2));
+        let request = dynamic_model_request();
+        let context = provider_context(registration.provider_profile_id(), &request);
+        let binding = context
+            .run_binding()
+            .expect("executor context should carry the exact run binding");
+        let descriptor = crate::AiProviderSessionDescriptor::new(
+            ProviderKind::LocalHarness,
+            registration.provider_profile_id(),
+            registration.logical_model(),
+            registration.identity(),
+            registration.protocol_version(),
+            "d".repeat(64),
+        )
+        .expect("descriptor should validate");
+        let cursor = provider
+            .create_empty_session(&binding, &descriptor, &request)
+            .await
+            .expect("provider should create an empty thread");
+        let opened = opened_session(binding, &registration, cursor.clone())
+            .activate_newly_bound_empty(binding, &cursor)
+            .expect("executor should mark only the exact new binding");
+        let context = context
+            .with_provider_session(opened)
+            .expect("opened provider session should match the run context");
+        let events = provider
+            .stream_with_dynamic_tools(request, context, Arc::new(FakeDynamicResponder))
+            .await
+            .expect("provider should dispatch initial activation directly")
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(events.len(), 7);
+        assert_eq!(counters.launches.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.bound_turns.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.retained_turns.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn provider_dispatches_tool_free_newly_bound_session_directly() {
+        let counters = Arc::new(Counters::new());
+        let registration = registration("1.0.0");
+        let provider =
+            AiCodexAppServerProvider::new(registration.clone(), pool(counters.clone(), 1, 2));
+        let mut request = model_request();
+        request.continuation_mode = ModelContinuationMode::ProviderRetained;
+        let context = provider_context(registration.provider_profile_id(), &request);
+        let binding = context
+            .run_binding()
+            .expect("executor context should carry the exact run binding");
+        let descriptor = crate::AiProviderSessionDescriptor::new(
+            ProviderKind::LocalHarness,
+            registration.provider_profile_id(),
+            registration.logical_model(),
+            registration.identity(),
+            registration.protocol_version(),
+            "d".repeat(64),
+        )
+        .expect("descriptor should validate");
+        let cursor = provider
+            .create_empty_session(&binding, &descriptor, &request)
+            .await
+            .expect("provider should create a tool-free empty thread");
+        let opened = opened_session(binding, &registration, cursor.clone())
+            .activate_newly_bound_empty(binding, &cursor)
+            .expect("executor should mark only the exact new binding");
+        let context = context
+            .with_provider_session(opened)
+            .expect("opened provider session should match the run context");
+        let events = provider
+            .stream(request, context)
+            .await
+            .expect("provider should dispatch tool-free activation directly")
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(events.len(), 4);
+        assert_eq!(counters.launches.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.bound_turns.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.retained_turns.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn newly_bound_tool_free_activation_is_exact_and_one_shot() {
+        let counters = Arc::new(Counters::new());
+        let pool = pool(counters.clone(), 2, 3);
+        let binding = binding();
+        let registration = registration("1.0.0");
+        let cursor = pool
+            .create_empty_thread(binding, registration.clone(), Vec::new())
+            .await
+            .expect("empty retained thread should create");
+        let opened = opened_session(binding, &registration, cursor.clone())
+            .activate_newly_bound_empty(binding, &cursor)
+            .expect("executor activation should match");
+        let replay = opened.clone();
+        let events = pool
+            .start_bound_turn(binding, registration.clone(), opened, turn())
+            .await
+            .expect("initial bound turn should start directly")
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(events.len(), 4);
+        assert_eq!(counters.launches.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.bound_turns.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.retained_turns.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            pool.start_bound_turn(binding, registration, replay, turn())
+                .await,
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[tokio::test]
+    async fn newly_bound_activation_rejects_cursor_process_and_tool_swaps() {
+        let counters = Arc::new(Counters::new());
+        let primary_pool = pool(counters.clone(), 2, 3);
+        let binding = binding();
+        let registration = dynamic_registration("1.0.0");
+        let created = primary_pool
+            .create_empty_thread(binding, registration.clone(), vec![dynamic_tool()])
+            .await
+            .expect("empty retained thread should create");
+        let other_binding = AiProviderRunBinding::new_for_principal_reference(
+            binding.session_id(),
+            binding.run_id(),
+            binding.attempt_id(),
+            binding.lease_generation(),
+            &principal_reference_for_owner(2),
+        )
+        .expect("same fence with another owner should construct for rejection testing");
+        assert!(matches!(
+            opened_session(binding, &registration, created.clone())
+                .activate_newly_bound_empty(other_binding, &created),
+            Err(crate::AiError::Conflict)
+        ));
+        let swapped = crate::AiProviderSessionCursor::new(
+            "codex.app_server.thread.v2",
+            "thread-retained-swapped",
+        )
+        .expect("swapped cursor should be structurally valid");
+        let opened = opened_session(binding, &registration, swapped.clone())
+            .activate_newly_bound_empty(binding, &swapped)
+            .expect("crate marker alone is not the process correlation proof");
+        let input = AiCodexAppServerTurnInput::try_from_dynamic_request(dynamic_model_request())
+            .expect("dynamic input should validate");
+        assert!(matches!(
+            primary_pool
+                .start_bound_dynamic_turn(
+                    binding,
+                    registration.clone(),
+                    opened,
+                    input,
+                    Arc::new(FakeDynamicResponder),
+                )
+                .await,
+            Err(ProviderError::Rejected)
+        ));
+        assert_eq!(counters.bound_turns.load(Ordering::SeqCst), 0);
+
+        let other_counters = Arc::new(Counters::new());
+        let other_pool = pool(other_counters.clone(), 1, 2);
+        let opened = opened_session(binding, &registration, created.clone())
+            .activate_newly_bound_empty(binding, &created)
+            .expect("exact activation should validate");
+        assert!(matches!(
+            other_pool
+                .start_bound_dynamic_turn(
+                    binding,
+                    registration,
+                    opened,
+                    AiCodexAppServerTurnInput::try_from_dynamic_request(dynamic_model_request())
+                        .expect("dynamic input should validate"),
+                    Arc::new(FakeDynamicResponder),
+                )
+                .await,
+            Err(ProviderError::Rejected)
+        ));
+        assert_eq!(other_counters.launches.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn later_run_resumes_committed_cursor_on_a_new_process() {
+        let counters = Arc::new(Counters::new());
+        let pool = pool(counters.clone(), 1, 2);
+        let later_binding = binding_for_owner(1);
+        let registration = dynamic_registration("1.0.0");
+        let cursor = crate::AiProviderSessionCursor::new(
+            "codex.app_server.thread.v2",
+            "thread-retained-test",
+        )
+        .expect("committed cursor should validate");
+        let opened = opened_session(later_binding, &registration, cursor);
+        let input = AiCodexAppServerTurnInput::try_from_dynamic_request(dynamic_model_request())
+            .expect("dynamic input should validate");
+        let events = pool
+            .start_retained_dynamic_turn(
+                later_binding,
+                registration,
+                opened,
+                input,
+                Arc::new(FakeDynamicResponder),
+            )
+            .await
+            .expect("later retained claim should use resume path")
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(events.len(), 7);
+        assert_eq!(counters.launches.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.bound_turns.load(Ordering::SeqCst), 0);
+        assert_eq!(counters.retained_turns.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn newly_bound_activation_rejects_changed_frozen_tool_definition() {
+        let counters = Arc::new(Counters::new());
+        let pool = pool(counters.clone(), 1, 2);
+        let binding = binding();
+        let registration = dynamic_registration("1.0.0");
+        let cursor = pool
+            .create_empty_thread(binding, registration.clone(), vec![dynamic_tool()])
+            .await
+            .expect("empty dynamic thread should create");
+        let opened = opened_session(binding, &registration, cursor.clone())
+            .activate_newly_bound_empty(binding, &cursor)
+            .expect("exact activation should validate");
+        let mut request = dynamic_model_request();
+        request.tools[0].description = "Changed after durable binding.".to_owned();
+        let changed = AiCodexAppServerTurnInput::try_from_dynamic_request(request)
+            .expect("changed definition remains structurally valid");
+        assert!(matches!(
+            pool.start_bound_dynamic_turn(
+                binding,
+                registration,
+                opened,
+                changed,
+                Arc::new(FakeDynamicResponder),
+            )
+            .await,
+            Err(ProviderError::Rejected)
+        ));
+        assert_eq!(counters.bound_turns.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn close_before_newly_bound_turn_prevents_business_content() {
+        let counters = Arc::new(Counters::new());
+        let pool = pool(counters.clone(), 1, 2);
+        let binding = binding();
+        let registration = registration("1.0.0");
+        let cursor = pool
+            .create_empty_thread(binding, registration.clone(), Vec::new())
+            .await
+            .expect("empty thread should create");
+        let opened = opened_session(binding, &registration, cursor.clone())
+            .activate_newly_bound_empty(binding, &cursor)
+            .expect("activation should validate");
+        assert_eq!(
+            pool.close_run(&binding, AiProviderRunCloseReason::Cancelled)
+                .await
+                .expect("exact cancellation should close the process"),
+            AiProviderRunCloseOutcome::Closed
+        );
+        assert!(matches!(
+            pool.start_bound_turn(binding, registration, opened, turn())
+                .await,
+            Err(ProviderError::Rejected)
+        ));
+        assert_eq!(counters.bound_turns.load(Ordering::SeqCst), 0);
+        assert_eq!(counters.turns.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -3868,9 +4539,11 @@ mod tests {
         let mut retained = model_request();
         retained.continuation_mode = ModelContinuationMode::ProviderRetained;
         assert!(matches!(
-            AiCodexAppServerTurnInput::try_from_model_request(retained),
+            AiCodexAppServerTurnInput::try_from_model_request(retained.clone()),
             Err(ProviderError::Unsupported)
         ));
+        AiCodexAppServerTurnInput::try_from_retained_model_request(retained)
+            .expect("tool-free retained initial input should use its explicit converter");
 
         let mut reasoning = model_request();
         reasoning.reasoning_summary = ModelReasoningSummaryRequest::auto(1_024)
@@ -5115,6 +5788,20 @@ mod tests {
         assert!(create.contains("\"dynamicTools\""));
         assert!(create.contains("\"inventory_count\""));
         assert!(!create.contains("turn/start"));
+        dynamic_create
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("persistent dynamic create response should bind");
+        dynamic_create
+            .accept(&thread_started_notification("thread-retained-1"))
+            .expect("persistent dynamic create notification should bind");
+        let direct = String::from_utf8(
+            dynamic_create
+                .start_turn("thread-retained-1", &input)
+                .expect("newly bound persistent thread should start directly"),
+        )
+        .expect("direct turn frame should be UTF-8");
+        assert!(direct.contains("\"method\":\"turn/start\""));
+        assert!(!direct.contains("thread/resume"));
 
         let cursor =
             crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", "thread-retained-1")
@@ -5178,7 +5865,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires a reviewed Codex CLI 0.147.0 binary and disposable configured home"]
-    fn live_codex_0147_persistent_create_resume_turn_delete_uses_the_strict_actor() {
+    fn live_codex_0147_bound_first_turn_then_later_resume_uses_strict_actor() {
         let executable = std::env::var("GRAPHQL_ORM_AI_CODEX_0147_BIN")
             .expect("set GRAPHQL_ORM_AI_CODEX_0147_BIN to the reviewed absolute binary path");
         assert!(PathBuf::from(&executable).is_absolute());
@@ -5199,12 +5886,12 @@ mod tests {
             std::env::var_os("GRAPHQL_ORM_AI_CODEX_0147_HOME")
                 .expect("set GRAPHQL_ORM_AI_CODEX_0147_HOME to a disposable configured home"),
         );
-        let mut process = LiveCodexProcess::launch(&executable, configured_home);
+        let mut process = LiveCodexProcess::launch(&executable, configured_home.clone());
         let mut actor =
             AiCodexAppServerProtocolActor::new(MAXIMUM_FRAME_BYTES).expect("actor should validate");
         process.send(
             &actor
-                .initialize(
+                .initialize_with_dynamic_tools(
                     "graphql_orm_ai_live_test",
                     "GraphQL ORM AI live test",
                     "0.147.0",
@@ -5231,7 +5918,7 @@ mod tests {
         );
         process.send(
             &actor
-                .start_persistent_empty_thread("gpt-5.6-sol", &[])
+                .start_persistent_empty_thread("gpt-5.6-sol", &[dynamic_tool()])
                 .expect("persistent thread start should encode"),
         );
 
@@ -5282,74 +5969,20 @@ mod tests {
         let thread_id = response_thread_id.expect("both thread lifecycle frames should arrive");
         let cursor = crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", thread_id)
             .expect("live thread cursor should validate");
-        let input = AiCodexAppServerTurnInput::new(
-            "gpt-5.6-sol",
-            Vec::new(),
-            vec!["Reply with exactly OK.".to_owned()],
-            32,
-        )
-        .expect("live retained input should validate");
-        process.send(
-            &actor
-                .resume_thread(&cursor, &input)
-                .expect("live retained thread should resume on the same actor"),
-        );
-        let mut resume_response_observed = false;
-        let mut resume_notification_observed = false;
-        for _ in 0..8 {
-            let frame = process.receive();
-            let inbound = actor.accept(&frame).unwrap_or_else(|error| {
-                let envelope: Value = serde_json::from_slice(&frame)
-                    .expect("rejected resume frame should remain valid JSON");
-                let keys = envelope
-                    .as_object()
-                    .map(|object| object.keys().cloned().collect::<Vec<_>>());
-                let result_keys = envelope
-                    .get("result")
-                    .and_then(Value::as_object)
-                    .map(|object| object.keys().cloned().collect::<Vec<_>>());
-                panic!(
-                    "resume lifecycle frame was rejected: {error:?}; id={:?}; method={:?}; keys={keys:?}; result_keys={result_keys:?}",
-                    envelope.get("id"),
-                    envelope.get("method").and_then(Value::as_str),
-                );
-            });
-            match inbound {
-                AiCodexAppServerInbound::Response {
-                    method: "thread/resume",
-                    result,
-                    ..
-                } => {
-                    assert_eq!(
-                        nested_reference(&result, "thread", "id")
-                            .expect("resume response thread should be valid"),
-                        cursor.expose_to_provider_adapter()
-                    );
-                    resume_response_observed = true;
-                }
-                AiCodexAppServerInbound::Notification { method, params }
-                    if method == "thread/started" =>
-                {
-                    assert_eq!(
-                        nested_reference(&params, "thread", "id")
-                            .expect("resume notification thread should be valid"),
-                        cursor.expose_to_provider_adapter()
-                    );
-                    resume_notification_observed = true;
-                }
-                other => panic!("unexpected resume lifecycle frame: {other:?}"),
-            }
-            if resume_response_observed && resume_notification_observed {
-                break;
-            }
-        }
-        assert!(resume_response_observed);
-        assert!(resume_notification_observed);
+        let mut live_request = dynamic_model_request();
+        live_request.model = "gpt-5.6-sol".to_owned();
+        live_request.instructions.clear();
+        live_request.input = vec![ModelInputBlock::Text {
+            text: "Call inventory_count once with query bounded, then report the count.".to_owned(),
+        }];
+        live_request.maximum_output_tokens = Some(128);
+        let input = AiCodexAppServerTurnInput::try_from_dynamic_request(live_request)
+            .expect("live retained dynamic input should validate");
 
         process.send(
             &actor
                 .start_turn(cursor.expose_to_provider_adapter(), &input)
-                .expect("live retained turn should encode"),
+                .expect("newly bound thread should start its first turn without resume"),
         );
         let mut turn_response_observed = false;
         let mut turn_started_observed = false;
@@ -5379,6 +6012,18 @@ mod tests {
                 {
                     turn_completed_observed = true;
                 }
+                AiCodexAppServerInbound::DynamicToolCall {
+                    request_id, call, ..
+                } => {
+                    let result = ProviderDynamicToolResult::new(&call, json!({"count": 3}))
+                        .expect("live dynamic result should bind to the exact call");
+                    process.send(
+                        &actor
+                            .dynamic_tool_response(request_id, &result)
+                            .expect("live dynamic response should encode"),
+                    );
+                }
+                AiCodexAppServerInbound::DynamicToolLifecycle { .. } => {}
                 AiCodexAppServerInbound::Notification { .. } => {}
                 other => panic!("unexpected retained turn frame: {other:?}"),
             }
@@ -5389,6 +6034,118 @@ mod tests {
         assert!(turn_response_observed);
         assert!(turn_started_observed);
         assert!(turn_completed_observed);
+
+        drop(process);
+        let mut process = LiveCodexProcess::launch(&executable, configured_home);
+        let mut actor = AiCodexAppServerProtocolActor::new(MAXIMUM_FRAME_BYTES)
+            .expect("resume actor should validate");
+        process.send(
+            &actor
+                .initialize_with_dynamic_tools(
+                    "graphql_orm_ai_live_test",
+                    "GraphQL ORM AI live test",
+                    "0.147.0",
+                )
+                .expect("resume initialize should encode"),
+        );
+        loop {
+            match actor
+                .accept(&process.receive())
+                .expect("resume initialization frame should be admitted")
+            {
+                AiCodexAppServerInbound::Response {
+                    method: "initialize",
+                    ..
+                } => break,
+                AiCodexAppServerInbound::RemoteControlDisabled => {}
+                other => panic!("unexpected resume initialization frame: {other:?}"),
+            }
+        }
+        process.send(
+            &actor
+                .initialized()
+                .expect("resume initialized notification should encode"),
+        );
+        process.send(
+            &actor
+                .resume_thread(&cursor, &input)
+                .expect("later process should resume the committed thread"),
+        );
+        let mut resume_response_observed = false;
+        let mut resume_notification_observed = false;
+        for _ in 0..8 {
+            match actor
+                .accept(&process.receive())
+                .expect("later resume frame should be admitted")
+            {
+                AiCodexAppServerInbound::Response {
+                    method: "thread/resume",
+                    result,
+                    ..
+                } => {
+                    assert_eq!(
+                        nested_reference(&result, "thread", "id")
+                            .expect("resume response thread should validate"),
+                        cursor.expose_to_provider_adapter()
+                    );
+                    resume_response_observed = true;
+                }
+                AiCodexAppServerInbound::Notification { method, params }
+                    if method == "thread/started" =>
+                {
+                    assert_eq!(
+                        nested_reference(&params, "thread", "id")
+                            .expect("resume notification thread should validate"),
+                        cursor.expose_to_provider_adapter()
+                    );
+                    resume_notification_observed = true;
+                }
+                AiCodexAppServerInbound::RemoteControlDisabled => {}
+                other => panic!("unexpected later resume frame: {other:?}"),
+            }
+            if resume_response_observed && resume_notification_observed {
+                break;
+            }
+        }
+        assert!(resume_response_observed && resume_notification_observed);
+
+        process.send(
+            &actor
+                .start_turn(cursor.expose_to_provider_adapter(), &input)
+                .expect("resumed thread should start a second turn"),
+        );
+        let mut second_completed = false;
+        for _ in 0..64 {
+            match actor
+                .accept(&process.receive())
+                .expect("second turn frame should be admitted")
+            {
+                AiCodexAppServerInbound::DynamicToolCall {
+                    request_id, call, ..
+                } => {
+                    let result = ProviderDynamicToolResult::new(&call, json!({"count": 3}))
+                        .expect("second dynamic result should bind");
+                    process.send(
+                        &actor
+                            .dynamic_tool_response(request_id, &result)
+                            .expect("second dynamic response should encode"),
+                    );
+                }
+                AiCodexAppServerInbound::Notification { method, .. }
+                    if method == "turn/completed" =>
+                {
+                    second_completed = true
+                }
+                AiCodexAppServerInbound::Response { .. }
+                | AiCodexAppServerInbound::Notification { .. }
+                | AiCodexAppServerInbound::DynamicToolLifecycle { .. } => {}
+                other => panic!("unexpected second turn frame: {other:?}"),
+            }
+            if second_completed {
+                break;
+            }
+        }
+        assert!(second_completed);
 
         process.send(
             &actor
