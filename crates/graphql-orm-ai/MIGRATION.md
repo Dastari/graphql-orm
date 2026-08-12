@@ -19,6 +19,26 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.73.1: repeatable retained Codex lifecycles (schema remains 0.55.0)
+
+`AiCodexAppServerProtocolActor` now owns a separate bounded observation phase
+for every typed thread creation or resume operation. Hosts may use the same
+actor for `thread/start` followed by one or more exact `thread/resume` cycles.
+For each cycle, continue passing complete frames unchanged and wait for exactly
+one correlated response plus one matching `thread/started` notification before
+starting a turn. Either ordering remains supported.
+
+No reset method is added. Starting the next lifecycle fails while the previous
+pair, a turn, or deletion remains incomplete. Retained model and dynamic-tool
+definitions are immutable across cycles and terminal turns. Existing process
+adapters need no source changes; remove any host-side actor replacement or
+protocol-frame workaround introduced for this bug.
+
+This is a runtime protocol-state fix only. There is no GraphQL SDL, database,
+entity, table, column, index, constraint, backup/restore, or persistent semantic
+change. No data migration or row rewrite is required, and AI schema module
+`0.55.0` remains current.
+
 ## Unreleased: strict Codex lifecycle envelopes (crate 0.72.0 to 0.73.0; schema remains 0.55.0)
 
 The `provider-codex-app-server` protocol actor now requires the complete Codex

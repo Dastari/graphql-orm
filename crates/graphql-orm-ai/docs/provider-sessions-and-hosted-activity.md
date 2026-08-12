@@ -83,6 +83,14 @@ until the opaque cursor is durably protected and claimed. Resume binds the
 cursor to the exact owner/session/scope/profile/model/executable/protocol/
 policy/transcript/run fence.
 
+One protocol actor may perform sequential lifecycle cycles on its retained
+process. Each typed `thread/start` or `thread/resume` begins a private
+observation phase that accepts exactly one correlated response and one
+matching `thread/started` notification in either order. The next resume and
+`turn/start` remain closed until that pair is complete. There is no public
+state reset, and the retained model and dynamic-tool definitions cannot change
+between creation, resume, or later terminal turns.
+
 Experimental dynamic tools require
 `AiCodexAppServerRegistration::with_experimental_dynamic_tools` and
 `AiReadOnlyAgentTurnPlan::new_experimental_dynamic_tools`. The provider process

@@ -20,7 +20,22 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-No changes recorded after 0.73.0.
+No changes recorded after 0.73.1.
+
+## [0.73.1] - 2026-08-12
+
+### Fixed
+
+- The strict Codex app-server actor now begins a new internal lifecycle
+  observation phase for each typed `thread/start` or `thread/resume` request.
+  One actor can create an empty retained thread, accept its response and
+  `thread/started` notification, resume the same protected cursor, accept the
+  new pair in either order, and start a turn. Incomplete, duplicate,
+  mismatched, late, or concurrently active lifecycle cycles remain rejected.
+- Retained model and experimental dynamic-tool definitions remain frozen
+  across terminal turns and repeated resume cycles. A later resume or
+  `turn/start` cannot replace the tool set, while ephemeral thread definitions
+  are still cleared after their terminal turn.
 
 ## [0.73.0] - 2026-08-11
 

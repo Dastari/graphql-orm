@@ -1796,6 +1796,17 @@ impl std::fmt::Debug for AiCodexAppServerInbound {
     }
 }
 
+/// Internal response/notification observation phase for one thread lifecycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThreadLifecyclePhase {
+    Ready,
+    AwaitingResponseAndStarted,
+    AwaitingResponse,
+    AwaitingStarted,
+    Complete,
+    Deleted,
+}
+
 /// Closed app-server JSON-RPC encoder/guard.
 ///
 /// There is intentionally no generic request builder. The provider-specific
@@ -1821,9 +1832,7 @@ pub struct AiCodexAppServerProtocolActor {
     started_items: BTreeMap<String, String>,
     completed_items: BTreeSet<String>,
     initialization_complete: bool,
-    thread_response_observed: bool,
-    thread_started_observed: bool,
-    thread_deleted: bool,
+    thread_lifecycle_phase: ThreadLifecyclePhase,
     deleting_thread_id: Option<String>,
     thread_not_loaded_observed: bool,
     turn_response_observed: bool,
@@ -1860,9 +1869,7 @@ impl AiCodexAppServerProtocolActor {
             started_items: BTreeMap::new(),
             completed_items: BTreeSet::new(),
             initialization_complete: false,
-            thread_response_observed: false,
-            thread_started_observed: false,
-            thread_deleted: false,
+            thread_lifecycle_phase: ThreadLifecyclePhase::Ready,
             deleting_thread_id: None,
             thread_not_loaded_observed: false,
             turn_response_observed: false,
@@ -1952,6 +1959,39 @@ impl AiCodexAppServerProtocolActor {
         self.encode(json!({"method": "initialized", "params": {}}))
     }
 
+    fn validate_thread_lifecycle_boundary(&self) -> Result<(), ProviderError> {
+        if !self.initialization_complete
+            || !self.pending.is_empty()
+            || !matches!(
+                self.thread_lifecycle_phase,
+                ThreadLifecyclePhase::Ready | ThreadLifecyclePhase::Complete
+            )
+            || self.pending_turn_thread_id.is_some()
+            || self.active_turn_id.is_some()
+            || self.deleting_thread_id.is_some()
+            || self.turn_response_observed
+            || self.turn_started_observed
+            || !self.pending_dynamic_requests.is_empty()
+            || !self.started_dynamic_calls.is_empty()
+            || !self.responded_dynamic_calls.is_empty()
+            || !self.started_items.is_empty()
+            || !self.completed_items.is_empty()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        Ok(())
+    }
+
+    fn begin_new_thread_lifecycle(&mut self) {
+        self.active_thread_id = None;
+        self.thread_lifecycle_phase = ThreadLifecyclePhase::AwaitingResponseAndStarted;
+    }
+
+    fn begin_resume_lifecycle(&mut self, thread_id: &str) {
+        self.active_thread_id = Some(thread_id.to_owned());
+        self.thread_lifecycle_phase = ThreadLifecyclePhase::AwaitingResponseAndStarted;
+    }
+
     /// Encodes an ephemeral thread start with trusted instructions kept in the
     /// protocol's developer-instruction field.
     ///
@@ -1964,7 +2004,9 @@ impl AiCodexAppServerProtocolActor {
         input: &AiCodexAppServerTurnInput,
     ) -> Result<Vec<u8>, ProviderError> {
         input.validate()?;
-        if !self.dynamic_tools.is_empty()
+        self.validate_thread_lifecycle_boundary()?;
+        if self.retained_model.is_some()
+            || !self.dynamic_tools.is_empty()
             || !self.pending_dynamic_requests.is_empty()
             || !self.started_dynamic_calls.is_empty()
             || !self.responded_dynamic_calls.is_empty()
@@ -1976,7 +2018,7 @@ impl AiCodexAppServerProtocolActor {
         } else {
             Value::String(input.instructions().join("\n\n"))
         };
-        self.request(
+        let frame = self.request(
             ClientMethod::ThreadStart,
             "thread/start",
             json!({
@@ -1986,7 +2028,9 @@ impl AiCodexAppServerProtocolActor {
                 "approvalPolicy": "never",
                 "sandbox": "read-only",
             }),
-        )
+        )?;
+        self.begin_new_thread_lifecycle();
+        Ok(frame)
     }
 
     /// Creates a durable empty thread before any business content is sent.
@@ -2000,7 +2044,10 @@ impl AiCodexAppServerProtocolActor {
         model: &str,
         dynamic_tools: &[ModelToolDefinition],
     ) -> Result<Vec<u8>, ProviderError> {
+        self.validate_thread_lifecycle_boundary()?;
         if !valid_identifier(model)
+            || self.thread_lifecycle_phase != ThreadLifecyclePhase::Ready
+            || self.active_thread_id.is_some()
             || self.retained_model.is_some()
             || !self.dynamic_tools.is_empty()
             || !self.pending_dynamic_requests.is_empty()
@@ -2043,6 +2090,7 @@ impl AiCodexAppServerProtocolActor {
                 .insert("dynamicTools".to_owned(), Value::Array(dynamic_tools));
         }
         let frame = self.request(ClientMethod::ThreadStart, "thread/start", params)?;
+        self.begin_new_thread_lifecycle();
         self.retained_model = Some(model.to_owned());
         self.dynamic_tools = definitions;
         Ok(frame)
@@ -2062,8 +2110,18 @@ impl AiCodexAppServerProtocolActor {
         input: &AiCodexAppServerTurnInput,
     ) -> Result<Vec<u8>, ProviderError> {
         input.validate()?;
+        self.validate_thread_lifecycle_boundary()?;
         if cursor.kind() != "codex.app_server.thread.v2"
             || !valid_reference(cursor.expose_to_provider_adapter())
+            || match self.thread_lifecycle_phase {
+                ThreadLifecyclePhase::Ready => self.active_thread_id.is_some(),
+                ThreadLifecyclePhase::Complete => {
+                    self.retained_model.is_none()
+                        || self.active_thread_id.as_deref()
+                            != Some(cursor.expose_to_provider_adapter())
+                }
+                _ => true,
+            }
             || self
                 .retained_model
                 .as_deref()
@@ -2088,7 +2146,7 @@ impl AiCodexAppServerProtocolActor {
         } else {
             Value::String(input.instructions().join("\n\n"))
         };
-        if !self.dynamic_tools.is_empty() && self.dynamic_tools != definitions {
+        if self.retained_model.is_some() && self.dynamic_tools != definitions {
             return Err(ProviderError::Rejected);
         }
         let frame = self.request(
@@ -2102,7 +2160,7 @@ impl AiCodexAppServerProtocolActor {
                 "sandbox": "read-only",
             }),
         )?;
-        self.active_thread_id = Some(cursor.expose_to_provider_adapter().to_owned());
+        self.begin_resume_lifecycle(cursor.expose_to_provider_adapter());
         self.retained_model = Some(input.model().to_owned());
         self.dynamic_tools = definitions;
         Ok(frame)
@@ -2115,6 +2173,7 @@ impl AiCodexAppServerProtocolActor {
     ) -> Result<Vec<u8>, ProviderError> {
         if cursor.kind() != "codex.app_server.thread.v2"
             || !valid_reference(cursor.expose_to_provider_adapter())
+            || self.thread_lifecycle_phase != ThreadLifecyclePhase::Complete
             || self.pending_turn_thread_id.is_some()
             || self.active_turn_id.is_some()
             || self.deleting_thread_id.is_some()
@@ -2147,7 +2206,9 @@ impl AiCodexAppServerProtocolActor {
         input: &AiCodexAppServerTurnInput,
     ) -> Result<Vec<u8>, ProviderError> {
         input.validate()?;
-        if input.tools().is_empty()
+        self.validate_thread_lifecycle_boundary()?;
+        if self.retained_model.is_some()
+            || input.tools().is_empty()
             || !self.dynamic_tools.is_empty()
             || !self.pending_dynamic_requests.is_empty()
             || !self.started_dynamic_calls.is_empty()
@@ -2192,6 +2253,7 @@ impl AiCodexAppServerProtocolActor {
                 "sandbox": "read-only",
             }),
         )?;
+        self.begin_new_thread_lifecycle();
         self.dynamic_tools = definitions;
         Ok(frame)
     }
@@ -2243,7 +2305,7 @@ impl AiCodexAppServerProtocolActor {
         Ok(frame)
     }
 
-    /// Encodes text-only user input for one exact fresh thread.
+    /// Encodes text-only user input for one exact lifecycle-complete thread.
     ///
     /// Trusted instructions are deliberately not copied into the user input
     /// list. No tool, path, URL, image, skill, audio, environment, approval,
@@ -2259,11 +2321,20 @@ impl AiCodexAppServerProtocolActor {
         input: &AiCodexAppServerTurnInput,
     ) -> Result<Vec<u8>, ProviderError> {
         input.validate()?;
+        let input_dynamic_tools = input
+            .tools()
+            .iter()
+            .map(|tool| (tool.provider_name.clone(), tool.clone()))
+            .collect::<BTreeMap<_, _>>();
         if !valid_reference(thread_id)
             || self.active_thread_id.as_deref() != Some(thread_id)
-            || !self.thread_response_observed
-            || !self.thread_started_observed
-            || self.thread_deleted
+            || self.thread_lifecycle_phase != ThreadLifecyclePhase::Complete
+            || self
+                .retained_model
+                .as_deref()
+                .is_some_and(|model| model != input.model())
+            || input_dynamic_tools.len() != input.tools().len()
+            || self.dynamic_tools != input_dynamic_tools
             || self.pending_turn_thread_id.is_some()
             || self.active_turn_id.is_some()
             || self.turn_response_observed
@@ -2481,7 +2552,9 @@ impl AiCodexAppServerProtocolActor {
             {
                 return Err(ProviderError::Rejected);
             }
-            self.dynamic_tools.clear();
+            if self.retained_model.is_none() {
+                self.dynamic_tools.clear();
+            }
             self.pending_turn_thread_id = None;
             self.active_turn_id = None;
             self.turn_response_observed = false;
@@ -2607,17 +2680,25 @@ impl AiCodexAppServerProtocolActor {
         match method {
             ClientMethod::ThreadStart | ClientMethod::ThreadResume => {
                 let thread_id = nested_reference(result, "thread", "id")?;
-                if self.thread_response_observed
-                    || self.thread_deleted
-                    || self
-                        .active_thread_id
-                        .as_deref()
-                        .is_some_and(|expected| expected != thread_id)
+                if !matches!(
+                    self.thread_lifecycle_phase,
+                    ThreadLifecyclePhase::AwaitingResponseAndStarted
+                        | ThreadLifecyclePhase::AwaitingResponse
+                ) || self
+                    .active_thread_id
+                    .as_deref()
+                    .is_some_and(|expected| expected != thread_id)
                 {
                     return Err(ProviderError::Rejected);
                 }
                 self.active_thread_id = Some(thread_id.to_owned());
-                self.thread_response_observed = true;
+                self.thread_lifecycle_phase = match self.thread_lifecycle_phase {
+                    ThreadLifecyclePhase::AwaitingResponseAndStarted => {
+                        ThreadLifecyclePhase::AwaitingStarted
+                    }
+                    ThreadLifecyclePhase::AwaitingResponse => ThreadLifecyclePhase::Complete,
+                    _ => return Err(ProviderError::Rejected),
+                };
             }
             ClientMethod::TurnStart => {
                 let turn_id = nested_reference(result, "turn", "id")?;
@@ -2637,10 +2718,8 @@ impl AiCodexAppServerProtocolActor {
                 self.initialization_complete = true;
             }
             ClientMethod::ThreadDelete => {
-                self.thread_deleted = true;
                 self.active_thread_id = None;
-                self.thread_response_observed = false;
-                self.thread_started_observed = false;
+                self.thread_lifecycle_phase = ThreadLifecyclePhase::Deleted;
             }
             ClientMethod::TurnInterrupt => {}
         }
@@ -2658,7 +2737,12 @@ impl AiCodexAppServerProtocolActor {
             || !valid_identifier(&params.installation_id)
             || !self.initialization_complete
             || self.remote_control_disabled_observed
-            || self.thread_response_observed
+            || matches!(
+                self.thread_lifecycle_phase,
+                ThreadLifecyclePhase::AwaitingStarted
+                    | ThreadLifecyclePhase::Complete
+                    | ThreadLifecyclePhase::Deleted
+            )
             || self.pending_turn_thread_id.is_some()
             || self.active_turn_id.is_some()
         {
@@ -2677,15 +2761,19 @@ impl AiCodexAppServerProtocolActor {
             "thread/started" => {
                 let thread_id = nested_reference(params, "thread", "id")?;
                 if !self.initialization_complete
-                    || self.thread_started_observed
-                    || self.thread_deleted
+                    || !matches!(
+                        self.thread_lifecycle_phase,
+                        ThreadLifecyclePhase::AwaitingResponseAndStarted
+                            | ThreadLifecyclePhase::AwaitingStarted
+                    )
                     || self.pending_turn_thread_id.is_some()
                     || self.active_turn_id.is_some()
                     || self
                         .pending
                         .values()
                         .any(|method| *method == ClientMethod::ThreadDelete)
-                    || (!self.thread_response_observed
+                    || (self.thread_lifecycle_phase
+                        == ThreadLifecyclePhase::AwaitingResponseAndStarted
                         && !self.pending.values().any(|method| {
                             matches!(
                                 method,
@@ -2700,7 +2788,13 @@ impl AiCodexAppServerProtocolActor {
                     return Err(ProviderError::Rejected);
                 }
                 self.active_thread_id = Some(thread_id.to_owned());
-                self.thread_started_observed = true;
+                self.thread_lifecycle_phase = match self.thread_lifecycle_phase {
+                    ThreadLifecyclePhase::AwaitingResponseAndStarted => {
+                        ThreadLifecyclePhase::AwaitingResponse
+                    }
+                    ThreadLifecyclePhase::AwaitingStarted => ThreadLifecyclePhase::Complete,
+                    _ => return Err(ProviderError::Rejected),
+                };
             }
             "thread/status/changed" => {
                 let status: ThreadNotLoadedStatusChangedParams =
@@ -2709,7 +2803,7 @@ impl AiCodexAppServerProtocolActor {
                     || !valid_reference(&status.thread_id)
                     || self.deleting_thread_id.as_deref() != Some(status.thread_id.as_str())
                     || self.thread_not_loaded_observed
-                    || (!self.thread_deleted
+                    || (self.thread_lifecycle_phase != ThreadLifecyclePhase::Deleted
                         && !self
                             .pending
                             .values()
@@ -2812,8 +2906,7 @@ impl AiCodexAppServerProtocolActor {
     fn validate_active_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), ProviderError> {
         if self.active_thread_id.as_deref() != Some(thread_id)
             || self.active_turn_id.as_deref() != Some(turn_id)
-            || !self.thread_response_observed
-            || !self.thread_started_observed
+            || self.thread_lifecycle_phase != ThreadLifecyclePhase::Complete
             || !self.turn_started_observed
         {
             return Err(ProviderError::Rejected);
@@ -2999,7 +3092,6 @@ fn registration_identity(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::io::{BufRead, BufReader, Write};
     use std::path::PathBuf;
     use std::process::{Child, ChildStdin, Command, Stdio};
@@ -3021,14 +3113,12 @@ mod tests {
         stdin: ChildStdin,
         frames: Receiver<Vec<u8>>,
         reader: Option<JoinHandle<()>>,
-        root: PathBuf,
     }
 
     impl LiveCodexProcess {
-        fn launch(executable: &str) -> Self {
-            let root =
-                std::env::temp_dir().join(format!("graphql-orm-ai-codex-0147-{}", Uuid::new_v4()));
-            fs::create_dir(&root).expect("isolated Codex home should be created");
+        fn launch(executable: &str, root: PathBuf) -> Self {
+            assert!(root.is_absolute());
+            assert!(root.is_dir());
             let mut child = Command::new(executable)
                 .args(["app-server", "--stdio"])
                 .env_clear()
@@ -3059,7 +3149,6 @@ mod tests {
                 stdin,
                 frames,
                 reader: Some(reader),
-                root,
             }
         }
 
@@ -3084,7 +3173,6 @@ mod tests {
             if let Some(reader) = self.reader.take() {
                 let _ = reader.join();
             }
-            let _ = fs::remove_dir_all(&self.root);
         }
     }
 
@@ -3526,6 +3614,16 @@ mod tests {
         )
     }
 
+    fn turn_completed_notification(thread_id: &str, turn_id: &str) -> Vec<u8> {
+        lifecycle_notification(
+            "turn/completed",
+            json!({
+                "threadId": thread_id,
+                "turn": {"id": turn_id, "items": [], "status": "completed"},
+            }),
+        )
+    }
+
     fn active_protocol_actor() -> AiCodexAppServerProtocolActor {
         let mut actor = initialized_protocol_actor();
         actor
@@ -3744,6 +3842,7 @@ mod tests {
             .await;
         assert_eq!(events.len(), 7);
         assert!(events.iter().all(Result::is_ok));
+        assert_eq!(counters.launches.load(Ordering::SeqCst), 1);
         assert_eq!(counters.created_threads.load(Ordering::SeqCst), 1);
         assert_eq!(counters.turns.load(Ordering::SeqCst), 1);
     }
@@ -4280,6 +4379,151 @@ mod tests {
         resumed
             .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
             .expect("resume response should match the protected cursor");
+    }
+
+    #[test]
+    fn retained_actor_repeats_response_first_create_resume_and_turn_lifecycle() {
+        let mut actor = initialized_protocol_actor();
+        actor
+            .start_persistent_empty_thread("model-1", &[])
+            .expect("persistent create should encode");
+        actor
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("create response should bind");
+        actor
+            .accept(&thread_started_notification("thread-retained-1"))
+            .expect("create notification should complete the lifecycle");
+
+        let cursor =
+            crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", "thread-retained-1")
+                .expect("retained cursor should validate");
+        actor
+            .resume_thread(&cursor, &turn())
+            .expect("the same actor should begin a new resume lifecycle");
+        actor
+            .accept(br#"{"id":3,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("resume response should belong to the new lifecycle");
+        actor
+            .accept(&thread_started_notification("thread-retained-1"))
+            .expect("resume notification should complete the new lifecycle");
+        actor
+            .start_turn("thread-retained-1", &turn())
+            .expect("turn should start only after both resume observations");
+    }
+
+    #[test]
+    fn retained_actor_repeats_notification_first_create_and_resume_lifecycle() {
+        let mut actor = initialized_protocol_actor();
+        actor
+            .start_persistent_empty_thread("model-1", &[])
+            .expect("persistent create should encode");
+        actor
+            .accept(&thread_started_notification("thread-retained-1"))
+            .expect("create notification may arrive first");
+        let cursor =
+            crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", "thread-retained-1")
+                .expect("retained cursor should validate");
+        assert!(matches!(
+            actor.resume_thread(&cursor, &turn()),
+            Err(ProviderError::Rejected)
+        ));
+        actor
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("create response should complete the lifecycle");
+
+        actor
+            .resume_thread(&cursor, &turn())
+            .expect("resume should begin a fresh observation phase");
+        actor
+            .accept(&thread_started_notification("thread-retained-1"))
+            .expect("resume notification may arrive first");
+        actor
+            .accept(br#"{"id":3,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("resume response should complete the lifecycle");
+        actor
+            .start_turn("thread-retained-1", &turn())
+            .expect("turn should start after notification-first correlation");
+    }
+
+    #[test]
+    fn retained_actor_requires_each_lifecycle_pair_and_preserves_dynamic_definitions() {
+        let input = AiCodexAppServerTurnInput::try_from_dynamic_request(dynamic_model_request())
+            .expect("dynamic input should validate");
+        let mut actor = initialized_protocol_actor();
+        actor
+            .start_persistent_empty_thread("model-1", input.tools())
+            .expect("persistent dynamic create should encode");
+        actor
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("create response should bind");
+
+        let cursor =
+            crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", "thread-retained-1")
+                .expect("retained cursor should validate");
+        assert!(matches!(
+            actor.resume_thread(&cursor, &input),
+            Err(ProviderError::Rejected)
+        ));
+        actor
+            .accept(&thread_started_notification("thread-retained-1"))
+            .expect("missing create notification should complete the lifecycle");
+        actor
+            .resume_thread(&cursor, &input)
+            .expect("complete create lifecycle should permit exact resume");
+        actor
+            .accept(br#"{"id":3,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("resume response should bind");
+        assert!(matches!(
+            actor.resume_thread(&cursor, &input),
+            Err(ProviderError::Rejected)
+        ));
+        actor
+            .accept(&thread_started_notification("thread-retained-1"))
+            .expect("resume notification should complete the lifecycle");
+
+        actor
+            .start_turn("thread-retained-1", &input)
+            .expect("first retained turn should encode");
+        actor
+            .accept(br#"{"id":4,"result":{"turn":{"id":"turn-retained-1"}}}"#)
+            .expect("turn response should bind");
+        actor
+            .accept(&turn_started_notification(
+                "thread-retained-1",
+                "turn-retained-1",
+            ))
+            .expect("turn notification should bind");
+        actor
+            .accept(&turn_completed_notification(
+                "thread-retained-1",
+                "turn-retained-1",
+            ))
+            .expect("tool-free terminal turn should complete");
+
+        let mut changed_request = dynamic_model_request();
+        changed_request.tools[0].description = "Changed after binding.".to_owned();
+        let changed_input = AiCodexAppServerTurnInput::try_from_dynamic_request(changed_request)
+            .expect("changed definition remains structurally valid");
+        assert!(matches!(
+            actor.resume_thread(&cursor, &changed_input),
+            Err(ProviderError::Rejected)
+        ));
+        actor
+            .resume_thread(&cursor, &input)
+            .expect("second exact resume should begin after terminal turn");
+        actor
+            .accept(br#"{"id":5,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("second resume response should bind");
+        actor
+            .accept(&thread_started_notification("thread-retained-1"))
+            .expect("second resume notification should bind");
+        assert!(matches!(
+            actor.start_turn("thread-retained-1", &changed_input),
+            Err(ProviderError::InvalidRequest)
+        ));
+        actor
+            .start_turn("thread-retained-1", &input)
+            .expect("frozen definitions should remain usable");
     }
 
     #[test]
@@ -4933,8 +5177,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires an explicitly selected reviewed Codex CLI 0.147.0 binary"]
-    fn live_codex_0147_persistent_create_delete_uses_the_strict_actor() {
+    #[ignore = "requires a reviewed Codex CLI 0.147.0 binary and disposable configured home"]
+    fn live_codex_0147_persistent_create_resume_turn_delete_uses_the_strict_actor() {
         let executable = std::env::var("GRAPHQL_ORM_AI_CODEX_0147_BIN")
             .expect("set GRAPHQL_ORM_AI_CODEX_0147_BIN to the reviewed absolute binary path");
         assert!(PathBuf::from(&executable).is_absolute());
@@ -4951,7 +5195,11 @@ mod tests {
             "codex-cli 0.147.0"
         );
 
-        let mut process = LiveCodexProcess::launch(&executable);
+        let configured_home = PathBuf::from(
+            std::env::var_os("GRAPHQL_ORM_AI_CODEX_0147_HOME")
+                .expect("set GRAPHQL_ORM_AI_CODEX_0147_HOME to a disposable configured home"),
+        );
+        let mut process = LiveCodexProcess::launch(&executable, configured_home);
         let mut actor =
             AiCodexAppServerProtocolActor::new(MAXIMUM_FRAME_BYTES).expect("actor should validate");
         process.send(
@@ -5034,6 +5282,114 @@ mod tests {
         let thread_id = response_thread_id.expect("both thread lifecycle frames should arrive");
         let cursor = crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", thread_id)
             .expect("live thread cursor should validate");
+        let input = AiCodexAppServerTurnInput::new(
+            "gpt-5.6-sol",
+            Vec::new(),
+            vec!["Reply with exactly OK.".to_owned()],
+            32,
+        )
+        .expect("live retained input should validate");
+        process.send(
+            &actor
+                .resume_thread(&cursor, &input)
+                .expect("live retained thread should resume on the same actor"),
+        );
+        let mut resume_response_observed = false;
+        let mut resume_notification_observed = false;
+        for _ in 0..8 {
+            let frame = process.receive();
+            let inbound = actor.accept(&frame).unwrap_or_else(|error| {
+                let envelope: Value = serde_json::from_slice(&frame)
+                    .expect("rejected resume frame should remain valid JSON");
+                let keys = envelope
+                    .as_object()
+                    .map(|object| object.keys().cloned().collect::<Vec<_>>());
+                let result_keys = envelope
+                    .get("result")
+                    .and_then(Value::as_object)
+                    .map(|object| object.keys().cloned().collect::<Vec<_>>());
+                panic!(
+                    "resume lifecycle frame was rejected: {error:?}; id={:?}; method={:?}; keys={keys:?}; result_keys={result_keys:?}",
+                    envelope.get("id"),
+                    envelope.get("method").and_then(Value::as_str),
+                );
+            });
+            match inbound {
+                AiCodexAppServerInbound::Response {
+                    method: "thread/resume",
+                    result,
+                    ..
+                } => {
+                    assert_eq!(
+                        nested_reference(&result, "thread", "id")
+                            .expect("resume response thread should be valid"),
+                        cursor.expose_to_provider_adapter()
+                    );
+                    resume_response_observed = true;
+                }
+                AiCodexAppServerInbound::Notification { method, params }
+                    if method == "thread/started" =>
+                {
+                    assert_eq!(
+                        nested_reference(&params, "thread", "id")
+                            .expect("resume notification thread should be valid"),
+                        cursor.expose_to_provider_adapter()
+                    );
+                    resume_notification_observed = true;
+                }
+                other => panic!("unexpected resume lifecycle frame: {other:?}"),
+            }
+            if resume_response_observed && resume_notification_observed {
+                break;
+            }
+        }
+        assert!(resume_response_observed);
+        assert!(resume_notification_observed);
+
+        process.send(
+            &actor
+                .start_turn(cursor.expose_to_provider_adapter(), &input)
+                .expect("live retained turn should encode"),
+        );
+        let mut turn_response_observed = false;
+        let mut turn_started_observed = false;
+        let mut turn_completed_observed = false;
+        for _ in 0..64 {
+            let frame = process.receive();
+            let inbound = actor.accept(&frame).unwrap_or_else(|error| {
+                let envelope: Value = serde_json::from_slice(&frame)
+                    .expect("rejected turn frame should remain valid JSON");
+                panic!(
+                    "retained turn frame was rejected: {error:?}; method={:?}",
+                    envelope.get("method").and_then(Value::as_str),
+                );
+            });
+            match inbound {
+                AiCodexAppServerInbound::Response {
+                    method: "turn/start",
+                    ..
+                } => turn_response_observed = true,
+                AiCodexAppServerInbound::Notification { method, .. }
+                    if method == "turn/started" =>
+                {
+                    turn_started_observed = true;
+                }
+                AiCodexAppServerInbound::Notification { method, .. }
+                    if method == "turn/completed" =>
+                {
+                    turn_completed_observed = true;
+                }
+                AiCodexAppServerInbound::Notification { .. } => {}
+                other => panic!("unexpected retained turn frame: {other:?}"),
+            }
+            if turn_completed_observed {
+                break;
+            }
+        }
+        assert!(turn_response_observed);
+        assert!(turn_started_observed);
+        assert!(turn_completed_observed);
+
         process.send(
             &actor
                 .delete_thread(&cursor)
