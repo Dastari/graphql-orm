@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "fac98d99e64c841a34d2d0096cdf928c3f9a7c6f", version = "0.75.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.75.1", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -60,6 +60,8 @@ the compiled test-backed recipe and the missing reusable bootstrap API.
   provider calls, tool calls, approvals, audit, and restore readiness.
 - Fenced durable provider turns, streaming output, bounded checkpoints,
   cancellation, recovery, retention, and current-principal rehydration.
+- Watermark-bounded, contiguous durable session and owner-inbox replay whose
+  `HasMore` contract remains correct at the configured ORM page maximum.
 - Default-deny application tools with server-authored documents and static
   disclosure schemas; consequential work is exact-preview and one-shot
   approval bound.

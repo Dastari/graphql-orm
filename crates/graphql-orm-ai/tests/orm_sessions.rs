@@ -6,7 +6,7 @@ use agql_auth::{AccessTokenMetadata, AuthPrincipal, AuthUser, SessionContext};
 use async_trait::async_trait;
 use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
 use graphql_orm::graphql::pagination::KeysetConnectionInput;
-use graphql_orm::prelude::{Database, SqliteBackend};
+use graphql_orm::prelude::{Database, PaginationConfig, SqliteBackend};
 use graphql_orm_ai::*;
 use uuid::Uuid;
 
@@ -104,15 +104,27 @@ fn principal(subject: &str) -> AuthPrincipal {
 }
 
 async fn service() -> OrmAiSessionService {
-    service_with_protector(Arc::new(DatabaseManagedContentProtector)).await
+    service_with_protector_and_maximum(
+        Arc::new(DatabaseManagedContentProtector),
+        PaginationConfig::SECURE_MAX_LIMIT,
+    )
+    .await
 }
 
 async fn service_with_protector(
     content_protector: Arc<dyn AiContentProtector>,
 ) -> OrmAiSessionService {
+    service_with_protector_and_maximum(content_protector, PaginationConfig::SECURE_MAX_LIMIT).await
+}
+
+async fn service_with_protector_and_maximum(
+    content_protector: Arc<dyn AiContentProtector>,
+    maximum_page_limit: i64,
+) -> OrmAiSessionService {
     let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
         .await
-        .expect("in-memory SQLite should open");
+        .expect("in-memory SQLite should open")
+        .with_pagination_config(PaginationConfig::explicit_only(maximum_page_limit));
     let module = AiSchemaModule;
     let plan = database
         .schema()
@@ -134,6 +146,59 @@ async fn service_with_protector(
         Arc::new(ProtectionPolicy),
         content_protector,
     )
+}
+
+async fn append_title_events(
+    service: &OrmAiSessionService,
+    owner: &AuthPrincipal,
+    session_id: Uuid,
+    first_revision: i64,
+    count: i64,
+) {
+    for revision in first_revision..first_revision + count {
+        let renamed = service
+            .rename_session(
+                owner,
+                RenameAiSessionInput {
+                    session_id,
+                    title: format!("Title {}", revision + 1),
+                    client_mutation_id: Uuid::new_v4(),
+                    expected_title_revision: Some(revision),
+                },
+            )
+            .await
+            .expect("title event should commit");
+        assert_eq!(renamed.title_revision, revision + 1);
+    }
+}
+
+async fn collect_session_sequences(
+    service: &OrmAiSessionService,
+    owner: &AuthPrincipal,
+    session_id: Uuid,
+    first: i64,
+) -> (Vec<i64>, Vec<usize>, i64, String) {
+    let mut after = 0;
+    let mut sequences = Vec::new();
+    let mut page_lengths = Vec::new();
+    let mut final_event_type = String::new();
+    loop {
+        let page = service
+            .session_event_page(owner, AiSessionId(session_id), after, first)
+            .await
+            .expect("session event page should load");
+        assert!(!page.reset_required);
+        let watermark = page.watermark;
+        page_lengths.push(page.events.len());
+        for event in page.events {
+            after = event.sequence;
+            final_event_type = event.event_type;
+            sequences.push(after);
+        }
+        if !page.has_more {
+            return (sequences, page_lengths, watermark, final_event_type);
+        }
+    }
 }
 
 fn scope_input() -> AiScopeInput {
@@ -250,6 +315,113 @@ async fn owner_isolation_atomic_send_idempotency_and_windowed_reads() {
         events.events[0].payload.0["runId"],
         first.run_id.to_string()
     );
+}
+
+#[tokio::test]
+async fn session_event_pages_use_the_snapshotted_watermark_at_the_orm_limit() {
+    let service = service().await;
+    let owner = principal("event-page-owner");
+    let stranger = principal("event-page-stranger");
+    let session = service
+        .create_session(
+            &owner,
+            CreateAiSessionInput {
+                scope: scope_input(),
+                title: Some("Initial".to_owned()),
+            },
+        )
+        .await
+        .expect("session should create");
+
+    append_title_events(&service, &owner, session.id, 0, 99).await;
+    let page_99 = service
+        .session_event_page(&owner, AiSessionId(session.id), 0, 100)
+        .await
+        .expect("99-event page should load");
+    assert_eq!(page_99.events.len(), 99);
+    assert_eq!(page_99.watermark, 99);
+    assert!(!page_99.has_more);
+
+    append_title_events(&service, &owner, session.id, 99, 1).await;
+    let page_100 = service
+        .session_event_page(&owner, AiSessionId(session.id), 0, 100)
+        .await
+        .expect("100-event page should load");
+    assert_eq!(page_100.events.len(), 100);
+    assert_eq!(page_100.watermark, 100);
+    assert!(!page_100.has_more);
+
+    append_title_events(&service, &owner, session.id, 100, 1).await;
+    let first_101 = service
+        .session_event_page(&owner, AiSessionId(session.id), 0, 100)
+        .await
+        .expect("first 101-event page should load");
+    assert_eq!(first_101.events.len(), 100);
+    assert_eq!(first_101.watermark, 101);
+    assert!(first_101.has_more);
+    let last_101 = service
+        .session_event_page(&owner, AiSessionId(session.id), 100, 100)
+        .await
+        .expect("last 101-event page should load");
+    assert_eq!(last_101.events.len(), 1);
+    assert_eq!(last_101.events[0].sequence, 101);
+    assert!(!last_101.has_more);
+
+    append_title_events(&service, &owner, session.id, 101, 244).await;
+    let (sequences, page_lengths, watermark, final_event_type) =
+        collect_session_sequences(&service, &owner, session.id, 100).await;
+    assert_eq!(page_lengths, [100, 100, 100, 45]);
+    assert_eq!(sequences, (1..=345).collect::<Vec<_>>());
+    assert_eq!(watermark, 345);
+    assert_eq!(final_event_type, "session_title_changed");
+
+    append_title_events(&service, &owner, session.id, 345, 1).await;
+    let later = service
+        .session_event_page(&owner, AiSessionId(session.id), watermark, 100)
+        .await
+        .expect("the subsequent replay boundary should observe the new event");
+    assert_eq!(later.watermark, 346);
+    assert_eq!(later.events.len(), 1);
+    assert_eq!(later.events[0].sequence, 346);
+    assert_eq!(later.events[0].event_type, "session_title_changed");
+    assert!(!later.has_more);
+
+    assert!(matches!(
+        service
+            .session_event_page(&stranger, AiSessionId(session.id), 0, 100)
+            .await,
+        Err(AiError::NotFound)
+    ));
+    assert!(matches!(
+        service
+            .session_event_page(&owner, AiSessionId(Uuid::new_v4()), 0, 100)
+            .await,
+        Err(AiError::NotFound)
+    ));
+}
+
+#[tokio::test]
+async fn session_event_pages_follow_a_smaller_orm_maximum() {
+    let service =
+        service_with_protector_and_maximum(Arc::new(DatabaseManagedContentProtector), 7).await;
+    let owner = principal("small-event-page-owner");
+    let session = service
+        .create_session(
+            &owner,
+            CreateAiSessionInput {
+                scope: scope_input(),
+                title: Some("Initial".to_owned()),
+            },
+        )
+        .await
+        .expect("session should create");
+    append_title_events(&service, &owner, session.id, 0, 20).await;
+
+    let (sequences, page_lengths, watermark, _) =
+        collect_session_sequences(&service, &owner, session.id, 7).await;
+    assert_eq!(page_lengths, [7, 7, 6]);
+    assert_eq!(sequences, (1..=20).collect::<Vec<_>>());
+    assert_eq!(watermark, 20);
 }
 
 #[tokio::test]

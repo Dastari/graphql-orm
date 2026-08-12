@@ -102,6 +102,18 @@ async fn services(
     AuthPrincipal,
     Arc<AtomicBool>,
 ) {
+    services_with_replay_page_size(reauthorization_interval, 1).await
+}
+
+async fn services_with_replay_page_size(
+    reauthorization_interval: Duration,
+    replay_page_size: i64,
+) -> (
+    Arc<OrmAiSessionService>,
+    OrmAiSubscriptionService,
+    AuthPrincipal,
+    Arc<AtomicBool>,
+) {
     let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
         .await
         .expect("in-memory SQLite opens");
@@ -136,8 +148,30 @@ async fn services(
         }),
     )
     .with_reauthorization_interval(reauthorization_interval)
-    .with_replay_page_size(1);
+    .with_replay_page_size(replay_page_size);
     (sessions, subscriptions, principal, active)
+}
+
+async fn append_title_events(
+    sessions: &OrmAiSessionService,
+    principal: &AuthPrincipal,
+    session_id: Uuid,
+    count: i64,
+) {
+    for revision in 0..count {
+        sessions
+            .rename_session(
+                principal,
+                RenameAiSessionInput {
+                    session_id,
+                    title: format!("Subscription title {}", revision + 1),
+                    client_mutation_id: Uuid::new_v4(),
+                    expected_title_revision: Some(revision),
+                },
+            )
+            .await
+            .expect("title event should commit");
+    }
 }
 
 async fn create_session(
@@ -228,4 +262,49 @@ async fn replay_is_paged_to_a_watermark_and_revocation_closes_stream() {
         .expect("terminal error item");
     assert!(matches!(revoked, Err(AiError::ReauthorizationFailed)));
     assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
+async fn maximum_sized_replay_pages_are_drained_before_live_delivery() {
+    let (sessions, subscriptions, principal, _active) =
+        services_with_replay_page_size(Duration::from_secs(60), 100).await;
+    let session = create_session(&sessions, &principal).await;
+    append_title_events(&sessions, &principal, session.id, 101).await;
+    let mut stream = subscriptions
+        .session_events(principal.clone(), AiSessionId(session.id), 0)
+        .await
+        .expect("subscription should open");
+
+    let mut replayed = Vec::new();
+    for _ in 0..101 {
+        let envelope = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("replay should not stall")
+            .expect("replay item should exist")
+            .expect("replay item should succeed");
+        assert!(!envelope.reset_required);
+        replayed.push(envelope.event.expect("durable event").sequence);
+    }
+    assert_eq!(replayed, (1..=101).collect::<Vec<_>>());
+
+    sessions
+        .rename_session(
+            &principal,
+            RenameAiSessionInput {
+                session_id: session.id,
+                title: "Live title".to_owned(),
+                client_mutation_id: Uuid::new_v4(),
+                expected_title_revision: Some(101),
+            },
+        )
+        .await
+        .expect("live event should commit");
+    let live = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("subscription should wake")
+        .expect("live item should exist")
+        .expect("live item should succeed");
+    let live = live.event.expect("live durable event");
+    assert_eq!(live.sequence, 102);
+    assert_eq!(live.event_type, "session_title_changed");
 }

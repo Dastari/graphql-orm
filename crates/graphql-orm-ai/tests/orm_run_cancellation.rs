@@ -272,6 +272,95 @@ async fn owner_cancellation_is_idempotent_durable_and_observable() {
 }
 
 #[tokio::test]
+async fn terminal_run_event_after_a_maximum_sized_page_is_replayed() {
+    let fixture = fixture().await;
+    let session = fixture
+        .sessions
+        .create_session(
+            &fixture.owner,
+            CreateAiSessionInput {
+                scope: AiScopeInput {
+                    kind: "workspace".to_owned(),
+                    id: "workspace-cancel".to_owned(),
+                    tenant_id: Some("tenant-cancel".to_owned()),
+                },
+                title: None,
+            },
+        )
+        .await
+        .expect("session should create");
+    for revision in 0..99 {
+        fixture
+            .sessions
+            .rename_session(
+                &fixture.owner,
+                RenameAiSessionInput {
+                    session_id: session.id,
+                    title: format!("Replay title {}", revision + 1),
+                    client_mutation_id: Uuid::new_v4(),
+                    expected_title_revision: Some(revision),
+                },
+            )
+            .await
+            .expect("title event should commit");
+    }
+    let sent = fixture
+        .sessions
+        .send_message(
+            &fixture.owner,
+            SendAiMessageInput {
+                session_id: session.id,
+                text: "Queue the terminal-event regression run".to_owned(),
+                attachment_ids: vec![],
+                client_message_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("message should enqueue a run");
+    fixture
+        .cancellation
+        .request_cancellation(
+            &fixture.owner,
+            CancelAiRunInput {
+                session_id: session.id,
+                run_id: sent.run_id,
+                client_request_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("queued run should cancel");
+
+    let first = fixture
+        .sessions
+        .session_event_page(&fixture.owner, AiSessionId(session.id), 0, 100)
+        .await
+        .expect("first maximum-sized page should load");
+    assert_eq!(first.watermark, 102);
+    assert_eq!(first.events.len(), 100);
+    assert_eq!(first.events.last().expect("event 100").sequence, 100);
+    assert_eq!(
+        first.events.last().expect("event 100").event_type,
+        "message_queued"
+    );
+    assert!(first.has_more);
+
+    let terminal = fixture
+        .sessions
+        .session_event_page(&fixture.owner, AiSessionId(session.id), 100, 100)
+        .await
+        .expect("terminal page should load");
+    assert_eq!(
+        terminal
+            .events
+            .iter()
+            .map(|event| (event.sequence, event.event_type.as_str()))
+            .collect::<Vec<_>>(),
+        [(101, "run_cancellation_requested"), (102, "run_cancelled")]
+    );
+    assert!(!terminal.has_more);
+}
+
+#[tokio::test]
 async fn cancellation_rechecks_current_principal_and_permissions() {
     let fixture = fixture().await;
     let (session, running) = active_run(&fixture).await;

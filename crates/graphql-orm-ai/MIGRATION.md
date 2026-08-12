@@ -19,6 +19,22 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.75.1: complete durable event replay at the ORM page limit (schema remains 0.55.0)
+
+No host API changes are required. `AiSessionEventPage.HasMore` and
+`AiInboxEventPage.HasMore` now compare the final contiguous event sequence
+with the page's captured watermark instead of requiring one row beyond the
+configured ORM page limit. Hosts should remove any workaround that requests
+one fewer event than their configured database maximum; the maximum value is
+now a supported replay page size.
+
+The watermark, cursor, reset-required, owner authorization, scope policy,
+payload protection, retention, and replay-then-live contracts are unchanged.
+There is no GraphQL SDL, database entity, table, column, index, constraint,
+backup/restore, or persistent storage semantic change. No data migration,
+backfill, or row rewrite is required, and AI schema module `0.55.0` remains
+current.
+
 ## 0.75.0: canonical Codex tools and retained bootstrap (schema remains 0.55.0)
 
 Construct provider definitions from the registered manifest instead of

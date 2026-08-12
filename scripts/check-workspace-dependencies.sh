@@ -75,6 +75,10 @@ allowed_internal_edges = {
     ("graphql-orm-backup", "graphql-orm"),
     ("graphql-orm", "graphql-orm-macros"),
     ("graphql-orm", "graphql-orm-operation-catalog"),
+    # The runnable router-descriptor example uses the protocol directly. The
+    # edge is test-only; production support remains routed through the
+    # operation-catalog feature boundary.
+    ("graphql-orm", "graphql-orm-router-protocol"),
     ("graphql-orm-operation-catalog", "graphql-orm-router-protocol"),
     ("graphql-orm-router", "graphql-orm-router-protocol"),
     # Test-only end-to-end coverage proves that profile manifests survive the
@@ -83,6 +87,7 @@ allowed_internal_edges = {
     ("graphql-orm-ai-tool-profiles", "graphql-orm-router-protocol"),
 }
 test_only_internal_edges = {
+    ("graphql-orm", "graphql-orm-router-protocol"),
     ("graphql-orm-ai-tool-profiles", "graphql-orm-router-protocol"),
 }
 actual_internal_edges = set()

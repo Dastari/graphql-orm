@@ -12,7 +12,7 @@ use agql_auth::{
 use async_trait::async_trait;
 use futures::StreamExt;
 use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
-use graphql_orm::prelude::{Database, SqliteBackend};
+use graphql_orm::prelude::{Database, PaginationConfig, SqliteBackend};
 use graphql_orm_ai::*;
 use secrecy::SecretString;
 use time::Duration as TimeDuration;
@@ -179,9 +179,30 @@ async fn services(
     AuthPrincipal,
     Arc<AtomicBool>,
 ) {
+    services_with_limits(
+        reauthorization_interval,
+        1,
+        PaginationConfig::SECURE_MAX_LIMIT,
+    )
+    .await
+}
+
+async fn services_with_limits(
+    reauthorization_interval: Duration,
+    replay_page_size: i64,
+    maximum_page_limit: i64,
+) -> (
+    OrmAiSessionService,
+    OrmAiInboxService,
+    OrmAiInboxPruningService,
+    OrmAiSessionRetentionService,
+    AuthPrincipal,
+    Arc<AtomicBool>,
+) {
     let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
         .await
-        .expect("in-memory SQLite opens");
+        .expect("in-memory SQLite opens")
+        .with_pagination_config(PaginationConfig::explicit_only(maximum_page_limit));
     let module = AiSchemaModule;
     let plan = database
         .schema()
@@ -257,7 +278,7 @@ async fn services(
         content_protector,
     )
     .with_reauthorization_interval(reauthorization_interval)
-    .with_replay_page_size(1);
+    .with_replay_page_size(replay_page_size);
     let pruning = OrmAiInboxPruningService::new(
         database.clone(),
         Arc::new(FixedClock::new(now + TimeDuration::seconds(61))),
@@ -271,6 +292,57 @@ async fn services(
             .expect("valid session inbox-retention limit"),
     );
     (sessions, inbox, pruning, session_retention, owner, active)
+}
+
+async fn append_title_events(
+    sessions: &OrmAiSessionService,
+    owner: &AuthPrincipal,
+    session_id: Uuid,
+    first_revision: i64,
+    count: i64,
+) {
+    for revision in first_revision..first_revision + count {
+        sessions
+            .rename_session(
+                owner,
+                RenameAiSessionInput {
+                    session_id,
+                    title: format!("Inbox title {}", revision + 1),
+                    client_mutation_id: Uuid::new_v4(),
+                    expected_title_revision: Some(revision),
+                },
+            )
+            .await
+            .expect("title event should commit");
+    }
+}
+
+async fn collect_inbox_sequences(
+    inbox: &OrmAiInboxService,
+    owner: &AuthPrincipal,
+    first: i64,
+) -> (Vec<i64>, Vec<usize>, i64, String) {
+    let mut after = 0;
+    let mut sequences = Vec::new();
+    let mut page_lengths = Vec::new();
+    let mut final_event_type = String::new();
+    loop {
+        let page = inbox
+            .inbox_event_page(owner, after, first)
+            .await
+            .expect("inbox event page should load");
+        assert!(!page.reset_required);
+        let watermark = page.watermark;
+        page_lengths.push(page.events.len());
+        for event in page.events {
+            after = event.sequence;
+            final_event_type = event.event_type;
+            sequences.push(after);
+        }
+        if !page.has_more {
+            return (sequences, page_lengths, watermark, final_event_type);
+        }
+    }
 }
 
 async fn create_session(
@@ -340,6 +412,139 @@ async fn owner_pages_atomic_cross_session_events_without_cross_principal_leakage
         .expect("an unrelated empty inbox does not reveal owner activity");
     assert!(stranger_page.events.is_empty());
     assert_eq!(stranger_page.watermark, 0);
+}
+
+#[tokio::test]
+async fn owner_inbox_pages_use_the_snapshotted_watermark_at_the_orm_limit() {
+    let (sessions, inbox, _pruning, _retention, owner, _active) =
+        services(Duration::from_secs(60)).await;
+    let session = create_session(&sessions, &owner).await;
+
+    append_title_events(&sessions, &owner, session.id, 0, 98).await;
+    let page_99 = inbox
+        .inbox_event_page(&owner, 0, 100)
+        .await
+        .expect("99-event inbox page should load");
+    assert_eq!(page_99.events.len(), 99);
+    assert_eq!(page_99.watermark, 99);
+    assert!(!page_99.has_more);
+
+    append_title_events(&sessions, &owner, session.id, 98, 1).await;
+    let page_100 = inbox
+        .inbox_event_page(&owner, 0, 100)
+        .await
+        .expect("100-event inbox page should load");
+    assert_eq!(page_100.events.len(), 100);
+    assert_eq!(page_100.watermark, 100);
+    assert!(!page_100.has_more);
+
+    append_title_events(&sessions, &owner, session.id, 99, 1).await;
+    let first_101 = inbox
+        .inbox_event_page(&owner, 0, 100)
+        .await
+        .expect("first 101-event inbox page should load");
+    assert_eq!(first_101.events.len(), 100);
+    assert_eq!(first_101.watermark, 101);
+    assert!(first_101.has_more);
+    let last_101 = inbox
+        .inbox_event_page(&owner, 100, 100)
+        .await
+        .expect("last 101-event inbox page should load");
+    assert_eq!(last_101.events.len(), 1);
+    assert_eq!(last_101.events[0].sequence, 101);
+    assert!(!last_101.has_more);
+
+    append_title_events(&sessions, &owner, session.id, 100, 243).await;
+    sessions
+        .archive_session(&owner, AiSessionId(session.id))
+        .await
+        .expect("terminal archive event should commit");
+    let (sequences, page_lengths, watermark, final_event_type) =
+        collect_inbox_sequences(&inbox, &owner, 100).await;
+    assert_eq!(page_lengths, [100, 100, 100, 45]);
+    assert_eq!(sequences, (1..=345).collect::<Vec<_>>());
+    assert_eq!(watermark, 345);
+    assert_eq!(final_event_type, "session_archived");
+
+    sessions
+        .restore_session(&owner, AiSessionId(session.id))
+        .await
+        .expect("event after the captured watermark should commit");
+    let later = inbox
+        .inbox_event_page(&owner, watermark, 100)
+        .await
+        .expect("the subsequent inbox boundary should observe the new event");
+    assert_eq!(later.watermark, 346);
+    assert_eq!(later.events.len(), 1);
+    assert_eq!(later.events[0].sequence, 346);
+    assert_eq!(later.events[0].event_type, "session_restored");
+    assert!(!later.has_more);
+
+    let stranger = inbox
+        .inbox_event_page(&principal("inbox-stranger"), 0, 100)
+        .await
+        .expect("another principal should see only its own empty stream");
+    assert!(stranger.events.is_empty());
+    assert_eq!(stranger.watermark, 0);
+    assert!(!stranger.has_more);
+}
+
+#[tokio::test]
+async fn owner_inbox_pages_follow_a_smaller_orm_maximum() {
+    let (sessions, inbox, _pruning, _retention, owner, _active) =
+        services_with_limits(Duration::from_secs(60), 7, 7).await;
+    let session = create_session(&sessions, &owner).await;
+    append_title_events(&sessions, &owner, session.id, 0, 19).await;
+
+    let (sequences, page_lengths, watermark, _) = collect_inbox_sequences(&inbox, &owner, 7).await;
+    assert_eq!(page_lengths, [7, 7, 6]);
+    assert_eq!(sequences, (1..=20).collect::<Vec<_>>());
+    assert_eq!(watermark, 20);
+}
+
+#[tokio::test]
+async fn owner_inbox_subscription_replays_every_maximum_sized_page_before_live_events() {
+    let (sessions, inbox, _pruning, _retention, owner, _active) =
+        services_with_limits(Duration::from_secs(60), 100, 100).await;
+    let session = create_session(&sessions, &owner).await;
+    append_title_events(&sessions, &owner, session.id, 0, 100).await;
+    let mut stream = inbox
+        .inbox_events(owner.clone(), 0)
+        .await
+        .expect("inbox subscription should open");
+
+    let mut replayed = Vec::new();
+    for _ in 0..101 {
+        let envelope = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("replay should not stall")
+            .expect("replay item should exist")
+            .expect("replay item should succeed");
+        assert!(!envelope.reset_required);
+        replayed.push(envelope.event.expect("durable event").sequence);
+    }
+    assert_eq!(replayed, (1..=101).collect::<Vec<_>>());
+
+    sessions
+        .rename_session(
+            &owner,
+            RenameAiSessionInput {
+                session_id: session.id,
+                title: "Live inbox title".to_owned(),
+                client_mutation_id: Uuid::new_v4(),
+                expected_title_revision: Some(100),
+            },
+        )
+        .await
+        .expect("live event should commit");
+    let live = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("subscription should wake")
+        .expect("live item should exist")
+        .expect("live item should succeed");
+    let live = live.event.expect("live durable event");
+    assert_eq!(live.sequence, 102);
+    assert_eq!(live.event_type, "session_title_changed");
 }
 
 #[tokio::test]

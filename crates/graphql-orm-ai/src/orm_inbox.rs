@@ -559,7 +559,7 @@ impl OrmAiInboxService {
                             ..Default::default()
                         })
                         .default_order()
-                        .limit(first.saturating_add(1))
+                        .limit(first)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -584,9 +584,42 @@ impl OrmAiInboxService {
                 reset_required: true,
             });
         }
-        let has_more = rows.len() > first as usize;
         let mut rows = rows;
         rows.truncate(first as usize);
+        if after_sequence < stream.stream_head && rows.is_empty() {
+            return Ok(AiInboxEventPage {
+                events: Vec::new(),
+                watermark: stream.stream_head,
+                has_more: false,
+                reset_required: true,
+            });
+        }
+        let mut expected_sequence = after_sequence.saturating_add(1);
+        for row in &rows {
+            if row.principal_kind != stream.principal_kind
+                || row.principal_subject != stream.principal_subject
+                || row.sequence <= after_sequence
+                || row.sequence > stream.stream_head
+            {
+                return Err(AiError::PersistenceFailed);
+            }
+            if row.sequence != expected_sequence {
+                return Ok(AiInboxEventPage {
+                    events: Vec::new(),
+                    watermark: stream.stream_head,
+                    has_more: false,
+                    reset_required: true,
+                });
+            }
+            expected_sequence = row.sequence.saturating_add(1);
+        }
+        // Inbox sequences are contiguous within this exact principal stream,
+        // and both rows and stream head were snapshotted in one transaction.
+        // The final validated sequence therefore proves whether the captured
+        // replay window has more data without querying past the ORM limit.
+        let has_more = rows
+            .last()
+            .is_some_and(|row| row.sequence < stream.stream_head);
         let mut retained_payloads = Vec::with_capacity(rows.len());
         for row in &rows {
             match (&row.protected_payload, row.payload_purged_at) {
@@ -606,13 +639,6 @@ impl OrmAiInboxService {
         }
         let mut events = Vec::with_capacity(rows.len());
         for (row, protected_payload) in rows.into_iter().zip(retained_payloads) {
-            if row.principal_kind != stream.principal_kind
-                || row.principal_subject != stream.principal_subject
-                || row.sequence <= after_sequence
-                || row.sequence > stream.stream_head
-            {
-                return Err(AiError::PersistenceFailed);
-            }
             let session_id = row.session_id.ok_or(AiError::PersistenceFailed)?;
             let session = AiSessionRecord::find_by_id(&self.database, &session_id)
                 .await

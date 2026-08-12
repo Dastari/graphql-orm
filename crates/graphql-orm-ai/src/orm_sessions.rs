@@ -450,7 +450,7 @@ impl AiSessionService for OrmAiSessionService {
                             ..Default::default()
                         })
                         .default_order()
-                        .limit(first.saturating_add(1))
+                        .limit(first)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)
@@ -480,9 +480,13 @@ impl AiSessionService for OrmAiSessionService {
                 reset_required: true,
             });
         }
-        let has_more = rows.len() > first as usize;
         let mut rows = rows;
         rows.truncate(first as usize);
+        // Session event sequences are allocated contiguously and the query is
+        // capped at the previously captured stream head. Comparing the final
+        // validated sequence with that watermark avoids an internal
+        // `first + 1` request that the database pagination policy may clamp.
+        let has_more = rows.last().is_some_and(|row| row.sequence < watermark);
         let mut events = Vec::with_capacity(rows.len());
         for row in rows {
             let payload = self

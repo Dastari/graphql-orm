@@ -20,7 +20,23 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-No changes recorded after 0.75.0.
+No changes recorded after 0.75.1.
+
+## [0.75.1] - 2026-08-12
+
+### Fixed
+
+- Durable session and owner-inbox event pages now derive `HasMore` from the
+  last contiguous sequence and the page's captured watermark. Requests at the
+  configured ORM maximum therefore drain every replay page instead of losing
+  the look-ahead row to database pagination clamping.
+
+### Security
+
+- Session and inbox replay continue to fail closed on missing, noncontiguous,
+  wrong-owner, wrong-session, purged, or out-of-watermark rows. The correction
+  changes no principal, scope, content-protection, disclosure, or retention
+  authorization boundary.
 
 ## [0.75.0] - 2026-08-12
 
