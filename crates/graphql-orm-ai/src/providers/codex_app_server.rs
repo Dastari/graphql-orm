@@ -51,9 +51,156 @@ const REMOTE_CONTROL_STATUS_CHANGED: &str = "remoteControl/status/changed";
 const RUNTIME_WARNING: &str = "warning";
 const THREAD_TOKEN_USAGE_UPDATED: &str = "thread/tokenUsage/updated";
 
+const DYNAMIC_TOOLS_ONLY_DISABLED_FEATURES: &[&str] = &[
+    "apps",
+    "auth_elicitation",
+    "browser_use",
+    "browser_use_external",
+    "browser_use_full_cdp_access",
+    "code_mode",
+    "code_mode_host",
+    "code_mode_only",
+    "computer_use",
+    "current_time_reminder",
+    "default_mode_request_user_input",
+    "deferred_executor",
+    "enable_mcp_apps",
+    "goals",
+    "hooks",
+    "image_generation",
+    "in_app_browser",
+    "multi_agent",
+    "plugins",
+    "recommended_plugins",
+    "remote_plugin",
+    "request_permissions_tool",
+    "shell_snapshot",
+    "shell_tool",
+    "skill_mcp_dependency_install",
+    "skill_search",
+    "standalone_web_search",
+    "token_budget",
+    "tool_call_mcp_elicitation",
+    "tool_suggest",
+    "unified_exec",
+    "view_image",
+    "workspace_dependencies",
+];
+
 /// Exact reviewed Codex app-server protocol contract supported by this
 /// adapter.
 pub const AI_CODEX_APP_SERVER_PROTOCOL_V2: &str = "app-server-v2";
+
+/// Tool-delivery mode declared by the reviewed Codex model catalogue.
+///
+/// The declaration is deployment evidence bound to the exact executable
+/// digest and model registration. It is not selected by the model or a
+/// request. Codex models declared as Code Mode-only cannot safely advertise
+/// direct dynamic tools when the Code Mode host is unavailable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AiCodexAppServerModelToolMode {
+    /// Ordinary Responses function tools are model-visible directly.
+    Direct,
+    /// The model prefers Code Mode but may fall back to direct tools.
+    CodeMode,
+    /// The model exposes tools only through Code Mode.
+    CodeModeOnly,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AiCodexAppServerLaunchProfileKind {
+    StrictTextOnlyV1,
+    ExperimentalDynamicToolsOnlyV1,
+}
+
+/// Closed Codex app-server launch and thread-isolation contract.
+///
+/// The dynamic-tools-only profile fixes the reviewed CLI feature disables,
+/// supplies an empty environment list for every dynamic thread/turn, disables
+/// ordinary utility and hosted-search tools in thread configuration, and
+/// requires an isolated configuration home. The process factory remains
+/// responsible for applying the returned argument vector and operating-system
+/// sandbox exactly; it cannot substitute a broader profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AiCodexAppServerLaunchProfile {
+    kind: AiCodexAppServerLaunchProfileKind,
+}
+
+impl AiCodexAppServerLaunchProfile {
+    /// Strict protocol profile for tool-free text turns.
+    pub const fn strict_text_only_v1() -> Self {
+        Self {
+            kind: AiCodexAppServerLaunchProfileKind::StrictTextOnlyV1,
+        }
+    }
+
+    /// Creates the experimental dynamic-tools-only profile for a direct-tool
+    /// model registration.
+    ///
+    /// Code Mode and Code Mode-only catalogue declarations are rejected
+    /// because disabling the native Code Mode surface makes their direct
+    /// dynamic-tool availability unreliable or impossible.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidConfiguration`] unless the reviewed
+    /// model catalogue declares [`AiCodexAppServerModelToolMode::Direct`].
+    pub fn experimental_dynamic_tools_only_v1(
+        model_tool_mode: AiCodexAppServerModelToolMode,
+    ) -> Result<Self, ProviderError> {
+        if model_tool_mode != AiCodexAppServerModelToolMode::Direct {
+            return Err(ProviderError::InvalidConfiguration(
+                "Codex dynamic-tools-only profile requires a direct-tool model".to_owned(),
+            ));
+        }
+        Ok(Self {
+            kind: AiCodexAppServerLaunchProfileKind::ExperimentalDynamicToolsOnlyV1,
+        })
+    }
+
+    /// Exact CLI arguments following the reviewed Codex executable path.
+    ///
+    /// The dynamic profile deliberately disables every native execution,
+    /// browser, hosted-search, connector, collaboration, image, plugin, and
+    /// interactive tool feature it relies on being absent. The factory must
+    /// also clear the environment, use a private configuration home containing
+    /// no project configuration or MCP servers, use an empty working
+    /// directory, and apply its reviewed external sandbox.
+    #[must_use]
+    pub fn codex_arguments(self) -> Vec<&'static str> {
+        let mut arguments = vec!["app-server", "--stdio", "--strict-config"];
+        if self.supports_experimental_dynamic_tools() {
+            for feature in DYNAMIC_TOOLS_ONLY_DISABLED_FEATURES {
+                arguments.extend(["--disable", *feature]);
+            }
+        }
+        arguments
+    }
+
+    /// Whether this closed profile supports the experimental dynamic-tool
+    /// protocol without native execution tools.
+    pub const fn supports_experimental_dynamic_tools(self) -> bool {
+        matches!(
+            self.kind,
+            AiCodexAppServerLaunchProfileKind::ExperimentalDynamicToolsOnlyV1
+        )
+    }
+
+    /// Whether the process must use a private configuration home containing
+    /// only the minimum provider authentication material.
+    pub const fn requires_isolated_configuration_home(self) -> bool {
+        true
+    }
+
+    fn identity_label(self) -> &'static str {
+        match self.kind {
+            AiCodexAppServerLaunchProfileKind::StrictTextOnlyV1 => "strict-text-only-v1",
+            AiCodexAppServerLaunchProfileKind::ExperimentalDynamicToolsOnlyV1 => {
+                "experimental-dynamic-tools-only-v1"
+            }
+        }
+    }
+}
 
 /// Immutable, content-free identity of one reviewed Codex app-server
 /// installation and provider profile.
@@ -70,7 +217,7 @@ pub struct AiCodexAppServerRegistration {
     executable_version: String,
     sandbox_profile: String,
     protocol_version: String,
-    experimental_dynamic_tools: bool,
+    launch_profile: AiCodexAppServerLaunchProfile,
     identity: String,
 }
 
@@ -106,6 +253,7 @@ impl AiCodexAppServerRegistration {
                 "invalid Codex app-server registration".to_owned(),
             ));
         }
+        let launch_profile = AiCodexAppServerLaunchProfile::strict_text_only_v1();
         let identity = registration_identity(
             &provider_profile_id,
             &logical_model,
@@ -113,7 +261,7 @@ impl AiCodexAppServerRegistration {
             &executable_version,
             &sandbox_profile,
             &protocol_version,
-            false,
+            launch_profile,
         );
         Ok(Self {
             provider_profile_id,
@@ -122,19 +270,21 @@ impl AiCodexAppServerRegistration {
             executable_version,
             sandbox_profile,
             protocol_version,
-            experimental_dynamic_tools: false,
+            launch_profile,
             identity,
         })
     }
 
-    /// Enables the reviewed experimental native dynamic-tool protocol.
+    /// Applies one closed reviewed app-server launch profile.
     ///
     /// This changes the immutable registration identity. It only permits the
     /// adapter to forward an exact provider request to a coordinator-owned
-    /// responder; it grants no application-tool or resolver authority.
+    /// responder; it grants no application-tool or resolver authority. A
+    /// process factory must separately attest that it implements this exact
+    /// profile before the provider advertises custom tools.
     #[must_use]
-    pub fn with_experimental_dynamic_tools(mut self) -> Self {
-        self.experimental_dynamic_tools = true;
+    pub fn with_launch_profile(mut self, launch_profile: AiCodexAppServerLaunchProfile) -> Self {
+        self.launch_profile = launch_profile;
         self.identity = registration_identity(
             &self.provider_profile_id,
             &self.logical_model,
@@ -142,9 +292,14 @@ impl AiCodexAppServerRegistration {
             &self.executable_version,
             &self.sandbox_profile,
             &self.protocol_version,
-            true,
+            launch_profile,
         );
         self
+    }
+
+    /// Exact immutable launch profile included in the registration identity.
+    pub const fn launch_profile(&self) -> AiCodexAppServerLaunchProfile {
+        self.launch_profile
     }
 
     /// Deployment-owned provider profile identifier.
@@ -180,7 +335,7 @@ impl AiCodexAppServerRegistration {
     /// Whether experimental app-server dynamic tools are enabled for this
     /// immutable registration.
     pub const fn experimental_dynamic_tools(&self) -> bool {
-        self.experimental_dynamic_tools
+        self.launch_profile.supports_experimental_dynamic_tools()
     }
 
     /// Stable content-free registration identity used to prevent configuration
@@ -594,9 +749,13 @@ impl AiProvider for AiCodexAppServerProvider {
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
+        let dynamic_tools_available = self.registration.experimental_dynamic_tools()
+            && self
+                .pool
+                .supports_launch_profile(self.registration.launch_profile());
         ProviderCapabilities {
             streaming: true,
-            custom_tools: self.registration.experimental_dynamic_tools(),
+            custom_tools: dynamic_tools_available,
             provider_retained_continuation: true,
             local: true,
             ..ProviderCapabilities::default()
@@ -647,7 +806,11 @@ impl AiProvider for AiCodexAppServerProvider {
         context: ProviderRequestContext,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
-        if !self.registration.experimental_dynamic_tools() {
+        if !self.registration.experimental_dynamic_tools()
+            || !self
+                .pool
+                .supports_launch_profile(self.registration.launch_profile())
+        {
             return Err(ProviderError::Unsupported);
         }
         context.validate_request(&ProviderKind::LocalHarness, &request)?;
@@ -724,7 +887,11 @@ impl AiProvider for AiCodexAppServerProvider {
         let input = if request.tools.is_empty() {
             AiCodexAppServerTurnInput::try_from_retained_model_request(request.clone())?
         } else {
-            if !self.registration.experimental_dynamic_tools() {
+            if !self.registration.experimental_dynamic_tools()
+                || !self
+                    .pool
+                    .supports_launch_profile(self.registration.launch_profile())
+            {
                 return Err(ProviderError::Unsupported);
             }
             AiCodexAppServerTurnInput::try_from_dynamic_request(request.clone())?
@@ -1030,6 +1197,17 @@ impl Drop for AiCodexAppServerLaunchedProcess {
 /// Trusted deployment seam that launches one reviewed app-server process.
 #[async_trait]
 pub trait AiCodexAppServerRunProcessFactory: Send + Sync {
+    /// Whether this factory implements one exact closed launch profile.
+    ///
+    /// The default keeps existing text-only factories compatible and refuses
+    /// the experimental dynamic-tools-only profile. A factory may return true
+    /// for that profile only when it uses [`AiCodexAppServerLaunchProfile::codex_arguments`]
+    /// unchanged and enforces the documented isolated-home, environment,
+    /// working-directory, integrity, and process-sandbox requirements.
+    fn supports_launch_profile(&self, profile: AiCodexAppServerLaunchProfile) -> bool {
+        profile == AiCodexAppServerLaunchProfile::strict_text_only_v1()
+    }
+
     /// Launches and initializes the exact reviewed registration.
     ///
     /// The factory must directly execute the verified image without a shell,
@@ -1143,13 +1321,21 @@ impl AiCodexAppServerRunPool {
         }
     }
 
+    /// Whether the trusted process factory implements one exact closed launch
+    /// profile.
+    pub fn supports_launch_profile(&self, profile: AiCodexAppServerLaunchProfile) -> bool {
+        self.inner.factory.supports_launch_profile(profile)
+    }
+
     async fn create_empty_thread(
         &self,
         binding: AiProviderRunBinding,
         registration: Arc<AiCodexAppServerRegistration>,
         dynamic_tools: Vec<ModelToolDefinition>,
     ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
-        if !dynamic_tools.is_empty() && !registration.experimental_dynamic_tools() {
+        if !self.supports_launch_profile(registration.launch_profile())
+            || (!dynamic_tools.is_empty() && !registration.experimental_dynamic_tools())
+        {
             return Err(ProviderError::Unsupported);
         }
         for tool in &dynamic_tools {
@@ -1263,6 +1449,9 @@ impl AiCodexAppServerRunPool {
         registration: Arc<AiCodexAppServerRegistration>,
         cursor: &crate::AiProviderSessionCursor,
     ) -> Result<(), ProviderError> {
+        if !self.supports_launch_profile(registration.launch_profile()) {
+            return Err(ProviderError::Unsupported);
+        }
         let permit = self
             .inner
             .admission
@@ -1895,6 +2084,9 @@ impl AiCodexAppServerRunPool {
         binding: AiProviderRunBinding,
         registration: Arc<AiCodexAppServerRegistration>,
     ) -> Result<Arc<RunEntry>, ProviderError> {
+        if !self.supports_launch_profile(registration.launch_profile()) {
+            return Err(ProviderError::Unsupported);
+        }
         let mut identities = self.inner.registration_identities.lock().await;
         let identity_is_new = if let Some(identity) = identities.get(&binding) {
             if identity != registration.identity() {
@@ -2510,10 +2702,10 @@ impl AiCodexAppServerProtocolActor {
             "sandbox": "read-only",
         });
         if !dynamic_tools.is_empty() {
-            params
-                .as_object_mut()
-                .ok_or(ProviderError::Rejected)?
-                .insert("dynamicTools".to_owned(), Value::Array(dynamic_tools));
+            let params = params.as_object_mut().ok_or(ProviderError::Rejected)?;
+            params.insert("dynamicTools".to_owned(), Value::Array(dynamic_tools));
+            params.insert("config".to_owned(), dynamic_tools_only_thread_config());
+            params.insert("environments".to_owned(), Value::Array(Vec::new()));
         }
         let frame = self.request(ClientMethod::ThreadStart, "thread/start", params)?;
         self.begin_new_thread_lifecycle();
@@ -2575,17 +2767,20 @@ impl AiCodexAppServerProtocolActor {
         if self.retained_model.is_some() && self.dynamic_tools != definitions {
             return Err(ProviderError::Rejected);
         }
-        let frame = self.request(
-            ClientMethod::ThreadResume,
-            "thread/resume",
-            json!({
-                "threadId": cursor.expose_to_provider_adapter(),
-                "model": input.model(),
-                "developerInstructions": developer_instructions,
-                "approvalPolicy": "never",
-                "sandbox": "read-only",
-            }),
-        )?;
+        let mut params = json!({
+            "threadId": cursor.expose_to_provider_adapter(),
+            "model": input.model(),
+            "developerInstructions": developer_instructions,
+            "approvalPolicy": "never",
+            "sandbox": "read-only",
+        });
+        if !input.tools().is_empty() {
+            params
+                .as_object_mut()
+                .ok_or(ProviderError::Rejected)?
+                .insert("config".to_owned(), dynamic_tools_only_thread_config());
+        }
+        let frame = self.request(ClientMethod::ThreadResume, "thread/resume", params)?;
         self.begin_resume_lifecycle(cursor.expose_to_provider_adapter());
         self.retained_model = Some(input.model().to_owned());
         self.dynamic_tools = definitions;
@@ -2677,6 +2872,8 @@ impl AiCodexAppServerProtocolActor {
                 "dynamicTools": dynamic_tools,
                 "approvalPolicy": "never",
                 "sandbox": "read-only",
+                "config": dynamic_tools_only_thread_config(),
+                "environments": [],
             }),
         )?;
         self.begin_new_thread_lifecycle();
@@ -2775,15 +2972,18 @@ impl AiCodexAppServerProtocolActor {
         {
             return Err(ProviderError::InvalidRequest);
         }
-        let frame = self.request(
-            ClientMethod::TurnStart,
-            "turn/start",
-            json!({
-                "threadId": thread_id,
-                "input": input.input().iter().map(|text| json!({"type": "text", "text": text})).collect::<Vec<_>>(),
-                "summary": "none",
-            }),
-        )?;
+        let mut params = json!({
+            "threadId": thread_id,
+            "input": input.input().iter().map(|text| json!({"type": "text", "text": text})).collect::<Vec<_>>(),
+            "summary": "none",
+        });
+        if !input.tools().is_empty() {
+            params
+                .as_object_mut()
+                .ok_or(ProviderError::Rejected)?
+                .insert("environments".to_owned(), Value::Array(Vec::new()));
+        }
+        let frame = self.request(ClientMethod::TurnStart, "turn/start", params)?;
         self.thread_lifecycle_operation = None;
         self.pending_turn_thread_id = Some(thread_id.to_owned());
         self.runtime_warning_count = 0;
@@ -2873,8 +3073,7 @@ impl AiCodexAppServerProtocolActor {
                 .get("params")
                 .and_then(Value::as_object)
                 .ok_or(ProviderError::Rejected)?;
-            if request_id == 0
-                || self.pending_dynamic_requests.contains_key(&request_id)
+            if self.pending_dynamic_requests.contains_key(&request_id)
                 || params.keys().any(|key| {
                     !matches!(
                         key.as_str(),
@@ -3687,6 +3886,19 @@ fn initialization_capabilities(experimental_api: bool) -> Value {
     Value::Object(capabilities)
 }
 
+fn dynamic_tools_only_thread_config() -> Value {
+    let mut config = serde_json::Map::new();
+    for feature in DYNAMIC_TOOLS_ONLY_DISABLED_FEATURES {
+        config.insert(format!("features.{feature}"), Value::Bool(false));
+    }
+    config.insert("tools.update_plan.enabled".to_owned(), Value::Bool(false));
+    config.insert(
+        "web_search".to_owned(),
+        Value::String("disabled".to_owned()),
+    );
+    Value::Object(config)
+}
+
 fn validate_allowed_notification(method: &str, params: &Value) -> Result<(), ProviderError> {
     let object = params.as_object().ok_or(ProviderError::Rejected)?;
     if matches!(method, "item/started" | "item/completed") {
@@ -3740,10 +3952,10 @@ fn registration_identity(
     executable_version: &str,
     sandbox_profile: &str,
     protocol_version: &str,
-    experimental_dynamic_tools: bool,
+    launch_profile: AiCodexAppServerLaunchProfile,
 ) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"graphql-orm-ai/codex-app-server-registration/v1\0");
+    hasher.update(b"graphql-orm-ai/codex-app-server-registration/v2\0");
     for value in [
         provider_profile_id,
         logical_model,
@@ -3755,7 +3967,9 @@ fn registration_identity(
         hasher.update((value.len() as u64).to_be_bytes());
         hasher.update(value.as_bytes());
     }
-    hasher.update([u8::from(experimental_dynamic_tools)]);
+    let profile = launch_profile.identity_label();
+    hasher.update((profile.len() as u64).to_be_bytes());
+    hasher.update(profile.as_bytes());
     hex::encode(hasher.finalize())
 }
 
@@ -3788,17 +4002,13 @@ mod tests {
         fn launch(executable: &str, root: PathBuf) -> Self {
             assert!(root.is_absolute());
             assert!(root.is_dir());
-            let mut child = Command::new(executable)
-                .args([
-                    "app-server",
-                    "--stdio",
-                    "--disable",
-                    "code_mode",
-                    "--disable",
-                    "code_mode_host",
-                    "--disable",
-                    "code_mode_only",
-                ])
+            let profile = AiCodexAppServerLaunchProfile::experimental_dynamic_tools_only_v1(
+                AiCodexAppServerModelToolMode::Direct,
+            )
+            .expect("direct-tool live profile should validate");
+            let mut command = Command::new(executable);
+            command.args(profile.codex_arguments());
+            let mut child = command
                 .env_clear()
                 .env("CODEX_HOME", &root)
                 .env("HOME", &root)
@@ -3896,6 +4106,10 @@ mod tests {
 
     #[async_trait]
     impl AiCodexAppServerRunProcessFactory for FakeFactory {
+        fn supports_launch_profile(&self, _profile: AiCodexAppServerLaunchProfile) -> bool {
+            true
+        }
+
         async fn launch(
             &self,
             _registration: Arc<AiCodexAppServerRegistration>,
@@ -3911,6 +4125,18 @@ mod tests {
                     counters.kills.fetch_add(1, Ordering::SeqCst);
                 }),
             ))
+        }
+    }
+
+    struct TextOnlyFactory;
+
+    #[async_trait]
+    impl AiCodexAppServerRunProcessFactory for TextOnlyFactory {
+        async fn launch(
+            &self,
+            _registration: Arc<AiCodexAppServerRegistration>,
+        ) -> Result<AiCodexAppServerLaunchedProcess, ProviderError> {
+            Err(ProviderError::Unavailable)
         }
     }
 
@@ -3973,6 +4199,9 @@ mod tests {
             responder: Arc<dyn ProviderDynamicToolResponder>,
         ) -> Result<ProviderEventStream, ProviderError> {
             self.counters.turns.fetch_add(1, Ordering::SeqCst);
+            if self.counters.pending.load(Ordering::SeqCst) {
+                return Ok(Box::pin(stream::pending()));
+            }
             let definition = input.tools().first().ok_or(ProviderError::Rejected)?;
             let call = ProviderDynamicToolCall::from_definition(
                 "turn-dynamic-1",
@@ -4156,6 +4385,10 @@ mod tests {
     }
 
     fn dynamic_registration(version: &str) -> Arc<AiCodexAppServerRegistration> {
+        let profile = AiCodexAppServerLaunchProfile::experimental_dynamic_tools_only_v1(
+            AiCodexAppServerModelToolMode::Direct,
+        )
+        .expect("direct-tool launch profile should validate");
         Arc::new(
             AiCodexAppServerRegistration::new(
                 "profile-1",
@@ -4166,7 +4399,7 @@ mod tests {
                 AI_CODEX_APP_SERVER_PROTOCOL_V2,
             )
             .expect("test registration should validate")
-            .with_experimental_dynamic_tools(),
+            .with_launch_profile(profile),
         )
     }
 
@@ -4229,6 +4462,39 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_tools_only_profile_requires_direct_model_and_closes_native_surfaces() {
+        for mode in [
+            AiCodexAppServerModelToolMode::CodeMode,
+            AiCodexAppServerModelToolMode::CodeModeOnly,
+        ] {
+            assert!(matches!(
+                AiCodexAppServerLaunchProfile::experimental_dynamic_tools_only_v1(mode),
+                Err(ProviderError::InvalidConfiguration(_))
+            ));
+        }
+        let profile = AiCodexAppServerLaunchProfile::experimental_dynamic_tools_only_v1(
+            AiCodexAppServerModelToolMode::Direct,
+        )
+        .expect("direct-tool profile should validate");
+        assert!(profile.supports_experimental_dynamic_tools());
+        assert!(profile.requires_isolated_configuration_home());
+        let arguments = profile.codex_arguments();
+        assert_eq!(
+            &arguments[..3],
+            ["app-server", "--stdio", "--strict-config"]
+        );
+        assert!(!arguments.contains(&"--enable"));
+        for feature in DYNAMIC_TOOLS_ONLY_DISABLED_FEATURES {
+            assert!(
+                arguments
+                    .windows(2)
+                    .any(|pair| pair == ["--disable", *feature]),
+                "missing disabled feature {feature}"
+            );
+        }
+    }
+
+    #[test]
     fn provider_advertises_only_implemented_retained_local_capabilities() {
         let counters = Arc::new(Counters::new());
         let provider = AiCodexAppServerProvider::new(registration("1.0.0"), pool(counters, 1, 2));
@@ -4251,6 +4517,15 @@ mod tests {
                 .capabilities()
                 .provider_retained_continuation
         );
+
+        let unverified_dynamic_provider = AiCodexAppServerProvider::new(
+            dynamic_registration("1.0.0"),
+            AiCodexAppServerRunPool::new(
+                Arc::new(TextOnlyFactory),
+                AiCodexAppServerRunLimits::default(),
+            ),
+        );
+        assert!(!unverified_dynamic_provider.capabilities().custom_tools);
     }
 
     fn turn() -> AiCodexAppServerTurnInput {
@@ -4981,6 +5256,24 @@ mod tests {
         ));
         assert_eq!(counters.launches.load(Ordering::SeqCst), 0);
 
+        let unverified = AiCodexAppServerProvider::new(
+            dynamic_registration("1.0.0"),
+            AiCodexAppServerRunPool::new(
+                Arc::new(TextOnlyFactory),
+                AiCodexAppServerRunLimits::default(),
+            ),
+        );
+        assert!(matches!(
+            unverified
+                .stream_with_dynamic_tools(
+                    request.clone(),
+                    context.clone(),
+                    Arc::new(FakeDynamicResponder),
+                )
+                .await,
+            Err(ProviderError::Unsupported)
+        ));
+
         let enabled = AiCodexAppServerProvider::new(
             dynamic_registration("1.0.0"),
             pool(counters.clone(), 1, 2),
@@ -4995,6 +5288,43 @@ mod tests {
         assert!(events.iter().all(Result::is_ok));
         assert_eq!(counters.launches.load(Ordering::SeqCst), 1);
         assert_eq!(counters.turns.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn active_dynamic_turn_uses_exact_interrupt_and_close_lifecycle() {
+        let counters = Arc::new(Counters::new());
+        counters.pending.store(true, Ordering::SeqCst);
+        let provider: Arc<dyn AiProvider> = Arc::new(AiCodexAppServerProvider::new(
+            dynamic_registration("1.0.0"),
+            pool(counters.clone(), 1, 2),
+        ));
+        let request = dynamic_model_request();
+        let context = provider_context("profile-1", &request);
+        let binding = context
+            .run_binding()
+            .expect("test context should carry the exact run binding");
+        let active = provider
+            .stream_with_dynamic_tools(request, context, Arc::new(FakeDynamicResponder))
+            .await
+            .expect("dynamic provider turn should start");
+        assert_eq!(
+            provider
+                .interrupt_run(&binding)
+                .await
+                .expect("dynamic interrupt should dispatch"),
+            AiProviderRunInterruptOutcome::Requested
+        );
+        assert_eq!(
+            provider
+                .close_run(&binding, AiProviderRunCloseReason::Cancelled)
+                .await
+                .expect("dynamic close should dispatch"),
+            AiProviderRunCloseOutcome::Closed
+        );
+        drop(active);
+        assert_eq!(counters.interrupts.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.shutdowns.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.kills.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -6505,15 +6835,59 @@ mod tests {
         assert!(start.contains("\"ephemeral\":true"));
         assert!(start.contains("\"approvalPolicy\":\"never\""));
         assert!(start.contains("\"sandbox\":\"read-only\""));
+        let start_value: Value =
+            serde_json::from_str(start.trim()).expect("dynamic start should remain valid JSON");
+        assert_eq!(
+            start_value.pointer("/params/environments"),
+            Some(&json!([]))
+        );
+        assert_eq!(
+            start_value.pointer("/params/config/features.shell_tool"),
+            Some(&Value::Bool(false))
+        );
+        assert_eq!(
+            start_value.pointer("/params/config/features.unified_exec"),
+            Some(&Value::Bool(false))
+        );
+        assert_eq!(
+            start_value.pointer("/params/config/features.code_mode"),
+            Some(&Value::Bool(false))
+        );
+        assert_eq!(
+            start_value.pointer("/params/config/features.apps"),
+            Some(&Value::Bool(false))
+        );
+        assert_eq!(
+            start_value.pointer("/params/config/features.browser_use"),
+            Some(&Value::Bool(false))
+        );
+        assert_eq!(
+            start_value.pointer("/params/config/features.computer_use"),
+            Some(&Value::Bool(false))
+        );
+        assert_eq!(
+            start_value.pointer("/params/config/tools.update_plan.enabled"),
+            Some(&Value::Bool(false))
+        );
+        assert_eq!(
+            start_value.pointer("/params/config/web_search"),
+            Some(&Value::String("disabled".to_owned()))
+        );
         guard
             .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
             .expect("thread response should bind");
         guard
             .accept(&thread_started_notification("thread-1"))
             .expect("thread notification should bind");
-        guard
-            .start_turn("thread-1", &input)
-            .expect("turn request should encode");
+        let turn = String::from_utf8(
+            guard
+                .start_turn("thread-1", &input)
+                .expect("turn request should encode"),
+        )
+        .expect("turn frame should be UTF-8");
+        let turn_value: Value =
+            serde_json::from_str(turn.trim()).expect("turn should remain valid JSON");
+        assert_eq!(turn_value.pointer("/params/environments"), Some(&json!([])));
         guard
             .accept(br#"{"id":3,"result":{"turn":{"id":"turn-dynamic-1"}}}"#)
             .expect("turn response should bind");
@@ -6546,7 +6920,7 @@ mod tests {
         ));
 
         let request = serde_json::to_vec(&json!({
-            "id": 41,
+            "id": 0,
             "method": "item/tool/call",
             "params": {
                 "arguments": {"query": "bounded"},
@@ -6568,7 +6942,7 @@ mod tests {
                 turn_id,
                 call,
             } => {
-                assert_eq!(request_id, 41);
+                assert_eq!(request_id, 0);
                 assert_eq!(thread_id, "thread-1");
                 assert_eq!(turn_id, "turn-dynamic-1");
                 call
@@ -6579,7 +6953,7 @@ mod tests {
             .expect("result should validate");
         let response = String::from_utf8(
             guard
-                .dynamic_tool_response(41, &result)
+                .dynamic_tool_response(0, &result)
                 .expect("exact response should encode"),
         )
         .expect("response should be UTF-8");
@@ -6612,7 +6986,7 @@ mod tests {
             })
         ));
         assert!(matches!(
-            guard.dynamic_tool_response(41, &result),
+            guard.dynamic_tool_response(0, &result),
             Err(ProviderError::Rejected)
         ));
 
@@ -6847,7 +7221,7 @@ mod tests {
         );
         process.send(
             &actor
-                .start_persistent_empty_thread("gpt-5.6-sol", &[dynamic_tool()])
+                .start_persistent_empty_thread("gpt-5.4", &[dynamic_tool()])
                 .expect("persistent thread start should encode"),
         );
 
@@ -6899,7 +7273,7 @@ mod tests {
         let cursor = crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", thread_id)
             .expect("live thread cursor should validate");
         let mut live_request = dynamic_model_request();
-        live_request.model = "gpt-5.6-sol".to_owned();
+        live_request.model = "gpt-5.4".to_owned();
         live_request.instructions.clear();
         live_request.input = vec![ModelInputBlock::Text {
             text: "Call inventory_count once with query bounded, then report the count.".to_owned(),
@@ -6916,6 +7290,7 @@ mod tests {
         let mut turn_response_observed = false;
         let mut turn_started_observed = false;
         let mut turn_completed_observed = false;
+        let mut dynamic_tool_calls = 0;
         for _ in 0..64 {
             let frame = process.receive();
             let inbound = actor.accept(&frame).unwrap_or_else(|error| {
@@ -6930,8 +7305,14 @@ mod tests {
                     .and_then(Value::as_object)
                     .map(|object| object.keys().cloned().collect::<Vec<_>>());
                 panic!(
-                    "retained turn frame was rejected: {error:?}; method={:?}; params_keys={params_keys:?}; item_type={:?}; item_keys={item_keys:?}",
+                    "retained turn frame was rejected: {error:?}; id_is_unsigned={}; method={:?}; params_keys={params_keys:?}; active_thread_matches={}; active_turn_matches={}; started_dynamic_call_count={}; item_type={:?}; item_keys={item_keys:?}",
+                    envelope.get("id").and_then(Value::as_u64).is_some(),
                     envelope.get("method").and_then(Value::as_str),
+                    envelope.pointer("/params/threadId").and_then(Value::as_str)
+                        == actor.active_thread_id.as_deref(),
+                    envelope.pointer("/params/turnId").and_then(Value::as_str)
+                        == actor.active_turn_id.as_deref(),
+                    actor.started_dynamic_calls.len(),
                     item.and_then(|item| item.get("type")).and_then(Value::as_str),
                 );
             });
@@ -6953,6 +7334,7 @@ mod tests {
                 AiCodexAppServerInbound::DynamicToolCall {
                     request_id, call, ..
                 } => {
+                    dynamic_tool_calls += 1;
                     let result = ProviderDynamicToolResult::new(&call, json!({"count": 3}))
                         .expect("live dynamic result should bind to the exact call");
                     process.send(
@@ -6974,6 +7356,7 @@ mod tests {
         assert!(turn_response_observed);
         assert!(turn_started_observed);
         assert!(turn_completed_observed);
+        assert_eq!(dynamic_tool_calls, 1);
 
         drop(process);
         let mut process = LiveCodexProcess::launch(&executable, configured_home);
@@ -7101,6 +7484,7 @@ mod tests {
                 .expect("resumed thread should start a second turn"),
         );
         let mut second_completed = false;
+        let mut second_dynamic_tool_calls = 0;
         for _ in 0..64 {
             match actor
                 .accept(&process.receive())
@@ -7109,6 +7493,7 @@ mod tests {
                 AiCodexAppServerInbound::DynamicToolCall {
                     request_id, call, ..
                 } => {
+                    second_dynamic_tool_calls += 1;
                     let result = ProviderDynamicToolResult::new(&call, json!({"count": 3}))
                         .expect("second dynamic result should bind");
                     process.send(
@@ -7134,6 +7519,7 @@ mod tests {
             }
         }
         assert!(second_completed);
+        assert_eq!(second_dynamic_tool_calls, 1);
 
         process.send(
             &actor

@@ -64,6 +64,42 @@ and return `AiCodexAppServerLaunchedProcess` with an idempotent synchronous
 process-tree kill callback. The wrapper invokes that callback on final drop,
 including an abandoned stream or failed graceful shutdown.
 
+Dynamic tools require a separate closed launch profile. Bind the reviewed
+model-catalogue mode and profile into the registration:
+
+```rust
+let launch_profile = AiCodexAppServerLaunchProfile::experimental_dynamic_tools_only_v1(
+    AiCodexAppServerModelToolMode::Direct,
+)?;
+let registration = AiCodexAppServerRegistration::new(
+    "local-dynamic-tools",
+    "reviewed-direct-tool-model",
+    executable_sha256,
+    executable_version,
+    "isolated-no-native-tools",
+    AI_CODEX_APP_SERVER_PROTOCOL_V2,
+)?
+.with_launch_profile(launch_profile);
+```
+
+The factory returns true from `supports_launch_profile` only when it launches
+that profile with `registration.launch_profile().codex_arguments()` unchanged,
+an environment cleared of unrelated credentials, a private configuration home
+containing no project config or MCP servers, an empty working directory, and
+the registered operating-system sandbox. The actor additionally sends empty
+thread/turn environments and a closed thread config that disables shell,
+unified execution, Code Mode, utility tools, connectors, plugins,
+collaboration, images, browser/computer use, and hosted search. This is defense
+in depth: the process sandbox remains authoritative if a provider version
+ignores a feature toggle.
+
+Only a reviewed `Direct` model-tool declaration can construct this profile.
+Codex models declared `CodeMode` or `CodeModeOnly` are rejected rather than
+silently losing dynamic tools or requiring a native Code Mode host. Such a
+registration may still use the strict text-only profile. When the factory does
+not attest the dynamic profile, provider capabilities report
+`custom_tools = false` and no dynamic process starts.
+
 The crate-owned protocol actor deliberately has no generic JSON-RPC send
 method. Initialization always negotiates one fixed opt-out profile for thread
 status/settings/cleared-goal, MCP-startup, and account-rate-limit notifications
@@ -123,8 +159,9 @@ Deletion completes from the exact empty successful `thread/delete` response.
 It never depends on or admits `thread/status/changed`; the fixed initialization
 profile suppresses that notification for the connection.
 
-Experimental dynamic tools require
-`AiCodexAppServerRegistration::with_experimental_dynamic_tools` and
+Experimental dynamic tools require a registration using
+`AiCodexAppServerLaunchProfile::experimental_dynamic_tools_only_v1`, a process
+factory that attests that exact profile, and
 `AiReadOnlyAgentTurnPlan::new_experimental_dynamic_tools`. The provider process
 receives no application credential or resolver transport. An exact
 `item/tool/call` is schema/fingerprint matched to the current `ModelRequest`,
@@ -133,6 +170,11 @@ ordinary registered read-only GraphQL tool boundary. Only the already
 disclosure- and egress-approved result is returned to app-server. Unknown,
 duplicate, stale, over-limit, changed-policy, or incomplete calls poison the
 turn and make a retained cursor cleanup-only.
+
+JSON-RPC request identifier zero is valid and is used by Codex 0.147.0 for its
+first server-initiated dynamic call. The actor correlates it in the same
+private pending-request map as every other unsigned identifier; accepting zero
+does not weaken method, lifecycle, schema, tool, owner, run, or cursor checks.
 
 Coordinator cancellation and terminal paths call `interrupt_run` and
 `close_run` through `AiRuntime`. The process binding includes a non-exported

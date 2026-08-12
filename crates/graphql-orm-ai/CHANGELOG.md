@@ -20,7 +20,50 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-No changes recorded after 0.73.4.
+No changes recorded after 0.74.0.
+
+## [0.74.0] - 2026-08-12
+
+### Added
+
+- `AiCodexAppServerLaunchProfile` now supplies a closed, fingerprinted
+  experimental dynamic-tools-only process and thread profile. It exposes the
+  exact reviewed Codex CLI arguments, requires an isolated configuration home,
+  disables native execution, browser, hosted-search, connector, image,
+  collaboration, plugin, and interactive surfaces, and makes every dynamic
+  thread and turn environment-free.
+- `AiCodexAppServerModelToolMode` records the reviewed executable/model
+  catalogue mode. The dynamic-tools-only profile accepts only `Direct` models;
+  Code Mode and Code Mode-only models fail configuration rather than silently
+  advertising unusable custom tools.
+- `AiCodexAppServerRunProcessFactory::supports_launch_profile` makes runtime
+  readiness explicit. Existing factories default to text-only support, and
+  `ProviderCapabilities::custom_tools` remains false until the factory attests
+  the exact dynamic-only profile.
+
+### Changed
+
+- Dynamic Codex registrations now use `with_launch_profile` instead of the
+  former boolean `with_experimental_dynamic_tools` switch. Registration
+  identity version 2 includes the closed launch profile, so stale retained
+  cursors are cleanup-only after adoption.
+
+### Fixed
+
+- The strict protocol actor now accepts JSON-RPC server-request identifier
+  zero for an otherwise exact, lifecycle-correlated `item/tool/call`. Codex
+  0.147.0 uses this valid identifier for its first dynamic request; duplicate,
+  malformed, uncorrelated, unknown, or schema-invalid requests still fail
+  closed.
+
+### Security
+
+- The live Codex 0.147.0 acceptance now proves one exact dynamic tool call on
+  both a newly bound thread and a later retained resume while native shell,
+  unified execution, Code Mode, filesystem environments, MCP, browser,
+  hosted web, images, plugins, collaboration, and generic JSON-RPC remain
+  unavailable. It also proves provider-owned interruption and terminal close
+  for an active dynamic turn.
 
 ## [0.73.4] - 2026-08-12
 

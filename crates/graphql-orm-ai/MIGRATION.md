@@ -19,6 +19,61 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.74.0: closed Codex dynamic-tools-only launch profile (schema remains 0.55.0)
+
+Replace the former boolean dynamic-tool registration switch with the closed
+profile and make the trusted process factory attest that it applies that exact
+profile:
+
+```rust
+let launch_profile = AiCodexAppServerLaunchProfile::experimental_dynamic_tools_only_v1(
+    AiCodexAppServerModelToolMode::Direct,
+)?;
+let registration = AiCodexAppServerRegistration::new(
+    provider_profile_id,
+    logical_model,
+    executable_sha256,
+    executable_version,
+    sandbox_profile,
+    AI_CODEX_APP_SERVER_PROTOCOL_V2,
+)?
+.with_launch_profile(launch_profile);
+```
+
+`AiCodexAppServerRunProcessFactory::supports_launch_profile` defaults to true
+only for the strict text-only profile. A factory enabling dynamic tools must
+return true only after it launches the reviewed executable with
+`registration.launch_profile().codex_arguments()` unchanged, clears inherited
+environment and credentials, supplies an isolated configuration home with no
+project configuration or MCP servers, uses an empty working directory, and
+applies its fixed external sandbox. If this proof is absent,
+`ProviderCapabilities::custom_tools` is false and dynamic calls return
+`Unsupported` before process launch.
+
+The model tool mode comes from the reviewed model catalogue bound to the exact
+executable digest. Codex 0.147.0 models declared `code_mode_only` cannot use
+this profile: with Code Mode disabled their direct dynamic definitions are not
+model-visible. Keep their text-only provider registration or choose a reviewed
+`Direct` model for the separate dynamic-tool profile. Do not relabel the
+catalogue mode or enable Code Mode, shell, unified execution, filesystem, MCP,
+browser, hosted web, remote control, or another native surface as a workaround.
+
+Registration identity version 2 includes the launch profile. Existing
+provider-session bindings created with the earlier dynamic registration must
+be invalidated and deleted through the ordinary exact cleanup lifecycle before
+replacement; they must not be resumed under the new identity.
+
+The protocol actor now accepts unsigned server-request ID `0` for an otherwise
+exact dynamic call because Codex 0.147.0 emits that valid JSON-RPC identifier.
+Hosts need no special case and must continue passing complete frames unchanged
+to `accept`.
+
+This release changes only public provider API and runtime compatibility. There
+is no GraphQL SDL, database entity, table, column, index, constraint,
+backup/restore, or persistent storage semantic change. No data migration,
+backfill, or row rewrite is required, and AI schema module `0.55.0` remains
+current.
+
 ## 0.73.4: closed Codex notification profile and retained resume compatibility (schema remains 0.55.0)
 
 Existing Codex process implementations continue calling
