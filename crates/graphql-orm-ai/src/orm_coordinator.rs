@@ -2023,6 +2023,7 @@ mod tests {
         delay: Option<std::time::Duration>,
     }
 
+    #[cfg(feature = "provider-codex-app-server")]
     struct CanonicalDynamicProviderExecutor {
         definition: crate::ModelToolDefinition,
     }
@@ -2082,6 +2083,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "provider-codex-app-server")]
     #[async_trait]
     impl AiAgentProviderTurnExecutor for CanonicalDynamicProviderExecutor {
         async fn execute_turn(
@@ -2284,6 +2286,7 @@ mod tests {
         continuation_count: AtomicUsize,
     }
 
+    #[cfg(feature = "provider-codex-app-server")]
     struct CanonicalDynamicPlanner {
         scope: AiScope,
         route: AiToolResultEgressRoute,
@@ -2374,6 +2377,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "provider-codex-app-server")]
     #[async_trait]
     impl AiReadOnlyAgentTurnPlanner for CanonicalDynamicPlanner {
         async fn initial_plan(
@@ -2932,6 +2936,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "provider-codex-app-server")]
     fn canonical_dynamic_plan(
         lease: &AiRunLease,
     ) -> (AiProviderCallPlan, crate::ModelToolDefinition) {
@@ -3303,6 +3308,7 @@ mod tests {
         assert_eq!(session_service.cleanups.load(Ordering::SeqCst), 1);
     }
 
+    #[cfg(feature = "provider-codex-app-server")]
     #[tokio::test]
     async fn experimental_dynamic_turn_uses_ordinary_tool_boundary_and_no_continuation() {
         let lease = AiRunLease::test_running(principal_reference());
