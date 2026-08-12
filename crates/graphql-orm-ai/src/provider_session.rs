@@ -6,6 +6,8 @@
 //! adapter or host, while this module describes the durable, protected binding
 //! needed to resume provider state without weakening run fencing.
 
+#![cfg_attr(feature = "mssql", allow(dead_code))]
+
 use std::fmt;
 
 use agql_auth::PrincipalReference;

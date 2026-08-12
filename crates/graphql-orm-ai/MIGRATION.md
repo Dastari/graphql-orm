@@ -19,6 +19,65 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.75.0: canonical Codex tools and retained bootstrap (schema remains 0.55.0)
+
+Construct provider definitions from the registered manifest instead of
+copying descriptor fields:
+
+```rust
+let definition = tool_catalog.read_only_model_definition(
+    &registered_tool_id,
+    "inventory_count",
+)?;
+```
+
+The alias is provider-local correlation metadata. The library copies and later
+revalidates the exact stable ID, description, argument schema, and descriptor
+fingerprint. Hosts must not strip `$schema`, scalar bounds, or projection
+metadata. The Codex adapter now performs its own closed, fingerprint-bound
+projection of canonical argument JSON Schema into the subset accepted by the
+app-server.
+
+Move retained-thread developer instructions out of
+`ModelRequest::instructions` and into the immutable registration:
+
+```rust
+let bootstrap = AiCodexAppServerBootstrapInstructions::from_static(&[
+    "Use a registered application tool whenever current facts are needed to answer the request.",
+])?;
+let registration = AiCodexAppServerRegistration::new(
+    provider_profile_id,
+    logical_model,
+    executable_sha256,
+    executable_version,
+    sandbox_profile,
+    AI_CODEX_APP_SERVER_PROTOCOL_V2,
+)?
+.with_launch_profile(launch_profile)
+.with_bootstrap_instructions(bootstrap);
+```
+
+Only compile-time static deployment policy belongs in this value. Never place
+user input, tenant or route context, secrets, resolver output, or model-authored
+text in it. Retained requests now reject non-empty
+`ModelRequest::instructions`; ordinary business text remains in bounded input
+blocks. Update `AiCodexAppServerRunProcess::create_empty_thread` implementations
+to accept the added `&AiCodexAppServerBootstrapInstructions` argument and pass
+it unchanged to `AiCodexAppServerProtocolActor::start_persistent_empty_thread`.
+
+Registration identity version 3 includes the bootstrap fingerprint. Drain and
+delete older provider-session bindings through their exact cleanup lifecycle;
+do not resume them under a replacement registration. There is no GraphQL SDL,
+database entity, table, column, index, constraint, backup/restore, or persistent
+storage semantic change. No data migration, backfill, or row rewrite is
+required, and AI schema module `0.55.0` remains current.
+
+The provider-neutral session value types are also available when compiling the
+MSSQL feature profile so provider adapters can retain one canonical public
+contract across backend lanes. This does not add an MSSQL provider-session
+persistence implementation or change its experimental compile/schema-only
+status.
+
 ## 0.74.0: closed Codex dynamic-tools-only launch profile (schema remains 0.55.0)
 
 Replace the former boolean dynamic-tool registration switch with the closed

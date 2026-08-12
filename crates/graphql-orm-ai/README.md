@@ -335,7 +335,7 @@ Add the crate from a reviewed monorepo revision:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.74.0", features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.75.0", features = ["sqlite"] }
 ```
 
 > **Pre-release dependency note:** this source snapshot resolves
@@ -562,8 +562,17 @@ profile, a reviewed direct-tool model declaration, and process-factory
 attestation that the exact profile is enforced; otherwise the provider reports
 `custom_tools = false`. Accepted dynamic calls execute only through the
 ordinary coordinator's current-rule, registered-GraphQL-tool, disclosure,
-egress, budget, and resolver authorization boundary. Native
-OpenAI can combine host-enabled hosted search with exact application tools in
+egress, budget, and resolver authorization boundary. Retained Codex
+registrations may also bind an
+`AiCodexAppServerBootstrapInstructions` value created from compile-time static
+host policy. The protected fingerprint becomes part of the registration and
+every retained request must leave `ModelRequest::instructions` empty. Tool
+definitions should come from `AiToolCatalog::read_only_model_definition`, so
+the descriptor ID, description, canonical JSON Schema, and fingerprint cannot
+drift from the registered manifest; the adapter performs its closed
+provider-specific schema projection internally.
+
+Native OpenAI can combine host-enabled hosted search with exact application tools in
 provider-retained mode and can stream provider-generated visible summaries and
 validated citations into the ordered protected activity feed. Defaults remain
 closed. See [provider sessions, hosted search, and visible activity](docs/provider-sessions-and-hosted-activity.md).

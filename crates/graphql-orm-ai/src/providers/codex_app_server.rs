@@ -8,6 +8,8 @@
 //! ordinary coordinator. Every other server-initiated request remains
 //! forbidden.
 
+#![cfg_attr(feature = "mssql", allow(dead_code))]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -34,6 +36,8 @@ const MAXIMUM_TURNS_PER_RUN: u32 = 1_024;
 const MAXIMUM_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAXIMUM_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAXIMUM_TEXT_BLOCKS: usize = 256;
+const MAXIMUM_BOOTSTRAP_INSTRUCTION_BLOCKS: usize = 16;
+const MAXIMUM_BOOTSTRAP_INSTRUCTION_BYTES: usize = 64 * 1024;
 const MAXIMUM_IDENTIFIER_BYTES: usize = 200;
 const MAXIMUM_VERSION_BYTES: usize = 200;
 const MAXIMUM_RUNTIME_WARNING_MESSAGE_BYTES: usize = 4 * 1024;
@@ -90,6 +94,108 @@ const DYNAMIC_TOOLS_ONLY_DISABLED_FEATURES: &[&str] = &[
 /// Exact reviewed Codex app-server protocol contract supported by this
 /// adapter.
 pub const AI_CODEX_APP_SERVER_PROTOCOL_V2: &str = "app-server-v2";
+
+/// Static deployment-owned instructions installed when a retained Codex
+/// thread is created.
+///
+/// This proof is deliberately separate from [`ModelRequest::instructions`].
+/// A retained thread accepts no request-local instructions: browser input,
+/// route context, secrets, resolver output, and model-authored text therefore
+/// cannot be smuggled into the privileged developer-instruction channel. The
+/// exact bounded text is fingerprinted into the immutable provider
+/// registration and is rechecked at empty-thread creation, first activation,
+/// and every resume.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AiCodexAppServerBootstrapInstructions {
+    blocks: Vec<String>,
+    fingerprint: String,
+}
+
+impl std::fmt::Debug for AiCodexAppServerBootstrapInstructions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiCodexAppServerBootstrapInstructions")
+            .field("blocks", &"<protected-static-configuration>")
+            .field("block_count", &self.blocks.len())
+            .field("fingerprint", &self.fingerprint)
+            .finish()
+    }
+}
+
+impl AiCodexAppServerBootstrapInstructions {
+    /// Creates a disabled bootstrap with no developer instructions.
+    pub fn disabled() -> Self {
+        Self::from_blocks(Vec::new()).expect("an empty static bootstrap is valid")
+    }
+
+    /// Creates one bounded bootstrap from compile-time static host text.
+    ///
+    /// The static lifetime makes the intended trust boundary explicit. Hosts
+    /// must keep only reusable deployment policy here; per-user or per-request
+    /// data belongs in ordinary model input and application-tool results.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidConfiguration`] for an empty block,
+    /// control characters other than tab/newline, excessive block count, or
+    /// an aggregate size above 64 KiB.
+    pub fn from_static(blocks: &'static [&'static str]) -> Result<Self, ProviderError> {
+        Self::from_blocks(blocks.iter().map(|value| (*value).to_owned()).collect())
+    }
+
+    fn from_blocks(blocks: Vec<String>) -> Result<Self, ProviderError> {
+        let total_bytes = blocks.iter().try_fold(0_usize, |total, block| {
+            total
+                .checked_add(block.len())
+                .ok_or(ProviderError::InvalidConfiguration(
+                    "Codex bootstrap instructions are too large".to_owned(),
+                ))
+        })?;
+        if blocks.len() > MAXIMUM_BOOTSTRAP_INSTRUCTION_BLOCKS
+            || total_bytes > MAXIMUM_BOOTSTRAP_INSTRUCTION_BYTES
+            || blocks.iter().any(|block| {
+                block.trim().is_empty()
+                    || block
+                        .chars()
+                        .any(|value| value.is_control() && !matches!(value, '\n' | '\t'))
+            })
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "invalid Codex bootstrap instructions".to_owned(),
+            ));
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(b"graphql-orm-ai/codex-app-server-bootstrap/v1\0");
+        for block in &blocks {
+            hasher.update((block.len() as u64).to_be_bytes());
+            hasher.update(block.as_bytes());
+        }
+        Ok(Self {
+            blocks,
+            fingerprint: hex::encode(hasher.finalize()),
+        })
+    }
+
+    /// Stable content fingerprint included in the registration identity.
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    /// Whether the retained thread has no static developer instructions.
+    pub fn is_disabled(&self) -> bool {
+        self.blocks.is_empty()
+    }
+
+    fn joined(&self) -> Option<String> {
+        (!self.blocks.is_empty()).then(|| self.blocks.join("\n\n"))
+    }
+}
+
+impl Default for AiCodexAppServerBootstrapInstructions {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
 
 /// Tool-delivery mode declared by the reviewed Codex model catalogue.
 ///
@@ -218,6 +324,7 @@ pub struct AiCodexAppServerRegistration {
     sandbox_profile: String,
     protocol_version: String,
     launch_profile: AiCodexAppServerLaunchProfile,
+    bootstrap_instructions: AiCodexAppServerBootstrapInstructions,
     identity: String,
 }
 
@@ -254,16 +361,8 @@ impl AiCodexAppServerRegistration {
             ));
         }
         let launch_profile = AiCodexAppServerLaunchProfile::strict_text_only_v1();
-        let identity = registration_identity(
-            &provider_profile_id,
-            &logical_model,
-            &executable_sha256,
-            &executable_version,
-            &sandbox_profile,
-            &protocol_version,
-            launch_profile,
-        );
-        Ok(Self {
+        let bootstrap_instructions = AiCodexAppServerBootstrapInstructions::disabled();
+        let mut registration = Self {
             provider_profile_id,
             logical_model,
             executable_sha256,
@@ -271,8 +370,11 @@ impl AiCodexAppServerRegistration {
             sandbox_profile,
             protocol_version,
             launch_profile,
-            identity,
-        })
+            bootstrap_instructions,
+            identity: String::new(),
+        };
+        registration.refresh_identity();
+        Ok(registration)
     }
 
     /// Applies one closed reviewed app-server launch profile.
@@ -285,21 +387,37 @@ impl AiCodexAppServerRegistration {
     #[must_use]
     pub fn with_launch_profile(mut self, launch_profile: AiCodexAppServerLaunchProfile) -> Self {
         self.launch_profile = launch_profile;
-        self.identity = registration_identity(
-            &self.provider_profile_id,
-            &self.logical_model,
-            &self.executable_sha256,
-            &self.executable_version,
-            &self.sandbox_profile,
-            &self.protocol_version,
-            launch_profile,
-        );
+        self.refresh_identity();
         self
+    }
+
+    /// Installs immutable static developer instructions for retained threads.
+    ///
+    /// The instructions become part of the registration identity and cannot
+    /// vary by request. Changing them invalidates existing provider-session
+    /// bindings so a stale thread cannot inherit a new trust policy.
+    #[must_use]
+    pub fn with_bootstrap_instructions(
+        mut self,
+        bootstrap_instructions: AiCodexAppServerBootstrapInstructions,
+    ) -> Self {
+        self.bootstrap_instructions = bootstrap_instructions;
+        self.refresh_identity();
+        self
+    }
+
+    fn refresh_identity(&mut self) {
+        self.identity = registration_identity(self);
     }
 
     /// Exact immutable launch profile included in the registration identity.
     pub const fn launch_profile(&self) -> AiCodexAppServerLaunchProfile {
         self.launch_profile
+    }
+
+    /// Exact static bootstrap proof bound to this registration.
+    pub fn bootstrap_instructions(&self) -> &AiCodexAppServerBootstrapInstructions {
+        &self.bootstrap_instructions
     }
 
     /// Deployment-owned provider profile identifier.
@@ -354,6 +472,7 @@ impl AiCodexAppServerRegistration {
 pub struct AiCodexAppServerTurnInput {
     model: String,
     instructions: Vec<String>,
+    retained_bootstrap_fingerprint: Option<String>,
     input: Vec<String>,
     tools: Vec<ModelToolDefinition>,
     maximum_output_tokens: u64,
@@ -366,6 +485,10 @@ impl std::fmt::Debug for AiCodexAppServerTurnInput {
             .field("model", &self.model)
             .field("instructions", &"<protected>")
             .field("instruction_count", &self.instructions.len())
+            .field(
+                "retained_bootstrap_fingerprint",
+                &self.retained_bootstrap_fingerprint,
+            )
             .field("input", &"<protected>")
             .field("input_count", &self.input.len())
             .field("tool_count", &self.tools.len())
@@ -391,6 +514,7 @@ impl AiCodexAppServerTurnInput {
         let turn = Self {
             model: model.into(),
             instructions,
+            retained_bootstrap_fingerprint: None,
             input,
             tools: Vec::new(),
             maximum_output_tokens,
@@ -421,6 +545,14 @@ impl AiCodexAppServerTurnInput {
             || self.maximum_output_tokens > u64::from(u32::MAX)
         {
             return Err(ProviderError::InvalidRequest);
+        }
+        if let Some(fingerprint) = &self.retained_bootstrap_fingerprint {
+            let bootstrap =
+                AiCodexAppServerBootstrapInstructions::from_blocks(self.instructions.clone())
+                    .map_err(|_| ProviderError::InvalidRequest)?;
+            if !crate::valid_sha256(fingerprint) || bootstrap.fingerprint() != fingerprint {
+                return Err(ProviderError::InvalidRequest);
+            }
         }
         Ok(())
     }
@@ -454,8 +586,16 @@ impl AiCodexAppServerTurnInput {
         Self::try_from_tool_free_request(request, ModelContinuationMode::StatelessReplay)
     }
 
-    fn try_from_retained_model_request(request: ModelRequest) -> Result<Self, ProviderError> {
-        Self::try_from_tool_free_request(request, ModelContinuationMode::ProviderRetained)
+    fn try_from_retained_model_request(
+        request: ModelRequest,
+        bootstrap: &AiCodexAppServerBootstrapInstructions,
+    ) -> Result<Self, ProviderError> {
+        let request = retained_request_with_bootstrap(request, bootstrap)?;
+        let mut input =
+            Self::try_from_tool_free_request(request, ModelContinuationMode::ProviderRetained)?;
+        input.retained_bootstrap_fingerprint = Some(bootstrap.fingerprint().to_owned());
+        input.validate()?;
+        Ok(input)
     }
 
     fn try_from_tool_free_request(
@@ -530,6 +670,36 @@ impl AiCodexAppServerTurnInput {
         turn.validate()?;
         Ok(turn)
     }
+
+    fn try_from_retained_dynamic_request(
+        request: ModelRequest,
+        bootstrap: &AiCodexAppServerBootstrapInstructions,
+    ) -> Result<Self, ProviderError> {
+        let request = retained_request_with_bootstrap(request, bootstrap)?;
+        let mut input = Self::try_from_dynamic_request(request)?;
+        input.retained_bootstrap_fingerprint = Some(bootstrap.fingerprint().to_owned());
+        input.validate()?;
+        Ok(input)
+    }
+
+    fn instruction_fingerprint(&self) -> Result<String, ProviderError> {
+        Ok(
+            AiCodexAppServerBootstrapInstructions::from_blocks(self.instructions.clone())?
+                .fingerprint()
+                .to_owned(),
+        )
+    }
+}
+
+fn retained_request_with_bootstrap(
+    mut request: ModelRequest,
+    bootstrap: &AiCodexAppServerBootstrapInstructions,
+) -> Result<ModelRequest, ProviderError> {
+    if !request.instructions.is_empty() {
+        return Err(ProviderError::Rejected);
+    }
+    request.instructions = bootstrap.blocks.clone();
+    Ok(request)
 }
 
 /// Resource limits for the run-scoped app-server pool.
@@ -776,7 +946,10 @@ impl AiProvider for AiCodexAppServerProvider {
         let binding = context.run_binding().ok_or(ProviderError::Rejected)?;
         let retained = context.provider_session().cloned();
         let input = if retained.is_some() {
-            AiCodexAppServerTurnInput::try_from_retained_model_request(request)?
+            AiCodexAppServerTurnInput::try_from_retained_model_request(
+                request,
+                self.registration.bootstrap_instructions(),
+            )?
         } else {
             AiCodexAppServerTurnInput::try_from_model_request(request)?
         };
@@ -821,7 +994,14 @@ impl AiProvider for AiCodexAppServerProvider {
         )?;
         let binding = context.run_binding().ok_or(ProviderError::Rejected)?;
         let retained = context.provider_session().cloned();
-        let input = AiCodexAppServerTurnInput::try_from_dynamic_request(request)?;
+        let input = if retained.is_some() {
+            AiCodexAppServerTurnInput::try_from_retained_dynamic_request(
+                request,
+                self.registration.bootstrap_instructions(),
+            )?
+        } else {
+            AiCodexAppServerTurnInput::try_from_dynamic_request(request)?
+        };
         if let Some(session) = retained {
             match session.activation() {
                 crate::AiProviderSessionActivation::NewlyBoundEmpty => {
@@ -885,7 +1065,10 @@ impl AiProvider for AiCodexAppServerProvider {
             return Err(ProviderError::Rejected);
         }
         let input = if request.tools.is_empty() {
-            AiCodexAppServerTurnInput::try_from_retained_model_request(request.clone())?
+            AiCodexAppServerTurnInput::try_from_retained_model_request(
+                request.clone(),
+                self.registration.bootstrap_instructions(),
+            )?
         } else {
             if !self.registration.experimental_dynamic_tools()
                 || !self
@@ -894,7 +1077,10 @@ impl AiProvider for AiCodexAppServerProvider {
             {
                 return Err(ProviderError::Unsupported);
             }
-            AiCodexAppServerTurnInput::try_from_dynamic_request(request.clone())?
+            AiCodexAppServerTurnInput::try_from_retained_dynamic_request(
+                request.clone(),
+                self.registration.bootstrap_instructions(),
+            )?
         };
         self.pool
             .create_empty_thread(*binding, self.registration.clone(), input.tools().to_vec())
@@ -930,14 +1116,16 @@ impl AiProvider for AiCodexAppServerProvider {
 pub trait AiCodexAppServerRunProcess: Send + Sync {
     /// Creates one durable empty provider thread and returns its opaque cursor.
     ///
-    /// No developer instruction, user input, or other business content may
-    /// enter the thread before the caller durably binds it. Reviewed dynamic
-    /// tool definitions may be installed because app-server cannot add them
+    /// Only the immutable registration-bound bootstrap and reviewed dynamic
+    /// tool definitions may enter the thread before the caller durably binds
+    /// it. No user input, request-local instruction, route context, secret, or
+    /// resolver output is permitted. App-server cannot add dynamic tools
     /// during `thread/resume`; implementations must transmit exactly the
-    /// supplied definitions or reject them.
+    /// supplied bootstrap and definitions or reject them.
     async fn create_empty_thread(
         &self,
         _model: &str,
+        _bootstrap: &AiCodexAppServerBootstrapInstructions,
         _dynamic_tools: Vec<ModelToolDefinition>,
     ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
         Err(ProviderError::Unsupported)
@@ -1114,9 +1302,12 @@ impl AiCodexAppServerLaunchedProcess {
     async fn create_empty_thread(
         &self,
         model: &str,
+        bootstrap: &AiCodexAppServerBootstrapInstructions,
         dynamic_tools: Vec<ModelToolDefinition>,
     ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
-        self.process.create_empty_thread(model, dynamic_tools).await
+        self.process
+            .create_empty_thread(model, bootstrap, dynamic_tools)
+            .await
     }
 
     async fn start_fresh_turn(
@@ -1269,6 +1460,7 @@ enum EmptyThreadActivation {
     Creating,
     Available {
         cursor_fingerprint: String,
+        bootstrap_fingerprint: String,
         dynamic_tools: Vec<ModelToolDefinition>,
     },
     Consumed,
@@ -1362,9 +1554,11 @@ impl AiCodexAppServerRunPool {
         }
         let outcome = tokio::time::timeout(
             self.inner.limits.startup_timeout,
-            entry
-                .process
-                .create_empty_thread(registration.logical_model(), dynamic_tools.clone()),
+            entry.process.create_empty_thread(
+                registration.logical_model(),
+                registration.bootstrap_instructions(),
+                dynamic_tools.clone(),
+            ),
         )
         .await;
         entry.turn_active.store(false, Ordering::Release);
@@ -1372,6 +1566,10 @@ impl AiCodexAppServerRunPool {
             Ok(Ok(cursor)) if cursor.kind() == "codex.app_server.thread.v2" => {
                 *entry.empty_thread.lock().await = EmptyThreadActivation::Available {
                     cursor_fingerprint: cursor.fingerprint(),
+                    bootstrap_fingerprint: registration
+                        .bootstrap_instructions()
+                        .fingerprint()
+                        .to_owned(),
                     dynamic_tools,
                 };
                 Ok(cursor)
@@ -1670,6 +1868,7 @@ impl AiCodexAppServerRunPool {
         session: &crate::AiOpenedProviderSession,
         input: &AiCodexAppServerTurnInput,
     ) -> Result<Arc<RunEntry>, ProviderError> {
+        let input_instruction_fingerprint = input.instruction_fingerprint()?;
         if session.activation() != crate::AiProviderSessionActivation::NewlyBoundEmpty
             || !opened_session_matches(binding, registration, session)
             || input.model() != registration.logical_model()
@@ -1700,8 +1899,10 @@ impl AiCodexAppServerRunPool {
             match &*activation {
                 EmptyThreadActivation::Available {
                     cursor_fingerprint,
+                    bootstrap_fingerprint,
                     dynamic_tools,
                 } if cursor_fingerprint == &session.cursor().fingerprint()
+                    && bootstrap_fingerprint == &input_instruction_fingerprint
                     && dynamic_tools == input.tools() =>
                 {
                     *activation = EmptyThreadActivation::Consumed;
@@ -2425,7 +2626,9 @@ pub struct AiCodexAppServerProtocolActor {
     pending_turn_thread_id: Option<String>,
     active_turn_id: Option<String>,
     retained_model: Option<String>,
+    retained_bootstrap_fingerprint: Option<String>,
     dynamic_tools: BTreeMap<String, ModelToolDefinition>,
+    dynamic_tool_projection_fingerprints: BTreeMap<String, String>,
     pending_dynamic_requests: BTreeMap<u64, (String, String)>,
     started_dynamic_calls: BTreeMap<String, String>,
     responded_dynamic_calls: BTreeMap<String, String>,
@@ -2465,7 +2668,9 @@ impl AiCodexAppServerProtocolActor {
             pending_turn_thread_id: None,
             active_turn_id: None,
             retained_model: None,
+            retained_bootstrap_fingerprint: None,
             dynamic_tools: BTreeMap::new(),
+            dynamic_tool_projection_fingerprints: BTreeMap::new(),
             pending_dynamic_requests: BTreeMap::new(),
             started_dynamic_calls: BTreeMap::new(),
             responded_dynamic_calls: BTreeMap::new(),
@@ -2654,12 +2859,14 @@ impl AiCodexAppServerProtocolActor {
     /// Creates a durable empty thread before any business content is sent.
     ///
     /// The caller must durably protect and bind the returned thread cursor
-    /// before calling [`Self::start_turn`]. Reviewed dynamic-tool definitions
-    /// may be installed because app-server cannot add them at resume time, but
-    /// no developer or user instructions are included in this request.
+    /// before calling [`Self::start_turn`]. Only the supplied immutable static
+    /// bootstrap may enter `developerInstructions`; no request-local or user
+    /// content is included. Reviewed dynamic-tool definitions may be installed
+    /// because app-server cannot add them at resume time.
     pub fn start_persistent_empty_thread(
         &mut self,
         model: &str,
+        bootstrap: &AiCodexAppServerBootstrapInstructions,
         dynamic_tools: &[ModelToolDefinition],
     ) -> Result<Vec<u8>, ProviderError> {
         self.validate_thread_lifecycle_boundary()?;
@@ -2667,6 +2874,7 @@ impl AiCodexAppServerProtocolActor {
             || self.thread_lifecycle_phase != ThreadLifecyclePhase::Ready
             || self.active_thread_id.is_some()
             || self.retained_model.is_some()
+            || self.retained_bootstrap_fingerprint.is_some()
             || !self.dynamic_tools.is_empty()
             || !self.pending_dynamic_requests.is_empty()
             || !self.started_dynamic_calls.is_empty()
@@ -2674,43 +2882,29 @@ impl AiCodexAppServerProtocolActor {
         {
             return Err(ProviderError::Rejected);
         }
-        let mut definitions = BTreeMap::new();
-        let dynamic_tools = dynamic_tools
-            .iter()
-            .map(|tool| {
-                tool.validate()?;
-                if definitions
-                    .insert(tool.provider_name.clone(), tool.clone())
-                    .is_some()
-                {
-                    return Err(ProviderError::Rejected);
-                }
-                Ok(json!({
-                    "type": "function",
-                    "name": tool.provider_name,
-                    "description": tool.description,
-                    "inputSchema": tool.parameters,
-                    "deferLoading": false,
-                }))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let projected_tools = project_codex_dynamic_tools(dynamic_tools)?;
         let mut params = json!({
             "model": model,
-            "developerInstructions": null,
+            "developerInstructions": bootstrap.joined().map_or(Value::Null, Value::String),
             "ephemeral": false,
             "approvalPolicy": "never",
             "sandbox": "read-only",
         });
-        if !dynamic_tools.is_empty() {
+        if !projected_tools.protocol_values.is_empty() {
             let params = params.as_object_mut().ok_or(ProviderError::Rejected)?;
-            params.insert("dynamicTools".to_owned(), Value::Array(dynamic_tools));
+            params.insert(
+                "dynamicTools".to_owned(),
+                Value::Array(projected_tools.protocol_values),
+            );
             params.insert("config".to_owned(), dynamic_tools_only_thread_config());
             params.insert("environments".to_owned(), Value::Array(Vec::new()));
         }
         let frame = self.request(ClientMethod::ThreadStart, "thread/start", params)?;
         self.begin_new_thread_lifecycle();
         self.retained_model = Some(model.to_owned());
-        self.dynamic_tools = definitions;
+        self.retained_bootstrap_fingerprint = Some(bootstrap.fingerprint().to_owned());
+        self.dynamic_tools = projected_tools.definitions;
+        self.dynamic_tool_projection_fingerprints = projected_tools.fingerprints;
         Ok(frame)
     }
 
@@ -2729,6 +2923,7 @@ impl AiCodexAppServerProtocolActor {
     ) -> Result<Vec<u8>, ProviderError> {
         input.validate()?;
         self.validate_thread_lifecycle_boundary()?;
+        let input_instruction_fingerprint = input.instruction_fingerprint()?;
         if cursor.kind() != "codex.app_server.thread.v2"
             || !valid_reference(cursor.expose_to_provider_adapter())
             || match self.thread_lifecycle_phase {
@@ -2744,27 +2939,26 @@ impl AiCodexAppServerProtocolActor {
                 .retained_model
                 .as_deref()
                 .is_some_and(|model| model != input.model())
+            || self
+                .retained_bootstrap_fingerprint
+                .as_deref()
+                .is_some_and(|fingerprint| fingerprint != input_instruction_fingerprint.as_str())
             || !self.pending_dynamic_requests.is_empty()
             || !self.started_dynamic_calls.is_empty()
             || !self.responded_dynamic_calls.is_empty()
         {
             return Err(ProviderError::Rejected);
         }
-        let mut definitions = BTreeMap::new();
-        for tool in input.tools() {
-            if definitions
-                .insert(tool.provider_name.clone(), tool.clone())
-                .is_some()
-            {
-                return Err(ProviderError::Rejected);
-            }
-        }
+        let projected_tools = project_codex_dynamic_tools(input.tools())?;
         let developer_instructions = if input.instructions().is_empty() {
             Value::Null
         } else {
             Value::String(input.instructions().join("\n\n"))
         };
-        if self.retained_model.is_some() && self.dynamic_tools != definitions {
+        if self.retained_model.is_some()
+            && (self.dynamic_tools != projected_tools.definitions
+                || self.dynamic_tool_projection_fingerprints != projected_tools.fingerprints)
+        {
             return Err(ProviderError::Rejected);
         }
         let mut params = json!({
@@ -2783,7 +2977,9 @@ impl AiCodexAppServerProtocolActor {
         let frame = self.request(ClientMethod::ThreadResume, "thread/resume", params)?;
         self.begin_resume_lifecycle(cursor.expose_to_provider_adapter());
         self.retained_model = Some(input.model().to_owned());
-        self.dynamic_tools = definitions;
+        self.retained_bootstrap_fingerprint = Some(input_instruction_fingerprint);
+        self.dynamic_tools = projected_tools.definitions;
+        self.dynamic_tool_projection_fingerprints = projected_tools.fingerprints;
         Ok(frame)
     }
 
@@ -2837,26 +3033,7 @@ impl AiCodexAppServerProtocolActor {
         {
             return Err(ProviderError::Rejected);
         }
-        let mut definitions = BTreeMap::new();
-        let dynamic_tools = input
-            .tools()
-            .iter()
-            .map(|tool| {
-                if definitions
-                    .insert(tool.provider_name.clone(), tool.clone())
-                    .is_some()
-                {
-                    return Err(ProviderError::Rejected);
-                }
-                Ok(json!({
-                    "type": "function",
-                    "name": tool.provider_name,
-                    "description": tool.description,
-                    "inputSchema": tool.parameters,
-                    "deferLoading": false,
-                }))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let projected_tools = project_codex_dynamic_tools(input.tools())?;
         let developer_instructions = if input.instructions().is_empty() {
             Value::Null
         } else {
@@ -2869,7 +3046,7 @@ impl AiCodexAppServerProtocolActor {
                 "model": input.model(),
                 "developerInstructions": developer_instructions,
                 "ephemeral": true,
-                "dynamicTools": dynamic_tools,
+                "dynamicTools": projected_tools.protocol_values,
                 "approvalPolicy": "never",
                 "sandbox": "read-only",
                 "config": dynamic_tools_only_thread_config(),
@@ -2877,7 +3054,8 @@ impl AiCodexAppServerProtocolActor {
             }),
         )?;
         self.begin_new_thread_lifecycle();
-        self.dynamic_tools = definitions;
+        self.dynamic_tools = projected_tools.definitions;
+        self.dynamic_tool_projection_fingerprints = projected_tools.fingerprints;
         Ok(frame)
     }
 
@@ -2944,15 +3122,12 @@ impl AiCodexAppServerProtocolActor {
         input: &AiCodexAppServerTurnInput,
     ) -> Result<Vec<u8>, ProviderError> {
         input.validate()?;
+        let input_instruction_fingerprint = input.instruction_fingerprint()?;
         let consumes_retained_resume_fallback = self.thread_lifecycle_phase
             == ThreadLifecyclePhase::Complete
             && self.thread_lifecycle_operation == Some(ThreadLifecycleOperation::Resume)
             && self.retained_usage_snapshot_observed;
-        let input_dynamic_tools = input
-            .tools()
-            .iter()
-            .map(|tool| (tool.provider_name.clone(), tool.clone()))
-            .collect::<BTreeMap<_, _>>();
+        let projected_tools = project_codex_dynamic_tools(input.tools())?;
         if !valid_reference(thread_id)
             || self.active_thread_id.as_deref() != Some(thread_id)
             || self.thread_lifecycle_phase != ThreadLifecyclePhase::Complete
@@ -2961,8 +3136,12 @@ impl AiCodexAppServerProtocolActor {
                 .retained_model
                 .as_deref()
                 .is_some_and(|model| model != input.model())
-            || input_dynamic_tools.len() != input.tools().len()
-            || self.dynamic_tools != input_dynamic_tools
+            || self
+                .retained_bootstrap_fingerprint
+                .as_deref()
+                .is_some_and(|fingerprint| fingerprint != input_instruction_fingerprint)
+            || self.dynamic_tools != projected_tools.definitions
+            || self.dynamic_tool_projection_fingerprints != projected_tools.fingerprints
             || self.pending_turn_thread_id.is_some()
             || self.active_turn_id.is_some()
             || self.turn_response_observed
@@ -3204,6 +3383,7 @@ impl AiCodexAppServerProtocolActor {
             }
             if self.retained_model.is_none() {
                 self.dynamic_tools.clear();
+                self.dynamic_tool_projection_fingerprints.clear();
             }
             self.pending_turn_thread_id = None;
             self.active_turn_id = None;
@@ -3487,6 +3667,10 @@ impl AiCodexAppServerProtocolActor {
                     return Err(ProviderError::Rejected);
                 }
                 self.active_thread_id = None;
+                self.retained_model = None;
+                self.retained_bootstrap_fingerprint = None;
+                self.dynamic_tools.clear();
+                self.dynamic_tool_projection_fingerprints.clear();
                 self.deleting_thread_id = None;
                 self.thread_lifecycle_operation = None;
                 self.thread_lifecycle_phase = ThreadLifecyclePhase::Deleted;
@@ -3923,6 +4107,257 @@ fn validate_allowed_notification(method: &str, params: &Value) -> Result<(), Pro
     Ok(())
 }
 
+struct ProjectedCodexDynamicTools {
+    protocol_values: Vec<Value>,
+    definitions: BTreeMap<String, ModelToolDefinition>,
+    fingerprints: BTreeMap<String, String>,
+}
+
+fn project_codex_dynamic_tools(
+    tools: &[ModelToolDefinition],
+) -> Result<ProjectedCodexDynamicTools, ProviderError> {
+    let mut protocol_values = Vec::with_capacity(tools.len());
+    let mut definitions = BTreeMap::new();
+    let mut fingerprints = BTreeMap::new();
+    for tool in tools {
+        tool.validate()?;
+        if !tool.strict
+            || definitions
+                .insert(tool.provider_name.clone(), tool.clone())
+                .is_some()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let projected_schema = project_codex_argument_schema(&tool.parameters)?;
+        let fingerprint = codex_schema_projection_fingerprint(tool, &projected_schema)?;
+        fingerprints.insert(tool.provider_name.clone(), fingerprint);
+        protocol_values.push(json!({
+            "type": "function",
+            "name": tool.provider_name,
+            "description": tool.description,
+            "inputSchema": projected_schema,
+            "deferLoading": false,
+        }));
+    }
+    Ok(ProjectedCodexDynamicTools {
+        protocol_values,
+        definitions,
+        fingerprints,
+    })
+}
+
+fn project_codex_argument_schema(schema: &Value) -> Result<Value, ProviderError> {
+    let object = schema.as_object().ok_or(ProviderError::Rejected)?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "$schema" | "type" | "properties" | "required" | "additionalProperties"
+        )
+    }) || object
+        .get("$schema")
+        .is_some_and(|value| value.as_str() != Some("https://json-schema.org/draft/2020-12/schema"))
+        || object.get("type").and_then(Value::as_str) != Some("object")
+        || object.get("additionalProperties").and_then(Value::as_bool) != Some(false)
+    {
+        return Err(ProviderError::Rejected);
+    }
+    let properties = object
+        .get("properties")
+        .and_then(Value::as_object)
+        .ok_or(ProviderError::Rejected)?;
+    if properties.len() > 128 {
+        return Err(ProviderError::Rejected);
+    }
+    let mut projected_properties = serde_json::Map::new();
+    for (name, property) in properties {
+        if !valid_identifier(name) {
+            return Err(ProviderError::Rejected);
+        }
+        projected_properties.insert(name.clone(), project_codex_scalar_schema(property)?);
+    }
+    let required = object
+        .get("required")
+        .and_then(Value::as_array)
+        .ok_or(ProviderError::Rejected)?;
+    let mut required_names = BTreeSet::new();
+    for value in required {
+        let name = value.as_str().ok_or(ProviderError::Rejected)?;
+        if !properties.contains_key(name) || !required_names.insert(name.to_owned()) {
+            return Err(ProviderError::Rejected);
+        }
+    }
+    Ok(json!({
+        "type": "object",
+        "properties": projected_properties,
+        "required": required,
+        "additionalProperties": false,
+    }))
+}
+
+fn project_codex_scalar_schema(schema: &Value) -> Result<Value, ProviderError> {
+    let object = schema.as_object().ok_or(ProviderError::Rejected)?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "type" | "description" | "enum" | "minLength" | "maxLength" | "minimum" | "maximum"
+        )
+    }) {
+        return Err(ProviderError::Rejected);
+    }
+    let schema_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or(ProviderError::Rejected)?;
+    if !matches!(schema_type, "string" | "integer" | "number" | "boolean") {
+        return Err(ProviderError::Rejected);
+    }
+    let description = object
+        .get("description")
+        .map(|value| value.as_str().ok_or(ProviderError::Rejected))
+        .transpose()?
+        .unwrap_or_default();
+    if description.len() > 2_000 || description.chars().any(char::is_control) {
+        return Err(ProviderError::Rejected);
+    }
+    let mut constraint_notes = Vec::new();
+    match schema_type {
+        "string" => {
+            let minimum = optional_u64(object, "minLength")?;
+            let maximum = optional_u64(object, "maxLength")?;
+            if minimum
+                .zip(maximum)
+                .is_some_and(|(minimum, maximum)| minimum > maximum)
+            {
+                return Err(ProviderError::Rejected);
+            }
+            if let Some(minimum) = minimum {
+                constraint_notes.push(format!("minimum length {minimum}"));
+            }
+            if let Some(maximum) = maximum {
+                constraint_notes.push(format!("maximum length {maximum}"));
+            }
+        }
+        "integer" | "number" => {
+            let minimum = optional_number(object, "minimum")?;
+            let maximum = optional_number(object, "maximum")?;
+            if minimum
+                .zip(maximum)
+                .is_some_and(|(minimum, maximum)| minimum > maximum)
+            {
+                return Err(ProviderError::Rejected);
+            }
+            if let Some(minimum) = minimum {
+                constraint_notes.push(format!("minimum {minimum}"));
+            }
+            if let Some(maximum) = maximum {
+                constraint_notes.push(format!("maximum {maximum}"));
+            }
+        }
+        "boolean" => {
+            if object.contains_key("minLength")
+                || object.contains_key("maxLength")
+                || object.contains_key("minimum")
+                || object.contains_key("maximum")
+            {
+                return Err(ProviderError::Rejected);
+            }
+        }
+        _ => unreachable!("schema type was closed above"),
+    }
+    let mut projected = serde_json::Map::new();
+    projected.insert("type".to_owned(), Value::String(schema_type.to_owned()));
+    if let Some(values) = object.get("enum") {
+        let values = values.as_array().ok_or(ProviderError::Rejected)?;
+        if schema_type != "string"
+            || values.is_empty()
+            || values.len() > 100
+            || values.iter().any(|value| {
+                value
+                    .as_str()
+                    .is_none_or(|value| value.is_empty() || value.len() > 200)
+            })
+        {
+            return Err(ProviderError::Rejected);
+        }
+        projected.insert("enum".to_owned(), Value::Array(values.clone()));
+    }
+    if !description.is_empty() || !constraint_notes.is_empty() {
+        let mut projected_description = description.to_owned();
+        if !constraint_notes.is_empty() {
+            if !projected_description.is_empty() {
+                projected_description.push(' ');
+            }
+            projected_description.push_str("Accepted value constraints: ");
+            projected_description.push_str(&constraint_notes.join(", "));
+            projected_description.push('.');
+        }
+        if projected_description.len() > 4_096 {
+            return Err(ProviderError::Rejected);
+        }
+        projected.insert(
+            "description".to_owned(),
+            Value::String(projected_description),
+        );
+    }
+    Ok(Value::Object(projected))
+}
+
+fn optional_u64(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<u64>, ProviderError> {
+    object
+        .get(key)
+        .map(|value| value.as_u64().ok_or(ProviderError::Rejected))
+        .transpose()
+}
+
+fn optional_number(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<f64>, ProviderError> {
+    object
+        .get(key)
+        .map(|value| {
+            value
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .ok_or(ProviderError::Rejected)
+        })
+        .transpose()
+}
+
+fn codex_schema_projection_fingerprint(
+    tool: &ModelToolDefinition,
+    projected_schema: &Value,
+) -> Result<String, ProviderError> {
+    let canonical = canonical_json_value(json!({
+        "format": "graphql-orm-ai/codex-dynamic-tool-schema-projection/v1",
+        "descriptorFingerprint": tool.fingerprint,
+        "canonicalSchema": tool.parameters,
+        "projectedSchema": projected_schema,
+    }));
+    let encoded = serde_json::to_vec(&canonical).map_err(|_| ProviderError::Rejected)?;
+    Ok(hex::encode(Sha256::digest(encoded)))
+}
+
+fn canonical_json_value(value: Value) -> Value {
+    match value {
+        Value::Object(object) => Value::Object(
+            object
+                .into_iter()
+                .map(|(key, value)| (key, canonical_json_value(value)))
+                .collect::<BTreeMap<_, _>>()
+                .into_iter()
+                .collect(),
+        ),
+        Value::Array(values) => {
+            Value::Array(values.into_iter().map(canonical_json_value).collect())
+        }
+        value => value,
+    }
+}
+
 fn valid_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAXIMUM_IDENTIFIER_BYTES
@@ -3945,36 +4380,30 @@ fn valid_reference(value: &str) -> bool {
         && !value.bytes().any(|byte| byte.is_ascii_control())
 }
 
-fn registration_identity(
-    provider_profile_id: &str,
-    logical_model: &str,
-    executable_sha256: &str,
-    executable_version: &str,
-    sandbox_profile: &str,
-    protocol_version: &str,
-    launch_profile: AiCodexAppServerLaunchProfile,
-) -> String {
+fn registration_identity(registration: &AiCodexAppServerRegistration) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"graphql-orm-ai/codex-app-server-registration/v2\0");
+    hasher.update(b"graphql-orm-ai/codex-app-server-registration/v3\0");
     for value in [
-        provider_profile_id,
-        logical_model,
-        executable_sha256,
-        executable_version,
-        sandbox_profile,
-        protocol_version,
+        registration.provider_profile_id.as_str(),
+        registration.logical_model.as_str(),
+        registration.executable_sha256.as_str(),
+        registration.executable_version.as_str(),
+        registration.sandbox_profile.as_str(),
+        registration.protocol_version.as_str(),
     ] {
         hasher.update((value.len() as u64).to_be_bytes());
         hasher.update(value.as_bytes());
     }
-    let profile = launch_profile.identity_label();
+    let profile = registration.launch_profile.identity_label();
     hasher.update((profile.len() as u64).to_be_bytes());
     hasher.update(profile.as_bytes());
+    hasher.update((registration.bootstrap_instructions.fingerprint().len() as u64).to_be_bytes());
+    hasher.update(registration.bootstrap_instructions.fingerprint().as_bytes());
     hex::encode(hasher.finalize())
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::path::PathBuf;
     use std::process::{Child, ChildStdin, Command, Stdio};
@@ -3986,10 +4415,47 @@ mod tests {
         AccessTokenMetadata, AuthPrincipal, AuthUser, PrincipalReference, SessionContext,
     };
     use futures::stream;
+    use graphql_orm::prelude::*;
 
     use super::*;
     use crate::{AiRunId, AiSessionId, ProviderDynamicToolResult, ProviderEvent};
     use uuid::Uuid;
+
+    mod canonical_tool_surface {
+        use graphql_orm::prelude::*;
+
+        #[derive(
+            GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
+        )]
+        #[graphql_entity(
+            table = "codex_profile_inventory",
+            plural = "CodexProfileInventory",
+            description = "Reviewed inventory records available to application workflows"
+        )]
+        pub struct CodexProfileInventoryRecord {
+            #[primary_key]
+            #[filterable(type = "string")]
+            #[sortable]
+            #[graphql_orm(description = "Stable public inventory identity")]
+            pub id: String,
+            #[graphql_orm(description = "Human-facing inventory label")]
+            pub label: String,
+            #[graphql_orm(description = "Internal field excluded from the AI projection")]
+            pub internal_marker: String,
+        }
+
+        schema_roots! {
+            entities: [CodexProfileInventoryRecord],
+        }
+    }
+
+    struct AdmitCanonicalGeneratedTool;
+
+    impl crate::AiGeneratedGraphqlOperationPolicy for AdmitCanonicalGeneratedTool {
+        fn is_application_operation(&self, operation: &GraphqlResolverOperationDescriptor) -> bool {
+            operation.entity_name() == "CodexProfileInventoryRecord"
+        }
+    }
 
     struct LiveCodexProcess {
         child: Child,
@@ -4155,6 +4621,7 @@ mod tests {
         async fn create_empty_thread(
             &self,
             _model: &str,
+            _bootstrap: &AiCodexAppServerBootstrapInstructions,
             dynamic_tools: Vec<ModelToolDefinition>,
         ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
             self.counters.created_threads.fetch_add(1, Ordering::SeqCst);
@@ -4207,7 +4674,7 @@ mod tests {
                 "turn-dynamic-1",
                 "call-dynamic-1",
                 definition,
-                json!({"query": "bounded"}),
+                json!({"Limit": 3}),
             )?;
             let result = responder.respond(call).await?;
             if result.call_id() != "call-dynamic-1"
@@ -4226,11 +4693,11 @@ mod tests {
                 }),
                 Ok(ProviderEvent::ToolArgumentsDelta {
                     call_id: "call-dynamic-1".to_owned(),
-                    delta: "{\"query\":\"bounded\"}".to_owned(),
+                    delta: "{\"Limit\":3}".to_owned(),
                 }),
                 Ok(ProviderEvent::ToolCallCompleted {
                     call_id: "call-dynamic-1".to_owned(),
-                    arguments: json!({"query": "bounded"}),
+                    arguments: json!({"Limit": 3}),
                 }),
                 Ok(ProviderEvent::TextDelta {
                     text: "There are three.".to_owned(),
@@ -4380,7 +4847,8 @@ mod tests {
                 "sandbox-empty",
                 AI_CODEX_APP_SERVER_PROTOCOL_V2,
             )
-            .expect("test registration should validate"),
+            .expect("test registration should validate")
+            .with_bootstrap_instructions(trusted_bootstrap()),
         )
     }
 
@@ -4403,20 +4871,138 @@ mod tests {
         )
     }
 
+    fn bootstrap_instructions() -> AiCodexAppServerBootstrapInstructions {
+        AiCodexAppServerBootstrapInstructions::from_static(&[
+            "Use the exact registered application tool when it is required to answer the request.",
+        ])
+        .expect("test bootstrap should validate")
+    }
+
+    fn trusted_bootstrap() -> AiCodexAppServerBootstrapInstructions {
+        AiCodexAppServerBootstrapInstructions::from_static(&["trusted"])
+            .expect("trusted test bootstrap should validate")
+    }
+
+    pub(crate) fn canonical_dynamic_tool_catalog() -> (crate::AiToolCatalog, ModelToolDefinition) {
+        let operation_catalog = canonical_tool_surface::graphql_orm_operation_catalog();
+        let operation = operation_catalog
+            .exposed_operations()
+            .find(|operation| {
+                operation.category() == GeneratedGraphqlOperationCategory::List
+                    && operation.entity_name() == "CodexProfileInventoryRecord"
+            })
+            .expect("generated inventory list operation should exist");
+        let arguments = operation
+            .arguments()
+            .iter()
+            .map(|argument| format!("{}: {}", argument.graphql_name(), argument.graphql_type()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (page_argument, page_first, page_info, total_count) =
+            if cfg!(feature = "graphql-case-pascal") {
+                ("Page", "First", "PageInfo", "TotalCount")
+            } else {
+                ("page", "first", "pageInfo", "totalCount")
+            };
+        let sdl = format!(
+            r#"
+            schema {{ query: Query }}
+            type Query {{ {}({arguments}): CodexProfileInventoryRecordConnection! }}
+            input CodexProfileInventoryRecordWhereInput {{ id: StringFilter }}
+            input CodexProfileInventoryRecordOrderByInput {{ id: SortDirection }}
+            input PageInput {{ {page_first}: Int }}
+            input StringFilter {{ eq: String }}
+            enum SortDirection {{ ASC DESC }}
+            type CodexProfileInventoryRecordConnection {{
+                nodes: [CodexProfileInventoryRecord!]!
+                {page_info}: PageInfo!
+            }}
+            type PageInfo {{ {total_count}: Int! }}
+            type CodexProfileInventoryRecord {{ id: String!, label: String!, internalMarker: String! }}
+            "#,
+            operation.field_name(),
+        );
+        let disclosure_rule =
+            crate::AiDisclosureRule::exportable(crate::DataClassification::Internal);
+        let disclosure = crate::AiDisclosureSchema::new(
+            "codex-generated-count-v1",
+            crate::AiDisclosureShape::object(
+                disclosure_rule,
+                [(
+                    operation.field_name().to_owned(),
+                    crate::AiDisclosureShape::object(
+                        disclosure_rule,
+                        [(
+                            page_info.to_owned(),
+                            crate::AiDisclosureShape::object(
+                                disclosure_rule,
+                                [(
+                                    total_count.to_owned(),
+                                    crate::AiDisclosureShape::scalar(disclosure_rule),
+                                )],
+                            ),
+                        )],
+                    ),
+                )],
+            ),
+        )
+        .expect("generated inventory disclosure should validate");
+        let profile = crate::AiGraphqlToolProfile::read_only(
+            "bounded-count",
+            operation.field_name(),
+            "Count a bounded set of visible inventory records",
+            vec![crate::AiGraphqlSelection::object(
+                page_info,
+                [crate::AiGraphqlSelection::scalar(total_count)],
+            )],
+            disclosure,
+            4_096,
+            1,
+        )
+        .with_inputs([crate::AiGraphqlProfileInput::integer(
+            "Limit",
+            "Maximum records to consider",
+            true,
+            1,
+            25,
+        )])
+        .with_arguments([crate::AiGraphqlArgumentPlan::new(
+            page_argument,
+            crate::AiGraphqlArgumentValue::object([(
+                page_first,
+                crate::AiGraphqlArgumentValue::input("Limit"),
+            )]),
+        )]);
+        let mut builder = crate::AiGraphqlToolManifestBuilder::new(
+            "canonical-inventory-service",
+            crate::GraphqlExecutionTargetId::parse("canonical-inventory-graph")
+                .expect("generated inventory target should validate"),
+            &sdl,
+        )
+        .expect("generated inventory manifest builder should validate");
+        builder
+            .add_generated_profile(profile, operation_catalog, &AdmitCanonicalGeneratedTool)
+            .expect("generated inventory profile should compile");
+        let manifest = builder
+            .build()
+            .expect("generated inventory manifest should build");
+        let tool_id = manifest.entries[0].descriptor.id.clone();
+        let mut catalog = crate::AiToolCatalog::new();
+        manifest
+            .register_into(
+                &mut catalog,
+                operation_catalog,
+                &AdmitCanonicalGeneratedTool,
+            )
+            .expect("generated inventory manifest should register");
+        let definition = catalog
+            .read_only_model_definition(&tool_id, "inventory_count")
+            .expect("catalog should project the generated definition");
+        (catalog, definition)
+    }
+
     fn dynamic_tool() -> ModelToolDefinition {
-        ModelToolDefinition {
-            tool_id: "inventory.count".to_owned(),
-            provider_name: "inventory_count".to_owned(),
-            fingerprint: "b".repeat(64),
-            description: "Count a bounded reviewed inventory.".to_owned(),
-            parameters: json!({
-                "type": "object",
-                "properties": {"query": {"type": "string", "maxLength": 100}},
-                "required": ["query"],
-                "additionalProperties": false
-            }),
-            strict: true,
-        }
+        canonical_dynamic_tool_catalog().1
     }
 
     struct FakeDynamicResponder;
@@ -4427,12 +5013,33 @@ mod tests {
             &self,
             call: ProviderDynamicToolCall,
         ) -> Result<ProviderDynamicToolResult, ProviderError> {
+            let expected = dynamic_tool();
             if call.response_id() != "turn-dynamic-1"
                 || call.call_id() != "call-dynamic-1"
-                || call.tool_id() != "inventory.count"
-                || call.provider_name() != "inventory_count"
-                || call.tool_fingerprint() != "b".repeat(64)
-                || call.arguments() != &json!({"query": "bounded"})
+                || call.tool_id() != expected.tool_id
+                || call.provider_name() != expected.provider_name
+                || call.tool_fingerprint() != expected.fingerprint
+                || call.arguments() != &json!({"Limit": 3})
+            {
+                return Err(ProviderError::Rejected);
+            }
+            ProviderDynamicToolResult::new(&call, json!({"count": 3}))
+        }
+    }
+
+    struct LiveDynamicResponder;
+
+    #[async_trait]
+    impl ProviderDynamicToolResponder for LiveDynamicResponder {
+        async fn respond(
+            &self,
+            call: ProviderDynamicToolCall,
+        ) -> Result<ProviderDynamicToolResult, ProviderError> {
+            let expected = dynamic_tool();
+            if call.tool_id() != expected.tool_id
+                || call.provider_name() != expected.provider_name
+                || call.tool_fingerprint() != expected.fingerprint
+                || call.arguments() != &json!({"Limit": 3})
             {
                 return Err(ProviderError::Rejected);
             }
@@ -4459,6 +5066,125 @@ mod tests {
             ),
             Err(ProviderError::InvalidConfiguration(_))
         ));
+    }
+
+    #[test]
+    fn retained_bootstrap_is_static_registration_bound_and_active_on_first_turn() {
+        let bootstrap = bootstrap_instructions();
+        let without_bootstrap = dynamic_registration("1.0.0");
+        let with_bootstrap = AiCodexAppServerRegistration::new(
+            "profile-1",
+            "model-1",
+            "a".repeat(64),
+            "1.0.0",
+            "sandbox-empty",
+            AI_CODEX_APP_SERVER_PROTOCOL_V2,
+        )
+        .expect("registration should validate")
+        .with_launch_profile(
+            AiCodexAppServerLaunchProfile::experimental_dynamic_tools_only_v1(
+                AiCodexAppServerModelToolMode::Direct,
+            )
+            .expect("direct profile should validate"),
+        )
+        .with_bootstrap_instructions(bootstrap.clone());
+        assert_ne!(without_bootstrap.identity(), with_bootstrap.identity());
+
+        let mut actor = initialized_protocol_actor();
+        let frame = actor
+            .start_persistent_empty_thread("model-1", &bootstrap, &[dynamic_tool()])
+            .expect("static bootstrap thread should encode");
+        let value: Value = serde_json::from_slice(&frame).expect("frame should be JSON");
+        assert_eq!(
+            value.pointer("/params/developerInstructions"),
+            Some(&Value::String(
+                "Use the exact registered application tool when it is required to answer the request."
+                    .to_owned(),
+            ))
+        );
+        assert!(value.pointer("/params/input").is_none());
+        actor
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-bootstrap"}}}"#)
+            .expect("thread response should bind");
+        actor
+            .accept(&thread_started_notification("thread-bootstrap"))
+            .expect("thread notification should bind");
+
+        let mut request = dynamic_model_request();
+        request.instructions.clear();
+        let input = AiCodexAppServerTurnInput::try_from_retained_dynamic_request(
+            request.clone(),
+            &bootstrap,
+        )
+        .expect("registration bootstrap should project into retained input");
+        actor
+            .start_turn("thread-bootstrap", &input)
+            .expect("first bound turn should retain the static bootstrap");
+
+        request.instructions = vec!["request-local replacement".to_owned()];
+        assert!(matches!(
+            AiCodexAppServerTurnInput::try_from_retained_dynamic_request(request, &bootstrap),
+            Err(ProviderError::Rejected)
+        ));
+        assert!(AiCodexAppServerBootstrapInstructions::from_static(&["bad\0text"]).is_err());
+    }
+
+    #[test]
+    fn canonical_generated_schema_projects_closed_bounds_for_codex() {
+        let tool = dynamic_tool();
+        assert_eq!(
+            tool.parameters.pointer("/$schema").and_then(Value::as_str),
+            Some("https://json-schema.org/draft/2020-12/schema")
+        );
+        assert_eq!(
+            tool.parameters
+                .pointer("/properties/Limit/minimum")
+                .and_then(Value::as_i64),
+            Some(1)
+        );
+        assert_eq!(
+            tool.parameters
+                .pointer("/properties/Limit/maximum")
+                .and_then(Value::as_i64),
+            Some(25)
+        );
+        let projected = project_codex_dynamic_tools(std::slice::from_ref(&tool))
+            .expect("canonical generated schema should project");
+        let schema = &projected.protocol_values[0]["inputSchema"];
+        assert!(schema.get("$schema").is_none());
+        assert!(schema.pointer("/properties/Limit/minimum").is_none());
+        assert!(schema.pointer("/properties/Limit/maximum").is_none());
+        let description = schema
+            .pointer("/properties/Limit/description")
+            .and_then(Value::as_str)
+            .expect("Codex projection should preserve constraints semantically");
+        assert!(description.contains("minimum 1"));
+        assert!(description.contains("maximum 25"));
+
+        let mut reordered = tool.clone();
+        reordered.parameters = json!({
+            "additionalProperties": false,
+            "required": ["Limit"],
+            "properties": {
+                "Limit": {
+                    "maximum": 25,
+                    "minimum": 1,
+                    "description": "Maximum records to consider",
+                    "type": "integer"
+                }
+            },
+            "type": "object",
+            "$schema": "https://json-schema.org/draft/2020-12/schema"
+        });
+        let reordered_projection = project_codex_dynamic_tools(&[reordered])
+            .expect("object-key ordering must not alter projection");
+        assert_eq!(projected.fingerprints, reordered_projection.fingerprints);
+
+        let mut substituted = tool;
+        substituted.fingerprint = "f".repeat(64);
+        let substituted_projection = project_codex_dynamic_tools(&[substituted])
+            .expect("syntactically valid substituted descriptor should project distinctly");
+        assert_ne!(projected.fingerprints, substituted_projection.fingerprints);
     }
 
     #[test]
@@ -4558,6 +5284,7 @@ mod tests {
 
     fn dynamic_model_request() -> ModelRequest {
         ModelRequest {
+            instructions: Vec::new(),
             continuation_mode: ModelContinuationMode::ProviderRetained,
             tools: vec![dynamic_tool()],
             ..model_request()
@@ -4962,6 +5689,7 @@ mod tests {
             AiCodexAppServerProvider::new(registration.clone(), pool(counters.clone(), 1, 2));
         let mut request = model_request();
         request.continuation_mode = ModelContinuationMode::ProviderRetained;
+        request.instructions.clear();
         let context = provider_context(registration.provider_profile_id(), &request);
         let binding = context
             .run_binding()
@@ -5211,8 +5939,12 @@ mod tests {
             AiCodexAppServerTurnInput::try_from_model_request(retained.clone()),
             Err(ProviderError::Unsupported)
         ));
-        AiCodexAppServerTurnInput::try_from_retained_model_request(retained)
-            .expect("tool-free retained initial input should use its explicit converter");
+        retained.instructions.clear();
+        AiCodexAppServerTurnInput::try_from_retained_model_request(
+            retained,
+            &bootstrap_instructions(),
+        )
+        .expect("tool-free retained initial input should use its explicit converter");
 
         let mut reasoning = model_request();
         reasoning.reasoning_summary = ModelReasoningSummaryRequest::auto(1_024)
@@ -6119,7 +6851,11 @@ mod tests {
 
         let mut new_thread = initialized_protocol_actor();
         new_thread
-            .start_persistent_empty_thread("model-1", &[])
+            .start_persistent_empty_thread(
+                "model-1",
+                &AiCodexAppServerBootstrapInstructions::disabled(),
+                &[],
+            )
             .expect("new persistent thread should start");
         new_thread
             .accept(br#"{"id":2,"result":{"thread":{"id":"thread-new"}}}"#)
@@ -6159,7 +6895,7 @@ mod tests {
     fn protocol_admits_runtime_warning_after_strict_retained_resume() {
         let mut actor = initialized_protocol_actor();
         actor
-            .start_persistent_empty_thread("model-1", &[])
+            .start_persistent_empty_thread("model-1", &trusted_bootstrap(), &[])
             .expect("persistent empty thread should encode");
         actor
             .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
@@ -6256,7 +6992,7 @@ mod tests {
     fn retained_actor_repeats_response_first_create_resume_and_turn_lifecycle() {
         let mut actor = initialized_protocol_actor();
         actor
-            .start_persistent_empty_thread("model-1", &[])
+            .start_persistent_empty_thread("model-1", &trusted_bootstrap(), &[])
             .expect("persistent create should encode");
         actor
             .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
@@ -6286,7 +7022,7 @@ mod tests {
     fn retained_actor_repeats_notification_first_create_and_resume_lifecycle() {
         let mut actor = initialized_protocol_actor();
         actor
-            .start_persistent_empty_thread("model-1", &[])
+            .start_persistent_empty_thread("model-1", &trusted_bootstrap(), &[])
             .expect("persistent create should encode");
         actor
             .accept(&thread_started_notification("thread-retained-1"))
@@ -6322,7 +7058,11 @@ mod tests {
             .expect("dynamic input should validate");
         let mut actor = initialized_protocol_actor();
         actor
-            .start_persistent_empty_thread("model-1", input.tools())
+            .start_persistent_empty_thread(
+                "model-1",
+                &AiCodexAppServerBootstrapInstructions::disabled(),
+                input.tools(),
+            )
             .expect("persistent dynamic create should encode");
         actor
             .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
@@ -6899,7 +7639,7 @@ mod tests {
             "item/started",
             json!({
                 "item": {
-                    "arguments": {"query": "bounded"},
+                    "arguments": {"Limit": 3},
                     "id": "call-dynamic-1",
                     "namespace": null,
                     "status": "inProgress",
@@ -6923,7 +7663,7 @@ mod tests {
             "id": 0,
             "method": "item/tool/call",
             "params": {
-                "arguments": {"query": "bounded"},
+                "arguments": {"Limit": 3},
                 "callId": "call-dynamic-1",
                 "namespace": null,
                 "threadId": "thread-1",
@@ -6963,7 +7703,7 @@ mod tests {
             "item/completed",
             json!({
                 "item": {
-                    "arguments": {"query": "bounded"},
+                    "arguments": {"Limit": 3},
                     "contentItems": [{"type": "inputText", "text": "{\"count\":3}"}],
                     "durationMs": 2,
                     "id": "call-dynamic-1",
@@ -7012,7 +7752,7 @@ mod tests {
             "id": 43,
             "method": "item/tool/call",
             "params": {
-                "arguments": {"query": "bounded"},
+                "arguments": {"Limit": 3},
                 "callId": "call-dynamic-2",
                 "namespace": null,
                 "threadId": "thread-other",
@@ -7032,7 +7772,11 @@ mod tests {
         let mut empty_guard = initialized_protocol_actor();
         let create = String::from_utf8(
             empty_guard
-                .start_persistent_empty_thread("codex-test-model", &[])
+                .start_persistent_empty_thread(
+                    "codex-test-model",
+                    &AiCodexAppServerBootstrapInstructions::disabled(),
+                    &[],
+                )
                 .expect("empty retained thread should encode"),
         )
         .expect("frame should be UTF-8");
@@ -7080,7 +7824,11 @@ mod tests {
         let mut dynamic_create = initialized_protocol_actor();
         let create = String::from_utf8(
             dynamic_create
-                .start_persistent_empty_thread("model-1", input.tools())
+                .start_persistent_empty_thread(
+                    "model-1",
+                    &AiCodexAppServerBootstrapInstructions::disabled(),
+                    input.tools(),
+                )
                 .expect("empty dynamic retained thread should encode"),
         )
         .expect("frame should be UTF-8");
@@ -7166,9 +7914,9 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore = "requires a reviewed Codex CLI 0.147.0 binary and disposable configured home"]
-    fn live_codex_0147_bound_first_turn_then_later_resume_uses_strict_actor() {
+    async fn live_codex_0147_bound_first_turn_then_later_resume_uses_strict_actor() {
         let executable = std::env::var("GRAPHQL_ORM_AI_CODEX_0147_BIN")
             .expect("set GRAPHQL_ORM_AI_CODEX_0147_BIN to the reviewed absolute binary path");
         assert!(PathBuf::from(&executable).is_absolute());
@@ -7221,7 +7969,11 @@ mod tests {
         );
         process.send(
             &actor
-                .start_persistent_empty_thread("gpt-5.4", &[dynamic_tool()])
+                .start_persistent_empty_thread(
+                    "gpt-5.4",
+                    &bootstrap_instructions(),
+                    &[dynamic_tool()],
+                )
                 .expect("persistent thread start should encode"),
         );
 
@@ -7276,11 +8028,15 @@ mod tests {
         live_request.model = "gpt-5.4".to_owned();
         live_request.instructions.clear();
         live_request.input = vec![ModelInputBlock::Text {
-            text: "Call inventory_count once with query bounded, then report the count.".to_owned(),
+            text: "Call inventory_count exactly once with Limit set to 3, then report the count."
+                .to_owned(),
         }];
         live_request.maximum_output_tokens = Some(128);
-        let input = AiCodexAppServerTurnInput::try_from_dynamic_request(live_request)
-            .expect("live retained dynamic input should validate");
+        let input = AiCodexAppServerTurnInput::try_from_retained_dynamic_request(
+            live_request,
+            &bootstrap_instructions(),
+        )
+        .expect("live retained dynamic input should validate");
 
         process.send(
             &actor
@@ -7335,8 +8091,10 @@ mod tests {
                     request_id, call, ..
                 } => {
                     dynamic_tool_calls += 1;
-                    let result = ProviderDynamicToolResult::new(&call, json!({"count": 3}))
-                        .expect("live dynamic result should bind to the exact call");
+                    let result = LiveDynamicResponder
+                        .respond(call)
+                        .await
+                        .expect("live responder should bind to the exact canonical call");
                     process.send(
                         &actor
                             .dynamic_tool_response(request_id, &result)
@@ -7494,8 +8252,10 @@ mod tests {
                     request_id, call, ..
                 } => {
                     second_dynamic_tool_calls += 1;
-                    let result = ProviderDynamicToolResult::new(&call, json!({"count": 3}))
-                        .expect("second dynamic result should bind");
+                    let result = LiveDynamicResponder
+                        .respond(call)
+                        .await
+                        .expect("resumed responder should bind to the exact canonical call");
                     process.send(
                         &actor
                             .dynamic_tool_response(request_id, &result)

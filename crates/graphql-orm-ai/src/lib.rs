@@ -112,7 +112,6 @@ mod provider_activity;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod provider_calls;
 mod provider_run;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod provider_session;
 mod providers;
 mod remote_execution;
@@ -227,7 +226,6 @@ pub use provider_activity::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use provider_calls::*;
 pub use provider_run::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use provider_session::*;
 pub use providers::*;
 pub use remote_execution::*;

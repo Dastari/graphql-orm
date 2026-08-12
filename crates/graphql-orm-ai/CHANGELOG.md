@@ -20,7 +20,52 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-No changes recorded after 0.74.0.
+No changes recorded after 0.75.0.
+
+## [0.75.0] - 2026-08-12
+
+### Added
+
+- `AiToolCatalog::read_only_model_definition` constructs the provider-facing
+  definition directly from one registered read-only descriptor. Hosts choose
+  only a provider-safe alias; stable ID, description, canonical argument
+  schema, strictness, and fingerprint cannot drift into a second declaration.
+- `AiCodexAppServerBootstrapInstructions` carries bounded compile-time static
+  deployment instructions for retained threads. Its protected content
+  fingerprint participates in registration identity and is rechecked through
+  creation, first activation, and resume.
+
+### Changed
+
+- `AiCodexAppServerRunProcess::create_empty_thread` now receives the typed
+  static bootstrap beside the model and exact dynamic definitions. Retained
+  `ModelRequest::instructions` must be empty; request-local text cannot enter
+  the developer-instruction channel.
+- Registration identity version 3 binds the bootstrap fingerprint. Existing
+  retained cursors from older registration identities become cleanup-only.
+- Provider-neutral session cursor, descriptor, activation, and deletion
+  contracts now remain available in the MSSQL compile/schema profile. The ORM
+  provider-session runtime remains intentionally limited to SQLite and
+  PostgreSQL.
+
+### Fixed
+
+- Canonical GraphQL tool-profile argument schemas are projected through a
+  closed Codex-specific JSON Schema subset. Unsupported scalar bound keywords
+  are represented in provider-visible property descriptions, while the exact
+  canonical schema remains authoritative for every returned dynamic call.
+- The retained first turn now receives the same immutable trusted instructions
+  that created its empty thread. Tool behavior no longer depends on a
+  request-local instruction that cannot be transmitted after durable binding.
+
+### Security
+
+- Generated-profile, tool-bound plan, coordinator, newly-bound, retained
+  resume, exact responder, cancellation, process-fence, schema substitution,
+  descriptor substitution, instruction substitution, and cursor substitution
+  tests share one canonical generated read-only profile with a bounded integer
+  input and explicit result projection. The ignored Codex 0.147.0 acceptance
+  uses that same profile rather than a hand-authored model definition.
 
 ## [0.74.0] - 2026-08-12
 

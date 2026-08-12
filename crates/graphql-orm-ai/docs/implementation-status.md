@@ -10,7 +10,7 @@ supersedes: []
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.74.0` with AI schema module
+`graphql-orm-ai` is at crate version `0.75.0` with AI schema module
 `0.55.0`. It uses workspace `graphql-orm` `0.21.0`, backend-neutral
 `graphql-orm-ai-tool-profiles` `0.3.0`, and external `agql-auth`
 `0.14.0` at `413fda3435f060604cd653c11e2cc18a668aace1`.
@@ -46,7 +46,11 @@ verification evidence belongs in the focused guides.
   Initialization uses one library-owned notification opt-out profile, while
   response-authoritative deletion, empty reasoning lifecycle, and retained
   cumulative-usage replay are admitted only through typed content-free
-  controls that cannot become model output or current-run usage.
+  controls that cannot become model output or current-run usage. Retained
+  developer instructions are compile-time static, registration-fingerprinted,
+  and distinct from request input. Provider definitions are projected from the
+  exact registered manifest, with canonical JSON Schema validation retained at
+  every dynamic-call boundary.
 - The provider-neutral durable session service protects opaque retained-thread
   cursors under exact owner/scope/run/descriptor/transcript fencing and an
   exact deletion/absence lifecycle. Cursor state is separate from warm

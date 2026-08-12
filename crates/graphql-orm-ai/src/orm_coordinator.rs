@@ -2023,6 +2023,10 @@ mod tests {
         delay: Option<std::time::Duration>,
     }
 
+    struct CanonicalDynamicProviderExecutor {
+        definition: crate::ModelToolDefinition,
+    }
+
     impl TestProviderExecutor {
         fn remaining_responses(&self) -> usize {
             self.responses
@@ -2074,6 +2078,40 @@ mod tests {
                 completed.push(persisted);
             }
             result = result.test_with_interactive_tool_results(completed);
+            Ok(result)
+        }
+    }
+
+    #[async_trait]
+    impl AiAgentProviderTurnExecutor for CanonicalDynamicProviderExecutor {
+        async fn execute_turn(
+            &self,
+            _lease: &AiRunLease,
+            _plan: AiProviderCallPlan,
+        ) -> Result<AiProviderCallResult, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn execute_dynamic_turn(
+            &self,
+            lease: Arc<tokio::sync::Mutex<AiRunLease>>,
+            _plan: AiProviderCallPlan,
+            execution: Arc<dyn AiProviderDynamicToolExecution>,
+        ) -> Result<AiProviderCallResult, AiError> {
+            let current = lease.lock().await.clone();
+            let mut result = AiProviderCallResult::test_result(
+                &current,
+                None,
+                "canonical-dynamic-response",
+                vec![(
+                    "canonical-dynamic-call",
+                    self.definition.tool_id.as_str(),
+                    json!({"Limit": 3}),
+                )],
+            );
+            let persisted = execution.execute_dynamic_tool(&current, &result, 0).await?;
+            *lease.lock().await = persisted.lease().clone();
+            result = result.test_with_interactive_tool_results(vec![persisted]);
             Ok(result)
         }
     }
@@ -2246,6 +2284,12 @@ mod tests {
         continuation_count: AtomicUsize,
     }
 
+    struct CanonicalDynamicPlanner {
+        scope: AiScope,
+        route: AiToolResultEgressRoute,
+        plan: AiProviderCallPlan,
+    }
+
     struct TestRetainedChatPlanner {
         scope: AiScope,
         provider_session: crate::AiProviderSessionTurnPlan,
@@ -2326,6 +2370,30 @@ mod tests {
             _continuation: AiAgentContinuation,
         ) -> Result<AiReadOnlyAgentTurnPlan, AiError> {
             self.continuation_count.fetch_add(1, Ordering::SeqCst);
+            Err(AiError::Conflict)
+        }
+    }
+
+    #[async_trait]
+    impl AiReadOnlyAgentTurnPlanner for CanonicalDynamicPlanner {
+        async fn initial_plan(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<AiReadOnlyAgentTurnPlan, AiError> {
+            AiReadOnlyAgentTurnPlan::new_experimental_dynamic_tools(
+                self.plan.clone(),
+                self.route.clone(),
+                test_rules(self.scope.clone()),
+                false,
+            )
+        }
+
+        async fn continuation_plan(
+            &self,
+            _lease: &AiRunLease,
+            _provider_turns: u32,
+            _continuation: AiAgentContinuation,
+        ) -> Result<AiReadOnlyAgentTurnPlan, AiError> {
             Err(AiError::Conflict)
         }
     }
@@ -2864,6 +2932,93 @@ mod tests {
         }
     }
 
+    fn canonical_dynamic_plan(
+        lease: &AiRunLease,
+    ) -> (AiProviderCallPlan, crate::ModelToolDefinition) {
+        let (catalog, definition) = crate::providers::canonical_dynamic_tool_catalog();
+        let tool_id = crate::AiToolId::parse(definition.tool_id.clone())
+            .expect("canonical generated tool ID should validate");
+        let descriptor = catalog
+            .descriptor(&tool_id)
+            .expect("canonical generated descriptor should be registered");
+        let mut policy = crate::AiToolPolicySet::new(crate::ToolMaturity::ReadOnly);
+        policy.bind(crate::AiToolPolicyBinding {
+            tool_id,
+            fingerprint: descriptor.fingerprint.clone(),
+            enabled: true,
+        });
+        let scope = test_scope();
+        let request = crate::ModelRequest {
+            model: "model-1".to_owned(),
+            instructions: Vec::new(),
+            input: vec![crate::ModelInputBlock::Text {
+                text: "Use inventory_count with Limit 3 and return the count.".to_owned(),
+            }],
+            continuation: None,
+            continuation_mode: crate::ModelContinuationMode::ProviderRetained,
+            tools: vec![definition.clone()],
+            builtin_tools: Vec::new(),
+            maximum_builtin_tool_calls: None,
+            reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+            output_schema: None,
+            maximum_output_tokens: Some(128),
+        };
+        let budget = crate::AiBudgetReservationRequest {
+            scope: scope.clone(),
+            session_id: lease.session_id(),
+            run_id: lease.run_id(),
+            attempt_id: lease.attempt_id(),
+            lease_generation: lease.lease_generation(),
+            provider_kind: crate::ProviderKind::LocalHarness,
+            model: request.model.clone(),
+            pricing_policy_version: "canonical-codex-v1".to_owned(),
+            estimate: crate::AiBudgetAmounts {
+                output_tokens: 128,
+                runs: 1,
+                tool_units: 1,
+                ..crate::AiBudgetAmounts::default()
+            },
+            idempotency_key: Uuid::new_v4().to_string(),
+            expires_at: time::OffsetDateTime::now_utc() + Duration::minutes(5),
+        };
+        let manifest = AiEgressManifest {
+            provider_profile_id: "canonical-codex-profile".to_owned(),
+            provider_kind: crate::ProviderKind::LocalHarness.as_str().to_owned(),
+            model: request.model.clone(),
+            destination: "sandboxed-local-harness".to_owned(),
+            destination_trust: AiDestinationTrust::Local,
+            capability: AiEgressCapability::ModelInference,
+            scope,
+            session_id: Some(lease.session_id()),
+            run_id: Some(lease.run_id()),
+            sources: vec![AiDataSourceRef {
+                kind: "user_message".to_owned(),
+                reference: "canonical-generated-tool-test".to_owned(),
+                classification: DataClassification::Internal,
+                trust: AiSourceTrust::UserProvided,
+            }],
+            estimated_bytes: request.conservative_egress_bytes(),
+            estimated_tokens: 64,
+            attachment_count: 0,
+            purpose: "answer-with-registered-tool".to_owned(),
+            retention: "provider-session".to_owned(),
+            residency: None,
+            policy_version: "canonical-egress-v1".to_owned(),
+            consent_reference: None,
+        };
+        let plan = AiProviderCallPlan::new_with_tools(
+            crate::ProviderKind::LocalHarness,
+            request,
+            budget,
+            vec![manifest],
+            "canonical-generated-dynamic-turn",
+            &catalog,
+            &policy,
+        )
+        .expect("canonical generated dynamic plan should validate");
+        (plan, definition)
+    }
+
     fn adopted_read_only_checkpoint(
         lease: &AiRunLease,
         checkpoint_id: Uuid,
@@ -3152,19 +3307,20 @@ mod tests {
     async fn experimental_dynamic_turn_uses_ordinary_tool_boundary_and_no_continuation() {
         let lease = AiRunLease::test_running(principal_reference());
         let run = Arc::new(TestRunControl::new());
-        let provider = Arc::new(TestProviderExecutor {
-            responses: Mutex::new(VecDeque::from([Ok(AiProviderCallResult::test_result(
-                &lease,
-                None,
-                "response-dynamic-final",
-                vec![("dynamic-call-1", "test.read", json!({}))],
-            ))])),
-            delay: None,
-        });
-        let planner = Arc::new(TestDynamicPlanner {
+        let (plan, definition) = canonical_dynamic_plan(&lease);
+        let provider = Arc::new(CanonicalDynamicProviderExecutor { definition });
+        let planner = Arc::new(CanonicalDynamicPlanner {
             scope: test_scope(),
-            route: test_route(),
-            continuation_count: AtomicUsize::new(0),
+            route: AiToolResultEgressRoute::new(
+                "canonical-codex-profile",
+                "sandboxed-local-harness",
+                AiDestinationTrust::Local,
+                "answer-with-registered-tool",
+                "provider-session",
+                "canonical-egress-v1",
+            )
+            .expect("canonical dynamic route should validate"),
+            plan,
         });
         let forbidden_checkpoints = Arc::new(ChatForbiddenBoundaries::default());
         let coordinator = AiReadOnlyAgentCoordinator::new(
@@ -3206,7 +3362,6 @@ mod tests {
                 .load(Ordering::SeqCst),
             0
         );
-        assert_eq!(planner.continuation_count.load(Ordering::SeqCst), 0);
         assert_eq!(run.final_states(), vec![AiRunState::Completed]);
     }
 

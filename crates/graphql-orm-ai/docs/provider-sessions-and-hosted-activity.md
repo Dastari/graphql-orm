@@ -71,6 +71,9 @@ model-catalogue mode and profile into the registration:
 let launch_profile = AiCodexAppServerLaunchProfile::experimental_dynamic_tools_only_v1(
     AiCodexAppServerModelToolMode::Direct,
 )?;
+let bootstrap = AiCodexAppServerBootstrapInstructions::from_static(&[
+    "Use a registered application tool whenever current facts are needed to answer the request.",
+])?;
 let registration = AiCodexAppServerRegistration::new(
     "local-dynamic-tools",
     "reviewed-direct-tool-model",
@@ -79,7 +82,8 @@ let registration = AiCodexAppServerRegistration::new(
     "isolated-no-native-tools",
     AI_CODEX_APP_SERVER_PROTOCOL_V2,
 )?
-.with_launch_profile(launch_profile);
+.with_launch_profile(launch_profile)
+.with_bootstrap_instructions(bootstrap);
 ```
 
 The factory returns true from `supports_launch_profile` only when it launches
@@ -134,11 +138,15 @@ only bounded trusted instructions and text; each call gets a fresh ephemeral
 thread while the exact run process may be reused. A retained turn instead uses
 `ModelContinuationMode::ProviderRetained`, an exact
 `AiProviderSessionTurnPlan`, and a configured `AiProviderSessionService`.
-Creation sends only immutable model and reviewed dynamic-tool definitions to
-an empty persistent thread. It sends no developer instruction or user input
-until the opaque cursor is durably protected and claimed. Resume binds the
-cursor to the exact owner/session/scope/profile/model/executable/protocol/
-policy/transcript/run fence.
+Creation sends only the immutable model, optional compile-time static
+`AiCodexAppServerBootstrapInstructions`, and reviewed dynamic-tool definitions
+to an empty persistent thread. It sends no user input, request-local
+instruction, route context, secret, or resolver result until the opaque cursor
+is durably protected and claimed. The bootstrap fingerprint is part of the
+registration identity, and retained requests must leave
+`ModelRequest::instructions` empty. First activation and every resume prove
+the same bootstrap, cursor, owner/session/scope/profile/model/executable/
+protocol/policy/transcript/run fence before business input can start.
 
 One protocol actor may perform sequential lifecycle cycles on its retained
 process. Each typed `thread/start` or `thread/resume` begins a private
@@ -170,6 +178,19 @@ ordinary registered read-only GraphQL tool boundary. Only the already
 disclosure- and egress-approved result is returned to app-server. Unknown,
 duplicate, stale, over-limit, changed-policy, or incomplete calls poison the
 turn and make a retained cursor cleanup-only.
+
+Owning subgraphs compile generated or custom profiles into a canonical
+manifest and register it in `AiToolCatalog`. Build the provider definition with
+`AiToolCatalog::read_only_model_definition`; do not copy the description,
+argument schema, stable ID, or descriptor fingerprint into host code. Codex
+0.147.0 accepts a smaller JSON Schema subset than the canonical profile
+contract. The adapter therefore performs one closed deterministic projection:
+it removes only unsupported schema meta/constraint keywords, carries scalar
+bounds into the provider-visible property description, and fingerprints the
+projection together with the exact canonical descriptor. The unmodified
+canonical schema remains authoritative when a dynamic call is admitted and
+again at coordinator execution, so projection cannot weaken the accepted
+argument range.
 
 JSON-RPC request identifier zero is valid and is used by Codex 0.147.0 for its
 first server-initiated dynamic call. The actor correlates it in the same

@@ -2,7 +2,6 @@
 
 use uuid::Uuid;
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use sha2::{Digest, Sha256};
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -81,7 +80,7 @@ impl AiProviderRunBinding {
         )
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[cfg_attr(feature = "mssql", allow(dead_code))]
     pub(crate) fn matches_principal_reference(
         self,
         reference: &agql_auth::PrincipalReference,
@@ -115,7 +114,7 @@ impl AiProviderRunBinding {
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg_attr(feature = "mssql", allow(dead_code))]
 fn provider_run_owner_fingerprint(reference: &agql_auth::PrincipalReference) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"graphql-orm-ai/provider-run-owner/v1\0");

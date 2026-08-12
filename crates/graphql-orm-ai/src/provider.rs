@@ -1024,7 +1024,6 @@ pub struct ProviderRequestContext {
     session_id: AiSessionId,
     run_id: AiRunId,
     run_binding: Option<crate::AiProviderRunBinding>,
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     provider_session: Option<crate::AiOpenedProviderSession>,
     correlation_id: String,
     budget: AuthorizedBudgetReservation,
@@ -1051,7 +1050,6 @@ impl ProviderRequestContext {
             session_id,
             run_id,
             run_binding: None,
-            #[cfg(any(feature = "sqlite", feature = "postgres"))]
             provider_session: None,
             correlation_id: correlation_id.into(),
             budget,
@@ -1197,7 +1195,6 @@ impl ProviderRequestContext {
     }
 
     /// Freshly authorized retained provider session for this exact request.
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub fn provider_session(&self) -> Option<&crate::AiOpenedProviderSession> {
         self.provider_session.as_ref()
     }
