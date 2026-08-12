@@ -40,8 +40,16 @@ const MAXIMUM_RUNTIME_WARNING_MESSAGE_BYTES: usize = 4 * 1024;
 const MAXIMUM_RUNTIME_WARNING_BYTES_PER_TURN: usize = 16 * 1024;
 const MAXIMUM_RUNTIME_WARNINGS_PER_TURN: usize = 8;
 const MAXIMUM_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+const OPTED_OUT_NOTIFICATION_METHODS: [&str; 5] = [
+    "thread/status/changed",
+    "thread/settings/updated",
+    "thread/goal/cleared",
+    "mcpServer/startupStatus/updated",
+    "account/rateLimits/updated",
+];
 const REMOTE_CONTROL_STATUS_CHANGED: &str = "remoteControl/status/changed";
 const RUNTIME_WARNING: &str = "warning";
+const THREAD_TOKEN_USAGE_UPDATED: &str = "thread/tokenUsage/updated";
 
 /// Exact reviewed Codex app-server protocol contract supported by this
 /// adapter.
@@ -2086,6 +2094,27 @@ pub enum AiCodexAppServerInbound {
     /// validated and discarded inside the actor. No warning content or
     /// identifier crosses this boundary into events, logs, or model context.
     RuntimeWarning,
+    /// Content-free lifecycle for one exact provider reasoning item.
+    ///
+    /// The actor accepts only an empty `content` and `summary` shape while
+    /// reasoning summaries are disabled on the turn. The item identifier,
+    /// payload, and timestamp are correlated and discarded inside the actor;
+    /// hidden reasoning never crosses this boundary.
+    ReasoningLifecycle {
+        /// Whether this is the item start or terminal completion.
+        completed: bool,
+    },
+    /// Content-free retained-thread usage snapshot observed during an exact
+    /// resume lifecycle.
+    ///
+    /// App-server may replay one cumulative snapshot while loading a thread.
+    /// Its complete nonnegative generated shape and exact thread binding are
+    /// validated, then all turn identifiers and token values are discarded so
+    /// they cannot be charged again to the next run. On Codex versions that do
+    /// not emit `thread/started` after `thread/resume`, this signal may complete
+    /// only a typed resume after its exact correlated response is observed; it
+    /// can never complete a new thread-start lifecycle.
+    RetainedResumeUsageSnapshot,
     /// Exact experimental dynamic-tool server request matched to one offered
     /// definition. No other server request is admitted.
     DynamicToolCall {
@@ -2129,6 +2158,13 @@ impl std::fmt::Debug for AiCodexAppServerInbound {
                 formatter.write_str("AiCodexAppServerInbound::RemoteControlDisabled")
             }
             Self::RuntimeWarning => formatter.write_str("AiCodexAppServerInbound::RuntimeWarning"),
+            Self::ReasoningLifecycle { completed } => formatter
+                .debug_struct("AiCodexAppServerInbound::ReasoningLifecycle")
+                .field("completed", completed)
+                .finish(),
+            Self::RetainedResumeUsageSnapshot => {
+                formatter.write_str("AiCodexAppServerInbound::RetainedResumeUsageSnapshot")
+            }
             Self::DynamicToolCall {
                 request_id,
                 thread_id,
@@ -2168,17 +2204,27 @@ enum ThreadLifecyclePhase {
     Deleted,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThreadLifecycleOperation {
+    Start,
+    Resume,
+}
+
 /// Closed app-server JSON-RPC encoder/guard.
 ///
 /// There is intentionally no generic request builder. The provider-specific
 /// process actor may emit only the explicitly typed initialization, thread,
 /// turn, interruption, deletion, and dynamic-tool response methods represented
 /// here. Admitted server notifications require the complete positive signed
-/// `emittedAtMs` envelope and exact lifecycle correlation. The only admitted
-/// thread-status transition is `notLoaded` for the exact thread already being
-/// deleted. A documented generic `warning` is admitted only as a content-free,
-/// turn-correlated, flood-bounded control event. All other server-initiated
-/// requests and non-allowlisted notifications fail closed.
+/// `emittedAtMs` envelope and exact lifecycle correlation. Initialization
+/// negotiates one fixed opt-out profile for unused thread, MCP, and account
+/// notifications; those methods remain rejected if the server emits them.
+/// Deletion uses only its exact correlated response. A documented generic
+/// `warning` is admitted only as a content-free, turn-correlated,
+/// flood-bounded control event. Empty reasoning-item lifecycles are admitted
+/// only as content-free signals while turn-level reasoning summaries remain
+/// explicitly disabled. All other server-initiated requests and
+/// non-allowlisted notifications fail closed.
 #[derive(Debug)]
 pub struct AiCodexAppServerProtocolActor {
     next_id: u64,
@@ -2195,8 +2241,9 @@ pub struct AiCodexAppServerProtocolActor {
     completed_items: BTreeSet<String>,
     initialization_complete: bool,
     thread_lifecycle_phase: ThreadLifecyclePhase,
+    thread_lifecycle_operation: Option<ThreadLifecycleOperation>,
     deleting_thread_id: Option<String>,
-    thread_not_loaded_observed: bool,
+    retained_usage_snapshot_observed: bool,
     turn_response_observed: bool,
     turn_started_observed: bool,
     remote_control_disabled_observed: bool,
@@ -2234,8 +2281,9 @@ impl AiCodexAppServerProtocolActor {
             completed_items: BTreeSet::new(),
             initialization_complete: false,
             thread_lifecycle_phase: ThreadLifecyclePhase::Ready,
+            thread_lifecycle_operation: None,
             deleting_thread_id: None,
-            thread_not_loaded_observed: false,
+            retained_usage_snapshot_observed: false,
             turn_response_observed: false,
             turn_started_observed: false,
             remote_control_disabled_observed: false,
@@ -2245,7 +2293,13 @@ impl AiCodexAppServerProtocolActor {
         })
     }
 
-    /// Encodes the one allowed protocol-initialization request.
+    /// Encodes the one allowed stable protocol-initialization request.
+    ///
+    /// The actor always suppresses the exact thread-status, thread-settings,
+    /// MCP-startup, and account-rate-limit notifications that this closed
+    /// adapter neither consumes nor admits. The host cannot alter that profile
+    /// or suppress authoritative thread, turn, item, usage, dynamic-tool, or
+    /// completion traffic.
     ///
     /// # Errors
     ///
@@ -2274,13 +2328,14 @@ impl AiCodexAppServerProtocolActor {
                     "name": client_name,
                     "title": client_title,
                     "version": client_version,
-                }
+                },
+                "capabilities": initialization_capabilities(false),
             }),
         )
     }
 
-    /// Encodes initialization with only the experimental API capability
-    /// required by app-server dynamic tools.
+    /// Encodes initialization with the experimental API capability required
+    /// by app-server dynamic tools and the same closed notification profile.
     ///
     /// # Errors
     ///
@@ -2310,7 +2365,7 @@ impl AiCodexAppServerProtocolActor {
                     "title": client_title,
                     "version": client_version,
                 },
-                "capabilities": {"experimentalApi": true},
+                "capabilities": initialization_capabilities(true),
             }),
         )
     }
@@ -2332,6 +2387,7 @@ impl AiCodexAppServerProtocolActor {
                 self.thread_lifecycle_phase,
                 ThreadLifecyclePhase::Ready | ThreadLifecyclePhase::Complete
             )
+            || self.thread_lifecycle_operation.is_some()
             || self.pending_turn_thread_id.is_some()
             || self.active_turn_id.is_some()
             || self.deleting_thread_id.is_some()
@@ -2351,11 +2407,15 @@ impl AiCodexAppServerProtocolActor {
     fn begin_new_thread_lifecycle(&mut self) {
         self.active_thread_id = None;
         self.thread_lifecycle_phase = ThreadLifecyclePhase::AwaitingResponseAndStarted;
+        self.thread_lifecycle_operation = Some(ThreadLifecycleOperation::Start);
+        self.retained_usage_snapshot_observed = false;
     }
 
     fn begin_resume_lifecycle(&mut self, thread_id: &str) {
         self.active_thread_id = Some(thread_id.to_owned());
         self.thread_lifecycle_phase = ThreadLifecyclePhase::AwaitingResponseAndStarted;
+        self.thread_lifecycle_operation = Some(ThreadLifecycleOperation::Resume);
+        self.retained_usage_snapshot_observed = false;
     }
 
     /// Encodes an ephemeral thread start with trusted instructions kept in the
@@ -2555,8 +2615,8 @@ impl AiCodexAppServerProtocolActor {
             "thread/delete",
             json!({"threadId": cursor.expose_to_provider_adapter()}),
         )?;
+        self.thread_lifecycle_operation = None;
         self.deleting_thread_id = Some(cursor.expose_to_provider_adapter().to_owned());
-        self.thread_not_loaded_observed = false;
         Ok(frame)
     }
 
@@ -2687,6 +2747,10 @@ impl AiCodexAppServerProtocolActor {
         input: &AiCodexAppServerTurnInput,
     ) -> Result<Vec<u8>, ProviderError> {
         input.validate()?;
+        let consumes_retained_resume_fallback = self.thread_lifecycle_phase
+            == ThreadLifecyclePhase::Complete
+            && self.thread_lifecycle_operation == Some(ThreadLifecycleOperation::Resume)
+            && self.retained_usage_snapshot_observed;
         let input_dynamic_tools = input
             .tools()
             .iter()
@@ -2695,6 +2759,7 @@ impl AiCodexAppServerProtocolActor {
         if !valid_reference(thread_id)
             || self.active_thread_id.as_deref() != Some(thread_id)
             || self.thread_lifecycle_phase != ThreadLifecyclePhase::Complete
+            || (self.thread_lifecycle_operation.is_some() && !consumes_retained_resume_fallback)
             || self
                 .retained_model
                 .as_deref()
@@ -2716,8 +2781,10 @@ impl AiCodexAppServerProtocolActor {
             json!({
                 "threadId": thread_id,
                 "input": input.input().iter().map(|text| json!({"type": "text", "text": text})).collect::<Vec<_>>(),
+                "summary": "none",
             }),
         )?;
+        self.thread_lifecycle_operation = None;
         self.pending_turn_thread_id = Some(thread_id.to_owned());
         self.runtime_warning_count = 0;
         self.runtime_warning_bytes = 0;
@@ -2777,8 +2844,8 @@ impl AiCodexAppServerProtocolActor {
     /// Admits one exact bounded inbound response or allowlisted notification.
     ///
     /// Every server-initiated request, uncorrelated response, provider error,
-    /// forbidden item kind, raw reasoning item, and unknown notification is
-    /// rejected.
+    /// forbidden item kind, non-empty reasoning content, and unknown
+    /// notification is rejected.
     ///
     /// # Errors
     ///
@@ -2904,6 +2971,9 @@ impl AiCodexAppServerProtocolActor {
             .filter(|method| allowed_notification(method))
             .ok_or(ProviderError::Rejected)?;
         let params = notification.params;
+        if method == THREAD_TOKEN_USAGE_UPDATED && self.active_turn_id.is_none() {
+            return self.accept_retained_usage_snapshot(&params);
+        }
         if matches!(method, "item/started" | "item/completed")
             && params
                 .get("item")
@@ -2913,6 +2983,16 @@ impl AiCodexAppServerProtocolActor {
                 == Some("dynamicToolCall")
         {
             return self.accept_dynamic_tool_lifecycle(method, &params);
+        }
+        if matches!(method, "item/started" | "item/completed")
+            && params
+                .get("item")
+                .and_then(Value::as_object)
+                .and_then(|item| item.get("type"))
+                .and_then(Value::as_str)
+                == Some("reasoning")
+        {
+            return self.accept_empty_reasoning_lifecycle(method, &params);
         }
         validate_allowed_notification(method, &params)?;
         self.accept_notification_binding(method, &params)?;
@@ -3045,6 +3125,102 @@ impl AiCodexAppServerProtocolActor {
         })
     }
 
+    fn accept_empty_reasoning_lifecycle(
+        &mut self,
+        method: &str,
+        params: &Value,
+    ) -> Result<AiCodexAppServerInbound, ProviderError> {
+        self.validate_active_turn(
+            direct_reference(params, "threadId")?,
+            direct_reference(params, "turnId")?,
+        )?;
+        let params = params.as_object().ok_or(ProviderError::Rejected)?;
+        let timestamp_key = if method == "item/started" {
+            "startedAtMs"
+        } else {
+            "completedAtMs"
+        };
+        if params.keys().any(|key| {
+            !matches!(key.as_str(), "item" | "threadId" | "turnId") && key != timestamp_key
+        }) || params
+            .get(timestamp_key)
+            .and_then(Value::as_i64)
+            .is_none_or(|timestamp| timestamp <= 0)
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let item = params
+            .get("item")
+            .and_then(Value::as_object)
+            .ok_or(ProviderError::Rejected)?;
+        if item
+            .keys()
+            .any(|key| !matches!(key.as_str(), "content" | "id" | "summary" | "type"))
+            || item.get("type").and_then(Value::as_str) != Some("reasoning")
+            || item
+                .get("content")
+                .is_some_and(|content| content.as_array().is_none_or(|content| !content.is_empty()))
+            || item
+                .get("summary")
+                .is_some_and(|summary| summary.as_array().is_none_or(|summary| !summary.is_empty()))
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let item_id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|item_id| valid_reference(item_id))
+            .ok_or(ProviderError::Rejected)?;
+        let completed = method == "item/completed";
+        if completed {
+            if self.started_items.remove(item_id).as_deref() != Some("reasoning")
+                || !self.completed_items.insert(item_id.to_owned())
+                || self.completed_items.len() > MAXIMUM_TEXT_BLOCKS
+            {
+                return Err(ProviderError::Rejected);
+            }
+        } else if self.completed_items.contains(item_id)
+            || self
+                .started_items
+                .insert(item_id.to_owned(), "reasoning".to_owned())
+                .is_some()
+            || self.started_items.len() > MAXIMUM_TEXT_BLOCKS
+        {
+            return Err(ProviderError::Rejected);
+        }
+        Ok(AiCodexAppServerInbound::ReasoningLifecycle { completed })
+    }
+
+    fn accept_retained_usage_snapshot(
+        &mut self,
+        params: &Value,
+    ) -> Result<AiCodexAppServerInbound, ProviderError> {
+        let usage = validate_thread_token_usage(params)?;
+        if !self.initialization_complete
+            || self.retained_usage_snapshot_observed
+            || self.thread_lifecycle_operation != Some(ThreadLifecycleOperation::Resume)
+            || self.active_thread_id.as_deref() != Some(usage.thread_id.as_str())
+            || self.pending_turn_thread_id.is_some()
+            || self.active_turn_id.is_some()
+            || !matches!(
+                self.thread_lifecycle_phase,
+                ThreadLifecyclePhase::AwaitingResponseAndStarted
+                    | ThreadLifecyclePhase::AwaitingResponse
+                    | ThreadLifecyclePhase::AwaitingStarted
+                    | ThreadLifecyclePhase::Complete
+            )
+        {
+            return Err(ProviderError::Rejected);
+        }
+        self.retained_usage_snapshot_observed = true;
+        if self.thread_lifecycle_phase == ThreadLifecyclePhase::AwaitingStarted
+            && self.thread_lifecycle_operation == Some(ThreadLifecycleOperation::Resume)
+        {
+            self.thread_lifecycle_phase = ThreadLifecyclePhase::Complete;
+        }
+        Ok(AiCodexAppServerInbound::RetainedResumeUsageSnapshot)
+    }
+
     fn accept_correlated_response(
         &mut self,
         method: ClientMethod,
@@ -3067,9 +3243,18 @@ impl AiCodexAppServerProtocolActor {
                 self.active_thread_id = Some(thread_id.to_owned());
                 self.thread_lifecycle_phase = match self.thread_lifecycle_phase {
                     ThreadLifecyclePhase::AwaitingResponseAndStarted => {
-                        ThreadLifecyclePhase::AwaitingStarted
+                        if self.thread_lifecycle_operation == Some(ThreadLifecycleOperation::Resume)
+                            && self.retained_usage_snapshot_observed
+                        {
+                            ThreadLifecyclePhase::Complete
+                        } else {
+                            ThreadLifecyclePhase::AwaitingStarted
+                        }
                     }
-                    ThreadLifecyclePhase::AwaitingResponse => ThreadLifecyclePhase::Complete,
+                    ThreadLifecyclePhase::AwaitingResponse => {
+                        self.thread_lifecycle_operation = None;
+                        ThreadLifecyclePhase::Complete
+                    }
                     _ => return Err(ProviderError::Rejected),
                 };
             }
@@ -3091,7 +3276,20 @@ impl AiCodexAppServerProtocolActor {
                 self.initialization_complete = true;
             }
             ClientMethod::ThreadDelete => {
+                let deleting_thread_id = self
+                    .deleting_thread_id
+                    .as_deref()
+                    .ok_or(ProviderError::Rejected)?;
+                if !result.as_object().is_some_and(serde_json::Map::is_empty)
+                    || self.active_thread_id.as_deref() != Some(deleting_thread_id)
+                    || self.pending_turn_thread_id.is_some()
+                    || self.active_turn_id.is_some()
+                {
+                    return Err(ProviderError::Rejected);
+                }
                 self.active_thread_id = None;
+                self.deleting_thread_id = None;
+                self.thread_lifecycle_operation = None;
                 self.thread_lifecycle_phase = ThreadLifecyclePhase::Deleted;
             }
             ClientMethod::TurnInterrupt => {}
@@ -3176,20 +3374,26 @@ impl AiCodexAppServerProtocolActor {
         match method {
             "thread/started" => {
                 let thread_id = nested_reference(params, "thread", "id")?;
+                let optional_late_resume_started = self.thread_lifecycle_phase
+                    == ThreadLifecyclePhase::Complete
+                    && self.thread_lifecycle_operation == Some(ThreadLifecycleOperation::Resume)
+                    && self.retained_usage_snapshot_observed;
                 if !self.initialization_complete
-                    || !matches!(
-                        self.thread_lifecycle_phase,
-                        ThreadLifecyclePhase::AwaitingResponseAndStarted
-                            | ThreadLifecyclePhase::AwaitingStarted
-                    )
+                    || (!optional_late_resume_started
+                        && !matches!(
+                            self.thread_lifecycle_phase,
+                            ThreadLifecyclePhase::AwaitingResponseAndStarted
+                                | ThreadLifecyclePhase::AwaitingStarted
+                        ))
                     || self.pending_turn_thread_id.is_some()
                     || self.active_turn_id.is_some()
                     || self
                         .pending
                         .values()
                         .any(|method| *method == ClientMethod::ThreadDelete)
-                    || (self.thread_lifecycle_phase
-                        == ThreadLifecyclePhase::AwaitingResponseAndStarted
+                    || (!optional_late_resume_started
+                        && self.thread_lifecycle_phase
+                            == ThreadLifecyclePhase::AwaitingResponseAndStarted
                         && !self.pending.values().any(|method| {
                             matches!(
                                 method,
@@ -3204,32 +3408,20 @@ impl AiCodexAppServerProtocolActor {
                     return Err(ProviderError::Rejected);
                 }
                 self.active_thread_id = Some(thread_id.to_owned());
+                if optional_late_resume_started {
+                    self.thread_lifecycle_operation = None;
+                    return Ok(());
+                }
                 self.thread_lifecycle_phase = match self.thread_lifecycle_phase {
                     ThreadLifecyclePhase::AwaitingResponseAndStarted => {
                         ThreadLifecyclePhase::AwaitingResponse
                     }
-                    ThreadLifecyclePhase::AwaitingStarted => ThreadLifecyclePhase::Complete,
+                    ThreadLifecyclePhase::AwaitingStarted => {
+                        self.thread_lifecycle_operation = None;
+                        ThreadLifecyclePhase::Complete
+                    }
                     _ => return Err(ProviderError::Rejected),
                 };
-            }
-            "thread/status/changed" => {
-                let status: ThreadNotLoadedStatusChangedParams =
-                    serde_json::from_value(params.clone()).map_err(|_| ProviderError::Rejected)?;
-                if !self.initialization_complete
-                    || !valid_reference(&status.thread_id)
-                    || self.deleting_thread_id.as_deref() != Some(status.thread_id.as_str())
-                    || self.thread_not_loaded_observed
-                    || (self.thread_lifecycle_phase != ThreadLifecyclePhase::Deleted
-                        && !self
-                            .pending
-                            .values()
-                            .any(|method| *method == ClientMethod::ThreadDelete))
-                    || self.pending_turn_thread_id.is_some()
-                    || self.active_turn_id.is_some()
-                {
-                    return Err(ProviderError::Rejected);
-                }
-                self.thread_not_loaded_observed = true;
             }
             "turn/started" => {
                 let thread_id = direct_reference(params, "threadId")?;
@@ -3308,11 +3500,9 @@ impl AiCodexAppServerProtocolActor {
                     return Err(ProviderError::Rejected);
                 }
             }
-            "thread/tokenUsage/updated" => {
-                self.validate_active_turn(
-                    direct_reference(params, "threadId")?,
-                    direct_reference(params, "turnId")?,
-                )?;
+            THREAD_TOKEN_USAGE_UPDATED => {
+                let usage = validate_thread_token_usage(params)?;
+                self.validate_active_turn(&usage.thread_id, &usage.turn_id)?;
             }
             _ => return Err(ProviderError::Rejected),
         }
@@ -3368,30 +3558,76 @@ struct RuntimeWarningParams {
 }
 
 #[derive(Deserialize)]
-enum DisabledRemoteControlStatus {
-    #[serde(rename = "disabled")]
-    Disabled,
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ThreadTokenUsageUpdatedParams {
+    thread_id: String,
+    turn_id: String,
+    token_usage: ThreadTokenUsage,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct ThreadNotLoadedStatusChangedParams {
-    thread_id: String,
-    #[serde(rename = "status")]
-    _status: ThreadNotLoadedStatus,
+struct ThreadTokenUsage {
+    last: TokenUsageBreakdown,
+    total: TokenUsageBreakdown,
+    model_context_window: Option<i64>,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ThreadNotLoadedStatus {
-    #[serde(rename = "type")]
-    _kind: ThreadNotLoadedStatusKind,
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct TokenUsageBreakdown {
+    input_tokens: i64,
+    cached_input_tokens: i64,
+    #[serde(default)]
+    cache_write_input_tokens: i64,
+    output_tokens: i64,
+    reasoning_output_tokens: i64,
+    total_tokens: i64,
+}
+
+impl TokenUsageBreakdown {
+    fn validate(&self) -> Result<(), ProviderError> {
+        if [
+            self.input_tokens,
+            self.cached_input_tokens,
+            self.cache_write_input_tokens,
+            self.output_tokens,
+            self.reasoning_output_tokens,
+            self.total_tokens,
+        ]
+        .into_iter()
+        .any(|value| value < 0)
+        {
+            return Err(ProviderError::Rejected);
+        }
+        Ok(())
+    }
+}
+
+fn validate_thread_token_usage(
+    params: &Value,
+) -> Result<ThreadTokenUsageUpdatedParams, ProviderError> {
+    let usage: ThreadTokenUsageUpdatedParams =
+        serde_json::from_value(params.clone()).map_err(|_| ProviderError::Rejected)?;
+    usage.token_usage.last.validate()?;
+    usage.token_usage.total.validate()?;
+    if !valid_reference(&usage.thread_id)
+        || !valid_reference(&usage.turn_id)
+        || usage
+            .token_usage
+            .model_context_window
+            .is_some_and(|value| value < 0)
+        || usage.token_usage.total.total_tokens < usage.token_usage.last.total_tokens
+    {
+        return Err(ProviderError::Rejected);
+    }
+    Ok(usage)
 }
 
 #[derive(Deserialize)]
-enum ThreadNotLoadedStatusKind {
-    #[serde(rename = "notLoaded")]
-    NotLoaded,
+enum DisabledRemoteControlStatus {
+    #[serde(rename = "disabled")]
+    Disabled,
 }
 
 fn direct_reference<'a>(value: &'a Value, key: &str) -> Result<&'a str, ProviderError> {
@@ -3431,7 +3667,6 @@ fn allowed_notification(method: &str) -> bool {
     matches!(
         method,
         "thread/started"
-            | "thread/status/changed"
             | "turn/started"
             | "item/started"
             | "item/completed"
@@ -3439,6 +3674,17 @@ fn allowed_notification(method: &str) -> bool {
             | "thread/tokenUsage/updated"
             | "turn/completed"
     )
+}
+
+fn initialization_capabilities(experimental_api: bool) -> Value {
+    let mut capabilities = serde_json::Map::from_iter([(
+        "optOutNotificationMethods".to_owned(),
+        json!(OPTED_OUT_NOTIFICATION_METHODS),
+    )]);
+    if experimental_api {
+        capabilities.insert("experimentalApi".to_owned(), Value::Bool(true));
+    }
+    Value::Object(capabilities)
 }
 
 fn validate_allowed_notification(method: &str, params: &Value) -> Result<(), ProviderError> {
@@ -4093,14 +4339,42 @@ mod tests {
         lifecycle_notification(RUNTIME_WARNING, params)
     }
 
+    fn reasoning_lifecycle_notification(
+        method: &str,
+        item_id: &str,
+        content: Value,
+        summary: Value,
+    ) -> Vec<u8> {
+        let timestamp_key = if method == "item/started" {
+            "startedAtMs"
+        } else {
+            "completedAtMs"
+        };
+        let mut params = json!({
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "item": {
+                "id": item_id,
+                "type": "reasoning",
+                "content": content,
+                "summary": summary,
+            },
+        });
+        params
+            .as_object_mut()
+            .expect("reasoning params should be an object")
+            .insert(timestamp_key.to_owned(), json!(1));
+        lifecycle_notification(method, params)
+    }
+
     fn thread_started_notification(thread_id: &str) -> Vec<u8> {
         lifecycle_notification("thread/started", json!({"thread": {"id": thread_id}}))
     }
 
-    fn thread_not_loaded_notification(thread_id: &str) -> Vec<u8> {
+    fn thread_status_notification(thread_id: &str, status: Value) -> Vec<u8> {
         lifecycle_notification(
             "thread/status/changed",
-            json!({"threadId": thread_id, "status": {"type": "notLoaded"}}),
+            json!({"threadId": thread_id, "status": status}),
         )
     }
 
@@ -4120,6 +4394,35 @@ mod tests {
             json!({
                 "threadId": thread_id,
                 "turn": {"id": turn_id, "items": [], "status": "completed"},
+            }),
+        )
+    }
+
+    fn token_usage_notification(thread_id: &str, turn_id: &str) -> Vec<u8> {
+        lifecycle_notification(
+            THREAD_TOKEN_USAGE_UPDATED,
+            json!({
+                "threadId": thread_id,
+                "turnId": turn_id,
+                "tokenUsage": {
+                    "last": {
+                        "cacheWriteInputTokens": 0,
+                        "cachedInputTokens": 0,
+                        "inputTokens": 1,
+                        "outputTokens": 1,
+                        "reasoningOutputTokens": 0,
+                        "totalTokens": 2,
+                    },
+                    "total": {
+                        "cacheWriteInputTokens": 0,
+                        "cachedInputTokens": 0,
+                        "inputTokens": 1,
+                        "outputTokens": 1,
+                        "reasoningOutputTokens": 0,
+                        "totalTokens": 2,
+                    },
+                    "modelContextWindow": 128000,
+                },
             }),
         )
     }
@@ -4932,6 +5235,7 @@ mod tests {
         .expect("frame should be UTF-8");
         assert!(initialize.contains("\"method\":\"initialize\""));
         assert!(!initialize.contains("experimentalApi"));
+        assert!(initialize.contains("\"optOutNotificationMethods\""));
         assert!(thread.contains("\"ephemeral\":true"));
         assert!(thread.contains("\"developerInstructions\":\"trusted\""));
         assert!(thread.contains("\"approvalPolicy\":\"never\""));
@@ -4939,6 +5243,71 @@ mod tests {
         assert!(!thread.contains("dynamicTools"));
         assert!(!turn.contains("trusted"));
         assert!(!turn.contains("\"model\""));
+        assert!(turn.contains("\"summary\":\"none\""));
+    }
+
+    #[test]
+    fn protocol_initialization_uses_only_the_closed_notification_opt_out_profile() {
+        let expected_opt_outs = json!([
+            "thread/status/changed",
+            "thread/settings/updated",
+            "thread/goal/cleared",
+            "mcpServer/startupStatus/updated",
+            "account/rateLimits/updated",
+        ]);
+
+        let mut text_actor =
+            AiCodexAppServerProtocolActor::new(64 * 1024).expect("actor should validate");
+        let text: Value = serde_json::from_slice(
+            &text_actor
+                .initialize("test_client", "Test Client", "1.0.0")
+                .expect("stable initialization should encode"),
+        )
+        .expect("stable initialization should be JSON");
+        assert_eq!(
+            text,
+            json!({
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "test_client",
+                        "title": "Test Client",
+                        "version": "1.0.0",
+                    },
+                    "capabilities": {
+                        "optOutNotificationMethods": expected_opt_outs,
+                    },
+                },
+            })
+        );
+
+        let mut dynamic_actor =
+            AiCodexAppServerProtocolActor::new(64 * 1024).expect("actor should validate");
+        let dynamic: Value = serde_json::from_slice(
+            &dynamic_actor
+                .initialize_with_dynamic_tools("test_client", "Test Client", "1.0.0")
+                .expect("dynamic initialization should encode"),
+        )
+        .expect("dynamic initialization should be JSON");
+        assert_eq!(
+            dynamic,
+            json!({
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "test_client",
+                        "title": "Test Client",
+                        "version": "1.0.0",
+                    },
+                    "capabilities": {
+                        "experimentalApi": true,
+                        "optOutNotificationMethods": expected_opt_outs,
+                    },
+                },
+            })
+        );
     }
 
     #[test]
@@ -5239,6 +5608,219 @@ mod tests {
         }
         assert!(matches!(
             byte_limited.accept(&runtime_warning_notification(None, "overflow")),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[test]
+    fn protocol_admits_only_content_free_reasoning_item_lifecycle() {
+        let mut actor = active_protocol_actor();
+        let started = actor
+            .accept(&reasoning_lifecycle_notification(
+                "item/started",
+                "reasoning-1",
+                json!([]),
+                json!([]),
+            ))
+            .expect("empty reasoning start should be admitted");
+        assert_eq!(
+            started,
+            AiCodexAppServerInbound::ReasoningLifecycle { completed: false }
+        );
+        assert_eq!(
+            format!("{started:?}"),
+            "AiCodexAppServerInbound::ReasoningLifecycle { completed: false }"
+        );
+        let completed = actor
+            .accept(&reasoning_lifecycle_notification(
+                "item/completed",
+                "reasoning-1",
+                json!([]),
+                json!([]),
+            ))
+            .expect("empty reasoning completion should be admitted");
+        assert_eq!(
+            completed,
+            AiCodexAppServerInbound::ReasoningLifecycle { completed: true }
+        );
+
+        for (content, summary) in [
+            (json!(["hidden reasoning"]), json!([])),
+            (json!([]), json!(["unrequested summary"])),
+            (json!({}), json!([])),
+            (json!([]), json!({})),
+        ] {
+            let mut actor = active_protocol_actor();
+            assert!(matches!(
+                actor.accept(&reasoning_lifecycle_notification(
+                    "item/started",
+                    "reasoning-1",
+                    content,
+                    summary,
+                )),
+                Err(ProviderError::Rejected)
+            ));
+        }
+
+        let mut actor = active_protocol_actor();
+        assert!(matches!(
+            actor.accept(&lifecycle_notification(
+                "item/started",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "startedAtMs": 1,
+                    "item": {
+                        "id": "reasoning-1",
+                        "type": "reasoning",
+                        "content": [],
+                        "summary": [],
+                        "extra": true,
+                    },
+                }),
+            )),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[test]
+    fn protocol_admits_one_content_free_retained_usage_snapshot_without_recharging_it() {
+        let cursor =
+            crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", "thread-retained-1")
+                .expect("cursor should validate");
+        let mut actor = initialized_protocol_actor();
+        actor
+            .resume_thread(&cursor, &turn())
+            .expect("resume should begin a retained lifecycle");
+        actor
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("resume response should bind");
+        let snapshot = token_usage_notification("thread-retained-1", "turn-previous");
+        let inbound = actor
+            .accept(&snapshot)
+            .expect("one retained cumulative snapshot should be admitted");
+        assert_eq!(
+            inbound,
+            AiCodexAppServerInbound::RetainedResumeUsageSnapshot
+        );
+        assert_eq!(
+            format!("{inbound:?}"),
+            "AiCodexAppServerInbound::RetainedResumeUsageSnapshot"
+        );
+        assert!(matches!(
+            actor.accept(&snapshot),
+            Err(ProviderError::Rejected)
+        ));
+        assert_eq!(actor.thread_lifecycle_phase, ThreadLifecyclePhase::Complete);
+        actor
+            .accept(&thread_started_notification("thread-retained-1"))
+            .expect("a provider that also emits thread started remains supported");
+        assert!(matches!(
+            actor.accept(&thread_started_notification("thread-retained-1")),
+            Err(ProviderError::Rejected)
+        ));
+        actor
+            .start_turn("thread-retained-1", &turn())
+            .expect("the new turn should start");
+        actor
+            .accept(br#"{"id":3,"result":{"turn":{"id":"turn-current"}}}"#)
+            .expect("turn response should bind");
+        actor
+            .accept(&turn_started_notification(
+                "thread-retained-1",
+                "turn-current",
+            ))
+            .expect("turn notification should bind");
+        assert!(matches!(
+            actor.accept(&token_usage_notification(
+                "thread-retained-1",
+                "turn-current",
+            )),
+            Ok(AiCodexAppServerInbound::Notification { ref method, .. })
+                if method == THREAD_TOKEN_USAGE_UPDATED
+        ));
+
+        let mut notification_first = initialized_protocol_actor();
+        notification_first
+            .resume_thread(&cursor, &turn())
+            .expect("resume should begin");
+        assert!(matches!(
+            notification_first.accept(&snapshot),
+            Ok(AiCodexAppServerInbound::RetainedResumeUsageSnapshot)
+        ));
+        notification_first
+            .accept(&thread_started_notification("thread-retained-1"))
+            .expect("thread notification should bind first");
+        notification_first
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("thread response should complete the lifecycle");
+
+        let mut snapshot_first = initialized_protocol_actor();
+        snapshot_first
+            .resume_thread(&cursor, &turn())
+            .expect("snapshot-first resume should begin");
+        snapshot_first
+            .accept(&snapshot)
+            .expect("snapshot may precede the response");
+        snapshot_first
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("response should complete snapshot-first resume");
+        snapshot_first
+            .start_turn("thread-retained-1", &turn())
+            .expect("snapshot-first resume should permit a bounded turn");
+
+        let mut fallback_consumed = initialized_protocol_actor();
+        fallback_consumed
+            .resume_thread(&cursor, &turn())
+            .expect("fallback fixture resume should begin");
+        fallback_consumed
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("resume response should bind");
+        fallback_consumed
+            .accept(&snapshot)
+            .expect("usage snapshot should make a direct turn available");
+        fallback_consumed
+            .start_turn("thread-retained-1", &turn())
+            .expect("turn start should consume the resume fallback");
+        assert!(matches!(
+            fallback_consumed.accept(&thread_started_notification("thread-retained-1")),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut new_thread = initialized_protocol_actor();
+        new_thread
+            .start_persistent_empty_thread("model-1", &[])
+            .expect("new persistent thread should start");
+        new_thread
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-new"}}}"#)
+            .expect("new thread response should bind");
+        assert!(matches!(
+            new_thread.accept(&token_usage_notification("thread-new", "turn-empty")),
+            Err(ProviderError::Rejected)
+        ));
+        assert_eq!(
+            new_thread.thread_lifecycle_phase,
+            ThreadLifecyclePhase::AwaitingStarted
+        );
+        new_thread
+            .accept(&thread_started_notification("thread-new"))
+            .expect("usage cannot replace new-thread lifecycle evidence");
+
+        let mut negative = initialized_protocol_actor();
+        negative
+            .resume_thread(&cursor, &turn())
+            .expect("negative fixture resume should begin");
+        let mut invalid_usage: Value = serde_json::from_slice(&token_usage_notification(
+            "thread-retained-1",
+            "turn-previous",
+        ))
+        .expect("usage fixture should decode");
+        *invalid_usage
+            .pointer_mut("/params/tokenUsage/last/inputTokens")
+            .expect("input token field should exist") = json!(-1);
+        assert!(matches!(
+            negative
+                .accept(&serde_json::to_vec(&invalid_usage).expect("invalid usage should encode")),
             Err(ProviderError::Rejected)
         ));
     }
@@ -5558,7 +6140,13 @@ mod tests {
             Err(ProviderError::Rejected)
         ));
 
-        for status in ["idle", "systemError", "active", "unknown"] {
+        let mut malformed_delete = deleting_protocol_actor();
+        assert!(matches!(
+            malformed_delete.accept(br#"{"id":3,"result":{"deleted":true}}"#),
+            Err(ProviderError::Rejected)
+        ));
+
+        for status in ["idle", "systemError", "active", "notLoaded", "unknown"] {
             let mut deleting = deleting_protocol_actor();
             let status = if status == "active" {
                 json!({"type": status, "activeFlags": []})
@@ -5575,7 +6163,10 @@ mod tests {
         }
         let mut wrong_status_thread = deleting_protocol_actor();
         assert!(matches!(
-            wrong_status_thread.accept(&thread_not_loaded_notification("thread-other")),
+            wrong_status_thread.accept(&thread_status_notification(
+                "thread-other",
+                json!({"type": "notLoaded"}),
+            )),
             Err(ProviderError::Rejected)
         ));
         let mut extra_status_field = deleting_protocol_actor();
@@ -5586,6 +6177,48 @@ mod tests {
                     "threadId": "thread-1",
                     "status": {"type": "notLoaded", "activeFlags": []},
                 }),
+            )),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut mcp = active_protocol_actor();
+        assert!(matches!(
+            mcp.accept(&lifecycle_notification(
+                "mcpServer/startupStatus/updated",
+                json!({
+                    "threadId": "thread-1",
+                    "name": "untrusted",
+                    "status": "ready",
+                    "error": null,
+                    "failureReason": null,
+                }),
+            )),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut account_limits = active_protocol_actor();
+        assert!(matches!(
+            account_limits.accept(&lifecycle_notification(
+                "account/rateLimits/updated",
+                json!({"rateLimits": {"primary": {"usedPercent": 1.0}}}),
+            )),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut thread_settings = active_protocol_actor();
+        assert!(matches!(
+            thread_settings.accept(&lifecycle_notification(
+                "thread/settings/updated",
+                json!({"threadId": "thread-1", "threadSettings": {"summary": "none"}}),
+            )),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut thread_goal = active_protocol_actor();
+        assert!(matches!(
+            thread_goal.accept(&lifecycle_notification(
+                "thread/goal/cleared",
+                json!({"threadId": "thread-1"}),
             )),
             Err(ProviderError::Rejected)
         ));
@@ -5601,7 +6234,6 @@ mod tests {
             "collabToolCall",
             "webSearch",
             "imageView",
-            "reasoning",
         ];
         for item_type in forbidden_items {
             let mut guard = active_protocol_actor();
@@ -6051,14 +6683,21 @@ mod tests {
         empty_guard
             .delete_thread(&empty_cursor)
             .expect("persistent readiness thread should delete");
-        empty_guard
-            .accept(&thread_not_loaded_notification("thread-retained-empty"))
-            .expect("not-loaded status may precede its delete response");
+        assert!(matches!(
+            empty_guard.accept(&thread_status_notification(
+                "thread-retained-empty",
+                json!({"type": "notLoaded"}),
+            )),
+            Err(ProviderError::Rejected)
+        ));
         empty_guard
             .accept(br#"{"id":3,"result":{}}"#)
             .expect("persistent delete response should bind");
         assert!(matches!(
-            empty_guard.accept(&thread_not_loaded_notification("thread-retained-empty")),
+            empty_guard.accept(&thread_status_notification(
+                "thread-retained-empty",
+                json!({"type": "notLoaded"}),
+            )),
             Err(ProviderError::Rejected)
         ));
 
@@ -6133,9 +6772,13 @@ mod tests {
         guard
             .accept(br#"{"id":3,"result":{}}"#)
             .expect("delete response should bind");
-        guard
-            .accept(&thread_not_loaded_notification("thread-retained-1"))
-            .expect("not-loaded status may follow its delete response");
+        assert!(matches!(
+            guard.accept(&thread_status_notification(
+                "thread-retained-1",
+                json!({"type": "notLoaded"}),
+            )),
+            Err(ProviderError::Rejected)
+        ));
 
         let swapped = crate::AiProviderSessionCursor::new("other.thread", "thread-retained-1")
             .expect("bounded swapped cursor should construct");
@@ -6278,9 +6921,18 @@ mod tests {
             let inbound = actor.accept(&frame).unwrap_or_else(|error| {
                 let envelope: Value = serde_json::from_slice(&frame)
                     .expect("rejected turn frame should remain valid JSON");
+                let params_keys = envelope
+                    .get("params")
+                    .and_then(Value::as_object)
+                    .map(|object| object.keys().cloned().collect::<Vec<_>>());
+                let item = envelope.pointer("/params/item");
+                let item_keys = item
+                    .and_then(Value::as_object)
+                    .map(|object| object.keys().cloned().collect::<Vec<_>>());
                 panic!(
-                    "retained turn frame was rejected: {error:?}; method={:?}",
+                    "retained turn frame was rejected: {error:?}; method={:?}; params_keys={params_keys:?}; item_type={:?}; item_keys={item_keys:?}",
                     envelope.get("method").and_then(Value::as_str),
+                    item.and_then(|item| item.get("type")).and_then(Value::as_str),
                 );
             });
             match inbound {
@@ -6311,6 +6963,7 @@ mod tests {
                 }
                 AiCodexAppServerInbound::DynamicToolLifecycle { .. } => {}
                 AiCodexAppServerInbound::RuntimeWarning => {}
+                AiCodexAppServerInbound::ReasoningLifecycle { .. } => {}
                 AiCodexAppServerInbound::Notification { .. } => {}
                 other => panic!("unexpected retained turn frame: {other:?}"),
             }
@@ -6361,10 +7014,53 @@ mod tests {
         let mut resume_response_observed = false;
         let mut resume_notification_observed = false;
         for _ in 0..8 {
-            match actor
-                .accept(&process.receive())
-                .expect("later resume frame should be admitted")
-            {
+            let frame = process
+                .frames
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "resume lifecycle timed out: {error:?}; response_observed={resume_response_observed}; notification_observed={resume_notification_observed}; phase={:?}",
+                        actor.thread_lifecycle_phase,
+                    )
+                });
+            let inbound = actor.accept(&frame).unwrap_or_else(|error| {
+                let envelope: Value = serde_json::from_slice(&frame)
+                    .expect("rejected resume frame should remain valid JSON");
+                let keys = envelope
+                    .as_object()
+                    .map(|object| object.keys().cloned().collect::<Vec<_>>());
+                let params_keys = envelope
+                    .get("params")
+                    .and_then(Value::as_object)
+                    .map(|object| object.keys().cloned().collect::<Vec<_>>());
+                let thread_matches = envelope
+                    .pointer("/params/threadId")
+                    .and_then(Value::as_str)
+                    == Some(cursor.expose_to_provider_adapter());
+                let usage_keys = envelope
+                    .pointer("/params/tokenUsage")
+                    .and_then(Value::as_object)
+                    .map(|object| object.keys().cloned().collect::<Vec<_>>());
+                let last_keys = envelope
+                    .pointer("/params/tokenUsage/last")
+                    .and_then(Value::as_object)
+                    .map(|object| object.keys().cloned().collect::<Vec<_>>());
+                let total_keys = envelope
+                    .pointer("/params/tokenUsage/total")
+                    .and_then(Value::as_object)
+                    .map(|object| object.keys().cloned().collect::<Vec<_>>());
+                let turn_valid = envelope
+                    .pointer("/params/turnId")
+                    .and_then(Value::as_str)
+                    .is_some_and(valid_reference);
+                panic!(
+                    "later resume frame was rejected: {error:?}; method={:?}; keys={keys:?}; params_keys={params_keys:?}; thread_matches={thread_matches}; turn_valid={turn_valid}; usage_keys={usage_keys:?}; last_keys={last_keys:?}; total_keys={total_keys:?}; phase={:?}; snapshot_observed={}",
+                    envelope.get("method").and_then(Value::as_str),
+                    actor.thread_lifecycle_phase,
+                    actor.retained_usage_snapshot_observed,
+                );
+            });
+            match inbound {
                 AiCodexAppServerInbound::Response {
                     method: "thread/resume",
                     result,
@@ -6388,6 +7084,9 @@ mod tests {
                     resume_notification_observed = true;
                 }
                 AiCodexAppServerInbound::RemoteControlDisabled => {}
+                AiCodexAppServerInbound::RetainedResumeUsageSnapshot => {
+                    resume_notification_observed = true;
+                }
                 other => panic!("unexpected later resume frame: {other:?}"),
             }
             if resume_response_observed && resume_notification_observed {
@@ -6426,7 +7125,8 @@ mod tests {
                 AiCodexAppServerInbound::Response { .. }
                 | AiCodexAppServerInbound::Notification { .. }
                 | AiCodexAppServerInbound::DynamicToolLifecycle { .. }
-                | AiCodexAppServerInbound::RuntimeWarning => {}
+                | AiCodexAppServerInbound::RuntimeWarning
+                | AiCodexAppServerInbound::ReasoningLifecycle { .. } => {}
                 other => panic!("unexpected second turn frame: {other:?}"),
             }
             if second_completed {
@@ -6441,7 +7141,6 @@ mod tests {
                 .expect("live readiness thread delete should encode"),
         );
         let mut delete_response_observed = false;
-        let mut not_loaded_observed = false;
         for _ in 0..4 {
             let frame = process.receive();
             let inbound = actor.accept(&frame).unwrap_or_else(|error| {
@@ -6460,20 +7159,12 @@ mod tests {
                     method: "thread/delete",
                     ..
                 } => delete_response_observed = true,
-                AiCodexAppServerInbound::Notification { method, params }
-                    if method == "thread/status/changed"
-                        && params.pointer("/status/type").and_then(Value::as_str)
-                            == Some("notLoaded") =>
-                {
-                    not_loaded_observed = true;
-                }
                 other => panic!("unexpected delete frame: {other:?}"),
             }
-            if delete_response_observed && not_loaded_observed {
+            if delete_response_observed {
                 break;
             }
         }
         assert!(delete_response_observed);
-        assert!(not_loaded_observed);
     }
 }

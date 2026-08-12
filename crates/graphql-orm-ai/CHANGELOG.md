@@ -20,7 +20,41 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-No changes recorded after 0.73.3.
+No changes recorded after 0.73.4.
+
+## [0.73.4] - 2026-08-12
+
+### Fixed
+
+- Both strict Codex app-server initialization paths now send one
+  library-owned `optOutNotificationMethods` profile for unused thread status,
+  thread settings, cleared goals, MCP startup status, and account rate-limit
+  notifications. Authoritative thread starts, turns, item lifecycles,
+  assistant deltas, dynamic-tool requests, in-turn usage, and completion are
+  never suppressed. A server that emits any opted-out method still fails
+  closed at the actor.
+- Retained-thread deletion now uses only the exact empty successful
+  `thread/delete` response as provider-absence evidence. The actor no longer
+  admits a deletion-bound `thread/status/changed` exception.
+- Codex 0.147.0 empty reasoning item pairs are admitted only through the new
+  content-free `AiCodexAppServerInbound::ReasoningLifecycle` value while every
+  `turn/start` explicitly sets `summary: "none"`. Non-empty content or summary,
+  malformed pairs, and raw reasoning deltas remain rejected and never cross
+  the provider boundary.
+- A cumulative `thread/tokenUsage/updated` value replayed while loading a
+  retained thread is validated against the complete nonnegative generated
+  shape and exposed only as content-free
+  `AiCodexAppServerInbound::RetainedResumeUsageSnapshot`. It is never charged
+  to the next run. On Codex 0.147.0, the exact snapshot can complete only a
+  typed resume after its correlated response is observed when that version
+  omits `thread/started`; it cannot complete new thread creation.
+
+### Security
+
+- The live Codex 0.147.0 gate now covers a persistent empty thread, an initial
+  direct dynamic-tool turn, process restart, retained resume, a second
+  dynamic-tool turn, and response-authoritative deletion while shell, files,
+  MCP, browser, hosted web, remote control, and generic JSON-RPC stay closed.
 
 ## [0.73.3] - 2026-08-12
 

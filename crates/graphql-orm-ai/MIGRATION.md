@@ -19,6 +19,41 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.73.4: closed Codex notification profile and retained resume compatibility (schema remains 0.55.0)
+
+Existing Codex process implementations continue calling
+`AiCodexAppServerProtocolActor::initialize` or
+`initialize_with_dynamic_tools`; no host-authored capability object is added.
+Both methods now include the library-owned exact notification opt-out profile.
+Do not add, remove, or rewrite its methods in the host, and continue passing
+every received frame unchanged to `accept`. The stable path does not opt into
+the experimental API; the dynamic-tool path still adds only
+`experimentalApi: true`.
+
+Hosts should treat the additive non-exhaustive inbound variants as follows:
+
+- `ReasoningLifecycle` is content-free progress metadata. Do not invent or
+  display reasoning text. The actor accepts only paired empty reasoning items
+  because every turn explicitly requests `summary: "none"`.
+- `RetainedResumeUsageSnapshot` is cumulative provider state replayed during
+  an exact retained-thread resume and before the new active turn. Do not emit
+  it as usage or charge it to the current run. It may satisfy retained-resume
+  readiness after the correlated response because Codex 0.147.0 does not emit
+  `thread/started` on that exact resume path. It never replaces the response
+  or completes initial thread creation.
+
+Deletion adapters should finish only after the exact correlated empty
+`thread/delete` response. Stop waiting for or locally admitting a
+`thread/status/changed` `notLoaded` notification. The fixed initialization
+profile suppresses unused thread status, thread settings, cleared goal, MCP
+startup, and account rate-limit notifications. If the server sends any of
+those despite negotiation, pass the frame to the actor and fail closed.
+
+This release changes only the provider protocol/API contract. There is no
+GraphQL SDL, database entity, table, column, index, constraint,
+backup/restore, or durable semantic change. No data migration, backfill, or
+row rewrite is required, and AI schema module `0.55.0` remains current.
+
 ## 0.73.3: content-free Codex runtime warnings (schema remains 0.55.0)
 
 Codex app-server process adapters should handle

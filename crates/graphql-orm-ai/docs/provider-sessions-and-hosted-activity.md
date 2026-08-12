@@ -3,7 +3,7 @@ title: "Provider Sessions, Hosted Search, and Visible Activity"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-11
+last_reviewed: 2026-08-12
 review_by: 2027-02-11
 supersedes: []
 ---
@@ -65,12 +65,17 @@ process-tree kill callback. The wrapper invokes that callback on final drop,
 including an abandoned stream or failed graceful shutdown.
 
 The crate-owned protocol actor deliberately has no generic JSON-RPC send
-method. It admits only initialization, exact thread start/resume/delete, turn
-start/interruption, correlated responses, the closed visible-event allowlist,
-and—only for an experimental registration—the exact documented
-`item/tool/call` server request. Commands, shell, files, patches, MCP,
-collaboration, images, hosted web search, browser control, raw reasoning, and
-arbitrary methods remain forbidden.
+method. Initialization always negotiates one fixed opt-out profile for thread
+status/settings/cleared-goal, MCP-startup, and account-rate-limit notifications
+that this adapter neither consumes nor exposes. Stable and experimental
+initialization use the same profile; only the dynamic-tool path additionally
+sets `experimentalApi: true`. An opted-out method remains rejected if the
+server sends it anyway. The actor admits only initialization, exact thread
+start/resume/delete, turn start/interruption, correlated responses, the closed
+visible-event allowlist, and—only for an experimental registration—the exact
+documented `item/tool/call` server request. Commands, shell, files, patches,
+MCP, collaboration, images, hosted web search, browser control, raw reasoning,
+and arbitrary methods remain forbidden.
 
 Codex may emit the documented generic `warning` while a turn is open. The
 actor accepts only the exact positive-timestamp envelope, an optional thread ID
@@ -80,6 +85,13 @@ and returns only `AiCodexAppServerInbound::RuntimeWarning`. Hosts treat that
 variant as a non-fatal control event; they never log or forward the warning
 text. Warnings outside the current turn and every other generic notification
 remain rejected.
+
+Every turn explicitly requests `summary: "none"`. Codex may still report an
+empty reasoning item lifecycle. The actor accepts only an exact paired item
+whose `content` and `summary` arrays remain empty, discards its identifier and
+timestamp, and returns `ReasoningLifecycle`. It rejects non-empty reasoning or
+summary content and all reasoning deltas, so this control event is neither a
+reasoning summary nor hidden chain-of-thought.
 
 The closed default accepts an initial `StatelessReplay` request containing
 only bounded trusted instructions and text; each call gets a fresh ephemeral
@@ -94,11 +106,22 @@ policy/transcript/run fence.
 
 One protocol actor may perform sequential lifecycle cycles on its retained
 process. Each typed `thread/start` or `thread/resume` begins a private
-observation phase that accepts exactly one correlated response and one
-matching `thread/started` notification in either order. The next resume and
-`turn/start` remain closed until that pair is complete. There is no public
-state reset, and the retained model and dynamic-tool definitions cannot change
+observation phase. New thread creation requires exactly one correlated
+response and one matching `thread/started` notification in either order.
+Retained resume uses that same pair when both frames are delivered. Codex
+0.147.0 may instead deliver one cumulative `thread/tokenUsage/updated`
+snapshot around the correlated response. The actor validates its complete
+nonnegative generated shape and exact thread correlation, discards all token
+values, and permits that content-free snapshot to close only the typed resume
+phase once its response is also present. The snapshot is not charged to the
+new run and cannot complete initial creation. The next resume and `turn/start`
+remain closed until the applicable phase is complete. There is no public state
+reset, and the retained model and dynamic-tool definitions cannot change
 between creation, resume, or later terminal turns.
+
+Deletion completes from the exact empty successful `thread/delete` response.
+It never depends on or admits `thread/status/changed`; the fixed initialization
+profile suppresses that notification for the connection.
 
 Experimental dynamic tools require
 `AiCodexAppServerRegistration::with_experimental_dynamic_tools` and
