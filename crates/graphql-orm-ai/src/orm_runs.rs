@@ -21,7 +21,8 @@ use crate::orm_inbox::{PreparedAiInboxEvent, append_inbox_event};
 use crate::persistence::*;
 use crate::{
     AiApprovalId, AiBudgetAmounts, AiError, AiRunCancellation, AiRunCancellationHub, AiRunId,
-    AiRunState, AiScope, AiSessionId, AiSessionWakeup, AiToolCallId,
+    AiRunState, AiRunTerminalEvent, AiScope, AiSessionId, AiSessionWakeup, AiToolCallId,
+    ProtectedContentEnvelope,
 };
 
 const MAXIMUM_WORKER_ID_BYTES: usize = 256;
@@ -905,7 +906,8 @@ impl OrmAiRunService {
                         completion.provider_response_id,
                         now,
                     )
-                    .await
+                    .await?;
+                    append_terminal_run_event(tx, &current, completion.final_state, now).await
                 })
             })
             .await
@@ -1434,6 +1436,9 @@ impl OrmAiRunService {
                             now,
                         )
                         .await?;
+                        if AiRunTerminalEvent::from_run_state(next_state).is_some() {
+                            append_terminal_run_event(tx, &current, next_state, now).await?;
+                        }
                     }
                     Ok(report)
                 })
@@ -4055,6 +4060,7 @@ impl OrmAiRunService {
                         now,
                     )
                     .await?;
+                    append_terminal_run_event(tx, &current, final_state, now).await?;
                     tx.queue_event(AiSessionWakeup {
                         session_id: session.id,
                         sequence: event_sequence,
@@ -4248,6 +4254,170 @@ fn reservation_usage_matches(
             && reservation.actual_cost_microunits == Some(as_i64(usage.cost_microunits)?)
             && reservation.actual_runs == Some(as_i64(usage.runs)?),
     )
+}
+
+const TERMINAL_EVENT_METADATA_FORMAT: &str = "graphql-orm-ai-run-terminal-event-v1";
+
+/// Opens the deliberately content-free metadata envelope used by canonical
+/// run terminal events without consulting a scope content key.
+///
+/// The run state and event type are already ordinary row metadata. The exact
+/// tagged envelope adds no prompt, output, provider, tool, authorization, or
+/// error content. All other event payloads continue through the configured
+/// content-protection policy and protector.
+pub(crate) fn open_terminal_event_metadata(
+    event_type: &str,
+    protected_payload: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, AiError> {
+    let Some(value) = protected_payload
+        .as_object()
+        .and_then(|envelope| envelope.get("value"))
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(None);
+    };
+    if value.get("format").and_then(serde_json::Value::as_str)
+        != Some(TERMINAL_EVENT_METADATA_FORMAT)
+    {
+        return Ok(None);
+    }
+    let terminal =
+        AiRunTerminalEvent::from_event_type(event_type).ok_or(AiError::PersistenceFailed)?;
+    if protected_payload
+        .get("protection")
+        .and_then(serde_json::Value::as_str)
+        != Some("database_managed")
+        || protected_payload
+            .as_object()
+            .is_none_or(|object| object.len() != 2)
+        || value.len() != 2
+        || value.get("state").and_then(serde_json::Value::as_str)
+            != Some(terminal.run_state().as_str())
+    {
+        return Err(AiError::PersistenceFailed);
+    }
+    Ok(Some(serde_json::Value::Object(value.clone())))
+}
+
+fn terminal_event_metadata(
+    terminal: AiRunTerminalEvent,
+) -> Result<serde_json::Value, OrmPublicError> {
+    serde_json::to_value(ProtectedContentEnvelope::DatabaseManaged {
+        value: serde_json::json!({
+            "format": TERMINAL_EVENT_METADATA_FORMAT,
+            "state": terminal.run_state().as_str(),
+        }),
+    })
+    .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))
+}
+
+/// Appends the canonical session and owner-inbox terminal event in the
+/// caller's exact run-transition transaction.
+pub(crate) async fn append_terminal_run_event(
+    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    run: &AiRunRecord,
+    final_state: AiRunState,
+    now: OffsetDateTime,
+) -> Result<(), OrmPublicError> {
+    let terminal = AiRunTerminalEvent::from_run_state(final_state)
+        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InvalidInput))?;
+    let principal_reference: PrincipalReference =
+        serde_json::from_value(run.principal_reference.clone())
+            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    let expected_principal_kind = match &principal_reference.kind {
+        agql_auth::PrincipalReferenceKind::UserSession => "user".to_owned(),
+        agql_auth::PrincipalReferenceKind::ApiToken { principal_kind } => {
+            format!("api_token:{principal_kind}")
+        }
+    };
+    let session = tx
+        .find_by_id::<AiSessionRecord>(&run.session_id)
+        .await
+        .map_err(OrmPublicError::from)?
+        .ok_or_else(OrmPublicError::not_found)?;
+    let valid_session_state = match session.state.as_str() {
+        "active" | "archived" => session.deleted_at.is_none(),
+        "deleting" => session.deleted_at.is_some(),
+        _ => false,
+    };
+    if run.id.is_nil()
+        || run.attempt_id.is_none()
+        || run.lease_generation <= 0
+        || session.id != run.session_id
+        || !valid_session_state
+        || session.owner_principal_kind != expected_principal_kind
+        || session.owner_subject != principal_reference.subject
+        || session.scope_kind.trim().is_empty()
+        || session.scope_id.trim().is_empty()
+        || session.stream_head < 0
+        || principal_reference
+            .tenant_id
+            .as_ref()
+            .is_some_and(|tenant_id| session.tenant_id.as_ref() != Some(tenant_id))
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    }
+    let sequence = session
+        .stream_head
+        .checked_add(1)
+        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    if !matches!(
+        tx.compare_and_swap::<AiSessionRecord>(
+            &session.id,
+            session.row_version,
+            AiSessionRecordWhereInput::default(),
+            UpdateAiSessionRecordInput {
+                stream_head: Some(sequence),
+                last_activity_at: Some(now.unix_timestamp()),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(OrmPublicError::from)?,
+        ConditionalUpdateOutcome::Updated(_)
+    ) {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
+    let scope = AiScope {
+        kind: session.scope_kind,
+        id: session.scope_id,
+        tenant_id: session.tenant_id,
+    };
+    let event_id = Uuid::new_v4();
+    let inbox_event_id = Uuid::new_v4();
+    let protected_event = terminal_event_metadata(terminal)?;
+    let protected_inbox_event = terminal_event_metadata(terminal)?;
+    tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+        id: event_id,
+        session_id: session.id,
+        sequence,
+        event_type: terminal.event_type().to_owned(),
+        run_id: Some(run.id),
+        causation_id: run.attempt_id.map(|attempt_id| attempt_id.to_string()),
+        correlation_id: run.id.to_string(),
+        protected_payload: protected_event,
+    })
+    .await
+    .map_err(OrmPublicError::from)?;
+    tx.queue_event(AiSessionWakeup {
+        session_id: session.id,
+        sequence,
+    });
+    append_inbox_event(
+        tx,
+        PreparedAiInboxEvent {
+            id: inbox_event_id,
+            principal_kind: session.owner_principal_kind,
+            principal_subject: session.owner_subject,
+            scope,
+            session_id: session.id,
+            event_type: terminal.event_type().to_owned(),
+            protected_payload: protected_inbox_event,
+            created_at: now.unix_timestamp(),
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 pub(crate) async fn append_attempt_outcome(
@@ -4519,6 +4689,40 @@ mod tests {
             })
             .await
             .expect("attempt outcomes should query")
+    }
+
+    async fn session_events(fixture: &Fixture) -> Vec<AiSessionEventRecord> {
+        fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiSessionEventRecord>()
+                        .default_order()
+                        .limit(32)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("session events should query")
+    }
+
+    async fn inbox_events(fixture: &Fixture) -> Vec<AiInboxEventRecord> {
+        fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiInboxEventRecord>()
+                        .default_order()
+                        .limit(32)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("inbox events should query")
     }
 
     #[tokio::test]
@@ -4996,6 +5200,24 @@ mod tests {
             outcomes[0].provider_response_id.as_deref(),
             Some("response-safe-reference")
         );
+        let events = session_events(&fixture).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "run_completed");
+        assert_eq!(events[0].run_id, Some(run_id.0));
+        assert_eq!(events[0].sequence, 1);
+        assert_eq!(
+            open_terminal_event_metadata(&events[0].event_type, &events[0].protected_payload)
+                .expect("terminal metadata should validate")
+                .expect("terminal event should use metadata-only envelope"),
+            serde_json::json!({
+                "format": TERMINAL_EVENT_METADATA_FORMAT,
+                "state": "completed",
+            })
+        );
+        let inbox = inbox_events(&fixture).await;
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].event_type, "run_completed");
+        assert_eq!(inbox[0].session_id, Some(running.session_id().0));
         assert!(matches!(
             fixture
                 .service
@@ -5007,6 +5229,124 @@ mod tests {
                 .await,
             Err(AiError::Conflict)
         ));
+        assert_eq!(session_events(&fixture).await.len(), 1);
+        assert_eq!(inbox_events(&fixture).await.len(), 1);
+        assert_eq!(attempt_outcomes(&fixture).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_and_recovery_completions_publish_exact_canonical_events() {
+        for (state, event_type, code) in [
+            (AiRunState::Failed, "run_failed", "provider_failed"),
+            (
+                AiRunState::RecoveryRequired,
+                "run_recovery_required",
+                "provider_ambiguous",
+            ),
+        ] {
+            let fixture = fixture().await;
+            let run_id = seed_queued(&fixture).await;
+            let lease = fixture
+                .service
+                .claim_next("worker-terminal-event")
+                .await
+                .expect("claim should succeed")
+                .expect("run should be eligible");
+            let lease = fixture
+                .service
+                .start(&lease)
+                .await
+                .expect("run should start");
+            fixture
+                .service
+                .finish(
+                    &lease,
+                    AiRunCompletion::new(state, code, Some(code.to_owned()), None)
+                        .expect("terminal completion should validate"),
+                )
+                .await
+                .expect("terminal completion should commit");
+
+            assert_eq!(run_record(&fixture, run_id).await.state, state.as_str());
+            let events = session_events(&fixture).await;
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].event_type, event_type);
+            assert_eq!(events[0].run_id, Some(run_id.0));
+            let inbox = inbox_events(&fixture).await;
+            assert_eq!(inbox.len(), 1);
+            assert_eq!(inbox[0].event_type, event_type);
+            assert_eq!(attempt_outcomes(&fixture).await.len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_event_failure_rolls_back_run_outcome_and_watermarks() {
+        let fixture = fixture().await;
+        let run_id = seed_queued(&fixture).await;
+        let lease = fixture
+            .service
+            .claim_next("worker-terminal-rollback")
+            .await
+            .expect("claim should succeed")
+            .expect("run should be eligible");
+        let lease = fixture
+            .service
+            .start(&lease)
+            .await
+            .expect("run should start");
+        let session = AiSessionRecord::find_by_id(&fixture.database, &lease.session_id().0)
+            .await
+            .expect("session lookup should succeed")
+            .expect("session should exist");
+        fixture
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let outcome = tx
+                        .compare_and_swap::<AiSessionRecord>(
+                            &session.id,
+                            session.row_version,
+                            AiSessionRecordWhereInput::default(),
+                            UpdateAiSessionRecordInput {
+                                stream_head: Some(i64::MAX),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                        Ok(())
+                    } else {
+                        Err(OrmPublicError::new(OrmErrorCode::Conflict))
+                    }
+                })
+            })
+            .await
+            .expect("test should inject a terminal-event sequence overflow");
+
+        assert!(matches!(
+            fixture
+                .service
+                .finish(
+                    &lease,
+                    AiRunCompletion::new(
+                        AiRunState::RecoveryRequired,
+                        "terminal_event_failure",
+                        Some("terminal_event_failure".to_owned()),
+                        None,
+                    )
+                    .expect("completion should validate"),
+                )
+                .await,
+            Err(AiError::PersistenceFailed)
+        ));
+        assert_eq!(
+            run_record(&fixture, run_id).await.state,
+            AiRunState::Running.as_str()
+        );
+        assert!(attempt_outcomes(&fixture).await.is_empty());
+        assert!(session_events(&fixture).await.is_empty());
+        assert!(inbox_events(&fixture).await.is_empty());
     }
 
     #[tokio::test]

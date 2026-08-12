@@ -2472,7 +2472,7 @@ mod tests {
             .expect("denied approval should remain durable");
         assert_eq!(approval.state, "denied");
 
-        let (events, audits, outcomes) = fixture
+        let (events, inbox_events, audits, outcomes) = fixture
             .database
             .transaction(TransactionMode::Default, move |tx| {
                 Box::pin(async move {
@@ -2488,13 +2488,19 @@ mod tests {
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
+                    let inbox_events = tx
+                        .query::<AiInboxEventRecord>()
+                        .limit(100)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
                     let outcomes = tx
                         .query::<AiRunAttemptOutcomeRecord>()
                         .limit(100)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
-                    Ok((events, audits, outcomes))
+                    Ok((events, inbox_events, audits, outcomes))
                 })
             })
             .await
@@ -2503,6 +2509,20 @@ mod tests {
             events
                 .iter()
                 .filter(|event| event.event_type == "approval_wait_reconciled")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "run_cancelled")
+                .count(),
+            1
+        );
+        assert_eq!(
+            inbox_events
+                .iter()
+                .filter(|event| event.event_type == "run_cancelled")
                 .count(),
             1
         );

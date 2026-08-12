@@ -3,7 +3,7 @@ title: "Durable Principal Inbox"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -17,9 +17,9 @@ pagination.
 
 Each exact principal kind and subject owns one monotonic sequence. Creating a
 session, queueing a user message, changing archive state, beginning deletion,
-or committing an authoritative assistant message appends a protected inbox
-event in the same ORM transaction as the underlying state change. A rollback
-therefore creates neither the state change nor its notification.
+committing an authoritative assistant message, or closing a run appends an
+inbox event in the same ORM transaction as the underlying state change. A
+rollback therefore creates neither the state change nor its notification.
 
 ## GraphQL contract
 
@@ -56,13 +56,21 @@ Current event types are server-authored and bounded:
 | `session_created` | A new owner-only session committed. |
 | `message_queued` | A user message and fenced run committed atomically. |
 | `assistant_message_completed` | Authoritative protected assistant output committed. |
+| `run_completed` | The exact run completed successfully. |
+| `run_failed` | The exact run failed with no provider or error detail disclosed. |
+| `run_cancelled` | The exact run was durably cancelled. |
+| `run_recovery_required` | Ordinary execution stopped because an external effect is uncertain. |
 | `session_archived` | The session entered archived state. |
 | `session_restored` | The session returned to active state. |
 | `session_deleting` | Durable deletion/purge state began. |
 
 Payloads contain only bounded identifiers and state needed to refresh a
-session shell. They use the exact scope content-protection policy; the inbox is
-not a plaintext mirror of chat content.
+session shell. Content-bearing payloads use the exact scope content-protection
+policy; the inbox is not a plaintext mirror of chat content. Canonical run
+terminal events are the narrow exception: their exact database-managed
+metadata envelope contains only a format marker and the same closed state
+already disclosed by the event type. Readers accept that envelope only for the
+matching canonical event and reject malformed or mismatched forms.
 
 ## Client replay algorithm
 

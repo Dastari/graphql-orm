@@ -5287,6 +5287,41 @@ mod tests {
             .expect("run should exist");
         assert_eq!(run.state, AiRunState::Completed.as_str());
         assert_eq!(run.latest_checkpoint_id, Some(message_id));
+        let (terminal_events, terminal_inbox_events) = test
+            .fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    let events = tx
+                        .query::<AiSessionEventRecord>()
+                        .limit(16)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let inbox = tx
+                        .query::<AiInboxEventRecord>()
+                        .limit(16)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    Ok((
+                        events
+                            .into_iter()
+                            .filter(|event| event.event_type == "run_completed")
+                            .collect::<Vec<_>>(),
+                        inbox
+                            .into_iter()
+                            .filter(|event| event.event_type == "run_completed")
+                            .collect::<Vec<_>>(),
+                    ))
+                })
+            })
+            .await
+            .expect("terminal events should query");
+        assert_eq!(terminal_events.len(), 1);
+        assert_eq!(terminal_events[0].run_id, Some(run.id));
+        assert_eq!(terminal_inbox_events.len(), 1);
+        assert_eq!(terminal_inbox_events[0].session_id, Some(run.session_id));
         let budget = AiBudgetReservationRecord::find_by_id(
             &test.fixture.database,
             &test.accepted.budget_reservation_id().0,
@@ -9259,6 +9294,48 @@ mod tests {
             .expect("run lookup should succeed")
             .expect("run should exist");
         assert_eq!(run.state, AiRunState::RecoveryRequired.as_str());
+        let (session_events, inbox_events) = fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    let session_events = tx
+                        .query::<AiSessionEventRecord>()
+                        .default_order()
+                        .limit(32)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let inbox_events = tx
+                        .query::<AiInboxEventRecord>()
+                        .default_order()
+                        .limit(32)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    Ok((session_events, inbox_events))
+                })
+            })
+            .await
+            .expect("tool and terminal lifecycle should query");
+        let started = session_events
+            .iter()
+            .filter(|event| event.event_type == "application_tool_started")
+            .collect::<Vec<_>>();
+        let terminal = session_events
+            .iter()
+            .filter(|event| event.event_type == "run_recovery_required")
+            .collect::<Vec<_>>();
+        assert_eq!(started.len(), 1);
+        assert_eq!(terminal.len(), 1);
+        assert_eq!(terminal[0].run_id, Some(run.id));
+        assert!(started[0].sequence < terminal[0].sequence);
+        assert_eq!(
+            inbox_events
+                .iter()
+                .filter(|event| event.event_type == "run_recovery_required")
+                .count(),
+            1
+        );
         let approval = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
             .await
             .expect("approval lookup should succeed")

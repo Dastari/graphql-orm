@@ -24,8 +24,8 @@ use crate::persistence::*;
 use crate::{
     AiAccessPolicy, AiContentProtectionPolicy, AiContentProtectionPolicyResolver,
     AiContentProtector, AiError, AiRunCancellationHub, AiRunCancellationService,
-    AiRunCancellationView, AiRunState, AiScope, AiSessionAction, AiSessionId, AiSessionWakeup,
-    CancelAiRunInput,
+    AiRunCancellationView, AiRunState, AiRunTerminalEvent, AiScope, AiSessionAction, AiSessionId,
+    AiSessionWakeup, CancelAiRunInput,
 };
 
 const MAXIMUM_ACTIVE_TOOL_CALLS_HARD_LIMIT: usize = 256;
@@ -454,7 +454,7 @@ impl AiRunCancellationService for OrmAiRunCancellationService {
                         id: final_event_id,
                         session_id,
                         sequence: final_sequence,
-                        event_type: "run_cancelled".to_owned(),
+                        event_type: AiRunTerminalEvent::Cancelled.event_type().to_owned(),
                         run_id: Some(run_id),
                         causation_id: Some(request_event_id.to_string()),
                         correlation_id: client_request_id.to_string(),
@@ -492,7 +492,7 @@ impl AiRunCancellationService for OrmAiRunCancellationService {
                             principal_subject: principal_subject.clone(),
                             scope,
                             session_id,
-                            event_type: "run_cancelled".to_owned(),
+                            event_type: AiRunTerminalEvent::Cancelled.event_type().to_owned(),
                             protected_payload: final_inbox_payload,
                             created_at: now_unix,
                         },

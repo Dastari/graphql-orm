@@ -19,6 +19,46 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.76.0: authoritative durable run terminal events (schema 0.55.0 to 0.56.0)
+
+Apply AI schema module `0.56.0` before starting workers from this release. The
+migration records a persistent semantic version only: it produces no table,
+column, index, constraint, or row rewrite.
+
+Every successful authoritative transition to `Completed`, `Failed`,
+`Cancelled`, or `RecoveryRequired` now appends exactly one owner-visible
+session event and owner-inbox event in the same fenced transaction as the run
+state and immutable attempt outcome. The event names are available through
+the closed `AiRunTerminalEvent` API:
+
+```rust
+assert_eq!(
+    AiRunTerminalEvent::RecoveryRequired.event_type(),
+    "run_recovery_required",
+);
+```
+
+No run-service constructor or coordinator integration changes are required.
+Continue composing the existing `OrmAiSessionService`, `OrmAiInboxService`,
+and subscription services. Clients should page replay to its captured
+watermark before subscribing live and close local Working/Stop state when a
+canonical terminal event arrives. On `ResetRequired`, discard provisional
+per-run rendering and reload authoritative session/message windows before
+reconnecting at the returned watermark.
+
+Canonical terminal payloads contain only a format marker and the matching
+closed run state. They deliberately use a content-free database-managed
+metadata envelope because the same state already appears in the non-secret
+event type and private run row. All nonterminal and content-bearing payloads
+continue through the configured scope content-protection policy unchanged.
+
+Historical runs are not backfilled. Manufacturing events for an already
+terminal run would require choosing a stream position after the original
+transaction and could falsely imply atomic observation. Existing durable rows
+remain valid; applications may clear stale transient UI state during a reset
+or one-time deployment reconciliation. No data migration, backfill, or row
+rewrite is required.
+
 ## 0.75.1: complete durable event replay at the ORM page limit (schema remains 0.55.0)
 
 No host API changes are required. `AiSessionEventPage.HasMore` and

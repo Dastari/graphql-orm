@@ -20,7 +20,44 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-No changes recorded after 0.75.1.
+No changes recorded after 0.76.0.
+
+## [0.76.0] - 2026-08-12
+
+### Added
+
+- `AiRunTerminalEvent` provides the closed mapping from authoritative durable
+  run states to `run_completed`, `run_failed`, `run_cancelled`, and
+  `run_recovery_required` event names.
+
+### Changed
+
+- Every successful fenced terminal/recovery run transition now atomically
+  advances the session and owner-inbox watermarks and appends one canonical
+  metadata-only terminal event beside the immutable attempt outcome. This
+  includes ordinary and supervised coordinators, expired-lease recovery,
+  approval-wait reconciliation, and background-provider reconciliation.
+- The existing owner-cancellation transaction remains authoritative for
+  `run_cancelled`; generalized completion loses its fence after cancellation
+  and cannot append a duplicate event.
+
+### Security
+
+- Terminal payloads use an exact server-authored, content-free metadata
+  envelope containing only its format and closed run state. Prompts, output,
+  tool data, provider references, authorization detail, and error text never
+  enter these events. Session and inbox reads retain current owner, scope,
+  content-policy, retention, and replay authorization.
+- Run transition, attempt outcome, session event, session watermark, inbox
+  event, inbox watermark, and commit-only wakeups now succeed or roll back as
+  one ORM state-machine transaction. A stale fence, duplicate finish, or event
+  persistence failure cannot publish a partial terminal projection.
+
+### Schema
+
+- AI schema module `0.56.0` records the new authoritative durable terminal
+  event semantics. No entity, table, column, index, constraint, or stored-row
+  representation changes.
 
 ## [0.75.1] - 2026-08-12
 

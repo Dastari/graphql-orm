@@ -489,18 +489,25 @@ impl AiSessionService for OrmAiSessionService {
         let has_more = rows.last().is_some_and(|row| row.sequence < watermark);
         let mut events = Vec::with_capacity(rows.len());
         for row in rows {
-            let payload = self
-                .open_value(
-                    &policy,
-                    content_context(
-                        "graphql_orm_ai_session_events",
-                        row.id,
-                        "protected_payload",
-                        &scope,
-                    ),
-                    &row.protected_payload,
-                )
-                .await?;
+            let payload = match crate::orm_runs::open_terminal_event_metadata(
+                &row.event_type,
+                &row.protected_payload,
+            )? {
+                Some(metadata) => metadata,
+                None => {
+                    self.open_value(
+                        &policy,
+                        content_context(
+                            "graphql_orm_ai_session_events",
+                            row.id,
+                            "protected_payload",
+                            &scope,
+                        ),
+                        &row.protected_payload,
+                    )
+                    .await?
+                }
+            };
             events.push(AiSessionEventView {
                 id: row.id,
                 sequence: row.sequence,

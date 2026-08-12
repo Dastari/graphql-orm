@@ -36,6 +36,77 @@ pub enum AiRunState {
     Cancelled,
 }
 
+/// Canonical owner-visible event emitted when an authoritative run leaves the
+/// active worker lifecycle.
+///
+/// `RecoveryRequired` is included even though it is not a safely deletable
+/// terminal state: it closes ordinary worker execution and requires explicit
+/// operator reconciliation. This value describes durable UI/replay metadata
+/// only. It grants no run mutation, retry, provider, tool, or resource
+/// authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AiRunTerminalEvent {
+    /// The run completed successfully.
+    Completed,
+    /// The run failed with a redacted server-owned classification.
+    Failed,
+    /// The run was cancelled.
+    Cancelled,
+    /// The run stopped because an external effect could not be proven safe.
+    RecoveryRequired,
+}
+
+impl AiRunTerminalEvent {
+    /// Maps a durable run state to its owner-visible closing event.
+    pub const fn from_run_state(state: AiRunState) -> Option<Self> {
+        match state {
+            AiRunState::Completed => Some(Self::Completed),
+            AiRunState::Failed => Some(Self::Failed),
+            AiRunState::Cancelled => Some(Self::Cancelled),
+            AiRunState::RecoveryRequired => Some(Self::RecoveryRequired),
+            AiRunState::Queued
+            | AiRunState::Leased
+            | AiRunState::Running
+            | AiRunState::WaitingApproval
+            | AiRunState::WaitingTool
+            | AiRunState::WaitingReauth
+            | AiRunState::WaitingProvider
+            | AiRunState::RetryScheduled => None,
+        }
+    }
+
+    /// Maps one canonical terminal event type back to its closed value.
+    pub const fn from_event_type(event_type: &str) -> Option<Self> {
+        match event_type.as_bytes() {
+            b"run_completed" => Some(Self::Completed),
+            b"run_failed" => Some(Self::Failed),
+            b"run_cancelled" => Some(Self::Cancelled),
+            b"run_recovery_required" => Some(Self::RecoveryRequired),
+            _ => None,
+        }
+    }
+
+    /// Stable owner-visible durable event name.
+    pub const fn event_type(self) -> &'static str {
+        match self {
+            Self::Completed => "run_completed",
+            Self::Failed => "run_failed",
+            Self::Cancelled => "run_cancelled",
+            Self::RecoveryRequired => "run_recovery_required",
+        }
+    }
+
+    /// Exact durable run state represented by this event.
+    pub const fn run_state(self) -> AiRunState {
+        match self {
+            Self::Completed => AiRunState::Completed,
+            Self::Failed => AiRunState::Failed,
+            Self::Cancelled => AiRunState::Cancelled,
+            Self::RecoveryRequired => AiRunState::RecoveryRequired,
+        }
+    }
+}
+
 impl AiRunState {
     /// Stable durable storage value.
     pub const fn as_str(self) -> &'static str {

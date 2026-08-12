@@ -2,12 +2,17 @@
 
 use std::sync::Arc;
 
-use agql_auth::{AccessTokenMetadata, AuthPrincipal, AuthUser, SessionContext};
+use agql_auth::{
+    AccessTokenMetadata, AuthPrincipal, AuthUser, CurrentPrincipalResolver, PrincipalReference,
+    ResolvedPrincipal, SessionContext, SystemClock,
+};
 use async_trait::async_trait;
+use futures::StreamExt;
 use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
 use graphql_orm::graphql::pagination::KeysetConnectionInput;
 use graphql_orm::prelude::{Database, PaginationConfig, SqliteBackend};
 use graphql_orm_ai::*;
+use time::{Duration as TimeDuration, OffsetDateTime};
 use uuid::Uuid;
 
 struct AllowAll;
@@ -53,6 +58,24 @@ impl AiContentProtectionPolicyResolver for ProtectionPolicy {
 }
 
 struct LegacyPreviewProtector;
+
+struct StaticPrincipalResolver {
+    principal: AuthPrincipal,
+}
+
+#[async_trait]
+impl CurrentPrincipalResolver for StaticPrincipalResolver {
+    async fn resolve(
+        &self,
+        reference: &PrincipalReference,
+    ) -> agql_auth::AuthResult<ResolvedPrincipal> {
+        ResolvedPrincipal::new(
+            reference.clone(),
+            self.principal.clone(),
+            OffsetDateTime::now_utc(),
+        )
+    }
+}
 
 #[async_trait]
 impl AiContentProtector for LegacyPreviewProtector {
@@ -207,6 +230,15 @@ fn scope_input() -> AiScopeInput {
         id: "54".to_owned(),
         tenant_id: Some("tenant-1".to_owned()),
     }
+}
+
+fn run_service(sessions: &OrmAiSessionService) -> OrmAiRunService {
+    OrmAiRunService::new(
+        sessions.database().clone(),
+        Arc::new(SystemClock),
+        AiRunServiceLimits::new(TimeDuration::minutes(1), TimeDuration::hours(1), 32, 2, 8)
+            .expect("run-service limits should validate"),
+    )
 }
 
 #[tokio::test]
@@ -422,6 +454,200 @@ async fn session_event_pages_follow_a_smaller_orm_maximum() {
     assert_eq!(page_lengths, [7, 7, 6]);
     assert_eq!(sequences, (1..=20).collect::<Vec<_>>());
     assert_eq!(watermark, 20);
+}
+
+#[tokio::test]
+async fn terminal_event_at_sequence_101_replays_across_session_and_inbox_pages() {
+    let sessions = service().await;
+    let owner = principal("terminal-page-owner");
+    let session = sessions
+        .create_session(
+            &owner,
+            CreateAiSessionInput {
+                scope: scope_input(),
+                title: Some("Initial".to_owned()),
+            },
+        )
+        .await
+        .expect("session should create");
+    let submitted = sessions
+        .send_message(
+            &owner,
+            SendAiMessageInput {
+                session_id: session.id,
+                text: "Run a bounded operation".to_owned(),
+                attachment_ids: vec![],
+                client_message_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("message should queue a run");
+    append_title_events(&sessions, &owner, session.id, 0, 99).await;
+
+    let runs = run_service(&sessions);
+    let lease = runs
+        .claim_next("terminal-page-worker")
+        .await
+        .expect("run claim should succeed")
+        .expect("queued run should be eligible");
+    assert_eq!(lease.run_id().0, submitted.run_id);
+    let lease = runs.start(&lease).await.expect("run should start");
+    runs.finish(
+        &lease,
+        AiRunCompletion::new(
+            AiRunState::RecoveryRequired,
+            "provider_completion_ambiguous",
+            Some("provider_completion_ambiguous".to_owned()),
+            None,
+        )
+        .expect("recovery completion should validate"),
+    )
+    .await
+    .expect("recovery completion should commit");
+    append_title_events(&sessions, &owner, session.id, 99, 244).await;
+
+    let (sequences, page_lengths, watermark, _) =
+        collect_session_sequences(&sessions, &owner, session.id, 100).await;
+    assert_eq!(page_lengths, [100, 100, 100, 45]);
+    assert_eq!(sequences, (1..=345).collect::<Vec<_>>());
+    assert_eq!(watermark, 345);
+    let terminal_page = sessions
+        .session_event_page(&owner, AiSessionId(session.id), 100, 100)
+        .await
+        .expect("terminal page should load");
+    assert_eq!(terminal_page.events[0].sequence, 101);
+    assert_eq!(terminal_page.events[0].event_type, "run_recovery_required");
+    assert_eq!(terminal_page.events[0].run_id, Some(submitted.run_id));
+    assert_eq!(
+        terminal_page.events[0].payload.0["state"],
+        "recovery_required"
+    );
+
+    let inbox = OrmAiInboxService::new(
+        sessions.database().clone(),
+        Arc::new(StaticPrincipalResolver {
+            principal: owner.clone(),
+        }),
+        Arc::new(AllowAll),
+        Arc::new(ProtectionPolicy),
+        Arc::new(DatabaseManagedContentProtector),
+    );
+    let mut after = 0;
+    let mut inbox_sequences = Vec::new();
+    let mut inbox_page_lengths = Vec::new();
+    loop {
+        let page = inbox
+            .inbox_event_page(&owner, after, 100)
+            .await
+            .expect("inbox page should load");
+        assert!(!page.reset_required);
+        inbox_page_lengths.push(page.events.len());
+        for event in page.events {
+            after = event.sequence;
+            inbox_sequences.push(after);
+            if event.event_type == "run_recovery_required" {
+                assert_eq!(event.session_id, session.id);
+                assert_eq!(event.payload.0["state"], "recovery_required");
+            }
+        }
+        if !page.has_more {
+            // The inbox also contains the session-created notification, while
+            // the per-session stream begins with the first message.
+            assert_eq!(page.watermark, 346);
+            break;
+        }
+    }
+    assert_eq!(inbox_page_lengths, [100, 100, 100, 46]);
+    assert_eq!(inbox_sequences, (1..=346).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn reconnect_replays_terminal_then_switches_live_without_duplication() {
+    let sessions = Arc::new(service().await);
+    let owner = principal("terminal-reconnect-owner");
+    let session = sessions
+        .create_session(
+            &owner,
+            CreateAiSessionInput {
+                scope: scope_input(),
+                title: Some("Reconnect".to_owned()),
+            },
+        )
+        .await
+        .expect("session should create");
+    let submitted = sessions
+        .send_message(
+            &owner,
+            SendAiMessageInput {
+                session_id: session.id,
+                text: "Start work before disconnect".to_owned(),
+                attachment_ids: vec![],
+                client_message_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("message should queue");
+    let runs = run_service(&sessions);
+    let lease = runs
+        .claim_next("terminal-reconnect-worker")
+        .await
+        .expect("run claim should succeed")
+        .expect("run should be eligible");
+    let lease = runs.start(&lease).await.expect("run should start");
+    runs.finish(
+        &lease,
+        AiRunCompletion::new(
+            AiRunState::Failed,
+            "provider_failed_closed",
+            Some("provider_failed_closed".to_owned()),
+            None,
+        )
+        .expect("failure should validate"),
+    )
+    .await
+    .expect("failure should commit while client is disconnected");
+
+    let subscriptions = OrmAiSubscriptionService::new(
+        sessions.clone(),
+        Arc::new(StaticPrincipalResolver {
+            principal: owner.clone(),
+        }),
+    )
+    .with_reauthorization_interval(std::time::Duration::from_secs(60));
+    let mut stream = subscriptions
+        .session_events(owner.clone(), AiSessionId(session.id), 1)
+        .await
+        .expect("subscription should open");
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("terminal replay should not block")
+        .expect("stream should yield")
+        .expect("terminal replay should succeed");
+    let terminal_event = terminal.event.expect("terminal event should replay");
+    assert_eq!(terminal_event.sequence, 2);
+    assert_eq!(terminal_event.event_type, "run_failed");
+    assert_eq!(terminal_event.run_id, Some(submitted.run_id));
+
+    sessions
+        .rename_session(
+            &owner,
+            RenameAiSessionInput {
+                session_id: session.id,
+                title: "Live after terminal".to_owned(),
+                client_mutation_id: Uuid::new_v4(),
+                expected_title_revision: Some(0),
+            },
+        )
+        .await
+        .expect("live event should commit");
+    let live = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("live handoff should not block")
+        .expect("stream should yield")
+        .expect("live handoff should succeed");
+    let live_event = live.event.expect("live event should be present");
+    assert_eq!(live_event.sequence, 3);
+    assert_eq!(live_event.event_type, "session_title_changed");
 }
 
 #[tokio::test]

@@ -3,7 +3,7 @@ title: "Durable Worker and Provider Turn"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-11
+last_reviewed: 2026-08-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -17,7 +17,8 @@ of these contracts permits arbitrary provider calls or model-authored GraphQL.
 ## Required services
 
 - `OrmAiRunService` owns bounded queue scans, claims, heartbeats, fenced state
-  changes, retries, immutable attempt outcomes, and expired-lease recovery.
+  changes, retries, immutable attempt outcomes, canonical terminal
+  session/inbox events, and expired-lease recovery.
 - `OrmAiBudgetService` atomically reserves all applicable scope/principal
   counters and retains uncertain capacity.
 - `OrmAiEgressDecisionAudit` appends the exact redacted allow/deny decision ID
@@ -87,7 +88,9 @@ Queued/RetryScheduled
         │ output transaction also appends exact final-output checkpoint
         │ finish
         ▼
-     Completed
+  Completed/Failed/Cancelled/RecoveryRequired
+        │ same fenced transaction
+        └─ immutable attempt outcome + canonical session/inbox terminal event
 ```
 
 Every successful heartbeat, start, protected-output append, and other fenced
@@ -115,7 +118,17 @@ the newly returned value. A cloned older value is expected to fail with
   transport. Every other running/waiting claim becomes `RecoveryRequired` and
   is never replayed.
 - Recovery writes append an immutable attempt-outcome fact and invalidate the
-  old worker fence.
+  old worker fence. Every authoritative transition that closes ordinary worker
+  execution also appends exactly one canonical `run_completed`, `run_failed`,
+  `run_cancelled`, or `run_recovery_required` session and owner-inbox event.
+  The run update, outcome, both stream-head updates, both events, and commit-only
+  wakeups are one state-machine transaction.
+
+The terminal event payload is an exact server-authored metadata envelope with
+only a format marker and the matching closed state. The event type and private
+run state already disclose that classification, so no prompt, result, provider
+reference, authorization detail, or error text is copied into protected event
+content. `AiRunTerminalEvent` is the canonical public event-name mapping.
 
 ## Current bounded-output behavior
 

@@ -3,7 +3,7 @@ title: "Bounded Session Retention"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-11
+last_reviewed: 2026-08-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -337,9 +337,13 @@ that tombstone state.
 
 When an event replay window crosses a removed sequence,
 `session_event_page` returns no events and `reset_required = true`. A client
-must discard provisional per-run rendering and reload bounded authoritative
-session/message windows. It should continue using virtualized keyset windows;
-retention never requires loading the complete transcript into the DOM.
+must discard provisional per-run rendering—including local Working/Stop
+state—and reload bounded authoritative session/message windows. Canonical run
+terminal events are retained with ordinary session history until the
+deleting-session cutoff; provisional live delta/activity removal never
+reclassifies a run as active. Clients should continue using virtualized keyset
+windows; retention never requires loading the complete transcript into the
+DOM.
 Deleting and deleted session shells are not visible through session queries.
 
 ## Deliberate limits

@@ -24,8 +24,8 @@ use crate::orm_provider_output::{
     AiProviderOutputLimits, BackgroundProviderOutputPreparation, prepare_background_provider_output,
 };
 use crate::orm_runs::{
-    PreparedProviderOutput, append_attempt_outcome, canonical_second, exact_state,
-    lease_from_record, load_and_validate_active_lease, validate_worker_id,
+    PreparedProviderOutput, append_attempt_outcome, append_terminal_run_event, canonical_second,
+    exact_state, lease_from_record, load_and_validate_active_lease, validate_worker_id,
 };
 use crate::persistence::*;
 use crate::{
@@ -1538,6 +1538,8 @@ impl OrmAiOpenAiBackgroundSubmissionService {
                         now,
                     )
                     .await?;
+                    append_terminal_run_event(tx, &current, AiRunState::RecoveryRequired, now)
+                        .await?;
                     tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
                         actor_principal_kind: "system".to_owned(),
                         actor_subject: "provider-background".to_owned(),
@@ -3305,6 +3307,7 @@ async fn commit_background_terminal_graph(
     })
     .await
     .map_err(OrmPublicError::from)?;
+    append_terminal_run_event(tx, &run, run_state, now).await?;
     tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
         actor_principal_kind: "system".to_owned(),
         actor_subject: submission
@@ -4705,6 +4708,7 @@ async fn close_background_recovery(
     })
     .await
     .map_err(OrmPublicError::from)?;
+    append_terminal_run_event(tx, &run, AiRunState::RecoveryRequired, now).await?;
     close_matched_receipt_recovery(tx, submission, safe_error_code, now).await?;
     tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
         actor_principal_kind: "system".to_owned(),

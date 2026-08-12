@@ -667,18 +667,25 @@ impl OrmAiInboxService {
             if !policy.ready || policy.scope != scope {
                 return Err(AiError::RuntimeNotReady);
             }
-            let payload = self
-                .open_value(
-                    &policy,
-                    ContentProtectionContext {
-                        entity: "graphql_orm_ai_inbox_events".to_owned(),
-                        row_id: row.id.to_string(),
-                        field: "protected_payload".to_owned(),
-                        scope,
-                    },
-                    &protected_payload,
-                )
-                .await?;
+            let payload = match crate::orm_runs::open_terminal_event_metadata(
+                &row.event_type,
+                &protected_payload,
+            )? {
+                Some(metadata) => metadata,
+                None => {
+                    self.open_value(
+                        &policy,
+                        ContentProtectionContext {
+                            entity: "graphql_orm_ai_inbox_events".to_owned(),
+                            row_id: row.id.to_string(),
+                            field: "protected_payload".to_owned(),
+                            scope,
+                        },
+                        &protected_payload,
+                    )
+                    .await?
+                }
+            };
             events.push(AiInboxEventView {
                 id: row.id,
                 sequence: row.sequence,
