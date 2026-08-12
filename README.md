@@ -51,6 +51,9 @@ graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "fac98
 Choose exactly the backend support needed by each service. Cargo can unify
 features in a shared dependency graph; when more than one backend is enabled,
 declare the backend explicitly on each entity and `schema_roots!` block.
+The [quickstart](docs/learn/sqlite-quickstart.md) separately pins its
+repository snapshot because the checked-in example was added after this package
+release.
 
 ## Backend and schema capability
 

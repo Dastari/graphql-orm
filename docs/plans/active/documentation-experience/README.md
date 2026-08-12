@@ -53,8 +53,9 @@ discoverable package, configuration, security, and operations documentation.
 The first three documentation passes are complete:
 
 - The public front door now gives a 60-second project description, fit and
-  non-fit, current exact Git-release installation, capability limits, all nine
-  package choices, security boundaries, and a source-backed SQLite quickstart.
+  non-fit, current exact Git package-release installation, capability limits,
+  all nine package choices, security boundaries, and a source-backed SQLite
+  quickstart with its own reproducible repository snapshot pin.
 - The core ORM reference now has a discoverable entry point and canonical macro
   and attribute reference; Learn, How-to, Reference, and Concepts navigation
   link into it without routing newcomers through completed-plan history.

@@ -17,12 +17,14 @@ the commands below execute and test that exact file.
 
 ## Run the example
 
-Clone the release and run its smoke test before starting the server:
+Clone the documentation/example snapshot and run its smoke test before
+starting the server. This is the first commit that contains the quickstart;
+it is intentionally separate from the package dependency release pin below.
 
 ```bash
 git clone https://github.com/Dastari/graphql-orm.git
 cd graphql-orm
-git checkout graphql-orm-v0.21.0
+git checkout f88306d4fb9f2524f38886df3b316155122e89ff
 cargo test -p graphql-orm --example sqlite_quickstart
 cargo run -p graphql-orm --example sqlite_quickstart
 ```
@@ -58,8 +60,10 @@ test and the published guidance cannot silently drift apart.
 ## Use it in a separate application
 
 Copy the canonical source into your application and give it these direct
-dependencies. The ORM revision below is the exact revision for
-`graphql-orm` 0.21.0; review and update it deliberately when upgrading.
+dependencies. This is the package dependency release pin for `graphql-orm`
+0.21.0 (`fac98d99e64c841a34d2d0096cdf928c3f9a7c6f`), not the repository
+snapshot used above to run the checked-in example. Review and update it
+deliberately when upgrading.
 
 ```toml
 [dependencies]
