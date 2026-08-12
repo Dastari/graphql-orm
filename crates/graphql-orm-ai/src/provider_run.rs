@@ -60,7 +60,11 @@ impl AiProviderRunBinding {
         )
     }
 
-    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+    #[cfg(all(
+        test,
+        feature = "provider-codex-app-server",
+        any(feature = "sqlite", feature = "postgres")
+    ))]
     pub(crate) fn new_for_principal_reference(
         session_id: AiSessionId,
         run_id: AiRunId,
