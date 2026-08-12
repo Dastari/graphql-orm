@@ -85,7 +85,10 @@ a side effect of this process.
    alternative profiles.
 9. Review the complete diff, dependency trees, generated schema/manifest
    changes, documentation links, and migration statements.
-10. Merge and push the reviewed release commit to `main`. Do not tag it yet.
+10. In the pull request, select exactly one documentation-impact option from
+    the repository template. Release changes normally select
+    `Documentation updated`; CI rejects missing or ambiguous declarations.
+11. Merge and push the reviewed release commit to `main`. Do not tag it yet.
 
 ## Preview the release bill of materials
 
