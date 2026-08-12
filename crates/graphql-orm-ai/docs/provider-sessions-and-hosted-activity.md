@@ -72,6 +72,15 @@ and—only for an experimental registration—the exact documented
 collaboration, images, hosted web search, browser control, raw reasoning, and
 arbitrary methods remain forbidden.
 
+Codex may emit the documented generic `warning` while a turn is open. The
+actor accepts only the exact positive-timestamp envelope, an optional thread ID
+matching the active thread, and a bounded non-empty control-free message. It
+limits each turn to eight warnings and 16 KiB total text, discards every field,
+and returns only `AiCodexAppServerInbound::RuntimeWarning`. Hosts treat that
+variant as a non-fatal control event; they never log or forward the warning
+text. Warnings outside the current turn and every other generic notification
+remain rejected.
+
 The closed default accepts an initial `StatelessReplay` request containing
 only bounded trusted instructions and text; each call gets a fresh ephemeral
 thread while the exact run process may be reused. A retained turn instead uses

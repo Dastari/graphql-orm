@@ -20,7 +20,22 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-No changes recorded after 0.73.2.
+No changes recorded after 0.73.3.
+
+## [0.73.3] - 2026-08-12
+
+### Fixed
+
+- The strict Codex app-server actor now admits the documented generic
+  `warning` notification only during an exact correlated turn. Its positive
+  timestamp, closed parameter shape, optional thread binding, bounded
+  control-free message, per-turn count, and cumulative bytes are validated;
+  the message, timestamp, and thread reference are then discarded behind the
+  content-free `AiCodexAppServerInbound::RuntimeWarning` variant.
+- Warnings before `turn/start`, after terminal completion, for another thread,
+  or with malformed, extra, oversized, control-bearing, or flooding payloads
+  remain rejected. No generic notification, remote-control, shell, file, MCP,
+  browser, hosted-web, or JSON-RPC capability is added.
 
 ## [0.73.2] - 2026-08-12
 

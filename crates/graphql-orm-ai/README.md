@@ -323,7 +323,7 @@ Exactly one persistence backend should be selected:
 | `provider-ollama` | no | Native Ollama chat: text, exact images, structured output, stateless application tools |
 | `provider-openai-compatible` | no | Profiled Responses/SSE: text/JSON and opt-in strict tools, structured output, retained continuation |
 | `local-harness` | no | Installed JSONL v2 text/structured/stateless-tool protocol over a trusted sandbox launcher |
-| `provider-codex-app-server` | no | Strict timestamped and correlated Codex app-server lifecycle, protected retained threads, explicit never-approval/read-only thread policy, disabled-only remote-control and deletion-bound not-loaded status admission, and default-off coordinator-owned experimental dynamic tools; no remote control, shell, filesystem, web, or generic JSON-RPC |
+| `provider-codex-app-server` | no | Strict timestamped and correlated Codex app-server lifecycle, protected retained threads, content-free turn-bound warning admission, explicit never-approval/read-only thread policy, disabled-only remote-control and deletion-bound not-loaded status admission, and default-off coordinator-owned experimental dynamic tools; no remote control, shell, filesystem, web, or generic JSON-RPC |
 | `graphql-case-pascal` | no | PascalCase roots, arguments, inputs, outputs, and ORM fields |
 
 Do not build with `--all-features`: the database backends are mutually
@@ -335,7 +335,7 @@ Add the crate from a reviewed monorepo revision:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.73.2", features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.73.3", features = ["sqlite"] }
 ```
 
 > **Pre-release dependency note:** this source snapshot resolves

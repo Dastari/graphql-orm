@@ -19,6 +19,28 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.73.3: content-free Codex runtime warnings (schema remains 0.55.0)
+
+Codex app-server process adapters should handle
+`AiCodexAppServerInbound::RuntimeWarning` as a non-fatal, content-free control
+event and continue waiting for authoritative turn, item, usage, and completion
+events. Continue passing every complete provider frame unchanged to
+`AiCodexAppServerProtocolActor::accept`; do not inspect, log, forward, or
+substring-match warning messages in the host.
+
+The actor admits a warning only after a typed `turn/start` has opened the exact
+thread-bound turn and before its terminal `turn/completed`. It validates the
+positive signed timestamp, exact envelope and parameter keys, optional thread
+correlation, a non-empty control-free message of at most 4 KiB, at most eight
+warnings, and at most 16 KiB of warning text per turn. All content is discarded
+before the public inbound value is returned. Warning budgets reset only when a
+new typed turn begins and after terminal completion.
+
+This is an additive provider protocol-compatibility fix. There is no GraphQL
+SDL, database entity, table, column, index, constraint, backup/restore, or
+durable semantic change. No data migration or row rewrite is required, and AI
+schema module `0.55.0` remains current.
+
 ## 0.73.2: newly bound provider-session activation (schema remains 0.55.0)
 
 `AiProviderCallExecutor::execute_with_provider_session` now preserves whether

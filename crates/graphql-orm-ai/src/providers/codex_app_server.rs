@@ -36,8 +36,12 @@ const MAXIMUM_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAXIMUM_TEXT_BLOCKS: usize = 256;
 const MAXIMUM_IDENTIFIER_BYTES: usize = 200;
 const MAXIMUM_VERSION_BYTES: usize = 200;
+const MAXIMUM_RUNTIME_WARNING_MESSAGE_BYTES: usize = 4 * 1024;
+const MAXIMUM_RUNTIME_WARNING_BYTES_PER_TURN: usize = 16 * 1024;
+const MAXIMUM_RUNTIME_WARNINGS_PER_TURN: usize = 8;
 const MAXIMUM_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const REMOTE_CONTROL_STATUS_CHANGED: &str = "remoteControl/status/changed";
+const RUNTIME_WARNING: &str = "warning";
 
 /// Exact reviewed Codex app-server protocol contract supported by this
 /// adapter.
@@ -2075,6 +2079,13 @@ pub enum AiCodexAppServerInbound {
     /// protocol compatibility evidence only and grants no remote-control
     /// method or capability.
     RemoteControlDisabled,
+    /// Content-free notice that app-server emitted one bounded non-fatal
+    /// warning during the current correlated turn.
+    ///
+    /// The timestamp, optional thread reference, and warning text are
+    /// validated and discarded inside the actor. No warning content or
+    /// identifier crosses this boundary into events, logs, or model context.
+    RuntimeWarning,
     /// Exact experimental dynamic-tool server request matched to one offered
     /// definition. No other server request is admitted.
     DynamicToolCall {
@@ -2117,6 +2128,7 @@ impl std::fmt::Debug for AiCodexAppServerInbound {
             Self::RemoteControlDisabled => {
                 formatter.write_str("AiCodexAppServerInbound::RemoteControlDisabled")
             }
+            Self::RuntimeWarning => formatter.write_str("AiCodexAppServerInbound::RuntimeWarning"),
             Self::DynamicToolCall {
                 request_id,
                 thread_id,
@@ -2164,8 +2176,9 @@ enum ThreadLifecyclePhase {
 /// here. Admitted server notifications require the complete positive signed
 /// `emittedAtMs` envelope and exact lifecycle correlation. The only admitted
 /// thread-status transition is `notLoaded` for the exact thread already being
-/// deleted. All other server-initiated requests and non-allowlisted
-/// notifications fail closed.
+/// deleted. A documented generic `warning` is admitted only as a content-free,
+/// turn-correlated, flood-bounded control event. All other server-initiated
+/// requests and non-allowlisted notifications fail closed.
 #[derive(Debug)]
 pub struct AiCodexAppServerProtocolActor {
     next_id: u64,
@@ -2187,6 +2200,8 @@ pub struct AiCodexAppServerProtocolActor {
     turn_response_observed: bool,
     turn_started_observed: bool,
     remote_control_disabled_observed: bool,
+    runtime_warning_count: usize,
+    runtime_warning_bytes: usize,
     maximum_frame_bytes: usize,
 }
 
@@ -2224,6 +2239,8 @@ impl AiCodexAppServerProtocolActor {
             turn_response_observed: false,
             turn_started_observed: false,
             remote_control_disabled_observed: false,
+            runtime_warning_count: 0,
+            runtime_warning_bytes: 0,
             maximum_frame_bytes,
         })
     }
@@ -2702,6 +2719,8 @@ impl AiCodexAppServerProtocolActor {
             }),
         )?;
         self.pending_turn_thread_id = Some(thread_id.to_owned());
+        self.runtime_warning_count = 0;
+        self.runtime_warning_bytes = 0;
         Ok(frame)
     }
 
@@ -2878,6 +2897,9 @@ impl AiCodexAppServerProtocolActor {
         if notification.method == REMOTE_CONTROL_STATUS_CHANGED {
             return self.accept_disabled_remote_control_status(notification);
         }
+        if notification.method == RUNTIME_WARNING {
+            return self.accept_runtime_warning(notification);
+        }
         let method = Some(notification.method.as_str())
             .filter(|method| allowed_notification(method))
             .ok_or(ProviderError::Rejected)?;
@@ -2908,6 +2930,8 @@ impl AiCodexAppServerProtocolActor {
             self.active_turn_id = None;
             self.turn_response_observed = false;
             self.turn_started_observed = false;
+            self.runtime_warning_count = 0;
+            self.runtime_warning_bytes = 0;
             self.started_items.clear();
             self.completed_items.clear();
         }
@@ -3099,6 +3123,49 @@ impl AiCodexAppServerProtocolActor {
         }
         self.remote_control_disabled_observed = true;
         Ok(AiCodexAppServerInbound::RemoteControlDisabled)
+    }
+
+    fn accept_runtime_warning(
+        &mut self,
+        notification: CodexAppServerNotificationEnvelope,
+    ) -> Result<AiCodexAppServerInbound, ProviderError> {
+        let params: RuntimeWarningParams =
+            serde_json::from_value(notification.params).map_err(|_| ProviderError::Rejected)?;
+        let active_thread_id = self
+            .active_thread_id
+            .as_deref()
+            .ok_or(ProviderError::Rejected)?;
+        let message_bytes = params.message.len();
+        let next_bytes = self
+            .runtime_warning_bytes
+            .checked_add(message_bytes)
+            .ok_or(ProviderError::Rejected)?;
+        if notification.method != RUNTIME_WARNING
+            || !self.initialization_complete
+            || self.thread_lifecycle_phase != ThreadLifecyclePhase::Complete
+            || self.pending_turn_thread_id.as_deref() != Some(active_thread_id)
+            || self.deleting_thread_id.is_some()
+            || (!self
+                .pending
+                .values()
+                .any(|method| *method == ClientMethod::TurnStart)
+                && !self.turn_response_observed
+                && !self.turn_started_observed)
+            || params
+                .thread_id
+                .as_deref()
+                .is_some_and(|thread_id| thread_id != active_thread_id)
+            || params.message.trim().is_empty()
+            || message_bytes > MAXIMUM_RUNTIME_WARNING_MESSAGE_BYTES
+            || params.message.chars().any(char::is_control)
+            || self.runtime_warning_count >= MAXIMUM_RUNTIME_WARNINGS_PER_TURN
+            || next_bytes > MAXIMUM_RUNTIME_WARNING_BYTES_PER_TURN
+        {
+            return Err(ProviderError::Rejected);
+        }
+        self.runtime_warning_count += 1;
+        self.runtime_warning_bytes = next_bytes;
+        Ok(AiCodexAppServerInbound::RuntimeWarning)
     }
 
     fn accept_notification_binding(
@@ -3294,6 +3361,13 @@ struct DisabledRemoteControlStatusParams {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RuntimeWarningParams {
+    thread_id: Option<String>,
+    message: String,
+}
+
+#[derive(Deserialize)]
 enum DisabledRemoteControlStatus {
     #[serde(rename = "disabled")]
     Disabled,
@@ -3469,7 +3543,16 @@ mod tests {
             assert!(root.is_absolute());
             assert!(root.is_dir());
             let mut child = Command::new(executable)
-                .args(["app-server", "--stdio"])
+                .args([
+                    "app-server",
+                    "--stdio",
+                    "--disable",
+                    "code_mode",
+                    "--disable",
+                    "code_mode_host",
+                    "--disable",
+                    "code_mode_only",
+                ])
                 .env_clear()
                 .env("CODEX_HOME", &root)
                 .env("HOME", &root)
@@ -4000,6 +4083,14 @@ mod tests {
             "params": params,
         }))
         .expect("lifecycle notification should encode")
+    }
+
+    fn runtime_warning_notification(thread_id: Option<&str>, message: &str) -> Vec<u8> {
+        let params = thread_id.map_or_else(
+            || json!({"message": message}),
+            |thread_id| json!({"threadId": thread_id, "message": message}),
+        );
+        lifecycle_notification(RUNTIME_WARNING, params)
     }
 
     fn thread_started_notification(thread_id: &str) -> Vec<u8> {
@@ -5004,6 +5095,201 @@ mod tests {
             let frame = serde_json::to_vec(&invalid).expect("invalid fixture should encode");
             assert!(matches!(actor.accept(&frame), Err(ProviderError::Rejected)));
         }
+    }
+
+    #[test]
+    fn protocol_admits_only_content_free_runtime_warnings_during_a_correlated_turn() {
+        let mut actor = initialized_protocol_actor();
+        actor
+            .start_fresh_thread(&turn())
+            .expect("thread start should encode");
+        actor
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
+            .expect("thread response should bind");
+        actor
+            .accept(&thread_started_notification("thread-1"))
+            .expect("thread notification should bind");
+
+        let warning = runtime_warning_notification(
+            Some("thread-1"),
+            "Code Mode is unavailable and remains disabled.",
+        );
+        assert!(matches!(
+            actor.accept(&warning),
+            Err(ProviderError::Rejected)
+        ));
+
+        actor
+            .start_turn("thread-1", &turn())
+            .expect("turn should begin the warning admission window");
+        let inbound = actor
+            .accept(&warning)
+            .expect("correlated pending-turn warning should be admitted");
+        assert!(matches!(inbound, AiCodexAppServerInbound::RuntimeWarning));
+        assert_eq!(
+            format!("{inbound:?}"),
+            "AiCodexAppServerInbound::RuntimeWarning"
+        );
+        assert!(!format!("{inbound:?}").contains("Code Mode"));
+        assert!(matches!(
+            actor.accept(&runtime_warning_notification(None, "Still unavailable.")),
+            Ok(AiCodexAppServerInbound::RuntimeWarning)
+        ));
+        assert!(matches!(
+            actor.accept(&lifecycle_notification(
+                RUNTIME_WARNING,
+                json!({"threadId": null, "message": "Still safely unavailable."}),
+            )),
+            Ok(AiCodexAppServerInbound::RuntimeWarning)
+        ));
+
+        actor
+            .accept(br#"{"id":3,"result":{"turn":{"id":"turn-1"}}}"#)
+            .expect("turn response should bind");
+        actor
+            .accept(&turn_started_notification("thread-1", "turn-1"))
+            .expect("turn notification should bind");
+        assert!(matches!(
+            actor.accept(&runtime_warning_notification(
+                Some("thread-1"),
+                "Warning while the correlated turn is active.",
+            )),
+            Ok(AiCodexAppServerInbound::RuntimeWarning)
+        ));
+        actor
+            .accept(&turn_completed_notification("thread-1", "turn-1"))
+            .expect("turn should complete");
+        assert!(matches!(
+            actor.accept(&warning),
+            Err(ProviderError::Rejected)
+        ));
+
+        actor
+            .start_turn("thread-1", &turn())
+            .expect("a later turn should have an independent warning budget");
+        assert!(matches!(
+            actor.accept(&warning),
+            Ok(AiCodexAppServerInbound::RuntimeWarning)
+        ));
+    }
+
+    #[test]
+    fn protocol_rejects_malformed_mismatched_late_or_flooding_runtime_warnings() {
+        let malformed = [
+            br#"{"method":"warning","params":{"message":"bounded"}}"#.as_slice(),
+            br#"{"emittedAtMs":0,"method":"warning","params":{"message":"bounded"}}"#,
+            br#"{"emittedAtMs":-1,"method":"warning","params":{"message":"bounded"}}"#,
+            br#"{"emittedAtMs":9223372036854775808,"method":"warning","params":{"message":"bounded"}}"#,
+            br#"{"emittedAtMs":"1","method":"warning","params":{"message":"bounded"}}"#,
+            br#"{"emittedAtMs":1,"emittedAtMs":2,"method":"warning","params":{"message":"bounded"}}"#,
+            br#"{"emittedAtMs":1,"method":"warning","params":{"message":"bounded"},"extra":true}"#,
+            br#"{"emittedAtMs":1,"method":"warning","params":{}}"#,
+            br#"{"emittedAtMs":1,"method":"warning","params":{"message":"bounded","extra":true}}"#,
+            br#"{"emittedAtMs":1,"method":"warning","params":{"message":"bounded","threadId":7}}"#,
+        ];
+        for frame in malformed {
+            let mut actor = active_protocol_actor();
+            assert!(matches!(actor.accept(frame), Err(ProviderError::Rejected)));
+        }
+
+        for message in ["", "   ", "contains\ncontrol", "contains\u{7f}control"] {
+            let mut actor = active_protocol_actor();
+            assert!(matches!(
+                actor.accept(&runtime_warning_notification(Some("thread-1"), message)),
+                Err(ProviderError::Rejected)
+            ));
+        }
+        let mut oversized = active_protocol_actor();
+        assert!(matches!(
+            oversized.accept(&runtime_warning_notification(
+                Some("thread-1"),
+                &"x".repeat(MAXIMUM_RUNTIME_WARNING_MESSAGE_BYTES + 1),
+            )),
+            Err(ProviderError::Rejected)
+        ));
+        let mut mismatched = active_protocol_actor();
+        assert!(matches!(
+            mismatched.accept(&runtime_warning_notification(
+                Some("thread-other"),
+                "bounded",
+            )),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut count_limited = active_protocol_actor();
+        for _ in 0..MAXIMUM_RUNTIME_WARNINGS_PER_TURN {
+            assert!(matches!(
+                count_limited.accept(&runtime_warning_notification(None, "bounded")),
+                Ok(AiCodexAppServerInbound::RuntimeWarning)
+            ));
+        }
+        assert!(matches!(
+            count_limited.accept(&runtime_warning_notification(None, "one too many")),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut byte_limited = active_protocol_actor();
+        let maximum_message = "x".repeat(MAXIMUM_RUNTIME_WARNING_MESSAGE_BYTES);
+        for _ in 0..(MAXIMUM_RUNTIME_WARNING_BYTES_PER_TURN / MAXIMUM_RUNTIME_WARNING_MESSAGE_BYTES)
+        {
+            assert!(matches!(
+                byte_limited.accept(&runtime_warning_notification(None, &maximum_message)),
+                Ok(AiCodexAppServerInbound::RuntimeWarning)
+            ));
+        }
+        assert!(matches!(
+            byte_limited.accept(&runtime_warning_notification(None, "overflow")),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[test]
+    fn protocol_admits_runtime_warning_after_strict_retained_resume() {
+        let mut actor = initialized_protocol_actor();
+        actor
+            .start_persistent_empty_thread("model-1", &[])
+            .expect("persistent empty thread should encode");
+        actor
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("thread response should bind");
+        actor
+            .accept(&thread_started_notification("thread-retained-1"))
+            .expect("thread notification should bind");
+        actor
+            .start_turn("thread-retained-1", &turn())
+            .expect("newly bound first turn should start directly");
+        actor
+            .accept(br#"{"id":3,"result":{"turn":{"id":"turn-1"}}}"#)
+            .expect("first turn response should bind");
+        actor
+            .accept(&turn_started_notification("thread-retained-1", "turn-1"))
+            .expect("first turn notification should bind");
+        actor
+            .accept(&turn_completed_notification("thread-retained-1", "turn-1"))
+            .expect("first turn should complete");
+
+        let cursor =
+            crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", "thread-retained-1")
+                .expect("cursor should validate");
+        actor
+            .resume_thread(&cursor, &turn())
+            .expect("later retained lifecycle should resume");
+        actor
+            .accept(br#"{"id":4,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("resume response should bind");
+        actor
+            .accept(&thread_started_notification("thread-retained-1"))
+            .expect("resume notification should bind");
+        actor
+            .start_turn("thread-retained-1", &turn())
+            .expect("resumed turn should start");
+        assert!(matches!(
+            actor.accept(&runtime_warning_notification(
+                Some("thread-retained-1"),
+                "Code Mode remains unavailable after resume.",
+            )),
+            Ok(AiCodexAppServerInbound::RuntimeWarning)
+        ));
     }
 
     #[test]
@@ -6024,6 +6310,7 @@ mod tests {
                     );
                 }
                 AiCodexAppServerInbound::DynamicToolLifecycle { .. } => {}
+                AiCodexAppServerInbound::RuntimeWarning => {}
                 AiCodexAppServerInbound::Notification { .. } => {}
                 other => panic!("unexpected retained turn frame: {other:?}"),
             }
@@ -6138,7 +6425,8 @@ mod tests {
                 }
                 AiCodexAppServerInbound::Response { .. }
                 | AiCodexAppServerInbound::Notification { .. }
-                | AiCodexAppServerInbound::DynamicToolLifecycle { .. } => {}
+                | AiCodexAppServerInbound::DynamicToolLifecycle { .. }
+                | AiCodexAppServerInbound::RuntimeWarning => {}
                 other => panic!("unexpected second turn frame: {other:?}"),
             }
             if second_completed {
