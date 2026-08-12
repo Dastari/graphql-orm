@@ -3,41 +3,59 @@ title: GraphQL ORM documentation index
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-11
-review_by: 2026-11-01
+last_reviewed: 2026-08-12
+review_by: 2027-02-01
 supersedes: []
 ---
 
 # GraphQL ORM documentation
 
-This is the authoritative index for the monorepo. Start with the system
-context, then follow the document type that matches the question:
+Choose the route that matches what you are trying to do. The learning and
+how-to paths are for application developers; architecture, decisions,
+operations, and plans preserve the deeper contracts and maintainer record.
 
-- [Architecture](architecture/system-context.md) describes durable system
-  boundaries and current design.
-- [Decisions](decisions/README.md) explain why durable choices were made.
-- [Operations](operations/README.md) contains executable runbooks and release
-  guidance.
-- [Development](development/README.md) covers setup, tests, and GraphQL work.
-- [Reference](reference/README.md) describes current APIs and mechanics.
-- [Plans](plans/README.md) records current outcomes and the bounded backlog.
-- [Investigations](investigations/README.md) retains evidence and conclusions.
-- [Archive](archive/README.md) retains superseded chronology, prompts, and
-  ledgers; it is not current guidance.
+## Learn
 
-## Current architecture
+Build and query a small local service first.
+
+- [SQLite GraphQL quickstart](learn/sqlite-quickstart.md) — managed schema,
+  seed data, generated roots, Axum transport, and a smoke test.
+- [Learn index](learn/README.md) — the recommended sequence and example
+  inventory.
+
+## How-to guides
+
+Follow a focused task rather than reading reference material end-to-end.
+
+- [How-to index](how-to/README.md)
+- [Choose backend features](reference/graphql-orm/backends.md)
+- [Manage a schema](reference/graphql-orm/schema-management.md)
+- [Model entities and relations](reference/graphql-orm/entities-and-relations.md)
+- [Use SQL Server safely](reference/graphql-orm/mssql.md)
+- [Configure PostgreSQL and RLS](reference/graphql-orm/postgres.md)
+
+## Reference
+
+Start with the [`graphql-orm` reference](reference/graphql-orm/README.md) for
+core runtime mechanics and configuration. Use the [macro and attribute
+reference](reference/graphql-orm/macros-and-attributes.md) for the accepted
+derive and `schema_roots!` syntax. The [reference index](reference/README.md)
+also links generated inventories and component-local contract documentation.
+
+## Concepts
+
+Architecture explains durable boundaries and trade-offs:
 
 - [System context and package boundaries](architecture/system-context.md)
+- [Portable persistence](architecture/portable-persistence.md)
 - [Authentication and authorization](architecture/authentication-and-authorization.md)
 - [Operation assurance](architecture/operation-assurance.md)
-- [Portable persistence](architecture/portable-persistence.md)
 - [Schema modules and fenced leases](architecture/schema-modules-and-leases.md)
 - [Storage and backup boundaries](architecture/storage-and-backup-boundaries.md)
 
 ## Component documentation
 
-Component-local documents remain beside the package whose contract they
-describe:
+Each package owns its local contract documentation:
 
 - [`graphql-orm`](../crates/graphql-orm/README.md)
 - [`graphql-orm-macros`](../crates/graphql-orm-macros/README.md)
@@ -50,42 +68,20 @@ describe:
 - [`graphql-orm-router`](../crates/graphql-orm-router/README.md)
 
 The [generated workspace package inventory](reference/workspace-packages.md)
-is the only manually linked version/dependency overview. Regenerate it with
-`python3 scripts/generate-workspace-inventory.py` from the workspace root.
+is the canonical version and dependency overview.
 
-## Authority and lifecycle
+## Maintainers and governance
 
-One active canonical document owns each topic. Code, configuration, schemas,
-and generated inventory describe current mechanics. Architecture documents
-describe durable boundaries. Accepted ADRs explain decisions and are immutable;
-a later ADR supersedes an earlier one. Runbooks describe repeatable operations.
+- [Development](development/README.md) — local setup, testing, and GraphQL
+  workflow.
+- [Operations](operations/README.md) — repeatable operational and release
+  guidance.
+- [Decisions](decisions/README.md) — accepted durable rationale.
+- [Plans](plans/README.md) — active outcomes and bounded backlog.
+- [Investigations](investigations/README.md) — retained evidence and
+  conclusions.
+- [Archive](archive/README.md) — superseded history, not current guidance.
 
-Active plans exist only at `docs/plans/active/<initiative>/README.md`. They
-contain the outcome, non-goals, dependencies, acceptance gates, and current
-checkpoint—not session transcripts. Completed plans move to `completed/`.
-Investigations and incident evidence are archived rather than deleted.
-Temporary agent/session material belongs in the ignored `.handoff/` directory.
-
-The complete policy and exceptions are defined by
+One active canonical document owns each topic. The lifecycle, metadata, and
+exceptions are defined by
 [ADR-0001](decisions/ADR-0001-documentation-authority-and-lifecycle.md).
-
-## Required metadata
-
-Every governed Markdown document starts with:
-
-```yaml
----
-title: A unique descriptive title
-kind: architecture | decision | runbook | plan | investigation | reference
-status: draft | active | accepted | superseded | archived
-owner: accountable-maintainer-group
-last_reviewed: YYYY-MM-DD
-review_by: YYYY-MM-DD | none
-supersedes: []
----
-```
-
-Use the [templates](templates/README.md) for new ADRs, plans, runbooks, and
-investigations. CI checks metadata, local links, ADR numbering and immutability,
-active-plan placement, stale paths, generated inventory drift, and pull-request
-documentation impact.

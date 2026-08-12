@@ -13,6 +13,7 @@ supersedes: []
 ## Active
 
 - [AI production readiness](active/ai-production-readiness/README.md)
+- [Documentation experience](active/documentation-experience/README.md)
 
 ## Backlog
 

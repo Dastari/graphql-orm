@@ -18,6 +18,7 @@ guidance for the core ORM package.
 ## Foundations
 
 - [Backends and multi-backend workspaces](backends.md)
+- [Macro and attribute reference](macros-and-attributes.md) — canonical derive syntax, feature flags, defaults, and constraints
 - [Entities and relations](entities-and-relations.md)
 - [Schema management](schema-management.md)
 - [PostgreSQL](postgres.md)
@@ -36,6 +37,20 @@ guidance for the core ORM package.
 - [Binary keys and indexes](binary-keys-and-indexes.md)
 - [Resolver operation metadata](resolver-operation-metadata.md)
 - [Pagination migration](pagination-migration.md)
+
+## Choose a path
+
+- Start a managed application with [SQLite](backends.md#features) or
+  [PostgreSQL](postgres.md), then define entities and roots with the
+  [macro reference](macros-and-attributes.md).
+- Integrate an externally owned SQL Server schema through the
+  [read-only MSSQL guide](mssql.md); do not use generated schema changes or
+  writes for that backend.
+- Use [repository-only entities](repository-only-entities.md) when typed Rust
+  data access is required without a GraphQL object or generated resolver.
+- Add relations, generated CRUD, hooks, and subscriptions using
+  [runtime writes and policies](runtime-and-writes.md), then review
+  [strict authorization](strict-authorization.md) before exposing the schema.
 
 ## Runtime schema APIs
 

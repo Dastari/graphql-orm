@@ -3,22 +3,31 @@ title: graphql-orm-router documentation
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-12
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router documentation
 
-- [Configuration](configuration.md) is the field and secret-loading reference
-  for the executable.
-- [Operations](operations.md) is the startup, health, reload, reconnect,
-  troubleshooting, resource-budget, and shutdown runbook.
-- [Schema evolution](schema-evolution.md) defines compatible rollout and
-  last-known-good behavior.
-- [Threat model](threat-model.md) records trust boundaries, mitigations, and
-  residual deployment responsibilities.
-- [Migration](../MIGRATION.md) covers adoption and compatibility changes.
+Start with the package [README](../README.md).
 
-The package [README](../README.md) remains the concise API entry point. The
-workspace implementation plan is not an operator runbook.
+## Learn
+
+- [Configuration](configuration.md) — strict file format, defaults, limits, and secret loading.
+- [Schema evolution](schema-evolution.md) — compatible rollout and last-known-good publication.
+
+## How-to
+
+- [Operate the router](operations.md) — startup, health, reload, reconnect, budgets, and shutdown.
+- [Run the configuration check](configuration.md#top-level-fields) before binding a listener.
+
+## Reference
+
+- [Migration guide](../MIGRATION.md) and [changelog](../CHANGELOG.md).
+
+## Concepts
+
+- [Threat model](threat-model.md) — trust boundaries, mitigations, and residual deployment work.
+
+Plans and historical records are deliberately outside this operator path.

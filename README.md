@@ -3,299 +3,114 @@ title: "GraphQL ORM workspace"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-11
+last_reviewed: 2026-08-12
 review_by: 2027-02-01
 supersedes: []
 ---
 
-# GraphQL ORM workspace
+# GraphQL ORM
 
-`graphql-orm` generates async-graphql query/mutation types, typed filters, ordering, pagination,
-relation loading, repository helpers, schema metadata, and migration plans from Rust entity structs.
+`graphql-orm` turns Rust entity definitions into an `async-graphql` API and
+typed repository helpers. It generates filters, ordering, keyset pagination,
+relations, schema metadata, and explicit migration plans while leaving the
+application in control of its server, authentication, authorization, and
+deployment.
 
-This repository also contains independently consumable operation-catalog,
-AI-tool-profile, AI-runtime, backup, storage, router-protocol, and router
-packages. Applications depend only on the packages they need; workspace
-membership does not enable companion packages as ORM features.
+Start with the [five-minute SQLite GraphQL quickstart](docs/learn/sqlite-quickstart.md).
+It is a runnable Axum service with a managed SQLite schema, seed data, a
+generated GraphQL query, and a smoke test.
 
-It is designed for two related use cases:
+## When it fits
 
-- greenfield SQLite/Postgres apps where Rust entity metadata can own the database schema
-- existing databases, especially legacy Microsoft SQL Server schemas, where the ORM should provide a
-  safe generated GraphQL read layer without taking ownership of writes or migrations
+Use this workspace when you want to:
 
-## Highlights
+- build a Rust + `async-graphql` service on SQLite or PostgreSQL, with explicit
+  application-controlled schema ownership;
+- expose a safe generated GraphQL read layer over an existing SQL Server
+  schema; or
+- compose independent storage, backup, AI, operation-catalog, and Federation
+  router packages without making them dependencies of the core ORM.
 
-- `#[derive(GraphQLEntity)]` for GraphQL object types, SQL row decoding, filters, order inputs, and
-  schema metadata
-- `#[derive(GraphQLOperations)]` for generated list queries, single-entity lookups, repository
-  helpers, and write operations where the backend supports writes
-- generated resolver-operation descriptors and schema-root exposure catalogs
-  with deterministic drift fingerprints
-- opt-in operation assurance classification, completeness audits, directive
-  metadata, deterministic client manifests, and authoritative resolver guards
-- `#[derive(GraphQLRelations)]` for nested relation fields with batched loading
-- SQLite and PostgreSQL read/write support through SQLx
-- Microsoft SQL Server read/query-only support through Tiberius
-- validated runtime-schema filters, deterministic keyset reads, and owned
-  records on SQLite/PostgreSQL without compiled entity types
-- schema-bound, least-privilege runtime relation batching with composite keys,
-  per-parent keysets, and optional counts
-- single and composite primary-key read support
-- single and composite relation-key batching, including nested legacy shapes like
-  `LegacyCardFiles -> Contacts -> Details`
-- managed compound foreign keys with ordered member introspection on SQLite and PostgreSQL
-- stable named ordinary indexes with typed per-column ascending or descending order
-- portable spatial fields and predicates with native PostGIS support and SQLite GeoJSON fallback
-- portable per-entity full-text search with native Postgres search tables and SQLite FTS5 support
-- explicit schema ownership policies for managed, external, validate-only, and plan-only schemas
-- ABI-style schema migration stages for managed SQLite/Postgres schemas
-- row, field, and entity policy hooks for application-owned access control
-- project-agnostic `AuthSubject` and exact-scope `ScopeEntityPolicy` helpers
-- opt-in PostgreSQL row-level security metadata and request-local database auth context
-- backend-neutral typed read projections that omit sensitive columns from SQL and process memory
-- typed composite-key, insert-if-absent, conditional, and bounded mutation APIs
-- federation-composable conventional GraphQL operation roots with stable Rust root names
-- dependency-owned schema modules with stable migration, backup, and restore metadata
-- owned backend-neutral runtime schema IR with validation, canonical fingerprints, and static-metadata conversion
-- owned runtime values, fingerprint-bound schema handles, projections, and exact SQLite/PostgreSQL row decoding
-- backend-neutral fenced lease transitions for durable workers
-- bounded forward and backward repository keyset windows for large timelines
-- opt-in policy-gated bounded retention purge for managed append-only entities
+It is not a hosted GraphQL service, an authentication provider, or a database
+administration system. SQL Server support is deliberately read/query-only.
+Schema construction never applies migrations; applications choose and execute
+schema changes explicitly.
 
 ## Install
 
-Select exactly the backend support your service needs:
+Packages are distributed from this repository, not crates.io. Pin the reviewed
+release revision, not a moving branch or tag. The current `graphql-orm` 0.21.0
+release is tag `graphql-orm-v0.21.0` at
+`fac98d99e64c841a34d2d0096cdf928c3f9a7c6f`:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.21.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "fac98d99e64c841a34d2d0096cdf928c3f9a7c6f", version = "0.21.0", default-features = false, features = ["sqlite"] }
 ```
 
-GitHub with an exact full revision is the only supported distribution method. The workspace packages are
-not published to crates.io. Replace the placeholder with the reviewed release commit (the version tag
-is an identity aid, not a substitute for `rev`). The optional `auth-agql` bridge likewise resolves
-the exact upstream revision `413fda3435f060604cd653c11e2cc18a668aace1`.
+Choose exactly the backend support needed by each service. Cargo can unify
+features in a shared dependency graph; when more than one backend is enabled,
+declare the backend explicitly on each entity and `schema_roots!` block.
 
-Available backend features:
+## Backend and schema capability
 
-- `sqlite` - activates only SQLx SQLite support
-- `postgres` - activates only SQLx PostgreSQL support
-- `mssql` - read/query-only SQL Server support without either SQLx database driver
+| Backend | Reads | Generated writes | Managed migrations | Intended schema policy |
+| --- | --- | --- | --- | --- |
+| SQLite (`sqlite`) | Yes | Yes | Yes | `Managed` |
+| PostgreSQL (`postgres`) | Yes | Yes | Yes | `Managed` or externally owned |
+| Microsoft SQL Server (`mssql`) | Yes | No | No | `ExternalReadOnly` |
 
-Optional integration features:
+Backend features compile database support. `SchemaPolicy` separately decides
+whether the application owns the schema: `Managed`, `ValidateOnly`, `PlanOnly`,
+`ExternalWritable`, or `ExternalReadOnly`. Read the [schema-management
+reference](docs/reference/graphql-orm/schema-management.md) before connecting
+to an existing database.
 
-- `auth-agql` - optional one-way bridge from `agql-auth` 0.14 principals into
-  `AuthSubject` / `DbAuthContext` plus declared assurance evaluation
+## Choose a package
 
-Naming features are independent of backend features:
+| Package | Use it for | Start here |
+| --- | --- | --- |
+| `graphql-orm` | Generated GraphQL, repositories, migrations, and database runtime | [quickstart](docs/learn/sqlite-quickstart.md) |
+| `graphql-orm-macros` | The derive macros re-exported by `graphql-orm` | [package README](crates/graphql-orm-macros/README.md) |
+| `graphql-orm-operation-catalog` | Stable generated-operation metadata and fingerprints | [package README](crates/graphql-orm-operation-catalog/README.md) |
+| `graphql-orm-storage` | Provider-neutral object storage contracts | [package docs](crates/graphql-orm-storage/docs/README.md) |
+| `graphql-orm-backup` | Backup, verification, and restore orchestration | [package docs](crates/graphql-orm-backup/docs/README.md) |
+| `graphql-orm-ai-tool-profiles` | Least-privilege AI tool declarations | [package README](crates/graphql-orm-ai-tool-profiles/README.md) |
+| `graphql-orm-ai` | Project-neutral AI runtime and durable state | [package docs](crates/graphql-orm-ai/docs/README.md) |
+| `graphql-orm-router-protocol` | Versioned project-neutral subgraph/router declarations | [package README](crates/graphql-orm-router-protocol/README.md) |
+| `graphql-orm-router` | Federated GraphQL router runtime | [package README](crates/graphql-orm-router/README.md) |
 
-- `resolver-case-*`
-- `argument-case-*`
-- `field-case-*`
+The packages remain independently consumable. Adding one does not enable the
+others as ORM features.
 
-When one backend feature is enabled, existing single-backend shorthand remains available. In
-multi-service workspaces, Cargo may unify backend features; in that mode each entity and
-`schema_roots!` block must declare an explicit backend.
+## Maturity and security boundaries
 
-## Quick SQLite Example
+SQLite and PostgreSQL support managed schemas and generated writes. SQL Server
+is intentionally query-only. The generated API supplies query limits and
+policy hooks, but it does not make an application public-service ready by
+itself: install authentication, authorization, disclosure policy, rate limits,
+transport security, and operational controls in the host application.
 
-```rust
-use graphql_orm::prelude::*;
-
-#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[graphql_entity(table = "users", plural = "Users", default_sort = "name ASC")]
-pub struct User {
-    #[primary_key]
-    pub id: String,
-
-    #[filterable(type = "string")]
-    #[sortable]
-    pub name: String,
-
-    #[filterable(type = "boolean")]
-    pub active: bool,
-}
-
-schema_roots! {
-    auth: "required",
-    query_custom_ops: [],
-    entities: [User],
-}
-
-async fn build_schema(database_url: &str) -> graphql_orm::Result<AppSchema> {
-    let database =
-        graphql_orm::db::Database::<graphql_orm::SqliteBackend>::connect_sqlite(database_url)
-            .await?;
-
-    Ok(schema_builder(database)
-        .data(AuthSubject::new("current-user-id"))
-        .finish())
-}
-```
-
-Generated resolver auth can be set at the schema root or entity level with
-`auth = "required" | "optional" | "none"`. The default preserves the previous fail-closed generated
-auth behavior; use `auth: "none"` for public generated schemas.
-
-Generated GraphQL includes list and single lookup queries:
-
-```graphql
-query {
-  users(where: { active: { eq: true } }, orderBy: [{ name: ASC }]) {
-    edges {
-      node { id name active }
-    }
-    pageInfo { totalCount hasNextPage }
-  }
-}
-```
-
-SQLite/Postgres entities also get generated mutations and repository helpers unless policy/backend
-settings make them unavailable.
-
-For persisted types that must never enter the GraphQL type registry, derive
-`RepositoryEntity` with `#[repository_entity(...)]`. It generates ordinary Rust
-filter/order/create/update/projection types and applicable typed repository and
-transaction operations, but no async-graphql object, input, resolver,
-connection, payload, subscription, or schema-root implementation. Private and
-sensitive fields remain available to trusted repository inputs, with generated
-debug output and mutation side effects redacted. The storage model and stable
-schema hash are identical to an equivalent GraphQL-enabled declaration.
-
-`schema_roots!` can hide generated GraphQL mutations without disabling generated repository
-writes. `generated_mutations` defaults to `"all"` for compatibility; use `"none"` to expose only
-custom mutation roots from `extra_mutation_types`, or use `"allowlist"` with
-`generated_mutation_allowlist: [Entity]` / `"denylist"` with
-`generated_mutation_denylist: [Entity]` for mixed public exposure.
-
-`GraphQLOperations` also implements `GraphqlOperationMetadata`, while
-`schema_roots!` emits `graphql_orm_operation_catalog()`. The catalog reports
-the exact generated root field names, categories, argument/result signatures,
-backend profile, and resolved generated-mutation exposure. Its fingerprints
-detect generated-surface drift; they do not authorize execution or bind a
-document projection or disclosure policy. See
-[generated resolver operation metadata](docs/reference/graphql-orm/resolver-operation-metadata.md).
-
-For step-up-sensitive operations, build an `OperationAssuranceRegistry` from
-that catalog, register custom root fields, and classify every mutation with a
-policy ID or explicit exemption. Compatibility mode applies no default;
-strict mode can apply an interactive-mutation default and fail completeness
-checks for remaining gaps. Generated resolvers call the generic enforcement
-hook automatically, while custom fields use `DeclaredAssuranceGuard`. The
-optional `auth-agql` evaluator maps current upstream decisions to
-`STEP_UP_REQUIRED`, `UNAUTHENTICATED`, or `FORBIDDEN` through lowercase GraphQL
-extension key `code`. Directive metadata and deterministic manifests are
-advisory; server-side enforcement remains authoritative. See
-[operation assurance](docs/architecture/operation-assurance.md).
-
-## SQL Server Read-Only Example
-
-SQL Server support is intentionally read-only. It lets projects point the same entity/filter/query
-system at existing databases without generating writes or migrations.
-
-```rust
-use graphql_orm::prelude::*;
-
-#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[graphql_entity(
-    backend = "mssql",
-    table = "dbo.Jobs",
-    plural = "Jobs",
-    schema_policy = "external_read_only",
-    default_sort = "[JobId] ASC"
-)]
-pub struct Job {
-    #[primary_key]
-    #[graphql_orm(db_column = "JobId", write = false)]
-    #[filterable(type = "number")]
-    #[sortable]
-    pub id: i32,
-
-    #[graphql_orm(db_column = "JobName", write = false)]
-    #[filterable(type = "string")]
-    #[sortable]
-    pub name: String,
-}
-
-schema_roots! {
-    backend: "mssql",
-    schema_policy: "external_read_only",
-    query_custom_ops: [],
-    entities: [Job],
-}
-```
-
-Create a SQL Server database handle from an ADO.NET-style connection string:
-
-```rust
-let database = graphql_orm::db::Database::<graphql_orm::MssqlBackend>::connect_ado(
-    "server=tcp:127.0.0.1,1433;\
-     database=LegacyDb;\
-     user id=sa;\
-     password=Your_strong_password123;\
-     TrustServerCertificate=true",
-)
-.await?
-    .with_schema_policy(graphql_orm::graphql::orm::SchemaPolicy::ExternalReadOnly);
-```
-
-## Composite Relations
-
-Composite relation keys use array syntax and batch efficiently across SQLite, Postgres, and MSSQL:
-
-```rust
-#[graphql(skip, name = "Details")]
-#[relation(
-    target = "LegacyCardFileDetail",
-    from = ["card_no", "cont_no"],
-    to = ["CardNo", "ContNo"],
-    multiple,
-    emit_fk = false
-)]
-pub details: Vec<LegacyCardFileDetail>,
-```
-
-A nested query such as `LegacyCardFiles -> Contacts -> Details` executes as one parent query plus one
-batched relation query per relation layer, not N+1 or nested N*N queries.
+The quickstart intentionally sets `auth: "none"` for a local learning server.
+Do not deploy that configuration. See [authentication and
+authorization](docs/architecture/authentication-and-authorization.md),
+[operation assurance](docs/architecture/operation-assurance.md), and the
+[GraphQL workflow](docs/development/graphql-workflow.md).
 
 ## Documentation
 
-- [Full documentation index and authority model](docs/README.md)
-- [Workspace setup](docs/development/setup.md)
-- [Backend features and multi-backend workspaces](docs/reference/graphql-orm/backends.md)
-- [Entities, keys, columns, naming, and relations](docs/reference/graphql-orm/entities-and-relations.md)
-- [PostgreSQL RLS and auth-aware execution](docs/reference/graphql-orm/postgres.md)
-- [SQL Server read-only backend](docs/reference/graphql-orm/mssql.md)
-- [Schema ownership, validation, planning, and ABI migrations](docs/reference/graphql-orm/schema-management.md)
-- [Writes, repository helpers, hooks, subscriptions, and policies](docs/reference/graphql-orm/runtime-and-writes.md)
-- [Portable transactions, CAS, append-only entities, constraints, and keysets](docs/architecture/portable-persistence.md)
-- [Binary keys, private repository upserts, and indexes](docs/reference/graphql-orm/binary-keys-and-indexes.md)
-- [Typed least-privilege read projections](docs/reference/graphql-orm/read-projections.md)
-- [Repository-only persisted entities](docs/reference/graphql-orm/repository-only-entities.md)
-- [Typed composite-key and bounded mutations](docs/reference/graphql-orm/composite-mutations.md)
-- [Bounded append-only retention maintenance](docs/operations/runbooks/retention-maintenance.md)
-- [Backup runtime API](docs/reference/graphql-orm/backup-runtime.md)
-- [Schema modules and fenced leases](docs/architecture/schema-modules-and-leases.md)
-- [Completed monorepo consolidation](docs/plans/completed/monorepo-consolidation/README.md)
-- [Testing and verification](docs/development/testing.md)
-- [Workspace versioning and releases](docs/operations/release/process.md)
+- [Learn](docs/learn/README.md) — begin with a working service.
+- [How-to guides](docs/how-to/README.md) — choose a backend, manage schemas,
+  work with entities, or operate companion packages.
+- [Core ORM reference](docs/reference/graphql-orm/README.md) — runtime
+  mechanics and configuration; use the [macro and attribute
+  reference](docs/reference/graphql-orm/macros-and-attributes.md) for exact
+  derive syntax.
+- [Reference index](docs/reference/README.md) — all API and configuration
+  material.
+- [Concepts](docs/architecture/system-context.md) — package boundaries,
+  persistence, auth, assurance, storage, and backup design.
+- [Contributing and verification](docs/development/README.md) — workspace setup
+  and maintainer checks.
 
-## Status
-
-The crate is under active development. SQLite/Postgres write paths and schema management are
-available for managed schemas. SQL Server is currently read/query-only by design.
-
-## Repository Layout
-
-- `crates/graphql-orm` - runtime crate used by applications
-- `crates/graphql-orm-macros` - proc-macro crate re-exported by `graphql-orm`
-- `crates/graphql-orm-storage` - provider-neutral object storage primitives
-- `crates/graphql-orm-backup` - backup and restore orchestration
-- `crates/graphql-orm-ai` - project-agnostic AI agent runtime
-- `crates/graphql-orm-router-protocol` - versioned project-neutral subgraph and
-  router declarations
-- `crates/graphql-orm-router` - federated GraphQL router runtime
-
-Applications should depend on `graphql-orm` and use the re-exported macros from
-`graphql_orm::prelude::*`.
+The [documentation index](docs/README.md) is the canonical navigation point.

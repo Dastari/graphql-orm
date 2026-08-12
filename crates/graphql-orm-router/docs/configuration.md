@@ -29,6 +29,27 @@ addresses. `--check` loads environment secrets, initializes JWKS, fetches every
 SDL and descriptor, composes the graph, and constructs the executable runtime;
 it does not bind a listener.
 
+## Programmatic configuration types
+
+The strict JSON file is represented by `RouterFileConfig`; applications using
+the library directly build `RouterConfig` (also exposed as `RouterBuilder`).
+The public field-level source contracts are:
+
+| Type | Responsibility |
+| --- | --- |
+| [`RouterConfig`](../src/config.rs) | Static listener, subgraphs, timeouts, and fail-closed builder validation. |
+| [`SubscriptionConfig`](../src/config.rs) | WebSocket enablement, connection, operation, queue, and message limits. |
+| [`RequestLimits`](../src/config.rs) | HTTP body/header/parser/depth/alias/directive/cost ceilings. |
+| [`RouterTelemetryConfig`](../src/config.rs) | Log and optional Prometheus listener settings. |
+| [`AdminConfig`](../src/config.rs) | Separate authenticated administration listener and scopes. |
+| [`JwksAuthenticationConfig`](../src/jwt.rs) | RS256 public-key verification, issuer/audience, cache, and bounded JWKS fetch. |
+| [`NetworkPolicy`](../src/network.rs) | Dynamic destination host/port/CIDR/DNS policy. |
+| [`RouterFileConfig`](../src/file_config.rs) | Strict file representation and environment-secret mapping. |
+
+The defaults and hard ceilings below are applied by the file loader and
+programmatic validation. Do not treat an unlisted builder field as a promise of
+an unbounded value.
+
 ## Top-level fields
 
 | Field | Default or rule |
@@ -66,6 +87,14 @@ array. JWKS uses HTTPS. Plain HTTP is accepted only for loopback when
 
 The router validates RS256 public keys only. Configuration has no private-key,
 token-signing, session, refresh-token, or RSA-decryption field.
+
+For programmatic setup, `JwksAuthenticationConfig::new` requires a JWKS URL,
+issuer, and non-empty audiences. It defaults to a 15-minute key cache,
+5-minute refresh interval, 5-second request timeout, 1 MiB JWKS body limit,
+zero clock leeway, rejected legacy scope arrays, and HTTPS-only verification.
+Leeway may not exceed five minutes; insecure HTTP is an explicit loopback-only
+development setting. These fields are configured by the `with_*` methods in
+the [source type](../src/jwt.rs).
 
 ## Static subgraphs and secrets
 
@@ -127,6 +156,12 @@ also require their matching explicit boolean. DNS has a timeout and resolved
 address-count bound. Dynamic execution GraphQL/WebSocket origins must use an
 IP-literal host because the private execution client cannot consume the
 router's pinned DNS result.
+
+The programmatic [`NetworkPolicy`](../src/network.rs) defaults to no allowed
+hosts/networks, ports 80 and 443 only, loopback/private/link-local denial, a
+2-second DNS deadline, and 16 resolved addresses. Hosts, ports, CIDRs, and
+special ranges must all be expressly allowed; this type has no credential or
+proxy setting.
 
 ## Telemetry
 

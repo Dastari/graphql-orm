@@ -3,193 +3,99 @@ title: "graphql-orm-storage"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-12
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # graphql-orm-storage
 
-`graphql-orm-storage` provides provider-neutral object storage primitives for
-applications that use `graphql-orm`.
+Provider-neutral object storage primitives for `graphql-orm` applications.
+Use it to keep object bytes in a storage backend while your application owns
+database metadata, authorization, upload/download routes, and workflow.
 
-It stores bytes in object backends and returns metadata that host applications
-can persist in their own `graphql-orm` entities. It does not define application
-tables, authorization, upload routes, download routes, GraphQL resolvers, or
-domain workflows.
-
-## Highlights
-
-- streaming `BlobStore` trait for low-level key-addressed blob storage
-- high-level `StorageService` that generates object IDs, sharded keys, byte
-  counts, SHA-256 checksums, and timestamps
-- buffered and streaming object APIs
-- bucket/key streaming object APIs for large recordings and HTTP range playback
-- local filesystem backend enabled by default
-- S3-compatible backend behind the `s3` feature, including MinIO-compatible
-  path-style configuration
-- Azure Blob placeholder behind the `azure` feature that returns explicit
-  `UnsupportedBackend` errors until implemented
-- strict key validation for path safety across providers
-- byte-range reads, conditional writes, provider-side copy hooks, and paged
-  listing for cloud-provider compatibility
-- multipart local recording writes with atomic finalize and abort cleanup
-- retry-aware provider error taxonomy through `StorageError::is_retryable`
+It is not an application file service: it defines no tables, GraphQL roots,
+tenant model, authorization policy, or HTTP endpoint. It never stores file
+bytes in database rows.
 
 ## Install
 
-Default local filesystem support:
+Packages are Git-only. Pin the full reviewed monorepo revision, and use that
+same revision for every GraphQL ORM companion crate in one application:
+
+Upgrade deliberately: review the target revision's package changelog and
+migration guide, update every companion package together, then test the
+resolved dependency graph.
 
 ```toml
 [dependencies]
-graphql-orm-storage = {
-    git = "https://github.com/Dastari/graphql-orm.git",
-    rev = "<reviewed-full-40-character-commit-sha>",
-    version = "0.6.0",
-}
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "fac98d99e64c841a34d2d0096cdf928c3f9a7c6f", version = "0.6.0" }
 ```
 
-S3-compatible storage without the default local backend:
+For S3-compatible storage without the default local backend:
 
 ```toml
-[dependencies]
-graphql-orm-storage = {
-    git = "https://github.com/Dastari/graphql-orm.git",
-    rev = "<reviewed-full-40-character-commit-sha>",
-    version = "0.6.0",
-    default-features = false,
-    features = ["s3"],
-}
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "fac98d99e64c841a34d2d0096cdf928c3f9a7c6f", version = "0.6.0", default-features = false, features = ["s3"] }
 ```
 
-Git consumers pin a reviewed full monorepo revision. If an application also
-uses `graphql-orm`, `graphql-orm-backup`, or `graphql-orm-ai`, give every
-package the same `rev` so Cargo resolves one internal source universe.
-Within this workspace, companion packages use workspace path dependencies and
-the root `Cargo.lock`; the current baseline is ORM 0.19.0, backup 0.7.0, and
-storage 0.6.0. The ORM-owned optional `agql-auth` bridge pins `agql-auth` 0.14.0
-at `413fda3435f060604cd653c11e2cc18a668aace1`.
+## Five-minute local start
 
-Available provider features:
+`local` is enabled by default. The service generates an object ID, safe
+sharded key, size, SHA-256 checksum, and timestamp; persist that returned
+metadata in a host-owned entity. The canonical runnable source is
+[`examples/local_storage.rs`](examples/local_storage.rs):
 
-- `local` - enabled by default; provides `LocalStorageBackend`
-- `s3` - provides `S3StorageBackend` and `S3StorageConfig`
-- `azure` - provides unsupported placeholder types for future Azure Blob work
+```sh
+cargo run -p graphql-orm-storage --example local_storage
+```
 
-## Quick Local Example
-
-```rust
+```rust,no_run
 use std::sync::Arc;
-
-use graphql_orm_storage::{
-    LocalStorageBackend, StorageNamespace, StoragePutRequest, StorageService,
-};
+use graphql_orm_storage::{LocalStorageBackend, StorageNamespace, StoragePutRequest, StorageService};
 
 # async fn example() -> Result<(), graphql_orm_storage::StorageError> {
 let service = StorageService::new(Arc::new(LocalStorageBackend::new("./data/storage")));
-
-let stored = service
-    .put_object(StoragePutRequest {
-        namespace: StorageNamespace::Originals,
-        file_name: Some("artifact.jpg".to_string()),
-        mime_type: Some("image/jpeg".to_string()),
-        bytes: b"image bytes".to_vec(),
-    })
-    .await?;
-
-// Persist this metadata in the host application's graphql-orm entity.
-let object_id = stored.object_id;
-let storage_key = stored.storage_key;
-let sha256_hex = stored.sha256_hex;
+let object = service.put_object(StoragePutRequest {
+    namespace: StorageNamespace::Originals,
+    file_name: Some("note.txt".into()),
+    mime_type: Some("text/plain".into()),
+    bytes: b"hello".to_vec(),
+}).await?;
+println!("{} {}", object.storage_key, object.sha256_hex);
 # Ok(())
 # }
 ```
 
-## S3-Compatible Example
+Use [`BlobStore`](docs/blob-store.md) instead when the caller owns safe keys
+and needs streaming, ranges, conditional writes, copy, or paging.
 
-```rust
-use std::sync::Arc;
+## Providers and features
 
-use graphql_orm_storage::{
-    S3StorageBackend, S3StorageConfig, StorageNamespace, StoragePutRequest,
-    StorageService,
-};
+| Feature | Default | Provider | Notes |
+| --- | --- | --- | --- |
+| `local` | Yes | `LocalStorageBackend` | Baseline filesystem provider. |
+| `s3` | No | `S3StorageBackend` | S3-compatible endpoints, including path-style MinIO setups. |
+| `smb` | No | `SmbStorageBackend` | Native SMB2/SMB3; credentials are runtime-only. |
+| `azure` | No | `AzureBlobStorageConfig` | Explicit placeholder; returns `UnsupportedBackend`. |
 
-# async fn example() -> Result<(), graphql_orm_storage::StorageError> {
-let backend = S3StorageBackend::new(S3StorageConfig {
-    endpoint_url: "http://127.0.0.1:9000".to_string(),
-    region: "us-east-1".to_string(),
-    bucket: "objects".to_string(),
-    key_prefix: Some("app-storage".to_string()),
-    access_key_id: "minioadmin".to_string(),
-    secret_access_key: "minioadmin".to_string(),
-    path_style: true,
-});
+There is no implicit credential lookup. Keep S3 and SMB secrets out of config
+files, logs, metadata, and error reports. Azure is not a supported provider.
 
-let service = StorageService::new(Arc::new(backend));
-let stored = service
-    .put_object(StoragePutRequest {
-        namespace: StorageNamespace::Originals,
-        file_name: Some("artifact.bin".to_string()),
-        mime_type: Some("application/octet-stream".to_string()),
-        bytes: b"bytes".to_vec(),
-    })
-    .await?;
-# let _ = stored;
-# Ok(())
-# }
-```
+## Configuration and operations
 
-## Storage Metadata
+The [configuration and limits reference](docs/configuration.md) lists every
+public provider and request option, including source-backed defaults. Blob keys
+are relative `/`-separated identifiers: traversal, absolute paths, backslashes,
+NULs, and platform prefixes are rejected. `StorageError::is_retryable()` is a
+provider signal, not permission to replay a non-idempotent stream.
 
-Applications own their metadata entity so they can attach application-specific
-fields and policies.
+For backups, adapt `Arc<dyn BlobStore>` with the companion backup repository;
+use atomic `put_blob_if_not_exists` for locks and deduplication.
 
-```rust
-#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[graphql_entity(table = "storage_objects", plural = "StorageObjects")]
-pub struct StorageObjectRow {
-    #[primary_key]
-    pub id: graphql_orm::uuid::Uuid,
-
-    #[unique]
-    pub object_id: graphql_orm::uuid::Uuid,
-
-    pub namespace: String,
-    pub backend: String,
-
-    #[unique]
-    pub storage_key: String,
-
-    pub original_file_name: Option<String>,
-    pub mime_type: Option<String>,
-    pub size_bytes: i64,
-    pub sha256_hex: String,
-    pub created_at: i64,
-}
-```
-
-The crate deliberately stores file bytes in object storage, not in database
-rows.
-
-## Documentation
+## Further reading
 
 - [Documentation index](docs/README.md)
-- [Usage guide](docs/usage.md)
-- [BlobStore API](docs/blob-store.md)
-- [Streaming APIs](docs/streaming.md)
-- [Recording and large-object streams](docs/recording-streams.md)
-- [Architecture and crate boundaries](docs/architecture.md)
-- [Provider backlog](../../docs/plans/backlog/storage-providers/README.md)
-- [Backup integration guidance](docs/backup-integration.md)
-- [Development and test commands](docs/development.md)
-- [Migration guide](MIGRATION.md)
-- [Changelog](CHANGELOG.md)
-
-## Status
-
-Current crate version: `0.6.0`.
-
-Local filesystem, S3-compatible storage, and feature-gated native SMB2/SMB3
-storage are implemented. Azure Blob remains an explicit placeholder. Provider
-integration tests that require external services are opt-in.
+- [Usage](docs/usage.md), [streaming](docs/streaming.md), and [large-object recording](docs/recording-streams.md)
+- [Native SMB setup and safety](docs/native-smb.md)
+- [Backup integration](docs/backup-integration.md)
+- [Migration guide](MIGRATION.md) and [changelog](CHANGELOG.md)

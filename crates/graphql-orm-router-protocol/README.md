@@ -3,95 +3,83 @@ title: graphql-orm-router-protocol
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-11
+last_reviewed: 2026-08-12
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router-protocol
 
-`graphql-orm-router-protocol` defines versioned, serializable declarations a
-GraphQL subgraph can advertise to a compatible router. It is usable by
-`graphql-orm`-generated and hand-written Federation services alike.
+Versioned, serializable declarations that a GraphQL subgraph advertises to a
+compatible router. It works with generated and hand-written Federation
+services alike.
 
-The crate intentionally contains no router runtime, HTTP server, Federation
-engine, ORM, database, authentication implementation, or application types.
+It is deliberately data-only: no HTTP server, router runtime, Federation
+engine, ORM, database, URL parsing, DNS/network I/O, credential, deployment
+override, or application type belongs here. Endpoint strings are inert
+advertisements; a router owns SSRF, DNS, credential, and network policy.
 
-## Boundary
+## Install
 
-Endpoint strings are service advertisements only. This crate does not parse
-URLs, perform DNS or network I/O, resolve redirects, retain credentials, or
-apply deployment overrides. A router must bind an advertised endpoint to its
-own network, SSRF, credential, and registration policy before connecting.
+This unpublished package is Git-only:
 
-The descriptor includes a stable subgraph identity, GraphQL and SDL endpoint
-advertisements, capabilities, root operation and argument declarations,
-authorization metadata, and schema, authorization, and combined fingerprints.
-`SubgraphOnly` authorization explicitly marks policy that the router cannot
-represent; a router allow never replaces the subgraph's authoritative guard.
-The authorization fingerprint canonically covers each root field's
-authorization metadata and the argument declarations referenced by scope
-templates, including argument type and requiredness. Other argument drift is
-detected by the schema and combined fingerprints without changing the
-authorization fingerprint.
+```toml
+[dependencies]
+graphql-orm-router-protocol = { git = "https://github.com/Dastari/graphql-orm.git", rev = "fac98d99e64c841a34d2d0096cdf928c3f9a7c6f", version = "0.2.0" }
+```
 
-Optional `DescriptorExtension` values carry project-neutral, extension-owned
-JSON payloads. The protocol bounds and canonicalizes each payload, validates a
-positive version and lower-case identity, and binds it into the combined
-fingerprint without interpreting it. Consumers of a named extension must
-reject unsupported or incomplete inner versions; an extension never changes
-router authorization semantics by itself.
+## Minimal descriptor route
 
-## Compatibility
+Build deterministic bytes and let the host framework serve them at
+`/.well-known/graphql-router` with `application/json`:
 
-V1 uses `protocolVersion: { "major": 1, "minor": 0 }`. Readers accept later
-minor versions in the same major and ignore unknown additive JSON fields.
-Producers must place semantics a reader must understand in `requiredSemantics`.
-An unknown required semantic and any different major fail with stable
-`ProtocolErrorKind` categories.
+The canonical runnable source is
+[`examples/handwritten_descriptor.rs`](examples/handwritten_descriptor.rs):
 
-## Framework-neutral host route
+```sh
+cargo run -p graphql-orm-router-protocol --example handwritten_descriptor
+```
 
 ```rust
-use graphql_orm_router_protocol::{
-    CapabilitySet, Fingerprint, SubgraphDescriptorBuilder,
-};
+use graphql_orm_router_protocol::{CapabilitySet, Fingerprint, SubgraphDescriptorBuilder};
 
-// A host framework can return these bytes from a GET route at
-// `/.well-known/graphql-router` with `application/json` content type.
-fn router_descriptor_json(schema_sdl: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn descriptor(schema_sdl: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let descriptor = SubgraphDescriptorBuilder::new(
-        "inventory-service",
-        "inventory",
-        "https://inventory.example/graphql",
-        "https://inventory.example/schema.graphql",
-        Fingerprint::sha256(schema_sdl),
-    )?
-    .capabilities(CapabilitySet {
-        schema_fingerprints: true,
-        ..CapabilitySet::default()
-    })
-    .build()?;
-
+        "inventory-service", "inventory", "https://inventory.example/graphql",
+        "https://inventory.example/schema.graphql", Fingerprint::sha256(schema_sdl),
+    )?.capabilities(CapabilitySet { schema_fingerprints: true, ..CapabilitySet::default() })
+      .build()?;
     Ok(serde_json::to_vec(&descriptor)?)
 }
-# let _ = router_descriptor_json("type Query { inventory: Int! }")?;
+# let _ = descriptor("type Query { inventory: Int! }")?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-The service's chosen HTTP framework owns routing and response construction;
-the protocol package intentionally does not. Operation declarations can be
-added with `SubgraphDescriptorBuilder::operation`, and the builder canonicalizes
-them and calculates authorization and combined fingerprints before validation.
-Optional extensions are added with `SubgraphDescriptorBuilder::extension`.
+Add root operation declarations with `operation` and project-neutral extension
+payloads with `extension`; the builder canonicalizes and fingerprints output.
 
-See the golden generated-style and hand-written descriptors under
-[`tests/fixtures`](tests/fixtures).
+## Compatibility and authority boundary
 
-See the [migration guide](MIGRATION.md) for protocol-major/minor compatibility
-and first adoption.
+V1 uses `protocolVersion: { "major": 1, "minor": 0 }`. Readers accept later
+minor versions in the same major and ignore unknown additive JSON fields.
+Semantics that a reader must understand belong in `requiredSemantics`; an
+unknown required semantic or different major fails with stable
+`ProtocolErrorKind` values.
 
-## Verification
+`SubgraphOnly` remains available for authorization a router cannot represent.
+A router allow is advisory defense in depth and never replaces the subgraph's
+authoritative guard. Optional extensions are bounded and fingerprinted but do
+not change authorization semantics by themselves.
+
+## Reference and verification
+
+Public model types are field-documented in source. `UnrepresentablePolicy` and
+`UnrepresentablePolicyCode` are the protocol's policy-declaration reference in
+[`src/model.rs`](src/model.rs); they declare information a router must leave to
+the subgraph, not a router-side authorization grant. Golden generated-style and
+hand-written descriptors live in [`tests/fixtures`](tests/fixtures). See the
+[migration guide](MIGRATION.md) and [changelog](CHANGELOG.md) for protocol
+compatibility.
 
 ```sh
 cargo test --manifest-path crates/graphql-orm-router-protocol/Cargo.toml

@@ -5,6 +5,7 @@ edition = "2024"
 description = "Runtime support crate for graphql-orm-macros"
 license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm"
+documentation = "https://github.com/Dastari/graphql-orm/tree/main/crates/graphql-orm/README.md"
 publish = false
 
 [package.metadata.distribution]
@@ -75,8 +76,10 @@ tokio-util = { workspace = true, optional = true }
 uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]
+axum = "0.8.9"
+graphql-orm-router-protocol = { workspace = true }
 time = "0.3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync"] }
 trybuild = "1"
 
 [[example]]

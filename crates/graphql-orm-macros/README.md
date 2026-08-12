@@ -3,75 +3,86 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-12
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm-macros`
 
-Procedural macros for [`graphql-orm`](../../README.md).
+This is the procedural-macro implementation for `graphql-orm`. Applications
+normally depend on the runtime crate and import its prelude; that keeps the
+macro/runtime versions aligned:
 
-Applications normally use these macros through `graphql-orm` re-exports:
+```toml
+[dependencies]
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "fac98d99e64c841a34d2d0096cdf928c3f9a7c6f", version = "0.21.0", default-features = false, features = ["sqlite"] }
+```
+
+Direct use is supported for tooling that needs the macro package:
+
+```toml
+graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "fac98d99e64c841a34d2d0096cdf928c3f9a7c6f", version = "0.21.0", default-features = false, features = ["sqlite"] }
+```
+
+The direct dependency still requires a compatible `graphql-orm` runtime in the
+consumer crate because generated code refers to `::graphql_orm`. The macros do
+not connect to a database, run migrations, host GraphQL, or authorize requests.
+
+## Public macros
+
+| Item | Purpose |
+| --- | --- |
+| `GraphQLEntity` | GraphQL object/filter/order/input types, row decoding, metadata, and query helpers |
+| `GraphQLSchemaEntity` | schema metadata only |
+| `RepositoryEntity` | typed repository CRUD and private projections with no GraphQL surface |
+| `GraphQLRelations` | batched single/composite-key relation resolvers |
+| `GraphQLOperations` | generated GraphQL root operation types and operation metadata |
+| `schema_roots!` | query/mutation/subscription roots, schema builders, metadata, and resolved catalog |
+| `mutation_result!` | a simple GraphQL mutation result object |
+| `backend_selected_graphql_entity` | emits cfg-selected entity definitions for a multi-backend consumer |
+
+## Feature configuration
+
+`sqlite` is the default. Select `postgres` or `mssql` by disabling default
+features. The macro compiler rejects a build with no backend and a consumer
+must select an explicit backend when Cargo feature unification enables more
+than one. `mysql` exists as a macro feature but the runtime package does not
+offer a MySQL backend in this release; do not use it as application support.
+
+The independent `resolver-case-*`, `argument-case-*`, and `field-case-*`
+groups each permit at most one feature: `pascal`, `snake`,
+`screaming-snake`, `lower`, or `upper`.
+
+## Minimum use
 
 ```rust
 use graphql_orm::prelude::*;
-```
 
-## Macros
-
-- `#[derive(GraphQLEntity)]`: entity metadata, filters, order inputs, row decoding, query helpers, and optional write inputs.
-- `#[derive(GraphQLSchemaEntity)]`: schema metadata without GraphQL operation generation.
-- `#[derive(RepositoryEntity)]`: managed schema, typed repository operations, filters, ordering,
-  projections, and ordinary Rust write inputs with no async-graphql type or resolver generation.
-- `#[derive(GraphQLRelations)]`: single-key and composite-key relation resolvers with batching support.
-- `#[derive(GraphQLOperations)]`: generated query, mutation, and subscription operation types.
-- `schema_roots!`: generated root query/mutation/subscription aliases for a set of entities. Rust
-  names remain `QueryRoot`, `MutationRoot`, and `SubscriptionRoot`; nonempty GraphQL operation
-  objects use the conventional federation-composable names `Query`, `Mutation`, and `Subscription`.
-- `mutation_result!`: GraphQL mutation result object generation.
-
-## Backend Selection
-
-For normal single-backend builds, derives keep the existing behavior and infer the backend from enabled features.
-
-For multi-backend workspaces, select the backend explicitly:
-
-```rust
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
-#[graphql_entity(
-    backend = "mssql",
-    table = "dbo.Jobs",
-    plural = "Jobs",
-    schema_policy = "external_read_only"
-)]
-pub struct Job {
+#[graphql_entity(table = "notes", plural = "Notes")]
+struct Note {
     #[primary_key]
-    pub job_id: i32,
+    id: i64,
+    #[filterable(type = "string")]
+    #[sortable]
+    body: String,
 }
 ```
 
-Naming feature groups remain independent:
+The generated surface depends on the selected backend and schema policy.
+MSSQL and `external_read_only` schemas retain reads but omit generated
+mutations and subscriptions. Repository-only entities intentionally report no
+generated GraphQL operations.
 
-- `resolver-case-*`
-- `argument-case-*`
-- `field-case-*`
+## Authoritative reference and security
 
-Enable at most one feature from each group.
+The [macro and attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md)
+is the canonical accepted-syntax, defaults, constraints, naming, relation,
+index, projection, search/spatial, schema-policy, and generated-authorization
+reference. Attribute metadata is not authorization: resolver auth, scope
+metadata, semantic descriptions, and operation fingerprints never replace
+application row/field policy or database controls.
 
-## Generated Resolver Auth
-
-`schema_roots!` and `#[graphql_entity(...)]` accept
-`auth = "required" | "optional" | "none"`. Entity-level auth overrides the schema-root mode. The
-runtime default remains fail-closed for compatibility; use `auth = "none"` for public generated
-schemas.
-
-Generated root resolvers also call the runtime's operation-assurance hook before
-database work. It is a compatibility no-op until the schema installs
-`AssuranceEnforcement`; classification, policy IDs, custom-field guards,
-directives, audits, and manifests are runtime registry concerns.
-
-## Documentation
-
-See the root [README](../../README.md), project [docs](../../docs/README.md),
-and generated rustdocs for the full public contract.
+See [core runtime documentation](../graphql-orm/README.md),
+and the [macro and attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md).
