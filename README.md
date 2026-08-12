@@ -43,7 +43,7 @@ It is designed for two related use cases:
   per-parent keysets, and optional counts
 - single and composite primary-key read support
 - single and composite relation-key batching, including nested legacy shapes like
-  `JimCardFiles -> Contacts -> Details`
+  `LegacyCardFiles -> Contacts -> Details`
 - managed compound foreign keys with ordered member introspection on SQLite and PostgreSQL
 - stable named ordinary indexes with typed per-column ascending or descending order
 - portable spatial fields and predicates with native PostGIS support and SQLite GeoJSON fallback
@@ -247,16 +247,16 @@ Composite relation keys use array syntax and batch efficiently across SQLite, Po
 ```rust
 #[graphql(skip, name = "Details")]
 #[relation(
-    target = "JimCardFileDetail",
+    target = "LegacyCardFileDetail",
     from = ["card_no", "cont_no"],
     to = ["CardNo", "ContNo"],
     multiple,
     emit_fk = false
 )]
-pub details: Vec<JimCardFileDetail>,
+pub details: Vec<LegacyCardFileDetail>,
 ```
 
-A nested query such as `JimCardFiles -> Contacts -> Details` executes as one parent query plus one
+A nested query such as `LegacyCardFiles -> Contacts -> Details` executes as one parent query plus one
 batched relation query per relation layer, not N+1 or nested N*N queries.
 
 ## Documentation
@@ -279,6 +279,7 @@ batched relation query per relation layer, not N+1 or nested N*N queries.
 - [Schema modules and fenced leases](docs/architecture/schema-modules-and-leases.md)
 - [Completed monorepo consolidation](docs/plans/completed/monorepo-consolidation/README.md)
 - [Testing and verification](docs/development/testing.md)
+- [Workspace versioning and releases](docs/operations/release/process.md)
 
 ## Status
 

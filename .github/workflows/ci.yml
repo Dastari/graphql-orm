@@ -2,6 +2,9 @@ name: CI
 
 on:
   pull_request:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
@@ -19,6 +22,21 @@ jobs:
         run: python3 scripts/check-documentation.py --base "${{ github.event.pull_request.base.sha }}"
       - name: Check generated workspace inventory
         run: python3 scripts/generate-workspace-inventory.py --check
+      - name: Check Git-only release metadata
+        run: |
+          python3 scripts/check-release-state.py
+          python3 scripts/generate-release-manifest.py \
+            --release-id workspace-2000.01.01.1 \
+            --ref HEAD \
+            --output /tmp/workspace-release-a.json \
+            --notes-output /tmp/workspace-release-a.md
+          python3 scripts/generate-release-manifest.py \
+            --release-id workspace-2000.01.01.1 \
+            --ref HEAD \
+            --output /tmp/workspace-release-b.json \
+            --notes-output /tmp/workspace-release-b.md
+          cmp /tmp/workspace-release-a.json /tmp/workspace-release-b.json
+          cmp /tmp/workspace-release-a.md /tmp/workspace-release-b.md
       - name: Check PR documentation impact
         if: github.event_name == 'pull_request'
         env:

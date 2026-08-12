@@ -20,7 +20,8 @@ This crate is a reusable backup and restore companion for applications that use 
 ## Rules
 
 - Keep the crate generic and reusable.
-- Do not add Digitise-specific domain names, entity names, collection semantics, accession logic, record logic, media workflows, or policy assumptions.
+- Do not add consumer-specific domain names, entity names, collection
+  semantics, record workflows, or policy assumptions.
 - Do not store file bytes in a database.
 - Prefer traits and small adapters over application-specific coupling.
 - Keep provider-specific code behind feature flags.

@@ -7,7 +7,6 @@ use async_trait::async_trait;
 use graphql_orm::graphql::orm::{GraphqlOperationCatalog, GraphqlOperationKind};
 use serde::{Deserialize, Serialize};
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use crate::{AiApprovalRule, AiToolRisk, ModelToolDefinition};
 use crate::{
     AiDisclosureSchema, AiError, AiGeneratedGraphqlOperationPolicy, AiGraphqlToolManifestCatalog,
@@ -223,6 +222,50 @@ impl AiToolCatalog {
     /// Returns all registered descriptors.
     pub fn descriptors(&self) -> impl Iterator<Item = &AiToolDescriptor> {
         self.tools.values().map(|tool| &tool.descriptor)
+    }
+
+    /// Builds one provider-facing definition from the exact registered
+    /// read-only descriptor.
+    ///
+    /// This is a canonical projection of catalog metadata, not a second tool
+    /// declaration and not authorization. The caller supplies only the
+    /// provider-safe alias used to correlate one model request; the stable ID,
+    /// description, argument schema, and fingerprint are copied from the
+    /// registered descriptor. Ordinary policy, current-principal, delegated
+    /// authority, resolver, and disclosure checks still run when a plan is
+    /// built and when a call executes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error when the tool is absent, is not an idempotent
+    /// read-only application query, or the provider alias is malformed.
+    pub fn read_only_model_definition(
+        &self,
+        id: &AiToolId,
+        provider_name: impl Into<String>,
+    ) -> Result<ModelToolDefinition, AiError> {
+        let descriptor = self.descriptor(id).ok_or(AiError::Forbidden)?;
+        if descriptor.operation_kind != AiToolOperationKind::Query
+            || descriptor.operation_domain != AiToolOperationDomain::Application
+            || descriptor.maturity != ToolMaturity::ReadOnly
+            || descriptor.risk != AiToolRisk::ReadOnly
+            || descriptor.approval != AiApprovalRule::None
+            || !descriptor.idempotent
+        {
+            return Err(AiError::Forbidden);
+        }
+        let definition = ModelToolDefinition {
+            tool_id: descriptor.id.as_str().to_owned(),
+            provider_name: provider_name.into(),
+            fingerprint: descriptor.fingerprint.clone(),
+            description: descriptor.description.clone(),
+            parameters: descriptor.argument_schema.clone(),
+            strict: true,
+        };
+        definition.validate().map_err(|_| {
+            AiError::InvalidConfiguration("provider-facing tool alias is invalid".to_owned())
+        })?;
+        Ok(definition)
     }
 
     pub(crate) fn validate_execution_request(

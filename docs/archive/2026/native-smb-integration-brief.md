@@ -1,5 +1,5 @@
 ---
-title: "Digitise Native SMB Integration Brief"
+title: "Native SMB host-integration brief"
 kind: reference
 status: archived
 owner: graphql-orm-backup-maintainers
@@ -12,15 +12,15 @@ supersedes: []
 > as historical context and is not guidance for reusable backup or storage
 > work.
 
-# Digitise Native SMB Integration Brief
+# Native SMB host-integration brief
 
-Keep Digitise settings and policy in the host; reusable crates expose storage
-and backup primitives only.
+Keep application settings and policy in the host; reusable crates expose
+storage and backup primitives only.
 
 - Replace `backup.smb.mountPath` for the native provider with server, port,
   share, optional root prefix, username, optional domain/workgroup, minimum
   dialect, signing/encryption requirements, and timeout fields.
-- Persist the password through Digitise's encrypted secret-settings service.
+- Persist the password through the host's encrypted secret-settings service.
   GraphQL and non-secret exports expose only `passwordConfigured`.
 - Build `SmbStorageConfig` from resolved settings and return
   `Arc<dyn BackupRepository>` containing `BlobStoreBackupRepository` over an
@@ -39,7 +39,7 @@ No `agql-auth` change is required. SMB authentication proves an identity to a
 remote storage server, separate from application-user authentication. The host
 already expresses platform-admin authorization and trusted internal execution.
 
-Digitise currently builds its backup object index only from
+Host application currently builds its backup object index only from
 `LocalStorageBackend`. Native SMB as a destination does not fix that independent
 restriction. Build the index from the configured `Arc<dyn BlobStore>` so full
 backups can read referenced objects from any supported primary provider.

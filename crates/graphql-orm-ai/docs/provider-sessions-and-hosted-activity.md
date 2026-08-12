@@ -3,7 +3,7 @@ title: "Provider Sessions, Hosted Search, and Visible Activity"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-11
+last_reviewed: 2026-08-12
 review_by: 2027-02-11
 supersedes: []
 ---
@@ -64,27 +64,112 @@ and return `AiCodexAppServerLaunchedProcess` with an idempotent synchronous
 process-tree kill callback. The wrapper invokes that callback on final drop,
 including an abandoned stream or failed graceful shutdown.
 
+Dynamic tools require a separate closed launch profile. Bind the reviewed
+model-catalogue mode and profile into the registration:
+
+```rust
+let launch_profile = AiCodexAppServerLaunchProfile::experimental_dynamic_tools_only_v1(
+    AiCodexAppServerModelToolMode::Direct,
+)?;
+let bootstrap = AiCodexAppServerBootstrapInstructions::from_static(&[
+    "Use a registered application tool whenever current facts are needed to answer the request.",
+])?;
+let registration = AiCodexAppServerRegistration::new(
+    "local-dynamic-tools",
+    "reviewed-direct-tool-model",
+    executable_sha256,
+    executable_version,
+    "isolated-no-native-tools",
+    AI_CODEX_APP_SERVER_PROTOCOL_V2,
+)?
+.with_launch_profile(launch_profile)
+.with_bootstrap_instructions(bootstrap);
+```
+
+The factory returns true from `supports_launch_profile` only when it launches
+that profile with `registration.launch_profile().codex_arguments()` unchanged,
+an environment cleared of unrelated credentials, a private configuration home
+containing no project config or MCP servers, an empty working directory, and
+the registered operating-system sandbox. The actor additionally sends empty
+thread/turn environments and a closed thread config that disables shell,
+unified execution, Code Mode, utility tools, connectors, plugins,
+collaboration, images, browser/computer use, and hosted search. This is defense
+in depth: the process sandbox remains authoritative if a provider version
+ignores a feature toggle.
+
+Only a reviewed `Direct` model-tool declaration can construct this profile.
+Codex models declared `CodeMode` or `CodeModeOnly` are rejected rather than
+silently losing dynamic tools or requiring a native Code Mode host. Such a
+registration may still use the strict text-only profile. When the factory does
+not attest the dynamic profile, provider capabilities report
+`custom_tools = false` and no dynamic process starts.
+
 The crate-owned protocol actor deliberately has no generic JSON-RPC send
-method. It admits only initialization, exact thread start/resume/delete, turn
-start/interruption, correlated responses, the closed visible-event allowlist,
-and—only for an experimental registration—the exact documented
-`item/tool/call` server request. Commands, shell, files, patches, MCP,
-collaboration, images, hosted web search, browser control, raw reasoning, and
-arbitrary methods remain forbidden.
+method. Initialization always negotiates one fixed opt-out profile for thread
+status/settings/cleared-goal, MCP-startup, and account-rate-limit notifications
+that this adapter neither consumes nor exposes. Stable and experimental
+initialization use the same profile; only the dynamic-tool path additionally
+sets `experimentalApi: true`. An opted-out method remains rejected if the
+server sends it anyway. The actor admits only initialization, exact thread
+start/resume/delete, turn start/interruption, correlated responses, the closed
+visible-event allowlist, and—only for an experimental registration—the exact
+documented `item/tool/call` server request. Commands, shell, files, patches,
+MCP, collaboration, images, hosted web search, browser control, raw reasoning,
+and arbitrary methods remain forbidden.
+
+Codex may emit the documented generic `warning` while a turn is open. The
+actor accepts only the exact positive-timestamp envelope, an optional thread ID
+matching the active thread, and a bounded non-empty control-free message. It
+limits each turn to eight warnings and 16 KiB total text, discards every field,
+and returns only `AiCodexAppServerInbound::RuntimeWarning`. Hosts treat that
+variant as a non-fatal control event; they never log or forward the warning
+text. Warnings outside the current turn and every other generic notification
+remain rejected.
+
+Every turn explicitly requests `summary: "none"`. Codex may still report an
+empty reasoning item lifecycle. The actor accepts only an exact paired item
+whose `content` and `summary` arrays remain empty, discards its identifier and
+timestamp, and returns `ReasoningLifecycle`. It rejects non-empty reasoning or
+summary content and all reasoning deltas, so this control event is neither a
+reasoning summary nor hidden chain-of-thought.
 
 The closed default accepts an initial `StatelessReplay` request containing
 only bounded trusted instructions and text; each call gets a fresh ephemeral
 thread while the exact run process may be reused. A retained turn instead uses
 `ModelContinuationMode::ProviderRetained`, an exact
 `AiProviderSessionTurnPlan`, and a configured `AiProviderSessionService`.
-Creation sends only immutable model and reviewed dynamic-tool definitions to
-an empty persistent thread. It sends no developer instruction or user input
-until the opaque cursor is durably protected and claimed. Resume binds the
-cursor to the exact owner/session/scope/profile/model/executable/protocol/
-policy/transcript/run fence.
+Creation sends only the immutable model, optional compile-time static
+`AiCodexAppServerBootstrapInstructions`, and reviewed dynamic-tool definitions
+to an empty persistent thread. It sends no user input, request-local
+instruction, route context, secret, or resolver result until the opaque cursor
+is durably protected and claimed. The bootstrap fingerprint is part of the
+registration identity, and retained requests must leave
+`ModelRequest::instructions` empty. First activation and every resume prove
+the same bootstrap, cursor, owner/session/scope/profile/model/executable/
+protocol/policy/transcript/run fence before business input can start.
 
-Experimental dynamic tools require
-`AiCodexAppServerRegistration::with_experimental_dynamic_tools` and
+One protocol actor may perform sequential lifecycle cycles on its retained
+process. Each typed `thread/start` or `thread/resume` begins a private
+observation phase. New thread creation requires exactly one correlated
+response and one matching `thread/started` notification in either order.
+Retained resume uses that same pair when both frames are delivered. Codex
+0.147.0 may instead deliver one cumulative `thread/tokenUsage/updated`
+snapshot around the correlated response. The actor validates its complete
+nonnegative generated shape and exact thread correlation, discards all token
+values, and permits that content-free snapshot to close only the typed resume
+phase once its response is also present. The snapshot is not charged to the
+new run and cannot complete initial creation. The next resume and `turn/start`
+remain closed until the applicable phase is complete. There is no public state
+reset, and the retained model and dynamic-tool definitions cannot change
+between creation, resume, or later terminal turns.
+
+Deletion completes from the exact empty successful `thread/delete` response.
+It never depends on or admits `thread/status/changed`; the fixed initialization
+profile suppresses that notification for the connection.
+
+Experimental dynamic tools require a registration using
+`AiCodexAppServerLaunchProfile::experimental_dynamic_tools_only_v1`, a process
+factory that attests that exact profile, and
 `AiReadOnlyAgentTurnPlan::new_experimental_dynamic_tools`. The provider process
 receives no application credential or resolver transport. An exact
 `item/tool/call` is schema/fingerprint matched to the current `ModelRequest`,
@@ -93,6 +178,24 @@ ordinary registered read-only GraphQL tool boundary. Only the already
 disclosure- and egress-approved result is returned to app-server. Unknown,
 duplicate, stale, over-limit, changed-policy, or incomplete calls poison the
 turn and make a retained cursor cleanup-only.
+
+Owning subgraphs compile generated or custom profiles into a canonical
+manifest and register it in `AiToolCatalog`. Build the provider definition with
+`AiToolCatalog::read_only_model_definition`; do not copy the description,
+argument schema, stable ID, or descriptor fingerprint into host code. Codex
+0.147.0 accepts a smaller JSON Schema subset than the canonical profile
+contract. The adapter therefore performs one closed deterministic projection:
+it removes only unsupported schema meta/constraint keywords, carries scalar
+bounds into the provider-visible property description, and fingerprints the
+projection together with the exact canonical descriptor. The unmodified
+canonical schema remains authoritative when a dynamic call is admitted and
+again at coordinator execution, so projection cannot weaken the accepted
+argument range.
+
+JSON-RPC request identifier zero is valid and is used by Codex 0.147.0 for its
+first server-initiated dynamic call. The actor correlates it in the same
+private pending-request map as every other unsigned identifier; accepting zero
+does not weaken method, lifecycle, schema, tool, owner, run, or cursor checks.
 
 Coordinator cancellation and terminal paths call `interrupt_run` and
 `close_run` through `AiRuntime`. The process binding includes a non-exported
@@ -207,16 +310,21 @@ enforce this creation order:
 2. use the host-planned immutable `AiProviderSessionDescriptor` and canonical
    transcript-prefix fingerprint;
 3. call `bind_for_run` under the current run lease;
-4. only after the protected binding commits, send business content; and
-5. after protected assistant output, its matching
+4. call `open_for_run`, preserve the crate-owned newly-bound activation, and
+   consume it once on the exact process/cursor that created the empty thread;
+5. start the first `turn/start` directly on that already-loaded thread without
+   issuing `thread/resume`, then send business content; and
+6. after protected assistant output, its matching
    `assistant_output_persisted` checkpoint, and canonical `Completed` run state
    commit, call `commit_turn` with the new authoritative
    watermark/fingerprint. If this retention-only update fails, quarantine the
    cursor without changing the already-completed user answer.
 
-Resume uses `claim_for_run` and then `open_for_run`. Both require the exact
+Later-run resume uses `claim_for_run` and then `open_for_run`. Both require the exact
 descriptor and transcript evidence, current principal/session/scope access,
-and current run fence. A crash, cancellation, protocol error, ambiguous
+and current run fence. Its provider adapter performs the strict
+`thread/resume` response/notification lifecycle before `turn/start`; it cannot
+reuse the one-shot newly-bound activation. A crash, cancellation, protocol error, ambiguous
 provider state, output-persistence failure, policy/profile/model/executable
 drift, or rejected cursor calls `require_cleanup`; v1 never guesses provider
 state or advances a watermark from incomplete evidence.

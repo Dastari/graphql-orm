@@ -78,7 +78,7 @@ Git revision containing this evidence satisfies ADR-0008 for that revision and
 channel only.
 
 No binary, container, hosted deployment, or later dependency revision is
-approved by this record. GEMA and every other deployment must retain its own
+approved by this record. Every deployment must retain its own
 artifact-derived SBOM, notices, linked-component inventory, and designated
 approval.
 

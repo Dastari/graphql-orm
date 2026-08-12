@@ -27,6 +27,9 @@ mod ollama;
 #[cfg(feature = "provider-codex-app-server")]
 mod codex_app_server;
 
+#[cfg(all(test, feature = "provider-codex-app-server"))]
+pub(crate) use codex_app_server::tests::canonical_dynamic_tool_catalog;
+
 #[cfg(all(test, feature = "provider-openai"))]
 pub(crate) use mock::MockBackgroundRetrievalFailure;
 pub use mock::MockProvider;
@@ -61,8 +64,9 @@ pub use ollama::{OllamaProvider, OllamaProviderConfig};
 
 #[cfg(feature = "provider-codex-app-server")]
 pub use codex_app_server::{
-    AI_CODEX_APP_SERVER_PROTOCOL_V2, AiCodexAppServerInbound, AiCodexAppServerLaunchedProcess,
-    AiCodexAppServerProtocolActor, AiCodexAppServerProvider, AiCodexAppServerRegistration,
-    AiCodexAppServerRunLimits, AiCodexAppServerRunPool, AiCodexAppServerRunProcess,
-    AiCodexAppServerRunProcessFactory, AiCodexAppServerTurnInput,
+    AI_CODEX_APP_SERVER_PROTOCOL_V2, AiCodexAppServerBootstrapInstructions,
+    AiCodexAppServerInbound, AiCodexAppServerLaunchProfile, AiCodexAppServerLaunchedProcess,
+    AiCodexAppServerModelToolMode, AiCodexAppServerProtocolActor, AiCodexAppServerProvider,
+    AiCodexAppServerRegistration, AiCodexAppServerRunLimits, AiCodexAppServerRunPool,
+    AiCodexAppServerRunProcess, AiCodexAppServerRunProcessFactory, AiCodexAppServerTurnInput,
 };

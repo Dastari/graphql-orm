@@ -80,3 +80,13 @@ internal dependencies.
 
 The accepted decisions in [`docs/decisions`](../decisions/README.md) define
 these boundaries precisely.
+
+## Distribution boundary
+
+Packages retain independent SemVer identities while one immutable workspace
+release identifies the exact set tested together. Consumers pin the release's
+full commit SHA. Qualified package tags and the generated release manifest
+provide discoverability and machine-readable package, dependency, schema, and
+wire identities. ADR-0010 and the
+[workspace release process](../operations/release/process.md) define the
+versioning and publication contract.

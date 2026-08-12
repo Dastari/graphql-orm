@@ -3,14 +3,14 @@ title: "Implementation Status"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-11
+last_reviewed: 2026-08-12
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.73.0` with AI schema module
+`graphql-orm-ai` is at crate version `0.75.0` with AI schema module
 `0.55.0`. It uses workspace `graphql-orm` `0.21.0`, backend-neutral
 `graphql-orm-ai-tool-profiles` `0.3.0`, and external `agql-auth`
 `0.14.0` at `413fda3435f060604cd653c11e2cc18a668aace1`.
@@ -37,11 +37,20 @@ verification evidence belongs in the focused guides.
 - The optional Codex app-server adapter retains one strictly allowlisted
   process per exact claimed run and may resume one exact protected provider
   thread. It is globally and per-owner bounded, cancellation-aware, and
-  kill-on-drop. Experimental native dynamic tools require an immutable
-  default-off registration flag and remain coordinator-owned; every exact call
+  kill-on-drop. Experimental native dynamic tools require an immutable closed
+  dynamic-tools-only launch profile, a direct-tool model declaration, and a
+  process-factory profile attestation; every exact call
   rechecks current rules and uses the ordinary registered GraphQL tool,
   disclosure, egress, budget, and resolver authorization path. Generic
   protocol bridging, shell, files, hosted web, MCP, and browser remain closed.
+  Initialization uses one library-owned notification opt-out profile, while
+  response-authoritative deletion, empty reasoning lifecycle, and retained
+  cumulative-usage replay are admitted only through typed content-free
+  controls that cannot become model output or current-run usage. Retained
+  developer instructions are compile-time static, registration-fingerprinted,
+  and distinct from request input. Provider definitions are projected from the
+  exact registered manifest, with canonical JSON Schema validation retained at
+  every dynamic-call boundary.
 - The provider-neutral durable session service protects opaque retained-thread
   cursors under exact owner/scope/run/descriptor/transcript fencing and an
   exact deletion/absence lifecycle. Cursor state is separate from warm

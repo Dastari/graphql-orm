@@ -2115,20 +2115,23 @@ impl AiProviderCallExecutor {
         }
         let lease = lease_state.lock().await.clone();
         let binding = crate::AiProviderRunBinding::from_lease(&lease)?;
-        let claim = match session_service.inspect_for_run(&lease).await? {
+        let (claim, newly_bound_cursor) = match session_service.inspect_for_run(&lease).await? {
             Some(existing)
                 if existing.state() == crate::AiProviderSessionState::Active
                     && existing.descriptor() == session_plan.descriptor()
                     && existing.transcript_fingerprint()
                         == session_plan.transcript_fingerprint() =>
             {
-                session_service
-                    .claim_for_run(
-                        &lease,
-                        session_plan.descriptor(),
-                        session_plan.transcript_fingerprint(),
-                    )
-                    .await?
+                (
+                    session_service
+                        .claim_for_run(
+                            &lease,
+                            session_plan.descriptor(),
+                            session_plan.transcript_fingerprint(),
+                        )
+                        .await?,
+                    None,
+                )
             }
             Some(_) => return Err(AiError::Conflict),
             None => {
@@ -2149,7 +2152,7 @@ impl AiProviderCallExecutor {
                     None,
                 )?;
                 match session_service.bind_for_run(&lease, request).await {
-                    Ok(claim) => claim,
+                    Ok(claim) => (claim, Some(cursor)),
                     Err(error) => {
                         let _ = self
                             .runtime
@@ -2168,11 +2171,44 @@ impl AiProviderCallExecutor {
         let opened = match session_service.open_for_run(&lease, &claim).await {
             Ok(opened) => opened,
             Err(error) => {
+                if let Some(cursor) = &newly_bound_cursor {
+                    let _ = self
+                        .runtime
+                        .discard_empty_provider_session(
+                            session_plan.descriptor().provider_kind(),
+                            &binding,
+                            session_plan.descriptor(),
+                            cursor,
+                        )
+                        .await;
+                }
                 let _ = session_service
                     .require_cleanup(&claim, "provider_session_open_failed")
                     .await;
                 return Err(error);
             }
+        };
+        let opened = if let Some(cursor) = &newly_bound_cursor {
+            match opened.activate_newly_bound_empty(binding, cursor) {
+                Ok(opened) => opened,
+                Err(error) => {
+                    let _ = self
+                        .runtime
+                        .discard_empty_provider_session(
+                            session_plan.descriptor().provider_kind(),
+                            &binding,
+                            session_plan.descriptor(),
+                            cursor,
+                        )
+                        .await;
+                    let _ = session_service
+                        .require_cleanup(&claim, "provider_session_activation_failed")
+                        .await;
+                    return Err(error);
+                }
+            }
+        } else {
+            opened
         };
         let turn = self.execute_inner(lease_state.clone(), plan, dynamic_execution, Some(opened));
         tokio::pin!(turn);
@@ -6975,6 +7011,115 @@ mod tests {
             )
             .await
             .expect("caller can terminally finish after handling the result");
+    }
+
+    #[tokio::test]
+    async fn executor_marks_only_newly_bound_empty_provider_session_for_initial_turn() {
+        let cursor = AiProviderSessionCursor::new("mock.thread", "new-empty-thread")
+            .expect("test cursor should validate");
+        let mock = MockProvider::new(vec![
+            ProviderEvent::ResponseStarted { response_id: None },
+            ProviderEvent::TextDelta {
+                text: "initial retained output".to_owned(),
+            },
+            ProviderEvent::Usage {
+                input_tokens: 8,
+                output_tokens: 3,
+                cached_input_tokens: 0,
+            },
+            ProviderEvent::ResponseCompleted { response_id: None },
+        ])
+        .with_provider_session_cursor(cursor);
+        let fixture = fixture_with_provider(mock).await;
+        let session = AiSessionRecord::find_by_id(&fixture.database, &fixture.lease.session_id().0)
+            .await
+            .expect("session lookup should succeed")
+            .expect("session should exist");
+        let update = AiSessionRecord::compare_and_swap(
+            &fixture.database,
+            &session.id,
+            session.row_version,
+            AiSessionRecordWhereInput::default(),
+            UpdateAiSessionRecordInput {
+                message_head: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("session watermark update should succeed");
+        assert!(matches!(update, ConditionalUpdateOutcome::Updated(_)));
+        AiMessageRecord::insert(
+            &fixture.database,
+            CreateAiMessageRecordInput {
+                id: fixture.lease.input_message_id(),
+                session_id: fixture.lease.session_id().0,
+                sequence: 1,
+                message_role: "user".to_owned(),
+                author_principal_kind: Some("user".to_owned()),
+                author_subject: Some(fixture.principal.subject().to_owned()),
+                client_message_id: Some(Uuid::new_v4()),
+                content_hash: Some("c".repeat(64)),
+                run_id: Some(fixture.lease.run_id().0),
+                provider_kind: None,
+                provider_model: None,
+                protected_preview: None,
+                block_count: 1,
+                completion_state: "complete".to_owned(),
+                finalized_at: Some(OffsetDateTime::now_utc().unix_timestamp()),
+                content_purged_at: None,
+            },
+        )
+        .await
+        .expect("input message should insert");
+
+        let provider_sessions = Arc::new(
+            OrmAiProviderSessionService::new(
+                fixture.database.clone(),
+                Arc::new(AllowAccess),
+                Arc::new(ProtectionPolicy),
+                Arc::new(DatabaseManagedContentProtector),
+                Arc::new(Resolver(fixture.principal.clone())),
+                Arc::new(SystemClock),
+                AiProviderSessionLimits::default(),
+                Duration::minutes(5),
+            )
+            .expect("provider-session service should validate"),
+        );
+        let descriptor = AiProviderSessionDescriptor::new(
+            ProviderKind::OpenAiCompatible,
+            "mock-profile",
+            "mock-model",
+            "a".repeat(64),
+            "mock-retained/v1",
+            "b".repeat(64),
+        )
+        .expect("descriptor should validate");
+        let session_plan = AiProviderSessionTurnPlan::new(descriptor, "d".repeat(64))
+            .expect("session plan should validate");
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("provider limits should validate"),
+        );
+        let result = executor
+            .execute_with_provider_session(
+                Arc::new(Mutex::new(fixture.lease.clone())),
+                plan(&fixture),
+                session_plan,
+                provider_sessions,
+                None,
+            )
+            .await
+            .expect("initial retained provider turn should succeed");
+        assert!(result.provider_session_claim().is_some());
+        assert_eq!(
+            fixture.mock.provider_session_activations(),
+            vec![AiProviderSessionActivation::NewlyBoundEmpty]
+        );
     }
 
     #[tokio::test]

@@ -6,6 +6,8 @@
 //! adapter or host, while this module describes the durable, protected binding
 //! needed to resume provider state without weakening run fencing.
 
+#![cfg_attr(feature = "mssql", allow(dead_code))]
+
 use std::fmt;
 
 use agql_auth::PrincipalReference;
@@ -632,11 +634,34 @@ impl AiProviderSessionClaim {
 pub struct AiOpenedProviderSession {
     claim: AiProviderSessionClaim,
     cursor: AiProviderSessionCursor,
+    activation: AiProviderSessionActivation,
 }
 
 impl AiOpenedProviderSession {
     pub(crate) fn new(claim: AiProviderSessionClaim, cursor: AiProviderSessionCursor) -> Self {
-        Self { claim, cursor }
+        Self {
+            claim,
+            cursor,
+            activation: AiProviderSessionActivation::ExistingRetained,
+        }
+    }
+
+    pub(crate) fn activate_newly_bound_empty(
+        mut self,
+        binding: crate::AiProviderRunBinding,
+        created_cursor: &AiProviderSessionCursor,
+    ) -> Result<Self, AiError> {
+        if self.claim.session_id != binding.session_id()
+            || self.claim.run_id != binding.run_id()
+            || self.claim.attempt_id != binding.attempt_id()
+            || self.claim.run_lease_generation != binding.lease_generation()
+            || !binding.matches_principal_reference(&self.claim.principal_reference)
+            || self.cursor != *created_cursor
+        {
+            return Err(AiError::Conflict);
+        }
+        self.activation = AiProviderSessionActivation::NewlyBoundEmpty;
+        Ok(self)
     }
 
     /// Exact fenced claim receiving provider transport.
@@ -648,6 +673,14 @@ impl AiOpenedProviderSession {
     pub const fn cursor(&self) -> &AiProviderSessionCursor {
         &self.cursor
     }
+
+    #[cfg_attr(
+        not(any(test, feature = "provider-codex-app-server")),
+        allow(dead_code)
+    )]
+    pub(crate) const fn activation(&self) -> AiProviderSessionActivation {
+        self.activation
+    }
 }
 
 impl fmt::Debug for AiOpenedProviderSession {
@@ -656,8 +689,15 @@ impl fmt::Debug for AiOpenedProviderSession {
             .debug_struct("AiOpenedProviderSession")
             .field("claim", &self.claim)
             .field("cursor", &self.cursor)
+            .field("activation", &self.activation)
             .finish()
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AiProviderSessionActivation {
+    NewlyBoundEmpty,
+    ExistingRetained,
 }
 
 /// Exact durable assistant-output proof used to advance a provider session.

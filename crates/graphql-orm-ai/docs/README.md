@@ -35,7 +35,7 @@ Start with the root [README](../README.md), then use the focused guides below.
 - [Native Ollama provider](ollama.md)
 - [Installed local harness boundary](local-harness.md)
 - [Provider sessions, hosted search, and visible activity](provider-sessions-and-hosted-activity.md)
-- [AI provider sessions, hosted tools, and visible activity plan](../../../docs/plans/active/ai-provider-sessions-and-hosted-tools/README.md)
+- [AI provider sessions, hosted tools, and visible activity completion](../../../docs/plans/completed/ai-provider-sessions-and-hosted-tools/README.md)
 - [Future capability-scoped visual-browser broker](visual-browser-broker.md)
 - [Read-only application-tool loop](read-only-tool-loop.md)
 - [Protected coordinator checkpoints](coordinator-checkpoints.md)

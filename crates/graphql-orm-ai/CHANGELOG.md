@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-11
+last_reviewed: 2026-08-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -19,6 +19,184 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
 ## [Unreleased]
+
+No changes recorded after 0.75.0.
+
+## [0.75.0] - 2026-08-12
+
+### Added
+
+- `AiToolCatalog::read_only_model_definition` constructs the provider-facing
+  definition directly from one registered read-only descriptor. Hosts choose
+  only a provider-safe alias; stable ID, description, canonical argument
+  schema, strictness, and fingerprint cannot drift into a second declaration.
+- `AiCodexAppServerBootstrapInstructions` carries bounded compile-time static
+  deployment instructions for retained threads. Its protected content
+  fingerprint participates in registration identity and is rechecked through
+  creation, first activation, and resume.
+
+### Changed
+
+- `AiCodexAppServerRunProcess::create_empty_thread` now receives the typed
+  static bootstrap beside the model and exact dynamic definitions. Retained
+  `ModelRequest::instructions` must be empty; request-local text cannot enter
+  the developer-instruction channel.
+- Registration identity version 3 binds the bootstrap fingerprint. Existing
+  retained cursors from older registration identities become cleanup-only.
+- Provider-neutral session cursor, descriptor, activation, and deletion
+  contracts now remain available in the MSSQL compile/schema profile. The ORM
+  provider-session runtime remains intentionally limited to SQLite and
+  PostgreSQL.
+
+### Fixed
+
+- Canonical GraphQL tool-profile argument schemas are projected through a
+  closed Codex-specific JSON Schema subset. Unsupported scalar bound keywords
+  are represented in provider-visible property descriptions, while the exact
+  canonical schema remains authoritative for every returned dynamic call.
+- The retained first turn now receives the same immutable trusted instructions
+  that created its empty thread. Tool behavior no longer depends on a
+  request-local instruction that cannot be transmitted after durable binding.
+
+### Security
+
+- Generated-profile, tool-bound plan, coordinator, newly-bound, retained
+  resume, exact responder, cancellation, process-fence, schema substitution,
+  descriptor substitution, instruction substitution, and cursor substitution
+  tests share one canonical generated read-only profile with a bounded integer
+  input and explicit result projection. The ignored Codex 0.147.0 acceptance
+  uses that same profile rather than a hand-authored model definition.
+
+## [0.74.0] - 2026-08-12
+
+### Added
+
+- `AiCodexAppServerLaunchProfile` now supplies a closed, fingerprinted
+  experimental dynamic-tools-only process and thread profile. It exposes the
+  exact reviewed Codex CLI arguments, requires an isolated configuration home,
+  disables native execution, browser, hosted-search, connector, image,
+  collaboration, plugin, and interactive surfaces, and makes every dynamic
+  thread and turn environment-free.
+- `AiCodexAppServerModelToolMode` records the reviewed executable/model
+  catalogue mode. The dynamic-tools-only profile accepts only `Direct` models;
+  Code Mode and Code Mode-only models fail configuration rather than silently
+  advertising unusable custom tools.
+- `AiCodexAppServerRunProcessFactory::supports_launch_profile` makes runtime
+  readiness explicit. Existing factories default to text-only support, and
+  `ProviderCapabilities::custom_tools` remains false until the factory attests
+  the exact dynamic-only profile.
+
+### Changed
+
+- Dynamic Codex registrations now use `with_launch_profile` instead of the
+  former boolean `with_experimental_dynamic_tools` switch. Registration
+  identity version 2 includes the closed launch profile, so stale retained
+  cursors are cleanup-only after adoption.
+
+### Fixed
+
+- The strict protocol actor now accepts JSON-RPC server-request identifier
+  zero for an otherwise exact, lifecycle-correlated `item/tool/call`. Codex
+  0.147.0 uses this valid identifier for its first dynamic request; duplicate,
+  malformed, uncorrelated, unknown, or schema-invalid requests still fail
+  closed.
+
+### Security
+
+- The live Codex 0.147.0 acceptance now proves one exact dynamic tool call on
+  both a newly bound thread and a later retained resume while native shell,
+  unified execution, Code Mode, filesystem environments, MCP, browser,
+  hosted web, images, plugins, collaboration, and generic JSON-RPC remain
+  unavailable. It also proves provider-owned interruption and terminal close
+  for an active dynamic turn.
+
+## [0.73.4] - 2026-08-12
+
+### Fixed
+
+- Both strict Codex app-server initialization paths now send one
+  library-owned `optOutNotificationMethods` profile for unused thread status,
+  thread settings, cleared goals, MCP startup status, and account rate-limit
+  notifications. Authoritative thread starts, turns, item lifecycles,
+  assistant deltas, dynamic-tool requests, in-turn usage, and completion are
+  never suppressed. A server that emits any opted-out method still fails
+  closed at the actor.
+- Retained-thread deletion now uses only the exact empty successful
+  `thread/delete` response as provider-absence evidence. The actor no longer
+  admits a deletion-bound `thread/status/changed` exception.
+- Codex 0.147.0 empty reasoning item pairs are admitted only through the new
+  content-free `AiCodexAppServerInbound::ReasoningLifecycle` value while every
+  `turn/start` explicitly sets `summary: "none"`. Non-empty content or summary,
+  malformed pairs, and raw reasoning deltas remain rejected and never cross
+  the provider boundary.
+- A cumulative `thread/tokenUsage/updated` value replayed while loading a
+  retained thread is validated against the complete nonnegative generated
+  shape and exposed only as content-free
+  `AiCodexAppServerInbound::RetainedResumeUsageSnapshot`. It is never charged
+  to the next run. On Codex 0.147.0, the exact snapshot can complete only a
+  typed resume after its correlated response is observed when that version
+  omits `thread/started`; it cannot complete new thread creation.
+
+### Security
+
+- The live Codex 0.147.0 gate now covers a persistent empty thread, an initial
+  direct dynamic-tool turn, process restart, retained resume, a second
+  dynamic-tool turn, and response-authoritative deletion while shell, files,
+  MCP, browser, hosted web, remote control, and generic JSON-RPC stay closed.
+
+## [0.73.3] - 2026-08-12
+
+### Fixed
+
+- The strict Codex app-server actor now admits the documented generic
+  `warning` notification only during an exact correlated turn. Its positive
+  timestamp, closed parameter shape, optional thread binding, bounded
+  control-free message, per-turn count, and cumulative bytes are validated;
+  the message, timestamp, and thread reference are then discarded behind the
+  content-free `AiCodexAppServerInbound::RuntimeWarning` variant.
+- Warnings before `turn/start`, after terminal completion, for another thread,
+  or with malformed, extra, oversized, control-bearing, or flooding payloads
+  remain rejected. No generic notification, remote-control, shell, file, MCP,
+  browser, hosted-web, or JSON-RPC capability is added.
+
+## [0.73.2] - 2026-08-12
+
+### Fixed
+
+- Durable provider-session activation now distinguishes a newly created empty
+  thread from a previously committed retained thread. The first turn consumes
+  a crate-owned, run-fenced activation and starts directly on the exact
+  process and cursor that created the empty thread; later runs continue to use
+  the strict `thread/resume` lifecycle.
+- The Codex app-server run pool freezes the empty thread's cursor and reviewed
+  dynamic-tool definitions, rejects process, run, cursor, registration,
+  model, or tool swaps, and consumes initial activation once. Bind/open
+  failure, cancellation, lease loss, and abandoned streams retain exact
+  deletion and process-tree cleanup behavior.
+
+### Added
+
+- `AiCodexAppServerRunProcess` has typed `start_bound_turn` and
+  `start_bound_dynamic_turn` operations for the post-bind first turn. They do
+  not expose activation state or a reset flag and must not issue
+  `thread/resume`.
+
+## [0.73.1] - 2026-08-12
+
+### Fixed
+
+- The strict Codex app-server actor now begins a new internal lifecycle
+  observation phase for each typed `thread/start` or `thread/resume` request.
+  One actor can create an empty retained thread, accept its response and
+  `thread/started` notification, resume the same protected cursor, accept the
+  new pair in either order, and start a turn. Incomplete, duplicate,
+  mismatched, late, or concurrently active lifecycle cycles remain rejected.
+- Retained model and experimental dynamic-tool definitions remain frozen
+  across terminal turns and repeated resume cycles. A later resume or
+  `turn/start` cannot replace the tool set, while ephemeral thread definitions
+  are still cleared after their terminal turn.
+
+## [0.73.0] - 2026-08-11
 
 This development line advances the pre-1.0 crate version to `0.73.0` and AI
 schema module `0.55.0`. It begins the applied-restore implementation with

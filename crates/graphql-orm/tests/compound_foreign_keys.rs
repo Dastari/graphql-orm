@@ -417,19 +417,19 @@ async fn fresh_sqlite_schema_round_trips_compound_fk_checks_and_descending_index
         .apply_migration(&plan, ApplyOptions::default())
         .await?;
 
-    insert_snapshot(&database, "fame", "tenant-a", 1, "digest-a").await?;
-    insert_snapshot(&database, "fame", "tenant-a", 2, "digest-a")
+    insert_snapshot(&database, "edge", "tenant-a", 1, "digest-a").await?;
+    insert_snapshot(&database, "edge", "tenant-a", 2, "digest-a")
         .await
         .expect_err("digest uniqueness must remain partitioned by provider and tenant");
-    insert_snapshot(&database, "fame", "tenant-b", 2, "digest-a").await?;
-    insert_snapshot(&database, "fame", "tenant-c", 0, "digest-zero")
+    insert_snapshot(&database, "edge", "tenant-b", 2, "digest-a").await?;
+    insert_snapshot(&database, "edge", "tenant-c", 0, "digest-zero")
         .await
         .expect_err("generation must remain positive");
     graphql_orm::sqlx::query(
         "INSERT INTO decommish_snapshot_records
          (provider, tenant_key, tenant_id, generation, schema_version, record_count,
           serialized_bytes, digest, payload, created_at)
-         VALUES ('fame', 'tenant-c', NULL, 1, 1, -1, 0, 'digest-negative', '{}', 'now')",
+         VALUES ('edge', 'tenant-c', NULL, 1, 1, -1, 0, 'digest-negative', '{}', 'now')",
     )
     .execute(database.pool())
     .await
@@ -438,7 +438,7 @@ async fn fresh_sqlite_schema_round_trips_compound_fk_checks_and_descending_index
         "INSERT INTO decommish_snapshot_records
          (provider, tenant_key, tenant_id, generation, schema_version, record_count,
           serialized_bytes, digest, payload, created_at)
-         VALUES ('fame', 'tenant-d', NULL, 1, 1, 0, -1, 'digest-negative', '{}', 'now')",
+         VALUES ('edge', 'tenant-d', NULL, 1, 1, 0, -1, 'digest-negative', '{}', 'now')",
     )
     .execute(database.pool())
     .await
@@ -467,16 +467,16 @@ async fn fresh_sqlite_schema_round_trips_compound_fk_checks_and_descending_index
 }
 
 #[tokio::test]
-async fn exact_gema_legacy_schema_is_recorded_without_ddl_or_row_loss() -> graphql_orm::Result<()> {
+async fn exact_legacy_schema_is_recorded_without_ddl_or_row_loss() -> graphql_orm::Result<()> {
     let database = legacy_database().await?;
-    insert_snapshot(&database, "fame", "tenant-a", 1, "digest-a").await?;
-    insert_outbox(&database, "fame", "tenant-a", 1, "digest-a").await?;
+    insert_snapshot(&database, "edge", "tenant-a", 1, "digest-a").await?;
+    insert_outbox(&database, "edge", "tenant-a", 1, "digest-a").await?;
     let entities = snapshot_entities();
     let plan = database
         .schema()
         .plan_migration_to_entities(
             "snapshot-adopt-v1",
-            "adopt exact GEMA snapshot schema",
+            "adopt exact host application snapshot schema",
             &entities,
         )
         .await?;
@@ -543,12 +543,12 @@ async fn exact_gema_legacy_schema_is_recorded_without_ddl_or_row_loss() -> graph
 async fn compound_fk_rejects_partial_matches_and_cascades_only_exact_tuple()
 -> graphql_orm::Result<()> {
     let database = legacy_database().await?;
-    insert_snapshot(&database, "fame-a", "tenant-a", 1, "digest-a").await?;
-    insert_snapshot(&database, "fame-b", "tenant-b", 2, "digest-b").await?;
-    insert_outbox(&database, "fame-a", "tenant-a", 1, "digest-a").await?;
-    insert_outbox(&database, "fame-b", "tenant-b", 2, "digest-b").await?;
+    insert_snapshot(&database, "edge-a", "tenant-a", 1, "digest-a").await?;
+    insert_snapshot(&database, "edge-b", "tenant-b", 2, "digest-b").await?;
+    insert_outbox(&database, "edge-a", "tenant-a", 1, "digest-a").await?;
+    insert_outbox(&database, "edge-b", "tenant-b", 2, "digest-b").await?;
 
-    let mismatch = insert_outbox(&database, "fame-a", "tenant-b", 2, "bad")
+    let mismatch = insert_outbox(&database, "edge-a", "tenant-b", 2, "bad")
         .await
         .expect_err("partial tuple must not satisfy the foreign key");
     assert!(
@@ -561,7 +561,7 @@ async fn compound_fk_rejects_partial_matches_and_cascades_only_exact_tuple()
         "DELETE FROM decommish_snapshot_records
          WHERE provider = ? AND tenant_key = ? AND generation = ?",
     )
-    .bind("fame-a")
+    .bind("edge-a")
     .bind("tenant-a")
     .bind(1_i64)
     .execute(database.pool())
@@ -572,7 +572,7 @@ async fn compound_fk_rejects_partial_matches_and_cascades_only_exact_tuple()
     .fetch_all(database.pool())
     .await?;
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].try_get::<String, _>("provider")?, "fame-b");
+    assert_eq!(rows[0].try_get::<String, _>("provider")?, "edge-b");
     assert_eq!(rows[0].try_get::<String, _>("tenant_key")?, "tenant-b");
     assert_eq!(rows[0].try_get::<i64, _>("generation")?, 2);
     let violations = graphql_orm::sqlx::query("PRAGMA foreign_key_check")

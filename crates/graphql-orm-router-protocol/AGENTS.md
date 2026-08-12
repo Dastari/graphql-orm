@@ -15,8 +15,8 @@ supersedes: []
 - Keep this crate project-neutral, serializable declarations and deterministic
   utilities only.
 - Do not add Hive, Axum, a GraphQL server, database backend, `graphql-orm`,
-  `agql-auth`, GEMA, application types, network I/O, URL parsing, credentials,
-  or deployment overrides.
+  `agql-auth`, product-specific code, application types, network I/O, URL
+  parsing, credentials, or deployment overrides.
 - Endpoint strings are inert advertisements. Router code owns SSRF policy,
   DNS and network validation, credentials, and override selection.
 - Unknown additive fields remain compatible. New semantics that a reader must

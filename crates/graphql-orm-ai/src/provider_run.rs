@@ -2,7 +2,6 @@
 
 use uuid::Uuid;
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use sha2::{Digest, Sha256};
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -51,26 +50,42 @@ impl AiProviderRunBinding {
 
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn from_lease(lease: &AiRunLease) -> Result<Self, AiError> {
-        let reference = lease.principal_reference();
-        let mut digest = Sha256::new();
-        digest.update(b"graphql-orm-ai/provider-run-owner/v1\0");
-        match &reference.kind {
-            agql_auth::PrincipalReferenceKind::UserSession => digest.update(b"user_session\0"),
-            agql_auth::PrincipalReferenceKind::ApiToken { principal_kind } => {
-                digest.update(b"api_token\0");
-                digest.update((principal_kind.len() as u64).to_be_bytes());
-                digest.update(principal_kind.as_bytes());
-            }
-        }
-        digest.update((reference.subject.len() as u64).to_be_bytes());
-        digest.update(reference.subject.as_bytes());
         Self::new(
             lease.session_id(),
             lease.run_id(),
             lease.attempt_id(),
             lease.lease_generation(),
-            digest.finalize().into(),
+            provider_run_owner_fingerprint(lease.principal_reference()),
         )
+    }
+
+    #[cfg(all(
+        test,
+        feature = "provider-codex-app-server",
+        any(feature = "sqlite", feature = "postgres")
+    ))]
+    pub(crate) fn new_for_principal_reference(
+        session_id: AiSessionId,
+        run_id: AiRunId,
+        attempt_id: Uuid,
+        lease_generation: i64,
+        reference: &agql_auth::PrincipalReference,
+    ) -> Result<Self, AiError> {
+        Self::new(
+            session_id,
+            run_id,
+            attempt_id,
+            lease_generation,
+            provider_run_owner_fingerprint(reference),
+        )
+    }
+
+    #[cfg_attr(feature = "mssql", allow(dead_code))]
+    pub(crate) fn matches_principal_reference(
+        self,
+        reference: &agql_auth::PrincipalReference,
+    ) -> bool {
+        self.owner_fingerprint == provider_run_owner_fingerprint(reference)
     }
 
     /// Owning durable AI session.
@@ -97,6 +112,23 @@ impl AiProviderRunBinding {
     pub(crate) const fn owner_fingerprint(self) -> [u8; 32] {
         self.owner_fingerprint
     }
+}
+
+#[cfg_attr(feature = "mssql", allow(dead_code))]
+fn provider_run_owner_fingerprint(reference: &agql_auth::PrincipalReference) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"graphql-orm-ai/provider-run-owner/v1\0");
+    match &reference.kind {
+        agql_auth::PrincipalReferenceKind::UserSession => digest.update(b"user_session\0"),
+        agql_auth::PrincipalReferenceKind::ApiToken { principal_kind } => {
+            digest.update(b"api_token\0");
+            digest.update((principal_kind.len() as u64).to_be_bytes());
+            digest.update(principal_kind.as_bytes());
+        }
+    }
+    digest.update((reference.subject.len() as u64).to_be_bytes());
+    digest.update(reference.subject.as_bytes());
+    digest.finalize().into()
 }
 
 /// Why a run-scoped provider resource is being closed.

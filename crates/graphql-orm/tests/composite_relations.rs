@@ -19,12 +19,12 @@ use graphql_orm::sqlx::Row;
 #[graphql(complex)]
 #[graphql_entity(
     backend = "sqlite",
-    table = "JimCardFile",
-    plural = "JimCardFiles",
+    table = "LegacyCardFile",
+    plural = "LegacyCardFiles",
     schema_policy = "external_read_only",
     default_sort = "CardNo ASC"
 )]
-pub struct JimCardFile {
+pub struct LegacyCardFile {
     #[primary_key]
     #[graphql(name = "CardNo")]
     #[graphql_orm(db_column = "CardNo")]
@@ -44,13 +44,13 @@ pub struct JimCardFile {
 
     #[graphql(skip, name = "Contacts")]
     #[relation(
-        target = "JimCardFileContact",
+        target = "LegacyCardFileContact",
         from = "card_no",
         to = "CardNo",
         multiple,
         emit_fk = false
     )]
-    pub contacts: Vec<JimCardFileContact>,
+    pub contacts: Vec<LegacyCardFileContact>,
 }
 
 #[derive(
@@ -68,12 +68,12 @@ pub struct JimCardFile {
 #[graphql(complex)]
 #[graphql_entity(
     backend = "sqlite",
-    table = "JimCardFileContacts",
-    plural = "JimCardFileContacts",
+    table = "LegacyCardFileContacts",
+    plural = "LegacyCardFileContacts",
     schema_policy = "external_read_only",
     default_sort = "CardNo ASC, ContNo ASC"
 )]
-pub struct JimCardFileContact {
+pub struct LegacyCardFileContact {
     #[primary_key]
     #[graphql(name = "CardNo")]
     #[graphql_orm(db_column = "CardNo")]
@@ -95,13 +95,13 @@ pub struct JimCardFileContact {
 
     #[graphql(skip, name = "Details")]
     #[relation(
-        target = "JimCardFileDetail",
+        target = "LegacyCardFileDetail",
         from = ["card_no", "cont_no"],
         to = ["CardNo", "ContNo"],
         multiple,
         emit_fk = false
     )]
-    pub details: Vec<JimCardFileDetail>,
+    pub details: Vec<LegacyCardFileDetail>,
 }
 
 #[derive(
@@ -110,12 +110,12 @@ pub struct JimCardFileContact {
 #[graphql(rename_fields = "PascalCase")]
 #[graphql_entity(
     backend = "sqlite",
-    table = "JimCardFileDetails",
-    plural = "JimCardFileDetails",
+    table = "LegacyCardFileDetails",
+    plural = "LegacyCardFileDetails",
     schema_policy = "external_read_only",
     default_sort = "CardNo ASC, ContNo ASC, LineNum ASC"
 )]
-pub struct JimCardFileDetail {
+pub struct LegacyCardFileDetail {
     #[primary_key]
     #[graphql(name = "CardNo")]
     #[graphql_orm(db_column = "CardNo")]
@@ -149,7 +149,7 @@ pub struct JimCardFileDetail {
 }
 
 impl graphql_orm::graphql::loaders::BatchLoadEntity<graphql_orm::SqliteBackend>
-    for JimCardFileContact
+    for LegacyCardFileContact
 {
     fn batch_column() -> &'static str {
         "CardNo"
@@ -164,7 +164,7 @@ impl graphql_orm::graphql::loaders::BatchLoadEntity<graphql_orm::SqliteBackend>
 }
 
 impl graphql_orm::graphql::loaders::BatchLoadEntity<graphql_orm::SqliteBackend>
-    for JimCardFileDetail
+    for LegacyCardFileDetail
 {
     fn batch_column() -> &'static str {
         "CardNo"
@@ -182,7 +182,7 @@ schema_roots! {
     backend: "sqlite",
     schema_policy: "external_read_only",
     query_custom_ops: [],
-    entities: [JimCardFile, JimCardFileContact, JimCardFileDetail],
+    entities: [LegacyCardFile, LegacyCardFileContact, LegacyCardFileDetail],
 }
 
 type TestSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
@@ -191,7 +191,7 @@ async fn setup_schema() -> Result<TestSchema, Box<dyn std::error::Error>> {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
 
     sqlx::query(
-        "CREATE TABLE JimCardFile (
+        "CREATE TABLE LegacyCardFile (
             CardNo INTEGER PRIMARY KEY,
             CardCode TEXT NOT NULL,
             Name TEXT NULL
@@ -201,7 +201,7 @@ async fn setup_schema() -> Result<TestSchema, Box<dyn std::error::Error>> {
     .await?;
 
     sqlx::query(
-        "CREATE TABLE JimCardFileContacts (
+        "CREATE TABLE LegacyCardFileContacts (
             CardNo INTEGER NOT NULL,
             ContNo INTEGER NOT NULL,
             DName TEXT NULL,
@@ -212,7 +212,7 @@ async fn setup_schema() -> Result<TestSchema, Box<dyn std::error::Error>> {
     .await?;
 
     sqlx::query(
-        "CREATE TABLE JimCardFileDetails (
+        "CREATE TABLE LegacyCardFileDetails (
             CardNo INTEGER NOT NULL,
             ContNo INTEGER NOT NULL,
             LineNum INTEGER NOT NULL,
@@ -225,7 +225,7 @@ async fn setup_schema() -> Result<TestSchema, Box<dyn std::error::Error>> {
     .await?;
 
     for (card_no, card_code, name) in [(1001, "ACME", "Acme Pty Ltd"), (1002, "GLOB", "Globex")] {
-        sqlx::query("INSERT INTO JimCardFile (CardNo, CardCode, Name) VALUES (?, ?, ?)")
+        sqlx::query("INSERT INTO LegacyCardFile (CardNo, CardCode, Name) VALUES (?, ?, ?)")
             .bind(card_no)
             .bind(card_code)
             .bind(name)
@@ -238,7 +238,7 @@ async fn setup_schema() -> Result<TestSchema, Box<dyn std::error::Error>> {
         (1001, 2, "Alex Accounts"),
         (1002, 1, "Bob Buyer"),
     ] {
-        sqlx::query("INSERT INTO JimCardFileContacts (CardNo, ContNo, DName) VALUES (?, ?, ?)")
+        sqlx::query("INSERT INTO LegacyCardFileContacts (CardNo, ContNo, DName) VALUES (?, ?, ?)")
             .bind(card_no)
             .bind(cont_no)
             .bind(display_name)
@@ -254,7 +254,7 @@ async fn setup_schema() -> Result<TestSchema, Box<dyn std::error::Error>> {
         (1002, 1, 2, "Phone", "555-0201"),
     ] {
         sqlx::query(
-            "INSERT INTO JimCardFileDetails (CardNo, ContNo, LineNum, Type, Value)
+            "INSERT INTO LegacyCardFileDetails (CardNo, ContNo, LineNum, Type, Value)
              VALUES (?, ?, ?, ?, ?)",
         )
         .bind(card_no)
@@ -282,7 +282,7 @@ async fn nested_composite_relations_batch_without_n_plus_one()
         .execute(
             r#"
             query {
-              jimCardFiles(orderBy: [{ CardNo: ASC }]) {
+              legacyCardFiles(orderBy: [{ CardNo: ASC }]) {
                 edges {
                   node {
                     CardNo
@@ -321,7 +321,7 @@ async fn nested_composite_relations_batch_without_n_plus_one()
 
     assert!(response.errors.is_empty(), "{:?}", response.errors);
     let data = response.data.into_json()?;
-    let cards = data["jimCardFiles"]["edges"].as_array().unwrap();
+    let cards = data["legacyCardFiles"]["edges"].as_array().unwrap();
     assert_eq!(cards.len(), 2);
 
     let first_contacts = cards[0]["node"]["Contacts"]["edges"].as_array().unwrap();
@@ -364,7 +364,7 @@ fn composite_relation_predicates_render_for_all_backends() {
     let sqlite = render_select_query(
         DatabaseBackend::Sqlite,
         &SelectQuery {
-            table: "JimCardFileDetails",
+            table: "LegacyCardFileDetails",
             columns: vec!["*".to_string()],
             filter: Some(relation_key_filter(&["CardNo", "ContNo"], &keys)),
             sorts: Vec::new(),
@@ -382,7 +382,7 @@ fn composite_relation_predicates_render_for_all_backends() {
     let postgres = render_select_query(
         DatabaseBackend::Postgres,
         &SelectQuery {
-            table: "\"JimCardFileDetails\"",
+            table: "\"LegacyCardFileDetails\"",
             columns: vec!["*".to_string()],
             filter: Some(relation_key_filter(&["\"CardNo\"", "\"ContNo\""], &keys)),
             sorts: Vec::new(),
@@ -397,7 +397,7 @@ fn composite_relation_predicates_render_for_all_backends() {
     let mssql = render_select_query(
         DatabaseBackend::Mssql,
         &SelectQuery {
-            table: "[dbo].[JimCardFileDetails]",
+            table: "[dbo].[LegacyCardFileDetails]",
             columns: vec!["*".to_string()],
             filter: Some(relation_key_filter(&["[CardNo]", "[ContNo]"], &keys)),
             sorts: Vec::new(),

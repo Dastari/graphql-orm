@@ -323,7 +323,7 @@ Exactly one persistence backend should be selected:
 | `provider-ollama` | no | Native Ollama chat: text, exact images, structured output, stateless application tools |
 | `provider-openai-compatible` | no | Profiled Responses/SSE: text/JSON and opt-in strict tools, structured output, retained continuation |
 | `local-harness` | no | Installed JSONL v2 text/structured/stateless-tool protocol over a trusted sandbox launcher |
-| `provider-codex-app-server` | no | Strict timestamped and correlated Codex app-server lifecycle, protected retained threads, explicit never-approval/read-only thread policy, disabled-only remote-control and deletion-bound not-loaded status admission, and default-off coordinator-owned experimental dynamic tools; no remote control, shell, filesystem, web, or generic JSON-RPC |
+| `provider-codex-app-server` | no | Strict timestamped and correlated Codex app-server lifecycle, a closed notification opt-out profile, response-authoritative deletion, protected retained threads, content-free warning/empty-reasoning/retained-usage control events, explicit never-approval/read-only thread policy, disabled-only remote-control admission, and a factory-attested direct-model dynamic-tools-only profile; no remote control, shell, filesystem, web, MCP, or generic JSON-RPC |
 | `graphql-case-pascal` | no | PascalCase roots, arguments, inputs, outputs, and ORM fields |
 
 Do not build with `--all-features`: the database backends are mutually
@@ -335,7 +335,7 @@ Add the crate from a reviewed monorepo revision:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.73.0", features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.75.0", features = ["sqlite"] }
 ```
 
 > **Pre-release dependency note:** this source snapshot resolves
@@ -557,11 +557,22 @@ callbacks remain separately gated; see the
 
 The separate Codex app-server feature retains one strictly allowlisted process
 per exact claimed run and can resume an exact protected provider-session
-cursor. Experimental native dynamic tools are separately enabled on the
-immutable registration and execute only through the ordinary coordinator's
-current-rule, registered-GraphQL-tool, disclosure, egress, budget, and resolver
-authorization boundary. Native
-OpenAI can combine host-enabled hosted search with exact application tools in
+cursor. Experimental dynamic tools require a closed dynamic-tools-only launch
+profile, a reviewed direct-tool model declaration, and process-factory
+attestation that the exact profile is enforced; otherwise the provider reports
+`custom_tools = false`. Accepted dynamic calls execute only through the
+ordinary coordinator's current-rule, registered-GraphQL-tool, disclosure,
+egress, budget, and resolver authorization boundary. Retained Codex
+registrations may also bind an
+`AiCodexAppServerBootstrapInstructions` value created from compile-time static
+host policy. The protected fingerprint becomes part of the registration and
+every retained request must leave `ModelRequest::instructions` empty. Tool
+definitions should come from `AiToolCatalog::read_only_model_definition`, so
+the descriptor ID, description, canonical JSON Schema, and fingerprint cannot
+drift from the registered manifest; the adapter performs its closed
+provider-specific schema projection internally.
+
+Native OpenAI can combine host-enabled hosted search with exact application tools in
 provider-retained mode and can stream provider-generated visible summaries and
 validated citations into the ordered protected activity feed. Defaults remain
 closed. See [provider sessions, hosted search, and visible activity](docs/provider-sessions-and-hosted-activity.md).

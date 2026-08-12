@@ -11,7 +11,7 @@ supersedes: []
 # graphql-orm-router agent guide
 
 - Keep this crate project-neutral. It must not depend on `graphql-orm`, AI,
-  backup, storage, GEMA, or application types.
+  backup, storage, a consuming product, or application types.
 - Keep Federation composition, Hive, planner, executor, parser, and `ArcSwap`
   types behind private adapters. Public errors and data must be router-owned.
 - Do not expose or initialize Hive JWT, S3, or `object_store` configuration.

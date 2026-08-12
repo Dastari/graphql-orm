@@ -162,16 +162,16 @@ Composite primary keys are supported for read paths by marking each key field wi
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
 #[graphql_entity(
     backend = "mssql",
-    table = "dbo.JimLabour",
-    plural = "JimLabourEntries",
+    table = "dbo.LegacyLabour",
+    plural = "LegacyLabourEntries",
     schema_policy = "external_read_only",
-    default_sort = "[JimObjectType] ASC, [RefNo] ASC, [LineNum] ASC"
+    default_sort = "[LegacyObjectType] ASC, [RefNo] ASC, [LineNum] ASC"
 )]
-pub struct JimLabourEntry {
+pub struct LegacyLabourEntry {
     #[primary_key]
-    #[graphql(name = "JimObjectType")]
-    #[graphql_orm(db_column = "JimObjectType", write = false)]
-    pub jim_object_type: i32,
+    #[graphql(name = "LegacyObjectType")]
+    #[graphql_orm(db_column = "LegacyObjectType", write = false)]
+    pub legacy_object_type: i32,
 
     #[primary_key]
     #[graphql(name = "RefNo")]
@@ -193,8 +193,8 @@ The generated single lookup uses one argument per key field and binds them in de
 
 ```graphql
 query {
-  jimLabourEntry(jimObjectType: 1, refNo: 12345, lineNum: 2) {
-    jimObjectType
+  legacyLabourEntry(legacyObjectType: 1, refNo: 12345, lineNum: 2) {
+    legacyObjectType
     refNo
     lineNum
     labourDate
@@ -203,9 +203,9 @@ query {
 ```
 
 With Pascal-case resolver, argument, and field features, the same lookup is exposed as
-`JimLabourEntry(JimObjectType: ..., RefNo: ..., LineNum: ...)`.
+`LegacyLabourEntry(LegacyObjectType: ..., RefNo: ..., LineNum: ...)`.
 
-The generated repository key type is `JimLabourEntryKey`, and read helpers include `find_by_key` and
+The generated repository key type is `LegacyLabourEntryKey`, and read helpers include `find_by_key` and
 `get_by_key`. `PRIMARY_KEY` remains the first key for compatibility; use `PRIMARY_KEYS` or
 `Entity::metadata().primary_keys` when code needs the full key.
 Pagination cursors are offset-based today, so composite keys do not change cursor encoding.
@@ -252,12 +252,12 @@ Composite relations use array syntax. `from` lists Rust source fields on the cur
 #[graphql(complex)]
 #[graphql_entity(
     backend = "mssql",
-    table = "dbo.JimCardFileContacts",
-    plural = "JimCardFileContacts",
+    table = "dbo.LegacyCardFileContacts",
+    plural = "LegacyCardFileContacts",
     schema_policy = "external_read_only",
     default_sort = "[CardNo] ASC, [ContNo] ASC"
 )]
-pub struct JimCardFileContact {
+pub struct LegacyCardFileContact {
     #[primary_key]
     #[graphql(name = "CardNo")]
     #[graphql_orm(db_column = "CardNo", write = false)]
@@ -270,45 +270,45 @@ pub struct JimCardFileContact {
 
     #[graphql(skip, name = "Details")]
     #[relation(
-        target = "JimCardFileDetail",
+        target = "LegacyCardFileDetail",
         from = ["card_no", "cont_no"],
         to = ["CardNo", "ContNo"],
         multiple,
         emit_fk = false
     )]
-    pub details: Vec<JimCardFileDetail>,
+    pub details: Vec<LegacyCardFileDetail>,
 }
 ```
 
-The Jim card-file shape can be mapped as:
+The Legacy card-file shape can be mapped as:
 
 ```rust
 #[graphql(skip, name = "Contacts")]
 #[relation(
-    target = "JimCardFileContact",
+    target = "LegacyCardFileContact",
     from = "card_no",
     to = "CardNo",
     multiple,
     emit_fk = false
 )]
-pub contacts: Vec<JimCardFileContact>,
+pub contacts: Vec<LegacyCardFileContact>,
 
 #[graphql(skip, name = "Details")]
 #[relation(
-    target = "JimCardFileDetail",
+    target = "LegacyCardFileDetail",
     from = ["card_no", "cont_no"],
     to = ["CardNo", "ContNo"],
     multiple,
     emit_fk = false
 )]
-pub details: Vec<JimCardFileDetail>,
+pub details: Vec<LegacyCardFileDetail>,
 ```
 
 With Pascal-case feature flags, nested reads keep the expected legacy GraphQL shape:
 
 ```graphql
 query {
-  JimCardFiles {
+  LegacyCardFiles {
     Edges {
       Node {
         CardNo
@@ -414,7 +414,8 @@ docker run --rm -e ACCEPT_EULA=Y \
   mcr.microsoft.com/mssql/server:2022-latest
 ```
 
-Do not run migrations or generated writes against Jim or other legacy SQL Server databases in this
+Do not run migrations or generated writes against managed production or other
+legacy SQL Server databases in this
 phase. Use `SchemaPolicy::ExternalReadOnly` at runtime and `schema_policy = "external_read_only"`
 in the entity/root macros. The migration path is to port one simple read-only entity first, then a
 relation-heavy entity, and only then replace the old local SQL Server-specific GraphQL read path
