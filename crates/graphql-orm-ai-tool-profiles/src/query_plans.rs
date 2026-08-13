@@ -470,7 +470,7 @@ impl AiGraphqlQueryCapability {
                     AiToolRisk::ReadOnly
                 }
                 (GraphqlOperationKind::Mutation, Some(AiMutationExecutionPolicy::Automatic)) => {
-                    AiToolRisk::LowRiskWrite
+                    AiToolRisk::NonIdempotentWrite
                 }
                 (
                     GraphqlOperationKind::Mutation,
@@ -3947,6 +3947,7 @@ mod tests {
             ToolMaturity::AutonomousWrite
         );
         assert_eq!(compiled.descriptor().approval, AiApprovalRule::None);
+        assert_eq!(compiled.descriptor().risk, AiToolRisk::NonIdempotentWrite);
         assert!(!compiled.descriptor().idempotent);
         assert!(matches!(
             automatic.compile(json!({
