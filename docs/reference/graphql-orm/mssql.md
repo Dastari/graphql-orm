@@ -23,7 +23,7 @@ not provide an MSSQL driver.
 For a service that only uses SQL Server, select the `mssql` backend feature:
 
 ```toml
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.21.1", default-features = false, features = ["mssql"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.22.0", default-features = false, features = ["mssql"] }
 ```
 
 When exactly one of `sqlite`, `postgres`, or `mssql` is enabled, the legacy implicit backend remains
@@ -451,14 +451,15 @@ publishes it on loopback only, creates a unique test database, verifies ownershi
 and asserts that the container is absent afterward. It never accepts an ambient database URL:
 
 ```bash
-cargo test -p graphql-orm --no-default-features --features mssql \
-  --test mssql_writes -- --ignored --nocapture
+scripts/run-owned-database-lanes.sh mssql
 ```
 
 It verifies physical read-only defaults, deliberate writable DML, generated keys and defaults,
 native decimal/JSON/binary/date-time values, single and composite keys, bounded mutations,
 concurrent upsert locking, compare-and-swap, commit/rollback, cancellation socket disposal, and
-typed grouped aggregate parity. Docker must be available to the test user.
+typed grouped aggregate parity. The runner rejects ambient database URL
+variables, and Docker must be available to the test user. A Docker failure is
+a failed required lane rather than a skip.
 
 Do not point the owned test or schema-management APIs at application databases. Start adoption with
 `ExternalReadOnly`; enable `ExternalWritable` only after the externally managed table contract,

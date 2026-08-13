@@ -19,6 +19,8 @@ fn sqlite_and_mssql_services_can_share_one_graphql_orm_build() {
             "-p",
             "auth-service",
             "-p",
+            "coordinated-service",
+            "-p",
             "legacy-service",
             "-p",
             "ai-runtime",

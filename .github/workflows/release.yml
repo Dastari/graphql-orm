@@ -74,6 +74,7 @@ jobs:
           python3 scripts/check-documentation.py
           python3 scripts/generate-workspace-inventory.py --check
           python3 scripts/check-release-state.py
+          scripts/check-release-manifest.sh
           scripts/check-workspace-dependencies.sh
           cargo fmt --all -- --check
       - name: Verify neutral packages
@@ -94,14 +95,15 @@ jobs:
           RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --no-deps --locked
       - name: Verify AI provider and backend lanes
         run: |
-          cargo test -p graphql-orm-ai --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness --locked
+          scripts/check-ai-provider-lanes.sh test
           cargo test -p graphql-orm-ai --features graphql-case-pascal --test graphql_naming --locked
           cargo check -p graphql-orm-ai --no-default-features --features postgres --locked
           cargo check -p graphql-orm-ai --no-default-features --features mssql --locked
           cargo check -p graphql-orm-ai -p graphql-orm --no-default-features --features graphql-orm-ai/sqlite,graphql-orm/mssql --locked
           cargo test -p graphql-orm-ai --no-default-features --features postgres,provider-openai --test postgres_parity --locked -- --test-threads=1
-          cargo clippy -p graphql-orm-ai --all-targets --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness --locked -- -D warnings
-          RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc -p graphql-orm-ai -p graphql-orm-operation-catalog -p graphql-orm-ai-tool-profiles --features graphql-orm-ai/provider-openai,graphql-orm-ai/provider-anthropic,graphql-orm-ai/provider-xai,graphql-orm-ai/provider-ollama,graphql-orm-ai/provider-openai-compatible,graphql-orm-ai/local-harness --no-deps --locked
+          scripts/check-ai-provider-lanes.sh clippy
+          scripts/check-ai-provider-lanes.sh doc
+          RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc -p graphql-orm-operation-catalog -p graphql-orm-ai-tool-profiles --no-deps --locked
       - name: Verify alternate storage and backup lanes
         run: |
           cargo check -p graphql-orm-backup --no-default-features --features local,orm-postgres --locked

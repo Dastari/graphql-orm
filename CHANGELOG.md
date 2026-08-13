@@ -60,6 +60,11 @@ semantic owner: `graphql-orm-operation-catalog` **0.2.0**.
   including precision and scale. SQLite scaled integers and PostgreSQL native
   numerics now share one canonical backup form, and restore rejects changed
   definitions or lossy values.
+- Added local, individually selectable provider and owned-database acceptance
+  runners, complete workspace package/SemVer release-policy coverage, and a
+  deterministic release-manifest row for semantic-catalogue wire version 1.
+  The coordinated compile fixture consumes semantic, grouped-aggregate, and
+  deliberate MSSQL writable contracts without a downstream application.
 
 The semantic catalogue is discovery and disclosure-shape metadata only. It
 does not authorize resolvers, fields, rows, provider egress, or database work.

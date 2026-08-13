@@ -3,7 +3,7 @@ title: Workspace release process
 kind: runbook
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-11
+last_reviewed: 2026-08-13
 review_by: 2026-11-11
 supersedes: []
 ---
@@ -44,9 +44,10 @@ under that package's release rules. A workspace release does not require a new
 version for an unchanged package.
 
 `graphql-orm-ai` additionally versions its persistent schema module. Router,
-tool-manifest, and operation-assurance protocols keep their own contract
-versions. The generated release manifest records these values separately from
-package SemVer.
+semantic-catalogue, tool-manifest, and operation-assurance protocols keep their
+own contract versions. The generated release manifest records these values
+separately from package SemVer. Contract rows are unique and name-sorted so the
+same source commit and release ID always produce byte-identical output.
 
 The workspace remains deliberately unpublished on crates.io. Every member
 sets `publish = false`, and `scripts/check-release-state.py` enforces that
@@ -76,13 +77,19 @@ a side effect of this process.
    python3 scripts/generate-workspace-inventory.py --check
    python3 scripts/check-release-state.py
    scripts/check-workspace-dependencies.sh
+   scripts/check-package-release-policy.sh <merge-base-or-reviewed-base-sha>
+   scripts/check-semver.sh <merge-base-or-reviewed-base-sha>
+   scripts/check-release-manifest.sh
    cargo fmt --all -- --check
    ```
 
 8. Run every package, backend, provider, Clippy, Rustdoc, SemVer, migration,
    restore, and release-policy lane required by the root and package-local
-   instructions. Never use workspace `--all-features`; database backends are
-   alternative profiles.
+   instructions. `scripts/check-ai-provider-lanes.sh` exercises each provider
+   separately, and `scripts/run-owned-database-lanes.sh` supplies the disposable
+   database evidence. Never use workspace `--all-features`; database backends
+   are alternative profiles. Local command output is the acceptance evidence;
+   hosted workflow success alone is insufficient.
 9. Review the complete diff, dependency trees, generated schema/manifest
    changes, documentation links, and migration statements.
 10. In the pull request, select exactly one documentation-impact option from

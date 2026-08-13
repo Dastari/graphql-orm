@@ -20,7 +20,23 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-No changes recorded after 0.77.0.
+No changes recorded after 0.77.1.
+
+## [0.77.1] - 2026-08-13
+
+### Fixed
+
+- Restored independent `provider-xai`, `provider-ollama`, and
+  `provider-openai-compatible` builds by gating the OpenAI-only background
+  overrides and helpers. Other adapters retain the provider-neutral
+  fail-closed default, and runtime background capability remains unavailable
+  unless the exact provider profile advertises it.
+
+### Verification
+
+- Added a local provider runner that builds and tests every provider feature
+  separately with one explicit persistence backend, including the Codex app
+  server and local harness lanes.
 
 ## [0.77.0] - 2026-08-13
 

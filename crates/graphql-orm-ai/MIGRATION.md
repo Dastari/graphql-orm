@@ -19,6 +19,26 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.77.1: independent provider feature builds (schema remains 0.57.0)
+
+Update the AI package to 0.77.1 at the same reviewed full Git revision as its
+workspace companions. No API, provider wire, GraphQL SDL, database, table,
+column, index, constraint, protected-row, backup, restore, or schema-module
+migration is required.
+
+Hosts may continue enabling one provider feature. The shared Responses adapter
+now compiles OpenAI background overrides only in the OpenAI lane. xAI, Ollama,
+and approved OpenAI-compatible profiles continue using the provider-neutral
+fail-closed default and report background execution as unsupported. Feature
+selection grants no capability or egress authority.
+
+Run the exact local feature lane before deployment:
+
+```sh
+scripts/check-ai-provider-lanes.sh test provider-xai
+scripts/check-ai-provider-lanes.sh clippy provider-xai
+```
+
 ## 0.77.0: absence-proven provider-session rebind (schema 0.56.0 to 0.57.0)
 
 Apply AI schema module `0.57.0` before starting workers from this release. The

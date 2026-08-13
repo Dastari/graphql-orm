@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.77.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.77.1", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -89,6 +89,11 @@ data. Tool discovery and registration are not authorization. Every provider
 call requires exact egress and atomic budget proof; every application tool
 uses current principal rehydration, a static result disclosure contract, and
 ordinary resolver authorization.
+
+Each provider feature is independently buildable with one persistence backend.
+Use `scripts/check-ai-provider-lanes.sh` from the repository root to verify one
+feature at a time; provider feature unification is not required for a valid
+adapter build.
 
 ## Configuration, operations, and errors
 

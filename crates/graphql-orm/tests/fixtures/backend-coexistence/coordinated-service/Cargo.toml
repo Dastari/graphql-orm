@@ -1,0 +1,10 @@
+[package]
+name = "coordinated-service"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+async-graphql = { version = "7", features = ["dataloader", "uuid"] }
+graphql-orm = { path = "../../../../", default-features = false, features = ["mssql"] }
+serde = { version = "1", features = ["derive"] }

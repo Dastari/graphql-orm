@@ -1,7 +1,11 @@
 #![cfg(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql"))))]
 
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 use graphql_orm::prelude::*;
 use graphql_orm::rust_decimal::Decimal;
+use owned_postgres::OwnedPostgres;
 
 #[derive(GraphQLEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[graphql_entity(
@@ -25,13 +29,11 @@ struct GroupedAggregatePgRow {
 }
 
 #[tokio::test]
+#[ignore = "starts a test-owned loopback-only PostgreSQL 17 container"]
 async fn postgres_grouped_multi_sum_matches_portable_contract()
 -> Result<(), Box<dyn std::error::Error>> {
-    let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
-        eprintln!("skipping PostgreSQL grouped aggregate parity: TEST_DATABASE_URL is unset");
-        return Ok(());
-    };
-    let database = Database::<PostgresBackend>::connect_postgres(url).await?;
+    let mut postgres = OwnedPostgres::start("grouped-aggregates")?;
+    let database = Database::<PostgresBackend>::connect_postgres(&postgres.url).await?;
     graphql_orm::sqlx::query("DROP TABLE IF EXISTS grouped_aggregate_pg_rows")
         .execute(database.pool())
         .await?;
@@ -91,5 +93,7 @@ async fn postgres_grouped_multi_sum_matches_portable_contract()
         rows[1].metrics[3].value,
         AggregateValue::Decimal(Decimal::new(375, 2))
     );
+    drop(database);
+    postgres.cleanup()?;
     Ok(())
 }

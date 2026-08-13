@@ -25,18 +25,7 @@ jobs:
       - name: Check Git-only release metadata
         run: |
           python3 scripts/check-release-state.py
-          python3 scripts/generate-release-manifest.py \
-            --release-id workspace-2000.01.01.1 \
-            --ref HEAD \
-            --output /tmp/workspace-release-a.json \
-            --notes-output /tmp/workspace-release-a.md
-          python3 scripts/generate-release-manifest.py \
-            --release-id workspace-2000.01.01.1 \
-            --ref HEAD \
-            --output /tmp/workspace-release-b.json \
-            --notes-output /tmp/workspace-release-b.md
-          cmp /tmp/workspace-release-a.json /tmp/workspace-release-b.json
-          cmp /tmp/workspace-release-a.md /tmp/workspace-release-b.md
+          scripts/check-release-manifest.sh
       - name: Check PR documentation impact
         if: github.event_name == 'pull_request'
         env:
@@ -70,7 +59,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p graphql-orm-ai --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness
+      - run: scripts/check-ai-provider-lanes.sh test
       - run: cargo test -p graphql-orm-ai --features graphql-case-pascal --test graphql_naming
       - run: cargo clippy -p graphql-orm-ai --all-targets --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness -- -D warnings
       - run: cargo clippy -p graphql-orm-operation-catalog -p graphql-orm-ai-tool-profiles --all-targets -- -D warnings
@@ -107,14 +96,14 @@ jobs:
       - run: cargo test -p graphql-orm-router-protocol --locked
       - run: cargo test -p graphql-orm-router --locked
 
-  router-release-policy:
+  package-release-policy:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - run: scripts/check-router-release-policy.sh "${{ github.event.pull_request.base.sha }}"
+      - run: scripts/check-package-release-policy.sh "${{ github.event.pull_request.base.sha }}"
 
   alternate-features:
     runs-on: ubuntu-latest
@@ -138,15 +127,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run ORM parity against a test-owned disposable PostgreSQL container
         run: cargo test -p graphql-orm-ai --no-default-features --features postgres,provider-openai --test postgres_parity -- --test-threads=1
-
-  ai-release-policy:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-      - run: crates/graphql-orm-ai/scripts/check-release-policy.sh "${{ github.event.pull_request.base.sha }}"
 
   semver:
     if: github.event_name == 'pull_request'
@@ -177,6 +157,23 @@ jobs:
         with:
           manifest-path: crates/graphql-orm/Cargo.toml
           baseline-root: ../graphql-orm-baseline/crates/graphql-orm
+          feature-group: default-features
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          manifest-path: crates/graphql-orm-macros/Cargo.toml
+          baseline-root: ../graphql-orm-baseline/crates/graphql-orm-macros
+          feature-group: default-features
+      - if: steps.companion-baseline.outputs.exists == 'true'
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          manifest-path: crates/graphql-orm-operation-catalog/Cargo.toml
+          baseline-root: ../graphql-orm-baseline/crates/graphql-orm-operation-catalog
+          feature-group: default-features
+      - if: steps.companion-baseline.outputs.exists == 'true'
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          manifest-path: crates/graphql-orm-ai-tool-profiles/Cargo.toml
+          baseline-root: ../graphql-orm-baseline/crates/graphql-orm-ai-tool-profiles
           feature-group: default-features
       - if: steps.companion-baseline.outputs.exists == 'true'
         uses: obi1kenobi/cargo-semver-checks-action@v2

@@ -104,6 +104,11 @@ def parse_contracts(commit: str) -> list[dict[str, str]]:
             r"AI_GRAPHQL_TOOL_MANIFEST_VERSION:\s*u16\s*=\s*(\d+)",
         ),
         (
+            "graphql-orm-semantic-catalog",
+            "crates/graphql-orm-operation-catalog/src/semantic.rs",
+            r"GRAPHQL_SEMANTIC_CATALOG_VERSION:\s*u16\s*=\s*(\d+)",
+        ),
+        (
             "graphql-orm-operation-assurance-manifest",
             "crates/graphql-orm/src/graphql/assurance.rs",
             r"OPERATION_ASSURANCE_MANIFEST_VERSION:\s*u32\s*=\s*(\d+)",
@@ -117,7 +122,7 @@ def parse_contracts(commit: str) -> list[dict[str, str]]:
             raise SystemExit(f"could not read {name} from {path}")
         version = ".".join(match.groups())
         values.append({"name": name, "version": version})
-    return values
+    return sorted(values, key=lambda contract: contract["name"])
 
 
 def package_kind(package: dict[str, Any]) -> list[str]:

@@ -3,7 +3,7 @@ title: "Testing and verification"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-13
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -58,6 +58,22 @@ cargo test -p graphql-orm-router --features auth-agql
 Run package-local tests and their required feature matrices whenever a change
 crosses the package boundary.
 
+Provider implementations are separate feature lanes. Run them locally one at
+a time so an accidental dependency on another provider feature cannot make a
+lane pass:
+
+```sh
+scripts/check-ai-provider-lanes.sh test
+scripts/check-ai-provider-lanes.sh clippy
+scripts/check-ai-provider-lanes.sh doc
+```
+
+The runner covers `provider-openai`, `provider-anthropic`, `provider-xai`,
+`provider-ollama`, `provider-openai-compatible`, `local-harness`, and
+`provider-codex-app-server`, each with only SQLite and that provider enabled.
+Pass one provider feature as the second argument for a focused run. These local
+commands are release evidence; a hosted workflow result is not a substitute.
+
 Router changes also require warnings-denied package lanes and the dependency
 boundary check:
 
@@ -87,16 +103,30 @@ lag. They must not contact a deployed subgraph or application database.
 
 ## External-service tests
 
-SQLite tests may use temporary local databases. PostgreSQL and MSSQL tests may
-run only against documented, disposable test infrastructure—never an
-application, staging, or shared developer database. Follow the
-[PostgreSQL testing runbook](../operations/runbooks/postgres-testing.md) before
-running PostgreSQL integration tests. MSSQL live tests are opt-in; consult the
-[MSSQL reference](../reference/graphql-orm/mssql.md).
+SQLite tests may use temporary local databases. PostgreSQL and MSSQL acceptance
+tests may run only against infrastructure the test creates, labels,
+loopback-publishes, and removes itself—never an application, staging, shared
+developer, or manually supplied database. The canonical local runner rejects
+ambient database URL variables:
 
-Some PostgreSQL tests create their own labelled loopback-only Docker resources
-and are intentionally ignored. Run the named target with `--ignored` only
-when that target's test source documents the owned-resource contract.
+```sh
+scripts/run-owned-database-lanes.sh sqlite
+scripts/run-owned-database-lanes.sh postgres
+scripts/run-owned-database-lanes.sh mssql
+scripts/run-owned-database-lanes.sh ai-postgres
+```
+
+Use `all` only when the machine has enough memory for the lanes to run
+sequentially. Docker absence or failure is a failed required lane, not a skip.
+Follow the [PostgreSQL testing runbook](../operations/runbooks/postgres-testing.md)
+and [MSSQL reference](../reference/graphql-orm/mssql.md) for the owned-resource
+contract and coverage.
+
+Owned PostgreSQL and SQL Server tests are intentionally ignored in ordinary
+unit-test runs because they start containers. Invoke them through the canonical
+runner rather than exporting `TEST_DATABASE_URL`, `MSSQL_TEST_DATABASE_URL`, or
+`DATABASE_URL`. Older opt-in tests that still accept a URL are not release
+acceptance evidence until migrated to the owned harness.
 
 ## Authentication bridge lane
 

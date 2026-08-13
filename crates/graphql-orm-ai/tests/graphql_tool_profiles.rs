@@ -194,7 +194,12 @@ fn semantic_entity_metadata_is_public_only_and_descriptive() {
         metadata.fields[0].description,
         "Stable public record identity"
     );
-    assert!(metadata.fields.iter().all(|field| !field.is_relationship));
+    assert!(
+        metadata
+            .fields
+            .iter()
+            .all(|field| field.relationship.is_none())
+    );
 }
 
 #[test]

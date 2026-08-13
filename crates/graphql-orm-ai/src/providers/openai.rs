@@ -12,14 +12,17 @@ use secrecy::ExposeSecret;
 use serde_json::{Value, json};
 
 #[cfg(feature = "provider-openai")]
-use crate::{AiError, AiProviderFileDeletionRequest, AiProviderFileDeletionService};
+use crate::{
+    AiError, AiProviderFileDeletionRequest, AiProviderFileDeletionService,
+    ProviderBackgroundBinding, ProviderBackgroundObservation, ProviderBackgroundRetrievalBinding,
+    ProviderBackgroundRetrievalContext, ProviderBackgroundStatus, ProviderBackgroundSubmission,
+    ProviderBackgroundUsage,
+};
 use crate::{
     AiProvider, AiProviderAttachmentRequest, AiSecretStore, ModelBuiltinTool, ModelContinuation,
     ModelInputBlock, ModelReasoningSummaryRequest, ModelRequest, ModelWebSearchDomainPolicy,
-    ProviderBackgroundBinding, ProviderBackgroundObservation, ProviderBackgroundRetrievalBinding,
-    ProviderBackgroundRetrievalContext, ProviderBackgroundStatus, ProviderBackgroundSubmission,
-    ProviderBackgroundUsage, ProviderCapabilities, ProviderCitation, ProviderError, ProviderEvent,
-    ProviderEventStream, ProviderKind, ProviderRequestContext, SecretRef,
+    ProviderCapabilities, ProviderCitation, ProviderError, ProviderEvent, ProviderEventStream,
+    ProviderKind, ProviderRequestContext, SecretRef,
 };
 
 #[cfg(feature = "provider-openai")]
@@ -698,6 +701,7 @@ impl AiProvider for OpenAiProvider {
         self.capabilities.clone()
     }
 
+    #[cfg(feature = "provider-openai")]
     async fn submit_background(
         &self,
         request: ModelRequest,
@@ -815,6 +819,7 @@ impl AiProvider for OpenAiProvider {
         ))
     }
 
+    #[cfg(feature = "provider-openai")]
     async fn retrieve_background(
         &self,
         binding: ProviderBackgroundRetrievalBinding,
