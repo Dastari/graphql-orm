@@ -68,7 +68,7 @@ fn consumer_can_construct_deployment_resolver_through_public_contracts() {
 #[test]
 fn invalid_deployment_constraints_fail_before_resolver_construction() {
     let mut constraints = deployment_constraints();
-    constraints.maximum_tool_maturity = ToolMaturity::AutonomousWrite;
+    constraints.maximum_classification = graphql_orm_ai::DataClassification::Secret;
 
     assert!(AiRuleDeploymentLimits::new(1, constraints).is_err());
 }
