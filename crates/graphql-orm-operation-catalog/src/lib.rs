@@ -15,6 +15,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
+mod semantic;
+
+pub use semantic::*;
+
 /// Stable identifier for the resolver-operation fingerprint algorithm.
 ///
 /// Version 1 uses SHA-256 over a domain-separated sequence of UTF-8 fields.
@@ -77,7 +81,8 @@ impl GraphqlOperationKind {
 }
 
 /// Stable semantic category for a generated resolver field.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum GeneratedGraphqlOperationCategory {
     /// Offset-paginated entity connection query.
@@ -88,6 +93,8 @@ pub enum GeneratedGraphqlOperationCategory {
     Search,
     /// Keyset-paginated entity connection query.
     KeysetList,
+    /// Opt-in bounded aggregate query, optionally grouped.
+    Aggregate,
     /// Create one entity.
     Create,
     /// Create or update one entity by a configured unique key.
@@ -112,6 +119,7 @@ impl GeneratedGraphqlOperationCategory {
             Self::SingleRead => "single_read",
             Self::Search => "search",
             Self::KeysetList => "keyset_list",
+            Self::Aggregate => "aggregate",
             Self::Create => "create",
             Self::Upsert => "upsert",
             Self::Update => "update",
@@ -121,6 +129,42 @@ impl GeneratedGraphqlOperationCategory {
             Self::Subscription => "subscription",
         }
     }
+}
+
+fn default_operation_description(
+    category: GeneratedGraphqlOperationCategory,
+    entity_name: &str,
+) -> String {
+    let action = match category {
+        GeneratedGraphqlOperationCategory::List => "List",
+        GeneratedGraphqlOperationCategory::SingleRead => "Read one",
+        GeneratedGraphqlOperationCategory::Search => "Search",
+        GeneratedGraphqlOperationCategory::KeysetList => "Page through",
+        GeneratedGraphqlOperationCategory::Aggregate => "Aggregate",
+        GeneratedGraphqlOperationCategory::Create => "Create one",
+        GeneratedGraphqlOperationCategory::Upsert => "Create or update one",
+        GeneratedGraphqlOperationCategory::Update => "Update one",
+        GeneratedGraphqlOperationCategory::UpdateMany => "Update matching",
+        GeneratedGraphqlOperationCategory::Delete => "Delete one",
+        GeneratedGraphqlOperationCategory::DeleteMany => "Delete matching",
+        GeneratedGraphqlOperationCategory::Subscription => "Observe changes to",
+    };
+    format!("{action} {entity_name} records")
+}
+
+fn default_argument_description(value: &str) -> String {
+    let mut output = String::new();
+    for (index, character) in value.chars().enumerate() {
+        if index > 0 && character.is_uppercase() {
+            output.push(' ');
+        }
+        if index == 0 {
+            output.extend(character.to_uppercase());
+        } else {
+            output.extend(character.to_lowercase());
+        }
+    }
+    output
 }
 
 /// One all-of scope set in an any-of authorization requirement.
@@ -287,6 +331,7 @@ impl GraphqlAuthorizationRequirement {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphqlOperationArgumentDescriptor {
     graphql_name: &'static str,
+    description: String,
     rust_type: &'static str,
     graphql_type: String,
 }
@@ -302,8 +347,26 @@ impl GraphqlOperationArgumentDescriptor {
         rust_type: &'static str,
         graphql_type: impl Into<String>,
     ) -> Self {
+        Self::generated_with_description(
+            graphql_name,
+            default_argument_description(graphql_name),
+            rust_type,
+            graphql_type,
+        )
+    }
+
+    /// Constructs macro-generated argument metadata with the exact public
+    /// GraphQL description emitted into SDL.
+    #[doc(hidden)]
+    pub fn generated_with_description(
+        graphql_name: &'static str,
+        description: impl Into<String>,
+        rust_type: &'static str,
+        graphql_type: impl Into<String>,
+    ) -> Self {
         Self {
             graphql_name,
+            description: description.into(),
             rust_type,
             graphql_type: graphql_type.into(),
         }
@@ -312,6 +375,11 @@ impl GraphqlOperationArgumentDescriptor {
     /// Returns the exact configured GraphQL argument name.
     pub const fn graphql_name(&self) -> &'static str {
         self.graphql_name
+    }
+
+    /// Returns the public GraphQL argument description.
+    pub fn description(&self) -> &str {
+        &self.description
     }
 
     /// Returns the generated Rust argument type spelling.
@@ -340,6 +408,7 @@ pub struct GeneratedGraphqlOperationDescriptor {
     kind: GraphqlOperationKind,
     category: GeneratedGraphqlOperationCategory,
     field_name: &'static str,
+    description: String,
     arguments: Box<[GraphqlOperationArgumentDescriptor]>,
     rust_result_type: &'static str,
     graphql_result_type: String,
@@ -408,6 +477,47 @@ impl GeneratedGraphqlOperationDescriptor {
         schema_signature: &'static str,
         authorization: GraphqlAuthorizationRequirement,
     ) -> Self {
+        let description = default_operation_description(category, entity_name);
+        Self::generated_with_authorization_and_description(
+            entity_rust_type,
+            entity_name,
+            table_name,
+            backend,
+            kind,
+            category,
+            field_name,
+            description,
+            arguments,
+            rust_result_type,
+            graphql_result_type,
+            schema_signature,
+            authorization,
+        )
+    }
+
+    /// Constructs generated resolver metadata with static authorization and
+    /// one model-safe public description.
+    ///
+    /// This constructor is public only so `GraphQLOperations` expansions in
+    /// downstream crates can create descriptors. The description participates
+    /// in the semantic catalogue, not the legacy discovery fingerprint.
+    #[allow(clippy::too_many_arguments)]
+    #[doc(hidden)]
+    pub fn generated_with_authorization_and_description(
+        entity_rust_type: &'static str,
+        entity_name: &'static str,
+        table_name: &'static str,
+        backend: &'static str,
+        kind: GraphqlOperationKind,
+        category: GeneratedGraphqlOperationCategory,
+        field_name: &'static str,
+        description: impl Into<String>,
+        arguments: Vec<GraphqlOperationArgumentDescriptor>,
+        rust_result_type: &'static str,
+        graphql_result_type: impl Into<String>,
+        schema_signature: &'static str,
+        authorization: GraphqlAuthorizationRequirement,
+    ) -> Self {
         let mut descriptor = Self {
             entity_rust_type,
             entity_name,
@@ -416,6 +526,7 @@ impl GeneratedGraphqlOperationDescriptor {
             kind,
             category,
             field_name,
+            description: description.into(),
             arguments: arguments.into_boxed_slice(),
             rust_result_type,
             graphql_result_type: graphql_result_type.into(),
@@ -469,6 +580,11 @@ impl GeneratedGraphqlOperationDescriptor {
     /// Returns the exact configured GraphQL root field name.
     pub const fn field_name(&self) -> &'static str {
         self.field_name
+    }
+
+    /// Returns the public model-safe operation description.
+    pub fn description(&self) -> &str {
+        &self.description
     }
 
     /// Returns the generated resolver arguments in declaration order.
@@ -683,6 +799,11 @@ impl GraphqlResolverOperationDescriptor {
     /// Returns the exact configured GraphQL root field name.
     pub const fn field_name(&self) -> &'static str {
         self.generated.field_name()
+    }
+
+    /// Returns the public model-safe operation description.
+    pub fn description(&self) -> &str {
+        self.generated.description()
     }
 
     /// Returns the fully qualified Rust entity type.

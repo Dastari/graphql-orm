@@ -16,13 +16,13 @@ macro/runtime versions aligned:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.21.1", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.22.0", default-features = false, features = ["sqlite"] }
 ```
 
 Direct use is supported for tooling that needs the macro package:
 
 ```toml
-graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.21.1", default-features = false, features = ["sqlite"] }
+graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.22.0", default-features = false, features = ["sqlite"] }
 ```
 
 The direct dependency still requires a compatible `graphql-orm` runtime in the
@@ -39,6 +39,8 @@ not connect to a database, run migrations, host GraphQL, or authorize requests.
 | `GraphQLRelations` | batched single/composite-key relation resolvers |
 | `GraphQLOperations` | generated GraphQL root operation types and operation metadata |
 | `schema_roots!` | query/mutation/subscription roots, schema builders, metadata, and resolved catalog |
+| `graphql_orm_custom_operations` | semantic metadata emitted beside a handwritten root impl |
+| `GraphQLSemanticObject` | classified public field metadata for a handwritten result object |
 | `mutation_result!` | a simple GraphQL mutation result object |
 | `backend_selected_graphql_entity` | emits cfg-selected entity definitions for a multi-backend consumer |
 

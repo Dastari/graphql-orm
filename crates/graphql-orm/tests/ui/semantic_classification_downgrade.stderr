@@ -1,0 +1,6 @@
+error: field classification cannot weaken its entity classification
+ --> tests/ui/semantic_classification_downgrade.rs:8:5
+  |
+8 | /     #[graphql_orm(classification = "public")]
+9 | |     label: String,
+  | |_________________^

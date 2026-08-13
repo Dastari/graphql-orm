@@ -36,10 +36,10 @@ cynic-parser = { version = "=0.11.2", features = ["pretty"] }
 futures = "0.3"
 getrandom = "0.3"
 graphql-composition = "=0.12.2"
-graphql-orm = { path = "crates/graphql-orm", version = "0.21.1", default-features = false }
+graphql-orm = { path = "crates/graphql-orm", version = "0.22.0", default-features = false }
 graphql-orm-ai-tool-profiles = { path = "crates/graphql-orm-ai-tool-profiles", version = "0.3.0" }
 graphql-orm-backup = { path = "crates/graphql-orm-backup", version = "0.7.0", default-features = false }
-graphql-orm-operation-catalog = { path = "crates/graphql-orm-operation-catalog", version = "0.1.0" }
+graphql-orm-operation-catalog = { path = "crates/graphql-orm-operation-catalog", version = "0.2.0" }
 graphql-orm-router-protocol = { path = "crates/graphql-orm-router-protocol", version = "0.2.0" }
 graphql-orm-storage = { path = "crates/graphql-orm-storage", version = "0.6.0", default-features = false }
 hive-router = "=0.0.87"

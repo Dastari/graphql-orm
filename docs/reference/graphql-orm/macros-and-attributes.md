@@ -25,7 +25,9 @@ does not.
 | `RepositoryEntity` | typed repository CRUD, filters, ordering, projections, and Rust write inputs | you need generated `async-graphql` types or resolvers |
 | `GraphQLRelations` | relation resolver/loading implementations | the struct has no relation fields |
 | `GraphQLOperations` | generated query, mutation, and subscription operation types plus discovery descriptors | the entity uses `#[repository_entity(...)]` |
-| `schema_roots!` | `QueryRoot`, `MutationRoot`, `SubscriptionRoot`, `AppSchema`, schema builders, schema metadata helpers, and an operation catalog | no generated operation types participate in the schema |
+| `schema_roots!` | `QueryRoot`, `MutationRoot`, `SubscriptionRoot`, `AppSchema`, schema builders, schema metadata helpers, and operation/semantic catalogs | no generated operation types participate in the schema |
+| `graphql_orm_custom_operations` | canonical semantic metadata beside one handwritten `async-graphql` root impl | the impl is not actually composed into the finished schema |
+| `GraphQLSemanticObject` | canonical fields, descriptions, classifications, export rules, and bounded object/list shape for a handwritten result object | the object is private or never returned by a semantic root |
 | `mutation_result!` | a `SimpleObject` mutation result with `success: bool`, optional `message`, and optional typed field | a normal application GraphQL object is more appropriate |
 
 All entity derives require a struct. `GraphQLEntity` requires
@@ -44,6 +46,7 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `table` | string | physical table name |
 | `plural` | string | GraphQL plural name |
 | `description` | nonempty string | at most 1,024 bytes; no control characters |
+| `classification` | `"public"`, `"internal"`, `"confidential"`, `"restricted"`, or `"secret"` | `"internal"`; inherited by ordinary public fields |
 | `backend` | `"sqlite"`, `"postgres"`, or `"mssql"` | inferred only when exactly one backend feature is enabled |
 | `default_sort` | string | no declared default |
 | `schema_policy` | `"managed"`, `"external_read_only"`, `"external_writable"`, `"validate_only"`, or `"plan_only"` | no declared policy |
@@ -95,7 +98,9 @@ still subject to entity policy and backend/schema-policy restrictions.
 | `#[skip_db]` | excludes a field from persisted row decoding |
 | `#[input_only]` | keeps a writable field in inputs even where it is skipped from GraphQL reads |
 | `#[graphql_orm(private)]` | removes generated read/filter/order/subscription exposure and inputs |
-| `#[graphql_orm(sensitive)]` | marks semantic sensitivity; it does not itself make a field private |
+| `#[graphql_orm(sensitive)]` | emits `Secret` plus structural `NeverExport`; it does not by itself remove the field from ordinary GraphQL |
+| `#[graphql_orm(classification = "…")]` | overrides the inherited public/internal/confidential/restricted/secret classification |
+| `#[graphql_orm(non_exportable)]` | structurally excludes the field from external-provider result projections while retaining ordinary GraphQL visibility |
 | `#[graphql_orm(description = "…")]` | nonempty semantic description, maximum 1,024 bytes |
 | `#[graphql_orm(read = bool, write = bool, filter = bool, order = bool, subscribe = bool)]` | per-surface capability switches; `write = false` also skips input |
 | `#[graphql_orm(read_policy = "…", write_policy = "…")]` | policy identifiers for runtime enforcement |
@@ -187,18 +192,111 @@ schema_roots! {
     extra_query_types: [],
     extra_mutation_types: [ApplicationMutations],
     extra_subscription_types: [],
+    semantic_custom_operations: [ApplicationQueries],
+    semantic_types: [ApplicationStatus],
     entities: [Account],
 }
 ```
 
 `entities` is required. The optional `backend`, `schema_policy`, and `auth`
 take the same values as the entity options. `query_custom_ops`,
-`extra_query_types`, `extra_mutation_types`, and `extra_subscription_types`
-are identifier lists. `generated_mutations` defaults to `"all"`; it accepts
+`extra_query_types`, `extra_mutation_types`, `extra_subscription_types`,
+`semantic_custom_operations`, and `semantic_types` are identifier lists. The
+last two lists name roots
+annotated by `#[graphql_orm_custom_operations]`; it does not compose a root by
+itself, and handwritten result objects deriving `GraphQLSemanticObject`.
+`generated_mutations` defaults to `"all"`; it accepts
 `"all"`, `"none"`, `"allowlist"`, or `"denylist"`. An allowlist/denylist
 requires its matching nonempty list, and every listed entity must be in
 `entities`. Read-only MSSQL/policy roots use empty mutation and subscription
 types regardless of the requested exposure.
+
+`schema_roots!` also emits `graphql_orm_semantic_catalog()`. The strict,
+versioned value contains public API names, safe descriptions, typed field and
+relationship shape, generated/custom root coordinates, and canonical
+fingerprints. It contains no table/column names, Rust paths, policy keys, or
+credentials and grants no authority. The optional `router-protocol` feature
+can wrap it in a generic descriptor extension.
+
+## Handwritten root semantic metadata
+
+Place `#[graphql_orm_custom_operations]` before the corresponding
+`async-graphql` `Object`, `Mutation`, or `Subscription` attribute:
+
+```rust,ignore
+#[graphql_orm_custom_operations(kind = "query", authorization = true)]
+#[async_graphql::Object]
+impl ApplicationQueries {
+    /// Returns one bounded public status value.
+    #[graphql(name = "ApplicationStatus")]
+    async fn status(&self, #[graphql(desc = "Maximum records")] limit: i32) -> String {
+        todo!()
+    }
+}
+```
+
+`kind` is required. `authorization` defaults to `true` and records only that an
+authoritative resolver policy exists; it does not describe or execute that
+policy. Resolver and argument names honor explicit `#[graphql(name = "…")]`
+attributes, then `async-graphql`'s default camel-case convention. Descriptions
+use the same explicit/doc/fallback rules and are emitted into SDL. Unknown attributes,
+unbounded descriptions, malformed GraphQL types, duplicate root coordinates,
+and stale fingerprints fail closed.
+
+Handwritten result objects use the sibling derive. Public list fields require
+an explicit positive maximum; sensitive fields are always secret and
+non-exportable:
+
+```rust,ignore
+/// Current application status.
+#[derive(async_graphql::SimpleObject, GraphQLSemanticObject)]
+#[graphql_orm(classification = "internal")]
+struct ApplicationStatus {
+    /// Bounded status entries.
+    #[graphql_orm(maximum_items = 10)]
+    entries: Vec<String>,
+    #[graphql_orm(sensitive)]
+    provider_credential: String,
+}
+```
+
+Object and field `description`/`classification` use the same bounded values as
+entities. `non_exportable`, `sensitive`, `maximum_items`, and an exceptional
+`type_kind = "scalar" | "enum" | "object"` override are accepted on fields.
+Explicit `#[graphql(name = "…")]` and `rename_fields` match the SDL; otherwise
+the ordinary `async-graphql` camel-case default is used.
+
+For `GraphQLSemanticObject`, put descriptions in Rust documentation (preferred)
+or `#[graphql(desc = "…")]`; those declarations are read by both
+`SimpleObject` and the semantic derive. A separate `graphql_orm(description)`
+is rejected here so SDL and semantic metadata cannot drift. A field hidden by
+a handwritten `SimpleObject` must use `#[graphql(skip)]`; semantic-private
+fields must likewise be absent from that finished GraphQL object.
+
+Custom subscription roots may additionally declare truthful bounded
+observation metadata:
+
+```rust,ignore
+#[graphql_orm_custom_operations(
+    kind = "subscription",
+    authorization = true,
+    observation = "replay_then_live",
+    maximum_duration_seconds = 300,
+    maximum_events = 100
+)]
+#[async_graphql::Subscription]
+impl ApplicationEvents {
+    /// Observes bounded application events.
+    async fn application_events(&self) -> impl futures::Stream<Item = ApplicationEvent> {
+        // ...
+    }
+}
+```
+
+This metadata does not make delivery durable. A later waiter/runtime must bind
+an authoritative source that implements the declared opaque cursor, watermark,
+replay, and reset contract. Generated broadcast subscriptions are explicitly
+`BestEffort` and have no bounded-wait registration limits.
 
 ## Naming features
 

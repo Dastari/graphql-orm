@@ -28,6 +28,18 @@ fn argument_name(camel: &'static str, pascal: &'static str) -> &'static str {
     }
 }
 
+fn root_field_has(sdl: &str, name: &str, expected: &str) -> bool {
+    sdl.match_indices(&format!("\n\t{name}")).any(|(start, _)| {
+        let tail = &sdl[start..];
+        let next_description = tail
+            .get(2..)
+            .and_then(|tail| tail.find("\n\t\"\"\""))
+            .map(|offset| offset + 2);
+        let root_end = tail.find("\n}");
+        tail[..next_description.or(root_end).unwrap_or(tail.len())].contains(expected)
+    })
+}
+
 mod rich_surface {
     use graphql_orm::prelude::*;
 
@@ -822,23 +834,22 @@ fn fixed_write_scope_declarations_drive_metadata_and_sdl() {
     for category in mutation_categories {
         let field_name = operation(operations, category).field_name();
         assert!(
-            sdl.lines().any(|line| {
-                let line = line.trim_start();
-                line.starts_with(field_name)
-                    && line.contains(r#"@requiresScopes(scopes: [["records.write"]])"#)
-            }),
+            root_field_has(
+                &sdl,
+                field_name,
+                r#"@requiresScopes(scopes: [["records.write"]])"#,
+            ),
             "generated field `{field_name}` is missing its fixed write scopes in:\n{sdl}"
         );
     }
     let subscription =
         operation(operations, GeneratedGraphqlOperationCategory::Subscription).field_name();
     assert!(
-        sdl.lines().any(|line| {
-            let line = line.trim_start();
-            line.starts_with(subscription)
-                && line
-                    .contains(r#"@federation__requiresScopes(scopes: [["records.events"], ["records.admin"]])"#)
-        }),
+        root_field_has(
+            &sdl,
+            subscription,
+            r#"@federation__requiresScopes(scopes: [["records.events"], ["records.admin"]])"#,
+        ),
         "generated field `{subscription}` is missing its event scopes in:\n{sdl}"
     );
 }
@@ -871,12 +882,7 @@ fn required_entity_auth_emits_the_standard_namespaced_federation_directive() {
     );
     for operation in operations {
         let name = operation.field_name();
-        let protected = sdl.lines().any(|line| {
-            let line = line.trim_start();
-            line.strip_prefix(name)
-                .is_some_and(|suffix| suffix.starts_with('(') || suffix.starts_with(':'))
-                && line.contains("@federation__authenticated")
-        });
+        let protected = root_field_has(&sdl, name, "@federation__authenticated");
         assert!(
             protected,
             "generated field `{name}` is missing standard authentication metadata in:\n{sdl}"

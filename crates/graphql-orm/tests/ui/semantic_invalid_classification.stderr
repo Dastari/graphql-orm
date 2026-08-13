@@ -1,0 +1,5 @@
+error: semantic classification must be public, internal, confidential, restricted, or secret
+ --> tests/ui/semantic_invalid_classification.rs:4:93
+  |
+4 | #[graphql_entity(table = "invalid_semantics", plural = "InvalidSemantics", classification = "private")]
+  |                                                                                             ^^^^^^^^^

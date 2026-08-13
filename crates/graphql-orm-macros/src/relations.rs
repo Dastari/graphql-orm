@@ -12,6 +12,7 @@ use syn::spanned::Spanned;
 struct RelationDef {
     field_name: syn::Ident,
     graphql_name: String,
+    description: String,
     target_type_str: String,
     source_columns: Vec<String>,
     fk_columns: Vec<String>,
@@ -290,6 +291,10 @@ pub(crate) fn generate_graphql_relations(
         relations.push(RelationDef {
             field_name,
             graphql_name,
+            description: meta
+                .description
+                .clone()
+                .expect("relation descriptions are resolved during parsing"),
             target_type_str: target_type,
             source_columns: from_cols,
             fk_columns: to_cols,
@@ -353,6 +358,7 @@ pub(crate) fn generate_graphql_relations(
         .map(|r| -> syn::Result<proc_macro2::TokenStream> {
         let field_name = &r.field_name;
         let graphql_name = &r.graphql_name;
+        let description = &r.description;
         let fk_columns_sql = r
             .fk_columns
             .iter()
@@ -567,12 +573,7 @@ pub(crate) fn generate_graphql_relations(
             };
             // One-to-many relation with smart batching
             Ok(quote! {
-                /// Get related #graphql_name with optional filtering, sorting, and pagination.
-                ///
-                /// When no arguments are provided, uses DataLoader to batch queries and
-                /// avoid N+1 when loading relations for multiple parent entities.
-                /// When filter/sort/pagination arguments are provided, uses direct
-                /// database query for full SQL support.
+                #[doc = #description]
                 #[graphql(name = #graphql_name, complexity = #list_relation_complexity)]
                 async fn #field_name(
                     &self,
@@ -721,7 +722,7 @@ pub(crate) fn generate_graphql_relations(
             };
             // Single relation (many-to-one) - uses DataLoader when the source key supports it
             Ok(quote! {
-                /// Get related #graphql_name
+                #[doc = #description]
                 #[graphql(name = #graphql_name, complexity = #single_relation_complexity)]
                 async fn #field_name(
                     &self,

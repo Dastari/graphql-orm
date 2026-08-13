@@ -3,7 +3,9 @@ use crate::backend::{
     BackendKind, backend_current_epoch_expr, backend_helper_import_tokens, backend_marker_tokens,
     backend_quote_identifier_path, backend_row_type_tokens, resolve_backend,
 };
-use crate::naming::{graphql_field_name, selected_field_case_rule};
+use crate::naming::{
+    apply_graphql_case, graphql_field_name, selected_argument_case, selected_field_case_rule,
+};
 use syn::spanned::Spanned;
 
 #[derive(Default)]
@@ -12,6 +14,7 @@ pub(crate) struct EntityMetadata {
     pub(crate) table_name: Option<String>,
     pub(crate) plural_name: Option<String>,
     pub(crate) description: Option<String>,
+    pub(crate) classification: String,
     pub(crate) default_sort: Option<String>,
     pub(crate) schema_policy: Option<String>,
     pub(crate) auth: Option<String>,
@@ -147,6 +150,11 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let lit: syn::LitStr = value.parse()?;
                     validate_semantic_description(&lit.value(), lit.span())?;
                     metadata.description = Some(lit.value());
+                } else if meta.path.is_ident("classification") {
+                    let value = meta.value()?;
+                    let lit: syn::LitStr = value.parse()?;
+                    validate_semantic_classification(&lit.value(), lit.span())?;
+                    metadata.classification = lit.value();
                 } else if meta.path.is_ident("default_sort") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
@@ -852,6 +860,8 @@ pub(crate) struct FieldMetadata {
     pub(crate) serde_name: Option<String>,
     pub(crate) db_column: Option<String>,
     pub(crate) description: Option<String>,
+    pub(crate) classification: Option<String>,
+    pub(crate) non_exportable: bool,
     pub(crate) filterable: Option<String>,
     pub(crate) sortable: bool,
     pub(crate) unique: bool,
@@ -997,6 +1007,8 @@ impl Default for FieldMetadata {
             serde_name: None,
             db_column: None,
             description: None,
+            classification: None,
+            non_exportable: false,
             filterable: None,
             sortable: false,
             unique: false,
@@ -1213,14 +1225,112 @@ fn validate_spatial_geometry_type(value: &str, span: proc_macro2::Span) -> syn::
     }
 }
 
-fn validate_semantic_description(value: &str, span: proc_macro2::Span) -> syn::Result<()> {
-    if value.trim().is_empty() || value.len() > 1024 || value.chars().any(char::is_control) {
+pub(crate) fn validate_semantic_description(
+    value: &str,
+    span: proc_macro2::Span,
+) -> syn::Result<()> {
+    let invalid_character = |character: char| {
+        character.is_control()
+            || matches!(
+                character,
+                '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}'
+            )
+    };
+    if value.trim().is_empty()
+        || value.trim() != value
+        || value.len() > 1024
+        || value.chars().any(invalid_character)
+    {
         return Err(syn::Error::new(
             span,
-            "semantic descriptions must be non-empty, at most 1024 bytes, and contain no control characters",
+            "semantic descriptions must be trimmed, non-empty, at most 1024 bytes, and contain no control or directional characters",
         ));
     }
     Ok(())
+}
+
+pub(crate) fn validate_semantic_classification(
+    value: &str,
+    span: proc_macro2::Span,
+) -> syn::Result<()> {
+    match value {
+        "public" | "internal" | "confidential" | "restricted" | "secret" => Ok(()),
+        _ => Err(syn::Error::new(
+            span,
+            "semantic classification must be public, internal, confidential, restricted, or secret",
+        )),
+    }
+}
+
+pub(crate) fn semantic_classification_rank(value: &str) -> u8 {
+    match value {
+        "public" => 0,
+        "internal" => 1,
+        "confidential" => 2,
+        "restricted" => 3,
+        "secret" => 4,
+        _ => unreachable!("classification is validated before ranking"),
+    }
+}
+
+pub(crate) fn semantic_doc_description(attrs: &[syn::Attribute]) -> syn::Result<Option<String>> {
+    let mut lines: Vec<String> = Vec::new();
+    for attr in attrs.iter().filter(|attr| attr.path().is_ident("doc")) {
+        let syn::Meta::NameValue(value) = &attr.meta else {
+            continue;
+        };
+        let syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(value),
+            ..
+        }) = &value.value
+        else {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "documentation must be a string",
+            ));
+        };
+        let line = value.value();
+        let line = line.trim();
+        if !line.is_empty() {
+            lines.push(line.to_owned());
+        }
+    }
+    if lines.is_empty() {
+        return Ok(None);
+    }
+    let description = lines.join(" ");
+    validate_semantic_description(&description, proc_macro2::Span::call_site())?;
+    Ok(Some(description))
+}
+
+pub(crate) fn humanize_identifier(value: &str) -> String {
+    let words = value.to_case(Case::Title);
+    if words.is_empty() {
+        "GraphQL value".to_owned()
+    } else {
+        words
+    }
+}
+
+pub(crate) fn semantic_classification_tokens(
+    value: &str,
+    span: proc_macro2::Span,
+) -> syn::Result<proc_macro2::TokenStream> {
+    validate_semantic_classification(value, span)?;
+    Ok(match value {
+        "public" => quote! { ::graphql_orm::graphql::orm::GraphqlSemanticClassification::Public },
+        "internal" => {
+            quote! { ::graphql_orm::graphql::orm::GraphqlSemanticClassification::Internal }
+        }
+        "confidential" => {
+            quote! { ::graphql_orm::graphql::orm::GraphqlSemanticClassification::Confidential }
+        }
+        "restricted" => {
+            quote! { ::graphql_orm::graphql::orm::GraphqlSemanticClassification::Restricted }
+        }
+        "secret" => quote! { ::graphql_orm::graphql::orm::GraphqlSemanticClassification::Secret },
+        _ => unreachable!(),
+    })
 }
 
 pub(crate) fn spatial_geometry_type_tokens(
@@ -1287,6 +1397,13 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let lit: syn::LitStr = value.parse()?;
                             validate_semantic_description(&lit.value(), lit.span())?;
                             meta.description = Some(lit.value());
+                        } else if nested.path.is_ident("classification") {
+                            let value = nested.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            validate_semantic_classification(&lit.value(), lit.span())?;
+                            meta.classification = Some(lit.value());
+                        } else if nested.path.is_ident("non_exportable") {
+                            meta.non_exportable = true;
                         } else if nested.path.is_ident("version") {
                             meta.is_version = true;
                             meta.skip_input = true;
@@ -1718,6 +1835,29 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                 _ => {}
             }
         }
+    }
+
+    if meta.description.is_none() {
+        meta.description = semantic_doc_description(&field.attrs)?.or_else(|| {
+            field
+                .ident
+                .as_ref()
+                .map(|ident| humanize_identifier(&ident.to_string()))
+        });
+    }
+    if meta.sensitive {
+        if meta
+            .classification
+            .as_deref()
+            .is_some_and(|value| value != "secret")
+        {
+            return Err(syn::Error::new_spanned(
+                field,
+                "sensitive fields cannot declare a classification below secret",
+            ));
+        }
+        meta.classification = Some("secret".to_owned());
+        meta.non_exportable = true;
     }
 
     Ok(meta)
@@ -2175,7 +2315,19 @@ fn generate_entity_impl(
         .unwrap_or_else(|| quote! { None });
     let graphql_rename_fields = entity_meta.graphql_rename_fields.as_deref();
     let serde_rename_all = entity_meta.serde_rename_all.as_deref();
-    let entity_description = entity_meta.description.as_deref().unwrap_or("");
+    let entity_description = entity_meta
+        .description
+        .clone()
+        .or(semantic_doc_description(&input.attrs)?)
+        .unwrap_or_else(|| humanize_identifier(&struct_name.to_string()));
+    validate_semantic_description(&entity_description, struct_name.span())?;
+    let entity_classification = if entity_meta.classification.is_empty() {
+        "internal"
+    } else {
+        entity_meta.classification.as_str()
+    };
+    let entity_classification_tokens =
+        semantic_classification_tokens(entity_classification, struct_name.span())?;
     let field_case_rule = selected_field_case_rule();
     let read_policy = entity_meta
         .read_policy
@@ -2397,6 +2549,10 @@ fn generate_entity_impl(
     let mut object_field_methods = Vec::new();
     let mut repository_field_policy_defs = Vec::new();
     let mut semantic_field_defs = Vec::new();
+    let semantic_argument_case = selected_argument_case();
+    let semantic_where_argument = apply_graphql_case("where", semantic_argument_case);
+    let semantic_order_by_argument = apply_graphql_case("order_by", semantic_argument_case);
+    let semantic_page_argument = apply_graphql_case("page", semantic_argument_case);
     let parsed_fields = collect_parsed_fields(fields.iter())?;
 
     for parsed_field in &parsed_fields {
@@ -2440,15 +2596,115 @@ fn generate_entity_impl(
                     .clone()
                     .unwrap_or_else(|| "Unknown".to_string());
                 if field_meta.read && !field_meta.is_private {
-                    let description = field_meta.description.as_deref().unwrap_or("");
+                    let description = field_meta
+                        .description
+                        .as_deref()
+                        .expect("field descriptions are resolved during parsing");
                     let is_multiple = field_meta.relation_multiple;
+                    let classification = field_meta
+                        .classification
+                        .as_deref()
+                        .unwrap_or(entity_classification);
+                    if semantic_classification_rank(classification)
+                        < semantic_classification_rank(entity_classification)
+                    {
+                        return Err(syn::Error::new_spanned(
+                            field,
+                            "field classification cannot weaken its entity classification",
+                        ));
+                    }
+                    let classification_tokens =
+                        semantic_classification_tokens(classification, field.span())?;
+                    let export_tokens = if field_meta.non_exportable || classification == "secret" {
+                        quote! { ::graphql_orm::graphql::orm::GraphqlSemanticExport::NeverExport }
+                    } else {
+                        quote! { ::graphql_orm::graphql::orm::GraphqlSemanticExport::Exportable }
+                    };
+                    let relationship_type = if is_multiple {
+                        quote! {
+                            ::graphql_orm::graphql::orm::GraphqlSemanticTypeRef::list(
+                                false,
+                                Some(::graphql_orm::graphql::orm::PaginationConfig::DEFAULT_MAX_LIMIT as u32),
+                                ::graphql_orm::graphql::orm::GraphqlSemanticTypeRef::named(
+                                    #target_type,
+                                    ::graphql_orm::graphql::orm::GraphqlSemanticTypeKind::Object,
+                                    false,
+                                ),
+                            )
+                        }
+                    } else {
+                        quote! {
+                            ::graphql_orm::graphql::orm::GraphqlSemanticTypeRef::named(
+                                #target_type,
+                                ::graphql_orm::graphql::orm::GraphqlSemanticTypeKind::Object,
+                                true,
+                            )
+                        }
+                    };
+                    let cardinality = if is_multiple {
+                        quote! { ::graphql_orm::graphql::orm::GraphqlSemanticRelationshipCardinality::Many }
+                    } else {
+                        quote! { ::graphql_orm::graphql::orm::GraphqlSemanticRelationshipCardinality::One }
+                    };
+                    let relationship_arguments = if is_multiple {
+                        quote! {
+                            vec![
+                                ::graphql_orm::graphql::orm::GraphqlSemanticArgumentDescriptor {
+                                    graphql_name: ::std::string::ToString::to_string(#semantic_where_argument),
+                                    description: ::std::string::ToString::to_string("Filter related records"),
+                                    type_ref: ::graphql_orm::graphql::orm::GraphqlSemanticTypeRef::named(
+                                        concat!(#target_type, "WhereInput"),
+                                        ::graphql_orm::graphql::orm::GraphqlSemanticTypeKind::Object,
+                                        true,
+                                    ),
+                                },
+                                ::graphql_orm::graphql::orm::GraphqlSemanticArgumentDescriptor {
+                                    graphql_name: ::std::string::ToString::to_string(#semantic_order_by_argument),
+                                    description: ::std::string::ToString::to_string("Order related records"),
+                                    type_ref: ::graphql_orm::graphql::orm::GraphqlSemanticTypeRef::list(
+                                        true,
+                                        Some(32),
+                                        ::graphql_orm::graphql::orm::GraphqlSemanticTypeRef::named(
+                                            concat!(#target_type, "OrderByInput"),
+                                            ::graphql_orm::graphql::orm::GraphqlSemanticTypeKind::Object,
+                                            true,
+                                        ),
+                                    ),
+                                },
+                                ::graphql_orm::graphql::orm::GraphqlSemanticArgumentDescriptor {
+                                    graphql_name: ::std::string::ToString::to_string(#semantic_page_argument),
+                                    description: ::std::string::ToString::to_string("Bound the related record page"),
+                                    type_ref: ::graphql_orm::graphql::orm::GraphqlSemanticTypeRef::named(
+                                        "PageInput",
+                                        ::graphql_orm::graphql::orm::GraphqlSemanticTypeKind::Object,
+                                        true,
+                                    ),
+                                },
+                            ]
+                        }
+                    } else {
+                        quote! { vec![] }
+                    };
+                    let has_field_policy = field_meta.read_policy.is_some();
                     semantic_field_defs.push(quote! {
                         ::graphql_orm::graphql::orm::GraphqlSemanticFieldMetadata {
-                            field_name: #graphql_name,
-                            description: #description,
-                            is_relationship: true,
-                            relationship_target: Some(#target_type),
-                            is_multiple: #is_multiple,
+                            field_name: ::std::string::ToString::to_string(#graphql_name),
+                            description: ::std::string::ToString::to_string(#description),
+                            type_ref: #relationship_type,
+                            selectable: true,
+                            filter_operators: vec![],
+                            sortable: false,
+                            groupable: false,
+                            aggregate_operators: vec![],
+                            aggregate_value_kind: None,
+                            relationship: Some(::graphql_orm::graphql::orm::GraphqlSemanticRelationshipDescriptor {
+                                target: ::std::string::ToString::to_string(#target_type),
+                                cardinality: #cardinality,
+                                arguments: #relationship_arguments,
+                            }),
+                            classification: #classification_tokens,
+                            export: #export_tokens,
+                            has_field_policy: #has_field_policy,
                         }
                     });
                 }
@@ -2588,14 +2844,132 @@ fn generate_entity_impl(
             serde_rename_all,
         );
         if field_meta.read && !field_meta.is_private {
-            let description = field_meta.description.as_deref().unwrap_or("");
+            let description = field_meta
+                .description
+                .as_deref()
+                .expect("field descriptions are resolved during parsing");
+            let classification = field_meta
+                .classification
+                .as_deref()
+                .unwrap_or(entity_classification);
+            if semantic_classification_rank(classification)
+                < semantic_classification_rank(entity_classification)
+            {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "field classification cannot weaken its entity classification",
+                ));
+            }
+            let classification_tokens =
+                semantic_classification_tokens(classification, field.span())?;
+            let export_tokens = if field_meta.non_exportable || classification == "secret" {
+                quote! { ::graphql_orm::graphql::orm::GraphqlSemanticExport::NeverExport }
+            } else {
+                quote! { ::graphql_orm::graphql::orm::GraphqlSemanticExport::Exportable }
+            };
+            let type_name =
+                type_path_last_ident(option_inner_type(field_type).unwrap_or(field_type))
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+            let is_numeric = matches!(
+                type_name.as_str(),
+                "i8" | "i16"
+                    | "i32"
+                    | "i64"
+                    | "isize"
+                    | "u8"
+                    | "u16"
+                    | "u32"
+                    | "u64"
+                    | "usize"
+                    | "f32"
+                    | "f64"
+                    | "Decimal"
+            );
+            let is_float = matches!(type_name.as_str(), "f32" | "f64");
+            let is_decimal = type_name == "Decimal";
+            let is_string = type_name == "String";
+            let filter_operators = if field_meta.filter && field_meta.filterable.is_some() {
+                if is_string {
+                    quote! { vec![
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::Equal,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::NotEqual,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::In,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::Contains,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::StartsWith,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::EndsWith,
+                    ] }
+                } else if is_numeric || field_meta.is_date_field {
+                    quote! { vec![
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::Equal,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::NotEqual,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::In,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::LessThan,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::LessThanOrEqual,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::GreaterThan,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::GreaterThanOrEqual,
+                    ] }
+                } else {
+                    quote! { vec![
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::Equal,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::NotEqual,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::In,
+                    ] }
+                }
+            } else {
+                quote! { vec![] }
+            };
+            let groupable = !field_meta.is_json_field
+                && field_meta.spatial.is_none()
+                && !is_byte_vec_type(field_type);
+            let aggregate_operators = if is_numeric {
+                quote! { vec![
+                    ::graphql_orm::graphql::orm::GraphqlAggregateOperator::Count,
+                    ::graphql_orm::graphql::orm::GraphqlAggregateOperator::Min,
+                    ::graphql_orm::graphql::orm::GraphqlAggregateOperator::Max,
+                    ::graphql_orm::graphql::orm::GraphqlAggregateOperator::Sum,
+                ] }
+            } else if groupable {
+                quote! { vec![
+                    ::graphql_orm::graphql::orm::GraphqlAggregateOperator::Count,
+                    ::graphql_orm::graphql::orm::GraphqlAggregateOperator::Min,
+                    ::graphql_orm::graphql::orm::GraphqlAggregateOperator::Max,
+                ] }
+            } else {
+                quote! { vec![::graphql_orm::graphql::orm::GraphqlAggregateOperator::Count] }
+            };
+            let aggregate_value_kind = if is_numeric {
+                if is_float {
+                    quote! { Some(::graphql_orm::graphql::orm::GraphqlAggregateValueKind::Floating) }
+                } else if is_decimal {
+                    quote! { Some(::graphql_orm::graphql::orm::GraphqlAggregateValueKind::Decimal) }
+                } else {
+                    quote! { Some(::graphql_orm::graphql::orm::GraphqlAggregateValueKind::Integral) }
+                }
+            } else if groupable {
+                quote! { Some(::graphql_orm::graphql::orm::GraphqlAggregateValueKind::Text) }
+            } else {
+                quote! { Some(::graphql_orm::graphql::orm::GraphqlAggregateValueKind::Count) }
+            };
+            let has_field_policy = field_meta.read_policy.is_some();
+            let sortable = field_meta.sortable && field_meta.order;
             semantic_field_defs.push(quote! {
                 ::graphql_orm::graphql::orm::GraphqlSemanticFieldMetadata {
-                    field_name: #graphql_name,
-                    description: #description,
-                    is_relationship: false,
-                    relationship_target: None,
-                    is_multiple: false,
+                    field_name: ::std::string::ToString::to_string(#graphql_name),
+                    description: ::std::string::ToString::to_string(#description),
+                    type_ref: ::graphql_orm::graphql::orm::parse_graphql_type(
+                        &<#field_type as ::graphql_orm::async_graphql::OutputType>::qualified_type_name(),
+                    ).expect("macro-generated public GraphQL field type must be valid"),
+                    selectable: true,
+                    filter_operators: #filter_operators,
+                    sortable: #sortable,
+                    groupable: #groupable,
+                    aggregate_operators: #aggregate_operators,
+                    aggregate_value_kind: #aggregate_value_kind,
+                    relationship: None,
+                    classification: #classification_tokens,
+                    export: #export_tokens,
+                    has_field_policy: #has_field_policy,
                 }
             });
         }
@@ -3117,6 +3491,10 @@ fn generate_entity_impl(
 
         if field_meta.read && !field_meta.input_only {
             let getter_name = field_name;
+            let description = field_meta
+                .description
+                .as_deref()
+                .expect("field descriptions are resolved during parsing");
             let subscribe_check = if field_meta.subscribe {
                 quote! {}
             } else {
@@ -3164,6 +3542,7 @@ fn generate_entity_impl(
                 )
             };
             object_field_methods.push(quote! {
+                #[doc = #description]
                 #[graphql(name = #graphql_name)]
                 async fn #getter_name(
                     &self,
@@ -3345,6 +3724,7 @@ fn generate_entity_impl(
         quote! {}
     } else {
         quote! {
+            #[doc = #entity_description]
             #[::graphql_orm::async_graphql::Object]
             impl #struct_name {
                 #(#object_field_methods)*
@@ -3433,16 +3813,17 @@ fn generate_entity_impl(
                 }
 
                 fn graphql_semantic_metadata() -> Option<&'static ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata> {
-                    static FIELDS: &[::graphql_orm::graphql::orm::GraphqlSemanticFieldMetadata] = &[
-                        #(#semantic_field_defs),*
-                    ];
-                    static METADATA: ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata =
+                    static METADATA: ::std::sync::OnceLock<
+                        ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata
+                    > = ::std::sync::OnceLock::new();
+                    Some(METADATA.get_or_init(|| {
                         ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata {
-                            entity_name: #struct_name_str,
-                            description: #entity_description,
-                            fields: FIELDS,
-                        };
-                    Some(&METADATA)
+                            entity_name: ::std::string::ToString::to_string(#struct_name_str),
+                            description: ::std::string::ToString::to_string(#entity_description),
+                            default_classification: #entity_classification_tokens,
+                            fields: vec![#(#semantic_field_defs),*].into_boxed_slice(),
+                        }
+                    }))
                 }
 
                 fn repository_field_policies() -> &'static [::graphql_orm::graphql::orm::RepositoryFieldPolicyDef] {
@@ -3825,16 +4206,17 @@ fn generate_entity_impl(
             }
 
             fn graphql_semantic_metadata() -> Option<&'static ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata> {
-                static FIELDS: &[::graphql_orm::graphql::orm::GraphqlSemanticFieldMetadata] = &[
-                    #(#semantic_field_defs),*
-                ];
-                static METADATA: ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata =
+                static METADATA: ::std::sync::OnceLock<
+                    ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata
+                > = ::std::sync::OnceLock::new();
+                Some(METADATA.get_or_init(|| {
                     ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata {
-                        entity_name: #struct_name_str,
-                        description: #entity_description,
-                        fields: FIELDS,
-                    };
-                Some(&METADATA)
+                        entity_name: ::std::string::ToString::to_string(#struct_name_str),
+                        description: ::std::string::ToString::to_string(#entity_description),
+                        default_classification: #entity_classification_tokens,
+                        fields: vec![#(#semantic_field_defs),*].into_boxed_slice(),
+                    }
+                }))
             }
 
 

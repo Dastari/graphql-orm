@@ -3021,38 +3021,6 @@ pub struct EntityMetadata {
     pub search: Option<&'static SearchIndexDef>,
 }
 
-/// Model- and documentation-facing semantic description of one public entity
-/// field. It contains no physical table/column identity or authorization
-/// policy details.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GraphqlSemanticFieldMetadata {
-    /// Exact public GraphQL field name.
-    pub field_name: &'static str,
-    /// Explicit host-authored semantic description, or an empty string.
-    pub description: &'static str,
-    /// Whether the field is an explicitly declared relationship.
-    pub is_relationship: bool,
-    /// Public target type for a relationship, when applicable.
-    pub relationship_target: Option<&'static str>,
-    /// Whether a relationship may return multiple records.
-    pub is_multiple: bool,
-}
-
-/// Semantic entity metadata suitable for generated documentation and reviewed
-/// AI tool-profile authoring.
-///
-/// This metadata is descriptive only. It never authorizes a field, selects a
-/// result, assigns disclosure classification, or enables an AI tool.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GraphqlEntitySemanticMetadata {
-    /// Public entity/type identity.
-    pub entity_name: &'static str,
-    /// Explicit host-authored entity description, or an empty string.
-    pub description: &'static str,
-    /// Public fields only, in declaration order.
-    pub fields: &'static [GraphqlSemanticFieldMetadata],
-}
-
 impl EntityMetadata {
     /// Build metadata for an entity without append-only retention maintenance.
     ///

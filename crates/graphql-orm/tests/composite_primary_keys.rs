@@ -144,15 +144,25 @@ mod sqlite_fixture {
         let schema = schema_builder(graphql_orm::db::Database::new(pool)).finish();
         let sdl = schema.sdl();
 
-        assert!(sdl.contains(
+        let without_descriptions = sdl
+            .split("\"\"\"")
+            .enumerate()
+            .filter_map(|(index, value)| (index % 2 == 0).then_some(value))
+            .collect::<String>();
+        let compact = without_descriptions
+            .chars()
+            .filter(|value| !value.is_whitespace())
+            .collect::<String>();
+        assert!(compact.contains(&
             "legacyLabourEntry(legacyObjectType: Int!, refNo: Int!, lineNum: Int!): LegacyLabourEntry"
+                .chars().filter(|value| !value.is_whitespace()).collect::<String>()
         ));
-        assert!(sdl.contains("singleKeyRecord(id: String!): SingleKeyRecord"));
+        assert!(compact.contains("singleKeyRecord(id:String!):SingleKeyRecord"));
         assert!(!sdl.contains("createLegacyLabourEntry("));
         assert!(!sdl.contains("updateLegacyLabourEntry("));
         assert!(!sdl.contains("deleteLegacyLabourEntry("));
-        assert!(sdl.contains(
-            "createSingleKeyRecord(input: CreateSingleKeyRecordInput!): SingleKeyRecordResult!"
+        assert!(compact.contains(
+            "createSingleKeyRecord(input:CreateSingleKeyRecordInput!):SingleKeyRecordResult!"
         ));
     }
 }

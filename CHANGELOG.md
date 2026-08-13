@@ -14,6 +14,38 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.22.0 - 2026-08-13
+
+Companion macros crate: `graphql-orm-macros` **0.22.0**. Backend-neutral
+semantic owner: `graphql-orm-operation-catalog` **0.2.0**.
+
+- Added a versioned, strict `GraphqlSemanticCatalog` containing public entity,
+  field, relationship, argument, type, capability, classification, export, and
+  generated/custom root-operation semantics. Canonical JSON fingerprints and
+  the optional router descriptor extension bind the complete descriptive graph.
+- `GraphQLEntity` now emits selectable/filterable/sortable/groupable/aggregate
+  facts, typed relationship cardinality and bounds, inherited classifications,
+  field-policy presence, and structural non-exportability. Private and
+  `read = false` fields remain absent; `sensitive` fields become `Secret` and
+  `NeverExport`.
+- Generated root and object documentation now use the same bounded semantic
+  descriptions. `#[graphql_orm_custom_operations]` publishes equivalent
+  metadata beside handwritten resolvers, and `schema_roots!` can compose those
+  declarations through `semantic_custom_operations`. Handwritten result
+  objects derive `GraphQLSemanticObject` and compose through `semantic_types`.
+- Subscription semantics truthfully distinguish best-effort delivery from a
+  bounded replay-then-live declaration. Generated broadcast subscriptions
+  remain best-effort; a replayable custom declaration still requires a
+  separately registered authoritative runtime source.
+- Added canonical aggregate semantic enums and the opt-in `Aggregate`
+  operation category for the typed aggregate implementation to consume.
+
+The semantic catalogue is discovery and disclosure-shape metadata only. It
+does not authorize resolvers, fields, rows, provider egress, or database work.
+There is no database, stored-data, backup, or migration-history change. SDL
+descriptions and semantic/catalogue fingerprints change where new generated
+documentation participates.
+
 ## 0.21.1 - 2026-08-13
 
 Companion macros crate: `graphql-orm-macros` **0.21.1** under the aligned

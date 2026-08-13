@@ -15,15 +15,17 @@ generated GraphQL resolver metadata emitted by `GraphQLOperations` and resolved
 by `schema_roots!`. It is useful to deployment tooling, drift checks, and
 optional router-protocol adapters that should not select a database backend.
 
-It is discovery metadata only. A catalog does not prove a host schema contains
-custom roots, authorize a resolver, bind a GraphQL document or result
-projection, classify data, or replace row/field/database policy.
+It is discovery metadata only. `GraphqlOperationCatalog` does not prove a host
+schema contains custom roots, authorize a resolver, or bind a GraphQL document.
+`GraphqlSemanticCatalog` additionally carries reviewed classification and
+structural export facts, but those facts do not authorize disclosure or replace
+row, field, resolver, provider-egress, or database policy.
 
 ## Install
 
 ```toml
 [dependencies]
-graphql-orm-operation-catalog = { git = "https://github.com/Dastari/graphql-orm.git", rev = "fac98d99e64c841a34d2d0096cdf928c3f9a7c6f", version = "0.1.0" }
+graphql-orm-operation-catalog = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.2.0" }
 serde_json = "1"
 ```
 
@@ -49,8 +51,11 @@ envelope with algorithm identifiers and all three fingerprints:
 It is executed by `cargo test -p graphql-orm --example operation_catalog`.
 
 `GraphqlOperationCatalog` and its descriptor types are intentionally not a
-wire format. Export a versioned host-owned envelope as above rather than relying
-on a private struct layout.
+wire format. `GraphqlSemanticCatalog` is the separate strict, versioned wire
+contract for safe public descriptions and typed API shape. Use
+`graphql_orm_semantic_catalog()` from `schema_roots!`, then call
+`extension_payload()` or, with `router-protocol`,
+`router_protocol_extension()`.
 
 ## Compose descriptors in generated code
 
@@ -75,6 +80,10 @@ read-only policy.
 | `GeneratedGraphqlOperationCategory` | stable generated category such as `list`, `single_read`, `create`, `update_many`, or `subscription` |
 | `GraphqlAuthorizationRequirement` | `Public`, `Authenticated`, all-of/any-of scope declarations, or explicit `SubgraphOnly` policy explanation |
 | `GraphqlOperationCatalog` | deterministic, root-exposure-resolved operation collection and three fingerprints |
+| `GraphqlSemanticCatalog` | strict versioned public entity/field/relationship/root semantic graph |
+| `GraphqlSemanticClassification` / `GraphqlSemanticExport` | inherited classification and structural provider-export eligibility; neither authorizes disclosure |
+| `GraphqlAggregateOperator` / `GraphqlAggregateValueKind` | canonical portable aggregate capabilities used by field and generated-operation metadata |
+| `GraphqlSubscriptionObservationDescriptor` | truthful best-effort or replay-then-live subscription semantics plus bounded wait and closed condition capabilities; metadata alone does not register a runtime replay source |
 | discovery fingerprint | algorithm `graphql-orm-sha256-len-v1`; detects generated declaration/exposure drift, not authorization or disclosure |
 | authorization fingerprint | algorithm `graphql-orm-authorization-sha256-len-v2`; binds core static authorization separately |
 | router-export fingerprint | algorithm `graphql-orm-router-export-sha256-len-v1`; combines the previous two for protocol adapters |

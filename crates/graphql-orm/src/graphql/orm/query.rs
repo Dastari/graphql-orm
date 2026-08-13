@@ -72,7 +72,7 @@ pub trait Entity: DatabaseEntity + DatabaseSchema + EntityRelations + DatabaseSe
 
     /// Returns optional public semantic descriptions emitted by the derive.
     /// Handwritten implementations remain source-compatible and return none.
-    fn graphql_semantic_metadata() -> Option<&'static super::core::GraphqlEntitySemanticMetadata> {
+    fn graphql_semantic_metadata() -> Option<&'static super::GraphqlEntitySemanticMetadata> {
         None
     }
 

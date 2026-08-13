@@ -16,6 +16,21 @@ use crate::naming::{
 use std::collections::HashMap;
 use syn::spanned::Spanned;
 
+fn semantic_argument_description(value: &str) -> String {
+    let mut output = String::new();
+    for (index, character) in value.chars().enumerate() {
+        if index > 0 && character.is_uppercase() {
+            output.push(' ');
+        }
+        if index == 0 {
+            output.extend(character.to_uppercase());
+        } else {
+            output.extend(character.to_lowercase());
+        }
+    }
+    output
+}
+
 #[derive(Clone)]
 enum FixedOperationAuthorization {
     AllScopes(Vec<syn::LitStr>),
@@ -1748,6 +1763,25 @@ pub(crate) fn generate_graphql_operations(
     let id_arg_name = apply_graphql_case("id", argument_case);
     let input_arg_name = apply_graphql_case("input", argument_case);
     let filter_arg_name = apply_graphql_case("filter", argument_case);
+    let where_arg_description = semantic_argument_description(&where_arg_name);
+    let search_arg_description = semantic_argument_description(&search_arg_name);
+    let order_by_arg_description = semantic_argument_description(&order_by_arg_name);
+    let page_arg_description = semantic_argument_description(&page_arg_name);
+    let id_arg_description = semantic_argument_description(&id_arg_name);
+    let input_arg_description = semantic_argument_description(&input_arg_name);
+    let filter_arg_description = semantic_argument_description(&filter_arg_name);
+    let list_operation_description = format!("List {struct_name_str} records");
+    let single_operation_description = format!("Read one {struct_name_str} records");
+    let search_operation_description = format!("Search {struct_name_str} records");
+    let keyset_operation_description = format!("Page through {struct_name_str} records");
+    let create_operation_description = format!("Create one {struct_name_str} records");
+    let upsert_operation_description = format!("Create or update one {struct_name_str} records");
+    let update_operation_description = format!("Update one {struct_name_str} records");
+    let update_many_operation_description = format!("Update matching {struct_name_str} records");
+    let delete_operation_description = format!("Delete one {struct_name_str} records");
+    let delete_many_operation_description = format!("Delete matching {struct_name_str} records");
+    let subscription_operation_description =
+        format!("Observe changes to {struct_name_str} records");
     let page_info_field_name = apply_graphql_case("pageInfo", field_case);
     let change_kind_field_name = apply_graphql_case("changeKind", field_case);
     let source_entity_field_name = apply_graphql_case("sourceEntity", field_case);
@@ -1802,7 +1836,10 @@ pub(crate) fn generate_graphql_operations(
     let single_query_args = single_query_argument_specs
         .iter()
         .map(|(field_name, field_type, arg_name)| {
-            quote! { #[graphql(name = #arg_name)] #field_name: #field_type, }
+            let description = semantic_argument_description(arg_name);
+            quote! {
+                #[graphql(name = #arg_name, desc = #description)] #field_name: #field_type,
+            }
         })
         .collect::<Vec<_>>();
     let single_query_key_init = if has_composite_primary_key {
@@ -3627,11 +3664,12 @@ pub(crate) fn generate_graphql_operations(
     };
     let upsert_graphql_method = if graphql_upsert_enabled {
         quote! {
+            #[doc = #upsert_operation_description]
             #[graphql(name = #upsert_mutation_name, #upsert_requires_scopes #authenticated_directive)]
             async fn upsert(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = #input_arg_name)] input: #graphql_create_input,
+                #[graphql(name = #input_arg_name, desc = #input_arg_description)] input: #graphql_create_input,
             ) -> ::graphql_orm::async_graphql::Result<#upsert_result_type> {
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                 #upsert_scope_enforcement
@@ -4351,12 +4389,13 @@ pub(crate) fn generate_graphql_operations(
     };
     let keyset_graphql_method = if keyset_parts.is_some() {
         quote! {
+            #[doc = #keyset_operation_description]
             #[graphql(name = #keyset_query_name, #keyset_list_requires_scopes #authenticated_directive)]
             async fn keyset(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = #where_arg_name)] where_input: Option<#where_input>,
-                #[graphql(name = #page_arg_name)] page: ::graphql_orm::graphql::pagination::KeysetPageInput,
+                #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: Option<#where_input>,
+                #[graphql(name = #page_arg_name, desc = #page_arg_description)] page: ::graphql_orm::graphql::pagination::KeysetPageInput,
             ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                 #keyset_list_scope_enforcement
@@ -4429,13 +4468,14 @@ pub(crate) fn generate_graphql_operations(
 
     let search_query_method = if has_search {
         quote! {
+            #[doc = #search_operation_description]
             #[graphql(name = #search_query_name, #search_requires_scopes #authenticated_directive)]
             async fn search(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = #search_arg_name)] search: ::graphql_orm::graphql::filters::SearchInput,
-                #[graphql(name = #where_arg_name)] where_input: Option<#where_input>,
-                #[graphql(name = #page_arg_name)] page: Option<::graphql_orm::graphql::orm::PageInput>,
+                #[graphql(name = #search_arg_name, desc = #search_arg_description)] search: ::graphql_orm::graphql::filters::SearchInput,
+                #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: Option<#where_input>,
+                #[graphql(name = #page_arg_name, desc = #page_arg_description)] page: Option<::graphql_orm::graphql::orm::PageInput>,
             ) -> ::graphql_orm::async_graphql::Result<#search_connection_type> {
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                 #search_scope_enforcement
@@ -4745,11 +4785,12 @@ pub(crate) fn generate_graphql_operations(
 
             #[::graphql_orm::async_graphql::Object]
             impl #mutations_struct {
+                #[doc = #create_operation_description]
                 #[graphql(name = #create_mutation_name, #create_requires_scopes #authenticated_directive)]
                 async fn create(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
-                    #[graphql(name = #input_arg_name)] input: #graphql_create_input,
+                    #[graphql(name = #input_arg_name, desc = #input_arg_description)] input: #graphql_create_input,
                 ) -> ::graphql_orm::async_graphql::Result<#result_type> {
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                     #create_scope_enforcement
@@ -4782,11 +4823,12 @@ pub(crate) fn generate_graphql_operations(
 
             #[::graphql_orm::async_graphql::Subscription]
             impl #subscriptions_struct {
+                #[doc = #subscription_operation_description]
                 #[graphql(name = #subscription_name, #subscription_requires_scopes #authenticated_directive)]
                 async fn on_changed(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
-                    #[graphql(name = #filter_arg_name)] _filter: Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>,
+                    #[graphql(name = #filter_arg_name, desc = #filter_arg_description)] _filter: Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>,
                 ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = #changed_event>> {
                     use ::graphql_orm::futures::StreamExt;
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
@@ -5904,9 +5946,11 @@ pub(crate) fn generate_graphql_operations(
     };
 
     let argument_descriptor = |graphql_name: &str, rust_type: proc_macro2::TokenStream| {
+        let description = semantic_argument_description(graphql_name);
         quote! {
-            ::graphql_orm::graphql::orm::GraphqlOperationArgumentDescriptor::generated(
+            ::graphql_orm::graphql::orm::GraphqlOperationArgumentDescriptor::generated_with_description(
                 #graphql_name,
+                #description,
                 stringify!(#rust_type),
                 <#rust_type as ::graphql_orm::async_graphql::InputType>
                     ::qualified_type_name(),
@@ -6204,13 +6248,14 @@ pub(crate) fn generate_graphql_operations(
 
             #[::graphql_orm::async_graphql::Object]
             impl #queries_struct {
+                #[doc = #list_operation_description]
                 #[graphql(name = #list_query_name, #list_requires_scopes #authenticated_directive)]
                 async fn list(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
-                    #[graphql(name = #where_arg_name)] where_input: Option<#where_input>,
-                    #[graphql(name = #order_by_arg_name)] order_by: Option<Vec<#order_by_input>>,
-                    #[graphql(name = #page_arg_name)] page: Option<::graphql_orm::graphql::orm::PageInput>,
+                    #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: Option<#where_input>,
+                    #[graphql(name = #order_by_arg_name, desc = #order_by_arg_description)] order_by: Option<Vec<#order_by_input>>,
+                    #[graphql(name = #page_arg_name, desc = #page_arg_description)] page: Option<::graphql_orm::graphql::orm::PageInput>,
                 ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
                     use ::graphql_orm::graphql::orm::{DatabaseOrderBy, EntityQuery};
 
@@ -6328,6 +6373,7 @@ pub(crate) fn generate_graphql_operations(
                 #search_query_method
                 #keyset_graphql_method
 
+                #[doc = #single_operation_description]
                 #[graphql(name = #single_query_name, #single_read_requires_scopes #authenticated_directive)]
                 async fn get_by_id(
                     &self,
@@ -6591,13 +6637,14 @@ pub(crate) fn generate_graphql_operations(
         #[::graphql_orm::async_graphql::Object]
         impl #queries_struct {
             /// Get a list of #plural_name with optional filtering, sorting, and pagination
+            #[doc = #list_operation_description]
             #[graphql(name = #list_query_name, #list_requires_scopes #authenticated_directive)]
             async fn list(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = #where_arg_name)] where_input: Option<#where_input>,
-                #[graphql(name = #order_by_arg_name)] order_by: Option<Vec<#order_by_input>>,
-                #[graphql(name = #page_arg_name)] page: Option<::graphql_orm::graphql::orm::PageInput>,
+                #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: Option<#where_input>,
+                #[graphql(name = #order_by_arg_name, desc = #order_by_arg_description)] order_by: Option<Vec<#order_by_input>>,
+                #[graphql(name = #page_arg_name, desc = #page_arg_description)] page: Option<::graphql_orm::graphql::orm::PageInput>,
             ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, DatabaseOrderBy, EntityQuery, FromSqlRow};
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
@@ -6715,6 +6762,7 @@ pub(crate) fn generate_graphql_operations(
             #keyset_graphql_method
 
             /// Get a single #struct_name_str by ID
+            #[doc = #single_operation_description]
             #[graphql(name = #single_query_name, #single_read_requires_scopes #authenticated_directive)]
             async fn get_by_id(
                 &self,
@@ -6777,11 +6825,12 @@ pub(crate) fn generate_graphql_operations(
         #[::graphql_orm::async_graphql::Object]
         impl #mutations_struct {
             /// Create a new #struct_name_str
+            #[doc = #create_operation_description]
             #[graphql(name = #create_mutation_name, #create_requires_scopes #authenticated_directive)]
             async fn create(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = #input_arg_name)] input: #graphql_create_input,
+                #[graphql(name = #input_arg_name, desc = #input_arg_description)] input: #graphql_create_input,
             ) -> ::graphql_orm::async_graphql::Result<#result_type> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
 
@@ -6884,12 +6933,13 @@ pub(crate) fn generate_graphql_operations(
             #upsert_graphql_method
 
             /// Update an existing #struct_name_str
+            #[doc = #update_operation_description]
             #[graphql(name = #update_mutation_name, #update_requires_scopes #authenticated_directive)]
             async fn update(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = #id_arg_name)] id: #pk_type,
-                #[graphql(name = #input_arg_name)] input: #graphql_update_input,
+                #[graphql(name = #id_arg_name, desc = #id_arg_description)] id: #pk_type,
+                #[graphql(name = #input_arg_name, desc = #input_arg_description)] input: #graphql_update_input,
             ) -> ::graphql_orm::async_graphql::Result<#result_type> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
 
@@ -7041,11 +7091,12 @@ pub(crate) fn generate_graphql_operations(
             }
 
             /// Delete a #struct_name_str
+            #[doc = #delete_operation_description]
             #[graphql(name = #delete_mutation_name, #delete_requires_scopes #authenticated_directive)]
             async fn delete(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = #id_arg_name)] id: #pk_type,
+                #[graphql(name = #id_arg_name, desc = #id_arg_description)] id: #pk_type,
             ) -> ::graphql_orm::async_graphql::Result<#result_type> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, SqlValue};
 
@@ -7159,12 +7210,13 @@ pub(crate) fn generate_graphql_operations(
             }
 
             /// Update multiple #plural_name matching the given Where filter
+            #[doc = #update_many_operation_description]
             #[graphql(name = #update_many_mutation_name, #update_many_requires_scopes #authenticated_directive)]
             async fn update_many(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = #where_arg_name)] where_input: Option<#where_input>,
-                #[graphql(name = #input_arg_name)] input: #graphql_update_input,
+                #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: Option<#where_input>,
+                #[graphql(name = #input_arg_name, desc = #input_arg_description)] input: #graphql_update_input,
             ) -> ::graphql_orm::async_graphql::Result<#update_many_result_type> {
                 use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
 
@@ -7199,11 +7251,12 @@ pub(crate) fn generate_graphql_operations(
             }
 
             /// Delete multiple #plural_name matching the given Where filter
+            #[doc = #delete_many_operation_description]
             #[graphql(name = #delete_many_mutation_name, #delete_many_requires_scopes #authenticated_directive)]
             async fn delete_many(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = #where_arg_name)] where_input: Option<#where_input>,
+                #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: Option<#where_input>,
             ) -> ::graphql_orm::async_graphql::Result<#delete_many_result_type> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow};
 
@@ -7248,11 +7301,12 @@ pub(crate) fn generate_graphql_operations(
         #[::graphql_orm::async_graphql::Subscription]
         impl #subscriptions_struct {
             /// Subscribe to #struct_name_str changes
+            #[doc = #subscription_operation_description]
             #[graphql(name = #subscription_name, #subscription_requires_scopes #authenticated_directive)]
             async fn on_changed(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
-                #[graphql(name = #filter_arg_name)] _filter: Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>,
+                #[graphql(name = #filter_arg_name, desc = #filter_arg_description)] _filter: Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>,
             ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = #changed_event>> {
                 use ::graphql_orm::futures::StreamExt;
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;

@@ -1,0 +1,5 @@
+error: public semantic-object lists require #[graphql_orm(maximum_items = ...)]
+ --> tests/ui/semantic_object_unbounded_list.rs:5:13
+  |
+5 |     values: Vec<String>,
+  |             ^^^^^^^^^^^

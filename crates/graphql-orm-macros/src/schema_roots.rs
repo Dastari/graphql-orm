@@ -128,6 +128,40 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             }
         })
         .collect::<Vec<_>>();
+    let semantic_entity_items = entities
+        .iter()
+        .map(|entity| {
+            quote! {
+                <#entity as ::graphql_orm::graphql::orm::Entity>
+                    ::graphql_semantic_metadata()
+                    .expect("GraphQLEntity must emit semantic metadata")
+                    .clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    let semantic_type_items = args
+        .semantic_types
+        .iter()
+        .map(|semantic_type| {
+            quote! {
+                <#semantic_type as ::graphql_orm::graphql::orm::GraphqlSemanticObjectMetadata>
+                    ::graphql_semantic_object()
+                    .clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    let semantic_custom_operation_items = args
+        .semantic_custom_operations
+        .iter()
+        .map(|root| {
+            quote! {
+                <#root as ::graphql_orm::graphql::orm::GraphqlCustomOperationMetadata>
+                    ::graphql_custom_operations()
+                    .iter()
+                    .cloned()
+            }
+        })
+        .collect::<Vec<_>>();
     let operation_catalog_helper = quote! {
         /// Returns deterministic generated resolver metadata for this schema root.
         ///
@@ -152,6 +186,30 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 ::graphql_orm::graphql::orm::GraphqlOperationCatalog::compose(
                     groups.iter().copied(),
                 )
+            })
+        }
+
+        /// Returns the canonical public GraphQL semantic catalogue for this
+        /// generated schema root.
+        ///
+        /// The catalogue is descriptive, fingerprinted metadata. It grants no
+        /// resolver, field, row, database, or provider authority.
+        pub fn graphql_orm_semantic_catalog(
+        ) -> &'static ::graphql_orm::graphql::orm::GraphqlSemanticCatalog {
+            static CATALOG: ::std::sync::OnceLock<
+                ::graphql_orm::graphql::orm::GraphqlSemanticCatalog
+            > = ::std::sync::OnceLock::new();
+            CATALOG.get_or_init(|| {
+                ::graphql_orm::graphql::orm::GraphqlSemanticCatalog::compose_with_custom(
+                    ::std::iter::empty::<
+                        ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata
+                    >()
+                        .chain(vec![#(#semantic_entity_items),*])
+                        .chain(vec![#(#semantic_type_items),*]),
+                    graphql_orm_operation_catalog(),
+                    ::std::iter::empty()
+                        #(.chain(#semantic_custom_operation_items))*
+                ).expect("macro-generated GraphQL semantic catalogue must validate")
             })
         }
     };
@@ -533,6 +591,8 @@ struct SchemaRootsArgs {
     extra_mutation_types: Vec<Ident>,
     extra_query_types: Vec<Ident>,
     extra_subscription_types: Vec<Ident>,
+    semantic_custom_operations: Vec<Ident>,
+    semantic_types: Vec<Ident>,
     generated_mutation_allowlist: Vec<Ident>,
     generated_mutation_denylist: Vec<Ident>,
 }
@@ -587,6 +647,8 @@ impl Parse for SchemaRootsArgs {
         let mut extra_mutation_types = None;
         let mut extra_query_types = None;
         let mut extra_subscription_types = None;
+        let mut semantic_custom_operations = None;
+        let mut semantic_types = None;
         let mut generated_mutation_allowlist = None;
         let mut generated_mutation_allowlist_span = None;
         let mut generated_mutation_denylist = None;
@@ -640,6 +702,16 @@ impl Parse for SchemaRootsArgs {
                 let content;
                 syn::bracketed!(content in input);
                 extra_subscription_types = Some(parse_list(&content)?);
+            } else if label == "semantic_custom_operations" {
+                reject_duplicate(&semantic_custom_operations, &label)?;
+                let content;
+                syn::bracketed!(content in input);
+                semantic_custom_operations = Some(parse_list(&content)?);
+            } else if label == "semantic_types" {
+                reject_duplicate(&semantic_types, &label)?;
+                let content;
+                syn::bracketed!(content in input);
+                semantic_types = Some(parse_list(&content)?);
             } else if label == "generated_mutation_allowlist" {
                 reject_duplicate(&generated_mutation_allowlist, &label)?;
                 let content;
@@ -655,7 +727,7 @@ impl Parse for SchemaRootsArgs {
             } else {
                 return Err(syn::Error::new(
                     label.span(),
-                    "expected one of `backend`, `schema_policy`, `auth`, `generated_mutations`, `query_custom_ops`, `entities`, `extra_query_types`, `extra_mutation_types`, `extra_subscription_types`, `generated_mutation_allowlist`, or `generated_mutation_denylist`",
+                    "expected one of `backend`, `schema_policy`, `auth`, `generated_mutations`, `query_custom_ops`, `entities`, `extra_query_types`, `extra_mutation_types`, `extra_subscription_types`, `semantic_custom_operations`, `semantic_types`, `generated_mutation_allowlist`, or `generated_mutation_denylist`",
                 ));
             }
 
@@ -672,6 +744,8 @@ impl Parse for SchemaRootsArgs {
         let extra_mutation_types = extra_mutation_types.unwrap_or_default();
         let extra_query_types = extra_query_types.unwrap_or_default();
         let extra_subscription_types = extra_subscription_types.unwrap_or_default();
+        let semantic_custom_operations = semantic_custom_operations.unwrap_or_default();
+        let semantic_types = semantic_types.unwrap_or_default();
         let (generated_mutations, generated_mutations_span) = generated_mutations.unwrap_or((
             GeneratedMutationExposure::All,
             proc_macro2::Span::mixed_site(),
@@ -729,6 +803,29 @@ impl Parse for SchemaRootsArgs {
             }
         }
 
+        let composed_custom_types = query_custom_ops
+            .iter()
+            .map(|entity| format!("{entity}CustomOperations"))
+            .chain(extra_query_types.iter().map(ToString::to_string))
+            .chain(extra_mutation_types.iter().map(ToString::to_string))
+            .chain(extra_subscription_types.iter().map(ToString::to_string))
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut declared_semantic_roots = std::collections::BTreeSet::new();
+        for root in &semantic_custom_operations {
+            if !declared_semantic_roots.insert(root.to_string()) {
+                return Err(syn::Error::new(
+                    root.span(),
+                    "duplicate `semantic_custom_operations` entry",
+                ));
+            }
+            if !composed_custom_types.contains(&root.to_string()) {
+                return Err(syn::Error::new(
+                    root.span(),
+                    "`semantic_custom_operations` entries must also be composed through a custom root list",
+                ));
+            }
+        }
+
         Ok(SchemaRootsArgs {
             backend,
             schema_policy,
@@ -739,6 +836,8 @@ impl Parse for SchemaRootsArgs {
             extra_mutation_types,
             extra_query_types,
             extra_subscription_types,
+            semantic_custom_operations,
+            semantic_types,
             generated_mutation_allowlist,
             generated_mutation_denylist,
         })

@@ -1,0 +1,6 @@
+error: sensitive fields cannot declare a classification below secret
+ --> tests/ui/semantic_sensitive_downgrade.rs:8:5
+  |
+8 | /     #[graphql_orm(sensitive, classification = "internal")]
+9 | |     secret: String,
+  | |__________________^

@@ -13,6 +13,59 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.22.0 canonical GraphQL semantic catalogue
+
+Update `graphql-orm` and `graphql-orm-macros` together to 0.22.0 at one
+reviewed full Git revision. Backend-neutral consumers use
+`graphql-orm-operation-catalog` 0.2.0.
+
+Existing entity and operation declarations continue to compile. The former
+minimal borrowed `GraphqlEntitySemanticMetadata` values are now owned,
+serializable catalogue values with typed field capabilities. Code constructing
+those structs directly must migrate to the expanded fields or, preferably,
+consume `Entity::graphql_semantic_metadata()` and
+`graphql_orm_semantic_catalog()`.
+
+Descriptions resolve from an explicit semantic `description`, then Rust doc
+comments, then a stable humanized public-name fallback. Use the same doc text
+when an entity also derives `async_graphql::SimpleObject`; that external derive
+owns its SDL field documentation. Sensitive fields are now structurally
+`Secret` and `NeverExport`, while `private` and `read = false` fields remain
+absent.
+
+Handwritten resolver roots can publish canonical metadata beside their
+`async-graphql` impl:
+
+```rust,ignore
+#[derive(Default)]
+struct HealthQueries;
+
+#[graphql_orm_custom_operations(kind = "query", authorization = true)]
+#[async_graphql::Object]
+impl HealthQueries {
+    /// Returns current service health.
+    async fn health(&self) -> String {
+        "ok".to_owned()
+    }
+}
+
+schema_roots! {
+    entities: [Account],
+    extra_query_types: [HealthQueries],
+    semantic_custom_operations: [HealthQueries],
+    semantic_types: [],
+}
+```
+
+The catalogue and per-operation semantic fingerprints intentionally change
+when public descriptions, fields, relationships, capabilities, classifications
+or exposure change. They are drift evidence, never authority. There is no
+database, stored-data, backup, migration-history, or AI schema-module migration.
+Generated broadcast subscriptions are now described as best-effort and are not
+eligible for a durable wait. A custom subscription may declare bounded
+`replay_then_live` semantics only beside its resolver; downstream runtimes must
+still register and verify the matching authoritative cursor/watermark source.
+
 ## 0.21.1 agql-auth 0.15 session-bound delegation alignment
 
 Update `graphql-orm` and `graphql-orm-macros` together to 0.21.1 at one

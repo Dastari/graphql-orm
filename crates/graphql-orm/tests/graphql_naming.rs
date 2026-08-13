@@ -55,24 +55,39 @@ async fn generated_graphql_schema_uses_pascal_case_types_and_camel_case_fields()
     let schema = schema_builder(graphql_orm::db::Database::new(pool)).finish();
 
     let sdl = schema.sdl();
+    let without_descriptions = sdl
+        .split("\"\"\"")
+        .enumerate()
+        .filter_map(|(index, value)| (index % 2 == 0).then_some(value))
+        .collect::<String>();
+    let compact_sdl = without_descriptions
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
 
     assert!(sdl.contains("type Collection "));
     assert!(sdl.contains("type CollectionResult "));
     assert!(sdl.contains("type CollectionConnection "));
     assert!(sdl.contains("type CollectionEdge "));
 
-    assert!(sdl.contains("collections(where: CollectionWhereInput, orderBy: [CollectionOrderByInput!], page: PageInput): CollectionConnection!"));
-    assert!(sdl.contains("collection(id: String!): Collection"));
-    assert!(sdl.contains("createCollection(input: CreateCollectionInput!): CollectionResult!"));
+    assert!(compact_sdl.contains("collections(where:CollectionWhereInput,orderBy:[CollectionOrderByInput!],page:PageInput):CollectionConnection!"));
+    assert!(compact_sdl.contains("collection(id:String!):Collection"));
     assert!(
-        sdl.contains("upsertCollection(input: CreateCollectionInput!): UpsertCollectionResult!")
+        compact_sdl.contains("createCollection(input:CreateCollectionInput!):CollectionResult!")
     );
-    assert!(sdl.contains(
-        "updateCollection(id: String!, input: UpdateCollectionInput!): CollectionResult!"
-    ));
-    assert!(sdl.contains("deleteCollection(id: String!): CollectionResult!"));
     assert!(
-        sdl.contains("collectionChanged(filter: SubscriptionFilterInput): CollectionChangedEvent!")
+        compact_sdl
+            .contains("upsertCollection(input:CreateCollectionInput!):UpsertCollectionResult!")
+    );
+    assert!(
+        compact_sdl.contains(
+            "updateCollection(id:String!,input:UpdateCollectionInput!):CollectionResult!"
+        )
+    );
+    assert!(compact_sdl.contains("deleteCollection(id:String!):CollectionResult!"));
+    assert!(
+        compact_sdl
+            .contains("collectionChanged(filter:SubscriptionFilterInput):CollectionChangedEvent!")
     );
 
     assert!(sdl.contains("type CollectionResult {"));
@@ -91,7 +106,10 @@ async fn generated_graphql_schema_uses_pascal_case_types_and_camel_case_fields()
     assert!(sdl.contains("\taction: ChangeAction!"));
     assert!(sdl.contains("\tid: String!"));
 
-    assert!(sdl.contains("type Collection {\n\tid: String!\n\tname: String!\n\tslug: String!\n\tcoverStoredFileId: UUID"));
+    assert!(
+        compact_sdl
+            .contains("typeCollection{id:String!name:String!slug:String!coverStoredFileId:UUID")
+    );
     assert!(sdl.contains(
         "input CreateCollectionInput {\n\tname: String!\n\tslug: String!\n\tcoverStoredFileId: UUID"
     ));

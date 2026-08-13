@@ -1,0 +1,7 @@
+error: kind must be query, mutation, or subscription
+ --> tests/ui/semantic_custom_invalid_kind.rs:6:1
+  |
+6 | #[graphql_orm_custom_operations(kind = "command")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `graphql_orm_custom_operations` (in Nightly builds, run with -Z macro-backtrace for more info)

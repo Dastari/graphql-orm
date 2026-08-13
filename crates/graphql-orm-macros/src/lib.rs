@@ -12,6 +12,8 @@
 //! - `#[derive(RepositoryEntity)]` - Generate persisted repository APIs with no GraphQL types
 //! - `#[derive(GraphQLRelations)]` - Generate relation loading with look_ahead support
 //! - `#[derive(GraphQLOperations)]` - Generate Query/Mutation/Subscription structs
+//! - `#[derive(GraphQLSemanticObject)]` - Describe handwritten result objects
+//! - `#[graphql_orm_custom_operations]` - Describe handwritten root resolvers
 //! - `schema_roots!` - Generate root query/mutation/subscription types for a set of entities
 //!
 //! The generated Rust names remain `QueryRoot`, `MutationRoot`, and
@@ -175,6 +177,7 @@ use syn::{
 };
 
 mod backend;
+mod custom_operations;
 mod entity;
 mod mutation_result;
 mod naming;
@@ -182,6 +185,7 @@ mod operations;
 mod relations;
 mod repository;
 mod schema_roots;
+mod semantic_object;
 
 #[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mssql")))]
 compile_error!("Enable at least one database backend feature: sqlite, postgres, or mssql.");
@@ -498,6 +502,16 @@ pub fn derive_graphql_operations(input: TokenStream) -> TokenStream {
     }
 }
 
+#[proc_macro_derive(GraphQLSemanticObject, attributes(graphql, graphql_orm))]
+/// Emits safe public field semantics for a handwritten GraphQL object.
+pub fn derive_graphql_semantic_object(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match semantic_object::expand(&input) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
 #[proc_macro]
 /// Generate schema root aliases for a set of generated operation types.
 ///
@@ -505,4 +519,13 @@ pub fn derive_graphql_operations(input: TokenStream) -> TokenStream {
 /// the macro can choose the correct root behavior.
 pub fn schema_roots(input: TokenStream) -> TokenStream {
     schema_roots::expand(input)
+}
+
+#[proc_macro_attribute]
+/// Emits canonical semantic metadata beside an `async-graphql` custom root impl.
+///
+/// Place this attribute before `#[async_graphql::Object]`, `Mutation`, or
+/// `Subscription`. The metadata is descriptive and grants no authority.
+pub fn graphql_orm_custom_operations(args: TokenStream, input: TokenStream) -> TokenStream {
+    custom_operations::expand(args, input)
 }

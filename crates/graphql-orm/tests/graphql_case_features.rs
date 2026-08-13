@@ -93,7 +93,23 @@ async fn setup_pool() -> Result<sqlx::PgPool, sqlx::Error> {
 
 #[allow(dead_code)]
 fn assert_has(sdl: &str, expected: &str) {
-    assert!(sdl.contains(expected), "SDL missing:\n{expected}\n\n{sdl}");
+    let without_descriptions = sdl
+        .split("\"\"\"")
+        .enumerate()
+        .filter_map(|(index, value)| (index % 2 == 0).then_some(value))
+        .collect::<String>();
+    let compact_sdl = without_descriptions
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    let compact_expected = expected
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    assert!(
+        compact_sdl.contains(&compact_expected),
+        "SDL missing:\n{expected}\n\n{sdl}"
+    );
 }
 
 #[tokio::test]
