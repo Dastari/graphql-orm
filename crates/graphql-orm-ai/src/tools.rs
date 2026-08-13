@@ -9,10 +9,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AiApprovalRule, AiToolRisk, ModelToolDefinition};
 use crate::{
-    AiCompiledGraphqlQuery, AiDisclosureSchema, AiError, AiGeneratedGraphqlOperationPolicy,
-    AiGraphqlQueryCapability, AiGraphqlQueryCapabilityCatalog, AiGraphqlToolManifestCatalog,
-    AiScope, AiToolDescriptor, AiToolId, AiToolOperationDomain, AiToolOperationKind,
-    DataClassification, ToolGraphqlRequest, ToolMaturity, contains_forbidden_graphql_name,
+    AiCompiledGraphqlMutation, AiCompiledGraphqlQuery, AiDisclosureSchema, AiError,
+    AiGeneratedGraphqlOperationPolicy, AiGraphqlMutationCapability,
+    AiGraphqlMutationCapabilityCatalog, AiGraphqlQueryCapability, AiGraphqlQueryCapabilityCatalog,
+    AiGraphqlToolManifestCatalog, AiScope, AiToolDescriptor, AiToolId, AiToolOperationDomain,
+    AiToolOperationKind, DataClassification, ToolGraphqlRequest, ToolMaturity,
+    contains_forbidden_graphql_name,
 };
 
 const JSON_SCHEMA_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
@@ -22,6 +24,7 @@ const JSON_SCHEMA_2020_12: &str = "https://json-schema.org/draft/2020-12/schema"
 pub struct AiToolCatalog {
     tools: BTreeMap<AiToolId, RegisteredAiTool>,
     query_capabilities: BTreeMap<AiToolId, AiGraphqlQueryCapability>,
+    mutation_capabilities: BTreeMap<AiToolId, AiGraphqlMutationCapability>,
 }
 
 #[derive(Clone, Debug)]
@@ -67,11 +70,42 @@ impl AiToolCatalog {
         for capability in catalog.capabilities() {
             if self.tools.contains_key(capability.id())
                 || self.query_capabilities.contains_key(capability.id())
+                || self.mutation_capabilities.contains_key(capability.id())
             {
                 return Err(AiError::AlreadyExists(capability.id().as_str().to_owned()));
             }
         }
         self.query_capabilities.extend(
+            catalog
+                .capabilities()
+                .map(|capability| (capability.id().clone(), capability.clone())),
+        );
+        Ok(())
+    }
+
+    /// Registers a complete classified mutation-capability set for discovery.
+    ///
+    /// Registration grants neither execution authority nor approval. The
+    /// runtime must separately admit the exact target/schema/catalogue binding
+    /// and apply the classified automatic or one-shot supervised path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stable-ID collision with any registered tool or
+    /// generated capability.
+    pub fn register_mutation_capability_catalog(
+        &mut self,
+        catalog: &AiGraphqlMutationCapabilityCatalog,
+    ) -> Result<(), AiError> {
+        for capability in catalog.capabilities() {
+            if self.tools.contains_key(capability.id())
+                || self.query_capabilities.contains_key(capability.id())
+                || self.mutation_capabilities.contains_key(capability.id())
+            {
+                return Err(AiError::AlreadyExists(capability.id().as_str().to_owned()));
+            }
+        }
+        self.mutation_capabilities.extend(
             catalog
                 .capabilities()
                 .map(|capability| (capability.id().clone(), capability.clone())),
@@ -227,6 +261,7 @@ impl AiToolCatalog {
         }
         if self.tools.contains_key(&descriptor.id)
             || self.query_capabilities.contains_key(&descriptor.id)
+            || self.mutation_capabilities.contains_key(&descriptor.id)
         {
             return Err(AiError::AlreadyExists(descriptor.id.as_str().to_owned()));
         }
@@ -262,6 +297,13 @@ impl AiToolCatalog {
     /// This is discovery only and does not imply current authority.
     pub fn query_capabilities(&self) -> impl Iterator<Item = &AiGraphqlQueryCapability> {
         self.query_capabilities.values()
+    }
+
+    /// Returns classified mutation capabilities ordered by stable ID.
+    ///
+    /// This is discovery only and grants neither authority nor approval.
+    pub fn mutation_capabilities(&self) -> impl Iterator<Item = &AiGraphqlMutationCapability> {
+        self.mutation_capabilities.values()
     }
 
     /// Projects one registered automatic query capability for a provider.
@@ -308,6 +350,67 @@ impl AiToolCatalog {
         plan: serde_json::Value,
     ) -> Result<AiCompiledGraphqlQuery, AiError> {
         let capability = self.query_capabilities.get(id).ok_or(AiError::Forbidden)?;
+        if capability.fingerprint() != expected_capability_fingerprint {
+            return Err(AiError::Forbidden);
+        }
+        capability.compile(plan)
+    }
+
+    /// Projects one registered classified mutation capability for a provider.
+    ///
+    /// The provider receives only the closed typed plan schema and model-safe
+    /// description. It receives no GraphQL document, target, credential,
+    /// approval token, or authorization rule.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for an absent capability or malformed provider
+    /// alias.
+    pub fn mutation_capability_model_definition(
+        &self,
+        id: &AiToolId,
+        provider_name: impl Into<String>,
+    ) -> Result<ModelToolDefinition, AiError> {
+        let capability = self
+            .mutation_capabilities
+            .get(id)
+            .ok_or(AiError::Forbidden)?;
+        let definition = ModelToolDefinition {
+            tool_id: capability.id().as_str().to_owned(),
+            provider_name: provider_name.into(),
+            fingerprint: capability.fingerprint().to_owned(),
+            description: capability.description().to_owned(),
+            parameters: capability.argument_schema().clone(),
+            strict: true,
+        };
+        definition.validate().map_err(|_| {
+            AiError::InvalidConfiguration(
+                "classified mutation provider alias is invalid".to_owned(),
+            )
+        })?;
+        Ok(definition)
+    }
+
+    /// Compiles one provider-authored typed mutation plan against the exact
+    /// registered semantic capability.
+    ///
+    /// Compilation neither authorizes nor executes the mutation and cannot
+    /// satisfy one-shot approval.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for an absent capability, stale fingerprint, or
+    /// invalid closed plan.
+    pub fn compile_mutation_capability(
+        &self,
+        id: &AiToolId,
+        expected_capability_fingerprint: &str,
+        plan: serde_json::Value,
+    ) -> Result<AiCompiledGraphqlMutation, AiError> {
+        let capability = self
+            .mutation_capabilities
+            .get(id)
+            .ok_or(AiError::Forbidden)?;
         if capability.fingerprint() != expected_capability_fingerprint {
             return Err(AiError::Forbidden);
         }

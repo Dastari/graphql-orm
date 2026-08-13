@@ -8,10 +8,11 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use async_graphql_parser::{parse_schema, types::TypeSystemDefinition};
 use graphql_orm_operation_catalog::{
-    GeneratedGraphqlOperationCategory, GraphqlOperationKind, GraphqlSemanticCatalog,
-    GraphqlSemanticClassification, GraphqlSemanticExport, GraphqlSemanticFieldMetadata,
-    GraphqlSemanticOperationDescriptor, GraphqlSemanticRelationshipCardinality,
-    GraphqlSemanticTypeRef, GraphqlSubscriptionConditionOperator, GraphqlSubscriptionReplayMode,
+    AiMutationExecutionPolicy, GeneratedGraphqlOperationCategory, GraphqlOperationKind,
+    GraphqlSemanticCatalog, GraphqlSemanticClassification, GraphqlSemanticExport,
+    GraphqlSemanticFieldMetadata, GraphqlSemanticOperationDescriptor,
+    GraphqlSemanticRelationshipCardinality, GraphqlSemanticTypeRef,
+    GraphqlSubscriptionConditionOperator, GraphqlSubscriptionReplayMode,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -26,6 +27,9 @@ use crate::{
 
 /// Current automatic query-capability contract version.
 pub const AI_GRAPHQL_QUERY_CAPABILITY_VERSION: u16 = 1;
+
+/// Current classified mutation-capability contract version.
+pub const AI_GRAPHQL_MUTATION_CAPABILITY_VERSION: u16 = 1;
 
 /// Current bounded subscription-capability contract version.
 pub const AI_GRAPHQL_SUBSCRIPTION_CAPABILITY_VERSION: u16 = 1;
@@ -218,6 +222,21 @@ impl AiGraphqlQueryCapability {
         &self.operation.field_name
     }
 
+    /// Returns the exact logical execution target.
+    pub fn target_id(&self) -> &GraphqlExecutionTargetId {
+        &self.target_id
+    }
+
+    /// Returns the active finished-SDL fingerprint.
+    pub fn finished_schema_fingerprint(&self) -> &str {
+        &self.schema_fingerprint
+    }
+
+    /// Returns the canonical semantic-catalogue fingerprint.
+    pub fn semantic_catalog_fingerprint(&self) -> &str {
+        &self.semantic_catalog.fingerprint
+    }
+
     /// Returns whether this is an opt-in generated aggregate root.
     pub fn is_aggregate(&self) -> bool {
         self.operation.generated_category == Some(GeneratedGraphqlOperationCategory::Aggregate)
@@ -333,13 +352,28 @@ impl AiGraphqlQueryCapability {
             format!("({})", arguments.join(", "))
         };
         let plan_fingerprint = sha256_json(&json!({
-            "version": AI_GRAPHQL_QUERY_CAPABILITY_VERSION,
+            "version": match expected_kind {
+                GraphqlOperationKind::Query => AI_GRAPHQL_QUERY_CAPABILITY_VERSION,
+                GraphqlOperationKind::Mutation => AI_GRAPHQL_MUTATION_CAPABILITY_VERSION,
+                GraphqlOperationKind::Subscription => AI_GRAPHQL_SUBSCRIPTION_CAPABILITY_VERSION,
+                _ => 0,
+            },
             "capability_fingerprint": self.fingerprint,
             "plan": fingerprint_plan,
         }));
-        let operation_name = format!("AiQuery_{}", &plan_fingerprint[..20]);
+        let operation_name = format!(
+            "{}_{}",
+            match expected_kind {
+                GraphqlOperationKind::Query => "AiQuery",
+                GraphqlOperationKind::Mutation => "AiMutation",
+                GraphqlOperationKind::Subscription => "AiSubscription",
+                _ => return Err(configuration_error("unsupported plan operation kind")),
+            },
+            &plan_fingerprint[..20]
+        );
         let operation_keyword = match expected_kind {
             GraphqlOperationKind::Query => "query",
+            GraphqlOperationKind::Mutation => "mutation",
             GraphqlOperationKind::Subscription => "subscription",
             _ => return Err(configuration_error("unsupported plan operation kind")),
         };
@@ -361,7 +395,18 @@ impl AiGraphqlQueryCapability {
             [(self.operation.field_name.clone(), disclosure)],
         );
         let disclosure_schema = AiDisclosureSchema::new(
-            format!("automatic-query-v{AI_GRAPHQL_QUERY_CAPABILITY_VERSION}"),
+            match expected_kind {
+                GraphqlOperationKind::Query => {
+                    format!("automatic-query-v{AI_GRAPHQL_QUERY_CAPABILITY_VERSION}")
+                }
+                GraphqlOperationKind::Mutation => {
+                    format!("classified-mutation-v{AI_GRAPHQL_MUTATION_CAPABILITY_VERSION}")
+                }
+                GraphqlOperationKind::Subscription => {
+                    format!("bounded-subscription-v{AI_GRAPHQL_SUBSCRIPTION_CAPABILITY_VERSION}")
+                }
+                _ => return Err(configuration_error("unsupported plan operation kind")),
+            },
             disclosure,
         )?;
         let projection_fingerprint = sha256_json(&json!({
@@ -390,6 +435,7 @@ impl AiGraphqlQueryCapability {
             &self.description,
             match expected_kind {
                 GraphqlOperationKind::Query => AiToolOperationKind::Query,
+                GraphqlOperationKind::Mutation => AiToolOperationKind::Mutation,
                 GraphqlOperationKind::Subscription => AiToolOperationKind::Subscription,
                 _ => return Err(configuration_error("unsupported plan operation kind")),
             },
@@ -403,9 +449,51 @@ impl AiGraphqlQueryCapability {
             self.limits.maximum_result_records,
         )
         .with_maximum_classification(maximum_classification(&disclosure_schema.root))
-        .with_maturity(ToolMaturity::ReadOnly)
-        .with_risk(AiToolRisk::ReadOnly, AiApprovalRule::None)
-        .with_idempotent(true);
+        .with_maturity(
+            match (expected_kind, self.operation.ai_mutation_execution) {
+                (GraphqlOperationKind::Query | GraphqlOperationKind::Subscription, None) => {
+                    ToolMaturity::ReadOnly
+                }
+                (GraphqlOperationKind::Mutation, Some(AiMutationExecutionPolicy::Automatic)) => {
+                    ToolMaturity::AutonomousWrite
+                }
+                (
+                    GraphqlOperationKind::Mutation,
+                    Some(AiMutationExecutionPolicy::ApprovalRequired),
+                ) => ToolMaturity::SupervisedWrite,
+                _ => return Err(configuration_error("operation capability is prohibited")),
+            },
+        )
+        .with_risk(
+            match (expected_kind, self.operation.ai_mutation_execution) {
+                (GraphqlOperationKind::Query | GraphqlOperationKind::Subscription, None) => {
+                    AiToolRisk::ReadOnly
+                }
+                (GraphqlOperationKind::Mutation, Some(AiMutationExecutionPolicy::Automatic)) => {
+                    AiToolRisk::LowRiskWrite
+                }
+                (
+                    GraphqlOperationKind::Mutation,
+                    Some(AiMutationExecutionPolicy::ApprovalRequired),
+                ) => AiToolRisk::NonIdempotentWrite,
+                _ => return Err(configuration_error("operation capability is prohibited")),
+            },
+            match (expected_kind, self.operation.ai_mutation_execution) {
+                (GraphqlOperationKind::Query | GraphqlOperationKind::Subscription, None)
+                | (GraphqlOperationKind::Mutation, Some(AiMutationExecutionPolicy::Automatic)) => {
+                    AiApprovalRule::None
+                }
+                (
+                    GraphqlOperationKind::Mutation,
+                    Some(AiMutationExecutionPolicy::ApprovalRequired),
+                ) => AiApprovalRule::OneShot,
+                _ => return Err(configuration_error("operation capability is prohibited")),
+            },
+        )
+        .with_idempotent(matches!(
+            expected_kind,
+            GraphqlOperationKind::Query | GraphqlOperationKind::Subscription
+        ));
         Ok(AiCompiledGraphqlQuery {
             capability_fingerprint: self.fingerprint.clone(),
             plan_fingerprint,
@@ -561,6 +649,229 @@ impl AiGraphqlQueryCapabilityCatalog {
 
     /// Returns one exact capability by stable ID.
     pub fn capability(&self, id: &AiToolId) -> Option<&AiGraphqlQueryCapability> {
+        self.capabilities.get(id)
+    }
+}
+
+/// One provider-visible typed mutation capability compiled from canonical semantics.
+#[derive(Clone, Debug)]
+pub struct AiGraphqlMutationCapability {
+    base: AiGraphqlQueryCapability,
+    execution_policy: AiMutationExecutionPolicy,
+}
+
+impl AiGraphqlMutationCapability {
+    /// Returns the stable target/root capability ID.
+    pub fn id(&self) -> &AiToolId {
+        self.base.id()
+    }
+
+    /// Returns the model-safe mutation description.
+    pub fn description(&self) -> &str {
+        self.base.description()
+    }
+
+    /// Returns the finite JSON Schema 2020-12 mutation-plan contract.
+    pub fn argument_schema(&self) -> &Value {
+        self.base.argument_schema()
+    }
+
+    /// Returns the complete capability fingerprint.
+    pub fn fingerprint(&self) -> &str {
+        self.base.fingerprint()
+    }
+
+    /// Returns the exact public Mutation root field.
+    pub fn field_name(&self) -> &str {
+        self.base.field_name()
+    }
+
+    /// Returns the exact logical execution target.
+    pub fn target_id(&self) -> &GraphqlExecutionTargetId {
+        self.base.target_id()
+    }
+
+    /// Returns the active finished-SDL fingerprint.
+    pub fn finished_schema_fingerprint(&self) -> &str {
+        self.base.finished_schema_fingerprint()
+    }
+
+    /// Returns the canonical semantic-catalogue fingerprint.
+    pub fn semantic_catalog_fingerprint(&self) -> &str {
+        self.base.semantic_catalog_fingerprint()
+    }
+
+    /// Returns the reviewed execution classification.
+    pub const fn execution_policy(&self) -> AiMutationExecutionPolicy {
+        self.execution_policy
+    }
+
+    /// Compiles one closed mutation plan into an exact server-owned operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for stale, malformed, hidden, prohibited,
+    /// excessive, or unbounded plan content.
+    pub fn compile(&self, plan: Value) -> Result<AiCompiledGraphqlMutation, AiError> {
+        let validator = jsonschema::validator_for(self.argument_schema())
+            .map_err(|_| configuration_error("mutation capability schema is invalid"))?;
+        if !validator.is_valid(&plan) {
+            return Err(input_error(
+                "mutation plan does not match the capability schema",
+            ));
+        }
+        let typed_plan: AiGraphqlQueryPlan = serde_json::from_value(plan.clone())
+            .map_err(|_| input_error("mutation plan has an invalid shape"))?;
+        let compiled =
+            self.base
+                .compile_typed_plan(typed_plan, &plan, GraphqlOperationKind::Mutation)?;
+        if compiled.descriptor.operation_kind != AiToolOperationKind::Mutation {
+            return Err(configuration_error(
+                "compiled mutation capability has invalid operation kind",
+            ));
+        }
+        Ok(AiCompiledGraphqlMutation {
+            execution_policy: self.execution_policy,
+            compiled,
+        })
+    }
+}
+
+/// Complete executable mutation capability set for one active finished schema.
+///
+/// Prohibited mutations are structurally absent rather than merely disabled.
+#[derive(Clone, Debug)]
+pub struct AiGraphqlMutationCapabilityCatalog {
+    semantic_catalog_fingerprint: String,
+    finished_schema_fingerprint: String,
+    capabilities: BTreeMap<AiToolId, AiGraphqlMutationCapability>,
+    fingerprint: String,
+}
+
+impl AiGraphqlMutationCapabilityCatalog {
+    /// Compiles every exposed mutation explicitly classified for AI execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for semantic/SDL drift, unsupported shapes, unsafe
+    /// inputs/results, collisions, or incomplete admission of a non-prohibited
+    /// mutation.
+    pub fn compile(
+        subgraph_id: &str,
+        target_id: GraphqlExecutionTargetId,
+        finished_sdl: &str,
+        semantic_catalog: &GraphqlSemanticCatalog,
+        limits: AiGraphqlQueryCapabilityLimits,
+    ) -> Result<Self, AiError> {
+        validate_public_token(subgraph_id, "subgraph ID")?;
+        semantic_catalog
+            .validate()
+            .map_err(|_| configuration_error("semantic catalogue is invalid"))?;
+        if finished_sdl.len() > limits.maximum_schema_bytes as usize {
+            return Err(configuration_error("finished GraphQL SDL is too large"));
+        }
+        validate_limits(limits)?;
+        let schema = FinishedSchema::parse(finished_sdl)?;
+        validate_semantic_entities_against_schema(&schema, semantic_catalog)?;
+        let schema_mutation_roots = schema.mutation_root_fields()?;
+        let semantic_mutations = semantic_catalog
+            .operations
+            .iter()
+            .filter(|operation| operation.kind == GraphqlOperationKind::Mutation)
+            .collect::<Vec<_>>();
+        let semantic_mutation_roots = semantic_mutations
+            .iter()
+            .map(|operation| operation.field_name.as_str())
+            .collect::<BTreeSet<_>>();
+        if schema_mutation_roots != semantic_mutation_roots {
+            return Err(configuration_error(
+                "finished GraphQL Mutation roots and semantic operations differ",
+            ));
+        }
+        let executable = semantic_mutations
+            .into_iter()
+            .filter(|operation| {
+                matches!(
+                    operation.ai_mutation_execution,
+                    Some(
+                        AiMutationExecutionPolicy::Automatic
+                            | AiMutationExecutionPolicy::ApprovalRequired
+                    )
+                )
+            })
+            .collect::<Vec<_>>();
+        if executable.len() > limits.maximum_capabilities as usize {
+            return Err(configuration_error(
+                "mutation capability capacity would omit active roots",
+            ));
+        }
+        let finished_schema_fingerprint = hex::encode(Sha256::digest(finished_sdl.as_bytes()));
+        let mut capabilities = BTreeMap::new();
+        for operation in executable {
+            let execution_policy = operation
+                .ai_mutation_execution
+                .ok_or_else(|| configuration_error("mutation execution policy is absent"))?;
+            let base = compile_capability(
+                subgraph_id,
+                target_id.clone(),
+                &schema,
+                &finished_schema_fingerprint,
+                semantic_catalog,
+                operation,
+                limits,
+                GraphqlOperationKind::Mutation,
+            )?;
+            let capability = AiGraphqlMutationCapability {
+                base,
+                execution_policy,
+            };
+            if capabilities
+                .insert(capability.id().clone(), capability)
+                .is_some()
+            {
+                return Err(configuration_error("mutation capability identity collides"));
+            }
+        }
+        let fingerprint = sha256_json(&json!({
+            "version": AI_GRAPHQL_MUTATION_CAPABILITY_VERSION,
+            "semantic_catalog_fingerprint": semantic_catalog.fingerprint,
+            "finished_schema_fingerprint": finished_schema_fingerprint,
+            "capabilities": capabilities.values().map(|capability| json!({
+                "id": capability.id().as_str(),
+                "fingerprint": capability.fingerprint(),
+                "execution_policy": capability.execution_policy(),
+            })).collect::<Vec<_>>(),
+        }));
+        Ok(Self {
+            semantic_catalog_fingerprint: semantic_catalog.fingerprint.clone(),
+            finished_schema_fingerprint,
+            capabilities,
+            fingerprint,
+        })
+    }
+
+    /// Returns the exact semantic-catalogue fingerprint.
+    pub fn semantic_catalog_fingerprint(&self) -> &str {
+        &self.semantic_catalog_fingerprint
+    }
+
+    /// Returns the exact finished-SDL fingerprint.
+    pub fn finished_schema_fingerprint(&self) -> &str {
+        &self.finished_schema_fingerprint
+    }
+
+    /// Returns the deterministic complete-catalogue fingerprint.
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    /// Returns executable mutation capabilities ordered by stable ID.
+    pub fn capabilities(&self) -> impl Iterator<Item = &AiGraphqlMutationCapability> {
+        self.capabilities.values()
+    }
+
+    /// Returns one exact executable mutation capability.
+    pub fn capability(&self, id: &AiToolId) -> Option<&AiGraphqlMutationCapability> {
         self.capabilities.get(id)
     }
 }
@@ -1027,6 +1338,58 @@ pub struct AiCompiledGraphqlQuery {
     variables: Value,
 }
 
+/// Exact server-compiled mutation ready for classified runtime handling.
+#[derive(Clone, Debug)]
+pub struct AiCompiledGraphqlMutation {
+    execution_policy: AiMutationExecutionPolicy,
+    compiled: AiCompiledGraphqlQuery,
+}
+
+impl AiCompiledGraphqlMutation {
+    /// Returns the reviewed execution classification.
+    pub const fn execution_policy(&self) -> AiMutationExecutionPolicy {
+        self.execution_policy
+    }
+
+    /// Returns the capability fingerprint offered to the provider.
+    pub fn capability_fingerprint(&self) -> &str {
+        self.compiled.capability_fingerprint()
+    }
+
+    /// Returns the exact canonical plan fingerprint.
+    pub fn plan_fingerprint(&self) -> &str {
+        self.compiled.plan_fingerprint()
+    }
+
+    /// Returns the exact dynamic descriptor.
+    pub fn descriptor(&self) -> &AiToolDescriptor {
+        self.compiled.descriptor()
+    }
+
+    /// Returns the selected static disclosure contract.
+    pub fn disclosure_schema(&self) -> &AiDisclosureSchema {
+        self.compiled.disclosure_schema()
+    }
+
+    /// Returns the server-compiled variables.
+    pub fn variables(&self) -> &Value {
+        self.compiled.variables()
+    }
+
+    /// Decomposes the compiled mutation for the runtime execution boundary.
+    pub fn into_parts(
+        self,
+    ) -> (
+        AiMutationExecutionPolicy,
+        AiToolDescriptor,
+        AiDisclosureSchema,
+        Value,
+    ) {
+        let (descriptor, disclosure, variables) = self.compiled.into_parts();
+        (self.execution_policy, descriptor, disclosure, variables)
+    }
+}
+
 impl AiCompiledGraphqlQuery {
     /// Returns the discovery capability fingerprint offered to the provider.
     pub fn capability_fingerprint(&self) -> &str {
@@ -1114,6 +1477,7 @@ struct OutputRouteSegment {
 #[derive(Clone, Debug)]
 struct FinishedSchema {
     query_root: String,
+    mutation_root: Option<String>,
     subscription_root: Option<String>,
     types: BTreeMap<String, SchemaType>,
 }
@@ -1148,6 +1512,7 @@ impl FinishedSchema {
         let document = parse_schema(sdl)
             .map_err(|_| configuration_error("finished GraphQL SDL is invalid"))?;
         let mut query_root = None;
+        let mut mutation_root = None;
         let mut subscription_root = None;
         let mut types = BTreeMap::new();
         for definition in &document.definitions {
@@ -1166,6 +1531,12 @@ impl FinishedSchema {
                 return Err(configuration_error(
                     "finished schema repeats subscription root",
                 ));
+            }
+            if let TypeSystemDefinition::Schema(schema) = definition
+                && let Some(mutation) = &schema.node.mutation
+                && mutation_root.replace(mutation.node.to_string()).is_some()
+            {
+                return Err(configuration_error("finished schema repeats mutation root"));
             }
         }
         for definition in document.definitions {
@@ -1249,8 +1620,14 @@ impl FinishedSchema {
                 .contains_key("Subscription")
                 .then(|| "Subscription".to_owned())
         });
+        let mutation_root = mutation_root.or_else(|| {
+            types
+                .contains_key("Mutation")
+                .then(|| "Mutation".to_owned())
+        });
         Ok(Self {
             query_root,
+            mutation_root,
             subscription_root,
             types,
         })
@@ -1286,6 +1663,27 @@ impl FinishedSchema {
         self.object_field(root, name)
     }
 
+    fn mutation_root_field(&self, name: &str) -> Result<&SchemaField, AiError> {
+        let root = self
+            .mutation_root
+            .as_deref()
+            .ok_or_else(|| configuration_error("finished schema has no mutation root"))?;
+        self.object_field(root, name)
+    }
+
+    fn mutation_root_fields(&self) -> Result<BTreeSet<&str>, AiError> {
+        let root = self
+            .mutation_root
+            .as_deref()
+            .ok_or_else(|| configuration_error("finished schema has no mutation root"))?;
+        let Some(SchemaType::Object(fields)) = self.types.get(root) else {
+            return Err(configuration_error(
+                "finished GraphQL Mutation root is missing",
+            ));
+        };
+        Ok(fields.keys().map(String::as_str).collect())
+    }
+
     fn subscription_root_fields(&self) -> Result<BTreeSet<&str>, AiError> {
         let root = self
             .subscription_root
@@ -1306,6 +1704,7 @@ impl FinishedSchema {
     ) -> Result<&SchemaField, AiError> {
         match kind {
             GraphqlOperationKind::Query => self.root_query_field(name),
+            GraphqlOperationKind::Mutation => self.mutation_root_field(name),
             GraphqlOperationKind::Subscription => self.subscription_root_field(name),
             _ => Err(configuration_error("unsupported semantic operation kind")),
         }
@@ -1337,9 +1736,23 @@ fn compile_capability(
     }
     jsonschema::validator_for(&argument_schema)
         .map_err(|_| configuration_error("generated query plan schema is invalid"))?;
-    let id = AiToolId::parse(stable_capability_id(subgraph_id, &operation.field_name))?;
+    let id = AiToolId::parse(match expected_kind {
+        GraphqlOperationKind::Query => stable_capability_id(subgraph_id, &operation.field_name),
+        GraphqlOperationKind::Mutation => {
+            stable_mutation_capability_id(subgraph_id, &operation.field_name)
+        }
+        GraphqlOperationKind::Subscription => {
+            stable_subscription_capability_id(subgraph_id, &operation.field_name)
+        }
+        _ => return Err(configuration_error("unsupported semantic operation kind")),
+    })?;
     let fingerprint = sha256_json(&json!({
-        "version": AI_GRAPHQL_QUERY_CAPABILITY_VERSION,
+        "version": match expected_kind {
+            GraphqlOperationKind::Query => AI_GRAPHQL_QUERY_CAPABILITY_VERSION,
+            GraphqlOperationKind::Mutation => AI_GRAPHQL_MUTATION_CAPABILITY_VERSION,
+            GraphqlOperationKind::Subscription => AI_GRAPHQL_SUBSCRIPTION_CAPABILITY_VERSION,
+            _ => 0,
+        },
         "id": id.as_str(),
         "target": target_id.as_str(),
         "schema": schema_fingerprint,
@@ -2782,6 +3195,17 @@ fn stable_capability_id(subgraph_id: &str, field_name: &str) -> String {
     )
 }
 
+fn stable_mutation_capability_id(subgraph_id: &str, field_name: &str) -> String {
+    let identity = format!("{subgraph_id}\0mutation\0{field_name}\0classified-v1");
+    let hash = hex::encode(Sha256::digest(identity.as_bytes()));
+    format!(
+        "{}.mutation.{}.classified-{}",
+        subgraph_id.to_ascii_lowercase(),
+        field_name.to_ascii_lowercase(),
+        &hash[..16]
+    )
+}
+
 fn stable_subscription_capability_id(subgraph_id: &str, field_name: &str) -> String {
     let identity = format!("{subgraph_id}\0subscription\0{field_name}\0bounded-v1");
     let hash = hex::encode(Sha256::digest(identity.as_bytes()));
@@ -2850,8 +3274,8 @@ fn input_error(message: impl Into<String>) -> AiError {
 #[cfg(test)]
 mod tests {
     use graphql_orm_operation_catalog::{
-        GeneratedGraphqlOperationDescriptor, GraphqlEntitySemanticMetadata,
-        GraphqlOperationArgumentDescriptor, GraphqlOperationCatalog,
+        AiMutationExecutionPolicy, GeneratedGraphqlOperationDescriptor,
+        GraphqlEntitySemanticMetadata, GraphqlOperationArgumentDescriptor, GraphqlOperationCatalog,
         GraphqlSemanticArgumentDescriptor, GraphqlSemanticFieldMetadata,
         GraphqlSemanticOperationDescriptor, GraphqlSemanticRelationshipDescriptor,
         GraphqlSemanticTypeKind, GraphqlSubscriptionConditionField,
@@ -2861,7 +3285,7 @@ mod tests {
     use super::*;
 
     const SDL: &str = r#"
-        schema { query: Query }
+        schema { query: Query, mutation: Mutation }
         type Query {
           ReadParent(id: ID!): Parent!
           ParentAggregate(groupLimit: Int!, metrics: [AggregateMetric!]!): [AggregateRow!]!
@@ -2876,6 +3300,12 @@ mod tests {
         type ChildConnection { edges: [ChildEdge!]!, pageInfo: PageInfo! }
         type ChildEdge { node: Child!, cursor: String! }
         type PageInfo { totalCount: Int!, hasNextPage: Boolean! }
+        type Mutation {
+          CreateParent(input: ParentMutationInput!): Parent!
+          UpdateParent(input: ParentMutationInput!): Parent!
+          DeleteParent(id: ID!): Parent
+        }
+        input ParentMutationInput { name: String!, credential: String }
         input PageInput { limit: Int, offset: Int }
         enum AggregateOperator { COUNT SUM }
         input AggregateMetric { operator: AggregateOperator!, field: String }
@@ -3008,8 +3438,13 @@ mod tests {
     }
 
     fn query_sdl() -> String {
-        SDL.replace(
+        SDL.replace("schema { query: Query, mutation: Mutation }", "schema { query: Query }")
+        .replace(
             "          ParentAggregate(groupLimit: Int!, metrics: [AggregateMetric!]!): [AggregateRow!]!\n",
+            "",
+        )
+        .replace(
+            "        type Mutation {\n          CreateParent(input: ParentMutationInput!): Parent!\n          UpdateParent(input: ParentMutationInput!): Parent!\n          DeleteParent(id: ID!): Parent\n        }\n",
             "",
         )
     }
@@ -3065,6 +3500,71 @@ mod tests {
             }),
         )
         .expect("aggregate semantic catalogue")
+    }
+
+    fn mutation_semantic_catalog() -> GraphqlSemanticCatalog {
+        let base = semantic_catalog();
+        let mutation = |field_name: &str,
+                        policy: AiMutationExecutionPolicy,
+                        argument_name: &str,
+                        argument_type: GraphqlSemanticTypeRef,
+                        nullable_result: bool| {
+            GraphqlSemanticOperationDescriptor::custom(
+                GraphqlOperationKind::Mutation,
+                field_name,
+                format!("Execute the reviewed {field_name} mutation."),
+                vec![GraphqlSemanticArgumentDescriptor {
+                    graphql_name: argument_name.to_owned(),
+                    description: format!("Reviewed {argument_name} value."),
+                    type_ref: argument_type,
+                }],
+                GraphqlSemanticTypeRef::named(
+                    "Parent",
+                    GraphqlSemanticTypeKind::Object,
+                    nullable_result,
+                ),
+                true,
+            )
+            .expect("custom mutation is valid")
+            .with_ai_mutation_execution(policy)
+            .expect("mutation policy is valid")
+        };
+        GraphqlSemanticCatalog::compose_with_custom(
+            base.entities,
+            &GraphqlOperationCatalog::compose(std::iter::empty()),
+            [
+                mutation(
+                    "CreateParent",
+                    AiMutationExecutionPolicy::Automatic,
+                    "input",
+                    GraphqlSemanticTypeRef::named(
+                        "ParentMutationInput",
+                        GraphqlSemanticTypeKind::Object,
+                        false,
+                    ),
+                    false,
+                ),
+                mutation(
+                    "UpdateParent",
+                    AiMutationExecutionPolicy::ApprovalRequired,
+                    "input",
+                    GraphqlSemanticTypeRef::named(
+                        "ParentMutationInput",
+                        GraphqlSemanticTypeKind::Object,
+                        false,
+                    ),
+                    false,
+                ),
+                mutation(
+                    "DeleteParent",
+                    AiMutationExecutionPolicy::Prohibited,
+                    "id",
+                    named("ID", false),
+                    true,
+                ),
+            ],
+        )
+        .expect("mutation semantic catalogue validates")
     }
 
     fn subscription_semantic_catalog(
@@ -3398,6 +3898,85 @@ mod tests {
         ));
         assert_eq!(compiled.variables()["v0"], json!(5));
         assert_eq!(compiled.variables()["v1"][0]["operator"], json!("SUM"));
+    }
+
+    #[test]
+    fn mutation_capabilities_are_typed_classified_and_default_prohibited() {
+        let semantics = mutation_semantic_catalog();
+        let catalog = AiGraphqlMutationCapabilityCatalog::compile(
+            "inventory",
+            GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
+            SDL,
+            &semantics,
+            AiGraphqlQueryCapabilityLimits::default(),
+        )
+        .expect("mutation capabilities compile");
+        assert_eq!(catalog.capabilities().count(), 2);
+        assert!(
+            catalog
+                .capabilities()
+                .all(|capability| capability.field_name() != "DeleteParent")
+        );
+
+        let automatic = catalog
+            .capabilities()
+            .find(|capability| capability.field_name() == "CreateParent")
+            .expect("automatic mutation");
+        assert_eq!(
+            automatic.execution_policy(),
+            AiMutationExecutionPolicy::Automatic
+        );
+        assert_eq!(automatic.target_id().as_str(), "inventory.graphql");
+        assert_eq!(
+            automatic.semantic_catalog_fingerprint(),
+            semantics.fingerprint
+        );
+        let schema = serde_json::to_string(automatic.argument_schema()).expect("schema");
+        assert!(schema.contains("name"));
+        assert!(!schema.contains("credential"));
+        let compiled = automatic
+            .compile(json!({
+                "arguments": { "input": { "name": "Reviewed" } },
+                "fields": { "id": true, "name": true },
+                "relationships": {}
+            }))
+            .expect("automatic mutation plan compiles");
+        assert!(compiled.descriptor().document.starts_with("mutation "));
+        assert_eq!(
+            compiled.descriptor().maturity,
+            ToolMaturity::AutonomousWrite
+        );
+        assert_eq!(compiled.descriptor().approval, AiApprovalRule::None);
+        assert!(!compiled.descriptor().idempotent);
+        assert!(matches!(
+            automatic.compile(json!({
+                "arguments": { "input": { "name": "Reviewed", "credential": "secret" } },
+                "fields": { "id": true },
+                "relationships": {}
+            })),
+            Err(AiError::InvalidInput(_))
+        ));
+
+        let supervised = catalog
+            .capabilities()
+            .find(|capability| capability.field_name() == "UpdateParent")
+            .expect("approval-required mutation");
+        let compiled = supervised
+            .compile(json!({
+                "arguments": { "input": { "name": "Changed" } },
+                "fields": { "id": true },
+                "relationships": {}
+            }))
+            .expect("supervised mutation plan compiles");
+        assert_eq!(
+            compiled.execution_policy(),
+            AiMutationExecutionPolicy::ApprovalRequired
+        );
+        assert_eq!(
+            compiled.descriptor().maturity,
+            ToolMaturity::SupervisedWrite
+        );
+        assert_eq!(compiled.descriptor().approval, AiApprovalRule::OneShot);
     }
 
     #[test]
