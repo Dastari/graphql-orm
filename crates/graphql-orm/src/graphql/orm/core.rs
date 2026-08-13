@@ -568,8 +568,9 @@ pub enum TransactionMode {
     Default,
     /// Serialize state-machine decisions against concurrent writers.
     ///
-    /// This uses serializable isolation on PostgreSQL and eagerly acquires the
-    /// SQLite write lock before the callback can perform its first read.
+    /// This uses serializable isolation on PostgreSQL and SQL Server and
+    /// eagerly acquires the SQLite write lock before the callback can perform
+    /// its first read.
     StateMachine,
 }
 
@@ -827,6 +828,7 @@ where
 pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     db: &'tx crate::db::Database<B>,
     tx: B::Transaction<'tx>,
+    mode: TransactionMode,
     deferred_events: Vec<Box<dyn DeferredEventEmitter<B>>>,
     deferred_actions: Vec<Box<dyn PostCommitActionRunner<B>>>,
 }
@@ -1055,6 +1057,39 @@ where
         }
     }
 
+    /// Construct a GraphQL-origin write-input context on an already pinned
+    /// mutation transaction.
+    #[doc(hidden)]
+    pub fn graphql_in_transaction(
+        ctx: &'ctx async_graphql::Context<'ctx>,
+        entity_name: &'static str,
+        hook_ctx: &'ctx mut MutationContext<'write, B>,
+    ) -> Self {
+        Self {
+            graphql_ctx: Some(ctx),
+            entity_name,
+            origin: WriteOrigin::GraphqlMutation,
+            database: None,
+            mutation_ctx: Some(hook_ctx),
+        }
+    }
+
+    /// Construct a repository-origin write-input context on an already pinned
+    /// mutation transaction.
+    #[doc(hidden)]
+    pub fn repository_in_transaction(
+        entity_name: &'static str,
+        hook_ctx: &'ctx mut MutationContext<'write, B>,
+    ) -> Self {
+        Self {
+            graphql_ctx: None,
+            entity_name,
+            origin: WriteOrigin::Repository,
+            database: None,
+            mutation_ctx: Some(hook_ctx),
+        }
+    }
+
     pub fn graphql_ctx(&self) -> Option<&async_graphql::Context<'ctx>> {
         self.graphql_ctx
     }
@@ -1196,9 +1231,21 @@ where
     /// Construct a context from a backend-owned transaction.
     #[doc(hidden)]
     pub fn new(db: &'tx crate::db::Database<B>, tx: B::Transaction<'tx>) -> Self {
+        Self::new_with_mode(db, tx, TransactionMode::Default)
+    }
+
+    /// Construct a context with the backend-owned transaction's isolation
+    /// intent.
+    #[doc(hidden)]
+    pub fn new_with_mode(
+        db: &'tx crate::db::Database<B>,
+        tx: B::Transaction<'tx>,
+        mode: TransactionMode,
+    ) -> Self {
         Self {
             db,
             tx,
+            mode,
             deferred_events: Vec::new(),
             deferred_actions: Vec::new(),
         }
@@ -1211,7 +1258,7 @@ where
         mode: TransactionMode,
     ) -> crate::Result<Self> {
         let tx = B::begin_write_transaction(db.pool(), mode).await?;
-        Ok(Self::new(db, tx))
+        Ok(Self::new_with_mode(db, tx, mode))
     }
 
     /// Begin a driver-neutral transaction and install its database-visible
@@ -1224,7 +1271,30 @@ where
     ) -> crate::Result<Self> {
         let mut tx = B::begin_write_transaction(db.pool(), mode).await?;
         B::apply_auth_context_to_write_transaction(&mut tx, auth).await?;
-        Ok(Self::new(db, tx))
+        Ok(Self::new_with_mode(db, tx, mode))
+    }
+
+    /// Return the isolation intent used to create this pinned transaction.
+    #[doc(hidden)]
+    pub fn transaction_mode(&self) -> TransactionMode {
+        self.mode
+    }
+
+    /// Reject an absent-key write decision unless the caller selected the
+    /// portable state-machine isolation contract.
+    #[doc(hidden)]
+    pub fn require_state_machine(&self, operation: &'static str) -> crate::Result<()> {
+        if self.mode == TransactionMode::StateMachine {
+            return Ok(());
+        }
+        Err(crate::graphql::errors::sqlx_error_from_public(
+            crate::graphql::errors::OrmPublicError::new(
+                crate::graphql::errors::OrmErrorCode::Conflict,
+            )
+            .with_internal(format!(
+                "{operation} requires TransactionMode::StateMachine to fence an absent-key write decision"
+            )),
+        ))
     }
 
     pub fn database(&self) -> &crate::db::Database<B> {
@@ -1329,6 +1399,7 @@ where
         let Self {
             db,
             tx,
+            mode: _,
             deferred_events,
             deferred_actions,
         } = self;
@@ -1390,6 +1461,7 @@ where {
     where
         T: MutationContextUpsert<B> + Entity,
     {
+        self.require_state_machine("upsert")?;
         ensure_transaction_entity_write_access::<T, B>(self.db).await?;
         T::upsert_in_mutation_context(self, input).await
     }

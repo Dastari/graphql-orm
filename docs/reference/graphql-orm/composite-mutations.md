@@ -87,6 +87,11 @@ An existing row must be visible and writable under row policy/RLS before it is r
 `upsert` and `MutationContext::upsert` use the same private Rust create input even when conflict
 fields are absent from public GraphQL inputs.
 
+Repository `upsert` starts a state-machine transaction automatically. A caller-owned transaction
+must use `TransactionMode::StateMachine`; `MutationContext::upsert` fails closed in `Default` mode.
+Complete-key update/delete decisions use a backend write lock and keep row-policy evaluation, input
+transformation, hooks, and exact-key DML on the same pinned transaction.
+
 Input transforms run before conflict evaluation. A before-create mutation hook can run on the
 losing side of a concurrent insert race, but no after hook, change event, search update, or deferred
 post-commit action is queued for `AlreadyPresent`.

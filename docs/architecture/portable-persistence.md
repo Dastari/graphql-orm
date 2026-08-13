@@ -17,7 +17,7 @@ code to import SQLx or construct backend SQL.
 
 `Database::transaction` supplies only a transaction-bound `MutationContext`. `Default` uses the
 backend default isolation. `StateMachine` starts SQLite with `BEGIN IMMEDIATE` before the callback's
-first read and sets PostgreSQL `SERIALIZABLE` before application statements.
+first read and sets PostgreSQL and SQL Server to `SERIALIZABLE` before application statements.
 
 ```rust
 let result = database.transaction(TransactionMode::StateMachine, |tx| {
@@ -40,6 +40,18 @@ independent nested transaction. `transaction_with_auth` additionally installs `D
 transaction-local PostgreSQL settings before the callback. `TransactionError::is_retryable()` is
 true for SQLite busy/snapshot conflicts and PostgreSQL serialization, deadlock, and lock failures;
 retry the complete callback, never only its last statement.
+
+Generated update and delete decisions load the authoritative row on this pinned transaction before
+running row policy, input transformation, and before hooks. PostgreSQL uses `FOR UPDATE`; SQL Server
+uses `UPDLOCK, HOLDLOCK`; SQLite's generated top-level helpers use `BEGIN IMMEDIATE`. Predicate
+writes materialize the authorized primary-key set and mutate only those exact keys. A row that starts
+matching concurrently is therefore ordered after the operation rather than being included by a
+later broad predicate.
+
+Upsert also has to fence the case where no row exists yet. Generated top-level upsert helpers select
+`StateMachine` automatically. An upsert invoked inside a caller-owned `Default` transaction fails
+closed with `CONFLICT`; create that transaction with `TransactionMode::StateMachine` and retry the
+complete callback when the backend classifies a serialization conflict as retryable.
 
 ## Versioned compare-and-swap
 

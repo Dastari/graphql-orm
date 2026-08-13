@@ -252,6 +252,11 @@ async fn row_policy_filters_reads_and_write_transform_injects_server_fields()
         "{:?}",
         second_created.errors
     );
+    let second_created_json = second_created.data.into_json()?;
+    let second_created_id = second_created_json["createScopedCollection"]["scopedCollection"]["id"]
+        .as_str()
+        .expect("missing second created id")
+        .to_string();
 
     let actor_a_list = actor_a_schema
         .execute(
@@ -369,6 +374,76 @@ async fn row_policy_filters_reads_and_write_transform_injects_server_fields()
     .await;
     assert!(repo_denied.is_err());
 
+    let actor_a_bulk_update = actor_a_schema
+        .execute(
+            "mutation {
+                updateScopedCollections(
+                    where: { name: { contains: \"a\" } }
+                    input: { name: \"BulkBlocked\" }
+                ) { success error affectedCount }
+            }",
+        )
+        .await;
+    assert!(
+        actor_a_bulk_update.errors.is_empty(),
+        "{:?}",
+        actor_a_bulk_update.errors
+    );
+    let actor_a_bulk_update_json = actor_a_bulk_update.data.into_json()?;
+    assert_eq!(
+        actor_a_bulk_update_json["updateScopedCollections"]["success"].as_bool(),
+        Some(false),
+        "a bulk mutation must reject the entire locked key set when any row is unauthorized"
+    );
+    let first_after_bulk =
+        ScopedCollection::get(&pool, &graphql_orm::uuid::Uuid::parse_str(&created_id)?)
+            .await?
+            .expect("first row missing after rejected bulk update");
+    let second_after_bulk = ScopedCollection::get(
+        &pool,
+        &graphql_orm::uuid::Uuid::parse_str(&second_created_id)?,
+    )
+    .await?
+    .expect("second row missing after rejected bulk update");
+    assert_eq!(first_after_bulk.name, "Renamed");
+    assert_eq!(second_after_bulk.name, "Bravo");
+
+    let actor_a_bulk_delete = actor_a_schema
+        .execute(
+            "mutation {
+                deleteScopedCollections(where: { name: { contains: \"a\" } }) {
+                    success
+                    error
+                    deletedCount
+                }
+            }",
+        )
+        .await;
+    assert!(
+        actor_a_bulk_delete.errors.is_empty(),
+        "{:?}",
+        actor_a_bulk_delete.errors
+    );
+    let actor_a_bulk_delete_json = actor_a_bulk_delete.data.into_json()?;
+    assert_eq!(
+        actor_a_bulk_delete_json["deleteScopedCollections"]["success"].as_bool(),
+        Some(false),
+        "a bulk delete must reject the entire locked key set when any row is unauthorized"
+    );
+    assert!(
+        ScopedCollection::get(&pool, &graphql_orm::uuid::Uuid::parse_str(&created_id)?)
+            .await?
+            .is_some()
+    );
+    assert!(
+        ScopedCollection::get(
+            &pool,
+            &graphql_orm::uuid::Uuid::parse_str(&second_created_id)?,
+        )
+        .await?
+        .is_some()
+    );
+
     let admin_delete = admin_schema
         .execute(format!(
             "mutation {{
@@ -395,5 +470,69 @@ async fn row_policy_filters_reads_and_write_transform_injects_server_fields()
     assert!(audit.iter().any(|entry| entry == "create:actor-a"));
     assert!(audit.iter().any(|entry| entry == "update:actor-a"));
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn mutation_context_cannot_bypass_repository_row_policy()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = setup_pool().await?;
+    let id = graphql_orm::uuid::Uuid::new_v4();
+    #[cfg(feature = "sqlite")]
+    sqlx::query(
+        "INSERT INTO scoped_collections (id, name, owner_user_id, updated_by_user_id) VALUES (?, ?, ?, ?)",
+    )
+    .bind(id.to_string())
+    .bind("Protected")
+    .bind("actor-a")
+    .bind("actor-a")
+    .execute(&pool)
+    .await?;
+    #[cfg(feature = "postgres")]
+    sqlx::query(
+        "INSERT INTO scoped_collections (id, name, owner_user_id, updated_by_user_id) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(id)
+    .bind("Protected")
+    .bind("actor-a")
+    .bind("actor-a")
+    .execute(&pool)
+    .await?;
+
+    let mut db = graphql_orm::db::Database::new(pool.clone());
+    db.set_row_policy(ScopedRowPolicy);
+
+    let update = db
+        .transaction(TransactionMode::StateMachine, move |transaction| {
+            Box::pin(async move {
+                transaction
+                    .update_by_id::<ScopedCollection>(
+                        &id,
+                        UpdateScopedCollectionInput {
+                            name: Some("Denied".to_string()),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                Ok(())
+            })
+        })
+        .await;
+    assert!(matches!(update, Err(TransactionError::Rejected(_))));
+
+    let delete = db
+        .transaction(TransactionMode::StateMachine, move |transaction| {
+            Box::pin(async move {
+                transaction.delete_by_id::<ScopedCollection>(&id).await?;
+                Ok(())
+            })
+        })
+        .await;
+    assert!(matches!(delete, Err(TransactionError::Rejected(_))));
+
+    let stored = ScopedCollection::get(&pool, &id)
+        .await?
+        .expect("row-policy denial must roll back the mutation");
+    assert_eq!(stored.name, "Protected");
     Ok(())
 }

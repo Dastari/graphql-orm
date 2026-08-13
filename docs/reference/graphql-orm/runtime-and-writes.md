@@ -72,6 +72,12 @@ The SQL Server transaction pins one Tiberius client. Successful commit or rollba
 pool; protocol failure, cancellation, or drop discards it so a client with indeterminate transaction
 state cannot be reused. SQL Server upserts use locked update/insert statements rather than `MERGE`.
 
+Generated row-policy decisions for update, delete, replace, and upsert share the pinned mutation
+transaction with their DML. Input transforms and before hooks receive the locked preimage. Bulk
+update/delete helpers execute only against the exact authorized key set and validate one affected
+row per key; they never re-run the original broad predicate after policy evaluation. This contract
+applies equally to generated GraphQL mutations and repository helpers.
+
 ## Repository Helpers
 
 Generated repository helpers use `graphql_orm::Result<T>` so application crates can keep SQLX out of
@@ -105,6 +111,11 @@ Write-capable entities generate:
 `replace_all` deletes existing rows and inserts the provided inputs in one transaction using the
 normal ORM write path, so hooks, policies, search maintenance, subscriptions, and change events are
 preserved.
+
+Top-level upsert helpers choose `TransactionMode::StateMachine` because an absent conflict key has no
+row to lock. The transaction-bound `MutationContext::upsert` rejects `TransactionMode::Default`;
+callers composing an upsert with other work must choose `StateMachine` explicitly. Update and delete
+helpers lock an existing authoritative preimage and keep their normal source signatures.
 
 ## Field Controls
 

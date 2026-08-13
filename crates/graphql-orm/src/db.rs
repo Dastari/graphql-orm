@@ -1253,7 +1253,11 @@ where
                 B::clear_retention_context(&mut tx)
                     .await
                     .map_err(classify_transaction_error::<B>)?;
-                let mutation = crate::graphql::orm::MutationContext::new(self, tx);
+                let mutation = crate::graphql::orm::MutationContext::new_with_mode(
+                    self,
+                    tx,
+                    crate::graphql::orm::TransactionMode::StateMachine,
+                );
                 let mut context = crate::graphql::orm::RetentionContext::new(mutation);
                 let value = match callback(&mut context).await {
                     Ok(value) => value,
@@ -1343,7 +1347,8 @@ where
                 B::apply_auth_context_to_write_transaction(&mut tx, auth)
                     .await
                     .map_err(classify_transaction_error::<B>)?;
-                let mut context = crate::graphql::orm::MutationContext::new(self, tx);
+                let mut context =
+                    crate::graphql::orm::MutationContext::new_with_mode(self, tx, mode);
                 let value = match callback(&mut context).await {
                     Ok(value) => value,
                     Err(error) => {

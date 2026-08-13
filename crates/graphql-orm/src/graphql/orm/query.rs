@@ -1637,13 +1637,22 @@ pub fn render_filter_expression(
     }
 }
 
-pub fn render_select_query(dialect: DatabaseBackend, query: &SelectQuery) -> RenderedQuery {
+fn render_select_query_inner(
+    dialect: DatabaseBackend,
+    query: &SelectQuery,
+    write_decision: bool,
+) -> RenderedQuery {
     let projection = if query.count_only {
         dialect.count_projection().to_string()
     } else {
         query.columns.join(", ")
     };
-    let mut sql = format!("SELECT {} FROM {}", projection, query.table);
+    let table = if write_decision && dialect == DatabaseBackend::Mssql {
+        format!("{} WITH (UPDLOCK, HOLDLOCK)", query.table)
+    } else {
+        query.table.to_string()
+    };
+    let mut sql = format!("SELECT {} FROM {}", projection, table);
     let mut values = Vec::new();
     let mut next_index = 1usize;
 
@@ -1676,7 +1685,22 @@ pub fn render_select_query(dialect: DatabaseBackend, query: &SelectQuery) -> Ren
         }
     }
 
+    if write_decision && dialect == DatabaseBackend::Postgres {
+        sql.push_str(" FOR UPDATE");
+    }
+
     RenderedQuery { sql, values }
+}
+
+pub fn render_select_query(dialect: DatabaseBackend, query: &SelectQuery) -> RenderedQuery {
+    render_select_query_inner(dialect, query, false)
+}
+
+fn render_write_decision_select_query(
+    dialect: DatabaseBackend,
+    query: &SelectQuery,
+) -> RenderedQuery {
+    render_select_query_inner(dialect, query, true)
 }
 
 pub fn render_aggregate_query(dialect: DatabaseBackend, query: &AggregateQuery) -> RenderedQuery {
@@ -3155,6 +3179,39 @@ where
         self.apply_in_memory_filtering(rows, PaginationConfig::default(), false)
     }
 
+    /// Fetch rows used to authorize a subsequent mutation while acquiring the
+    /// backend's portable write-decision lock on the same pinned transaction.
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    #[doc(hidden)]
+    pub async fn fetch_all_for_write_in_transaction(
+        &self,
+        context: &mut MutationContext<'_, B>,
+    ) -> crate::Result<Vec<T>>
+    where
+        B: WriteBackend,
+    {
+        let rendered = render_write_decision_select_query(B::DIALECT, &self.build_select_query());
+        let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
+        self.apply_in_memory_filtering(rows, PaginationConfig::default(), false)
+    }
+
+    /// Fetch at most one write-decision row on the pinned transaction.
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    #[doc(hidden)]
+    pub async fn fetch_one_for_write_in_transaction(
+        &self,
+        context: &mut MutationContext<'_, B>,
+    ) -> crate::Result<Option<T>>
+    where
+        B: WriteBackend,
+    {
+        Ok(self
+            .fetch_all_for_write_in_transaction(context)
+            .await?
+            .into_iter()
+            .next())
+    }
+
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     #[doc(hidden)]
     pub async fn fetch_bounded_mutation_sentinel_in_transaction(
@@ -3197,7 +3254,7 @@ where
             offset: Some(0),
         });
         let pagination = PaginationConfig::unbounded();
-        let rendered = render_select_query(
+        let rendered = render_write_decision_select_query(
             B::DIALECT,
             &query.build_select_query_with_config(pagination, false),
         );
@@ -3957,6 +4014,36 @@ mod grouped_aggregate_tests {
 
     fn field(name: &'static str, kind: AggregateFieldKind) -> AggregateFieldRef {
         AggregateFieldRef::generated(name, name, name, kind, false, true, OPERATORS)
+    }
+
+    #[test]
+    fn write_decision_selects_use_backend_specific_locks() {
+        let query = SelectQuery {
+            table: "work_records",
+            columns: vec!["id".to_string(), "owner_id".to_string()],
+            filter: None,
+            sorts: vec![SortExpression {
+                clause: "id ASC".to_string(),
+            }],
+            pagination: Some(PaginationRequest {
+                limit: Some(10),
+                offset: 0,
+            }),
+            count_only: false,
+        };
+
+        let sqlite = render_write_decision_select_query(DatabaseBackend::Sqlite, &query);
+        let postgres = render_write_decision_select_query(DatabaseBackend::Postgres, &query);
+        let mssql = render_write_decision_select_query(DatabaseBackend::Mssql, &query);
+
+        assert!(!sqlite.sql.contains("FOR UPDATE"));
+        assert!(!sqlite.sql.contains("UPDLOCK"));
+        assert!(postgres.sql.ends_with("LIMIT 10 FOR UPDATE"));
+        assert!(
+            mssql
+                .sql
+                .contains("FROM work_records WITH (UPDLOCK, HOLDLOCK)")
+        );
     }
 
     #[test]

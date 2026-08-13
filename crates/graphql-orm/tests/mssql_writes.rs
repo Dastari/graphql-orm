@@ -2,7 +2,7 @@
 
 use graphql_orm::prelude::*;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const SQL_SERVER_IMAGE: &str = "mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89";
 
@@ -89,6 +89,97 @@ struct ScalarRecord {
     business_date: String,
     business_time: String,
     occurred_at: String,
+}
+
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql_entity(
+    backend = "mssql",
+    table = "dbo.GraphqlOrmPolicyRecords",
+    plural = "MssqlPolicyRecords",
+    schema_policy = "external_writable",
+    auth = "none"
+)]
+struct MssqlPolicyRecord {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "string")]
+    #[sortable]
+    id: String,
+    #[graphql_orm(private)]
+    owner_id: String,
+    #[filterable(type = "string")]
+    #[sortable]
+    value: String,
+}
+
+schema_roots! {
+    backend: "mssql",
+    schema_policy: "external_writable",
+    generated_mutations: "allowlist",
+    generated_mutation_allowlist: [MssqlPolicyRecord],
+    query_custom_ops: [],
+    entities: [MssqlPolicyRecord],
+}
+
+type MssqlPolicySchema = async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
+
+#[derive(Clone)]
+struct MssqlOwnerPolicy;
+
+impl RowPolicy<MssqlBackend> for MssqlOwnerPolicy {
+    fn can_read_row<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a Database<MssqlBackend>,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+        _row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+
+    fn can_write_row<'a>(
+        &'a self,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a Database<MssqlBackend>,
+        entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+        row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            if entity_name != "MssqlPolicyRecord" {
+                return Ok(true);
+            }
+            let Some(row) = row.downcast_ref::<MssqlPolicyRecord>() else {
+                return Ok(false);
+            };
+            Ok(ctx.and_then(|ctx| ctx.data_opt::<String>()) == Some(&row.owner_id))
+        })
+    }
+}
+
+#[derive(Clone, Default)]
+struct MssqlPolicyHook(Arc<Mutex<Vec<MutationPhase>>>);
+
+impl MutationHook<MssqlBackend> for MssqlPolicyHook {
+    fn on_mutation<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _hook_ctx: &'a mut MutationContext<'_, MssqlBackend>,
+        event: &'a MutationEvent,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<()>> {
+        Box::pin(async move {
+            if event.entity_name == "MssqlPolicyRecord" {
+                self.0
+                    .lock()
+                    .expect("MSSQL policy hook lock poisoned")
+                    .push(event.phase.clone());
+            }
+            Ok(())
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -181,19 +272,18 @@ impl OwnedSqlServer {
         for _ in 0..180 {
             if let Ok(pool) =
                 graphql_orm::db::mssql::MssqlPool::connect_ado(&master_connection).await
+                && pool.fetch_rows("SELECT 1 AS ready", &[]).await.is_ok()
             {
-                if pool.fetch_rows("SELECT 1 AS ready", &[]).await.is_ok() {
-                    let database_name = format!("graphql_orm_{}", owned.owner_token);
-                    execute_batch(
-                        &master_connection,
-                        &format!("CREATE DATABASE [{database_name}]"),
-                    )
-                    .await?;
-                    owned.connection_string = format!(
-                        "server=tcp:127.0.0.1,{port};database={database_name};user id=sa;password={password};TrustServerCertificate=true"
-                    );
-                    return Ok(owned);
-                }
+                let database_name = format!("graphql_orm_{}", owned.owner_token);
+                execute_batch(
+                    &master_connection,
+                    &format!("CREATE DATABASE [{database_name}]"),
+                )
+                .await?;
+                owned.connection_string = format!(
+                    "server=tcp:127.0.0.1,{port};database={database_name};user id=sa;password={password};TrustServerCertificate=true"
+                );
+                return Ok(owned);
             }
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
@@ -328,6 +418,13 @@ async fn external_writable_mssql_dml_and_transactions_are_native_and_atomic()
             business_time TIME(3) NOT NULL,
             occurred_at DATETIME2(3) NOT NULL
         );
+        CREATE TABLE dbo.GraphqlOrmPolicyRecords (
+            id NVARCHAR(64) NOT NULL PRIMARY KEY,
+            owner_id NVARCHAR(64) NOT NULL,
+            value NVARCHAR(128) NOT NULL
+        );
+        INSERT INTO dbo.GraphqlOrmPolicyRecords (id, owner_id, value)
+        VALUES ('policy-a', 'actor-a', 'before');
         "#,
     )
     .await?;
@@ -339,6 +436,75 @@ async fn external_writable_mssql_dml_and_transactions_are_native_and_atomic()
     );
     assert!(
         WritableRecord::insert(&read_only, writable_input("read-only-denied", 9))
+            .await
+            .is_err()
+    );
+
+    let mut policy_database = writable_database(&server.connection_string, 2)?;
+    let policy_hook = MssqlPolicyHook::default();
+    policy_database.set_row_policy(MssqlOwnerPolicy);
+    policy_database.set_mutation_hook(policy_hook.clone());
+    let mut policy_events = policy_database
+        .ensure_event_sender::<MssqlPolicyRecordChangedEvent>()
+        .subscribe();
+    let actor_a_schema: MssqlPolicySchema = schema_builder(policy_database.clone())
+        .data("actor-a".to_string())
+        .finish();
+    let actor_b_schema: MssqlPolicySchema = schema_builder(policy_database)
+        .data("actor-b".to_string())
+        .finish();
+
+    let denied = actor_b_schema
+        .execute(
+            "mutation {
+                updateMssqlPolicyRecord(id: \"policy-a\", input: { value: \"denied\" }) {
+                    success
+                    error
+                }
+            }",
+        )
+        .await;
+    assert!(!denied.errors.is_empty());
+    assert!(policy_hook.0.lock().expect("hook lock poisoned").is_empty());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), policy_events.recv())
+            .await
+            .is_err()
+    );
+
+    let allowed = actor_a_schema
+        .execute(
+            "mutation {
+                updateMssqlPolicyRecord(id: \"policy-a\", input: { value: \"allowed\" }) {
+                    success
+                    mssqlPolicyRecord { id value }
+                }
+            }",
+        )
+        .await;
+    assert!(allowed.errors.is_empty(), "{:?}", allowed.errors);
+    assert_eq!(
+        policy_hook.0.lock().expect("hook lock poisoned").as_slice(),
+        &[MutationPhase::Before, MutationPhase::After]
+    );
+    let policy_event = policy_events.recv().await?;
+    assert_eq!(policy_event.action, ChangeAction::Updated);
+    assert_eq!(
+        policy_event.entity.expect("updated policy row").value,
+        "allowed"
+    );
+
+    let denied_delete = actor_b_schema
+        .execute(
+            "mutation {
+                deleteMssqlPolicyRecord(id: \"policy-a\") { success error }
+            }",
+        )
+        .await;
+    assert!(!denied_delete.errors.is_empty());
+    assert_eq!(policy_hook.0.lock().expect("hook lock poisoned").len(), 2);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), policy_events.recv())
             .await
             .is_err()
     );

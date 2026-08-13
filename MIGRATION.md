@@ -111,6 +111,16 @@ Server migration planning/application, managed RLS/search structures,
 runtime-schema writes, or backup/restore. No ORM schema or stored-data
 migration is performed by this release.
 
+Generated writes in 0.22.0 also tighten the row-authorization boundary without changing public
+top-level method signatures. Update/delete/bulk helpers now evaluate the locked preimage and perform
+exact-key DML on one pinned transaction. Generated upsert helpers select state-machine isolation.
+If application code calls `MutationContext::upsert` inside an explicit
+`Database::transaction(TransactionMode::Default, ...)`, change that transaction to
+`TransactionMode::StateMachine` and retry the complete callback when a serialization conflict is
+classified retryable. Default-mode upserts now fail closed instead of accepting an unfenced
+absent-key decision. No table, column, stored-data, migration-history, backup, GraphQL SDL, or AI
+schema-module migration is required.
+
 ## 0.21.1 agql-auth 0.15 session-bound delegation alignment
 
 Update `graphql-orm` and `graphql-orm-macros` together to 0.21.1 at one

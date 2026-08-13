@@ -391,3 +391,43 @@ async fn generated_upserts_work_for_graphql_and_repository_paths()
 
     Ok(())
 }
+
+#[tokio::test]
+async fn caller_owned_upsert_requires_state_machine_isolation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = setup_pool().await?;
+    let db = graphql_orm::db::Database::new(pool);
+    let input = CreateDiscoveredDeviceInput {
+        mac: "CC:DD".to_string(),
+        name: "Default transaction must fail closed".to_string(),
+        last_seen_by: "system".to_string(),
+    };
+
+    let default_result = db
+        .transaction(TransactionMode::Default, move |transaction| {
+            Box::pin(async move {
+                transaction.upsert::<DiscoveredDevice>(input).await?;
+                Ok(())
+            })
+        })
+        .await;
+    assert!(matches!(default_result, Err(TransactionError::Rejected(_))));
+
+    let state_machine_result = db
+        .transaction(TransactionMode::StateMachine, move |transaction| {
+            Box::pin(async move {
+                transaction
+                    .upsert::<DiscoveredDevice>(CreateDiscoveredDeviceInput {
+                        mac: "CC:DD".to_string(),
+                        name: "State machine succeeds".to_string(),
+                        last_seen_by: "system".to_string(),
+                    })
+                    .await?;
+                Ok(())
+            })
+        })
+        .await;
+    assert!(state_machine_result.is_ok());
+
+    Ok(())
+}

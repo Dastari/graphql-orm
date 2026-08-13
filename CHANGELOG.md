@@ -62,6 +62,12 @@ semantic owner: `graphql-orm-operation-catalog` **0.2.0**.
   `MERGE`; transactions discard a Tiberius client after cancellation or an
   indeterminate error. Fixed-decimal and JSON values have native validated
   MSSQL bind/decode paths.
+- Closed a generated-write authorization race across SQLite, PostgreSQL, and
+  SQL Server. Authoritative row lookup, row policy, input transformation,
+  before hooks, and exact-key DML now share one pinned mutation transaction;
+  predicate writes cannot capture newly matching rows after authorization.
+  Top-level upserts use state-machine isolation, while caller-owned default
+  transactions fail closed before an unfenced upsert.
 - Logical backups represent Decimal columns as exact validated Decimal values,
   including precision and scale. SQLite scaled integers and PostgreSQL native
   numerics now share one canonical backup form, and restore rejects changed

@@ -50,6 +50,15 @@ are independent groups; enable at most one feature in each group. In a
 multi-backend dependency graph, select `backend = "sqlite" | "postgres" |
 "mssql"` on each entity and in `schema_roots!`.
 
+Generated update, delete, predicate-write, and upsert helpers keep the
+authoritative preimage, row/field policy, input transformation, hooks, and DML
+on one pinned transaction. Predicate writes materialize the authorized primary
+keys and never re-run a broad predicate after authorization. Top-level upserts
+select `TransactionMode::StateMachine` automatically; an upsert composed inside
+`Database::transaction` must explicitly select that mode so an absent-key
+decision is fenced across every backend. See [runtime writes and repository
+operations](../../docs/reference/graphql-orm/runtime-and-writes.md#repository-helpers).
+
 ## Minimum entity
 
 ```rust

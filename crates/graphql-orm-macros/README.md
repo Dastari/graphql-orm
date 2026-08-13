@@ -86,5 +86,11 @@ reference. Attribute metadata is not authorization: resolver auth, scope
 metadata, semantic descriptions, and operation fingerprints never replace
 application row/field policy or database controls.
 
+Generated write resolvers and repository helpers lower authorization-sensitive
+reads and DML onto one driver-neutral mutation transaction. Existing-row
+decisions use backend write locks, predicate mutations materialize typed
+primary keys before exact-key DML, and absent-key upserts require the runtime's
+state-machine isolation mode. Consumers do not provide SQL or lock clauses.
+
 See [core runtime documentation](../graphql-orm/README.md),
 and the [macro and attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md).
