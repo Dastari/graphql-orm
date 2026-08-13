@@ -36,6 +36,10 @@ checkpoint facts. For the current workspace baseline and active gates, use the
   policy, ordinary resolver authorization, exact offered capability and plan
   fingerprints, bounded output and selected-field disclosure validation.
   Secret and `NeverExport` fields are absent from provider schemas.
+- Static and automatic GraphQL disclosure contracts prove their checked
+  worst-case total record count against the descriptor ceiling. Runtime
+  evaluation independently counts the actual composite result, including
+  sibling and nested list expansions, and fails closed above that total.
 
 ### Schema
 

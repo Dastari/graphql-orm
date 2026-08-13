@@ -36,6 +36,11 @@ supersedes: []
   unknown selections, stale capability fingerprints and schema drift fail
   readiness or compilation instead of silently omitting authority-relevant
   metadata.
+- Result-record ceilings cover the complete GraphQL result tree rather than
+  only the largest individual list. Checked sibling addition and nested
+  collection multiplication apply at compilation and registration; runtime
+  evaluation independently rejects an actual composite result above the same
+  exact total.
 
 ## [0.3.0] - 2026-08-11
 

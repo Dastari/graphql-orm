@@ -33,6 +33,14 @@ and migration contract rather than persisting these discovery values directly.
 No database, GraphQL SDL, manifest wire, table, column, constraint, backfill,
 or row rewrite is required by this package update.
 
+Review explicit profiles whose `maximum_result_records` was set equal to only
+one projected list bound. In 0.4.0 it is the checked total across the complete
+GraphQL result: the root result plus sibling object/list expansions and nested
+fanout. Increase it only to the reviewed complete projection maximum; retain
+the individual list bounds. Descriptor and disclosure wire shapes are
+unchanged, but a corrected limit changes the normal descriptor fingerprint and
+any exact host allowlist must be updated.
+
 ## 0.2.0 to 0.3.0: canonical JSON fingerprints
 
 Update every manifest producer and consumer to the same reviewed monorepo

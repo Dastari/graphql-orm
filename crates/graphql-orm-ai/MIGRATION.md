@@ -36,6 +36,13 @@ Existing explicit profiles and manifest wire version 2 remain supported.
 No AI schema, GraphQL SDL, table, column, constraint, backup, data migration or
 backfill is required. AI schema module `0.57.0` remains current.
 
+The existing descriptor `maximum_result_records` field now enforces the total
+selected GraphQL result rather than the greatest individual list. Review
+explicit static profiles with sibling or nested object/list projections and
+set the limit to their checked complete maximum. Corrected limits participate
+in the existing descriptor fingerprint. No wire field or persistence contract
+was added.
+
 ## 0.77.1: independent provider feature builds (schema remains 0.57.0)
 
 Update the AI package to 0.77.1 at the same reviewed full Git revision as its

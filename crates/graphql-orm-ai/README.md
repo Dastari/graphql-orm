@@ -90,8 +90,9 @@ selection/disclosure schema and dynamic descriptor. The authenticated bridge
 then rehydrates the principal, invokes current target/tool policy, builds the
 canonical request context, and lets the ordinary resolver authorize the call.
 Registration alone remains default-deny. The runtime enforces descriptor byte
-and record bounds and rejects response fields outside the selected disclosure
-shape.
+and total-record bounds and rejects response fields outside the selected
+disclosure shape. Total records include sibling and nested relationship
+expansion, not merely the largest returned list.
 
 Mutation and subscription execution do not use the query path. The
 backend-neutral profile package can compile a bounded `ReplayThenLive`

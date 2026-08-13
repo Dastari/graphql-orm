@@ -135,7 +135,7 @@ or resume an agent.
 | `AiGraphqlArgumentValue` | input reference, server-owned constant, closed input object, or fixed-shape list; every input must be used exactly once through argument plans |
 | `AiGraphqlSelection` | explicit scalar/object/list projection; every list needs a positive bound; projection depth is at most 8 and each level at most 128 selections |
 | `AiDisclosureSchema` | versioned recursive allow-list; unknown response fields and `NeverExport` nodes are rejected; maximum nesting depth is 64 |
-| `AiGraphqlToolProfile` | read-only query or explicit supervised mutation; nonempty projection and positive result byte/record bounds are required |
+| `AiGraphqlToolProfile` | read-only query or explicit supervised mutation; nonempty projection and positive result byte/total-record bounds are required |
 | `AiBrowserResultPreviewPolicy` | optional separate browser preview; byte limit 1..=1 MiB, record limit 1..=100,000, depth 1..=32, never `Secret` |
 | `AiGraphqlToolManifestBuilder` | validates a finished SDL locally, compiles custom/generated profiles, orders entries, and fingerprints the versioned manifest |
 
@@ -144,6 +144,14 @@ or resume an agent.
 idempotency. Profile compilation replaces the result limits and binds a
 server-authored document, JSON Schema, result-projection fingerprint, finished
 SDL fingerprint, and disclosure fingerprint.
+
+`maximum_result_records` is a total budget for the complete selected GraphQL
+result, not the largest individual list. The public root transport envelope is
+excluded; a result object or scalar counts once, sibling object/list expansions
+add, nested list expansions multiply, and scalar list items count individually.
+Compilation and registration reject a disclosure shape whose checked
+worst-case total exceeds the descriptor budget. Runtime evaluation counts the
+actual returned shape again before disclosure.
 
 ## Registration and serialization
 
