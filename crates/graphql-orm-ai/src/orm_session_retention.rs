@@ -2062,6 +2062,29 @@ impl OrmAiSessionRetentionService {
                             .map_err(OrmPublicError::from)?;
                             Ok(ProviderSessionCleanupOutcome::Requested)
                         }
+                        "deleted"
+                            if record.protected_cursor.is_none()
+                                && record
+                                    .provider_absence_observed_at
+                                    .is_some_and(|observed_at| observed_at > 0)
+                                && crate::valid_sha256(&record.cursor_fingerprint)
+                                && record.claimed_run_id.is_none()
+                                && record.claimed_attempt_id.is_none()
+                                && record.claimed_run_lease_generation.is_none()
+                                && record.claim_owner.is_none()
+                                && record.claim_expires_at.is_none()
+                                && record.cleanup_owner.is_none()
+                                && record.cleanup_lease_expires_at.is_none() =>
+                        {
+                            if !tx
+                                .delete_by_id::<AiProviderSessionBindingRecord>(&record.id)
+                                .await
+                                .map_err(OrmPublicError::from)?
+                            {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                            Ok(ProviderSessionCleanupOutcome::Absent)
+                        }
                         "cleanup_required"
                         | "cleanup_in_progress"
                         | "cleanup_backoff"

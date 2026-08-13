@@ -20,7 +20,57 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-No changes recorded after 0.76.1.
+No changes recorded after 0.77.0.
+
+## [0.77.0] - 2026-08-13
+
+### Added
+
+- `AiProviderSessionRunDisposition` gives hosts and the provider executor one
+  authoritative distinction between a new session, an exact resumable
+  binding, an unavailable lifecycle state, and a deleted generation that may
+  be rebound after exact provider-absence proof.
+- `AiProviderSessionRebindAuthorization` and
+  `AiProviderSessionService::rebind_for_run` provide a crate-issued,
+  short-lived, run-fenced replacement contract. Consumers cannot construct or
+  alter the authorization.
+- `AiProviderFailureCategory` and the optional
+  `AiProviderFailureDiagnosticSink` expose bounded content-free operational
+  diagnosis without changing conservative run outcomes. Bounded Codex
+  app-server startup, turn, delete, interrupt, and shutdown timeouts now report
+  the closed timeout category instead of looking like owner cancellation.
+
+### Changed
+
+- Successful provider-session cleanup now retains a private `Deleted`
+  tombstone containing the exact cleared generation and absence observation.
+  A later current-authority run may atomically replace that same row with a
+  freshly protected cursor and host-supplied canonical transcript fingerprint.
+- `AiProviderCallExecutor` owns fresh-session versus resume versus rebind
+  selection. If empty-thread creation succeeds but binding or rebinding loses
+  its fence, it invokes the existing exact provider discard boundary.
+- Final deleting-session retention removes an absence-proven tombstone only as
+  part of the existing session-deletion dependency order.
+
+### Security
+
+- Rebind eligibility is denied for active, claimed, cleanup-required,
+  cleanup-in-progress, cleanup-backoff, and restore-quarantined rows. Expiry,
+  process loss, transport ambiguity, or cursor redaction is never provider
+  absence proof.
+- Rebind rehydrates current principal/session authority and atomically binds
+  the exact owner, scope, run, attempt, lease generation, deleted row version,
+  cleanup generation, provider descriptor, and canonical transcript prefix.
+  Old cursor material is cleared and cannot be reopened.
+- Failure diagnostics contain only a closed machine category. They cannot
+  carry prompts, output, tool data, provider bodies, credentials, cursors, or
+  authorization details and cannot authorize retry.
+
+### Schema
+
+- AI schema module `0.57.0` records the durable provider-session tombstone and
+  rebind semantics. No entity, table, column, index, constraint, or stored-row
+  representation changes; existing rows require no rewrite or backfill.
 
 ## [0.76.1] - 2026-08-13
 

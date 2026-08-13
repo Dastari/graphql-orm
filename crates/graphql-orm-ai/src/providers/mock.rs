@@ -48,10 +48,14 @@ pub struct MockProvider {
     background_observation: Option<ProviderBackgroundObservation>,
     #[cfg(test)]
     background_retrieval_failure: Option<MockBackgroundRetrievalFailure>,
+    #[cfg(test)]
+    stream_failure: Option<crate::AiProviderFailureCategory>,
     #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
     provider_session_cursor: Option<crate::AiProviderSessionCursor>,
     #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
     provider_session_activations: Arc<Mutex<Vec<crate::AiProviderSessionActivation>>>,
+    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+    discarded_provider_sessions: Arc<AtomicU64>,
     request_count: Arc<AtomicU64>,
 }
 
@@ -81,10 +85,14 @@ impl MockProvider {
             background_observation: None,
             #[cfg(test)]
             background_retrieval_failure: None,
+            #[cfg(test)]
+            stream_failure: None,
             #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
             provider_session_cursor: None,
             #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
             provider_session_activations: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+            discarded_provider_sessions: Arc::new(AtomicU64::new(0)),
             request_count: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -120,6 +128,15 @@ impl MockProvider {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_stream_failure(
+        mut self,
+        category: crate::AiProviderFailureCategory,
+    ) -> Self {
+        self.stream_failure = Some(category);
+        self
+    }
+
     #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
     pub(crate) fn with_provider_session_cursor(
         mut self,
@@ -135,6 +152,11 @@ impl MockProvider {
             .lock()
             .expect("mock provider-session activation lock should remain available")
             .clone()
+    }
+
+    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+    pub(crate) fn discarded_provider_session_count(&self) -> u64 {
+        self.discarded_provider_sessions.load(Ordering::Acquire)
     }
 
     #[cfg(test)]
@@ -206,6 +228,10 @@ impl AiProvider for MockProvider {
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
         context.validate_request(&self.kind, &request)?;
+        #[cfg(test)]
+        if let Some(category) = self.stream_failure {
+            return Err(ProviderError::Classified(category));
+        }
         #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
         if let Some(session) = context.provider_session() {
             self.provider_session_activations
@@ -246,6 +272,29 @@ impl AiProvider for MockProvider {
             .provider_session_cursor
             .clone()
             .ok_or(ProviderError::Unsupported);
+        #[cfg(not(all(test, any(feature = "sqlite", feature = "postgres"))))]
+        Err(ProviderError::Unsupported)
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    async fn discard_empty_session(
+        &self,
+        _binding: &crate::AiProviderRunBinding,
+        descriptor: &crate::AiProviderSessionDescriptor,
+        cursor: &crate::AiProviderSessionCursor,
+    ) -> Result<(), ProviderError> {
+        if descriptor.provider_kind() != &self.kind || cursor.kind().is_empty() {
+            return Err(ProviderError::Rejected);
+        }
+        #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+        {
+            if self.provider_session_cursor.as_ref() != Some(cursor) {
+                return Err(ProviderError::Rejected);
+            }
+            self.discarded_provider_sessions
+                .fetch_add(1, Ordering::AcqRel);
+            return Ok(());
+        }
         #[cfg(not(all(test, any(feature = "sqlite", feature = "postgres"))))]
         Err(ProviderError::Unsupported)
     }

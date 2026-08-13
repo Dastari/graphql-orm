@@ -10,8 +10,8 @@ supersedes: []
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.76.1` with AI schema module
-`0.56.0`. It uses workspace `graphql-orm` `0.21.1`, backend-neutral
+`graphql-orm-ai` is at crate version `0.77.0` with AI schema module
+`0.57.0`. It uses workspace `graphql-orm` `0.21.1`, backend-neutral
 `graphql-orm-ai-tool-profiles` `0.3.0`, and external `agql-auth`
 `0.15.0` at `e841ffd382082ad7419be259fe957f949b956ff7`.
 
@@ -53,9 +53,13 @@ verification evidence belongs in the focused guides.
   every dynamic-call boundary.
 - The provider-neutral durable session service protects opaque retained-thread
   cursors under exact owner/scope/run/descriptor/transcript fencing and an
-  exact deletion/absence lifecycle. Cursor state is separate from warm
-  processes, private from GraphQL, backup-redacted, and readiness-blocking on
-  portable restore until drained.
+  exact deletion/absence lifecycle. An absence-proven deleted generation may
+  be replaced once through a crate-issued short-lived rebind authorization;
+  cleanup/backoff, expiry, descriptor drift, and restore quarantine remain
+  unavailable. Cursor state is separate from warm processes, private from
+  GraphQL, backup-redacted, and readiness-blocking on portable restore until
+  drained. Provider failures may additionally emit only a closed content-free
+  operational category without changing conservative run semantics.
 - Current rule evidence supports both generated-ORM managed hierarchies and
   immutable deployment-only ceilings with no artificial per-resource policy
   rows. Both paths share exact-principal rehydration and canonical

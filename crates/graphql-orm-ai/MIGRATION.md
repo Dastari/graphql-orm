@@ -19,6 +19,62 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.77.0: absence-proven provider-session rebind (schema 0.56.0 to 0.57.0)
+
+Apply AI schema module `0.57.0` before starting workers from this release. The
+migration records a persistent semantic version only: it produces no table,
+column, index, constraint, or row rewrite. Existing active/claimed/cleanup
+rows retain their prior meaning, and provider-session cleanups completed by an
+older release remain ordinary `New` sessions because no binding row exists.
+No historical cursor, absence proof, or tombstone is manufactured.
+
+Provider-session cleanup now clears the protected cursor and leaves an exact
+private `Deleted` tombstone after the registered deletion service proves the
+provider thread absent. A later run asks
+`AiProviderSessionService::disposition_for_run` for one of four closed results:
+
+```rust
+match provider_sessions
+    .disposition_for_run(&lease, &turn_plan)
+    .await?
+{
+    AiProviderSessionRunDisposition::New => { /* allow the executor to bind empty state */ }
+    AiProviderSessionRunDisposition::Resume(binding) => {
+        assert_eq!(binding.descriptor(), turn_plan.descriptor());
+    }
+    AiProviderSessionRunDisposition::RebindAllowed(_) => {
+        /* allow the executor to create, atomically rebind, or discard */
+    }
+    AiProviderSessionRunDisposition::Unavailable(_) => {
+        return Err(AiError::Conflict);
+    }
+}
+```
+
+Ordinary hosts should use `AiProviderCallExecutor::execute_with_provider_session`,
+which owns this branch and discards a newly created empty provider session if
+the bind/rebind CAS loses. Hosts that inspect readiness before constructing a
+turn should consume the closed disposition rather than infer eligibility from
+`AiProviderSessionState::Deleted` or treat it as row absence.
+
+`RebindAllowed` is issued only after exact persisted provider absence and is
+bound to the current principal reference, owner/session/scope, run ID, attempt
+ID, lease generation, deleted binding row/generations, immutable provider
+descriptor, and host-supplied canonical transcript fingerprint. The service
+rehydrates and rechecks authority again during `rebind_for_run`. Cleanup
+backoff, expiry alone, uncertain transport, restore quarantine, descriptor
+drift, and stale/replayed authorizations remain unavailable.
+
+Hosts may optionally install `AiProviderFailureDiagnosticSink` on the provider
+executor. It receives only `AiProviderFailureCategory`; the category is
+operational evidence, not retry authority, and `RecoveryRequired` remains
+mandatory whenever provider execution may have occurred.
+
+There is no GraphQL SDL, entity, table, column, index, constraint, backup,
+restore-format, or data migration. The schema-module bump records the new
+durable meaning of a successfully cleaned provider-session row. No backfill is
+required.
+
 ## 0.76.1: agql-auth 0.15 session-bound delegation alignment (schema remains 0.56.0)
 
 Update every monorepo dependency to one reviewed full revision and align any

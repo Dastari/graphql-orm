@@ -1,6 +1,7 @@
 //! Provider-neutral model adapter contract.
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -1590,6 +1591,97 @@ pub enum ProviderError {
     /// Stream was cancelled.
     #[error("provider stream cancelled")]
     Cancelled,
+    /// Provider adapter supplied a closed content-free operational category.
+    #[error("provider operation failed: {0}")]
+    Classified(AiProviderFailureCategory),
+}
+
+impl ProviderError {
+    /// Returns a bounded content-free diagnostic category.
+    ///
+    /// This value is suitable for operational metrics and logs. It never
+    /// contains provider text, prompts, output, tool arguments/results,
+    /// credentials, cursors, endpoints, or authorization details.
+    pub const fn safe_category(&self) -> AiProviderFailureCategory {
+        match self {
+            Self::InvalidConfiguration(_)
+            | Self::InvalidRequest
+            | Self::CredentialUnavailable
+            | Self::EgressDenied
+            | Self::BudgetDenied
+            | Self::Unsupported
+            | Self::Rejected => AiProviderFailureCategory::ProviderRejection,
+            Self::RateLimited => AiProviderFailureCategory::RateLimit,
+            Self::Unavailable => AiProviderFailureCategory::TransportUnavailable,
+            Self::Cancelled => AiProviderFailureCategory::Cancellation,
+            Self::Classified(category) => *category,
+        }
+    }
+}
+
+/// Closed operational diagnosis for a failed provider turn.
+///
+/// The category does not determine retry or terminal semantics. In
+/// particular, callers must still use `RecoveryRequired` whenever provider
+/// execution may have occurred.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AiProviderFailureCategory {
+    /// A local provider process exited before a proven completion.
+    ProcessExit,
+    /// A bounded provider operation timed out.
+    Timeout,
+    /// Provider transport was unavailable.
+    TransportUnavailable,
+    /// Provider rate limiting denied or interrupted the request.
+    RateLimit,
+    /// Provider rejected the reviewed request or capability.
+    ProviderRejection,
+    /// A strict provider protocol contract was violated.
+    ProtocolViolation,
+    /// A provider-issued dynamic-tool call or argument set was invalid.
+    InvalidDynamicToolCall,
+    /// A retained provider thread rejected exact resume.
+    RetainedResumeRejection,
+    /// Owner cancellation won the provider boundary.
+    Cancellation,
+    /// Durable persistence or a run/provider-session fence was lost.
+    PersistenceFenceLoss,
+}
+
+impl AiProviderFailureCategory {
+    /// Stable bounded machine code.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProcessExit => "provider_process_exit",
+            Self::Timeout => "provider_timeout",
+            Self::TransportUnavailable => "provider_transport_unavailable",
+            Self::RateLimit => "provider_rate_limit",
+            Self::ProviderRejection => "provider_rejection",
+            Self::ProtocolViolation => "provider_protocol_violation",
+            Self::InvalidDynamicToolCall => "invalid_dynamic_tool_call",
+            Self::RetainedResumeRejection => "retained_thread_resume_rejection",
+            Self::Cancellation => "provider_cancellation",
+            Self::PersistenceFenceLoss => "provider_persistence_fence_loss",
+        }
+    }
+}
+
+impl fmt::Display for AiProviderFailureCategory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Deployment-owned sink for content-free provider failure categories.
+///
+/// Implementations must not enrich observations with provider content,
+/// principal/resource identifiers, credentials, cursors, or arbitrary error
+/// strings. Recording is synchronous and infallible so diagnostics cannot
+/// change authoritative run behavior.
+pub trait AiProviderFailureDiagnosticSink: Send + Sync {
+    /// Records one bounded provider failure category.
+    fn record(&self, category: AiProviderFailureCategory);
 }
 
 /// Provider event stream.
@@ -2405,5 +2497,40 @@ pub trait AiProvider: Send + Sync {
         _context: ProviderBackgroundRetrievalContext,
     ) -> Result<ProviderBackgroundObservation, ProviderError> {
         Err(ProviderError::Unsupported)
+    }
+}
+
+#[cfg(test)]
+mod safe_failure_tests {
+    use super::*;
+
+    #[test]
+    fn provider_failure_categories_are_closed_and_content_free() {
+        let categories = [
+            AiProviderFailureCategory::ProcessExit,
+            AiProviderFailureCategory::Timeout,
+            AiProviderFailureCategory::TransportUnavailable,
+            AiProviderFailureCategory::RateLimit,
+            AiProviderFailureCategory::ProviderRejection,
+            AiProviderFailureCategory::ProtocolViolation,
+            AiProviderFailureCategory::InvalidDynamicToolCall,
+            AiProviderFailureCategory::RetainedResumeRejection,
+            AiProviderFailureCategory::Cancellation,
+            AiProviderFailureCategory::PersistenceFenceLoss,
+        ];
+        for category in categories {
+            let code = category.as_str();
+            assert!(!code.is_empty() && code.len() <= 64);
+            assert!(code.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+            }));
+            assert_eq!(
+                ProviderError::Classified(category).safe_category(),
+                category
+            );
+        }
+        let sensitive = "secret-provider-body bearer-token cursor-value";
+        let error = ProviderError::Classified(AiProviderFailureCategory::ProtocolViolation);
+        assert!(!format!("{error:?} {error}").contains(sensitive));
     }
 }

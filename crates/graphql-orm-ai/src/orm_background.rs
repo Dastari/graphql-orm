@@ -4030,7 +4030,8 @@ fn classify_background_retrieval_error(
         | ProviderError::BudgetDenied
         | ProviderError::Unsupported
         | ProviderError::Rejected
-        | ProviderError::Cancelled => {
+        | ProviderError::Cancelled
+        | ProviderError::Classified(_) => {
             AiOpenAiBackgroundRetrievalAttempt::RecoveryRequired(background_retrieval_failure(
                 claim,
                 BackgroundRetrievalFailureDisposition::RecoveryRequired,

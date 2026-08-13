@@ -127,9 +127,11 @@ mod service {
         AiProviderSessionBindRequest, AiProviderSessionBindingView, AiProviderSessionClaim,
         AiProviderSessionCleanupClaim, AiProviderSessionCommit, AiProviderSessionCursor,
         AiProviderSessionDeletionRequest, AiProviderSessionDescriptor, AiProviderSessionLimits,
-        AiProviderSessionService, AiProviderSessionState, AiRunId, AiRunLease, AiRunState, AiScope,
-        AiSessionAction, AiSessionId, ProtectedContentEnvelope, ai_scope_key, parse_provider_kind,
-        provider_kind_value,
+        AiProviderSessionRebindAuthorization, AiProviderSessionRunDisposition,
+        AiProviderSessionService, AiProviderSessionState, AiProviderSessionTurnPlan, AiRunId,
+        AiRunLease, AiRunState, AiScope, AiSessionAction, AiSessionId, ProtectedContentEnvelope,
+        ai_scope_key, parse_provider_kind, provider_kind_value,
+        provider_session::MAXIMUM_PROVIDER_SESSION_REBIND_AUTHORIZATION_TTL,
     };
 
     const CURSOR_FORMAT_VERSION: u16 = 1;
@@ -419,6 +421,140 @@ mod service {
             binding_view(record).map(Some)
         }
 
+        async fn disposition_for_run(
+            &self,
+            lease: &AiRunLease,
+            planned: &AiProviderSessionTurnPlan,
+        ) -> Result<AiProviderSessionRunDisposition, AiError> {
+            let (current, observed_session, scope) = self.load_owned_active_context(lease).await?;
+            self.protection_policy(current.principal(), &scope).await?;
+            let now = canonical_second(self.clock.now());
+            let authorization_expires_at = now
+                .checked_add(MAXIMUM_PROVIDER_SESSION_REBIND_AUTHORIZATION_TTL)
+                .map(|expiry| expiry.min(lease.lease_expires_at()))
+                .filter(|expiry| *expiry > now)
+                .ok_or(AiError::Conflict)?;
+            let expected_owner = principal_identity(current.principal());
+            let expected_owner_kind = expected_owner.0;
+            let expected_owner_subject = expected_owner.1.to_owned();
+            let lease = lease.clone();
+            let planned = planned.clone();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let run = load_and_validate_active_lease(tx, &lease, now).await?;
+                        if run.state != AiRunState::Running.as_str() {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let session = tx
+                            .find_by_id::<AiSessionRecord>(&lease.session_id().0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if session != observed_session
+                            || session.state != "active"
+                            || session.deleted_at.is_some()
+                            || session.owner_principal_kind != expected_owner_kind
+                            || session.owner_subject != expected_owner_subject
+                            || record_scope(&session) != scope
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let input = tx
+                            .find_by_id::<AiMessageRecord>(&lease.input_message_id())
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        if input.session_id != session.id
+                            || input.message_role != "user"
+                            || input.completion_state != "complete"
+                            || input.sequence != session.message_head
+                            || input.sequence <= 0
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let records = tx
+                            .query::<AiProviderSessionBindingRecord>()
+                            .filter(AiProviderSessionBindingRecordWhereInput {
+                                session_id: Some(UuidFilter {
+                                    eq: Some(session.id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .limit(2)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if records.len() > 1 {
+                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                        }
+                        let Some(binding) = records.first() else {
+                            return Ok(AiProviderSessionRunDisposition::New);
+                        };
+                        validate_binding_record(binding)?;
+                        if binding.owner_principal_kind != session.owner_principal_kind
+                            || binding.owner_subject != session.owner_subject
+                            || record_scope_from_binding(binding) != scope
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let state = AiProviderSessionState::from_persisted(&binding.state)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        if state == AiProviderSessionState::Active
+                            && descriptor_from_record(binding).map_err(ai_error_to_orm)?
+                                == *planned.descriptor()
+                            && binding.transcript_fingerprint == planned.transcript_fingerprint()
+                            && binding.through_message_sequence.checked_add(1)
+                                == Some(input.sequence)
+                            && binding.idle_expires_at > now.unix_timestamp()
+                            && binding.absolute_expires_at > now.unix_timestamp()
+                            && binding
+                                .provider_expires_at
+                                .is_none_or(|expiry| expiry > now.unix_timestamp())
+                        {
+                            return binding_view(binding)
+                                .map(Box::new)
+                                .map(AiProviderSessionRunDisposition::Resume)
+                                .map_err(ai_error_to_orm);
+                        }
+                        if state == AiProviderSessionState::Deleted
+                            && binding.last_run_id != Some(lease.run_id().0)
+                            && descriptor_from_record(binding).map_err(ai_error_to_orm)?
+                                == *planned.descriptor()
+                        {
+                            let provider_absence_observed_at = binding
+                                .provider_absence_observed_at
+                                .and_then(|value| OffsetDateTime::from_unix_timestamp(value).ok())
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            return Ok(AiProviderSessionRunDisposition::RebindAllowed(Box::new(
+                                AiProviderSessionRebindAuthorization {
+                                    binding_id: binding.id,
+                                    session_id: AiSessionId(binding.session_id),
+                                    run_id: lease.run_id(),
+                                    attempt_id: lease.attempt_id(),
+                                    run_lease_generation: lease.lease_generation(),
+                                    binding_row_version: binding.row_version,
+                                    binding_claim_generation: binding.claim_generation,
+                                    cleanup_generation: binding.cleanup_generation,
+                                    provider_absence_observed_at,
+                                    expires_at: authorization_expires_at,
+                                    principal_reference: lease.principal_reference().clone(),
+                                    scope: scope.clone(),
+                                    descriptor: planned.descriptor().clone(),
+                                    transcript_fingerprint: planned
+                                        .transcript_fingerprint()
+                                        .to_owned(),
+                                },
+                            )));
+                        }
+                        Ok(AiProviderSessionRunDisposition::Unavailable(state))
+                    })
+                })
+                .await
+                .map_err(map_transaction)
+        }
+
         async fn bind_for_run(
             &self,
             lease: &AiRunLease,
@@ -589,6 +725,217 @@ mod service {
                         )
                         .await?;
                         Ok(inserted)
+                    })
+                })
+                .await
+                .map_err(map_transaction)?;
+            claim_from_record(&record, &claim_principal_reference)
+        }
+
+        async fn rebind_for_run(
+            &self,
+            lease: &AiRunLease,
+            authorization: AiProviderSessionRebindAuthorization,
+            request: AiProviderSessionBindRequest,
+        ) -> Result<AiProviderSessionClaim, AiError> {
+            let (current, observed_session, scope) = self.load_owned_active_context(lease).await?;
+            let policy = self.protection_policy(current.principal(), &scope).await?;
+            let now = canonical_second(self.clock.now());
+            let (descriptor, cursor, transcript_fingerprint, provider_expires_at) =
+                request.into_parts();
+            if authorization.session_id != lease.session_id()
+                || authorization.run_id != lease.run_id()
+                || authorization.attempt_id != lease.attempt_id()
+                || authorization.run_lease_generation != lease.lease_generation()
+                || authorization.principal_reference != *lease.principal_reference()
+                || authorization.scope != scope
+                || authorization.descriptor != descriptor
+                || authorization.transcript_fingerprint != transcript_fingerprint
+                || authorization.expires_at <= now
+                || authorization.provider_absence_observed_at > now
+                || provider_expires_at.is_some_and(|expiry| expiry <= now)
+            {
+                return Err(AiError::Conflict);
+            }
+            let expected_owner = principal_identity(current.principal());
+            let expected_owner_kind = expected_owner.0;
+            let expected_owner_subject = expected_owner.1.to_owned();
+            let (protected_cursor, cursor_kind, cursor_fingerprint) = self
+                .protect_cursor(
+                    authorization.binding_id,
+                    lease.session_id(),
+                    &expected_owner_kind,
+                    &expected_owner_subject,
+                    &scope,
+                    &policy,
+                    &descriptor,
+                    cursor,
+                )
+                .await?;
+            let absolute_expires_at = now
+                .checked_add(self.limits.absolute_lifetime())
+                .ok_or(AiError::PersistenceFailed)?;
+            let idle_expires_at = now
+                .checked_add(self.limits.idle_ttl())
+                .ok_or(AiError::PersistenceFailed)?;
+            let claim_expires_at = now
+                .checked_add(self.limits.claim_lease_ttl())
+                .map(|expiry| expiry.min(lease.lease_expires_at()))
+                .filter(|expiry| *expiry > now)
+                .ok_or(AiError::Conflict)?;
+            let principal_reference = serde_json::to_value(lease.principal_reference())
+                .map_err(|_| AiError::PersistenceFailed)?;
+            let descriptor_for_update = descriptor.clone();
+            let scope_for_update = scope.clone();
+            let lease = lease.clone();
+            let claim_principal_reference = lease.principal_reference().clone();
+            let record = self
+                .database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let current_run = load_and_validate_active_lease(tx, &lease, now).await?;
+                        if current_run.state != AiRunState::Running.as_str() {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let session = tx
+                            .find_by_id::<AiSessionRecord>(&lease.session_id().0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if session != observed_session
+                            || session.state != "active"
+                            || session.deleted_at.is_some()
+                            || session.owner_principal_kind != expected_owner_kind
+                            || session.owner_subject != expected_owner_subject
+                            || record_scope(&session) != scope_for_update
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let input = tx
+                            .find_by_id::<AiMessageRecord>(&lease.input_message_id())
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        if input.session_id != session.id
+                            || input.message_role != "user"
+                            || input.completion_state != "complete"
+                            || input.sequence != session.message_head
+                            || input.sequence <= 0
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let binding = tx
+                            .find_by_id::<AiProviderSessionBindingRecord>(&authorization.binding_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        validate_binding_record(&binding)?;
+                        let absence_observed_at =
+                            authorization.provider_absence_observed_at.unix_timestamp();
+                        if binding.session_id != session.id
+                            || binding.owner_principal_kind != expected_owner_kind
+                            || binding.owner_subject != expected_owner_subject
+                            || record_scope_from_binding(&binding) != scope_for_update
+                            || binding.state != AiProviderSessionState::Deleted.as_str()
+                            || binding.protected_cursor.is_some()
+                            || binding.provider_absence_observed_at != Some(absence_observed_at)
+                            || binding.row_version != authorization.binding_row_version
+                            || binding.claim_generation != authorization.binding_claim_generation
+                            || binding.cleanup_generation != authorization.cleanup_generation
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let claim_generation = binding
+                            .claim_generation
+                            .checked_add(1)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        let outcome = tx
+                            .compare_and_swap::<AiProviderSessionBindingRecord>(
+                                &binding.id,
+                                authorization.binding_row_version,
+                                AiProviderSessionBindingRecordWhereInput {
+                                    state: Some(StringFilter {
+                                        eq: Some(
+                                            AiProviderSessionState::Deleted.as_str().to_owned(),
+                                        ),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                },
+                                UpdateAiProviderSessionBindingRecordInput {
+                                    owner_principal_kind: Some(expected_owner_kind.clone()),
+                                    owner_subject: Some(expected_owner_subject.clone()),
+                                    principal_reference: Some(principal_reference),
+                                    scope_key: Some(ai_scope_key(&scope_for_update)),
+                                    scope_kind: Some(scope_for_update.kind.clone()),
+                                    scope_id: Some(scope_for_update.id.clone()),
+                                    tenant_id: Some(scope_for_update.tenant_id.clone()),
+                                    provider_kind: Some(
+                                        provider_kind_value(descriptor_for_update.provider_kind())
+                                            .map_err(ai_error_to_orm)?,
+                                    ),
+                                    provider_profile_id: Some(
+                                        descriptor_for_update.provider_profile_id().to_owned(),
+                                    ),
+                                    provider_model: Some(
+                                        descriptor_for_update.provider_model().to_owned(),
+                                    ),
+                                    registration_fingerprint: Some(
+                                        descriptor_for_update.registration_fingerprint().to_owned(),
+                                    ),
+                                    protocol_version: Some(
+                                        descriptor_for_update.protocol_version().to_owned(),
+                                    ),
+                                    policy_fingerprint: Some(
+                                        descriptor_for_update.policy_fingerprint().to_owned(),
+                                    ),
+                                    cursor_kind: Some(cursor_kind),
+                                    cursor_fingerprint: Some(cursor_fingerprint),
+                                    protected_cursor: Some(Some(protected_cursor)),
+                                    through_message_sequence: Some(input.sequence - 1),
+                                    transcript_fingerprint: Some(transcript_fingerprint),
+                                    last_run_id: Some(None),
+                                    last_assistant_message_id: Some(None),
+                                    state: Some(
+                                        AiProviderSessionState::Claimed.as_str().to_owned(),
+                                    ),
+                                    claimed_run_id: Some(Some(lease.run_id().0)),
+                                    claimed_attempt_id: Some(Some(lease.attempt_id())),
+                                    claimed_run_lease_generation: Some(Some(
+                                        lease.lease_generation(),
+                                    )),
+                                    claim_owner: Some(Some(lease.worker_id().to_owned())),
+                                    claim_generation: Some(claim_generation),
+                                    claim_expires_at: Some(Some(claim_expires_at.unix_timestamp())),
+                                    provider_expires_at: Some(
+                                        provider_expires_at.map(OffsetDateTime::unix_timestamp),
+                                    ),
+                                    idle_expires_at: Some(idle_expires_at.unix_timestamp()),
+                                    absolute_expires_at: Some(absolute_expires_at.unix_timestamp()),
+                                    cleanup_owner: Some(None),
+                                    cleanup_lease_expires_at: Some(None),
+                                    cleanup_retry_count: Some(0),
+                                    cleanup_next_attempt_at: Some(None),
+                                    cleanup_reason_code: Some(None),
+                                    provider_absence_observed_at: Some(None),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        let ConditionalUpdateOutcome::Updated(updated) = outcome else {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        };
+                        append_audit(
+                            tx,
+                            "ai.provider_session.rebound",
+                            updated.id,
+                            "provider_session_absence_rebound",
+                            lease.run_id().0,
+                            now,
+                        )
+                        .await?;
+                        Ok(updated)
                     })
                 })
                 .await
@@ -955,7 +1302,7 @@ mod service {
                                 &binding.id,
                                 binding.row_version,
                                 AiProviderSessionBindingRecordWhereInput::default(),
-                                cleanup_required_update(reason_code.clone()),
+                                cleanup_required_update(reason_code.clone(), claim.run_id.0),
                             )
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -1212,22 +1559,46 @@ mod service {
                         if proof.cursor_fingerprint() != record.cursor_fingerprint {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                        if !tx
-                            .delete_by_id::<AiProviderSessionBindingRecord>(&record.id)
+                        let outcome = tx
+                            .compare_and_swap::<AiProviderSessionBindingRecord>(
+                                &record.id,
+                                record.row_version,
+                                AiProviderSessionBindingRecordWhereInput {
+                                    state: Some(StringFilter {
+                                        eq: Some(
+                                            AiProviderSessionState::CleanupInProgress
+                                                .as_str()
+                                                .to_owned(),
+                                        ),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                },
+                                UpdateAiProviderSessionBindingRecordInput {
+                                    protected_cursor: Some(None),
+                                    state: Some(
+                                        AiProviderSessionState::Deleted.as_str().to_owned(),
+                                    ),
+                                    claimed_run_id: Some(None),
+                                    claimed_attempt_id: Some(None),
+                                    claimed_run_lease_generation: Some(None),
+                                    claim_owner: Some(None),
+                                    claim_expires_at: Some(None),
+                                    cleanup_owner: Some(None),
+                                    cleanup_lease_expires_at: Some(None),
+                                    cleanup_next_attempt_at: Some(None),
+                                    provider_absence_observed_at: Some(Some(
+                                        observed_at.unix_timestamp(),
+                                    )),
+                                    ..Default::default()
+                                },
+                            )
                             .await
-                            .map_err(OrmPublicError::from)?
-                        {
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                        append_audit(
-                            tx,
-                            "ai.provider_session.deleted",
-                            record.id,
-                            "provider_session_absence_confirmed",
-                            record.last_run_id.unwrap_or(record.session_id),
-                            now,
-                        )
-                        .await
+                        append_cleanup_completion_audit(tx, &record, observed_at).await
                     })
                 })
                 .await
@@ -1298,9 +1669,13 @@ mod service {
         }
     }
 
-    fn cleanup_required_update(reason_code: String) -> UpdateAiProviderSessionBindingRecordInput {
+    fn cleanup_required_update(
+        reason_code: String,
+        last_run_id: Uuid,
+    ) -> UpdateAiProviderSessionBindingRecordInput {
         UpdateAiProviderSessionBindingRecordInput {
             state: Some(AiProviderSessionState::CleanupRequired.as_str().to_owned()),
+            last_run_id: Some(Some(last_run_id)),
             claimed_run_id: Some(None),
             claimed_attempt_id: Some(None),
             claimed_run_lease_generation: Some(None),
@@ -1534,6 +1909,10 @@ mod service {
             && record.absolute_expires_at > 0
             && record.idle_expires_at > 0
             && record.idle_expires_at <= record.absolute_expires_at
+            && record
+                .cleanup_reason_code
+                .as_deref()
+                .is_none_or(|reason| validate_reason_code(reason).is_ok())
             && record.row_version >= 0;
         let state_valid = match state {
             AiProviderSessionState::Active => {
@@ -1648,6 +2027,37 @@ mod service {
         .await
         .map_err(OrmPublicError::from)?;
         let _ = now;
+        Ok(())
+    }
+
+    async fn append_cleanup_completion_audit(
+        tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+        record: &AiProviderSessionBindingRecord,
+        observed_at: OffsetDateTime,
+    ) -> Result<(), OrmPublicError> {
+        let reason_code = record
+            .cleanup_reason_code
+            .as_deref()
+            .unwrap_or("provider_session_absence_confirmed");
+        tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+            actor_principal_kind: "system".to_owned(),
+            actor_subject: "provider-session-lifecycle".to_owned(),
+            action: "ai.provider_session.deleted".to_owned(),
+            resource_kind: "ai_provider_session".to_owned(),
+            resource_reference: record.id.to_string(),
+            outcome: "allowed".to_owned(),
+            reason_code: reason_code.to_owned(),
+            correlation_id: format!(
+                "claim-{}:cleanup-{}:absence-{}",
+                record.claim_generation,
+                record.cleanup_generation,
+                observed_at.unix_timestamp()
+            ),
+            causation_id: Some(record.last_run_id.unwrap_or(record.session_id).to_string()),
+            policy_version: None,
+        })
+        .await
+        .map_err(OrmPublicError::from)?;
         Ok(())
     }
 

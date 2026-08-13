@@ -255,11 +255,15 @@ When an owning session is deleting, retention CAS-moves an `active` or
 cleanup fence, appends redacted audit, and reports the request. It never opens
 the cursor or performs provider I/O. The separately managed provider-session
 cleanup worker opens the protected cursor only under its exact cleanup claim,
-calls the registered provider adapter, and deletes the binding row only after
-an exact cursor-bound absence proof. Bindings already in cleanup/backoff or
-restore quarantine remain blockers. Final session deletion requires the
-binding query to be empty; expiry, a redacted backup field, or a missing warm
-process is never accepted as provider absence.
+calls the registered provider adapter, and clears the protected cursor into a
+private `Deleted` tombstone only after an exact cursor-bound absence proof.
+That tombstone is eligible for a later fenced rebind during an active session,
+but bindings still claimed, in cleanup/backoff, or restore quarantine remain
+unavailable. For a deleting session, retention removes an absence-proven
+deleted tombstone in the normal dependency order; every other binding remains
+a blocker. Final session deletion requires the binding query to be empty.
+Expiry, a redacted backup field, or a missing warm process is never accepted as
+provider absence.
 
 Message content is scrubbed only when all of these are true:
 

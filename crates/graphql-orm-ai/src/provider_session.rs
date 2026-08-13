@@ -28,6 +28,7 @@ const MAXIMUM_PROVIDER_SESSION_LIFETIME: Duration = Duration::days(30);
 const MAXIMUM_PROVIDER_SESSION_IDLE_TTL: Duration = Duration::days(7);
 const MAXIMUM_PROVIDER_SESSION_LEASE_TTL: Duration = Duration::hours(1);
 const MAXIMUM_PROVIDER_SESSION_RETRY_DELAY: Duration = Duration::days(7);
+pub(crate) const MAXIMUM_PROVIDER_SESSION_REBIND_AUTHORIZATION_TTL: Duration = Duration::minutes(1);
 
 /// Opaque provider-issued resume cursor.
 ///
@@ -453,6 +454,78 @@ pub struct AiProviderSessionBindingView {
     pub(crate) row_version: i64,
 }
 
+/// Crate-issued authority to replace one exact deleted provider-session
+/// generation during one exact current run fence.
+///
+/// Consumers cannot construct or alter this value. It contains no provider
+/// cursor and grants no provider egress, tool, GraphQL, or application
+/// authority. [`AiProviderSessionService::rebind_for_run`] rehydrates the
+/// current principal and atomically revalidates every field before replacing
+/// the tombstone.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AiProviderSessionRebindAuthorization {
+    pub(crate) binding_id: Uuid,
+    pub(crate) session_id: AiSessionId,
+    pub(crate) run_id: AiRunId,
+    pub(crate) attempt_id: Uuid,
+    pub(crate) run_lease_generation: i64,
+    pub(crate) binding_row_version: i64,
+    pub(crate) binding_claim_generation: i64,
+    pub(crate) cleanup_generation: i64,
+    pub(crate) provider_absence_observed_at: OffsetDateTime,
+    pub(crate) expires_at: OffsetDateTime,
+    pub(crate) principal_reference: PrincipalReference,
+    pub(crate) scope: AiScope,
+    pub(crate) descriptor: AiProviderSessionDescriptor,
+    pub(crate) transcript_fingerprint: String,
+}
+
+impl AiProviderSessionRebindAuthorization {
+    /// Exact run authorized to replace the deleted generation.
+    pub const fn run_id(&self) -> AiRunId {
+        self.run_id
+    }
+
+    /// Short-lived authorization expiry, additionally bounded by the run
+    /// lease expiry.
+    pub const fn expires_at(&self) -> OffsetDateTime {
+        self.expires_at
+    }
+}
+
+impl fmt::Debug for AiProviderSessionRebindAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AiProviderSessionRebindAuthorization")
+            .field("expires_at", &self.expires_at)
+            .field("binding", &"[REDACTED]")
+            .field("run_fence", &"[REDACTED]")
+            .field("principal", &"[REDACTED]")
+            .field("scope", &"[REDACTED]")
+            .field("provider_descriptor", &"[REDACTED]")
+            .field("transcript", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Authoritative disposition of one provider session for a planned run.
+///
+/// The host may create an empty provider session only for [`Self::New`] or
+/// [`Self::RebindAllowed`]. Every other state remains unavailable until its
+/// owning lifecycle operation completes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AiProviderSessionRunDisposition {
+    /// No binding or tombstone exists for the AI session.
+    New,
+    /// The exact active binding can be claimed and resumed.
+    Resume(Box<AiProviderSessionBindingView>),
+    /// Exact provider absence was proven and this run may replace the
+    /// tombstone once.
+    RebindAllowed(Box<AiProviderSessionRebindAuthorization>),
+    /// A binding exists but cannot safely serve the planned run.
+    Unavailable(AiProviderSessionState),
+}
+
 impl AiProviderSessionBindingView {
     /// Durable binding identity.
     pub const fn binding_id(&self) -> Uuid {
@@ -524,7 +597,8 @@ pub enum AiProviderSessionState {
     CleanupInProgress,
     /// Exact deletion is waiting for bounded retry.
     CleanupBackoff,
-    /// Provider absence was confirmed and the cursor was cleared.
+    /// Provider absence was confirmed and the cursor was cleared; only the
+    /// crate-issued rebind lifecycle may replace this tombstone.
     Deleted,
     /// Restored provider state that must never resume automatically.
     RestoreQuarantined,
@@ -911,6 +985,40 @@ pub trait AiProviderSessionService: Send + Sync {
         lease: &AiRunLease,
     ) -> Result<Option<AiProviderSessionBindingView>, AiError>;
 
+    /// Classifies the exact planned provider session without exposing cursor
+    /// material or requiring the host to infer replacement authority.
+    ///
+    /// The default preserves compatibility for alternate stores but never
+    /// issues rebind authority. Durable stores that preserve deleted
+    /// tombstones override this method and return a crate-owned
+    /// [`AiProviderSessionRebindAuthorization`] only after validating exact
+    /// provider absence and the current run fence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the run fence, current principal/session access,
+    /// provider descriptor, transcript prefix, or stored lifecycle evidence
+    /// cannot be validated exactly.
+    async fn disposition_for_run(
+        &self,
+        lease: &AiRunLease,
+        planned: &AiProviderSessionTurnPlan,
+    ) -> Result<AiProviderSessionRunDisposition, AiError> {
+        match self.inspect_for_run(lease).await? {
+            None => Ok(AiProviderSessionRunDisposition::New),
+            Some(binding)
+                if binding.state() == AiProviderSessionState::Active
+                    && binding.descriptor() == planned.descriptor()
+                    && binding.transcript_fingerprint() == planned.transcript_fingerprint() =>
+            {
+                Ok(AiProviderSessionRunDisposition::Resume(Box::new(binding)))
+            }
+            Some(binding) => Ok(AiProviderSessionRunDisposition::Unavailable(
+                binding.state(),
+            )),
+        }
+    }
+
     /// Binds an already-created empty provider session and claims it for the
     /// exact current run.
     async fn bind_for_run(
@@ -918,6 +1026,26 @@ pub trait AiProviderSessionService: Send + Sync {
         lease: &AiRunLease,
         request: AiProviderSessionBindRequest,
     ) -> Result<AiProviderSessionClaim, AiError>;
+
+    /// Replaces one exact deleted tombstone with an already-created empty
+    /// provider session and claims it for the authorized run.
+    ///
+    /// The default denies so alternate stores do not acquire replacement
+    /// semantics implicitly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when current authority, the run fence, the
+    /// crate-issued authorization, deleted generation, provider descriptor,
+    /// transcript prefix, or protected replacement cursor is not exact.
+    async fn rebind_for_run(
+        &self,
+        _lease: &AiRunLease,
+        _authorization: AiProviderSessionRebindAuthorization,
+        _request: AiProviderSessionBindRequest,
+    ) -> Result<AiProviderSessionClaim, AiError> {
+        Err(AiError::RuntimeNotReady)
+    }
 
     /// Claims an existing active binding for an exact current run, expected
     /// provider/runtime identity, and host-planned canonical transcript.
@@ -981,7 +1109,9 @@ pub trait AiProviderSessionService: Send + Sync {
         policy: &crate::AiContentProtectionPolicy,
     ) -> Result<AiProviderSessionDeletionRequest, AiError>;
 
-    /// Records exact provider absence and clears protected cursor material.
+    /// Records exact provider absence, clears protected cursor material, and
+    /// retains a private deleted-generation tombstone eligible only for the
+    /// fenced disposition/rebind lifecycle.
     async fn complete_cleanup(
         &self,
         claim: &AiProviderSessionCleanupClaim,

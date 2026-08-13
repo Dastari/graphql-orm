@@ -238,9 +238,15 @@ Durable provider-session cursors are protected state, never authority. A row
 binds exact owner/scope/principal, provider profile/model/protocol/
 registration/policy identity, transcript watermark, and run claim generation.
 An ambiguous or cancelled turn is invalidated for cleanup rather than resumed.
-Session deletion waits for exact provider absence, portable backup redacts the
-cursor, and restore remains unready while any binding exists. Warm process
-memory is separate and carries no durable cursor proof.
+Successful cleanup clears the cursor into an exact absence-proven `Deleted`
+tombstone. A later current-authority run may replace only that exact
+row/generation through a crate-issued short-lived rebind authorization; the
+service rechecks the current owner, scope, principal reference, run fence,
+provider descriptor, cleanup proof, and canonical durable transcript. Expiry,
+local process loss, cleanup backoff, and restore quarantine cannot authorize
+replacement. Session deletion waits for exact provider absence, portable
+backup redacts the cursor, and restore remains unready while any binding
+exists. Warm process memory is separate and carries no durable cursor proof.
 
 Attachment upload requires both the current authenticated owner and an
 expiring one-use high-entropy token stored only as a hash. Filenames never form

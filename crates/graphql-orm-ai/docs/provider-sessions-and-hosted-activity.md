@@ -329,20 +329,47 @@ provider state, output-persistence failure, policy/profile/model/executable
 drift, or rejected cursor calls `require_cleanup`; v1 never guesses provider
 state or advances a watermark from incomplete evidence.
 
+`disposition_for_run` is the authoritative planning boundary. It reports
+`New`, exact `Resume`, `Unavailable`, or `RebindAllowed`; hosts must not infer
+eligibility from raw state fields. `RebindAllowed` is a crate-issued,
+short-lived authorization available only after cleanup persisted exact
+provider absence in a `Deleted` tombstone. `rebind_for_run` rehydrates current
+authority and atomically compares the exact owner/session/scope, run/attempt/
+lease fence, deleted row and cleanup generations, provider descriptor, and
+host-authored canonical transcript fingerprint. It protects a fresh cursor in
+the same row, so the unique session binding remains intact and concurrent
+replacement has one winner. Cleared cursor material is never reopened.
+
 A managed cleanup loop performs:
 
 1. `claim_cleanup(worker_id)`;
 2. `open_for_cleanup` under the exact maintenance protection policy;
 3. registered `AiProviderSessionDeletionService::delete_or_confirm_absent`;
-4. `complete_cleanup` with the exact cursor-bound absence proof; or
+4. `complete_cleanup` with the exact cursor-bound absence proof, which clears
+   the cursor and retains a private absence-proven `Deleted` tombstone; or
 5. `schedule_cleanup_retry` with a bounded safe reason and delay.
 
-Session deletion fences active bindings and cannot finalize until the row is
-absent. Expiry and a backup redaction marker are not absence proof. Portable
+An ordinary later run may replace only that exact absence-proven tombstone.
+Expiry, process death, transport failure, cleanup backoff, and restore
+quarantine remain unavailable. If creation of the replacement empty thread
+succeeds but its rebind CAS loses, `AiProviderCallExecutor` invokes the exact
+registered provider discard boundary.
+
+Session deletion fences active bindings and removes an absence-proven deleted
+tombstone only in the final retention dependency order. Expiry and a backup
+redaction marker are not absence proof. Portable
 backup redacts the cursor and the required restore audit blocks readiness when
 any binding exists; drain provider sessions before a portable backup intended
 for ready restore. Normal process restart may resume an exact live binding,
 but raw or portable database restore never does.
+
+Deployments may attach `AiProviderFailureDiagnosticSink` to the executor for a
+closed machine category such as process exit, timeout, transport unavailable,
+rate limit, protocol violation, invalid dynamic-tool call, retained-resume
+rejection, cancellation, or persistence-fence loss. These content-free values
+cannot change retry or terminal semantics. Provider text, prompts, output,
+tool data, credentials, cursors, and authorization detail never enter the
+sink; an uncertain turn still becomes `RecoveryRequired`.
 
 ## Deferred visual browser
 

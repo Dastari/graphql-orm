@@ -17,12 +17,13 @@ use crate::{
     AiEgressManifest, AiError, AiLiveDeltaBatch, AiLiveDeltaCoalescer, AiLiveDeltaCoalescerLimits,
     AiLiveDeltaPersistenceContext, AiLiveDeltaSink, AiPersistedApplicationToolCall,
     AiProviderActivity, AiProviderActivityCoalescer, AiProviderActivitySink,
-    AiProviderAttachmentRequest, AiProviderAttachmentResolver, AiResolvedProviderAttachment,
-    AiRuleProviderCapability, AiRuleRunUsage, AiRunLease, AiRunState, AiRuntime, AiScope,
-    AiSessionAction, AiToolPolicySet, ModelBuiltinTool, ModelContinuation, ModelContinuationMode,
-    ModelConversationMessage, ModelConversationToolCall, ModelInputBlock, ModelRequest,
-    ProviderDynamicToolCall, ProviderDynamicToolResponder, ProviderDynamicToolResult,
-    ProviderError, ProviderEvent, ProviderKind, ProviderRequestContext, ToolMaturity,
+    AiProviderAttachmentRequest, AiProviderAttachmentResolver, AiProviderFailureCategory,
+    AiProviderFailureDiagnosticSink, AiResolvedProviderAttachment, AiRuleProviderCapability,
+    AiRuleRunUsage, AiRunLease, AiRunState, AiRuntime, AiScope, AiSessionAction, AiToolPolicySet,
+    ModelBuiltinTool, ModelContinuation, ModelContinuationMode, ModelConversationMessage,
+    ModelConversationToolCall, ModelInputBlock, ModelRequest, ProviderDynamicToolCall,
+    ProviderDynamicToolResponder, ProviderDynamicToolResult, ProviderError, ProviderEvent,
+    ProviderKind, ProviderRequestContext, ToolMaturity,
 };
 
 const MAXIMUM_PROVIDER_TRANSFERS: usize = 288;
@@ -1946,6 +1947,7 @@ pub struct AiProviderCallExecutor {
     live_delta_limits: AiLiveDeltaCoalescerLimits,
     attachment_resolver: Option<Arc<dyn AiProviderAttachmentResolver>>,
     attachment_limits: AiProviderAttachmentResolutionLimits,
+    failure_diagnostic_sink: Option<Arc<dyn AiProviderFailureDiagnosticSink>>,
 }
 
 impl AiProviderCallExecutor {
@@ -1970,6 +1972,27 @@ impl AiProviderCallExecutor {
             live_delta_limits: AiLiveDeltaCoalescerLimits::default(),
             attachment_resolver: None,
             attachment_limits: AiProviderAttachmentResolutionLimits::default(),
+            failure_diagnostic_sink: None,
+        }
+    }
+
+    /// Enables content-free provider-failure operational diagnosis.
+    ///
+    /// The sink receives only a closed category. It cannot affect run state,
+    /// authorize retry, or observe provider content, credentials, cursors, or
+    /// application data.
+    #[must_use]
+    pub fn with_failure_diagnostic_sink(
+        mut self,
+        sink: Arc<dyn AiProviderFailureDiagnosticSink>,
+    ) -> Self {
+        self.failure_diagnostic_sink = Some(sink);
+        self
+    }
+
+    fn record_provider_failure(&self, category: AiProviderFailureCategory) {
+        if let Some(sink) = &self.failure_diagnostic_sink {
+            sink.record(category);
         }
     }
 
@@ -2115,26 +2138,21 @@ impl AiProviderCallExecutor {
         }
         let lease = lease_state.lock().await.clone();
         let binding = crate::AiProviderRunBinding::from_lease(&lease)?;
-        let (claim, newly_bound_cursor) = match session_service.inspect_for_run(&lease).await? {
-            Some(existing)
-                if existing.state() == crate::AiProviderSessionState::Active
-                    && existing.descriptor() == session_plan.descriptor()
-                    && existing.transcript_fingerprint()
-                        == session_plan.transcript_fingerprint() =>
-            {
-                (
-                    session_service
-                        .claim_for_run(
-                            &lease,
-                            session_plan.descriptor(),
-                            session_plan.transcript_fingerprint(),
-                        )
-                        .await?,
-                    None,
-                )
-            }
-            Some(_) => return Err(AiError::Conflict),
-            None => {
+        let (claim, newly_bound_cursor) = match session_service
+            .disposition_for_run(&lease, &session_plan)
+            .await?
+        {
+            crate::AiProviderSessionRunDisposition::Resume(_) => (
+                session_service
+                    .claim_for_run(
+                        &lease,
+                        session_plan.descriptor(),
+                        session_plan.transcript_fingerprint(),
+                    )
+                    .await?,
+                None,
+            ),
+            crate::AiProviderSessionRunDisposition::New => {
                 let cursor = self
                     .runtime
                     .create_empty_provider_session(
@@ -2144,7 +2162,10 @@ impl AiProviderCallExecutor {
                         &plan.request,
                     )
                     .await
-                    .map_err(|_| AiError::ProviderFailed)?;
+                    .map_err(|error| {
+                        self.record_provider_failure(error.safe_category());
+                        AiError::ProviderFailed
+                    })?;
                 let request = crate::AiProviderSessionBindRequest::new(
                     session_plan.descriptor().clone(),
                     cursor.clone(),
@@ -2167,10 +2188,56 @@ impl AiProviderCallExecutor {
                     }
                 }
             }
+            crate::AiProviderSessionRunDisposition::RebindAllowed(authorization) => {
+                let cursor = self
+                    .runtime
+                    .create_empty_provider_session(
+                        session_plan.descriptor().provider_kind(),
+                        &binding,
+                        session_plan.descriptor(),
+                        &plan.request,
+                    )
+                    .await
+                    .map_err(|error| {
+                        self.record_provider_failure(error.safe_category());
+                        AiError::ProviderFailed
+                    })?;
+                let request = crate::AiProviderSessionBindRequest::new(
+                    session_plan.descriptor().clone(),
+                    cursor.clone(),
+                    session_plan.transcript_fingerprint(),
+                    None,
+                )?;
+                match session_service
+                    .rebind_for_run(&lease, *authorization, request)
+                    .await
+                {
+                    Ok(claim) => (claim, Some(cursor)),
+                    Err(error) => {
+                        self.record_provider_failure(
+                            AiProviderFailureCategory::PersistenceFenceLoss,
+                        );
+                        let _ = self
+                            .runtime
+                            .discard_empty_provider_session(
+                                session_plan.descriptor().provider_kind(),
+                                &binding,
+                                session_plan.descriptor(),
+                                &cursor,
+                            )
+                            .await;
+                        return Err(error);
+                    }
+                }
+            }
+            crate::AiProviderSessionRunDisposition::Unavailable(_) => {
+                return Err(AiError::Conflict);
+            }
         };
         let opened = match session_service.open_for_run(&lease, &claim).await {
             Ok(opened) => opened,
             Err(error) => {
+                self.record_provider_failure(AiProviderFailureCategory::PersistenceFenceLoss);
                 if let Some(cursor) = &newly_bound_cursor {
                     let _ = self
                         .runtime
@@ -2557,7 +2624,10 @@ impl AiProviderCallExecutor {
                 .stream_provider(&plan.provider_kind, plan.request, context)
                 .await
         }
-        .map_err(|_| AiError::ProviderFailed)?;
+        .map_err(|error| {
+            self.record_provider_failure(error.safe_category());
+            AiError::ProviderFailed
+        })?;
         let mut events = Vec::new();
         let mut total_bytes = 0usize;
         let mut usage = None;
@@ -2622,7 +2692,10 @@ impl AiProviderCallExecutor {
             let Some(item) = item else {
                 break;
             };
-            let event = item.map_err(|_| AiError::ProviderFailed)?;
+            let event = item.map_err(|error| {
+                self.record_provider_failure(error.safe_category());
+                AiError::ProviderFailed
+            })?;
             let event_bytes = serde_json::to_vec(&event)
                 .map_err(|_| AiError::ProviderFailed)?
                 .len();
@@ -3478,6 +3551,135 @@ mod tests {
             _batch: &AiLiveDeltaBatch,
         ) -> Result<(), AiError> {
             Err(AiError::PersistenceFailed)
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingFailureSink(std::sync::Mutex<Vec<AiProviderFailureCategory>>);
+
+    impl AiProviderFailureDiagnosticSink for RecordingFailureSink {
+        fn record(&self, category: AiProviderFailureCategory) {
+            self.0
+                .lock()
+                .expect("failure diagnostic test lock should remain available")
+                .push(category);
+        }
+    }
+
+    struct RejectingRebindService(std::sync::Mutex<Option<AiProviderSessionRebindAuthorization>>);
+
+    #[async_trait]
+    impl AiProviderSessionService for RejectingRebindService {
+        async fn inspect_for_run(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Option<AiProviderSessionBindingView>, AiError> {
+            Ok(None)
+        }
+
+        async fn disposition_for_run(
+            &self,
+            _lease: &AiRunLease,
+            _planned: &AiProviderSessionTurnPlan,
+        ) -> Result<AiProviderSessionRunDisposition, AiError> {
+            self.0
+                .lock()
+                .map_err(|_| AiError::PersistenceFailed)?
+                .take()
+                .map(Box::new)
+                .map(AiProviderSessionRunDisposition::RebindAllowed)
+                .ok_or(AiError::Conflict)
+        }
+
+        async fn bind_for_run(
+            &self,
+            _lease: &AiRunLease,
+            _request: AiProviderSessionBindRequest,
+        ) -> Result<AiProviderSessionClaim, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn rebind_for_run(
+            &self,
+            _lease: &AiRunLease,
+            _authorization: AiProviderSessionRebindAuthorization,
+            _request: AiProviderSessionBindRequest,
+        ) -> Result<AiProviderSessionClaim, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn claim_for_run(
+            &self,
+            _lease: &AiRunLease,
+            _expected: &AiProviderSessionDescriptor,
+            _expected_transcript_fingerprint: &str,
+        ) -> Result<AiProviderSessionClaim, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn open_for_run(
+            &self,
+            _lease: &AiRunLease,
+            _claim: &AiProviderSessionClaim,
+        ) -> Result<AiOpenedProviderSession, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn heartbeat(
+            &self,
+            _lease: &AiRunLease,
+            _claim: &AiProviderSessionClaim,
+        ) -> Result<AiProviderSessionClaim, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn commit_turn(
+            &self,
+            _lease: &AiRunLease,
+            _claim: &AiProviderSessionClaim,
+            _commit: AiProviderSessionCommit,
+        ) -> Result<AiProviderSessionBindingView, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn require_cleanup(
+            &self,
+            _claim: &AiProviderSessionClaim,
+            _reason_code: &str,
+        ) -> Result<(), AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn claim_cleanup(
+            &self,
+            _worker_id: &str,
+        ) -> Result<Option<AiProviderSessionCleanupClaim>, AiError> {
+            Ok(None)
+        }
+
+        async fn open_for_cleanup(
+            &self,
+            _claim: &AiProviderSessionCleanupClaim,
+            _policy: &AiContentProtectionPolicy,
+        ) -> Result<AiProviderSessionDeletionRequest, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn complete_cleanup(
+            &self,
+            _claim: &AiProviderSessionCleanupClaim,
+            _proof: AiProviderSessionAbsenceProof,
+        ) -> Result<(), AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn schedule_cleanup_retry(
+            &self,
+            _claim: &AiProviderSessionCleanupClaim,
+            _delay: Duration,
+            _reason_code: &str,
+        ) -> Result<(), AiError> {
+            Err(AiError::Conflict)
         }
     }
 
@@ -7049,6 +7251,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_failures_emit_only_the_closed_safe_category() {
+        let fixture = fixture_with_provider(
+            MockProvider::new(Vec::new())
+                .with_stream_failure(AiProviderFailureCategory::ProtocolViolation),
+        )
+        .await;
+        let diagnostics = Arc::new(RecordingFailureSink::default());
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate"),
+        )
+        .with_failure_diagnostic_sink(diagnostics.clone());
+
+        assert!(matches!(
+            executor.execute(&fixture.lease, plan(&fixture)).await,
+            Err(AiError::ProviderFailed)
+        ));
+        assert_eq!(
+            diagnostics
+                .0
+                .lock()
+                .expect("failure diagnostic test lock should remain available")
+                .as_slice(),
+            &[AiProviderFailureCategory::ProtocolViolation]
+        );
+    }
+
+    #[tokio::test]
     async fn executor_marks_only_newly_bound_empty_provider_session_for_initial_turn() {
         let cursor = AiProviderSessionCursor::new("mock.thread", "new-empty-thread")
             .expect("test cursor should validate");
@@ -7155,6 +7390,71 @@ mod tests {
             fixture.mock.provider_session_activations(),
             vec![AiProviderSessionActivation::NewlyBoundEmpty]
         );
+    }
+
+    #[tokio::test]
+    async fn rebind_fence_loss_discards_the_exact_new_empty_provider_session() {
+        let cursor = AiProviderSessionCursor::new("mock.thread", "losing-rebind-thread")
+            .expect("test cursor should validate");
+        let fixture = fixture_with_provider(
+            MockProvider::new(Vec::new()).with_provider_session_cursor(cursor),
+        )
+        .await;
+        let descriptor = AiProviderSessionDescriptor::new(
+            ProviderKind::OpenAiCompatible,
+            "mock-profile",
+            "mock-model",
+            "a".repeat(64),
+            "mock-retained/v1",
+            "b".repeat(64),
+        )
+        .expect("descriptor should validate");
+        let transcript_fingerprint = "d".repeat(64);
+        let now = OffsetDateTime::now_utc();
+        let authorization = AiProviderSessionRebindAuthorization {
+            binding_id: Uuid::new_v4(),
+            session_id: fixture.lease.session_id(),
+            run_id: fixture.lease.run_id(),
+            attempt_id: fixture.lease.attempt_id(),
+            run_lease_generation: fixture.lease.lease_generation(),
+            binding_row_version: 4,
+            binding_claim_generation: 3,
+            cleanup_generation: 2,
+            provider_absence_observed_at: now,
+            expires_at: now + Duration::minutes(1),
+            principal_reference: fixture.lease.principal_reference().clone(),
+            scope: fixture.scope.clone(),
+            descriptor: descriptor.clone(),
+            transcript_fingerprint: transcript_fingerprint.clone(),
+        };
+        let session_service: Arc<dyn AiProviderSessionService> = Arc::new(RejectingRebindService(
+            std::sync::Mutex::new(Some(authorization)),
+        ));
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("provider limits should validate"),
+        );
+
+        assert!(matches!(
+            executor
+                .execute_with_provider_session(
+                    Arc::new(Mutex::new(fixture.lease.clone())),
+                    plan(&fixture),
+                    AiProviderSessionTurnPlan::new(descriptor, transcript_fingerprint)
+                        .expect("session plan should validate"),
+                    session_service,
+                    None,
+                )
+                .await,
+            Err(AiError::Conflict)
+        ));
+        assert_eq!(fixture.mock.discarded_provider_session_count(), 1);
+        assert_eq!(fixture.mock.request_count(), 0);
     }
 
     #[tokio::test]

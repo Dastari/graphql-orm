@@ -24,11 +24,11 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 use crate::{
-    AiProvider, AiProviderRunBinding, AiProviderRunCloseOutcome, AiProviderRunCloseReason,
-    AiProviderRunInterruptOutcome, ModelContinuationMode, ModelInputBlock,
-    ModelReasoningSummaryRequest, ModelRequest, ModelToolDefinition, ProviderCapabilities,
-    ProviderDynamicToolCall, ProviderDynamicToolResponder, ProviderError, ProviderEventStream,
-    ProviderKind, ProviderRequestContext,
+    AiProvider, AiProviderFailureCategory, AiProviderRunBinding, AiProviderRunCloseOutcome,
+    AiProviderRunCloseReason, AiProviderRunInterruptOutcome, ModelContinuationMode,
+    ModelInputBlock, ModelReasoningSummaryRequest, ModelRequest, ModelToolDefinition,
+    ProviderCapabilities, ProviderDynamicToolCall, ProviderDynamicToolResponder, ProviderError,
+    ProviderEventStream, ProviderKind, ProviderRequestContext,
 };
 
 const MAXIMUM_PROCESSES: usize = 4_096;
@@ -44,6 +44,11 @@ const MAXIMUM_RUNTIME_WARNING_MESSAGE_BYTES: usize = 4 * 1024;
 const MAXIMUM_RUNTIME_WARNING_BYTES_PER_TURN: usize = 16 * 1024;
 const MAXIMUM_RUNTIME_WARNINGS_PER_TURN: usize = 8;
 const MAXIMUM_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+fn provider_timeout_error() -> ProviderError {
+    ProviderError::Classified(AiProviderFailureCategory::Timeout)
+}
+
 const OPTED_OUT_NOTIFICATION_METHODS: [&str; 5] = [
     "thread/status/changed",
     "thread/settings/updated",
@@ -1574,10 +1579,22 @@ impl AiCodexAppServerRunPool {
                 };
                 Ok(cursor)
             }
-            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {
+            Ok(Ok(_)) => {
                 self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
                     .await;
-                Err(ProviderError::Rejected)
+                Err(ProviderError::Classified(
+                    AiProviderFailureCategory::ProtocolViolation,
+                ))
+            }
+            Ok(Err(error)) => {
+                self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
+                    .await;
+                Err(error)
+            }
+            Err(_) => {
+                self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
+                    .await;
+                Err(provider_timeout_error())
             }
         }
     }
@@ -1637,7 +1654,7 @@ impl AiCodexAppServerRunPool {
             Err(_) => {
                 self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
                     .await;
-                Err(ProviderError::Cancelled)
+                Err(provider_timeout_error())
             }
         }
     }
@@ -1661,13 +1678,13 @@ impl AiCodexAppServerRunPool {
             self.inner.factory.launch(registration),
         )
         .await
-        .map_err(|_| ProviderError::Cancelled)??;
+        .map_err(|_| provider_timeout_error())??;
         let result = tokio::time::timeout(
             self.inner.limits.shutdown_timeout,
             process.delete_thread(cursor),
         )
         .await
-        .map_err(|_| ProviderError::Cancelled)?;
+        .map_err(|_| provider_timeout_error())?;
         let _ = tokio::time::timeout(
             self.inner.limits.shutdown_timeout,
             process.shutdown(AiProviderRunCloseReason::Completed),
@@ -1729,7 +1746,7 @@ impl AiCodexAppServerRunPool {
                     entry.turn_active.store(false, Ordering::Release);
                     self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
                         .await;
-                    return Err(ProviderError::Cancelled);
+                    return Err(provider_timeout_error());
                 }
             };
         let guard = ActiveTurnGuard {
@@ -1751,7 +1768,7 @@ impl AiCodexAppServerRunPool {
                             AiProviderRunCloseReason::ProtocolViolation,
                         ).await;
                         guard.completed = true;
-                        Err(ProviderError::Cancelled)
+                        Err(provider_timeout_error())
                     }
                     event = stream.next() => match event {
                         Some(Ok(event)) => Ok(Some(event)),
@@ -1812,7 +1829,7 @@ impl AiCodexAppServerRunPool {
                 entry.turn_active.store(false, Ordering::Release);
                 self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
                     .await;
-                return Err(ProviderError::Cancelled);
+                return Err(provider_timeout_error());
             }
         };
         self.guard_turn_stream(binding, entry, turn_deadline, stream)
@@ -1855,7 +1872,7 @@ impl AiCodexAppServerRunPool {
                 entry.turn_active.store(false, Ordering::Release);
                 self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
                     .await;
-                return Err(ProviderError::Cancelled);
+                return Err(provider_timeout_error());
             }
         };
         self.guard_turn_stream(binding, entry, turn_deadline, stream)
@@ -1957,7 +1974,7 @@ impl AiCodexAppServerRunPool {
                             AiProviderRunCloseReason::ProtocolViolation,
                         ).await;
                         guard.completed = true;
-                        Err(ProviderError::Cancelled)
+                        Err(provider_timeout_error())
                     }
                     event = stream.next() => match event {
                         Some(Ok(event)) => Ok(Some(event)),
@@ -2030,7 +2047,7 @@ impl AiCodexAppServerRunPool {
                 entry.turn_active.store(false, Ordering::Release);
                 self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
                     .await;
-                return Err(ProviderError::Cancelled);
+                return Err(provider_timeout_error());
             }
         };
         let guard = ActiveTurnGuard {
@@ -2052,7 +2069,7 @@ impl AiCodexAppServerRunPool {
                             AiProviderRunCloseReason::ProtocolViolation,
                         ).await;
                         guard.completed = true;
-                        Err(ProviderError::Cancelled)
+                        Err(provider_timeout_error())
                     }
                     event = stream.next() => match event {
                         Some(Ok(event)) => Ok(Some(event)),
@@ -2131,7 +2148,7 @@ impl AiCodexAppServerRunPool {
                 entry.turn_active.store(false, Ordering::Release);
                 self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
                     .await;
-                return Err(ProviderError::Cancelled);
+                return Err(provider_timeout_error());
             }
         };
         let guard = ActiveTurnGuard {
@@ -2153,7 +2170,7 @@ impl AiCodexAppServerRunPool {
                             AiProviderRunCloseReason::ProtocolViolation,
                         ).await;
                         guard.completed = true;
-                        Err(ProviderError::Cancelled)
+                        Err(provider_timeout_error())
                     }
                     event = stream.next() => match event {
                         Some(Ok(event)) => Ok(Some(event)),
@@ -2231,7 +2248,7 @@ impl AiCodexAppServerRunPool {
                 entry.turn_active.store(false, Ordering::Release);
                 self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
                     .await;
-                return Err(ProviderError::Cancelled);
+                return Err(provider_timeout_error());
             }
         };
         let guard = ActiveTurnGuard {
@@ -2253,7 +2270,7 @@ impl AiCodexAppServerRunPool {
                             AiProviderRunCloseReason::ProtocolViolation,
                         ).await;
                         guard.completed = true;
-                        Err(ProviderError::Cancelled)
+                        Err(provider_timeout_error())
                     }
                     event = stream.next() => match event {
                         Some(Ok(event)) => Ok(Some(event)),
@@ -2400,7 +2417,7 @@ impl AiCodexAppServerRunPool {
             entry.process.interrupt(),
         )
         .await
-        .map_err(|_| ProviderError::Cancelled)??;
+        .map_err(|_| provider_timeout_error())??;
         Ok(AiProviderRunInterruptOutcome::Requested)
     }
 
@@ -2432,7 +2449,7 @@ impl AiCodexAppServerRunPool {
             entry.process.shutdown(reason),
         )
         .await
-        .map_err(|_| ProviderError::Cancelled)??;
+        .map_err(|_| provider_timeout_error())??;
         Ok(AiProviderRunCloseOutcome::Closed)
     }
 }
