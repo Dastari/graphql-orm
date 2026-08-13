@@ -1814,7 +1814,7 @@ impl OrmAiSubscriptionWaitService {
                         tx.compare_and_swap::<AiRunStepRecord>(
                             &step.id,
                             step.row_version,
-                            run_step_exact_state(&step.state),
+                            run_step_row_version_only(),
                             UpdateAiRunStepRecordInput {
                                 state: Some(waiter_state.to_owned()),
                                 finished_at: Some(Some(now.unix_timestamp())),
@@ -2223,7 +2223,7 @@ impl OrmAiSubscriptionWaitService {
                         tx.compare_and_swap::<AiRunStepRecord>(
                             &step.id,
                             step.row_version,
-                            run_step_exact_state(&step.state),
+                            run_step_row_version_only(),
                             UpdateAiRunStepRecordInput {
                                 state: Some("completed".to_owned()),
                                 finished_at: Some(Some(now.unix_timestamp())),
@@ -3097,14 +3097,8 @@ fn tool_call_exact_state(state: &str) -> AiToolCallRecordWhereInput {
     }
 }
 
-fn run_step_exact_state(state: &str) -> AiRunStepRecordWhereInput {
-    AiRunStepRecordWhereInput {
-        state: Some(StringFilter {
-            eq: Some(state.to_owned()),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
+fn run_step_row_version_only() -> AiRunStepRecordWhereInput {
+    AiRunStepRecordWhereInput::default()
 }
 
 fn condition_matches(
