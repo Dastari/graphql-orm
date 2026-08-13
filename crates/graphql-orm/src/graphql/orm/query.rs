@@ -2281,27 +2281,16 @@ pub fn render_upsert_sql(
         .map(|column| dialect.quote_identifier_path(column))
         .collect::<Vec<_>>();
     if dialect == DatabaseBackend::Mssql {
-        let placeholder_for = |column: &str| {
-            insert_columns
-                .iter()
-                .position(|candidate| *candidate == column)
-                .and_then(|index| insert_values.get(index))
-                .copied()
-                .expect("validated upsert columns must be present in insert values")
-        };
         let mut assignments = update_columns
             .iter()
             .map(|column| {
-                format!(
-                    "{} = {}",
-                    dialect.quote_identifier_path(column),
-                    placeholder_for(column)
-                )
+                let quoted = dialect.quote_identifier_path(column);
+                format!("target.{quoted} = source.{quoted}",)
             })
             .collect::<Vec<_>>();
         if update_updated_at {
             assignments.push(format!(
-                "{} = {}",
+                "target.{} = {}",
                 dialect.quote_identifier("updated_at"),
                 dialect.current_epoch_expr()
             ));
@@ -2309,20 +2298,28 @@ pub fn render_upsert_sql(
         let predicates = conflict_columns
             .iter()
             .map(|column| {
-                format!(
-                    "{} = {}",
-                    dialect.quote_identifier_path(column),
-                    placeholder_for(column)
-                )
+                let quoted = dialect.quote_identifier_path(column);
+                format!("target.{quoted} = source.{quoted}",)
             })
             .collect::<Vec<_>>()
             .join(" AND ");
+        let source_projection = insert_values
+            .iter()
+            .zip(&quoted_insert_columns)
+            .map(|(value, column)| format!("{value} AS {column}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         return format!(
-            "UPDATE {quoted_table} WITH (UPDLOCK, HOLDLOCK) SET {} WHERE {predicates}; \
-             IF @@ROWCOUNT = 0 BEGIN INSERT INTO {quoted_table} ({}) VALUES ({}); END",
+            "SELECT {source_projection} INTO #graphql_orm_upsert_source; \
+             UPDATE target WITH (UPDLOCK, HOLDLOCK) SET {} \
+             FROM {quoted_table} AS target CROSS JOIN #graphql_orm_upsert_source AS source \
+             WHERE {predicates}; \
+             IF @@ROWCOUNT = 0 BEGIN \
+             INSERT INTO {quoted_table} ({}) SELECT {} FROM #graphql_orm_upsert_source; END; \
+             DROP TABLE #graphql_orm_upsert_source",
             assignments.join(", "),
             quoted_insert_columns.join(", "),
-            insert_values.join(", "),
+            quoted_insert_columns.join(", "),
         );
     }
     let mut set_clauses = update_columns
@@ -2373,20 +2370,29 @@ pub fn render_insert_if_absent_sql(
         let predicates = conflict_columns
             .iter()
             .map(|column| {
-                let value = insert_columns
-                    .iter()
-                    .position(|candidate| *candidate == *column)
-                    .and_then(|index| insert_values.get(index))
-                    .copied()
-                    .expect("validated conflict columns must be present in insert values");
-                format!("{} = {value}", dialect.quote_identifier_path(column))
+                let quoted = dialect.quote_identifier_path(column);
+                format!("target.{quoted} = source.{quoted}")
             })
             .collect::<Vec<_>>()
             .join(" AND ");
+        let source_projection = insert_values
+            .iter()
+            .zip(insert_columns)
+            .map(|(value, column)| format!("{value} AS {}", dialect.quote_identifier_path(column)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source_columns = insert_columns
+            .iter()
+            .map(|column| format!("source.{}", dialect.quote_identifier_path(column)))
+            .collect::<Vec<_>>()
+            .join(", ");
         return format!(
-            "IF NOT EXISTS (SELECT 1 FROM {table} WITH (UPDLOCK, HOLDLOCK) WHERE {predicates}) \
-             BEGIN INSERT INTO {table} ({columns}) VALUES ({}); END",
-            insert_values.join(", ")
+            "SELECT {source_projection} INTO #graphql_orm_insert_source; \
+             IF NOT EXISTS (SELECT 1 FROM {table} AS target WITH (UPDLOCK, HOLDLOCK) \
+             CROSS JOIN #graphql_orm_insert_source AS source WHERE {predicates}) \
+             BEGIN INSERT INTO {table} ({columns}) SELECT {source_columns} \
+             FROM #graphql_orm_insert_source AS source; END; \
+             DROP TABLE #graphql_orm_insert_source"
         );
     }
     format!(
