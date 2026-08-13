@@ -2050,6 +2050,31 @@ impl AiProviderCallResult {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_with_tool_binding(
+        mut self,
+        tool_index: usize,
+        provider_name: impl Into<String>,
+        tool_fingerprint: impl Into<String>,
+    ) -> Self {
+        let call = self
+            .tool_calls
+            .get_mut(tool_index)
+            .expect("test provider tool index should exist");
+        call.provider_name = provider_name.into();
+        call.tool_fingerprint = tool_fingerprint.into();
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_with_budget_reservation(
+        mut self,
+        reservation_id: AiBudgetReservationId,
+    ) -> Self {
+        self.budget_reservation_id = reservation_id;
+        self
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_ui_intent_result(
         lease: &AiRunLease,
         budget_reservation_id: AiBudgetReservationId,
@@ -2508,6 +2533,20 @@ impl AiProviderCallExecutor {
                         return Err(error);
                     }
                 }
+            }
+            crate::AiProviderSessionRunDisposition::Unavailable(
+                crate::AiProviderSessionState::ParkedWait,
+            ) => {
+                let claim = session_service.reclaim_after_wait(&lease).await?;
+                if claim.descriptor() != session_plan.descriptor()
+                    || claim.transcript_fingerprint() != session_plan.transcript_fingerprint()
+                {
+                    let _ = session_service
+                        .require_cleanup(&claim, "provider_session_wait_plan_changed")
+                        .await;
+                    return Err(AiError::Conflict);
+                }
+                (claim, None)
             }
             crate::AiProviderSessionRunDisposition::Unavailable(_) => {
                 return Err(AiError::Conflict);

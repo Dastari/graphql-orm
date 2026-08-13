@@ -406,6 +406,29 @@ impl AiSubscriptionCheckpointAdopter {
     }
 }
 
+/// Extends the classified-mutation coordinator with the same durable
+/// subscription adoption state machine used by the read-only coordinator.
+///
+/// Supervised and automatic mutation checkpoints remain owned by the supplied
+/// canonical fallback. Only `subscription_wait_adopted` checkpoints are opened
+/// and consumed by the waiter service, so resumption cannot bypass the
+/// coordinator's ordinary mutation classification.
+pub struct AiSupervisedSubscriptionCheckpointControl {
+    waits: Arc<OrmAiSubscriptionWaitService>,
+    fallback: Arc<dyn crate::AiAgentSupervisedCheckpointControl>,
+}
+
+impl AiSupervisedSubscriptionCheckpointControl {
+    /// Creates the single classified-checkpoint control used when durable
+    /// subscription waits are enabled for a supervised coordinator.
+    pub fn new(
+        waits: Arc<OrmAiSubscriptionWaitService>,
+        fallback: Arc<dyn crate::AiAgentSupervisedCheckpointControl>,
+    ) -> Self {
+        Self { waits, fallback }
+    }
+}
+
 /// Generated-ORM durable subscription-wait service.
 ///
 /// Registration captures replay position before atomically ending the active
@@ -417,6 +440,7 @@ pub struct OrmAiSubscriptionWaitService {
     sources: Arc<AiReplayableSubscriptionSourceRegistry>,
     rule_service: Arc<dyn AiRulePolicyService>,
     egress_audit: Arc<dyn AiEgressDecisionAudit>,
+    provider_session_service: Option<Arc<dyn crate::AiProviderSessionService>>,
     clock: Arc<dyn Clock>,
     limits: AiSubscriptionWaitLimits,
 }
@@ -438,9 +462,25 @@ impl OrmAiSubscriptionWaitService {
             sources,
             rule_service,
             egress_audit,
+            provider_session_service: None,
             clock,
             limits,
         }
+    }
+
+    /// Enables exact parking and resumption for provider-retained turns.
+    ///
+    /// Stateless continuations do not use this service. A retained provider
+    /// result is rejected unless this service is configured, so a durable wait
+    /// can never release a live provider-session claim into an ordinary active
+    /// state.
+    #[must_use]
+    pub fn with_provider_session_service(
+        mut self,
+        service: Arc<dyn crate::AiProviderSessionService>,
+    ) -> Self {
+        self.provider_session_service = Some(service);
+        self
     }
 
     /// Returns the underlying generated-ORM database.
@@ -760,7 +800,7 @@ impl OrmAiSubscriptionWaitService {
             principal_reference,
             principal_reference_fingerprint,
             source_checkpoint_id: source_checkpoint.id,
-            source_checkpoint_fingerprint: source_checkpoint.checkpoint_hash,
+            source_checkpoint_fingerprint: source_checkpoint.checkpoint_hash.clone(),
             parked_checkpoint_id,
             parked_checkpoint_fingerprint,
             protected_parked_checkpoint,
@@ -814,7 +854,54 @@ impl OrmAiSubscriptionWaitService {
             expected_owner_principal_kind: session.owner_principal_kind,
             expected_owner_subject: session.owner_subject,
         };
-        self.persist_registration(lease, prepared, now).await?;
+        let parked_provider_session = if provider_result.provider_session_claim().is_some() {
+            let service = self
+                .provider_session_service
+                .as_ref()
+                .ok_or(AiError::RuntimeNotReady)?
+                .clone();
+            let identity = crate::AiProviderSessionWaitIdentity::subscription(waiter_id.0)?;
+            let request = provider_result.provider_session_wait_park_request(
+                lease,
+                identity,
+                source_checkpoint.id,
+                source_checkpoint.checkpoint_hash.clone(),
+            )?;
+            let parked = match service.park_for_wait(lease, request.clone()).await {
+                Ok(parked) => parked,
+                Err(error) => {
+                    let _ = service
+                        .require_wait_handoff_cleanup(
+                            &request,
+                            "provider_session_subscription_park_failed",
+                        )
+                        .await;
+                    return Err(error);
+                }
+            };
+            Some((service, parked))
+        } else {
+            None
+        };
+        if let Err(error) = self.persist_registration(lease, prepared, now).await {
+            if let Some((service, parked)) = &parked_provider_session {
+                let _ = service
+                    .require_parked_wait_cleanup(
+                        parked,
+                        "provider_session_subscription_registration_failed",
+                    )
+                    .await;
+            }
+            return Err(error);
+        }
+        if let Some((service, parked)) = parked_provider_session {
+            // The durable waiter graph is authoritative after registration.
+            // Confirmation is idempotent, and provider-session maintenance
+            // converges an indeterminate response from the same graph. Never
+            // return an ordinary registration error after the run lease was
+            // released, because that could replay the provider tool request.
+            let _ = service.confirm_parked_wait(&parked).await;
+        }
         Ok(AiRegisteredSubscriptionWait {
             waiter_id,
             tool_call_id,
@@ -1009,7 +1096,7 @@ impl OrmAiSubscriptionWaitService {
             Err(error) => return Err(error),
         };
         if opened.waiter.expires_at <= self.clock.now().unix_timestamp() {
-            self.queue_limit_outcome(&claim, &opened, "timeout", None)
+            self.queue_limit_outcome(&claim, &opened, "timeout", None, None)
                 .await?;
             return Ok(AiSubscriptionWaitWorkerOutcome::Queued {
                 waiter_id: claim.waiter_id,
@@ -1108,7 +1195,7 @@ impl OrmAiSubscriptionWaitService {
         if item_seconds <= 0 {
             drop(stream);
             if waiter_remaining <= 0 {
-                self.queue_limit_outcome(&claim, &opened, "timeout", None)
+                self.queue_limit_outcome(&claim, &opened, "timeout", None, None)
                     .await?;
                 return Ok(AiSubscriptionWaitWorkerOutcome::Queued {
                     waiter_id: claim.waiter_id,
@@ -1131,7 +1218,7 @@ impl OrmAiSubscriptionWaitService {
             Err(_) => {
                 drop(stream);
                 if self.clock.now().unix_timestamp() >= opened.waiter.expires_at {
-                    self.queue_limit_outcome(&claim, &opened, "timeout", None)
+                    self.queue_limit_outcome(&claim, &opened, "timeout", None, None)
                         .await?;
                     return Ok(AiSubscriptionWaitWorkerOutcome::Queued {
                         waiter_id: claim.waiter_id,
@@ -1272,8 +1359,14 @@ impl OrmAiSubscriptionWaitService {
                 });
             }
             if examined >= opened.waiter.maximum_events {
-                self.queue_limit_outcome(&claim, &opened, "event_limit", Some(&event))
-                    .await?;
+                self.queue_limit_outcome(
+                    &claim,
+                    &opened,
+                    "event_limit",
+                    Some(&event),
+                    Some(&validated),
+                )
+                .await?;
                 return Ok(AiSubscriptionWaitWorkerOutcome::Queued {
                     waiter_id: claim.waiter_id,
                     run_id: claim.run_id,
@@ -1489,6 +1582,7 @@ impl OrmAiSubscriptionWaitService {
         opened: &OpenedWait,
         outcome_kind: &str,
         event: Option<&AiReplayableSubscriptionEvent>,
+        validated_event: Option<&crate::AiToolExecutionResult>,
     ) -> Result<(), AiError> {
         let error_code = match outcome_kind {
             "timeout" => "AI_SUBSCRIPTION_WAIT_TIMEOUT",
@@ -1501,13 +1595,22 @@ impl OrmAiSubscriptionWaitService {
             classification: DataClassification::Public,
             trust: AiSourceTrust::TrustedRuntime,
         };
+        let source_event_fingerprint = match (event, validated_event) {
+            (Some(event), Some(validated)) => Some(canonical_json_hash(&json!({
+                "eventId": event.event_id(),
+                "positionFingerprint": event.position().fingerprint(),
+                "output": validated.model_output(),
+            }))?),
+            (None, None) => None,
+            _ => return Err(AiError::Conflict),
+        };
         self.queue_outcome(
             claim,
             opened,
             outcome_kind,
             json!({"data": Value::Null, "errorCodes": [error_code]}),
             event,
-            None,
+            source_event_fingerprint,
             source,
         )
         .await
@@ -1800,7 +1903,7 @@ impl OrmAiSubscriptionWaitService {
                                 state: Some(AiRunState::Queued.as_str().to_owned()),
                                 next_attempt_at: Some(Some(now.unix_timestamp())),
                                 latest_checkpoint_id: Some(Some(adoption.id)),
-                                error_code: Some(None),
+                                error_code: Some(Some("checkpoint_adoption_ready".to_owned())),
                                 ..Default::default()
                             },
                         )
@@ -2173,7 +2276,8 @@ impl OrmAiSubscriptionWaitService {
                 "positionFingerprint": event.position().fingerprint(),
                 "output": validated.model_output(),
             }))?;
-            if validated.model_output() != outcome.output
+            if (outcome.outcome_kind == "matched" && validated.model_output() != outcome.output)
+                || !matches!(outcome.outcome_kind.as_str(), "matched" | "event_limit")
                 || outcome.source_event_fingerprint.as_deref()
                     != Some(expected_event_fingerprint.as_str())
             {
@@ -3176,6 +3280,59 @@ impl crate::AiAgentCheckpointAdopter for AiSubscriptionCheckpointAdopter {
     }
 }
 
+#[async_trait]
+impl crate::AiAgentSupervisedCheckpointControl for AiSupervisedSubscriptionCheckpointControl {
+    async fn adopt(
+        &self,
+        lease: &AiRunLease,
+    ) -> Result<Option<crate::AiAdoptedSupervisedToolBatch>, AiError> {
+        self.fallback.adopt(lease).await
+    }
+
+    async fn consume(
+        &self,
+        lease: &AiRunLease,
+        adopted: &crate::AiAdoptedSupervisedToolBatch,
+    ) -> Result<AiRunLease, AiError> {
+        self.fallback.consume(lease, adopted).await
+    }
+
+    async fn adopt_automatic(
+        &self,
+        lease: &AiRunLease,
+    ) -> Result<Option<crate::AiAdoptedAutomaticMutationBatch>, AiError> {
+        self.fallback.adopt_automatic(lease).await
+    }
+
+    async fn consume_automatic(
+        &self,
+        lease: &AiRunLease,
+        adopted: &crate::AiAdoptedAutomaticMutationBatch,
+    ) -> Result<AiRunLease, AiError> {
+        self.fallback.consume_automatic(lease, adopted).await
+    }
+
+    async fn adopt_subscription(
+        &self,
+        lease: &AiRunLease,
+    ) -> Result<Option<crate::AiAdoptedReadOnlyToolBatch>, AiError> {
+        let Some(checkpoint_id) = lease.latest_checkpoint_id() else {
+            return Ok(None);
+        };
+        self.waits.adopt_wait(lease, checkpoint_id).await
+    }
+
+    async fn consume_subscription(
+        &self,
+        lease: &AiRunLease,
+        adopted: &crate::AiAdoptedReadOnlyToolBatch,
+    ) -> Result<AiRunLease, AiError> {
+        self.waits
+            .consume_wait_adoption(lease, adopted.checkpoint_id())
+            .await
+    }
+}
+
 fn enforce_size(value: &serde_json::Value, maximum: usize) -> Result<(), AiError> {
     if serde_json::to_vec(value)
         .map_err(|_| AiError::PersistenceFailed)?
@@ -3396,7 +3553,1290 @@ fn valid_provider_snapshot(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeSet, VecDeque};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use agql_auth::{
+        AccessTokenMetadata, AuthPrincipal, AuthUser, CurrentPrincipalResolver, FixedClock,
+        SessionContext,
+    };
+    use futures::stream;
+    use graphql_orm::graphql::orm::{
+        ApplyOptions, GraphqlEntitySemanticMetadata, GraphqlOperationCatalog, GraphqlOperationKind,
+        GraphqlSemanticArgumentDescriptor, GraphqlSemanticCatalog, GraphqlSemanticClassification,
+        GraphqlSemanticExport, GraphqlSemanticFieldMetadata, GraphqlSemanticOperationDescriptor,
+        GraphqlSemanticTypeKind, GraphqlSemanticTypeRef, GraphqlSubscriptionConditionField,
+        GraphqlSubscriptionConditionOperator, GraphqlSubscriptionObservationDescriptor,
+        GraphqlSubscriptionReplayMode, OrmSchemaModule,
+    };
+    use graphql_orm::prelude::SqliteBackend;
+
     use super::*;
+
+    const TEST_NOW: i64 = 1_900_000_000;
+
+    struct TestPrincipalResolver {
+        principal: AuthPrincipal,
+        active: Arc<AtomicBool>,
+        clock: Arc<FixedClock>,
+    }
+
+    #[async_trait]
+    impl CurrentPrincipalResolver for TestPrincipalResolver {
+        async fn resolve(
+            &self,
+            reference: &PrincipalReference,
+        ) -> agql_auth::AuthResult<ResolvedPrincipal> {
+            if !self.active.load(Ordering::SeqCst) {
+                return Err(agql_auth::AuthError::Forbidden);
+            }
+            ResolvedPrincipal::new(reference.clone(), self.principal.clone(), self.clock.now())
+        }
+    }
+
+    struct TestAccess(Arc<AtomicBool>);
+
+    #[async_trait]
+    impl crate::AiAccessPolicy for TestAccess {
+        async fn can_access_scope(
+            &self,
+            _principal: &AuthPrincipal,
+            _scope: &AiScope,
+            _action: AiSessionAction,
+        ) -> crate::AiAccessDecision {
+            if self.0.load(Ordering::SeqCst) {
+                crate::AiAccessDecision::allow("subscription-wait-test", "v1")
+            } else {
+                crate::AiAccessDecision::deny("revoked", "v1")
+            }
+        }
+
+        async fn can_access_session(
+            &self,
+            _principal: &AuthPrincipal,
+            _session_id: AiSessionId,
+            _action: AiSessionAction,
+        ) -> crate::AiAccessDecision {
+            if self.0.load(Ordering::SeqCst) {
+                crate::AiAccessDecision::allow("subscription-wait-test", "v1")
+            } else {
+                crate::AiAccessDecision::deny("revoked", "v1")
+            }
+        }
+    }
+
+    struct TestContextFactory;
+
+    #[async_trait]
+    impl crate::GraphqlRequestContextFactory for TestContextFactory {
+        async fn build(
+            &self,
+            _principal: &ResolvedPrincipal,
+            _target: &crate::GraphqlExecutionTarget,
+            _request: &ToolGraphqlRequest,
+        ) -> Result<crate::GraphqlRequestContext, crate::ToolExecutionError> {
+            Ok(crate::GraphqlRequestContext::new(()))
+        }
+    }
+
+    struct TestGraphqlExecutor;
+
+    #[async_trait]
+    impl crate::AuthenticatedGraphqlExecutor for TestGraphqlExecutor {
+        async fn execute(
+            &self,
+            _context: crate::GraphqlRequestContext,
+            _request: ToolGraphqlRequest,
+        ) -> Result<crate::ToolGraphqlResponse, crate::ToolExecutionError> {
+            Err(crate::ToolExecutionError::Execution)
+        }
+    }
+
+    struct TestToolPolicy;
+
+    #[async_trait]
+    impl crate::AiToolAuthorizationPolicy for TestToolPolicy {
+        async fn authorize(
+            &self,
+            principal: &ResolvedPrincipal,
+            _scope: &AiScope,
+            _descriptor: &AiToolDescriptor,
+            _variables: &Value,
+        ) -> crate::AiToolAuthorizationDecision {
+            crate::AiToolAuthorizationDecision::allow(
+                "subscription-wait-test",
+                "tool-policy-v1",
+                format!("auth:{}", principal.principal().subject()),
+            )
+        }
+    }
+
+    struct TestEgress;
+
+    #[async_trait]
+    impl crate::AiEgressPolicy for TestEgress {
+        async fn authorize(
+            &self,
+            principal: &ResolvedPrincipal,
+            manifest: &AiEgressManifest,
+        ) -> crate::AiEgressDecision {
+            crate::AiEgressDecision::allow(
+                manifest,
+                "subscription-egress-v1",
+                principal.principal().subject(),
+            )
+        }
+    }
+
+    struct TestEgressAudit;
+
+    #[async_trait]
+    impl AiEgressDecisionAudit for TestEgressAudit {
+        async fn record(
+            &self,
+            _manifest: &AiEgressManifest,
+            _decision: &crate::AiEgressDecision,
+        ) -> Result<(), AiError> {
+            Ok(())
+        }
+    }
+
+    struct TestProviderSessions {
+        database: Database<SqliteBackend>,
+        parks: AtomicUsize,
+        confirmations: AtomicUsize,
+        cleanup_requests: AtomicUsize,
+        invalidate_registration_after_park: AtomicBool,
+    }
+
+    #[async_trait]
+    impl crate::AiProviderSessionService for TestProviderSessions {
+        async fn inspect_for_run(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Option<crate::AiProviderSessionBindingView>, AiError> {
+            Ok(None)
+        }
+
+        async fn bind_for_run(
+            &self,
+            _lease: &AiRunLease,
+            _request: crate::AiProviderSessionBindRequest,
+        ) -> Result<crate::AiProviderSessionClaim, AiError> {
+            Err(AiError::RuntimeNotReady)
+        }
+
+        async fn claim_for_run(
+            &self,
+            _lease: &AiRunLease,
+            _expected: &crate::AiProviderSessionDescriptor,
+            _expected_transcript_fingerprint: &str,
+        ) -> Result<crate::AiProviderSessionClaim, AiError> {
+            Err(AiError::RuntimeNotReady)
+        }
+
+        async fn open_for_run(
+            &self,
+            _lease: &AiRunLease,
+            _claim: &crate::AiProviderSessionClaim,
+        ) -> Result<crate::AiOpenedProviderSession, AiError> {
+            Err(AiError::RuntimeNotReady)
+        }
+
+        async fn heartbeat(
+            &self,
+            _lease: &AiRunLease,
+            _claim: &crate::AiProviderSessionClaim,
+        ) -> Result<crate::AiProviderSessionClaim, AiError> {
+            Err(AiError::RuntimeNotReady)
+        }
+
+        async fn park_for_wait(
+            &self,
+            _lease: &AiRunLease,
+            request: crate::AiProviderSessionWaitParkRequest,
+        ) -> Result<crate::AiProviderSessionParkedWait, AiError> {
+            self.parks.fetch_add(1, Ordering::SeqCst);
+            if self
+                .invalidate_registration_after_park
+                .swap(false, Ordering::SeqCst)
+            {
+                AiRunRecord::update_by_id(
+                    &self.database,
+                    &request.claim.run_id.0,
+                    UpdateAiRunRecordInput {
+                        state: Some(AiRunState::Failed.as_str().to_owned()),
+                        error_code: Some(Some("test_registration_race".to_owned())),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|_| AiError::PersistenceFailed)?;
+            }
+            Ok(crate::AiProviderSessionParkedWait {
+                binding_id: request.claim.binding_id,
+                session_id: request.claim.session_id,
+                source_run_id: request.claim.run_id,
+                source_attempt_id: request.claim.attempt_id,
+                source_run_lease_generation: request.claim.run_lease_generation,
+                source_binding_claim_generation: request.claim.binding_claim_generation,
+                park_generation: 1,
+                wait: request.wait,
+                source_checkpoint_id: request.source_checkpoint_id,
+                source_checkpoint_fingerprint: request.source_checkpoint_fingerprint,
+                continuation_fingerprint: request.continuation_fingerprint,
+                binding_row_version: request.claim.binding_row_version + 1,
+            })
+        }
+
+        async fn confirm_parked_wait(
+            &self,
+            _parked: &crate::AiProviderSessionParkedWait,
+        ) -> Result<(), AiError> {
+            self.confirmations.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn require_parked_wait_cleanup(
+            &self,
+            _parked: &crate::AiProviderSessionParkedWait,
+            _reason_code: &str,
+        ) -> Result<(), AiError> {
+            self.cleanup_requests.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn require_wait_handoff_cleanup(
+            &self,
+            _request: &crate::AiProviderSessionWaitParkRequest,
+            _reason_code: &str,
+        ) -> Result<(), AiError> {
+            self.cleanup_requests.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn commit_turn(
+            &self,
+            _lease: &AiRunLease,
+            _claim: &crate::AiProviderSessionClaim,
+            _commit: crate::AiProviderSessionCommit,
+        ) -> Result<crate::AiProviderSessionBindingView, AiError> {
+            Err(AiError::RuntimeNotReady)
+        }
+
+        async fn require_cleanup(
+            &self,
+            _claim: &crate::AiProviderSessionClaim,
+            _reason_code: &str,
+        ) -> Result<(), AiError> {
+            Ok(())
+        }
+
+        async fn claim_cleanup(
+            &self,
+            _worker_id: &str,
+        ) -> Result<Option<crate::AiProviderSessionCleanupClaim>, AiError> {
+            Ok(None)
+        }
+
+        async fn open_for_cleanup(
+            &self,
+            _claim: &crate::AiProviderSessionCleanupClaim,
+            _policy: &AiContentProtectionPolicy,
+        ) -> Result<crate::AiProviderSessionDeletionRequest, AiError> {
+            Err(AiError::RuntimeNotReady)
+        }
+
+        async fn complete_cleanup(
+            &self,
+            _claim: &crate::AiProviderSessionCleanupClaim,
+            _proof: crate::AiProviderSessionAbsenceProof,
+        ) -> Result<(), AiError> {
+            Err(AiError::RuntimeNotReady)
+        }
+
+        async fn schedule_cleanup_retry(
+            &self,
+            _claim: &crate::AiProviderSessionCleanupClaim,
+            _delay: Duration,
+            _reason_code: &str,
+        ) -> Result<(), AiError> {
+            Err(AiError::RuntimeNotReady)
+        }
+    }
+
+    struct TestProtection;
+
+    #[async_trait]
+    impl crate::AiContentProtectionPolicyResolver for TestProtection {
+        async fn resolve(
+            &self,
+            _principal: &AuthPrincipal,
+            scope: &AiScope,
+        ) -> Result<AiContentProtectionPolicy, AiError> {
+            Ok(AiContentProtectionPolicy {
+                scope: scope.clone(),
+                mode: crate::AiContentProtectionMode::DatabaseManaged,
+                key_policy_reference: None,
+                version: 1,
+                ready: true,
+            })
+        }
+    }
+
+    struct TestRules(crate::AiResolvedRuleSet);
+
+    #[async_trait]
+    impl AiRulePolicyService for TestRules {
+        async fn policy(
+            &self,
+            _principal: &AuthPrincipal,
+            _scope: AiScope,
+        ) -> Result<Option<crate::AiRulePolicyView>, AiError> {
+            Ok(None)
+        }
+
+        async fn set_policy(
+            &self,
+            _principal: &AuthPrincipal,
+            _input: crate::SetAiRulePolicyInput,
+        ) -> Result<crate::AiRulePolicyView, AiError> {
+            Err(AiError::Forbidden)
+        }
+
+        async fn resolve_for_run(
+            &self,
+            _principal: &AuthPrincipal,
+            target_scope: AiScope,
+        ) -> Result<crate::AiResolvedRuleSet, AiError> {
+            if target_scope != *self.0.target_scope() {
+                return Err(AiError::Forbidden);
+            }
+            Ok(self.0.clone())
+        }
+    }
+
+    #[derive(Clone)]
+    struct TestReplaySource {
+        items: Arc<
+            Mutex<
+                VecDeque<
+                    Result<AiReplayableSubscriptionSourceItem, crate::AiSubscriptionSourceError>,
+                >,
+            >,
+        >,
+        opened_positions: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl TestReplaySource {
+        fn push(&self, item: AiReplayableSubscriptionSourceItem) {
+            self.items
+                .lock()
+                .expect("source queue lock")
+                .push_back(Ok(item));
+        }
+    }
+
+    #[async_trait]
+    impl crate::AiReplayableSubscriptionSource for TestReplaySource {
+        async fn capture_position(
+            &self,
+            _principal: &ResolvedPrincipal,
+            _request: &ToolGraphqlRequest,
+        ) -> Result<AiSubscriptionReplayPosition, crate::AiSubscriptionSourceError> {
+            AiSubscriptionReplayPosition::new(json!({"sequence": 0}), json!({"head": 0}))
+        }
+
+        async fn open(
+            &self,
+            _principal: &ResolvedPrincipal,
+            request: AiReplayableSubscriptionOpenRequest,
+        ) -> Result<crate::AiReplayableSubscriptionStream, crate::AiSubscriptionSourceError>
+        {
+            self.opened_positions
+                .lock()
+                .expect("opened positions lock")
+                .push(request.position().fingerprint().to_owned());
+            let item = self.items.lock().expect("source queue lock").pop_front();
+            Ok(Box::pin(stream::iter(item)))
+        }
+
+        async fn authorize_event(
+            &self,
+            _principal: &ResolvedPrincipal,
+            _request: &ToolGraphqlRequest,
+            event: &AiReplayableSubscriptionEvent,
+        ) -> Result<crate::ToolGraphqlResponse, crate::AiSubscriptionSourceError> {
+            Ok(crate::ToolGraphqlResponse {
+                data: event.data().clone(),
+                error_codes: Vec::new(),
+                application_audit_ref: Some("subscription-source-test".to_owned()),
+            })
+        }
+    }
+
+    fn test_principal() -> AuthPrincipal {
+        AuthPrincipal::User(AuthUser {
+            user_id: "subscription-owner".to_owned(),
+            session_id: Uuid::from_u128(61),
+            roles: Vec::new(),
+            scopes: Vec::new(),
+            session: SessionContext::default(),
+            token_claims: AccessTokenMetadata {
+                tenant_id: Some("tenant-subscription".to_owned()),
+                ..AccessTokenMetadata::default()
+            },
+        })
+    }
+
+    fn test_semantics() -> GraphqlSemanticCatalog {
+        let scalar = |name: &str| GraphqlSemanticFieldMetadata {
+            field_name: name.to_owned(),
+            description: format!("Reviewed public {name}."),
+            type_ref: GraphqlSemanticTypeRef::named(
+                "String",
+                GraphqlSemanticTypeKind::Scalar,
+                false,
+            ),
+            selectable: true,
+            filter_operators: Vec::new(),
+            sortable: false,
+            groupable: false,
+            aggregate_operators: Vec::new(),
+            aggregate_value_kind: None,
+            relationship: None,
+            classification: GraphqlSemanticClassification::Internal,
+            export: GraphqlSemanticExport::Exportable,
+            has_field_policy: true,
+        };
+        let entity = GraphqlEntitySemanticMetadata {
+            entity_name: "Parent".to_owned(),
+            description: "One reviewed parent event.".to_owned(),
+            default_classification: GraphqlSemanticClassification::Internal,
+            fields: vec![scalar("id"), scalar("name")].into_boxed_slice(),
+        };
+        let operation = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Subscription,
+            "ParentChanged",
+            "Observe reviewed parent changes.",
+            vec![GraphqlSemanticArgumentDescriptor {
+                graphql_name: "id".to_owned(),
+                description: "Optional parent identity.".to_owned(),
+                type_ref: GraphqlSemanticTypeRef::named(
+                    "ID",
+                    GraphqlSemanticTypeKind::Scalar,
+                    true,
+                ),
+            }],
+            GraphqlSemanticTypeRef::named("Parent", GraphqlSemanticTypeKind::Object, false),
+            true,
+        )
+        .expect("subscription operation semantics")
+        .with_subscription_observation(GraphqlSubscriptionObservationDescriptor {
+            replay_mode: GraphqlSubscriptionReplayMode::ReplayThenLive,
+            maximum_duration_seconds: Some(120),
+            maximum_events: Some(20),
+            condition_fields: vec![GraphqlSubscriptionConditionField {
+                field_name: "id".to_owned(),
+                operators: vec![GraphqlSubscriptionConditionOperator::Equal],
+            }],
+        })
+        .expect("replayable subscription semantics");
+        GraphqlSemanticCatalog::compose_with_custom(
+            [entity],
+            &GraphqlOperationCatalog::compose(std::iter::empty()),
+            [operation],
+        )
+        .expect("subscription semantic catalog")
+    }
+
+    fn test_rules(scope: AiScope) -> crate::AiResolvedRuleSet {
+        crate::AiResolvedRuleSet::new(
+            scope,
+            crate::AiRuleConstraints {
+                enabled: true,
+                maximum_classification: DataClassification::Internal,
+                maximum_tool_maturity: ToolMaturity::ReadOnly,
+                approval_requirement: crate::AiRuleApprovalRequirement::DescriptorPolicy,
+                allowed_tool_fingerprints: None,
+                allowed_provider_kinds: None,
+                allowed_provider_capabilities: None,
+                allow_provider_retention: true,
+                allow_byok: false,
+                budget: crate::AiRuleBudgetCeilings {
+                    maximum_steps: Some(10),
+                    maximum_duration_seconds: Some(3_600),
+                    maximum_output_tokens: Some(1_000),
+                    maximum_cost_microunits: Some(1_000),
+                    maximum_provider_calls: Some(10),
+                    maximum_tool_units: Some(10),
+                    maximum_web_search_calls: Some(0),
+                    maximum_image_units: Some(0),
+                },
+            },
+            Vec::new(),
+        )
+        .expect("test rules")
+    }
+
+    fn test_rule_usage() -> AiRuleRunUsage {
+        serde_json::from_value(json!({
+            "startedAtUnix": TEST_NOW,
+            "providerCalls": 1,
+            "steps": 1,
+            "outputTokens": 1,
+            "costMicrounits": 0,
+            "toolUnits": 0,
+            "webSearchCalls": 0,
+            "imageUnits": 0
+        }))
+        .expect("test rule usage")
+    }
+
+    struct WaitFixture {
+        database: Database<SqliteBackend>,
+        service: Arc<OrmAiSubscriptionWaitService>,
+        run_service: OrmAiRunService,
+        source: TestReplaySource,
+        principal: AuthPrincipal,
+        scope: AiScope,
+        clock: Arc<FixedClock>,
+        principal_active: Arc<AtomicBool>,
+        access_allowed: Arc<AtomicBool>,
+        capability_id: AiToolId,
+        capability_fingerprint: String,
+        provider_name: String,
+        rules: crate::AiResolvedRuleSet,
+        provider_sessions: Arc<TestProviderSessions>,
+    }
+
+    async fn wait_fixture() -> WaitFixture {
+        let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+            .await
+            .expect("subscription-wait SQLite opens");
+        let module = crate::AiSchemaModule;
+        let migration = database
+            .schema()
+            .plan_migration_to_entities(
+                "subscription-wait-test-v1",
+                "durable subscription wait behavioral test",
+                module.entities(),
+            )
+            .await
+            .expect("AI schema plans");
+        database
+            .schema()
+            .apply_migration(&migration, ApplyOptions::default())
+            .await
+            .expect("AI schema applies");
+        let now = OffsetDateTime::from_unix_timestamp(TEST_NOW).expect("test timestamp");
+        let clock = Arc::new(FixedClock::new(now));
+        let principal = test_principal();
+        let principal_active = Arc::new(AtomicBool::new(true));
+        let access_allowed = Arc::new(AtomicBool::new(true));
+        let scope = AiScope::new("workspace", "subscription-workspace")
+            .with_tenant_id("tenant-subscription");
+        let semantics = test_semantics();
+        let target_id =
+            crate::GraphqlExecutionTargetId::parse("subscription.graphql").expect("target ID");
+        let sdl = "schema { query: Query, subscription: Subscription }\n\
+                   type Query { health: Boolean! }\n\
+                   type Subscription { ParentChanged(id: ID): Parent! }\n\
+                   type Parent { id: String!, name: String! }";
+        let capability_catalog = crate::AiGraphqlSubscriptionCapabilityCatalog::compile(
+            "subscription-test",
+            target_id.clone(),
+            sdl,
+            &semantics,
+            crate::AiGraphqlSubscriptionCapabilityLimits::default(),
+        )
+        .expect("subscription capabilities compile");
+        let capability = capability_catalog
+            .capabilities()
+            .next()
+            .expect("subscription capability")
+            .clone();
+        let plan = json!({
+            "arguments": {"id": "wanted"},
+            "fields": {"id": true, "name": true},
+            "relationships": {},
+            "condition": {"field": "id", "operator": "equal", "value": "wanted"},
+            "timeoutSeconds": 60,
+            "maximumEvents": 2
+        });
+        let compiled = capability
+            .compile(plan.clone())
+            .expect("subscription plan compiles");
+        let operation_fingerprint = compiled
+            .descriptor()
+            .graphql_contract
+            .as_ref()
+            .and_then(crate::GraphqlOperationContract::semantic_operation)
+            .expect("semantic operation binding")
+            .operation_fingerprint()
+            .to_owned();
+        let source = TestReplaySource {
+            items: Arc::new(Mutex::new(VecDeque::new())),
+            opened_positions: Arc::new(Mutex::new(Vec::new())),
+        };
+        let source_descriptor = crate::AiReplayableSubscriptionSourceDescriptor::new(
+            "subscription-test-source",
+            "v1",
+            target_id.clone(),
+            operation_fingerprint,
+        )
+        .expect("source descriptor");
+        let mut sources = crate::AiReplayableSubscriptionSourceRegistry::new();
+        sources
+            .register(source_descriptor, Arc::new(source.clone()))
+            .expect("source registers");
+        let mut tool_catalog = crate::AiToolCatalog::new();
+        tool_catalog
+            .register_subscription_capability_catalog(&capability_catalog)
+            .expect("subscription catalog registers");
+        let provider_name = "parent_changed".to_owned();
+        let definition = tool_catalog
+            .subscription_capability_model_definition(capability.id(), provider_name.clone())
+            .expect("provider model definition");
+        let mut generated_policy = crate::AiGeneratedGraphqlTargetPolicySet::new();
+        generated_policy
+            .bind(
+                crate::AiGeneratedGraphqlTargetPolicyBinding::new(
+                    target_id.clone(),
+                    capability_catalog.finished_schema_fingerprint(),
+                    capability_catalog.semantic_catalog_fingerprint(),
+                )
+                .expect("target binding")
+                .allow_replayable_subscriptions(),
+            )
+            .expect("target policy binds");
+        let mut targets = crate::GraphqlExecutionTargetRegistry::new();
+        targets
+            .register(crate::GraphqlExecutionTarget {
+                id: target_id,
+                class: crate::GraphqlExecutionTargetClass::Local,
+                audience: None,
+                resource_type: None,
+                resource_id: None,
+                schema_fingerprint: capability_catalog.finished_schema_fingerprint().to_owned(),
+            })
+            .expect("target registers");
+        let runtime = crate::AiRuntime::builder()
+            .principal_resolver(Arc::new(TestPrincipalResolver {
+                principal: principal.clone(),
+                active: principal_active.clone(),
+                clock: clock.clone(),
+            }))
+            .access_policy(Arc::new(TestAccess(access_allowed.clone())))
+            .tool_authorization_policy(Arc::new(TestToolPolicy))
+            .request_context_factory(Arc::new(TestContextFactory))
+            .graphql_executor(Arc::new(TestGraphqlExecutor))
+            .graphql_targets(targets)
+            .egress_policy(Arc::new(TestEgress))
+            .deployment_egress(crate::AiDeploymentEgressBoundary {
+                allowed_destination_trust: BTreeSet::from([crate::AiDestinationTrust::Local]),
+                allowed_capabilities: BTreeSet::from([crate::AiEgressCapability::ToolResult]),
+                maximum_classification: DataClassification::Internal,
+                maximum_bytes: 64 * 1024,
+                maximum_attachments: 0,
+            })
+            .maximum_tool_maturity(ToolMaturity::ReadOnly)
+            .generated_graphql_target_policy(generated_policy)
+            .tool_catalog(tool_catalog)
+            .secret_store(Arc::new(crate::EnvironmentSecretStore::new()))
+            .content_protection_policy_resolver(Arc::new(TestProtection))
+            .content_protector(Arc::new(crate::DatabaseManagedContentProtector))
+            .build()
+            .expect("subscription runtime builds");
+        runtime
+            .start_gate()
+            .open(&crate::AiRuntimeReadinessReport {
+                module_fingerprint: runtime
+                    .start_gate()
+                    .expected_module_fingerprint()
+                    .to_owned(),
+                executor_bound: true,
+                restore_reconciled: true,
+                fatal_issue_count: 0,
+            })
+            .expect("runtime opens");
+        let run_service = OrmAiRunService::new(
+            database.clone(),
+            clock.clone(),
+            crate::AiRunServiceLimits::new(Duration::minutes(5), Duration::minutes(5), 16, 3, 8)
+                .expect("run limits"),
+        );
+        let rules = test_rules(scope.clone());
+        let provider_sessions = Arc::new(TestProviderSessions {
+            database: database.clone(),
+            parks: AtomicUsize::new(0),
+            confirmations: AtomicUsize::new(0),
+            cleanup_requests: AtomicUsize::new(0),
+            invalidate_registration_after_park: AtomicBool::new(false),
+        });
+        let service = Arc::new(
+            OrmAiSubscriptionWaitService::new(
+                run_service.clone(),
+                Arc::new(runtime),
+                Arc::new(sources),
+                Arc::new(TestRules(rules.clone())),
+                Arc::new(TestEgressAudit),
+                clock.clone(),
+                AiSubscriptionWaitLimits::default(),
+            )
+            .with_provider_session_service(provider_sessions.clone()),
+        );
+        WaitFixture {
+            database,
+            service,
+            run_service,
+            source,
+            principal,
+            scope,
+            clock,
+            principal_active,
+            access_allowed,
+            capability_id: capability.id().clone(),
+            capability_fingerprint: definition.fingerprint,
+            provider_name,
+            rules,
+            provider_sessions,
+        }
+    }
+
+    impl WaitFixture {
+        async fn register(&self) -> AiRegisteredSubscriptionWait {
+            self.register_mode(false)
+                .await
+                .expect("stateless wait registers")
+        }
+
+        async fn register_retained(&self) -> AiRegisteredSubscriptionWait {
+            self.register_mode(true)
+                .await
+                .expect("retained wait registers")
+        }
+
+        async fn register_mode(
+            &self,
+            retained: bool,
+        ) -> Result<AiRegisteredSubscriptionWait, AiError> {
+            let session_id = AiSessionId::new();
+            let run_id = crate::AiRunId::new();
+            let input_message_id = Uuid::new_v4();
+            AiSessionRecord::insert(
+                &self.database,
+                CreateAiSessionRecordInput {
+                    id: session_id.0,
+                    owner_principal_kind: "user".to_owned(),
+                    owner_subject: self.principal.subject().to_owned(),
+                    tenant_id: self.scope.tenant_id.clone(),
+                    scope_kind: self.scope.kind.clone(),
+                    scope_id: self.scope.id.clone(),
+                    title: "Subscription wait test".to_owned(),
+                    title_revision: 0,
+                    title_source: "default".to_owned(),
+                    state: "active".to_owned(),
+                    stream_head: 0,
+                    message_head: 0,
+                    last_activity_at: self.clock.now().unix_timestamp(),
+                    archived_at: None,
+                    deleted_at: None,
+                },
+            )
+            .await
+            .expect("test session inserts");
+            AiRunRecord::insert(
+                &self.database,
+                CreateAiRunRecordInput {
+                    id: run_id.0,
+                    session_id: session_id.0,
+                    input_message_id,
+                    principal_reference: serde_json::to_value(self.principal.reference())
+                        .expect("principal reference serializes"),
+                    state: AiRunState::Queued.as_str().to_owned(),
+                    attempt_id: None,
+                    lease_owner: None,
+                    lease_generation: 0,
+                    lease_expires_at: None,
+                    lease_heartbeat_at: None,
+                    retry_count: 0,
+                    next_attempt_at: Some(self.clock.now().unix_timestamp()),
+                    error_code: None,
+                    latest_checkpoint_id: None,
+                    cancellation_request_id: None,
+                    cancellation_requested_at: None,
+                },
+            )
+            .await
+            .expect("test run inserts");
+            let lease = self
+                .run_service
+                .claim_next("subscription-registration-worker")
+                .await
+                .expect("run claim succeeds")
+                .expect("queued run exists");
+            let lease = self.run_service.start(&lease).await.expect("run starts");
+            let plan = json!({
+                "arguments": {"id": "wanted"},
+                "fields": {"id": true, "name": true},
+                "relationships": {},
+                "condition": {"field": "id", "operator": "equal", "value": "wanted"},
+                "timeoutSeconds": 60,
+                "maximumEvents": 2
+            });
+            let result = AiProviderCallResult::test_result(
+                &lease,
+                None,
+                "subscription-response-1",
+                vec![("subscription-call-1", self.capability_id.as_str(), plan)],
+            )
+            .test_with_tool_binding(
+                0,
+                self.provider_name.clone(),
+                self.capability_fingerprint.clone(),
+            );
+            let result = if retained {
+                result.test_with_provider_session_claim(crate::AiProviderSessionClaim {
+                    binding_id: Uuid::new_v4(),
+                    session_id: lease.session_id(),
+                    run_id: lease.run_id(),
+                    attempt_id: lease.attempt_id(),
+                    run_lease_generation: lease.lease_generation(),
+                    binding_claim_generation: 1,
+                    binding_row_version: 1,
+                    claim_expires_at: self.clock.now() + Duration::minutes(5),
+                    through_message_sequence: 0,
+                    transcript_fingerprint: "a".repeat(64),
+                    principal_reference: lease.principal_reference().clone(),
+                    descriptor: crate::AiProviderSessionDescriptor::new(
+                        crate::ProviderKind::OpenAi,
+                        "test-profile",
+                        "coordinator-test-model",
+                        "b".repeat(64),
+                        "responses/v1",
+                        "c".repeat(64),
+                    )
+                    .expect("provider-session descriptor"),
+                })
+            } else {
+                result
+            };
+            let budget = AiBudgetReservationRecord::insert(
+                &self.database,
+                CreateAiBudgetReservationRecordInput {
+                    budget_counter_ids: json!([]),
+                    scope_kind: self.scope.kind.clone(),
+                    scope_id: self.scope.id.clone(),
+                    tenant_id: self.scope.tenant_id.clone(),
+                    principal_kind: "user".to_owned(),
+                    principal_subject: self.principal.subject().to_owned(),
+                    session_id: lease.session_id().0,
+                    run_id: lease.run_id().0,
+                    attempt_id: lease.attempt_id(),
+                    lease_generation: lease.lease_generation(),
+                    provider_kind: result.provider_kind().as_str().to_owned(),
+                    provider_model: result.provider_model().to_owned(),
+                    pricing_policy_version: "subscription-pricing-v1".to_owned(),
+                    reserved_input_tokens: 1,
+                    reserved_output_tokens: 1,
+                    reserved_tool_units: 1,
+                    reserved_image_units: 0,
+                    reserved_cost_microunits: 1,
+                    reserved_runs: 1,
+                    actual_input_tokens: Some(1),
+                    actual_cached_input_tokens: Some(0),
+                    actual_output_tokens: Some(1),
+                    actual_tool_units: Some(0),
+                    actual_image_units: Some(0),
+                    actual_cost_microunits: Some(0),
+                    actual_runs: Some(1),
+                    idempotency_key: format!("subscription-budget-{}", lease.run_id().0),
+                    state: "committed".to_owned(),
+                    expires_at: (self.clock.now() + Duration::hours(1)).unix_timestamp(),
+                    reconciled_at: Some(self.clock.now().unix_timestamp()),
+                },
+            )
+            .await
+            .expect("test budget inserts");
+            let result =
+                result.test_with_budget_reservation(crate::AiBudgetReservationId(budget.id));
+            let source_checkpoint_id = Uuid::new_v4();
+            let protected_state = json!({
+                "protection": "database_managed",
+                "value": {"providerTurn": 1}
+            });
+            let checkpoint_hash = coordinator_checkpoint_hash(
+                lease.run_id(),
+                lease.attempt_id(),
+                lease.lease_generation(),
+                source_checkpoint_id,
+                "provider_turn_persisted",
+                result.provider_kind().as_str(),
+                result.provider_model(),
+                result.provider_response_id(),
+                result.budget_reservation_id().0,
+                &protected_state,
+            )
+            .expect("provider checkpoint hashes");
+            let lease = self
+                .run_service
+                .append_coordinator_checkpoint(
+                    &lease,
+                    crate::PreparedCoordinatorCheckpoint {
+                        id: source_checkpoint_id,
+                        checkpoint_kind: "provider_turn_persisted".to_owned(),
+                        provider_kind: result.provider_kind().as_str().to_owned(),
+                        provider_model: result.provider_model().to_owned(),
+                        provider_response_id: result.provider_response_id().map(str::to_owned),
+                        budget_reservation_id: result.budget_reservation_id().0,
+                        protected_state,
+                        checkpoint_hash,
+                        completed_tools: Vec::new(),
+                    },
+                )
+                .await
+                .expect("provider checkpoint persists");
+            let resolution = AiAgentRuleResolution::new(self.rules.clone(), self.clock.now())
+                .expect("rule resolution");
+            let context = AiSubscriptionWaitRegistrationContext::new(
+                self.scope.clone(),
+                "subscription-wait-correlation",
+                AiToolResultEgressRoute::new(
+                    "test-profile",
+                    "local-test",
+                    crate::AiDestinationTrust::Local,
+                    "continue_subscription_wait",
+                    "none",
+                    "egress-v1",
+                )
+                .expect("egress route"),
+                resolution,
+                test_rule_usage(),
+                1,
+                1,
+            )
+            .expect("wait context");
+            self.service.register_wait(&lease, &result, context).await
+        }
+
+        fn event(&self, sequence: i64, id: &str) -> AiReplayableSubscriptionSourceItem {
+            let position = AiSubscriptionReplayPosition::new(
+                json!({"sequence": sequence}),
+                json!({"head": sequence}),
+            )
+            .expect("event position");
+            AiReplayableSubscriptionSourceItem::Event(
+                AiReplayableSubscriptionEvent::new(
+                    format!("event-{sequence}"),
+                    position,
+                    json!({"ParentChanged": {"id": id, "name": format!("Name {sequence}")}}),
+                )
+                .expect("source event"),
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_registration_replay_and_atomic_adoption_are_bounded() {
+        let fixture = wait_fixture().await;
+        let registered = fixture.register().await;
+        let run = AiRunRecord::find_by_id(&fixture.database, &registered.run_id().0)
+            .await
+            .expect("run loads")
+            .expect("run exists");
+        assert_eq!(run.state, AiRunState::WaitingSubscription.as_str());
+        assert!(run.attempt_id.is_none());
+        assert!(run.lease_owner.is_none());
+        assert!(run.lease_expires_at.is_none());
+
+        fixture.source.push(fixture.event(1, "other"));
+        assert!(matches!(
+            fixture
+                .service
+                .process_next("subscription-worker-a")
+                .await
+                .expect("nonmatch processes"),
+            AiSubscriptionWaitWorkerOutcome::Waiting { waiter_id }
+                if waiter_id == registered.waiter_id()
+        ));
+        let after_nonmatch =
+            AiSubscriptionWaiterRecord::find_by_id(&fixture.database, &registered.waiter_id().0)
+                .await
+                .expect("waiter loads")
+                .expect("waiter exists");
+        assert_eq!(after_nonmatch.events_examined, 1);
+        assert_eq!(after_nonmatch.state, "waiting");
+        assert!(after_nonmatch.claim_owner.is_none());
+
+        fixture.source.push(fixture.event(2, "wanted"));
+        assert!(matches!(
+            fixture
+                .service
+                .process_next("subscription-worker-b")
+                .await
+                .expect("matching event processes"),
+            AiSubscriptionWaitWorkerOutcome::Queued { waiter_id, run_id }
+                if waiter_id == registered.waiter_id() && run_id == registered.run_id()
+        ));
+        let adopted =
+            AiSubscriptionWaiterRecord::find_by_id(&fixture.database, &registered.waiter_id().0)
+                .await
+                .expect("waiter loads")
+                .expect("waiter exists");
+        assert_eq!(adopted.events_examined, 2);
+        assert_eq!(adopted.state, "adopted");
+        let queued = AiRunRecord::find_by_id(&fixture.database, &registered.run_id().0)
+            .await
+            .expect("run loads")
+            .expect("run exists");
+        assert_eq!(queued.state, AiRunState::Queued.as_str());
+        assert!(queued.latest_checkpoint_id.is_some());
+        let adoptions = AiSubscriptionWaitAdoptionRecord::query(fixture.database.pool())
+            .fetch_all()
+            .await
+            .expect("adoptions load");
+        assert_eq!(adoptions.len(), 1);
+        assert_eq!(adoptions[0].state, "queued");
+        assert!(matches!(
+            fixture
+                .service
+                .process_next("subscription-worker-c")
+                .await
+                .expect("adopted wait is not reclaimed"),
+            AiSubscriptionWaitWorkerOutcome::Idle
+        ));
+    }
+
+    #[tokio::test]
+    async fn sqlite_retained_registration_parks_confirms_and_persist_loss_cleans_up() {
+        let fixture = wait_fixture().await;
+        let registered = fixture.register_retained().await;
+        assert_eq!(fixture.provider_sessions.parks.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture
+                .provider_sessions
+                .confirmations
+                .load(Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            fixture
+                .provider_sessions
+                .cleanup_requests
+                .load(Ordering::SeqCst),
+            0
+        );
+        let run = AiRunRecord::find_by_id(&fixture.database, &registered.run_id().0)
+            .await
+            .expect("run loads")
+            .expect("run exists");
+        assert_eq!(run.state, AiRunState::WaitingSubscription.as_str());
+        assert!(run.lease_owner.is_none());
+
+        let raced = wait_fixture().await;
+        raced
+            .provider_sessions
+            .invalidate_registration_after_park
+            .store(true, Ordering::SeqCst);
+        assert!(raced.register_mode(true).await.is_err());
+        assert_eq!(raced.provider_sessions.parks.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            raced.provider_sessions.confirmations.load(Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            raced
+                .provider_sessions
+                .cleanup_requests
+                .load(Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_event_limit_queues_one_typed_outcome_and_fresh_attempt_consumes_once() {
+        let fixture = wait_fixture().await;
+        let registered = fixture.register().await;
+        fixture.source.push(fixture.event(1, "other-1"));
+        assert!(matches!(
+            fixture.service.process_next("limit-worker-a").await,
+            Ok(AiSubscriptionWaitWorkerOutcome::Waiting { .. })
+        ));
+        fixture.source.push(fixture.event(2, "other-2"));
+        assert!(matches!(
+            fixture.service.process_next("limit-worker-b").await,
+            Ok(AiSubscriptionWaitWorkerOutcome::Queued { .. })
+        ));
+
+        let claimed = fixture
+            .run_service
+            .claim_next("subscription-resume-worker")
+            .await
+            .expect("fresh attempt claims")
+            .expect("queued adopted run exists");
+        let lease = fixture
+            .run_service
+            .start(&claimed)
+            .await
+            .expect("fresh attempt starts");
+        let checkpoint_id = lease.latest_checkpoint_id().expect("adoption checkpoint");
+        let adopted = fixture
+            .service
+            .adopt_wait(&lease, checkpoint_id)
+            .await
+            .expect("adoption validates")
+            .expect("subscription adoption exists");
+        let _ = adopted;
+        assert!(matches!(
+            fixture.service.adopt_wait(&lease, checkpoint_id).await,
+            Err(AiError::Conflict)
+        ));
+        let consumed = fixture
+            .service
+            .consume_wait_adoption(&lease, checkpoint_id)
+            .await
+            .expect("adoption consumes once");
+        assert!(consumed.latest_checkpoint_id().is_none());
+        assert!(matches!(
+            fixture
+                .service
+                .consume_wait_adoption(&consumed, checkpoint_id)
+                .await,
+            Err(AiError::Conflict | AiError::NotFound)
+        ));
+        let waiter =
+            AiSubscriptionWaiterRecord::find_by_id(&fixture.database, &registered.waiter_id().0)
+                .await
+                .expect("waiter loads")
+                .expect("waiter exists");
+        let adoption =
+            AiSubscriptionWaitAdoptionRecord::find_by_id(&fixture.database, &checkpoint_id)
+                .await
+                .expect("adoption loads")
+                .expect("adoption exists");
+        assert_eq!(waiter.state, "adopted");
+        assert_eq!(adoption.state, "consumed");
+        assert!(adoption.consumed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn sqlite_wait_claims_are_single_worker_fenced() {
+        let fixture = wait_fixture().await;
+        let registered = fixture.register().await;
+        let (left, right) = tokio::join!(
+            fixture.service.claim_next("racing-worker-left"),
+            fixture.service.claim_next("racing-worker-right")
+        );
+        let claims = [left.expect("left claim"), right.expect("right claim")];
+        assert_eq!(claims.iter().filter(|claim| claim.is_some()).count(), 1);
+        let claim = claims.into_iter().flatten().next().expect("one winner");
+        assert_eq!(claim.waiter_id(), registered.waiter_id());
+        fixture
+            .service
+            .release_claim(&claim)
+            .await
+            .expect("winning fence releases");
+        assert!(
+            fixture
+                .service
+                .claim_next("racing-worker-after-release")
+                .await
+                .expect("later claim")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_reset_and_revocation_close_without_event_disclosure() {
+        let reset = wait_fixture().await;
+        let reset_wait = reset.register().await;
+        reset
+            .source
+            .push(AiReplayableSubscriptionSourceItem::ResetRequired);
+        assert!(matches!(
+            reset.service.process_next("reset-worker").await,
+            Ok(AiSubscriptionWaitWorkerOutcome::RecoveryRequired { waiter_id, .. })
+                if waiter_id == reset_wait.waiter_id()
+        ));
+        let reset_run = AiRunRecord::find_by_id(&reset.database, &reset_wait.run_id().0)
+            .await
+            .expect("reset run loads")
+            .expect("reset run exists");
+        assert_eq!(reset_run.state, AiRunState::RecoveryRequired.as_str());
+
+        let revoked = wait_fixture().await;
+        let revoked_wait = revoked.register().await;
+        revoked.principal_active.store(false, Ordering::SeqCst);
+        assert!(matches!(
+            revoked.service.process_next("revoked-worker").await,
+            Ok(AiSubscriptionWaitWorkerOutcome::Closed { waiter_id, .. })
+                if waiter_id == revoked_wait.waiter_id()
+        ));
+        let revoked_run = AiRunRecord::find_by_id(&revoked.database, &revoked_wait.run_id().0)
+            .await
+            .expect("revoked run loads")
+            .expect("revoked run exists");
+        assert_eq!(revoked_run.state, AiRunState::Failed.as_str());
+    }
+
+    #[tokio::test]
+    async fn sqlite_stop_closes_waiter_tool_and_run_once() {
+        let fixture = wait_fixture().await;
+        let registered = fixture.register().await;
+        let run = AiRunRecord::find_by_id(&fixture.database, &registered.run_id().0)
+            .await
+            .expect("run loads")
+            .expect("run exists");
+        let hub = Arc::new(crate::AiRunCancellationHub::new(8).expect("cancellation hub"));
+        let cancellation = crate::OrmAiRunCancellationService::new(
+            fixture.database.clone(),
+            Arc::new(TestAccess(fixture.access_allowed.clone())),
+            Arc::new(TestProtection),
+            Arc::new(crate::DatabaseManagedContentProtector),
+            Arc::new(TestPrincipalResolver {
+                principal: fixture.principal.clone(),
+                active: fixture.principal_active.clone(),
+                clock: fixture.clock.clone(),
+            }),
+            fixture.clock.clone(),
+            crate::AiRunCancellationLimits::default(),
+            hub,
+        );
+        crate::AiRunCancellationService::request_cancellation(
+            &cancellation,
+            &fixture.principal,
+            crate::CancelAiRunInput {
+                session_id: run.session_id,
+                run_id: run.id,
+                client_request_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("owner stops wait");
+        let waiter =
+            AiSubscriptionWaiterRecord::find_by_id(&fixture.database, &registered.waiter_id().0)
+                .await
+                .expect("waiter loads")
+                .expect("waiter exists");
+        let call = AiToolCallRecord::find_by_id(&fixture.database, &registered.tool_call_id().0)
+            .await
+            .expect("call loads")
+            .expect("call exists");
+        let cancelled = AiRunRecord::find_by_id(&fixture.database, &registered.run_id().0)
+            .await
+            .expect("run loads")
+            .expect("run exists");
+        assert_eq!(waiter.state, "cancelled");
+        assert_eq!(call.state, "cancelled");
+        assert_eq!(cancelled.state, AiRunState::Cancelled.as_str());
+        fixture.source.push(fixture.event(1, "wanted"));
+        assert!(matches!(
+            fixture.service.process_next("stopped-worker").await,
+            Ok(AiSubscriptionWaitWorkerOutcome::Idle)
+        ));
+    }
 
     fn condition(operator: &str, value: Value) -> AiGraphqlSubscriptionCondition {
         serde_json::from_value(json!({

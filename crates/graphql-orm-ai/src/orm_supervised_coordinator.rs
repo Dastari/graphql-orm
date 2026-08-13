@@ -304,11 +304,16 @@ impl AiAgentSupervisedApprovalStager for OrmAiConsequentialToolCallService {
 /// Exact classified-mutation checkpoint selected from durable checkpoint
 /// metadata before protected state is opened.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum AiAdoptedClassifiedMutationBatch {
     /// One approved one-shot mutation result.
     Supervised(AiAdoptedSupervisedToolBatch),
     /// One explicitly automatic mutation result.
     Automatic(AiAdoptedAutomaticMutationBatch),
+    /// One bounded replayable-subscription result. The next provider turn
+    /// remains subject to the same classified mutation policy as every other
+    /// supervised-coordinator turn.
+    Subscription(crate::AiAdoptedReadOnlyToolBatch),
 }
 
 /// Protected supervised-checkpoint adoption and one-shot consumption.
@@ -328,9 +333,12 @@ pub trait AiAgentSupervisedCheckpointControl: Send + Sync {
         if let Some(adopted) = self.adopt(lease).await? {
             return Ok(Some(AiAdoptedClassifiedMutationBatch::Supervised(adopted)));
         }
-        self.adopt_automatic(lease)
+        if let Some(adopted) = self.adopt_automatic(lease).await? {
+            return Ok(Some(AiAdoptedClassifiedMutationBatch::Automatic(adopted)));
+        }
+        self.adopt_subscription(lease)
             .await
-            .map(|adopted| adopted.map(AiAdoptedClassifiedMutationBatch::Automatic))
+            .map(|adopted| adopted.map(AiAdoptedClassifiedMutationBatch::Subscription))
     }
 
     /// Reopens the exact linked supervised result under current authority.
@@ -381,6 +389,23 @@ pub trait AiAgentSupervisedCheckpointControl: Send + Sync {
         &self,
         _lease: &AiRunLease,
         _adopted: &AiAdoptedAutomaticMutationBatch,
+    ) -> Result<AiRunLease, AiError> {
+        Err(AiError::Conflict)
+    }
+
+    /// Reopens one exact bounded subscription-wait result.
+    async fn adopt_subscription(
+        &self,
+        _lease: &AiRunLease,
+    ) -> Result<Option<crate::AiAdoptedReadOnlyToolBatch>, AiError> {
+        Ok(None)
+    }
+
+    /// Consumes one subscription adoption before provider transport.
+    async fn consume_subscription(
+        &self,
+        _lease: &AiRunLease,
+        _adopted: &crate::AiAdoptedReadOnlyToolBatch,
     ) -> Result<AiRunLease, AiError> {
         Err(AiError::Conflict)
     }
@@ -610,6 +635,9 @@ impl AiSupervisedAgentCoordinator {
                 Ok(Some(AiAdoptedClassifiedMutationBatch::Automatic(adopted))) => {
                     self.continue_from_automatic(lease, adopted).await
                 }
+                Ok(Some(AiAdoptedClassifiedMutationBatch::Subscription(adopted))) => {
+                    self.continue_from_subscription(lease, adopted).await
+                }
                 Ok(None) | Err(_) => {
                     let guard = AiAgentLoopGuard::new(&lease, self.limits.loop_limits);
                     self.finish_recovery(
@@ -632,8 +660,16 @@ impl AiSupervisedAgentCoordinator {
                         .await;
                 }
             };
-            self.execute_turn(lease, guard, plan, AiRuleRunUsage::default(), None, None)
-                .await
+            self.execute_turn(
+                lease,
+                guard,
+                plan,
+                AiRuleRunUsage::default(),
+                None,
+                None,
+                None,
+            )
+            .await
         }
     }
 
@@ -719,7 +755,7 @@ impl AiSupervisedAgentCoordinator {
             }
         };
         let usage = adopted.rule_usage();
-        self.execute_turn(lease, guard, plan, usage, Some(&adopted), None)
+        self.execute_turn(lease, guard, plan, usage, Some(&adopted), None, None)
             .await
     }
 
@@ -759,7 +795,47 @@ impl AiSupervisedAgentCoordinator {
             }
         };
         let usage = adopted.rule_usage();
-        self.execute_turn(lease, guard, plan, usage, None, Some(&adopted))
+        self.execute_turn(lease, guard, plan, usage, None, Some(&adopted), None)
+            .await
+    }
+
+    async fn continue_from_subscription(
+        &self,
+        lease: AiRunLease,
+        adopted: crate::AiAdoptedReadOnlyToolBatch,
+    ) -> Result<AiSupervisedAgentRunOutcome, AiError> {
+        let reference = adopted.continuation().chain_reference()?;
+        let guard = AiAgentLoopGuard::resume_after_tool_batch(
+            &lease,
+            self.limits.loop_limits,
+            adopted.provider_turns(),
+            adopted.total_tool_calls(),
+            &reference,
+        )?;
+        let plan = match self
+            .planner
+            .continuation_plan(
+                &lease,
+                adopted.provider_turns(),
+                adopted.continuation().clone(),
+            )
+            .await
+        {
+            Ok(plan)
+                if plan.is_continuation()
+                    && plan.provider_call.scope() == adopted.scope()
+                    && plan.rules.fingerprint() == adopted.rule_fingerprint() =>
+            {
+                plan
+            }
+            _ => {
+                return self
+                    .finish_failed(&lease, &guard, "subscription_continuation_plan_invalid")
+                    .await;
+            }
+        };
+        let usage = adopted.rule_usage();
+        self.execute_turn(lease, guard, plan, usage, None, None, Some(&adopted))
             .await
     }
 
@@ -771,6 +847,7 @@ impl AiSupervisedAgentCoordinator {
         mut rule_usage: AiRuleRunUsage,
         adopted: Option<&AiAdoptedSupervisedToolBatch>,
         adopted_automatic: Option<&AiAdoptedAutomaticMutationBatch>,
+        adopted_subscription: Option<&crate::AiAdoptedReadOnlyToolBatch>,
     ) -> Result<AiSupervisedAgentRunOutcome, AiError> {
         if !guard.can_begin_provider_turn() {
             return self
@@ -887,6 +964,46 @@ impl AiSupervisedAgentCoordinator {
             {
                 return self
                     .finish_failed(&lease, &guard, "automatic_rule_denied_after_consume")
+                    .await;
+            }
+        } else if let Some(adopted) = adopted_subscription {
+            lease = match self
+                .checkpoint_control
+                .consume_subscription(&lease, adopted)
+                .await
+            {
+                Ok(renewed) => renewed,
+                Err(_) => {
+                    return self
+                        .finish_recovery(
+                            &lease,
+                            &guard,
+                            AiAgentRecoveryPhase::ApplicationTool,
+                            "subscription_checkpoint_consumption_failed",
+                            None,
+                        )
+                        .await;
+                }
+            };
+            let final_rules = match self.rule_resolver.resolve_rules(&lease, &scope).await {
+                Ok(current)
+                    if current.rules().fingerprint() == planned_rules.fingerprint()
+                        && rule_usage.validate(&current).is_ok() =>
+                {
+                    current
+                }
+                _ => {
+                    return self
+                        .finish_failed(&lease, &guard, "subscription_rule_changed_after_consume")
+                        .await;
+                }
+            };
+            if provider_plan
+                .project_supervised_rule_usage(&final_rules, rule_usage, uses_byok)
+                .is_err()
+            {
+                return self
+                    .finish_failed(&lease, &guard, "subscription_rule_denied_after_consume")
                     .await;
             }
         }
@@ -2020,6 +2137,61 @@ mod tests {
             &self,
             lease: &AiRunLease,
             adopted: &AiAdoptedSupervisedToolBatch,
+        ) -> Result<AiRunLease, AiError> {
+            if lease.latest_checkpoint_id() != Some(adopted.checkpoint_id())
+                || self.consumed.swap(true, Ordering::SeqCst)
+            {
+                return Err(AiError::Conflict);
+            }
+            Ok(lease.test_without_checkpoint())
+        }
+    }
+
+    struct TestSubscriptionCheckpointControl {
+        adopted: Mutex<Option<crate::AiAdoptedReadOnlyToolBatch>>,
+        consumed: AtomicBool,
+    }
+
+    #[async_trait]
+    impl AiAgentSupervisedCheckpointControl for TestSubscriptionCheckpointControl {
+        async fn adopt(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Option<AiAdoptedSupervisedToolBatch>, AiError> {
+            Ok(None)
+        }
+
+        async fn consume(
+            &self,
+            _lease: &AiRunLease,
+            _adopted: &AiAdoptedSupervisedToolBatch,
+        ) -> Result<AiRunLease, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn adopt_subscription(
+            &self,
+            lease: &AiRunLease,
+        ) -> Result<Option<crate::AiAdoptedReadOnlyToolBatch>, AiError> {
+            let adopted = self
+                .adopted
+                .lock()
+                .expect("test subscription adoption lock should not be poisoned")
+                .take();
+            if adopted
+                .as_ref()
+                .map(crate::AiAdoptedReadOnlyToolBatch::checkpoint_id)
+                != lease.latest_checkpoint_id()
+            {
+                return Err(AiError::Conflict);
+            }
+            Ok(adopted)
+        }
+
+        async fn consume_subscription(
+            &self,
+            lease: &AiRunLease,
+            adopted: &crate::AiAdoptedReadOnlyToolBatch,
         ) -> Result<AiRunLease, AiError> {
             if lease.latest_checkpoint_id() != Some(adopted.checkpoint_id())
                 || self.consumed.swap(true, Ordering::SeqCst)

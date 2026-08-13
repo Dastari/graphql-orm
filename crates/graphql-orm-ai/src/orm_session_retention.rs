@@ -955,7 +955,7 @@ impl OrmAiSessionRetentionService {
                             {
                                 return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                             }
-                            if state.is_terminal() {
+                            if state.is_terminal() || state == AiRunState::RecoveryRequired {
                                 terminal_runs.insert(run.id);
                             } else if tool_payload_retention_mode
                                 == ToolPayloadRetentionMode::DeletingSession
@@ -4064,12 +4064,15 @@ async fn purge_terminal_subscription_waits(
             .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
         if run.session_id != session_id
             || call.run_id != run.id
-            || !state.is_terminal()
+            || !(state.is_terminal() || state == AiRunState::RecoveryRequired)
             || !tool_call_state_is_terminal(&call.state)
             || call.payload_purged_at.is_none()
             || call.protected_arguments.is_some()
             || call.protected_result.is_some()
-            || !matches!(waiter.state.as_str(), "cancelled" | "failed" | "adopted")
+            || !matches!(
+                waiter.state.as_str(),
+                "cancelled" | "failed" | "recovery_required" | "adopted"
+            )
         {
             return Ok(false);
         }
@@ -4209,6 +4212,7 @@ fn tool_call_state_is_terminal(state: &str) -> bool {
             | "approval_denied"
             | "approval_revoked"
             | "approval_expired"
+            | "recovery_required"
     )
 }
 
