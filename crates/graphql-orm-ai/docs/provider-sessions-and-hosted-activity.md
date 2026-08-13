@@ -355,6 +355,56 @@ quarantine remain unavailable. If creation of the replacement empty thread
 succeeds but its rebind CAS loses, `AiProviderCallExecutor` invokes the exact
 registered provider discard boundary.
 
+### Parking across approval and subscription waits
+
+A completed provider-retained tool-request turn may be parked while a durable
+human approval or bounded replayable-subscription wait owns progress. This is
+distinct from making the binding `Active`: no unrelated run can claim it, and
+the cursor remains bound to its source run, attempt, lease generation and
+binding claim generation.
+
+The checkpoint owner creates `AiProviderSessionWaitParkRequest`; applications
+cannot construct it. The opaque request binds the exact provider-session
+claim, already-durable `provider_turn_persisted` checkpoint and hash, closed
+approval/subscription wait identity, frozen descriptor and transcript prefix,
+and a fingerprint of the complete provider-retained continuation. Alternate
+provider-session stores may inspect only the bounded getters needed to enforce
+those comparisons.
+
+Parking uses a two-phase state graph:
+
+1. `park_for_wait` performs the exact `Claimed -> ParkedWait` CAS while the
+   source run lease is still current.
+2. The owning wait transaction persists its wait row and parked coordinator
+   checkpoint, transitions the run to `WaitingApproval` or
+   `WaitingSubscription`, and clears the ordinary run lease.
+3. `confirm_parked_wait` rehydrates the current owner and confirms that exact
+   graph. A cleanup worker may idempotently perform the same confirmation after
+   a crash between steps 2 and 3; it cannot confirm a partial or substituted
+   graph.
+4. The ordinary run queue later creates a fresh fence. Only after the exact
+   approval or subscription adoption has been claimed and consumed once does
+   `reclaim_after_wait` perform `ParkedWait -> Claimed` for that fence.
+
+The reclaim authorization is crate-private and derived from durable adoption
+state. A host cannot turn a state value, UUID or expired wait into resume
+authority. After reclaim, failure before provider transport uses
+`require_cleanup` for the returned claim; it never releases the cursor to
+`Active`. Concurrent reclaim has one CAS winner.
+
+Parking is available only after the adapter has produced a stable resumable
+retained checkpoint. Stateless replay, an in-flight streaming response, and a
+provider-native dynamic-tool turn whose synchronous responder is still active
+are not suspendable and fail closed. Parking never retains a warm process: the
+adapter may shut down while the protected cursor remains durably parked.
+
+Cancellation, terminal convergence, reset, wait expiry, abandonment and an
+unconfirmed park whose source claim expires become cleanup candidates. The
+registered deletion service must still delete the exact old provider session
+or authoritatively prove absence. Expiry, local process death and restore are
+not absence proof. Portable restore continues to quarantine/redact provider
+session state and cannot reclaim a parked cursor.
+
 Session deletion fences active bindings and removes an absence-proven deleted
 tombstone only in the final retention dependency order. Expiry and a backup
 redaction marker are not absence proof. Portable

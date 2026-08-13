@@ -1713,6 +1713,64 @@ impl AiProviderCallResult {
         self.provider_session_claim.as_ref()
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn provider_session_wait_park_request(
+        &self,
+        lease: &AiRunLease,
+        wait: crate::AiProviderSessionWaitIdentity,
+        source_checkpoint_id: uuid::Uuid,
+        source_checkpoint_fingerprint: impl Into<String>,
+    ) -> Result<crate::AiProviderSessionWaitParkRequest, AiError> {
+        let source_checkpoint_fingerprint = source_checkpoint_fingerprint.into();
+        let claim = self
+            .provider_session_claim
+            .as_ref()
+            .filter(|claim| {
+                self.session_id == lease.session_id()
+                    && self.run_id == lease.run_id()
+                    && self.attempt_id == lease.attempt_id()
+                    && self.lease_generation == lease.lease_generation()
+                    && claim.session_id() == lease.session_id()
+                    && claim.run_id() == lease.run_id()
+                    && claim.attempt_id() == lease.attempt_id()
+                    && claim.run_lease_generation() == lease.lease_generation()
+            })
+            .ok_or(AiError::Conflict)?;
+        if source_checkpoint_id.is_nil()
+            || !crate::valid_sha256(&source_checkpoint_fingerprint)
+            || self.uses_stateless_continuation()
+            || self.tool_calls.is_empty()
+            || !self.interactive_tool_results.is_empty()
+        {
+            return Err(AiError::Conflict);
+        }
+        let continuation = self.next_continuation()?;
+        if !matches!(continuation, ModelContinuation::ProviderResponse { .. }) {
+            return Err(AiError::Conflict);
+        }
+        let provider_result =
+            serde_json::to_vec(&self.checkpoint_value()).map_err(|_| AiError::PersistenceFailed)?;
+        let continuation =
+            serde_json::to_vec(&continuation).map_err(|_| AiError::PersistenceFailed)?;
+        let mut digest = Sha256::new();
+        digest.update(b"graphql-orm-ai/provider-session-wait-continuation/v1\0");
+        digest.update(source_checkpoint_id.as_bytes());
+        digest.update(source_checkpoint_fingerprint.as_bytes());
+        digest.update(claim.binding_id().as_bytes());
+        digest.update(claim.binding_claim_generation().to_be_bytes());
+        digest.update((provider_result.len() as u64).to_be_bytes());
+        digest.update(provider_result);
+        digest.update((continuation.len() as u64).to_be_bytes());
+        digest.update(continuation);
+        crate::AiProviderSessionWaitParkRequest::new(
+            claim.clone(),
+            wait,
+            source_checkpoint_id,
+            source_checkpoint_fingerprint,
+            hex::encode(digest.finalize()),
+        )
+    }
+
     pub(crate) fn provider_session_commit(
         &self,
         assistant_message_id: uuid::Uuid,
@@ -9948,6 +10006,88 @@ mod tests {
                 "test"
             ),
             Err(AiError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn parked_wait_request_is_opaque_exact_and_provider_retained_only() {
+        let principal = AuthPrincipal::User(AuthUser {
+            user_id: "parked-wait-owner".to_owned(),
+            session_id: Uuid::new_v4(),
+            roles: Vec::new(),
+            scopes: Vec::new(),
+            session: SessionContext::default(),
+            token_claims: AccessTokenMetadata::default(),
+        });
+        let lease = AiRunLease::test_running(principal.reference());
+        let descriptor = AiProviderSessionDescriptor::new(
+            ProviderKind::OpenAi,
+            "parked-wait-profile",
+            "coordinator-test-model",
+            "a".repeat(64),
+            "responses/v1",
+            "b".repeat(64),
+        )
+        .expect("test provider-session descriptor should validate");
+        let binding_id = Uuid::new_v4();
+        let claim = AiProviderSessionClaim {
+            binding_id,
+            session_id: lease.session_id(),
+            run_id: lease.run_id(),
+            attempt_id: lease.attempt_id(),
+            run_lease_generation: lease.lease_generation(),
+            binding_claim_generation: 4,
+            binding_row_version: 7,
+            claim_expires_at: lease.lease_expires_at(),
+            through_message_sequence: 1,
+            transcript_fingerprint: "c".repeat(64),
+            principal_reference: lease.principal_reference().clone(),
+            descriptor,
+        };
+        let result = AiProviderCallResult::test_result(
+            &lease,
+            None,
+            "parked-provider-response",
+            vec![("parked-call", "records.read", json!({"id": 7}))],
+        )
+        .test_with_provider_session_claim(claim);
+        let checkpoint_id = Uuid::new_v4();
+        let request = result
+            .provider_session_wait_park_request(
+                &lease,
+                AiProviderSessionWaitIdentity::approval(AiApprovalId::new()),
+                checkpoint_id,
+                "d".repeat(64),
+            )
+            .expect("exact retained result should produce an opaque park request");
+        assert_eq!(request.binding_id(), binding_id);
+        assert_eq!(request.run_id(), lease.run_id());
+        assert_eq!(request.attempt_id(), lease.attempt_id());
+        assert_eq!(request.source_checkpoint_id(), checkpoint_id);
+        assert_eq!(request.source_checkpoint_fingerprint(), "d".repeat(64));
+        assert!(crate::valid_sha256(request.continuation_fingerprint()));
+        assert!(!format!("{request:?}").contains("parked-provider-response"));
+        assert!(!format!("{request:?}").contains("records.read"));
+
+        let mut stateless = result.clone();
+        stateless.request_snapshot.continuation_mode = ModelContinuationMode::StatelessReplay;
+        assert!(matches!(
+            stateless.provider_session_wait_park_request(
+                &lease,
+                AiProviderSessionWaitIdentity::approval(AiApprovalId::new()),
+                checkpoint_id,
+                "d".repeat(64),
+            ),
+            Err(AiError::Conflict)
+        ));
+        assert!(matches!(
+            result.provider_session_wait_park_request(
+                &lease,
+                AiProviderSessionWaitIdentity::approval(AiApprovalId::new()),
+                checkpoint_id,
+                "not-a-fingerprint",
+            ),
+            Err(AiError::Conflict)
         ));
     }
 }

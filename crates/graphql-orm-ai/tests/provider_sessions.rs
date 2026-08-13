@@ -300,6 +300,31 @@ fn provider_session_cursor_is_private_redacted_schema_state() {
             .iter()
             .any(|column| { column.name == "protected_cursor" && column.nullable })
     );
+    for column_name in [
+        "parked_wait_kind",
+        "parked_wait_id",
+        "park_generation",
+        "parked_source_checkpoint_id",
+        "parked_source_checkpoint_fingerprint",
+        "parked_checkpoint_id",
+        "parked_checkpoint_fingerprint",
+        "parked_continuation_fingerprint",
+        "parked_confirmed_at",
+        "parked_expires_at",
+        "parked_reclaimed_at",
+    ] {
+        assert!(
+            table
+                .columns
+                .iter()
+                .any(|column| column.name == column_name),
+            "parked-wait column {column_name} must remain private durable state",
+        );
+    }
+    assert!(table.indexes.iter().any(|index| {
+        index.name == "idx_graphql_orm_ai_provider_sessions_parked_wait"
+            && index.columns == ["state", "parked_expires_at", "updated_at", "id"]
+    }));
     assert_eq!(
         metadata
             .fields

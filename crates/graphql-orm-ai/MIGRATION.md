@@ -45,6 +45,57 @@ from ordinary run workers. Source registration and catalogue discovery grant
 no authority. Best-effort sources are ineligible, and model-authored GraphQL,
 arbitrary predicates, raw cursors and indefinite monitors remain unsupported.
 
+## Unreleased: parked provider sessions across durable waits (schema 0.58.0)
+
+Apply the coordinated AI schema module `0.58.0` before enabling approval or
+subscription suspension of a provider-retained turn. The migration adds
+private nullable parked-wait identity, source/parked checkpoint fingerprints,
+continuation fingerprint, confirmation/expiry/reclaim fields and a bounded
+cleanup-scan index to `graphql_orm_ai_provider_session_bindings`. Existing
+bindings remain valid with no rewrite or backfill; all new nullable fields are
+empty and `park_generation` starts at zero, so no historical binding becomes
+parked or reclaimable.
+
+Ordinary hosts do not construct parking or reclaim authority. The owning
+approval/subscription coordinator obtains a crate-issued opaque park request
+only after `provider_turn_persisted` is durable, then uses the shared lifecycle:
+
+```rust,ignore
+let parked = provider_sessions
+    .park_for_wait(&lease, opaque_park_request)
+    .await?;
+
+// The owning wait transaction persists its exact wait row and parked
+// checkpoint, transitions the run to WaitingApproval/WaitingSubscription,
+// and clears the ordinary run lease.
+provider_sessions.confirm_parked_wait(&parked).await?;
+
+// After a fresh run claim adopts and consumes the exact one-shot wait result:
+let claim = provider_sessions.reclaim_after_wait(&fresh_lease).await?;
+```
+
+`confirm_parked_wait` is a two-phase crash-convergence check, not authority.
+It succeeds only for the exact run/wait/checkpoint graph and may be repeated
+only for that same opaque proof. Cleanup scanning can idempotently confirm the
+same graph after a crash between the wait transaction and explicit
+confirmation. An expired unconfirmed park, terminal/cancelled run, reset,
+abandoned adoption or expired confirmed wait instead enters the existing
+provider-deletion lifecycle; provider absence is never inferred from expiry.
+
+Only a fully completed provider-retained tool-request turn is suspendable.
+Stateless continuation, an in-flight stream and a provider-native synchronous
+dynamic-tool responder are rejected because they do not provide a stable
+resumable checkpoint. After a successful reclaim, any failure before provider
+continuation must call `require_cleanup` on the returned claim; it must not put
+the cursor back into `Active` or retry with stale adoption evidence.
+
+This changes no GraphQL SDL or public browser payload and stores no provider
+cursor, prompt, output, tool argument/result or authorization secret in the
+new columns. Portable backup continues to redact the protected cursor, and
+the existing provider-session restore audit keeps every restored binding
+closed. The package version and schema constant are intentionally updated
+together as `graphql-orm-ai` 0.78.0 / schema 0.58.0.
+
 ## Unreleased: generated GraphQL query and mutation capabilities (schema remains 0.58.0)
 
 Subgraphs that want automatic bounded reads compile

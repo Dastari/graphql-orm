@@ -526,6 +526,304 @@ pub enum AiProviderSessionRunDisposition {
     Unavailable(AiProviderSessionState),
 }
 
+/// Closed durable wait kind that may temporarily park one retained provider
+/// session.
+///
+/// This classification is persistence metadata, not provider, approval, or
+/// subscription authority. The owning service validates the exact linked
+/// durable wait before it confirms or reclaims a parked cursor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiProviderSessionWaitKind {
+    /// One exact human-approval wait.
+    Approval,
+    /// One exact bounded replayable-subscription wait.
+    Subscription,
+}
+
+impl AiProviderSessionWaitKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Approval => "approval",
+            Self::Subscription => "subscription",
+        }
+    }
+
+    pub(crate) fn from_persisted(value: &str) -> Option<Self> {
+        match value {
+            "approval" => Some(Self::Approval),
+            "subscription" => Some(Self::Subscription),
+            _ => None,
+        }
+    }
+}
+
+/// Exact durable wait identity selected by the host-owned approval or
+/// subscription persistence service.
+///
+/// Constructing this value does not authorize parking or resumption. The
+/// provider-session service requires a matching durable wait graph and a
+/// provider-turn checkpoint before either transition can commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AiProviderSessionWaitIdentity {
+    kind: AiProviderSessionWaitKind,
+    wait_id: Uuid,
+}
+
+impl AiProviderSessionWaitIdentity {
+    pub(crate) fn from_parts(
+        kind: AiProviderSessionWaitKind,
+        wait_id: Uuid,
+    ) -> Result<Self, AiError> {
+        if wait_id.is_nil() {
+            return Err(AiError::InvalidInput(
+                "invalid provider-session wait identity".to_owned(),
+            ));
+        }
+        Ok(Self { kind, wait_id })
+    }
+
+    /// Identifies one exact durable approval.
+    #[allow(dead_code)]
+    pub(crate) const fn approval(approval_id: crate::AiApprovalId) -> Self {
+        Self {
+            kind: AiProviderSessionWaitKind::Approval,
+            wait_id: approval_id.0,
+        }
+    }
+
+    /// Identifies one exact durable subscription waiter.
+    ///
+    /// The UUID must be allocated by the subscription-wait persistence
+    /// service. Passing an arbitrary UUID cannot create authority because the
+    /// provider-session service verifies the complete durable waiter graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidInput`] for a nil waiter identity.
+    #[allow(dead_code)]
+    pub(crate) fn subscription(waiter_id: Uuid) -> Result<Self, AiError> {
+        Self::from_parts(AiProviderSessionWaitKind::Subscription, waiter_id)
+    }
+
+    /// Closed wait kind.
+    pub const fn kind(self) -> AiProviderSessionWaitKind {
+        self.kind
+    }
+
+    /// Exact approval or waiter identity.
+    pub const fn wait_id(self) -> Uuid {
+        self.wait_id
+    }
+}
+
+/// Opaque request to park the provider-retained continuation proven by one
+/// exact durable provider-turn checkpoint.
+///
+/// Only the crate's checkpoint/approval/subscription persistence owners can
+/// construct this value. Alternate provider-session stores receive bounded
+/// getters for exact validation; application hosts cannot inject a wait,
+/// cursor, claim, checkpoint, or continuation fingerprint.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AiProviderSessionWaitParkRequest {
+    pub(crate) claim: AiProviderSessionClaim,
+    pub(crate) wait: AiProviderSessionWaitIdentity,
+    pub(crate) source_checkpoint_id: Uuid,
+    pub(crate) source_checkpoint_fingerprint: String,
+    pub(crate) continuation_fingerprint: String,
+    pub(crate) request_fingerprint: String,
+}
+
+impl AiProviderSessionWaitParkRequest {
+    pub(crate) fn new(
+        claim: AiProviderSessionClaim,
+        wait: AiProviderSessionWaitIdentity,
+        source_checkpoint_id: Uuid,
+        source_checkpoint_fingerprint: String,
+        continuation_fingerprint: String,
+    ) -> Result<Self, AiError> {
+        let request_fingerprint = wait_park_request_fingerprint(
+            &claim,
+            wait,
+            source_checkpoint_id,
+            &source_checkpoint_fingerprint,
+            &continuation_fingerprint,
+        )?;
+        Ok(Self {
+            claim,
+            wait,
+            source_checkpoint_id,
+            source_checkpoint_fingerprint,
+            continuation_fingerprint,
+            request_fingerprint,
+        })
+    }
+
+    pub(crate) fn has_valid_fingerprint(&self) -> bool {
+        wait_park_request_fingerprint(
+            &self.claim,
+            self.wait,
+            self.source_checkpoint_id,
+            &self.source_checkpoint_fingerprint,
+            &self.continuation_fingerprint,
+        )
+        .is_ok_and(|fingerprint| fingerprint == self.request_fingerprint)
+    }
+
+    /// Exact provider-session binding.
+    pub const fn binding_id(&self) -> Uuid {
+        self.claim.binding_id
+    }
+
+    /// Exact owning AI session.
+    pub const fn session_id(&self) -> AiSessionId {
+        self.claim.session_id
+    }
+
+    /// Exact source run.
+    pub const fn run_id(&self) -> AiRunId {
+        self.claim.run_id
+    }
+
+    /// Exact source attempt.
+    pub const fn attempt_id(&self) -> Uuid {
+        self.claim.attempt_id
+    }
+
+    /// Exact source run lease generation.
+    pub const fn run_lease_generation(&self) -> i64 {
+        self.claim.run_lease_generation
+    }
+
+    /// Exact binding claim generation.
+    pub const fn binding_claim_generation(&self) -> i64 {
+        self.claim.binding_claim_generation
+    }
+
+    /// Exact wait identity whose durable graph must later confirm parking.
+    pub const fn wait(&self) -> AiProviderSessionWaitIdentity {
+        self.wait
+    }
+
+    /// Exact already-durable provider-turn checkpoint.
+    pub const fn source_checkpoint_id(&self) -> Uuid {
+        self.source_checkpoint_id
+    }
+
+    /// Verified hash of the exact source checkpoint.
+    pub fn source_checkpoint_fingerprint(&self) -> &str {
+        &self.source_checkpoint_fingerprint
+    }
+
+    /// Fingerprint of the complete provider-retained continuation.
+    pub fn continuation_fingerprint(&self) -> &str {
+        &self.continuation_fingerprint
+    }
+
+    /// Exact frozen provider descriptor.
+    pub const fn descriptor(&self) -> &AiProviderSessionDescriptor {
+        &self.claim.descriptor
+    }
+
+    /// Exact durable transcript prefix preceding the parked turn.
+    pub fn transcript_fingerprint(&self) -> &str {
+        &self.claim.transcript_fingerprint
+    }
+}
+
+fn wait_park_request_fingerprint(
+    claim: &AiProviderSessionClaim,
+    wait: AiProviderSessionWaitIdentity,
+    source_checkpoint_id: Uuid,
+    source_checkpoint_fingerprint: &str,
+    continuation_fingerprint: &str,
+) -> Result<String, AiError> {
+    let value = serde_json::json!({
+        "format": "graphql-orm-ai/provider-session-wait-park-request/v1",
+        "bindingId": claim.binding_id,
+        "sessionId": claim.session_id.0,
+        "runId": claim.run_id.0,
+        "attemptId": claim.attempt_id,
+        "runLeaseGeneration": claim.run_lease_generation,
+        "bindingClaimGeneration": claim.binding_claim_generation,
+        "bindingRowVersion": claim.binding_row_version,
+        "throughMessageSequence": claim.through_message_sequence,
+        "transcriptFingerprint": claim.transcript_fingerprint,
+        "principalReference": claim.principal_reference,
+        "descriptor": claim.descriptor,
+        "waitKind": wait.kind.as_str(),
+        "waitId": wait.wait_id,
+        "sourceCheckpointId": source_checkpoint_id,
+        "sourceCheckpointFingerprint": source_checkpoint_fingerprint,
+        "continuationFingerprint": continuation_fingerprint,
+    });
+    let bytes = serde_json::to_vec(&value).map_err(|_| AiError::PersistenceFailed)?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+impl fmt::Debug for AiProviderSessionWaitParkRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AiProviderSessionWaitParkRequest")
+            .field("wait_kind", &self.wait.kind)
+            .field("binding", &"[REDACTED]")
+            .field("run_fence", &"[REDACTED]")
+            .field("checkpoint", &"[REDACTED]")
+            .field("continuation", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Opaque proof that one exact claimed provider session entered the bounded
+/// wait-parking protocol.
+///
+/// A host cannot construct or alter this proof. It contains no cursor,
+/// provider content, tool arguments, or authority. Confirmation revalidates
+/// the exact run, wait row, source provider-turn checkpoint, parked
+/// checkpoint, continuation fingerprint, owner, scope, descriptor, and
+/// transcript before the parked session becomes reclaimable.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AiProviderSessionParkedWait {
+    pub(crate) binding_id: Uuid,
+    pub(crate) session_id: AiSessionId,
+    pub(crate) source_run_id: AiRunId,
+    pub(crate) source_attempt_id: Uuid,
+    pub(crate) source_run_lease_generation: i64,
+    pub(crate) source_binding_claim_generation: i64,
+    pub(crate) park_generation: i64,
+    pub(crate) wait: AiProviderSessionWaitIdentity,
+    pub(crate) source_checkpoint_id: Uuid,
+    pub(crate) source_checkpoint_fingerprint: String,
+    pub(crate) continuation_fingerprint: String,
+    pub(crate) binding_row_version: i64,
+}
+
+impl AiProviderSessionParkedWait {
+    /// Exact durable wait identity.
+    pub const fn wait(&self) -> AiProviderSessionWaitIdentity {
+        self.wait
+    }
+
+    /// Exact source run whose provider cursor is parked.
+    pub const fn source_run_id(&self) -> AiRunId {
+        self.source_run_id
+    }
+}
+
+impl fmt::Debug for AiProviderSessionParkedWait {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AiProviderSessionParkedWait")
+            .field("wait_kind", &self.wait.kind)
+            .field("binding", &"[REDACTED]")
+            .field("wait", &"[REDACTED]")
+            .field("run_fence", &"[REDACTED]")
+            .field("checkpoints", &"[REDACTED]")
+            .field("continuation", &"[REDACTED]")
+            .finish()
+    }
+}
+
 impl AiProviderSessionBindingView {
     /// Durable binding identity.
     pub const fn binding_id(&self) -> Uuid {
@@ -591,6 +889,9 @@ pub enum AiProviderSessionState {
     Active,
     /// Held by one exact run/attempt/generation.
     Claimed,
+    /// Exact completed provider continuation is parked while a durable
+    /// approval or subscription wait owns coordinator progress.
+    ParkedWait,
     /// Never reusable; exact provider deletion is required.
     CleanupRequired,
     /// Held by one cleanup worker.
@@ -609,6 +910,7 @@ impl AiProviderSessionState {
         match self {
             Self::Active => "active",
             Self::Claimed => "claimed",
+            Self::ParkedWait => "parked_wait",
             Self::CleanupRequired => "cleanup_required",
             Self::CleanupInProgress => "cleanup_in_progress",
             Self::CleanupBackoff => "cleanup_backoff",
@@ -621,6 +923,7 @@ impl AiProviderSessionState {
         match value {
             "active" => Some(Self::Active),
             "claimed" => Some(Self::Claimed),
+            "parked_wait" => Some(Self::ParkedWait),
             "cleanup_required" => Some(Self::CleanupRequired),
             "cleanup_in_progress" => Some(Self::CleanupInProgress),
             "cleanup_backoff" => Some(Self::CleanupBackoff),
@@ -1075,6 +1378,47 @@ pub trait AiProviderSessionService: Send + Sync {
         lease: &AiRunLease,
         claim: &AiProviderSessionClaim,
     ) -> Result<AiProviderSessionClaim, AiError>;
+
+    /// Parks an exact completed provider-retained turn before the owning run
+    /// releases its coordinator lease for a durable wait.
+    ///
+    /// The default denies. Implementations must require the exact current
+    /// claim and already-durable `provider_turn_persisted` checkpoint and must
+    /// fingerprint the complete provider-retained continuation. In-flight
+    /// streams and synchronous dynamic-tool responders are not suspendable.
+    async fn park_for_wait(
+        &self,
+        _lease: &AiRunLease,
+        _request: AiProviderSessionWaitParkRequest,
+    ) -> Result<AiProviderSessionParkedWait, AiError> {
+        Err(AiError::RuntimeNotReady)
+    }
+
+    /// Confirms that the run lease was released into the exact durable wait
+    /// graph after [`Self::park_for_wait`].
+    ///
+    /// Confirmation is idempotent only for the same opaque proof. It grants
+    /// no provider authority and exposes no cursor.
+    async fn confirm_parked_wait(
+        &self,
+        _parked: &AiProviderSessionParkedWait,
+    ) -> Result<(), AiError> {
+        Err(AiError::RuntimeNotReady)
+    }
+
+    /// Reclaims one confirmed parked cursor for the exact fresh run fence
+    /// after its one-shot approval or subscription adoption remains linked.
+    ///
+    /// The service derives its crate-private authorization from durable state;
+    /// callers cannot manufacture or replay it. After this transition, any
+    /// failure before provider continuation must route the returned claim to
+    /// [`Self::require_cleanup`].
+    async fn reclaim_after_wait(
+        &self,
+        _lease: &AiRunLease,
+    ) -> Result<AiProviderSessionClaim, AiError> {
+        Err(AiError::RuntimeNotReady)
+    }
 
     /// Advances the durable watermark only after exact protected assistant
     /// output persistence and canonical terminal run completion, then releases

@@ -31,6 +31,14 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 - `AiSubscriptionCheckpointAdopter` composes wait adoption with the existing
   checkpoint adopter so resumption rechecks the source event and disclosure
   before consuming the one-shot continuation.
+- `AiProviderSessionState::ParkedWait` and the default-deny
+  `AiProviderSessionService::{park_for_wait,confirm_parked_wait,reclaim_after_wait}`
+  contract let approval and bounded subscription coordinators suspend an
+  exact completed provider-retained continuation without holding a provider
+  process or ordinary run lease. The park request is crate-issued from the
+  exact provider claim, durable provider-turn checkpoint and complete
+  continuation fingerprint; the later reclaim authority is derived only from
+  the matching one-shot durable adoption graph.
 - `AiToolCatalog::register_query_capability_catalog`, provider-definition
   projection and `AiRuntime::execute_query_capability` connect the canonical
   finished-schema semantic graph to closed automatic GraphQL read plans.
@@ -49,6 +57,13 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ### Security
 
+- Parking rejects stateless replay, unfinished streams and provider-native
+  dynamic-tool turns with synchronous responders. Confirmation requires a
+  cleared run lease, the exact `WaitingApproval`/`WaitingSubscription` state,
+  matching wait row and parked checkpoint. A stale, expired, restored,
+  cancelled, terminal, swapped or already-reclaimed binding cannot resume;
+  unconfirmed crash gaps and abandoned waits converge through the existing
+  exact provider-deletion lifecycle.
 - Automatic capability registration is discovery only. Execution still
   requires readiness, a freshly rehydrated principal, current host target/tool
   policy, ordinary resolver authorization, exact offered capability and plan
@@ -70,6 +85,10 @@ checkpoint facts. For the current workspace baseline and active gates, use the
   adoption tables. Protected plans, cursors and outcomes are backup-redacted;
   portable restore therefore treats live waits as recovery-required, while an
   unchanged database may reclaim an exact cursor after restart.
+- The provider-session binding gains private nullable parked-wait linkage,
+  checkpoint/fingerprint, confirmation/expiry/reclaim columns plus one cleanup
+  scan index in the same AI schema module `0.58.0`. Existing bindings require
+  no data backfill and cannot be interpreted as parked.
 
 ## [0.77.1] - 2026-08-13
 
