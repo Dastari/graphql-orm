@@ -28,6 +28,14 @@ supersedes: []
 - `GraphqlOperationContract::with_semantic_operation_kind` binds query or
   subscription documents to an exact canonical semantic root; the existing
   query convenience API remains source compatible.
+- Custom scalar/enum roots use an explicit fingerprinted result-disclosure
+  contract; unclassified, secret, and non-exportable roots remain structurally
+  absent from automatic query, mutation, and subscription capabilities.
+- Aggregate disclosure is derived from the owning generated entity and exact
+  selected grouping and metric field/operator identities, which are validated
+  again against runtime results.
+- `schema_roots!` described-root lists compose a handwritten root, its semantic
+  operations, and direct result-object metadata from one adjacent declaration.
 
 ### Security
 

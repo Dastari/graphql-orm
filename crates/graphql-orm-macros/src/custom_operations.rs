@@ -7,7 +7,10 @@ use syn::{
     FnArg, GenericArgument, ImplItem, ItemImpl, Meta, Pat, PathArguments, ReturnType, Token, Type,
 };
 
-use crate::entity::{semantic_doc_description, validate_semantic_description};
+use crate::entity::{
+    semantic_classification_tokens, semantic_doc_description, validate_semantic_classification,
+    validate_semantic_description,
+};
 
 struct CustomRootArgs {
     kind: String,
@@ -210,16 +213,64 @@ fn has_graphql_flag(attrs: &[syn::Attribute], key: &str) -> syn::Result<bool> {
     Ok(found)
 }
 
-fn take_semantic_description(attrs: &mut Vec<syn::Attribute>) -> syn::Result<Option<String>> {
-    let mut description = None;
+#[derive(Default)]
+struct MethodSemanticOptions {
+    description: Option<String>,
+    result_classification: Option<String>,
+    result_export: Option<String>,
+    result_maximum_items: Option<u32>,
+    result_type_kind: Option<String>,
+}
+
+fn take_semantic_options(attrs: &mut Vec<syn::Attribute>) -> syn::Result<MethodSemanticOptions> {
+    let mut options = MethodSemanticOptions::default();
     let mut retained = Vec::with_capacity(attrs.len());
     for attr in attrs.drain(..) {
         if attr.path().is_ident("graphql_orm") {
             attr.parse_nested_meta(|nested| {
                 if nested.path.is_ident("description") {
                     let lit: syn::LitStr = nested.value()?.parse()?;
-                    if description.replace(lit.value()).is_some() {
+                    if options.description.replace(lit.value()).is_some() {
                         return Err(nested.error("duplicate semantic description"));
+                    }
+                    Ok(())
+                } else if nested.path.is_ident("result_classification") {
+                    let lit: syn::LitStr = nested.value()?.parse()?;
+                    validate_semantic_classification(&lit.value(), lit.span())?;
+                    if options.result_classification.replace(lit.value()).is_some() {
+                        return Err(nested.error("duplicate result classification"));
+                    }
+                    Ok(())
+                } else if nested.path.is_ident("result_export") {
+                    let lit: syn::LitStr = nested.value()?.parse()?;
+                    if !matches!(lit.value().as_str(), "exportable" | "never_export") {
+                        return Err(
+                            nested.error("result_export must be exportable or never_export")
+                        );
+                    }
+                    if options.result_export.replace(lit.value()).is_some() {
+                        return Err(nested.error("duplicate result export"));
+                    }
+                    Ok(())
+                } else if nested.path.is_ident("result_maximum_items") {
+                    let lit: syn::LitInt = nested.value()?.parse()?;
+                    let maximum = lit.base10_parse::<u32>()?;
+                    if maximum == 0 {
+                        return Err(nested.error("result_maximum_items must be positive"));
+                    }
+                    if options.result_maximum_items.replace(maximum).is_some() {
+                        return Err(nested.error("duplicate result maximum"));
+                    }
+                    Ok(())
+                } else if nested.path.is_ident("result_type_kind") {
+                    let lit: syn::LitStr = nested.value()?.parse()?;
+                    if !matches!(lit.value().as_str(), "scalar" | "enum" | "object") {
+                        return Err(
+                            nested.error("result_type_kind must be scalar, enum, or object")
+                        );
+                    }
+                    if options.result_type_kind.replace(lit.value()).is_some() {
+                        return Err(nested.error("duplicate result type kind"));
                     }
                     Ok(())
                 } else {
@@ -231,7 +282,21 @@ fn take_semantic_description(attrs: &mut Vec<syn::Attribute>) -> syn::Result<Opt
         }
     }
     *attrs = retained;
-    Ok(description)
+    if options.result_classification.is_some() != options.result_export.is_some() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::mixed_site(),
+            "result_classification and result_export must be declared together",
+        ));
+    }
+    if options.result_classification.as_deref() == Some("secret")
+        && options.result_export.as_deref() == Some("exportable")
+    {
+        return Err(syn::Error::new(
+            proc_macro2::Span::mixed_site(),
+            "secret custom-operation results cannot be exportable",
+        ));
+    }
+    Ok(options)
 }
 
 fn humanize(value: &str) -> String {
@@ -268,6 +333,66 @@ fn unwrap_result_type(ty: &Type) -> &Type {
             _ => None,
         })
         .unwrap_or(ty)
+}
+
+fn generic_type<'a>(ty: &'a Type, wrapper: &str) -> Option<&'a Type> {
+    let Type::Path(path) = ty else { return None };
+    let segment = path.path.segments.last()?;
+    if segment.ident != wrapper {
+        return None;
+    }
+    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    arguments.args.iter().find_map(|argument| match argument {
+        GenericArgument::Type(ty) => Some(ty),
+        _ => None,
+    })
+}
+
+fn result_leaf_type(ty: &Type) -> &Type {
+    generic_type(ty, "Option")
+        .or_else(|| generic_type(ty, "Box"))
+        .or_else(|| generic_type(ty, "Vec"))
+        .map_or(ty, result_leaf_type)
+}
+
+fn result_is_list(ty: &Type) -> bool {
+    if let Some(inner) = generic_type(ty, "Option").or_else(|| generic_type(ty, "Box")) {
+        return result_is_list(inner);
+    }
+    generic_type(ty, "Vec").is_some()
+}
+
+fn is_known_scalar(ty: &Type) -> bool {
+    let Type::Path(path) = ty else { return false };
+    path.path.segments.last().is_some_and(|segment| {
+        matches!(
+            segment.ident.to_string().as_str(),
+            "String"
+                | "str"
+                | "bool"
+                | "i8"
+                | "i16"
+                | "i32"
+                | "i64"
+                | "isize"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "u64"
+                | "usize"
+                | "f32"
+                | "f64"
+                | "Uuid"
+                | "Decimal"
+                | "Date"
+                | "Time"
+                | "DateTime"
+                | "OffsetDateTime"
+                | "Value"
+        )
+    })
 }
 
 fn subscription_item_type(ty: &Type) -> Option<&Type> {
@@ -353,6 +478,8 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
     let self_ty = item.self_ty.clone();
     let mut descriptors = Vec::new();
     let mut field_names = std::collections::BTreeSet::new();
+    let mut result_type_names = std::collections::BTreeSet::new();
+    let mut result_types = Vec::<Type>::new();
 
     for impl_item in &mut item.items {
         let ImplItem::Fn(method) = impl_item else {
@@ -363,10 +490,11 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
             Ok(false) => {}
             Err(error) => return error.to_compile_error().into(),
         }
-        let explicit = match take_semantic_description(&mut method.attrs) {
-            Ok(description) => description,
+        let semantic_options = match take_semantic_options(&mut method.attrs) {
+            Ok(options) => options,
             Err(error) => return error.to_compile_error().into(),
         };
+        let explicit = semantic_options.description.clone();
         let method_name = method.sig.ident.to_string();
         let field_name = match graphql_attribute_value(&method.attrs, "name") {
             Ok(Some(name)) => name,
@@ -481,6 +609,103 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
         } else {
             output
         };
+        let leaf_type = result_leaf_type(output);
+        let result_kind = semantic_options
+            .result_type_kind
+            .as_deref()
+            .unwrap_or_else(|| {
+                if is_known_scalar(leaf_type) {
+                    "scalar"
+                } else {
+                    "object"
+                }
+            });
+        let scalar_or_enum = matches!(result_kind, "scalar" | "enum");
+        let list_result = result_is_list(output);
+        if semantic_options.result_maximum_items.is_some() && (!scalar_or_enum || !list_result) {
+            return syn::Error::new_spanned(
+                output,
+                "result_maximum_items is valid only for a scalar or enum list result",
+            )
+            .to_compile_error()
+            .into();
+        }
+        if scalar_or_enum
+            && list_result
+            && semantic_options.result_export.as_deref() == Some("exportable")
+            && semantic_options.result_maximum_items.is_none()
+        {
+            return syn::Error::new_spanned(
+                output,
+                "exportable scalar or enum list results require result_maximum_items",
+            )
+            .to_compile_error()
+            .into();
+        }
+        if result_kind == "object" {
+            let identity = leaf_type.to_token_stream().to_string();
+            if result_type_names.insert(identity) {
+                result_types.push(leaf_type.clone());
+            }
+        }
+        let result_kind_override = semantic_options
+            .result_type_kind
+            .as_deref()
+            .and_then(|kind| {
+                let kind = match kind {
+                    "scalar" => quote! {
+                        ::graphql_orm::graphql::orm::GraphqlSemanticTypeKind::Scalar
+                    },
+                    "enum" => quote! {
+                        ::graphql_orm::graphql::orm::GraphqlSemanticTypeKind::Enum
+                    },
+                    "object" => return None,
+                    _ => unreachable!(),
+                };
+                Some(quote! {
+                    .with_custom_result_leaf_kind(#kind)
+                    .expect("custom resolver result kind must validate")
+                })
+            });
+        let result_disclosure = if semantic_options.result_classification.is_some()
+            || semantic_options.result_maximum_items.is_some()
+        {
+            let classification = match semantic_options.result_classification.as_deref() {
+                Some(classification) => {
+                    match semantic_classification_tokens(classification, method.sig.ident.span()) {
+                        Ok(tokens) => tokens,
+                        Err(error) => return error.to_compile_error().into(),
+                    }
+                }
+                None => quote! {
+                    ::graphql_orm::graphql::orm::GraphqlSemanticClassification::Secret
+                },
+            };
+            let export = match semantic_options.result_export.as_deref() {
+                Some("exportable") => quote! {
+                    ::graphql_orm::graphql::orm::GraphqlSemanticExport::Exportable
+                },
+                Some("never_export") | None => quote! {
+                    ::graphql_orm::graphql::orm::GraphqlSemanticExport::NeverExport
+                },
+                Some(_) => unreachable!(),
+            };
+            let maximum = semantic_options.result_maximum_items.map(|maximum| {
+                quote! { .with_maximum_items(#maximum) }
+            });
+            Some(quote! {
+                .with_result_disclosure(
+                    ::graphql_orm::graphql::orm::GraphqlSemanticResultDisclosure::new(
+                        #classification,
+                        #export,
+                    )
+                    #maximum
+                )
+                .expect("custom resolver result disclosure must validate")
+            })
+        } else {
+            None
+        };
         let authorization = args.authorization;
         descriptors.push(quote! {
             ::graphql_orm::graphql::orm::GraphqlSemanticOperationDescriptor::custom(
@@ -493,6 +718,8 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
                 ).expect("custom resolver result type must be valid GraphQL"),
                 #authorization,
             ).expect("custom resolver semantic metadata must validate")
+            #result_kind_override
+            #result_disclosure
             #ai_execution
             #observation
         });
@@ -508,6 +735,21 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
                     Box<[::graphql_orm::graphql::orm::GraphqlSemanticOperationDescriptor]>
                 > = ::std::sync::OnceLock::new();
                 OPERATIONS.get_or_init(|| vec![#(#descriptors),*].into_boxed_slice())
+            }
+
+            fn graphql_custom_result_types(
+            ) -> &'static [::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata] {
+                static TYPES: ::std::sync::OnceLock<
+                    Box<[::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata]>
+                > = ::std::sync::OnceLock::new();
+                TYPES.get_or_init(|| vec![
+                    #(
+                        <#result_types as
+                            ::graphql_orm::graphql::orm::GraphqlSemanticResultTypeMetadata>
+                            ::graphql_semantic_result_type()
+                            .clone()
+                    ),*
+                ].into_boxed_slice())
             }
         }
     }

@@ -33,6 +33,15 @@ semantic owner: `graphql-orm-operation-catalog` **0.2.0**.
   metadata beside handwritten resolvers, and `schema_roots!` can compose those
   declarations through `semantic_custom_operations`. Handwritten result
   objects derive `GraphQLSemanticObject` and compose through `semantic_types`.
+- `schema_roots!` now offers single-source `described_*_types` lists that
+  compose a handwritten root together with its operation and direct result
+  semantics. Custom scalar/enum results carry explicit fingerprinted
+  classification/export metadata; unclassified leaves default to
+  `Secret`/`NeverExport`, and exportable scalar lists require a positive bound.
+- Generated aggregate operation descriptors bind their owning public entity.
+  AI aggregate disclosure and runtime validation use only the exact selected
+  grouping fields and metric field/operator pairs, preventing unrelated or
+  drifted fields from affecting or weakening provider egress.
 - Subscription semantics truthfully distinguish best-effort delivery from a
   bounded replay-then-live declaration. Generated broadcast subscriptions
   remain best-effort; a replayable custom declaration still requires a
@@ -75,6 +84,8 @@ semantic owner: `graphql-orm-operation-catalog` **0.2.0**.
 - Added local, individually selectable provider and owned-database acceptance
   runners, complete workspace package/SemVer release-policy coverage, and a
   deterministic release-manifest row for semantic-catalogue wire version 1.
+  The release BOM also records the canonical automatic query, mutation, and
+  subscription capability contract versions in stable name order.
   The coordinated compile fixture consumes semantic, grouped-aggregate, and
   deliberate MSSQL writable contracts without a downstream application.
 

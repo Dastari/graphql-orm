@@ -112,7 +112,19 @@ resolver remain authoritative at execution.
 
 Opt-in aggregate roots use the same catalogue and a fixed result projection.
 Their filters, grouping, metrics, operators, and group limits remain typed and
-server bounded.
+server bounded. The generated operation's fingerprinted public entity identity
+selects the one owning semantic entity. The compiled disclosure shape then
+contains only the exact selected `groupBy` fields and metric field/operator
+pairs. Runtime validation requires those exact returned identities before
+provider egress, so an unrelated entity or a drifted/unselected metric cannot
+inherit a less restrictive disclosure classification.
+
+Custom scalar and enum roots participate only when their canonical operation
+descriptor explicitly marks the result exportable. Scalar lists additionally
+need a positive result-item bound. Unclassified, `Secret`, and `NeverExport`
+leaf roots remain in the finished GraphQL schema but are structurally omitted
+from query, mutation, and subscription capability catalogues. This is
+disclosure metadata only and never grants resolver authority.
 
 ## Bounded replayable subscription contracts
 

@@ -82,6 +82,7 @@ read-only policy.
 | `GraphqlOperationCatalog` | deterministic, root-exposure-resolved operation collection and three fingerprints |
 | `GraphqlSemanticCatalog` | strict versioned public entity/field/relationship/root semantic graph |
 | `GraphqlSemanticClassification` / `GraphqlSemanticExport` | inherited classification and structural provider-export eligibility; neither authorizes disclosure |
+| `GraphqlSemanticResultDisclosure` | explicit classification/export disposition for a custom scalar or enum result, plus a positive bound for an exportable scalar list; unclassified leaves fail safe as `Secret`/`NeverExport` |
 | `GraphqlAggregateOperator` / `GraphqlAggregateValueKind` | canonical portable aggregate capabilities used by field and generated-operation metadata |
 | `GraphqlSubscriptionObservationDescriptor` | truthful best-effort or replay-then-live subscription semantics plus bounded wait and closed condition capabilities; metadata alone does not register a runtime replay source |
 | `AiMutationExecutionPolicy` | closed `Automatic`, `ApprovalRequired`, or default `Prohibited` classification for public mutations; metadata never grants execution or resolver authority |
@@ -93,6 +94,13 @@ Argument descriptors retain declaration order for discovery fingerprints.
 Catalog operations are sorted deterministically. Scope sets are canonicalized
 for authorization fingerprinting. None of these SHA-256 values are signatures
 or capabilities.
+
+Generated operations also carry an optional `generated_entity_name`: the
+canonical public GraphQL entity identity used to resolve generated aggregate
+semantics. It is fingerprint-bound and is never a physical table/column name
+or a Rust path. Custom operations cannot set it. Root-level result disclosure
+may tighten an object result, but selected object-field classification and
+`NeverExport` metadata remain authoritative and cannot be weakened.
 
 Mutation classification is declared beside the owning resolver metadata.
 Generated entities use the `ai_mutations(...)` category map and handwritten

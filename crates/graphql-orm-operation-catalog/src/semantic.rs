@@ -137,6 +137,53 @@ pub enum GraphqlSemanticExport {
     NeverExport,
 }
 
+/// Closed disclosure metadata for one root result.
+///
+/// This is descriptive, fingerprinted egress metadata only. It does not
+/// authorize the resolver or override entity/field disclosure rules. For an
+/// object result, the effective classification is at least as restrictive as
+/// every selected field and `NeverExport` remains absolute.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphqlSemanticResultDisclosure {
+    /// Minimum classification imposed by the root result.
+    pub classification: GraphqlSemanticClassification,
+    /// Structural export disposition for the complete root result.
+    pub export: GraphqlSemanticExport,
+    /// Positive server-owned bound for a scalar/enum list result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum_items: Option<u32>,
+}
+
+impl GraphqlSemanticResultDisclosure {
+    /// Returns the fail-safe default for an unclassified custom scalar result.
+    pub const fn fail_safe() -> Self {
+        Self {
+            classification: GraphqlSemanticClassification::Secret,
+            export: GraphqlSemanticExport::NeverExport,
+            maximum_items: None,
+        }
+    }
+
+    /// Builds explicit result disclosure metadata.
+    pub const fn new(
+        classification: GraphqlSemanticClassification,
+        export: GraphqlSemanticExport,
+    ) -> Self {
+        Self {
+            classification,
+            export,
+            maximum_items: None,
+        }
+    }
+
+    /// Applies a positive scalar/enum-list ceiling.
+    pub const fn with_maximum_items(mut self, maximum_items: u32) -> Self {
+        self.maximum_items = Some(maximum_items);
+        self
+    }
+}
+
 /// Public GraphQL type kind without Rust or database identity.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -191,6 +238,24 @@ impl GraphqlSemanticTypeRef {
             nullable,
             maximum_items,
             item: Box::new(item),
+        }
+    }
+
+    fn leaf_kind(&self) -> Option<GraphqlSemanticTypeKind> {
+        match self {
+            Self::Named { kind, .. } => Some(*kind),
+            Self::List { item, .. } => item.leaf_kind(),
+        }
+    }
+
+    fn is_list(&self) -> bool {
+        matches!(self, Self::List { .. })
+    }
+
+    fn set_leaf_kind(&mut self, replacement: GraphqlSemanticTypeKind) {
+        match self {
+            Self::Named { kind, .. } => *kind = replacement,
+            Self::List { item, .. } => item.set_leaf_kind(replacement),
         }
     }
 
@@ -400,12 +465,23 @@ pub struct GraphqlSemanticOperationDescriptor {
     /// Stable generated category when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated_category: Option<GeneratedGraphqlOperationCategory>,
+    /// Public entity identity owning a generated operation.
+    ///
+    /// This is a GraphQL semantic name, never a table, column, or Rust path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_entity_name: Option<String>,
     /// Model-safe operation description.
     pub description: String,
     /// Typed public arguments.
     pub arguments: Vec<GraphqlSemanticArgumentDescriptor>,
     /// Public result type shape.
     pub result_type: GraphqlSemanticTypeRef,
+    /// Optional root-level result disclosure contract.
+    ///
+    /// Custom scalar and enum results always carry this field. Object results
+    /// may carry it only to tighten their selected-field disclosure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_disclosure: Option<GraphqlSemanticResultDisclosure>,
     /// Whether this exact operation is composed into the finished root.
     pub is_exposed: bool,
     /// Whether an authoritative fixed or dynamic authorization policy exists.
@@ -424,12 +500,30 @@ pub struct GraphqlSemanticOperationDescriptor {
 pub trait GraphqlCustomOperationMetadata {
     /// Returns canonical semantic declarations authored beside the resolver.
     fn graphql_custom_operations() -> &'static [GraphqlSemanticOperationDescriptor];
+
+    /// Returns direct handwritten result-object semantics authored beside the
+    /// resolver declarations.
+    ///
+    /// Macro-generated implementations provide this automatically. The empty
+    /// default preserves compatibility for manually implemented metadata.
+    fn graphql_custom_result_types() -> &'static [GraphqlEntitySemanticMetadata] {
+        &[]
+    }
 }
 
 /// Metadata trait implemented by a described handwritten GraphQL object.
 pub trait GraphqlSemanticObjectMetadata {
     /// Returns the canonical public object-field semantic declaration.
     fn graphql_semantic_object() -> &'static GraphqlEntitySemanticMetadata;
+}
+
+/// Common metadata boundary for a GraphQL entity or handwritten result type.
+///
+/// Proc-macro generated custom roots use this trait to collect the direct
+/// result object without a second `schema_roots!` semantic-type list.
+pub trait GraphqlSemanticResultTypeMetadata {
+    /// Returns the canonical public result-object semantic declaration.
+    fn graphql_semantic_result_type() -> &'static GraphqlEntitySemanticMetadata;
 }
 
 /// Versioned canonical semantic graph for one composed GraphQL schema.
@@ -456,8 +550,7 @@ impl GraphqlSemanticCatalog {
         entities: impl IntoIterator<Item = GraphqlEntitySemanticMetadata>,
         operation_catalog: &GraphqlOperationCatalog,
     ) -> Result<Self, GraphqlSemanticError> {
-        let mut entities = entities.into_iter().collect::<Vec<_>>();
-        entities.sort_by(|left, right| left.entity_name.cmp(&right.entity_name));
+        let entities = normalize_composed_entities(entities);
         let operations = operation_catalog
             .operations()
             .iter()
@@ -477,8 +570,7 @@ impl GraphqlSemanticCatalog {
         operation_catalog: &GraphqlOperationCatalog,
         custom: impl IntoIterator<Item = GraphqlSemanticOperationDescriptor>,
     ) -> Result<Self, GraphqlSemanticError> {
-        let mut entities = entities.into_iter().collect::<Vec<_>>();
-        entities.sort_by(|left, right| left.entity_name.cmp(&right.entity_name));
+        let entities = normalize_composed_entities(entities);
         let mut operations = operation_catalog
             .operations()
             .iter()
@@ -549,6 +641,13 @@ impl GraphqlSemanticCatalog {
         let mut coordinates = BTreeSet::new();
         for operation in &self.operations {
             validate_operation(operation)?;
+            if let Some(entity_name) = &operation.generated_entity_name
+                && !entity_names.contains(entity_name)
+            {
+                return Err(GraphqlSemanticError::new(
+                    "generated semantic operation entity is absent",
+                ));
+            }
             if !coordinates.insert((operation.kind, &operation.field_name)) {
                 return Err(GraphqlSemanticError::new(
                     "semantic operation is duplicated",
@@ -619,9 +718,11 @@ impl GraphqlSemanticCatalog {
             field_name: &'a str,
             source: GraphqlSemanticOperationSource,
             generated_category: Option<GeneratedGraphqlOperationCategory>,
+            generated_entity_name: &'a Option<String>,
             description: &'a str,
             arguments: &'a [GraphqlSemanticArgumentDescriptor],
             result_type: &'a GraphqlSemanticTypeRef,
+            result_disclosure: &'a Option<GraphqlSemanticResultDisclosure>,
             is_exposed: bool,
             has_authorization_policy: bool,
             ai_mutation_execution: Option<AiMutationExecutionPolicy>,
@@ -639,9 +740,11 @@ impl GraphqlSemanticCatalog {
                     field_name: &operation.field_name,
                     source: operation.source,
                     generated_category: operation.generated_category,
+                    generated_entity_name: &operation.generated_entity_name,
                     description: &operation.description,
                     arguments: &operation.arguments,
                     result_type: &operation.result_type,
+                    result_disclosure: &operation.result_disclosure,
                     is_exposed: operation.is_exposed,
                     has_authorization_policy: operation.has_authorization_policy,
                     ai_mutation_execution: operation.ai_mutation_execution,
@@ -675,9 +778,11 @@ impl GraphqlSemanticOperationDescriptor {
             field_name: operation.field_name().to_owned(),
             source: GraphqlSemanticOperationSource::Generated,
             generated_category: Some(operation.category()),
+            generated_entity_name: Some(operation.entity_name().to_owned()),
             description: operation.description().to_owned(),
             arguments,
             result_type: parse_graphql_type(operation.graphql_result_type())?,
+            result_disclosure: None,
             is_exposed: operation.is_exposed(),
             has_authorization_policy: !matches!(
                 operation.authorization(),
@@ -712,14 +817,25 @@ impl GraphqlSemanticOperationDescriptor {
         result_type: GraphqlSemanticTypeRef,
         has_authorization_policy: bool,
     ) -> Result<Self, GraphqlSemanticError> {
+        let result_disclosure = result_type
+            .leaf_kind()
+            .is_some_and(|kind| {
+                matches!(
+                    kind,
+                    GraphqlSemanticTypeKind::Scalar | GraphqlSemanticTypeKind::Enum
+                )
+            })
+            .then_some(GraphqlSemanticResultDisclosure::fail_safe());
         let mut descriptor = Self {
             kind,
             field_name: field_name.into(),
             source: GraphqlSemanticOperationSource::Custom,
             generated_category: None,
+            generated_entity_name: None,
             description: description.into(),
             arguments,
             result_type,
+            result_disclosure,
             is_exposed: true,
             has_authorization_policy,
             ai_mutation_execution: (kind == GraphqlOperationKind::Mutation)
@@ -730,6 +846,57 @@ impl GraphqlSemanticOperationDescriptor {
         validate_operation_structure(&descriptor)?;
         descriptor.fingerprint = descriptor.compute_fingerprint();
         Ok(descriptor)
+    }
+
+    /// Attaches an explicit root result disclosure contract.
+    ///
+    /// The contract may tighten object-field disclosure but never weakens it.
+    /// A secret result cannot be marked exportable, and a list ceiling is
+    /// accepted only for a scalar or enum list result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the result contract is malformed or incompatible
+    /// with the declared GraphQL result shape.
+    pub fn with_result_disclosure(
+        mut self,
+        disclosure: GraphqlSemanticResultDisclosure,
+    ) -> Result<Self, GraphqlSemanticError> {
+        self.result_disclosure = Some(disclosure);
+        self.fingerprint.clear();
+        validate_operation_structure(&self)?;
+        self.fingerprint = self.compute_fingerprint();
+        Ok(self)
+    }
+
+    /// Overrides the semantic leaf kind for a custom scalar or enum wrapper.
+    ///
+    /// This does not change the public GraphQL type name or SDL signature. It
+    /// exists for custom scalar/enum Rust types that cannot be identified from
+    /// their GraphQL name alone by the metadata macro.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for generated operations or an object override.
+    pub fn with_custom_result_leaf_kind(
+        mut self,
+        kind: GraphqlSemanticTypeKind,
+    ) -> Result<Self, GraphqlSemanticError> {
+        if self.source != GraphqlSemanticOperationSource::Custom
+            || kind == GraphqlSemanticTypeKind::Object
+        {
+            return Err(GraphqlSemanticError::new(
+                "custom result kind override is invalid",
+            ));
+        }
+        self.result_type.set_leaf_kind(kind);
+        if self.result_disclosure.is_none() {
+            self.result_disclosure = Some(GraphqlSemanticResultDisclosure::fail_safe());
+        }
+        self.fingerprint.clear();
+        validate_operation_structure(&self)?;
+        self.fingerprint = self.compute_fingerprint();
+        Ok(self)
     }
 
     /// Classifies one custom mutation for AI execution.
@@ -857,6 +1024,15 @@ fn validate_entity(entity: &GraphqlEntitySemanticMetadata) -> Result<(), Graphql
     Ok(())
 }
 
+fn normalize_composed_entities(
+    entities: impl IntoIterator<Item = GraphqlEntitySemanticMetadata>,
+) -> Vec<GraphqlEntitySemanticMetadata> {
+    let mut entities = entities.into_iter().collect::<Vec<_>>();
+    entities.sort_by(|left, right| left.entity_name.cmp(&right.entity_name));
+    entities.dedup_by(|right, left| right == left);
+    entities
+}
+
 fn validate_operation(
     operation: &GraphqlSemanticOperationDescriptor,
 ) -> Result<(), GraphqlSemanticError> {
@@ -892,6 +1068,54 @@ fn validate_operation_structure(
     }
     validate_arguments(&operation.arguments)?;
     operation.result_type.validate(0)?;
+    if let Some(disclosure) = operation.result_disclosure {
+        if disclosure.classification == GraphqlSemanticClassification::Secret
+            && disclosure.export != GraphqlSemanticExport::NeverExport
+        {
+            return Err(GraphqlSemanticError::new(
+                "secret semantic operation result is exportable",
+            ));
+        }
+        if disclosure.maximum_items.is_some_and(|maximum| maximum == 0) {
+            return Err(GraphqlSemanticError::new(
+                "semantic operation result bound is invalid",
+            ));
+        }
+        if disclosure.maximum_items.is_some()
+            && (!operation.result_type.is_list()
+                || !matches!(
+                    operation.result_type.leaf_kind(),
+                    Some(GraphqlSemanticTypeKind::Scalar | GraphqlSemanticTypeKind::Enum)
+                ))
+        {
+            return Err(GraphqlSemanticError::new(
+                "semantic operation result bound is incompatible",
+            ));
+        }
+        if disclosure.export == GraphqlSemanticExport::Exportable
+            && operation.result_type.is_list()
+            && matches!(
+                operation.result_type.leaf_kind(),
+                Some(GraphqlSemanticTypeKind::Scalar | GraphqlSemanticTypeKind::Enum)
+            )
+            && disclosure.maximum_items.is_none()
+        {
+            return Err(GraphqlSemanticError::new(
+                "exportable semantic scalar-list result is unbounded",
+            ));
+        }
+    }
+    if operation.source == GraphqlSemanticOperationSource::Custom
+        && matches!(
+            operation.result_type.leaf_kind(),
+            Some(GraphqlSemanticTypeKind::Scalar | GraphqlSemanticTypeKind::Enum)
+        )
+        && operation.result_disclosure.is_none()
+    {
+        return Err(GraphqlSemanticError::new(
+            "custom scalar result lacks disclosure metadata",
+        ));
+    }
     match (&operation.subscription_observation, operation.kind) {
         (Some(observation), GraphqlOperationKind::Subscription) => {
             validate_subscription_observation(observation)?;
@@ -918,14 +1142,27 @@ fn validate_operation_structure(
             ));
         }
     }
-    if operation.source == GraphqlSemanticOperationSource::Generated
-        && operation.generated_category.is_none()
-        || operation.source == GraphqlSemanticOperationSource::Custom
-            && operation.generated_category.is_some()
-    {
-        return Err(GraphqlSemanticError::new(
-            "semantic operation source is invalid",
-        ));
+    match operation.source {
+        GraphqlSemanticOperationSource::Generated
+            if operation.generated_category.is_none()
+                || operation
+                    .generated_entity_name
+                    .as_deref()
+                    .is_none_or(|name| !valid_graphql_name(name)) =>
+        {
+            return Err(GraphqlSemanticError::new(
+                "semantic operation source is invalid",
+            ));
+        }
+        GraphqlSemanticOperationSource::Custom
+            if operation.generated_category.is_some()
+                || operation.generated_entity_name.is_some() =>
+        {
+            return Err(GraphqlSemanticError::new(
+                "semantic operation source is invalid",
+            ));
+        }
+        _ => {}
     }
     Ok(())
 }

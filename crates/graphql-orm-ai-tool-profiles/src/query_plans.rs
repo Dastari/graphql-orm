@@ -8,9 +8,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use async_graphql_parser::{parse_schema, types::TypeSystemDefinition};
 use graphql_orm_operation_catalog::{
-    AiMutationExecutionPolicy, GeneratedGraphqlOperationCategory, GraphqlOperationKind,
-    GraphqlSemanticCatalog, GraphqlSemanticClassification, GraphqlSemanticExport,
-    GraphqlSemanticFieldMetadata, GraphqlSemanticOperationDescriptor,
+    AiMutationExecutionPolicy, GeneratedGraphqlOperationCategory, GraphqlAggregateOperator,
+    GraphqlOperationKind, GraphqlSemanticCatalog, GraphqlSemanticClassification,
+    GraphqlSemanticExport, GraphqlSemanticFieldMetadata, GraphqlSemanticOperationDescriptor,
     GraphqlSemanticRelationshipCardinality, GraphqlSemanticTypeRef,
     GraphqlSubscriptionConditionOperator, GraphqlSubscriptionReplayMode,
 };
@@ -19,9 +19,9 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    AiApprovalRule, AiDisclosureRule, AiDisclosureSchema, AiDisclosureShape, AiError,
-    AiToolDescriptor, AiToolId, AiToolOperationKind, AiToolRisk, DataClassification,
-    GraphqlExecutionTargetId, GraphqlOperationContract, ToolMaturity,
+    AiApprovalRule, AiDisclosureListIdentity, AiDisclosureRule, AiDisclosureSchema,
+    AiDisclosureShape, AiError, AiToolDescriptor, AiToolId, AiToolOperationKind, AiToolRisk,
+    DataClassification, GraphqlExecutionTargetId, GraphqlOperationContract, ToolMaturity,
     canonical_json::canonical_json_bytes,
 };
 
@@ -293,7 +293,11 @@ impl AiGraphqlQueryCapability {
         )?;
 
         let (projection, disclosure) = match &self.output {
-            QueryOutput::Entity { entity, route } => {
+            QueryOutput::Entity {
+                entity,
+                route,
+                result_floor,
+            } => {
                 let selection = EntityPlanRef {
                     fields: &plan.fields,
                     relationships: &plan.relationships,
@@ -302,7 +306,12 @@ impl AiGraphqlQueryCapability {
                 let (entity_projection, entity_disclosure) =
                     context.compile_entity_selection(entity, selection, &mut ancestry, 0)?;
                 let maximum = plan.maximum_items.unwrap_or(1);
-                wrap_projection_route(route, entity_projection, entity_disclosure, maximum)
+                let (projection, mut disclosure) =
+                    wrap_projection_route(route, entity_projection, entity_disclosure, maximum);
+                if let Some(floor) = result_floor {
+                    tighten_disclosure_root(&mut disclosure, *floor);
+                }
+                (projection, disclosure)
             }
             QueryOutput::Scalar {
                 classification,
@@ -330,8 +339,11 @@ impl AiGraphqlQueryCapability {
                 (String::new(), disclosure)
             }
             QueryOutput::Aggregate {
+                entity,
                 projection,
-                disclosure,
+                groups_field,
+                metrics_field,
+                value_fields,
             } => {
                 if !plan.fields.is_empty() || !plan.relationships.is_empty() {
                     return Err(input_error(
@@ -341,7 +353,11 @@ impl AiGraphqlQueryCapability {
                 (
                     projection.clone(),
                     exact_aggregate_disclosure(
-                        disclosure,
+                        &self.semantic_catalog,
+                        entity,
+                        groups_field,
+                        metrics_field,
+                        value_fields,
                         &plan.arguments,
                         plan.maximum_items.ok_or_else(|| {
                             input_error("aggregate result group bound is missing")
@@ -435,6 +451,7 @@ impl AiGraphqlQueryCapability {
             "capability": self.fingerprint,
             "plan": plan_fingerprint,
             "document": document,
+            "disclosure": disclosure_schema.fingerprint,
         }));
         let contract = GraphqlOperationContract::new(
             self.target_id.clone(),
@@ -527,68 +544,219 @@ impl AiGraphqlQueryCapability {
 }
 
 fn exact_aggregate_disclosure(
-    disclosure: &AiDisclosureShape,
+    catalog: &GraphqlSemanticCatalog,
+    entity_name: &str,
+    groups_field: &str,
+    metrics_field: &str,
+    value_fields: &[String],
     arguments: &Map<String, Value>,
     maximum_groups: u32,
 ) -> Result<AiDisclosureShape, AiError> {
-    let list_length = |expected: &str| {
-        arguments
-            .iter()
-            .find(|(name, _)| semantic_name_key(name) == semantic_name_key(expected))
-            .and_then(|(_, value)| value.as_array())
-            .map(|items| u32::try_from(items.len()).unwrap_or(u32::MAX))
-            .unwrap_or(0)
-            .max(1)
-    };
-    let AiDisclosureShape::List { rule, item, .. } = disclosure else {
-        return Err(configuration_error(
-            "aggregate disclosure root is not a list",
-        ));
-    };
-    let AiDisclosureShape::Object {
-        rule: item_rule,
-        fields,
-    } = item.as_ref()
-    else {
-        return Err(configuration_error(
-            "aggregate disclosure row is not an object",
-        ));
-    };
-    let mut fields = fields.clone();
-    for (expected, maximum_items) in [
-        ("groups", list_length("groupBy")),
-        ("metrics", list_length("metrics")),
-    ] {
-        let name = fields
-            .keys()
-            .find(|name| name.eq_ignore_ascii_case(expected))
-            .cloned()
-            .ok_or_else(|| configuration_error("aggregate disclosure field is missing"))?;
-        let shape = fields
-            .remove(&name)
-            .ok_or_else(|| configuration_error("aggregate disclosure field is missing"))?;
-        let AiDisclosureShape::List { rule, item, .. } = shape else {
-            return Err(configuration_error(
-                "aggregate disclosure field is not a list",
-            ));
-        };
-        fields.insert(
-            name,
-            AiDisclosureShape::List {
-                rule,
-                maximum_items,
-                item,
-            },
+    let entity = semantic_entity(catalog, entity_name)?;
+    let group_values = aggregate_argument_array_optional(arguments, "groupBy").unwrap_or(&[]);
+    let metric_values = aggregate_argument_array(arguments, "metrics")?;
+    let mut group_identities = Vec::with_capacity(group_values.len());
+    let mut group_classification = None;
+    for value in group_values {
+        let selected = value
+            .as_str()
+            .ok_or_else(|| input_error("aggregate grouping field is invalid"))?;
+        let field = aggregate_semantic_field(entity, selected)?;
+        if !field.groupable {
+            return Err(input_error("aggregate grouping field is unavailable"));
+        }
+        ensure_aggregate_field_exportable(field)?;
+        group_classification = Some(
+            group_classification
+                .unwrap_or(DataClassification::Public)
+                .max(classification(field.classification)),
         );
+        group_identities.push(vec![Value::String(field.field_name.clone()), Value::Null]);
     }
+
+    let mut metric_identities = Vec::with_capacity(metric_values.len());
+    let mut metric_classification = None;
+    for value in metric_values {
+        let metric = value
+            .as_object()
+            .ok_or_else(|| input_error("aggregate metric is invalid"))?;
+        let operator_value = aggregate_object_value(metric, "operator")?
+            .as_str()
+            .ok_or_else(|| input_error("aggregate metric operator is invalid"))?;
+        let (operator, rendered_operator) = aggregate_operator(operator_value)?;
+        let selected_field =
+            aggregate_object_value_optional(metric, "field").filter(|value| !value.is_null());
+        let (field_identity, selected_classification) = match selected_field {
+            Some(value) => {
+                let selected = value
+                    .as_str()
+                    .ok_or_else(|| input_error("aggregate metric field is invalid"))?;
+                let field = aggregate_semantic_field(entity, selected)?;
+                ensure_aggregate_field_exportable(field)?;
+                if !field.aggregate_operators.contains(&operator) {
+                    return Err(input_error("aggregate metric operator is unavailable"));
+                }
+                (
+                    Value::String(field.field_name.clone()),
+                    classification(field.classification),
+                )
+            }
+            None if operator == GraphqlAggregateOperator::Count => {
+                (Value::Null, classification(entity.default_classification))
+            }
+            None => {
+                return Err(input_error(
+                    "aggregate metric field is required for this operator",
+                ));
+            }
+        };
+        metric_classification = Some(
+            metric_classification
+                .unwrap_or(DataClassification::Public)
+                .max(selected_classification),
+        );
+        metric_identities.push(vec![
+            field_identity,
+            Value::String(rendered_operator.to_owned()),
+        ]);
+    }
+
+    let field_identity_name = value_fields
+        .iter()
+        .find(|name| semantic_name_key(name) == semantic_name_key("field"))
+        .cloned()
+        .ok_or_else(|| configuration_error("aggregate result field identity is missing"))?;
+    let operator_identity_name = value_fields
+        .iter()
+        .find(|name| semantic_name_key(name) == semantic_name_key("operator"))
+        .cloned()
+        .ok_or_else(|| configuration_error("aggregate result operator identity is missing"))?;
+    let group_classification =
+        group_classification.unwrap_or_else(|| classification(entity.default_classification));
+    let metric_classification =
+        metric_classification.unwrap_or_else(|| classification(entity.default_classification));
+    let groups = aggregate_result_list(
+        group_classification,
+        value_fields,
+        &field_identity_name,
+        &operator_identity_name,
+        group_identities,
+    );
+    let metrics = aggregate_result_list(
+        metric_classification,
+        value_fields,
+        &field_identity_name,
+        &operator_identity_name,
+        metric_identities,
+    );
+    let row_classification = group_classification.max(metric_classification);
     Ok(AiDisclosureShape::list(
-        *rule,
+        AiDisclosureRule::exportable(row_classification),
         maximum_groups,
-        AiDisclosureShape::Object {
-            rule: *item_rule,
-            fields,
-        },
+        AiDisclosureShape::object(
+            AiDisclosureRule::exportable(row_classification),
+            [
+                (groups_field.to_owned(), groups),
+                (metrics_field.to_owned(), metrics),
+            ],
+        ),
     ))
+}
+
+fn aggregate_argument_array<'a>(
+    arguments: &'a Map<String, Value>,
+    expected: &str,
+) -> Result<&'a [Value], AiError> {
+    aggregate_argument_array_optional(arguments, expected)
+        .ok_or_else(|| input_error("aggregate query plan omits a required selection"))
+}
+
+fn aggregate_argument_array_optional<'a>(
+    arguments: &'a Map<String, Value>,
+    expected: &str,
+) -> Option<&'a [Value]> {
+    arguments
+        .iter()
+        .find(|(name, _)| semantic_name_key(name) == semantic_name_key(expected))
+        .and_then(|(_, value)| value.as_array())
+        .map(Vec::as_slice)
+}
+
+fn aggregate_object_value<'a>(
+    object: &'a Map<String, Value>,
+    expected: &str,
+) -> Result<&'a Value, AiError> {
+    aggregate_object_value_optional(object, expected)
+        .ok_or_else(|| input_error("aggregate metric is missing a required field"))
+}
+
+fn aggregate_object_value_optional<'a>(
+    object: &'a Map<String, Value>,
+    expected: &str,
+) -> Option<&'a Value> {
+    object
+        .iter()
+        .find(|(name, _)| semantic_name_key(name) == semantic_name_key(expected))
+        .map(|(_, value)| value)
+}
+
+fn aggregate_semantic_field<'a>(
+    entity: &'a graphql_orm_operation_catalog::GraphqlEntitySemanticMetadata,
+    selected: &str,
+) -> Result<&'a GraphqlSemanticFieldMetadata, AiError> {
+    entity
+        .fields
+        .iter()
+        .find(|field| semantic_name_key(&field.field_name) == semantic_name_key(selected))
+        .ok_or_else(|| input_error("aggregate selected an unknown field"))
+}
+
+fn ensure_aggregate_field_exportable(field: &GraphqlSemanticFieldMetadata) -> Result<(), AiError> {
+    if field.export != GraphqlSemanticExport::Exportable
+        || field.classification == GraphqlSemanticClassification::Secret
+    {
+        return Err(input_error("aggregate selected a hidden field"));
+    }
+    Ok(())
+}
+
+fn aggregate_operator(value: &str) -> Result<(GraphqlAggregateOperator, &'static str), AiError> {
+    match semantic_name_key(value).as_str() {
+        "count" => Ok((GraphqlAggregateOperator::Count, "COUNT")),
+        "min" => Ok((GraphqlAggregateOperator::Min, "MIN")),
+        "max" => Ok((GraphqlAggregateOperator::Max, "MAX")),
+        "sum" => Ok((GraphqlAggregateOperator::Sum, "SUM")),
+        _ => Err(input_error("aggregate metric operator is unknown")),
+    }
+}
+
+fn aggregate_result_list(
+    classification: DataClassification,
+    value_fields: &[String],
+    field_identity_name: &str,
+    operator_identity_name: &str,
+    identities: Vec<Vec<Value>>,
+) -> AiDisclosureShape {
+    let maximum_items = u32::try_from(identities.len()).unwrap_or(u32::MAX).max(1);
+    let scalar = AiDisclosureShape::scalar(AiDisclosureRule::exportable(classification));
+    let value = AiDisclosureShape::object(
+        AiDisclosureRule::exportable(classification),
+        value_fields
+            .iter()
+            .map(|field| (field.clone(), scalar.clone())),
+    );
+    AiDisclosureShape::list_with_identity(
+        AiDisclosureRule::exportable(classification),
+        maximum_items,
+        value,
+        AiDisclosureListIdentity::exact(
+            [
+                field_identity_name.to_owned(),
+                operator_identity_name.to_owned(),
+            ],
+            identities,
+        ),
+    )
 }
 
 /// Complete finite capability set for one active finished schema.
@@ -645,7 +813,10 @@ impl AiGraphqlQueryCapabilityCatalog {
         let operations = semantic_catalog
             .operations
             .iter()
-            .filter(|operation| operation.kind == GraphqlOperationKind::Query)
+            .filter(|operation| {
+                operation.kind == GraphqlOperationKind::Query
+                    && operation_result_is_provider_exportable(operation)
+            })
             .collect::<Vec<_>>();
         if operations.len() > limits.maximum_capabilities as usize {
             return Err(configuration_error(
@@ -675,7 +846,10 @@ impl AiGraphqlQueryCapabilityCatalog {
             != semantic_catalog
                 .operations
                 .iter()
-                .filter(|operation| operation.kind == GraphqlOperationKind::Query)
+                .filter(|operation| {
+                    operation.kind == GraphqlOperationKind::Query
+                        && operation_result_is_provider_exportable(operation)
+                })
                 .count()
         {
             return Err(configuration_error(
@@ -883,13 +1057,14 @@ impl AiGraphqlMutationCapabilityCatalog {
         let executable = semantic_mutations
             .into_iter()
             .filter(|operation| {
-                matches!(
-                    operation.ai_mutation_execution,
-                    Some(
-                        AiMutationExecutionPolicy::Automatic
-                            | AiMutationExecutionPolicy::ApprovalRequired
+                operation_result_is_provider_exportable(operation)
+                    && matches!(
+                        operation.ai_mutation_execution,
+                        Some(
+                            AiMutationExecutionPolicy::Automatic
+                                | AiMutationExecutionPolicy::ApprovalRequired
+                        )
                     )
-                )
             })
             .collect::<Vec<_>>();
         if executable.len() > limits.maximum_capabilities as usize {
@@ -1192,12 +1367,13 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
         let replayable_count = operations
             .iter()
             .filter(|operation| {
-                operation
-                    .subscription_observation
-                    .as_ref()
-                    .is_some_and(|observation| {
-                        observation.replay_mode == GraphqlSubscriptionReplayMode::ReplayThenLive
-                    })
+                operation_result_is_provider_exportable(operation)
+                    && operation
+                        .subscription_observation
+                        .as_ref()
+                        .is_some_and(|observation| {
+                            observation.replay_mode == GraphqlSubscriptionReplayMode::ReplayThenLive
+                        })
             })
             .count();
         if replayable_count > limits.query.maximum_capabilities as usize {
@@ -1213,6 +1389,9 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
                 .as_ref()
                 .ok_or_else(|| configuration_error("subscription has no observation semantics"))?;
             if observation.replay_mode != GraphqlSubscriptionReplayMode::ReplayThenLive {
+                continue;
+            }
+            if !operation_result_is_provider_exportable(operation) {
                 continue;
             }
             let maximum_duration_seconds = observation
@@ -1519,14 +1698,18 @@ enum QueryOutput {
     Entity {
         entity: String,
         route: Vec<OutputRouteSegment>,
+        result_floor: Option<DataClassification>,
     },
     Scalar {
         classification: DataClassification,
         maximum_items: Option<u32>,
     },
     Aggregate {
+        entity: String,
         projection: String,
-        disclosure: AiDisclosureShape,
+        groups_field: String,
+        metrics_field: String,
+        value_fields: Vec<String>,
     },
 }
 
@@ -1898,6 +2081,13 @@ fn validate_operation_against_schema(
     Ok(())
 }
 
+fn operation_result_is_provider_exportable(operation: &GraphqlSemanticOperationDescriptor) -> bool {
+    operation.result_disclosure.is_none_or(|disclosure| {
+        disclosure.export == GraphqlSemanticExport::Exportable
+            && disclosure.classification != GraphqlSemanticClassification::Secret
+    })
+}
+
 fn validate_semantic_entities_against_schema(
     schema: &FinishedSchema,
     catalog: &GraphqlSemanticCatalog,
@@ -1960,27 +2150,42 @@ fn resolve_query_output(
     limits: AiGraphqlQueryCapabilityLimits,
 ) -> Result<QueryOutput, AiError> {
     if operation.generated_category == Some(GeneratedGraphqlOperationCategory::Aggregate) {
-        return aggregate_output(schema, catalog, graphql_type, limits);
+        return aggregate_output(schema, catalog, operation, graphql_type);
     }
     let named = named_type(graphql_type)?;
     if matches!(
         schema.types.get(named),
         Some(SchemaType::Scalar | SchemaType::Enum(_)) | None
     ) {
-        let maximum_items = if list_item_type(graphql_type).is_some() {
-            Some(
-                semantic_root_list_bound(&operation.result_type)
-                    .filter(|maximum| *maximum > 0)
-                    .ok_or_else(|| {
-                        configuration_error("scalar list query has no positive semantic bound")
-                    })?
-                    .min(limits.maximum_result_records),
-            )
-        } else {
-            None
+        let disclosure = operation
+            .result_disclosure
+            .ok_or_else(|| configuration_error("scalar result disclosure is missing"))?;
+        if disclosure.export != GraphqlSemanticExport::Exportable
+            || disclosure.classification == GraphqlSemanticClassification::Secret
+        {
+            return Err(configuration_error("operation result is not exportable"));
+        }
+        let maximum_items = match (
+            list_item_type(graphql_type).is_some(),
+            disclosure.maximum_items,
+        ) {
+            (true, Some(maximum)) if maximum > 0 => {
+                Some(maximum.min(limits.maximum_result_records))
+            }
+            (true, _) => {
+                return Err(configuration_error(
+                    "scalar list query has no positive semantic bound",
+                ));
+            }
+            (false, None) => None,
+            (false, Some(_)) => {
+                return Err(configuration_error(
+                    "scalar query has an unexpected list bound",
+                ));
+            }
         };
         return Ok(QueryOutput::Scalar {
-            classification: DataClassification::Internal,
+            classification: classification(disclosure.classification),
             maximum_items,
         });
     }
@@ -1992,6 +2197,9 @@ fn resolve_query_output(
         return Ok(QueryOutput::Entity {
             entity: named.to_owned(),
             route: root_list_route(graphql_type),
+            result_floor: operation
+                .result_disclosure
+                .map(|disclosure| classification(disclosure.classification)),
         });
     }
     let (entity, mut route) = unique_entity_route(schema, catalog, named, limits.maximum_depth)?;
@@ -2004,14 +2212,20 @@ fn resolve_query_output(
             },
         );
     }
-    Ok(QueryOutput::Entity { entity, route })
+    Ok(QueryOutput::Entity {
+        entity,
+        route,
+        result_floor: operation
+            .result_disclosure
+            .map(|disclosure| classification(disclosure.classification)),
+    })
 }
 
 fn aggregate_output(
     schema: &FinishedSchema,
     catalog: &GraphqlSemanticCatalog,
+    operation: &GraphqlSemanticOperationDescriptor,
     graphql_type: &str,
-    limits: AiGraphqlQueryCapabilityLimits,
 ) -> Result<QueryOutput, AiError> {
     if list_item_type(graphql_type).is_none() {
         return Err(configuration_error(
@@ -2046,40 +2260,17 @@ fn aggregate_output(
             .join(" ")
     );
     let projection = format!("{{ {groups} {nested} {metrics} {nested} }}");
-    let classification = catalog
-        .entities
-        .iter()
-        .flat_map(|entity| entity.fields.iter())
-        .filter(|field| {
-            field.export == GraphqlSemanticExport::Exportable
-                && field.classification != GraphqlSemanticClassification::Secret
-                && (field.groupable || !field.aggregate_operators.is_empty())
-        })
-        .map(|field| classification(field.classification))
-        .max()
-        .unwrap_or(DataClassification::Internal);
-    let scalar = AiDisclosureShape::scalar(AiDisclosureRule::exportable(classification));
-    let value_shape = AiDisclosureShape::object(
-        AiDisclosureRule::exportable(classification),
-        selected
-            .iter()
-            .map(|field| ((*field).clone(), scalar.clone())),
-    );
-    let list = AiDisclosureShape::list(
-        AiDisclosureRule::exportable(classification),
-        limits.maximum_list_items,
-        value_shape,
-    );
+    let entity = operation
+        .generated_entity_name
+        .as_deref()
+        .ok_or_else(|| configuration_error("aggregate operation entity is missing"))?;
+    semantic_entity(catalog, entity)?;
     Ok(QueryOutput::Aggregate {
+        entity: entity.to_owned(),
         projection,
-        disclosure: AiDisclosureShape::list(
-            AiDisclosureRule::exportable(classification),
-            limits.maximum_result_records,
-            AiDisclosureShape::object(
-                AiDisclosureRule::exportable(classification),
-                [(groups.clone(), list.clone()), (metrics.clone(), list)],
-            ),
-        ),
+        groups_field: groups.clone(),
+        metrics_field: metrics.clone(),
+        value_fields: selected.into_iter().cloned().collect(),
     })
 }
 
@@ -3074,13 +3265,6 @@ fn semantic_list_bound(type_ref: &GraphqlSemanticTypeRef) -> Result<u32, AiError
     }
 }
 
-fn semantic_root_list_bound(type_ref: &GraphqlSemanticTypeRef) -> Option<u32> {
-    match type_ref {
-        GraphqlSemanticTypeRef::List { maximum_items, .. } => *maximum_items,
-        GraphqlSemanticTypeRef::Named { .. } => None,
-    }
-}
-
 fn inject_page_limit(
     schema: &FinishedSchema,
     schema_fields: &BTreeMap<String, SchemaInput>,
@@ -3351,6 +3535,15 @@ fn maximum_classification(shape: &AiDisclosureShape) -> DataClassification {
     }
 }
 
+fn tighten_disclosure_root(shape: &mut AiDisclosureShape, floor: DataClassification) {
+    let rule = match shape {
+        AiDisclosureShape::Scalar { rule }
+        | AiDisclosureShape::Object { rule, .. }
+        | AiDisclosureShape::List { rule, .. } => rule,
+    };
+    rule.classification = rule.classification.max(floor);
+}
+
 fn sha256_json(value: &Value) -> String {
     hex::encode(Sha256::digest(canonical_json_bytes(value)))
 }
@@ -3370,8 +3563,8 @@ mod tests {
         GraphqlEntitySemanticMetadata, GraphqlOperationArgumentDescriptor, GraphqlOperationCatalog,
         GraphqlSemanticArgumentDescriptor, GraphqlSemanticFieldMetadata,
         GraphqlSemanticOperationDescriptor, GraphqlSemanticRelationshipDescriptor,
-        GraphqlSemanticTypeKind, GraphqlSubscriptionConditionField,
-        GraphqlSubscriptionObservationDescriptor,
+        GraphqlSemanticResultDisclosure, GraphqlSemanticTypeKind,
+        GraphqlSubscriptionConditionField, GraphqlSubscriptionObservationDescriptor,
     };
 
     use super::*;
@@ -3380,15 +3573,17 @@ mod tests {
         schema { query: Query, mutation: Mutation }
         type Query {
           ReadParent(id: ID!): Parent!
-          ParentAggregate(groupLimit: Int!, metrics: [AggregateMetric!]!): [AggregateRow!]!
+          ParentAggregate(groupLimit: Int!, groupBy: [String!]!, metrics: [AggregateMetric!]!): [AggregateRow!]!
         }
         type Parent {
           id: String!
           name: String!
+          amount: Int!
           credential: String!
           children(page: PageInput): ChildConnection!
         }
         type Child { id: String!, label: String! }
+        type RestrictedLedger { restrictedTotal: String! }
         type ChildConnection { edges: [ChildEdge!]!, pageInfo: PageInfo! }
         type ChildEdge { node: Child!, cursor: String! }
         type PageInfo { totalCount: Int!, hasNextPage: Boolean! }
@@ -3396,10 +3591,11 @@ mod tests {
           CreateParent(input: ParentMutationInput!): Parent!
           UpdateParent(input: ParentMutationInput!): Parent!
           DeleteParent(id: ID!): Parent
+          HiddenMutation: String!
         }
         input ParentMutationInput { name: String!, credential: String }
         input PageInput { limit: Int, offset: Int }
-        enum AggregateOperator { COUNT SUM }
+        enum AggregateOperator { COUNT MIN MAX SUM }
         input AggregateMetric { operator: AggregateOperator!, field: String }
         type AggregateRow { groups: [AggregateValue!]!, metrics: [AggregateValue!]! }
         type AggregateValue { field: String, operator: String, kind: String!, value: String }
@@ -3450,6 +3646,34 @@ mod tests {
             ]
             .into_boxed_slice(),
         };
+        let mut name = scalar_field(
+            "name",
+            GraphqlSemanticClassification::Confidential,
+            GraphqlSemanticExport::Exportable,
+        );
+        name.groupable = true;
+        name.aggregate_operators = vec![
+            GraphqlAggregateOperator::Count,
+            GraphqlAggregateOperator::Min,
+            GraphqlAggregateOperator::Max,
+        ];
+        name.aggregate_value_kind =
+            Some(graphql_orm_operation_catalog::GraphqlAggregateValueKind::Text);
+        let mut amount = scalar_field(
+            "amount",
+            GraphqlSemanticClassification::Restricted,
+            GraphqlSemanticExport::Exportable,
+        );
+        amount.type_ref = named("Int", false);
+        amount.groupable = true;
+        amount.aggregate_operators = vec![
+            GraphqlAggregateOperator::Count,
+            GraphqlAggregateOperator::Min,
+            GraphqlAggregateOperator::Max,
+            GraphqlAggregateOperator::Sum,
+        ];
+        amount.aggregate_value_kind =
+            Some(graphql_orm_operation_catalog::GraphqlAggregateValueKind::Integral);
         let parent = GraphqlEntitySemanticMetadata {
             entity_name: "Parent".to_owned(),
             description: "A public parent record.".to_owned(),
@@ -3460,11 +3684,8 @@ mod tests {
                     GraphqlSemanticClassification::Internal,
                     GraphqlSemanticExport::Exportable,
                 ),
-                scalar_field(
-                    "name",
-                    GraphqlSemanticClassification::Confidential,
-                    GraphqlSemanticExport::Exportable,
-                ),
+                name,
+                amount,
                 scalar_field(
                     "credential",
                     GraphqlSemanticClassification::Secret,
@@ -3532,11 +3753,11 @@ mod tests {
     fn query_sdl() -> String {
         SDL.replace("schema { query: Query, mutation: Mutation }", "schema { query: Query }")
         .replace(
-            "          ParentAggregate(groupLimit: Int!, metrics: [AggregateMetric!]!): [AggregateRow!]!\n",
+            "          ParentAggregate(groupLimit: Int!, groupBy: [String!]!, metrics: [AggregateMetric!]!): [AggregateRow!]!\n",
             "",
         )
         .replace(
-            "        type Mutation {\n          CreateParent(input: ParentMutationInput!): Parent!\n          UpdateParent(input: ParentMutationInput!): Parent!\n          DeleteParent(id: ID!): Parent\n        }\n",
+            "        type Mutation {\n          CreateParent(input: ParentMutationInput!): Parent!\n          UpdateParent(input: ParentMutationInput!): Parent!\n          DeleteParent(id: ID!): Parent\n          HiddenMutation: String!\n        }\n",
             "",
         )
     }
@@ -3554,7 +3775,18 @@ mod tests {
     }
 
     fn aggregate_semantic_catalog() -> GraphqlSemanticCatalog {
-        let base = semantic_catalog();
+        let mut base = semantic_catalog();
+        base.entities.push(GraphqlEntitySemanticMetadata {
+            entity_name: "RestrictedLedger".to_owned(),
+            description: "An unrelated restricted aggregate entity.".to_owned(),
+            default_classification: GraphqlSemanticClassification::Restricted,
+            fields: vec![scalar_field(
+                "restrictedTotal",
+                GraphqlSemanticClassification::Restricted,
+                GraphqlSemanticExport::Exportable,
+            )]
+            .into_boxed_slice(),
+        });
         let generated = GeneratedGraphqlOperationDescriptor::generated(
             "tests::Parent",
             "Parent",
@@ -3569,6 +3801,12 @@ mod tests {
                     "Positive maximum result groups.",
                     "i32",
                     "Int!",
+                ),
+                GraphqlOperationArgumentDescriptor::generated_with_description(
+                    "groupBy",
+                    "Reviewed aggregate grouping fields.",
+                    "Vec<String>",
+                    "[String!]!",
                 ),
                 GraphqlOperationArgumentDescriptor::generated_with_description(
                     "metrics",
@@ -3621,6 +3859,17 @@ mod tests {
             .with_ai_mutation_execution(policy)
             .expect("mutation policy is valid")
         };
+        let hidden = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Mutation,
+            "HiddenMutation",
+            "Execute one structurally non-exportable mutation.",
+            Vec::new(),
+            named("String", false),
+            true,
+        )
+        .expect("hidden mutation defaults fail-safe")
+        .with_ai_mutation_execution(AiMutationExecutionPolicy::Automatic)
+        .expect("hidden mutation policy is valid");
         GraphqlSemanticCatalog::compose_with_custom(
             base.entities,
             &GraphqlOperationCatalog::compose(std::iter::empty()),
@@ -3654,6 +3903,7 @@ mod tests {
                     named("ID", false),
                     true,
                 ),
+                hidden,
             ],
         )
         .expect("mutation semantic catalogue validates")
@@ -3686,10 +3936,26 @@ mod tests {
             }],
         })
         .expect("observation semantics");
+        let hidden = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Subscription,
+            "HiddenTick",
+            "Observe one structurally non-exportable status tick.",
+            Vec::new(),
+            named("String", false),
+            true,
+        )
+        .expect("hidden subscription defaults fail-safe")
+        .with_subscription_observation(GraphqlSubscriptionObservationDescriptor {
+            replay_mode: GraphqlSubscriptionReplayMode::ReplayThenLive,
+            maximum_duration_seconds: Some(120),
+            maximum_events: Some(20),
+            condition_fields: Vec::new(),
+        })
+        .expect("hidden observation semantics");
         GraphqlSemanticCatalog::compose_with_custom(
             base.entities,
             &GraphqlOperationCatalog::compose(std::iter::empty()),
-            base.operations.into_iter().chain([subscription]),
+            base.operations.into_iter().chain([subscription, hidden]),
         )
         .expect("subscription semantic catalogue")
     }
@@ -3697,7 +3963,7 @@ mod tests {
     fn subscription_sdl() -> String {
         query_sdl().replace(
             "schema { query: Query }",
-            "schema { query: Query, subscription: Subscription }\n        type Subscription { ParentChanged(id: ID): Parent! }",
+            "schema { query: Query, subscription: Subscription }\n        type Subscription { ParentChanged(id: ID): Parent!, HiddenTick: String! }",
         )
     }
 
@@ -3842,25 +4108,63 @@ mod tests {
             named("String", false),
             true,
         )
-        .expect("health semantics");
+        .expect("health semantics")
+        .with_result_disclosure(GraphqlSemanticResultDisclosure::new(
+            GraphqlSemanticClassification::Public,
+            GraphqlSemanticExport::Exportable,
+        ))
+        .expect("health result disclosure");
         let tags = GraphqlSemanticOperationDescriptor::custom(
             GraphqlOperationKind::Query,
             "Tags",
             "Read bounded public tags.",
             Vec::new(),
-            GraphqlSemanticTypeRef::list(false, Some(10), named("String", false)),
+            GraphqlSemanticTypeRef::list(false, None, named("String", false)),
             true,
         )
-        .expect("tag semantics");
+        .expect("tag semantics")
+        .with_result_disclosure(
+            GraphqlSemanticResultDisclosure::new(
+                GraphqlSemanticClassification::Restricted,
+                GraphqlSemanticExport::Exportable,
+            )
+            .with_maximum_items(10),
+        )
+        .expect("tag result disclosure");
+        let secret = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Query,
+            "SecretStatus",
+            "Read a non-exportable secret status.",
+            Vec::new(),
+            named("String", false),
+            true,
+        )
+        .expect("secret defaults fail-safe");
+        let never_export = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Query,
+            "InternalOnlyStatus",
+            "Read a structurally internal-only status.",
+            Vec::new(),
+            named("String", false),
+            true,
+        )
+        .expect("internal-only semantics")
+        .with_result_disclosure(GraphqlSemanticResultDisclosure::new(
+            GraphqlSemanticClassification::Restricted,
+            GraphqlSemanticExport::NeverExport,
+        ))
+        .expect("internal-only result disclosure");
         let semantics = GraphqlSemanticCatalog::compose_with_custom(
             base.entities,
             &GraphqlOperationCatalog::compose(std::iter::empty()),
-            base.operations.into_iter().chain([health, tags]),
+            base.operations
+                .into_iter()
+                .chain([health, tags, secret, never_export]),
         )
         .expect("scalar root semantics");
         let sdl = query_sdl().replace(
             "ReadParent(id: ID!): Parent!",
-            "ReadParent(id: ID!): Parent!\nHealth: String!\nTags: [String!]!",
+            "ReadParent(id: ID!): Parent!\nHealth: String!\nTags: [String!]!\nSecretStatus: String!\nInternalOnlyStatus: String!",
         );
         let catalog = AiGraphqlQueryCapabilityCatalog::compile(
             "inventory",
@@ -3870,6 +4174,13 @@ mod tests {
             AiGraphqlQueryCapabilityLimits::default(),
         )
         .expect("scalar query capabilities");
+        assert_eq!(catalog.capabilities().count(), 3);
+        assert!(catalog.capabilities().all(|capability| {
+            !matches!(
+                capability.field_name(),
+                "SecretStatus" | "InternalOnlyStatus"
+            )
+        }));
         let health = catalog
             .capabilities()
             .find(|capability| capability.field_name() == "Health")
@@ -3886,6 +4197,10 @@ mod tests {
             }))
             .expect("bounded scalar-list plan");
         assert!(tags.descriptor().document.contains("{ Tags }"));
+        assert_eq!(
+            tags.descriptor().maximum_classification,
+            DataClassification::Restricted
+        );
         tags.disclosure_schema()
             .evaluate(&json!({ "Tags": ["one", "two"] }))
             .expect("bounded scalar list discloses");
@@ -3974,7 +4289,8 @@ mod tests {
         let compiled = capability
             .compile(json!({
                 "arguments": {
-                    "metrics": [{ "operator": "SUM", "field": "name" }]
+                    "groupBy": ["name"],
+                    "metrics": [{ "operator": "SUM", "field": "amount" }]
                 },
                 "maximumItems": 5
             }))
@@ -3983,13 +4299,125 @@ mod tests {
             compiled
                 .descriptor()
                 .document
-                .contains("ParentAggregate(groupLimit: $v0, metrics: $v1)")
+                .contains("ParentAggregate(groupBy: $v0, groupLimit: $v1, metrics: $v2)")
         );
         assert!(compiled.descriptor().document.contains(
             "groups { field operator kind value } metrics { field operator kind value }"
         ));
-        assert_eq!(compiled.variables()["v0"], json!(5));
-        assert_eq!(compiled.variables()["v1"][0]["operator"], json!("SUM"));
+        assert_eq!(compiled.variables()["v0"][0], json!("name"));
+        assert_eq!(compiled.variables()["v1"], json!(5));
+        assert_eq!(compiled.variables()["v2"][0]["operator"], json!("SUM"));
+        assert_eq!(
+            compiled.descriptor().maximum_classification,
+            DataClassification::Restricted
+        );
+        compiled
+            .disclosure_schema()
+            .evaluate(&json!({
+                "ParentAggregate": [{
+                    "groups": [{
+                        "field": "name", "operator": null, "kind": "TEXT", "value": "A"
+                    }],
+                    "metrics": [{
+                        "field": "amount", "operator": "SUM", "kind": "INTEGRAL", "value": "42"
+                    }]
+                }]
+            }))
+            .expect("exact aggregate identities disclose");
+        assert_eq!(
+            compiled.disclosure_schema().evaluate(&json!({
+                "ParentAggregate": [{
+                    "groups": [{
+                        "field": "name", "operator": null, "kind": "TEXT", "value": "A"
+                    }],
+                    "metrics": [{
+                        "field": "name", "operator": "SUM", "kind": "TEXT", "value": "42"
+                    }]
+                }]
+            })),
+            Err(crate::AiDisclosureError::IdentityMismatch)
+        );
+    }
+
+    #[test]
+    fn aggregate_disclosure_uses_only_owning_entity_and_exact_selected_fields() {
+        let semantic = aggregate_semantic_catalog();
+        let catalog = AiGraphqlQueryCapabilityCatalog::compile(
+            "inventory",
+            GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
+            SDL,
+            &semantic,
+            AiGraphqlQueryCapabilityLimits::default(),
+        )
+        .expect("aggregate capabilities compile");
+        let capability = catalog
+            .capabilities()
+            .find(|capability| capability.is_aggregate())
+            .expect("aggregate capability");
+        let confidential = capability
+            .compile(json!({
+                "arguments": {
+                    "groupBy": ["name"],
+                    "metrics": [{ "operator": "MIN", "field": "name" }]
+                },
+                "maximumItems": 2
+            }))
+            .expect("confidential aggregate compiles");
+        let restricted = capability
+            .compile(json!({
+                "arguments": {
+                    "groupBy": ["name"],
+                    "metrics": [{ "operator": "SUM", "field": "amount" }]
+                },
+                "maximumItems": 2
+            }))
+            .expect("restricted aggregate compiles");
+        assert_eq!(
+            confidential.descriptor().maximum_classification,
+            DataClassification::Confidential
+        );
+        assert_eq!(
+            restricted.descriptor().maximum_classification,
+            DataClassification::Restricted
+        );
+        assert_ne!(
+            confidential.plan_fingerprint(),
+            restricted.plan_fingerprint()
+        );
+        assert_ne!(
+            confidential.disclosure_schema().fingerprint,
+            restricted.disclosure_schema().fingerprint
+        );
+        assert_ne!(
+            confidential.descriptor().result_projection,
+            restricted.descriptor().result_projection
+        );
+        confidential
+            .disclosure_schema()
+            .evaluate(&json!({
+                "ParentAggregate": [{
+                    "groups": [{
+                        "field": "name", "operator": null, "kind": "TEXT", "value": "A"
+                    }],
+                    "metrics": [{
+                        "field": "name", "operator": "MIN", "kind": "TEXT", "value": "A"
+                    }]
+                }]
+            }))
+            .expect("selected confidential identities disclose");
+        assert_eq!(
+            confidential.disclosure_schema().evaluate(&json!({
+                "ParentAggregate": [{
+                    "groups": [{
+                        "field": "name", "operator": null, "kind": "TEXT", "value": "A"
+                    }],
+                    "metrics": [{
+                        "field": "amount", "operator": "SUM", "kind": "INTEGRAL", "value": "7"
+                    }]
+                }]
+            })),
+            Err(crate::AiDisclosureError::IdentityMismatch)
+        );
     }
 
     #[test]
@@ -4004,11 +4432,10 @@ mod tests {
         )
         .expect("mutation capabilities compile");
         assert_eq!(catalog.capabilities().count(), 2);
-        assert!(
-            catalog
-                .capabilities()
-                .all(|capability| capability.field_name() != "DeleteParent")
-        );
+        assert!(catalog.capabilities().all(|capability| !matches!(
+            capability.field_name(),
+            "DeleteParent" | "HiddenMutation"
+        )));
 
         let automatic = catalog
             .capabilities()
@@ -4082,7 +4509,9 @@ mod tests {
             AiGraphqlSubscriptionCapabilityLimits::default(),
         )
         .expect("replayable subscription capabilities");
+        assert_eq!(catalog.capabilities().count(), 1);
         let capability = catalog.capabilities().next().expect("capability");
+        assert_eq!(capability.field_name(), "ParentChanged");
         let compiled = capability
             .compile(json!({
                 "arguments": { "id": "parent-1" },
@@ -4154,8 +4583,8 @@ mod tests {
         )
         .expect("mixed subscription semantics");
         let sdl = subscription_sdl().replace(
-            "type Subscription { ParentChanged(id: ID): Parent! }",
-            "type Subscription { ParentChanged(id: ID): Parent!, StatusTick: Parent! }",
+            "type Subscription { ParentChanged(id: ID): Parent!, HiddenTick: String! }",
+            "type Subscription { ParentChanged(id: ID): Parent!, HiddenTick: String!, StatusTick: Parent! }",
         );
         let catalog = AiGraphqlSubscriptionCapabilityCatalog::compile(
             "inventory",

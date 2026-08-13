@@ -1,0 +1,5 @@
+error: exportable scalar or enum list results require result_maximum_items
+  --> tests/ui/semantic_custom_unbounded_scalar_list.rs:10:31
+   |
+10 |     async fn values(&self) -> Vec<String> {
+   |                               ^^^^^^^^^^^

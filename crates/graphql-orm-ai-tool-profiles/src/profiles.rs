@@ -1763,6 +1763,7 @@ fn validate_disclosure_shape(
                 rule,
                 maximum_items,
                 item,
+                ..
             },
             ProjectedShape::List(projected_maximum, projected_item),
         ) if maximum_items == projected_maximum => {

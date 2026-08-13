@@ -25,6 +25,27 @@ fingerprints must flow together through provider correlation and execution.
 Secret and `NeverExport` fields cannot be restored by host policy because they
 are absent from the generated schema.
 
+Handwritten scalar and enum roots now require canonical result disclosure
+metadata to become automatic capabilities. Unclassified leaves intentionally
+remain available to ordinary GraphQL callers but are treated as
+`Secret`/`NeverExport` and omitted from AI capabilities. Add paired
+`result_classification` and `result_export` method metadata only after review;
+an exportable scalar/enum list also needs `result_maximum_items`. Object roots
+continue deriving disclosure from selected semantic fields and an optional
+root declaration can only tighten that result.
+
+Generated aggregate plans now bind the owning public entity and exact selected
+group/metric identities into plan, result-projection, and disclosure
+fingerprints. Hosts persisting or allowlisting those fingerprints must refresh
+them from the adopted revision. Runtime responses with a different returned
+field/operator identity fail closed.
+
+`schema_roots!` callers may replace a handwritten root repeated in `extra_*`
+and `semantic_custom_operations` (plus direct result types in
+`semantic_types`) with one `described_*_types` entry. Legacy lists remain
+supported, but mixing both forms for the same root is rejected at compile
+time.
+
 The bounded subscription compiler is also additive and creates no durable
 worker by itself. Only `ReplayThenLive` semantic roots are admitted. Consumers
 that persist compiled waiters should use the owning runtime package's schema

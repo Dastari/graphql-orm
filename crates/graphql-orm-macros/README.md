@@ -44,6 +44,19 @@ not connect to a database, run migrations, host GraphQL, or authorize requests.
 | `mutation_result!` | a simple GraphQL mutation result object |
 | `backend_selected_graphql_entity` | emits cfg-selected entity definitions for a multi-backend consumer |
 
+For a handwritten root annotated by `graphql_orm_custom_operations`, prefer
+the matching `described_query_types`, `described_mutation_types`, or
+`described_subscription_types` list in `schema_roots!`. One entry composes the
+root and automatically includes its operation descriptors and direct
+`GraphQLSemanticObject` result metadata. The older `extra_*` plus
+`semantic_custom_operations`/`semantic_types` lists remain compatible for
+incremental migration, but a described root cannot also appear in them.
+
+Custom scalar and enum results are fail-safe by default. To make one eligible
+for provider disclosure, declare `result_classification` and `result_export`
+together on the resolver method. An exportable scalar/enum list also requires
+positive `result_maximum_items`; `secret` may only use `never_export`.
+
 ## Feature configuration
 
 `sqlite` is the default. Select `postgres` or `mssql` by disabling default

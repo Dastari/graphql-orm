@@ -1,0 +1,7 @@
+error: result_classification and result_export must be declared together
+ --> tests/ui/semantic_custom_partial_result_disclosure.rs:6:1
+  |
+6 | #[graphql_orm_custom_operations(kind = "query")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `graphql_orm_custom_operations` (in Nightly builds, run with -Z macro-backtrace for more info)

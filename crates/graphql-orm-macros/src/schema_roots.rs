@@ -63,6 +63,11 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 .iter()
                 .map(|entity| quote! { #entity }),
         )
+        .chain(
+            args.described_query_types
+                .iter()
+                .map(|entity| quote! { #entity }),
+        )
         .collect();
     let query_types: Vec<proc_macro2::TokenStream> = entities
         .iter()
@@ -75,6 +80,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let extra_mutation_type_streams: Vec<proc_macro2::TokenStream> = args
         .extra_mutation_types
         .iter()
+        .chain(&args.described_mutation_types)
         .map(|entity| quote! { #entity })
         .collect();
     let mutation_custom_ops = if extra_mutation_type_streams.is_empty() {
@@ -155,10 +161,27 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let semantic_custom_operation_items = args
         .semantic_custom_operations
         .iter()
+        .chain(&args.described_query_types)
+        .chain(&args.described_mutation_types)
+        .chain(&args.described_subscription_types)
         .map(|root| {
             quote! {
                 <#root as ::graphql_orm::graphql::orm::GraphqlCustomOperationMetadata>
                     ::graphql_custom_operations()
+                    .iter()
+                    .cloned()
+            }
+        })
+        .collect::<Vec<_>>();
+    let described_result_type_items = args
+        .described_query_types
+        .iter()
+        .chain(&args.described_mutation_types)
+        .chain(&args.described_subscription_types)
+        .map(|root| {
+            quote! {
+                <#root as ::graphql_orm::graphql::orm::GraphqlCustomOperationMetadata>
+                    ::graphql_custom_result_types()
                     .iter()
                     .cloned()
             }
@@ -207,7 +230,8 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                         ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata
                     >()
                         .chain(vec![#(#semantic_entity_items),*])
-                        .chain(vec![#(#semantic_type_items),*]),
+                        .chain(vec![#(#semantic_type_items),*])
+                        #(.chain(#described_result_type_items))*,
                     graphql_orm_operation_catalog(),
                     ::std::iter::empty()
                         #(.chain(#semantic_custom_operation_items))*
@@ -219,6 +243,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let extra_subscription_type_streams: Vec<proc_macro2::TokenStream> = args
         .extra_subscription_types
         .iter()
+        .chain(&args.described_subscription_types)
         .map(|entity| quote! { #entity })
         .collect();
     let subscription_custom_ops = if extra_subscription_type_streams.is_empty() {
@@ -593,6 +618,9 @@ struct SchemaRootsArgs {
     extra_mutation_types: Vec<Ident>,
     extra_query_types: Vec<Ident>,
     extra_subscription_types: Vec<Ident>,
+    described_query_types: Vec<Ident>,
+    described_mutation_types: Vec<Ident>,
+    described_subscription_types: Vec<Ident>,
     semantic_custom_operations: Vec<Ident>,
     semantic_types: Vec<Ident>,
     generated_mutation_allowlist: Vec<Ident>,
@@ -649,6 +677,9 @@ impl Parse for SchemaRootsArgs {
         let mut extra_mutation_types = None;
         let mut extra_query_types = None;
         let mut extra_subscription_types = None;
+        let mut described_query_types = None;
+        let mut described_mutation_types = None;
+        let mut described_subscription_types = None;
         let mut semantic_custom_operations = None;
         let mut semantic_types = None;
         let mut generated_mutation_allowlist = None;
@@ -704,6 +735,21 @@ impl Parse for SchemaRootsArgs {
                 let content;
                 syn::bracketed!(content in input);
                 extra_subscription_types = Some(parse_list(&content)?);
+            } else if label == "described_query_types" {
+                reject_duplicate(&described_query_types, &label)?;
+                let content;
+                syn::bracketed!(content in input);
+                described_query_types = Some(parse_list(&content)?);
+            } else if label == "described_mutation_types" {
+                reject_duplicate(&described_mutation_types, &label)?;
+                let content;
+                syn::bracketed!(content in input);
+                described_mutation_types = Some(parse_list(&content)?);
+            } else if label == "described_subscription_types" {
+                reject_duplicate(&described_subscription_types, &label)?;
+                let content;
+                syn::bracketed!(content in input);
+                described_subscription_types = Some(parse_list(&content)?);
             } else if label == "semantic_custom_operations" {
                 reject_duplicate(&semantic_custom_operations, &label)?;
                 let content;
@@ -729,7 +775,7 @@ impl Parse for SchemaRootsArgs {
             } else {
                 return Err(syn::Error::new(
                     label.span(),
-                    "expected one of `backend`, `schema_policy`, `auth`, `generated_mutations`, `query_custom_ops`, `entities`, `extra_query_types`, `extra_mutation_types`, `extra_subscription_types`, `semantic_custom_operations`, `semantic_types`, `generated_mutation_allowlist`, or `generated_mutation_denylist`",
+                    "expected one of `backend`, `schema_policy`, `auth`, `generated_mutations`, `query_custom_ops`, `entities`, `extra_query_types`, `extra_mutation_types`, `extra_subscription_types`, `described_query_types`, `described_mutation_types`, `described_subscription_types`, `semantic_custom_operations`, `semantic_types`, `generated_mutation_allowlist`, or `generated_mutation_denylist`",
                 ));
             }
 
@@ -746,6 +792,9 @@ impl Parse for SchemaRootsArgs {
         let extra_mutation_types = extra_mutation_types.unwrap_or_default();
         let extra_query_types = extra_query_types.unwrap_or_default();
         let extra_subscription_types = extra_subscription_types.unwrap_or_default();
+        let described_query_types = described_query_types.unwrap_or_default();
+        let described_mutation_types = described_mutation_types.unwrap_or_default();
+        let described_subscription_types = described_subscription_types.unwrap_or_default();
         let semantic_custom_operations = semantic_custom_operations.unwrap_or_default();
         let semantic_types = semantic_types.unwrap_or_default();
         let (generated_mutations, generated_mutations_span) = generated_mutations.unwrap_or((
@@ -811,7 +860,41 @@ impl Parse for SchemaRootsArgs {
             .chain(extra_query_types.iter().map(ToString::to_string))
             .chain(extra_mutation_types.iter().map(ToString::to_string))
             .chain(extra_subscription_types.iter().map(ToString::to_string))
+            .chain(described_query_types.iter().map(ToString::to_string))
+            .chain(described_mutation_types.iter().map(ToString::to_string))
+            .chain(described_subscription_types.iter().map(ToString::to_string))
             .collect::<std::collections::BTreeSet<_>>();
+        let described_types = described_query_types
+            .iter()
+            .chain(&described_mutation_types)
+            .chain(&described_subscription_types)
+            .map(ToString::to_string)
+            .collect::<std::collections::BTreeSet<_>>();
+        let legacy_extra_types = extra_query_types
+            .iter()
+            .chain(&extra_mutation_types)
+            .chain(&extra_subscription_types)
+            .map(ToString::to_string)
+            .collect::<std::collections::BTreeSet<_>>();
+        if described_types.len()
+            != described_query_types.len()
+                + described_mutation_types.len()
+                + described_subscription_types.len()
+        {
+            return Err(syn::Error::new(
+                proc_macro2::Span::mixed_site(),
+                "a described custom root type may be composed exactly once",
+            ));
+        }
+        if described_types
+            .iter()
+            .any(|described| legacy_extra_types.contains(described))
+        {
+            return Err(syn::Error::new(
+                proc_macro2::Span::mixed_site(),
+                "described custom roots must not be repeated in an extra root list",
+            ));
+        }
         let mut declared_semantic_roots = std::collections::BTreeSet::new();
         for root in &semantic_custom_operations {
             if !declared_semantic_roots.insert(root.to_string()) {
@@ -826,6 +909,12 @@ impl Parse for SchemaRootsArgs {
                     "`semantic_custom_operations` entries must also be composed through a custom root list",
                 ));
             }
+            if described_types.contains(&root.to_string()) {
+                return Err(syn::Error::new(
+                    root.span(),
+                    "described custom roots supply semantic metadata automatically and must not be repeated in `semantic_custom_operations`",
+                ));
+            }
         }
 
         Ok(SchemaRootsArgs {
@@ -838,6 +927,9 @@ impl Parse for SchemaRootsArgs {
             extra_mutation_types,
             extra_query_types,
             extra_subscription_types,
+            described_query_types,
+            described_mutation_types,
+            described_subscription_types,
             semantic_custom_operations,
             semantic_types,
             generated_mutation_allowlist,

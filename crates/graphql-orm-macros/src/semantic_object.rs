@@ -386,5 +386,13 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
                 })
             }
         }
+
+        impl ::graphql_orm::graphql::orm::GraphqlSemanticResultTypeMetadata for #object {
+            fn graphql_semantic_result_type(
+            ) -> &'static ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata {
+                <Self as ::graphql_orm::graphql::orm::GraphqlSemanticObjectMetadata>
+                    ::graphql_semantic_object()
+            }
+        }
     })
 }

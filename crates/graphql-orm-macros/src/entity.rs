@@ -4109,6 +4109,15 @@ fn generate_entity_impl(
                     FIELDS
                 }
             }
+
+            impl ::graphql_orm::graphql::orm::GraphqlSemanticResultTypeMetadata for #struct_name {
+                fn graphql_semantic_result_type(
+                ) -> &'static ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata {
+                    <Self as ::graphql_orm::graphql::orm::Entity>
+                        ::graphql_semantic_metadata()
+                        .expect("GraphQLEntity must emit semantic metadata")
+                }
+            }
         });
     }
 
@@ -4535,6 +4544,15 @@ fn generate_entity_impl(
                 &self,
             ) -> Option<&(dyn ::std::any::Any + Send + Sync)> {
                 Some(self)
+            }
+        }
+
+        impl ::graphql_orm::graphql::orm::GraphqlSemanticResultTypeMetadata for #struct_name {
+            fn graphql_semantic_result_type(
+            ) -> &'static ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata {
+                <Self as ::graphql_orm::graphql::orm::Entity>
+                    ::graphql_semantic_metadata()
+                    .expect("GraphQLEntity must emit semantic metadata")
             }
         }
 

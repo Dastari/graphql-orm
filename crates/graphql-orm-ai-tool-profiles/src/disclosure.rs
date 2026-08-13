@@ -9,6 +9,80 @@ use thiserror::Error;
 use crate::{AiError, DataClassification};
 
 const MAXIMUM_DISCLOSURE_SCHEMA_DEPTH: usize = 64;
+const MAXIMUM_IDENTITY_FIELDS: usize = 8;
+const MAXIMUM_IDENTITY_VALUE_BYTES: usize = 1_024;
+
+/// Exact ordered identities required from a bounded result list.
+///
+/// This reusable validator binds server-selected result labels (for example,
+/// aggregate field/operator pairs) to the protected disclosure schema. It is
+/// not model-authored and never grants access to an otherwise hidden field.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiDisclosureListIdentity {
+    /// Object fields forming one identity tuple, in exact order.
+    pub fields: Box<[String]>,
+    /// Exact ordered tuples required from the result list.
+    pub expected: Box<[Box<[serde_json::Value]>]>,
+}
+
+impl AiDisclosureListIdentity {
+    /// Builds an exact ordered identity contract.
+    ///
+    /// Validation occurs when the enclosing [`AiDisclosureSchema`] is built.
+    pub fn exact(
+        fields: impl IntoIterator<Item = String>,
+        expected: impl IntoIterator<Item = Vec<serde_json::Value>>,
+    ) -> Self {
+        Self {
+            fields: fields.into_iter().collect::<Vec<_>>().into_boxed_slice(),
+            expected: expected
+                .into_iter()
+                .map(Vec::into_boxed_slice)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        }
+    }
+
+    fn validate(&self, maximum_items: u32) -> Result<(), AiError> {
+        let unique_fields = self
+            .fields
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        if self.fields.is_empty()
+            || self.fields.len() > MAXIMUM_IDENTITY_FIELDS
+            || unique_fields.len() != self.fields.len()
+            || self.fields.iter().any(|field| !valid_identity_field(field))
+            || self.expected.len() > maximum_items as usize
+            || self.expected.iter().any(|identity| {
+                identity.len() != self.fields.len()
+                    || identity.iter().any(|value| match value {
+                        serde_json::Value::Null
+                        | serde_json::Value::Bool(_)
+                        | serde_json::Value::Number(_) => false,
+                        serde_json::Value::String(value) => {
+                            value.is_empty()
+                                || value.len() > MAXIMUM_IDENTITY_VALUE_BYTES
+                                || value.chars().any(char::is_control)
+                        }
+                        serde_json::Value::Array(_) | serde_json::Value::Object(_) => true,
+                    })
+            })
+        {
+            return Err(AiError::InvalidConfiguration(
+                "disclosure list identity is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn valid_identity_field(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    !value.starts_with("__")
+        && matches!(bytes.next(), Some(b'A'..=b'Z' | b'a'..=b'z' | b'_'))
+        && bytes.all(|byte| matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'))
+}
 
 /// Whether a selected result node may ever leave the application boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +143,9 @@ pub enum AiDisclosureShape {
         rule: AiDisclosureRule,
         /// Maximum number of model-visible list entries.
         maximum_items: u32,
+        /// Optional exact ordered identity contract for object entries.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<AiDisclosureListIdentity>,
         /// Static item shape.
         item: Box<AiDisclosureShape>,
     },
@@ -96,6 +173,22 @@ impl AiDisclosureShape {
         Self::List {
             rule,
             maximum_items,
+            identity: None,
+            item: Box::new(item),
+        }
+    }
+
+    /// Creates a bounded list with an exact ordered item-identity contract.
+    pub fn list_with_identity(
+        rule: AiDisclosureRule,
+        maximum_items: u32,
+        item: AiDisclosureShape,
+        identity: AiDisclosureListIdentity,
+    ) -> Self {
+        Self::List {
+            rule,
+            maximum_items,
+            identity: Some(identity),
             item: Box::new(item),
         }
     }
@@ -124,6 +217,7 @@ impl AiDisclosureShape {
             }
             Self::List {
                 maximum_items,
+                identity,
                 item,
                 ..
             } => {
@@ -131,6 +225,14 @@ impl AiDisclosureShape {
                     return Err(AiError::InvalidConfiguration(
                         "disclosure list limit must be positive".to_owned(),
                     ));
+                }
+                if let Some(identity) = identity {
+                    identity.validate(*maximum_items)?;
+                    if !matches!(item.as_ref(), Self::Object { .. }) {
+                        return Err(AiError::InvalidConfiguration(
+                            "disclosure list identity requires object items".to_owned(),
+                        ));
+                    }
                 }
                 item.validate(depth + 1)
             }
@@ -330,6 +432,9 @@ pub enum AiDisclosureError {
     /// A result list exceeds its registered model-visible item bound.
     #[error("tool result exceeds its disclosure list bound")]
     ListLimitExceeded,
+    /// A result list does not contain the exact server-selected identities.
+    #[error("tool result identity does not match its compiled operation")]
+    IdentityMismatch,
     /// The complete result contains more records than its exact descriptor
     /// budget, including sibling and nested collections.
     #[error("tool result exceeds its total record bound")]
@@ -383,6 +488,7 @@ fn evaluate_node(
         }
         AiDisclosureShape::List {
             maximum_items,
+            identity,
             item,
             ..
         } => {
@@ -390,12 +496,35 @@ fn evaluate_node(
             if list.len() > *maximum_items as usize {
                 return Err(AiDisclosureError::ListLimitExceeded);
             }
+            if let Some(identity) = identity {
+                validate_list_identity(list, identity)?;
+            }
             for item_value in list {
                 merge_evaluation(&mut evaluation, evaluate_node(item_value, item, depth + 1)?);
             }
             Ok(evaluation)
         }
     }
+}
+
+fn validate_list_identity(
+    list: &[serde_json::Value],
+    identity: &AiDisclosureListIdentity,
+) -> Result<(), AiDisclosureError> {
+    if list.len() != identity.expected.len() {
+        return Err(AiDisclosureError::IdentityMismatch);
+    }
+    for (item, expected) in list.iter().zip(identity.expected.iter()) {
+        let object = item
+            .as_object()
+            .ok_or(AiDisclosureError::IdentityMismatch)?;
+        for (field, expected) in identity.fields.iter().zip(expected.iter()) {
+            if object.get(field) != Some(expected) {
+                return Err(AiDisclosureError::IdentityMismatch);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn merge_evaluation(target: &mut AiDisclosureEvaluation, source: AiDisclosureEvaluation) {
@@ -564,5 +693,56 @@ mod tests {
                 .evaluate_graphql_with_record_limit(&json!({"Records":["a", "b", "c"]}), 3)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn exact_list_identities_are_fingerprint_bound_and_fail_closed() {
+        let item = AiDisclosureShape::object(
+            rule(),
+            [
+                ("field".to_owned(), AiDisclosureShape::scalar(rule())),
+                ("operator".to_owned(), AiDisclosureShape::scalar(rule())),
+            ],
+        );
+        let exact = schema(AiDisclosureShape::list_with_identity(
+            rule(),
+            2,
+            item.clone(),
+            AiDisclosureListIdentity::exact(
+                ["field".to_owned(), "operator".to_owned()],
+                [vec![json!("amount"), json!("SUM")]],
+            ),
+        ));
+        let changed = schema(AiDisclosureShape::list_with_identity(
+            rule(),
+            2,
+            item,
+            AiDisclosureListIdentity::exact(
+                ["field".to_owned(), "operator".to_owned()],
+                [vec![json!("amount"), json!("MAX")]],
+            ),
+        ));
+        assert_ne!(exact.fingerprint, changed.fingerprint);
+        exact
+            .evaluate(&json!({"Records":[{"field":"amount","operator":"SUM"}]}))
+            .expect("exact identity discloses");
+        assert_eq!(
+            exact.evaluate(&json!({"Records":[{"field":"amount","operator":"MAX"}]})),
+            Err(AiDisclosureError::IdentityMismatch)
+        );
+
+        let invalid = AiDisclosureShape::list_with_identity(
+            rule(),
+            1,
+            record(),
+            AiDisclosureListIdentity::exact(
+                ["id".to_owned(), "id".to_owned()],
+                [vec![json!("one"), json!("one")]],
+            ),
+        );
+        assert!(matches!(
+            AiDisclosureSchema::new("invalid-v1", invalid),
+            Err(AiError::InvalidConfiguration(_))
+        ));
     }
 }

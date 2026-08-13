@@ -238,23 +238,25 @@ schema_roots! {
     auth: "required",
     generated_mutations: "allowlist",
     generated_mutation_allowlist: [Account],
-    query_custom_ops: [ApplicationQueries],
-    extra_query_types: [],
-    extra_mutation_types: [ApplicationMutations],
-    extra_subscription_types: [],
-    semantic_custom_operations: [ApplicationQueries],
-    semantic_types: [ApplicationStatus],
+    query_custom_ops: [],
+    described_query_types: [ApplicationQueries],
+    described_mutation_types: [ApplicationMutations],
+    described_subscription_types: [ApplicationEvents],
     entities: [Account],
 }
 ```
 
 `entities` is required. The optional `backend`, `schema_policy`, and `auth`
 take the same values as the entity options. `query_custom_ops`,
+`described_query_types`, `described_mutation_types`, and
+`described_subscription_types` are the single-source form for handwritten
+roots annotated by `#[graphql_orm_custom_operations]`: each entry composes the
+root and automatically includes its operation metadata and direct handwritten
+result objects deriving `GraphQLSemanticObject`. The legacy
 `extra_query_types`, `extra_mutation_types`, `extra_subscription_types`,
-`semantic_custom_operations`, and `semantic_types` are identifier lists. The
-last two lists name roots
-annotated by `#[graphql_orm_custom_operations]`; it does not compose a root by
-itself, and handwritten result objects deriving `GraphQLSemanticObject`.
+`semantic_custom_operations`, and `semantic_types` lists remain available for
+incremental compatibility. A root in a `described_*` list cannot be repeated
+in a legacy composition/semantic list.
 `generated_mutations` defaults to `"all"`; it accepts
 `"all"`, `"none"`, `"allowlist"`, or `"denylist"`. An allowlist/denylist
 requires its matching nonempty list, and every listed entity must be in
@@ -283,6 +285,16 @@ impl ApplicationQueries {
     async fn status(&self, #[graphql(desc = "Maximum records")] limit: i32) -> String {
         todo!()
     }
+
+    /// Returns a bounded exportable set of public status codes.
+    #[graphql_orm(
+        result_classification = "public",
+        result_export = "exportable",
+        result_maximum_items = 10
+    )]
+    async fn status_codes(&self) -> Vec<i32> {
+        todo!()
+    }
 }
 ```
 
@@ -293,6 +305,18 @@ attributes, then `async-graphql`'s default camel-case convention. Descriptions
 use the same explicit/doc/fallback rules and are emitted into SDL. Unknown attributes,
 unbounded descriptions, malformed GraphQL types, duplicate root coordinates,
 and stale fingerprints fail closed.
+
+Custom scalar and enum result leaves carry an explicit project-neutral
+`result_disclosure`. Without a declaration they default to
+`Secret`/`NeverExport` and are unavailable to generated AI capabilities while
+remaining ordinary GraphQL roots. `result_classification` and `result_export`
+must be declared together; `secret` cannot be exportable. Exportable scalar or
+enum lists additionally require positive `result_maximum_items`. Use
+`result_type_kind = "enum"` (or `"scalar"`) for a custom wrapper the macro
+cannot classify from its Rust type. These facts are fingerprinted descriptive
+metadata and grant no resolver or provider authority. Object results continue
+to use selected `GraphQLSemanticObject` fields; any operation-level declaration
+may only make the root stricter.
 
 Handwritten result objects use the sibling derive. Public list fields require
 an explicit positive maximum; sensitive fields are always secret and

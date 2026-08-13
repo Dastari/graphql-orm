@@ -58,6 +58,22 @@ semantic = [
 ]
 if semantic != [{"name": "graphql-orm-semantic-catalog", "version": match.group(1)}]:
     raise SystemExit("release-manifest: semantic catalogue contract row is missing or stale")
+
+capability_source = (
+    root / "crates/graphql-orm-ai-tool-profiles/src/query_plans.rs"
+).read_text(encoding="utf-8")
+for contract_name, constant_name in (
+    ("graphql-orm-ai-mutation-capability", "AI_GRAPHQL_MUTATION_CAPABILITY_VERSION"),
+    ("graphql-orm-ai-query-capability", "AI_GRAPHQL_QUERY_CAPABILITY_VERSION"),
+    ("graphql-orm-ai-subscription-capability", "AI_GRAPHQL_SUBSCRIPTION_CAPABILITY_VERSION"),
+):
+    match = re.search(rf"{constant_name}:\s*u16\s*=\s*(\d+)", capability_source)
+    if match is None:
+        raise SystemExit(f"release-manifest: {contract_name} version is unreadable")
+    selected = [contract for contract in contracts if contract["name"] == contract_name]
+    expected = [{"name": contract_name, "version": match.group(1)}]
+    if selected != expected:
+        raise SystemExit(f"release-manifest: {contract_name} row is missing or stale")
 PY
 
-echo "release-manifest: deterministic output and semantic catalogue contract passed"
+echo "release-manifest: deterministic output and canonical capability contracts passed"

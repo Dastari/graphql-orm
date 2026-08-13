@@ -104,6 +104,21 @@ def parse_contracts(commit: str) -> list[dict[str, str]]:
             r"AI_GRAPHQL_TOOL_MANIFEST_VERSION:\s*u16\s*=\s*(\d+)",
         ),
         (
+            "graphql-orm-ai-query-capability",
+            "crates/graphql-orm-ai-tool-profiles/src/query_plans.rs",
+            r"AI_GRAPHQL_QUERY_CAPABILITY_VERSION:\s*u16\s*=\s*(\d+)",
+        ),
+        (
+            "graphql-orm-ai-mutation-capability",
+            "crates/graphql-orm-ai-tool-profiles/src/query_plans.rs",
+            r"AI_GRAPHQL_MUTATION_CAPABILITY_VERSION:\s*u16\s*=\s*(\d+)",
+        ),
+        (
+            "graphql-orm-ai-subscription-capability",
+            "crates/graphql-orm-ai-tool-profiles/src/query_plans.rs",
+            r"AI_GRAPHQL_SUBSCRIPTION_CAPABILITY_VERSION:\s*u16\s*=\s*(\d+)",
+        ),
+        (
             "graphql-orm-semantic-catalog",
             "crates/graphql-orm-operation-catalog/src/semantic.rs",
             r"GRAPHQL_SEMANTIC_CATALOG_VERSION:\s*u16\s*=\s*(\d+)",

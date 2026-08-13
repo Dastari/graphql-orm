@@ -103,6 +103,34 @@ impl ReviewedQueries {
             provider_credential: "not executed in schema tests".to_owned(),
         }
     }
+
+    /// Returns a public scalar status.
+    #[graphql_orm(result_classification = "public", result_export = "exportable")]
+    async fn public_scalar_status(&self) -> String {
+        "ok".to_owned()
+    }
+
+    /// Returns a bounded restricted scalar list.
+    #[graphql_orm(
+        result_classification = "restricted",
+        result_export = "exportable",
+        result_maximum_items = 3
+    )]
+    async fn restricted_status_codes(&self) -> Vec<i32> {
+        vec![1]
+    }
+
+    /// Returns a secret that is structurally unavailable to providers.
+    #[graphql_orm(result_classification = "secret", result_export = "never_export")]
+    async fn secret_scalar_status(&self) -> String {
+        "hidden".to_owned()
+    }
+
+    /// Returns a non-secret value that remains structurally non-exportable.
+    #[graphql_orm(result_classification = "restricted", result_export = "never_export")]
+    async fn internal_only_scalar_status(&self) -> String {
+        "internal".to_owned()
+    }
 }
 
 #[graphql_orm_custom_operations(
@@ -113,8 +141,19 @@ impl ReviewedQueries {
 #[graphql_orm::async_graphql::Object]
 impl ReviewedMutations {
     /// Applies one reviewed bounded status change.
+    #[graphql_orm(result_classification = "internal", result_export = "exportable")]
     async fn apply_reviewed_status(&self, enabled: bool) -> bool {
         enabled
+    }
+
+    /// Applies and returns bounded restricted status codes.
+    #[graphql_orm(
+        result_classification = "restricted",
+        result_export = "exportable",
+        result_maximum_items = 2
+    )]
+    async fn apply_restricted_codes(&self, enabled: bool) -> Vec<i32> {
+        if enabled { vec![1] } else { Vec::new() }
     }
 }
 
@@ -133,15 +172,23 @@ impl ReviewedSubscriptions {
     ) -> impl graphql_orm::futures::Stream<Item = ReviewedStatus> {
         graphql_orm::futures::stream::empty()
     }
+
+    /// Observes bounded restricted scalar-list events.
+    #[graphql_orm(
+        result_classification = "restricted",
+        result_export = "exportable",
+        result_maximum_items = 2
+    )]
+    async fn restricted_codes_changed(&self) -> impl graphql_orm::futures::Stream<Item = Vec<i32>> {
+        graphql_orm::futures::stream::empty()
+    }
 }
 
 schema_roots! {
     entities: [SemanticRecord],
-    extra_query_types: [ReviewedQueries],
-    extra_mutation_types: [ReviewedMutations],
-    extra_subscription_types: [ReviewedSubscriptions],
-    semantic_custom_operations: [ReviewedQueries, ReviewedMutations, ReviewedSubscriptions],
-    semantic_types: [ReviewedStatus],
+    described_query_types: [ReviewedQueries],
+    described_mutation_types: [ReviewedMutations],
+    described_subscription_types: [ReviewedSubscriptions],
 }
 
 #[test]
@@ -204,6 +251,61 @@ fn entity_and_custom_root_semantics_are_canonical_and_safe() {
         custom.description,
         "Returns a bounded service status value."
     );
+    assert!(custom.result_disclosure.is_none());
+    assert_eq!(custom.generated_entity_name, None);
+    let public_scalar = catalog
+        .operations
+        .iter()
+        .find(|operation| operation.field_name == "publicScalarStatus")
+        .expect("public scalar semantics");
+    assert_eq!(
+        public_scalar.result_disclosure,
+        Some(GraphqlSemanticResultDisclosure::new(
+            GraphqlSemanticClassification::Public,
+            GraphqlSemanticExport::Exportable,
+        ))
+    );
+    let restricted_list = catalog
+        .operations
+        .iter()
+        .find(|operation| operation.field_name == "restrictedStatusCodes")
+        .expect("restricted list semantics");
+    assert_eq!(
+        restricted_list.result_disclosure,
+        Some(
+            GraphqlSemanticResultDisclosure::new(
+                GraphqlSemanticClassification::Restricted,
+                GraphqlSemanticExport::Exportable,
+            )
+            .with_maximum_items(3)
+        )
+    );
+    for field_name in ["secretScalarStatus", "internalOnlyScalarStatus"] {
+        let operation = catalog
+            .operations
+            .iter()
+            .find(|operation| operation.field_name == field_name)
+            .expect("non-exportable scalar semantics");
+        assert_eq!(
+            operation
+                .result_disclosure
+                .expect("scalar result disclosure")
+                .export,
+            GraphqlSemanticExport::NeverExport
+        );
+    }
+    let restricted_subscription = catalog
+        .operations
+        .iter()
+        .find(|operation| operation.field_name == "restrictedCodesChanged")
+        .expect("restricted subscription semantics");
+    assert_eq!(
+        restricted_subscription
+            .result_disclosure
+            .expect("subscription result disclosure")
+            .maximum_items,
+        Some(2)
+    );
     let status = catalog
         .entities
         .iter()
@@ -263,6 +365,10 @@ fn entity_and_custom_root_semantics_are_canonical_and_safe() {
         automatic_create.ai_mutation_execution,
         Some(AiMutationExecutionPolicy::Automatic)
     );
+    assert_eq!(
+        automatic_create.generated_entity_name.as_deref(),
+        Some("SemanticRecord")
+    );
     let approval_update = catalog
         .operations
         .iter()
@@ -295,6 +401,18 @@ fn entity_and_custom_root_semantics_are_canonical_and_safe() {
     assert_eq!(
         custom_mutation.ai_mutation_execution,
         Some(AiMutationExecutionPolicy::ApprovalRequired)
+    );
+    let restricted_mutation = catalog
+        .operations
+        .iter()
+        .find(|operation| operation.field_name == "applyRestrictedCodes")
+        .expect("restricted mutation semantics");
+    assert_eq!(
+        restricted_mutation
+            .result_disclosure
+            .expect("mutation result disclosure")
+            .maximum_items,
+        Some(2)
     );
 
     let payload = catalog.extension_payload().expect("extension payload");
@@ -354,6 +472,22 @@ fn extra_or_stale_payload_metadata_fails_closed() {
             .expect_err("empty fingerprint evidence must fail")
             .message(),
         "semantic catalogue fingerprint is stale"
+    );
+
+    let mut changed_result = catalog.extension_payload().expect("extension payload");
+    let operations = changed_result["operations"]
+        .as_array_mut()
+        .expect("operation array");
+    let public_scalar = operations
+        .iter_mut()
+        .find(|operation| operation["field_name"] == "publicScalarStatus")
+        .expect("public scalar operation");
+    public_scalar["result_disclosure"]["classification"] = serde_json::json!("restricted");
+    assert_eq!(
+        GraphqlSemanticCatalog::from_extension_payload(changed_result)
+            .expect_err("result disclosure drift must fail")
+            .message(),
+        "semantic operation fingerprint is stale"
     );
 }
 

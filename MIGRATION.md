@@ -44,6 +44,10 @@ struct HealthQueries;
 #[async_graphql::Object]
 impl HealthQueries {
     /// Returns current service health.
+    #[graphql_orm(
+        result_classification = "public",
+        result_export = "exportable"
+    )]
     async fn health(&self) -> String {
         "ok".to_owned()
     }
@@ -51,11 +55,29 @@ impl HealthQueries {
 
 schema_roots! {
     entities: [Account],
-    extra_query_types: [HealthQueries],
-    semantic_custom_operations: [HealthQueries],
-    semantic_types: [],
+    described_query_types: [HealthQueries],
 }
 ```
+
+The `described_query_types`, `described_mutation_types`, and
+`described_subscription_types` lists replace the need to repeat one root in
+both an `extra_*` list and `semantic_custom_operations`; direct
+`GraphQLSemanticObject` results are collected as well. Legacy lists remain
+supported, but the same root cannot use both forms.
+
+Unclassified custom scalar/enum leaves now fail safe as
+`Secret`/`NeverExport` and therefore do not become automatic AI capabilities.
+Declare `result_classification` and `result_export` together only for a
+reviewed exportable root. An exportable scalar/enum list additionally requires
+positive `result_maximum_items`; custom enum/scalar wrappers may need the
+explicit `result_type_kind`. Object results continue deriving authority-neutral
+disclosure from selected fields, and a root declaration can only tighten it.
+
+Generated aggregate operation fingerprints now include their owning public
+entity identity. Compiled aggregate plan, projection, and disclosure
+fingerprints also bind exact selected grouping fields and metric
+field/operator pairs. Refresh any stored host allowlists; a response with
+unselected or drifted aggregate identities is rejected before provider egress.
 
 The catalogue and per-operation semantic fingerprints intentionally change
 when public descriptions, fields, relationships, capabilities, classifications
