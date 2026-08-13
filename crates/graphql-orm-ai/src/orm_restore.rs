@@ -19,7 +19,8 @@ use crate::persistence::{
     AiAuditEventRecord, AiAuditEventRecordOrderByInput, AiBudgetPolicyRecord,
     AiBudgetPolicyRecordOrderByInput, AiEgressConsentRecord, AiEgressConsentRecordOrderByInput,
     AiMessageRecord, AiPricingPolicyRecord, AiPricingPolicyRecordOrderByInput, AiRunRecord,
-    AiRunRecordOrderByInput, AiSessionRecord,
+    AiRunRecordOrderByInput, AiSessionRecord, AiSubscriptionWaitAdoptionRecord,
+    AiSubscriptionWaiterRecord,
 };
 use crate::{
     AiAttachmentServiceLimits, AiBudgetAmounts, AiBudgetPolicyManagementLimits,
@@ -374,6 +375,23 @@ impl OrmAiRestoreFactCollector {
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
+                    // Portable backup redacts live wait plans/cursors and
+                    // unconsumed adopted outcomes. Read the bounded graph so
+                    // terminal/consumed tombstones do not block readiness.
+                    let subscription_waiters = tx
+                        .query::<AiSubscriptionWaiterRecord>()
+                        .default_order()
+                        .limit(query_limit(limits.maximum_runs))
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let subscription_wait_adoptions = tx
+                        .query::<AiSubscriptionWaitAdoptionRecord>()
+                        .default_order()
+                        .limit(query_limit(limits.maximum_runs))
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
                     let policies = if let Some(policy_limits) = policy_audit_limits {
                         let budget_policies = tx
                             .query::<AiBudgetPolicyRecord>()
@@ -473,6 +491,8 @@ impl OrmAiRestoreFactCollector {
                         approvals,
                         egress_consents,
                         provider_sessions,
+                        subscription_waiters,
+                        subscription_wait_adoptions,
                         policies,
                         attachments,
                     })
@@ -490,6 +510,8 @@ struct CollectedRows {
     approvals: Vec<AiApprovalRecord>,
     egress_consents: Vec<AiEgressConsentRecord>,
     provider_sessions: Vec<AiProviderSessionBindingRecord>,
+    subscription_waiters: Vec<AiSubscriptionWaiterRecord>,
+    subscription_wait_adoptions: Vec<AiSubscriptionWaitAdoptionRecord>,
     policies: Option<CollectedPolicyRows>,
     attachments: Option<CollectedAttachmentMetadataRows>,
 }
@@ -696,6 +718,63 @@ impl CollectedRows {
                 }
             },
         );
+        let waits_truncated = self.subscription_waiters.len() > limits.maximum_runs;
+        let adoptions_truncated = self.subscription_wait_adoptions.len() > limits.maximum_runs;
+        let adoption_states = self
+            .subscription_wait_adoptions
+            .iter()
+            .map(|adoption| (adoption.waiter_id, adoption.state.as_str()))
+            .collect::<BTreeMap<_, _>>();
+        let waiter_ids = self
+            .subscription_waiters
+            .iter()
+            .map(|waiter| waiter.id)
+            .collect::<BTreeSet<_>>();
+        let invalid_waiters = self
+            .subscription_waiters
+            .iter()
+            .filter(|waiter| match waiter.state.as_str() {
+                "waiting" | "claimed" => true,
+                "adopted" => adoption_states
+                    .get(&waiter.id)
+                    .is_none_or(|state| *state != "consumed"),
+                "cancelled" | "failed" | "recovery_required" => false,
+                _ => true,
+            })
+            .count();
+        let invalid_adoptions = self
+            .subscription_wait_adoptions
+            .iter()
+            .filter(|adoption| {
+                !waiter_ids.contains(&adoption.waiter_id)
+                    || !matches!(
+                        adoption.state.as_str(),
+                        "queued" | "claimed" | "consumed" | "cancelled" | "recovery_required"
+                    )
+            })
+            .count();
+        let invalid_subscription_wait_count =
+            u64::try_from(invalid_waiters.saturating_add(invalid_adoptions))
+                .map_err(|_| AiError::PersistenceFailed)?
+                .saturating_add(u64::from(waits_truncated || adoptions_truncated));
+        let subscription_wait_evidence = self
+            .subscription_waiters
+            .iter()
+            .map(|waiter| (waiter.id, waiter.row_version, waiter.state.clone()))
+            .collect::<Vec<_>>();
+        let subscription_adoption_evidence = self
+            .subscription_wait_adoptions
+            .iter()
+            .map(|adoption| (adoption.id, adoption.row_version, adoption.state.clone()))
+            .collect::<Vec<_>>();
+        if invalid_subscription_wait_count > 0 {
+            statuses.insert(
+                AiRestoreAuditKind::CoordinatorCheckpoints,
+                AiRestoreAuditStatus::Invalid {
+                    count: invalid_subscription_wait_count,
+                },
+            );
+        }
 
         let mut invalid_budget_policy_count = 0_u64;
         let mut invalid_pricing_policy_count = 0_u64;
@@ -725,6 +804,8 @@ impl CollectedRows {
             approval_evidence,
             consent_evidence,
             provider_session_evidence,
+            subscription_wait_evidence,
+            subscription_adoption_evidence,
             policy_evidence,
             attachment_metadata_evidence,
         ))
@@ -743,7 +824,7 @@ impl CollectedRows {
                 invalid_pricing_policy_count,
                 invalid_skill_catalog_count: 0,
                 invalid_rule_policy_count: 0,
-                invalid_coordinator_checkpoint_count: 0,
+                invalid_coordinator_checkpoint_count: invalid_subscription_wait_count,
                 invalid_context_checkpoint_count: 0,
                 invalid_provider_webhook_receipt_count: 0,
                 invalid_provider_background_submission_count: 0,

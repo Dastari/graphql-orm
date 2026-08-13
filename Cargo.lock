@@ -3120,6 +3120,7 @@ dependencies = [
  "hmac 0.12.1",
  "jsonschema 0.47.0",
  "reqwest 0.13.4",
+ "rust_decimal",
  "secrecy",
  "serde",
  "serde_json",

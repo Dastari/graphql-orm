@@ -11,6 +11,7 @@ use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{StringFilter, UuidFilter};
 use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, DefaultWriteBackend, TransactionMode};
+use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use time::{Duration, OffsetDateTime};
@@ -349,12 +350,14 @@ struct ProtectedProviderResult {
     lease_generation: i64,
     provider_kind: crate::ProviderKind,
     provider_model: String,
+    events: Vec<crate::ProviderEvent>,
+    usage: crate::AiBudgetAmounts,
+    cached_input_tokens: u64,
+    builtin_usage: crate::AiProviderBuiltinUsage,
     provider_response_id: Option<String>,
     budget_reservation_id: Uuid,
     previous_response_id: Option<String>,
     tool_calls: Vec<ProtectedProviderToolCall>,
-    #[serde(flatten)]
-    remaining: std::collections::BTreeMap<String, Value>,
 }
 
 #[derive(Deserialize)]
@@ -872,23 +875,33 @@ impl OrmAiSubscriptionWaitService {
                             || waiter.protected_request.is_none()
                             || waiter.protected_cursor.is_none()
                         {
-                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                            quarantine_waiter_candidate(tx, &waiter, None).await?;
+                            continue;
                         }
-                        let run = tx
+                        let Some(run) = tx
                             .find_by_id::<AiRunRecord>(&waiter.run_id)
                             .await
                             .map_err(OrmPublicError::from)?
-                            .ok_or_else(OrmPublicError::not_found)?;
-                        let session = tx
+                        else {
+                            quarantine_waiter_candidate(tx, &waiter, None).await?;
+                            continue;
+                        };
+                        let Some(session) = tx
                             .find_by_id::<AiSessionRecord>(&waiter.session_id)
                             .await
                             .map_err(OrmPublicError::from)?
-                            .ok_or_else(OrmPublicError::not_found)?;
-                        let call = tx
+                        else {
+                            quarantine_waiter_candidate(tx, &waiter, Some(&run)).await?;
+                            continue;
+                        };
+                        let Some(call) = tx
                             .find_by_id::<AiToolCallRecord>(&waiter.tool_call_id)
                             .await
                             .map_err(OrmPublicError::from)?
-                            .ok_or_else(OrmPublicError::not_found)?;
+                        else {
+                            quarantine_waiter_candidate(tx, &waiter, Some(&run)).await?;
+                            continue;
+                        };
                         let adoptions = tx
                             .query::<AiSubscriptionWaitAdoptionRecord>()
                             .filter(AiSubscriptionWaitAdoptionRecordWhereInput {
@@ -918,7 +931,8 @@ impl OrmAiSubscriptionWaitService {
                             || call.completed_at.is_some()
                             || !adoptions.is_empty()
                         {
-                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            quarantine_waiter_candidate(tx, &waiter, Some(&run)).await?;
+                            continue;
                         }
                         let generation = waiter
                             .claim_generation
@@ -1067,6 +1081,18 @@ impl OrmAiSubscriptionWaitService {
                     waiter_id: claim.waiter_id,
                 });
             }
+            Ok(Err(error)) if source_state_is_invalid(&error) => {
+                self.close_claim(
+                    &claim,
+                    AiRunState::RecoveryRequired,
+                    "subscription_source_state_invalid",
+                )
+                .await?;
+                return Ok(AiSubscriptionWaitWorkerOutcome::RecoveryRequired {
+                    waiter_id: claim.waiter_id,
+                    run_id: claim.run_id,
+                });
+            }
             Ok(Err(error)) => return Err(map_source(error)),
         };
         let waiter_remaining = opened
@@ -1144,84 +1170,168 @@ impl OrmAiSubscriptionWaitService {
                     run_id: claim.run_id,
                 });
             }
-            Ok(Some(Err(error))) => return Err(map_source(error)),
-            Ok(Some(Ok(AiReplayableSubscriptionSourceItem::Event(event)))) => event,
-        };
-        drop(stream);
-        let principal = self
-            .runtime
-            .resolve_current_principal(&opened.principal_reference)
-            .await?;
-        self.ensure_fresh(&principal, &opened.principal_reference)?;
-        let preauthorization = self
-            .runtime
-            .preauthorize_compiled_subscription(
-                &opened.principal_reference,
-                &opened.descriptor,
-                &opened.request,
-            )
-            .await?;
-        self.ensure_fresh(preauthorization.principal(), &opened.principal_reference)?;
-        let response = resolved
-            .source
-            .authorize_event(preauthorization.principal(), &opened.request, &event)
-            .await;
-        let response = match response {
-            Ok(response) => response,
-            Err(crate::AiSubscriptionSourceError::Authorization) => {
-                self.close_claim(&claim, AiRunState::Failed, "subscription_authority_revoked")
-                    .await?;
-                return Ok(AiSubscriptionWaitWorkerOutcome::Closed {
+            Ok(Some(Err(error))) if source_state_is_invalid(&error) => {
+                self.close_claim(
+                    &claim,
+                    AiRunState::RecoveryRequired,
+                    "subscription_source_state_invalid",
+                )
+                .await?;
+                return Ok(AiSubscriptionWaitWorkerOutcome::RecoveryRequired {
                     waiter_id: claim.waiter_id,
                     run_id: claim.run_id,
                 });
             }
-            Err(error) => return Err(map_source(error)),
+            Ok(Some(Err(error))) => return Err(map_source(error)),
+            Ok(Some(Ok(AiReplayableSubscriptionSourceItem::Event(event)))) => event,
         };
-        let validated = self.runtime.validate_compiled_subscription_event(
-            &opened.descriptor,
-            &opened.disclosure_schema,
-            response,
-            &preauthorization,
-        )?;
-        let model_output = validated.model_output();
-        enforce_size(&model_output, self.limits.maximum_event_bytes)?;
-        let matches = condition_matches(
-            opened
-                .request
-                .contract
-                .semantic_operation()
-                .ok_or(AiError::Conflict)?
-                .field_name(),
-            opened.condition.as_ref(),
-            &validated.response().data,
-        )?;
-        let examined = opened
-            .waiter
-            .events_examined
-            .checked_add(1)
-            .ok_or(AiError::PersistenceFailed)?;
-        if matches {
-            self.queue_event_outcome(&claim, &opened, &event, validated)
-                .await?;
-            return Ok(AiSubscriptionWaitWorkerOutcome::Queued {
+        drop(stream);
+        let remaining = claim
+            .claim_expires_at
+            .unix_timestamp()
+            .saturating_sub(self.clock.now().unix_timestamp());
+        let post_event_seconds = remaining / 2;
+        if post_event_seconds <= 0 {
+            self.release_claim(&claim).await?;
+            return Ok(AiSubscriptionWaitWorkerOutcome::Waiting {
                 waiter_id: claim.waiter_id,
-                run_id: claim.run_id,
             });
         }
-        if examined >= opened.waiter.maximum_events {
-            self.queue_limit_outcome(&claim, &opened, "event_limit", Some(&event))
+        let post_event = async {
+            let principal = self
+                .runtime
+                .resolve_current_principal(&opened.principal_reference)
                 .await?;
-            return Ok(AiSubscriptionWaitWorkerOutcome::Queued {
+            self.ensure_fresh(&principal, &opened.principal_reference)?;
+            let preauthorization = self
+                .runtime
+                .preauthorize_compiled_subscription(
+                    &opened.principal_reference,
+                    &opened.descriptor,
+                    &opened.request,
+                )
+                .await?;
+            self.ensure_fresh(preauthorization.principal(), &opened.principal_reference)?;
+            let response = resolved
+                .source
+                .authorize_event(preauthorization.principal(), &opened.request, &event)
+                .await;
+            let response = match response {
+                Ok(response) => response,
+                Err(crate::AiSubscriptionSourceError::Authorization) => {
+                    self.close_claim(&claim, AiRunState::Failed, "subscription_authority_revoked")
+                        .await?;
+                    return Ok(AiSubscriptionWaitWorkerOutcome::Closed {
+                        waiter_id: claim.waiter_id,
+                        run_id: claim.run_id,
+                    });
+                }
+                Err(error) if source_state_is_invalid(&error) => {
+                    self.close_claim(
+                        &claim,
+                        AiRunState::RecoveryRequired,
+                        "subscription_source_state_invalid",
+                    )
+                    .await?;
+                    return Ok(AiSubscriptionWaitWorkerOutcome::RecoveryRequired {
+                        waiter_id: claim.waiter_id,
+                        run_id: claim.run_id,
+                    });
+                }
+                Err(error) => return Err(map_source(error)),
+            };
+            let validated = self.runtime.validate_compiled_subscription_event(
+                &opened.descriptor,
+                &opened.disclosure_schema,
+                response,
+                &preauthorization,
+            )?;
+            let model_output = validated.model_output();
+            enforce_size(&model_output, self.limits.maximum_event_bytes)?;
+            let matches = condition_matches(
+                opened
+                    .request
+                    .contract
+                    .semantic_operation()
+                    .ok_or(AiError::Conflict)?
+                    .field_name(),
+                opened.condition.as_ref(),
+                &validated.response().data,
+            )?;
+            let examined = opened
+                .waiter
+                .events_examined
+                .checked_add(1)
+                .ok_or(AiError::PersistenceFailed)?;
+            if matches {
+                self.queue_event_outcome(&claim, &opened, &event, validated)
+                    .await?;
+                return Ok(AiSubscriptionWaitWorkerOutcome::Queued {
+                    waiter_id: claim.waiter_id,
+                    run_id: claim.run_id,
+                });
+            }
+            if examined >= opened.waiter.maximum_events {
+                self.queue_limit_outcome(&claim, &opened, "event_limit", Some(&event))
+                    .await?;
+                return Ok(AiSubscriptionWaitWorkerOutcome::Queued {
+                    waiter_id: claim.waiter_id,
+                    run_id: claim.run_id,
+                });
+            }
+            self.advance_cursor_and_release(&claim, &opened, &event)
+                .await?;
+            Ok(AiSubscriptionWaitWorkerOutcome::Waiting {
                 waiter_id: claim.waiter_id,
-                run_id: claim.run_id,
-            });
+            })
+        };
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(
+                u64::try_from(post_event_seconds).map_err(|_| AiError::Conflict)?,
+            ),
+            post_event,
+        )
+        .await
+        {
+            Ok(Ok(outcome)) => Ok(outcome),
+            Ok(Err(AiError::Forbidden | AiError::NotFound | AiError::ReauthorizationFailed)) => {
+                self.close_claim(&claim, AiRunState::Failed, "subscription_authority_revoked")
+                    .await?;
+                Ok(AiSubscriptionWaitWorkerOutcome::Closed {
+                    waiter_id: claim.waiter_id,
+                    run_id: claim.run_id,
+                })
+            }
+            Ok(Err(
+                AiError::InvalidInput(_)
+                | AiError::ToolExecutionFailed
+                | AiError::PersistenceFailed,
+            )) => {
+                self.close_claim(
+                    &claim,
+                    AiRunState::RecoveryRequired,
+                    "subscription_event_validation_failed",
+                )
+                .await?;
+                Ok(AiSubscriptionWaitWorkerOutcome::RecoveryRequired {
+                    waiter_id: claim.waiter_id,
+                    run_id: claim.run_id,
+                })
+            }
+            Ok(Err(error)) => Err(error),
+            Err(_) => {
+                self.close_claim(
+                    &claim,
+                    AiRunState::RecoveryRequired,
+                    "subscription_claim_deadline_exceeded",
+                )
+                .await?;
+                Ok(AiSubscriptionWaitWorkerOutcome::RecoveryRequired {
+                    waiter_id: claim.waiter_id,
+                    run_id: claim.run_id,
+                })
+            }
         }
-        self.advance_cursor_and_release(&claim, &opened, &event)
-            .await?;
-        Ok(AiSubscriptionWaitWorkerOutcome::Waiting {
-            waiter_id: claim.waiter_id,
-        })
     }
 
     async fn release_claim(&self, claim: &AiSubscriptionWaitClaim) -> Result<(), AiError> {
@@ -1958,6 +2068,13 @@ impl OrmAiSubscriptionWaitService {
                 .map_err(|_| AiError::PersistenceFailed)?;
         let provider_tool = provider.tool_calls.first().ok_or(AiError::Conflict)?;
         let tool_id = AiToolId::parse(provider_tool.tool_id.clone())?;
+        let provider_definition = self
+            .runtime
+            .tool_catalog()
+            .subscription_capability_model_definition(
+                &tool_id,
+                provider_tool.provider_name.clone(),
+            )?;
         let compiled = self
             .runtime
             .tool_catalog()
@@ -1985,6 +2102,9 @@ impl OrmAiSubscriptionWaitService {
             || outcome.tool_id != provider_tool.tool_id
             || outcome.provider_turns != request_payload.provider_turns
             || outcome.total_tool_calls != request_payload.total_tool_calls
+            || !valid_provider_snapshot(&provider, &outcome.pending_continuation)
+            || provider_definition.provider_name != provider_tool.provider_name
+            || provider_definition.fingerprint != provider_tool.tool_fingerprint
             || descriptor != request_payload.descriptor
             || disclosure_schema != request_payload.disclosure_schema
             || variables != request_payload.variables
@@ -2404,6 +2524,7 @@ impl OrmAiSubscriptionWaitService {
             || provider.attempt_id != waiter.source_attempt_id
             || provider.lease_generation != waiter.source_lease_generation
             || provider.tool_calls.len() != 1
+            || !valid_provider_snapshot(&provider, &payload.pending_continuation)
             || provider.budget_reservation_id
                 != call.budget_reservation_id.ok_or(AiError::Conflict)?
             || provider.provider_response_id != call.provider_response_id
@@ -2423,6 +2544,18 @@ impl OrmAiSubscriptionWaitService {
             return Err(AiError::Conflict);
         }
         let tool_id = AiToolId::parse(provider_tool.tool_id.clone())?;
+        let provider_definition = self
+            .runtime
+            .tool_catalog()
+            .subscription_capability_model_definition(
+                &tool_id,
+                provider_tool.provider_name.clone(),
+            )?;
+        if provider_definition.provider_name != provider_tool.provider_name
+            || provider_definition.fingerprint != provider_tool.tool_fingerprint
+        {
+            return Err(AiError::Conflict);
+        }
         let compiled = self
             .runtime
             .tool_catalog()
@@ -3077,6 +3210,60 @@ fn validate_claimed_waiter(
     Ok(())
 }
 
+async fn quarantine_waiter_candidate(
+    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+    waiter: &AiSubscriptionWaiterRecord,
+    run: Option<&AiRunRecord>,
+) -> Result<(), OrmPublicError> {
+    let waiter_state = if run.is_some_and(|run| {
+        AiRunState::from_persisted(&run.state).is_some_and(AiRunState::is_terminal)
+    }) {
+        "cancelled"
+    } else {
+        "recovery_required"
+    };
+    if !matches!(
+        tx.compare_and_swap::<AiSubscriptionWaiterRecord>(
+            &waiter.id,
+            waiter.row_version,
+            waiter_exact_state(&waiter.state),
+            UpdateAiSubscriptionWaiterRecordInput {
+                state: Some(waiter_state.to_owned()),
+                claim_owner: Some(None),
+                claim_expires_at: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(OrmPublicError::from)?,
+        ConditionalUpdateOutcome::Updated(_)
+    ) {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
+    if let Some(run) = run
+        && run.state == AiRunState::WaitingSubscription.as_str()
+        && !matches!(
+            tx.compare_and_swap::<AiRunRecord>(
+                &run.id,
+                run.row_version,
+                exact_state(&run.state),
+                UpdateAiRunRecordInput {
+                    state: Some(AiRunState::RecoveryRequired.as_str().to_owned()),
+                    next_attempt_at: Some(None),
+                    error_code: Some(Some("subscription_wait_graph_invalid".to_owned())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(OrmPublicError::from)?,
+            ConditionalUpdateOutcome::Updated(_)
+        )
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
+    Ok(())
+}
+
 fn waiter_exact_state(state: &str) -> AiSubscriptionWaiterRecordWhereInput {
     AiSubscriptionWaiterRecordWhereInput {
         state: Some(StringFilter {
@@ -3138,12 +3325,20 @@ fn ordered_json(left: &Value, right: &Value) -> Result<std::cmp::Ordering, AiErr
     match (left, right) {
         (Value::String(left), Value::String(right)) => Ok(left.cmp(right)),
         (Value::Number(left), Value::Number(right)) => {
-            let left = left.as_f64().ok_or(AiError::ToolExecutionFailed)?;
-            let right = right.as_f64().ok_or(AiError::ToolExecutionFailed)?;
-            left.partial_cmp(&right).ok_or(AiError::ToolExecutionFailed)
+            let left = exact_json_decimal(left)?;
+            let right = exact_json_decimal(right)?;
+            Ok(left.cmp(&right))
         }
         _ => Err(AiError::ToolExecutionFailed),
     }
+}
+
+fn exact_json_decimal(number: &serde_json::Number) -> Result<Decimal, AiError> {
+    let value = number.to_string();
+    value
+        .parse::<Decimal>()
+        .or_else(|_| Decimal::from_scientific(&value))
+        .map_err(|_| AiError::ToolExecutionFailed)
 }
 
 fn valid_fingerprint(value: &str) -> bool {
@@ -3163,5 +3358,105 @@ fn map_source(error: crate::AiSubscriptionSourceError) -> AiError {
             AiError::InvalidInput("subscription source returned invalid bounded state".to_owned())
         }
         crate::AiSubscriptionSourceError::Unavailable => AiError::ToolExecutionFailed,
+    }
+}
+
+fn source_state_is_invalid(error: &crate::AiSubscriptionSourceError) -> bool {
+    matches!(
+        error,
+        crate::AiSubscriptionSourceError::InvalidPosition
+            | crate::AiSubscriptionSourceError::InvalidEvent
+            | crate::AiSubscriptionSourceError::LimitExceeded
+    )
+}
+
+fn valid_provider_snapshot(
+    provider: &ProtectedProviderResult,
+    continuation: &ModelContinuation,
+) -> bool {
+    if provider.events.is_empty()
+        || provider.events.len() > 16_384
+        || provider.usage.runs != 1
+        || provider.cached_input_tokens > provider.usage.input_tokens
+        || provider.builtin_usage.total_calls() > provider.usage.tool_units
+        || provider
+            .previous_response_id
+            .as_ref()
+            .is_some_and(|reference| reference.is_empty() || reference.len() > 1_024)
+    {
+        return false;
+    }
+    match continuation {
+        ModelContinuation::ProviderResponse { response_id } => {
+            provider.provider_response_id.as_deref() == Some(response_id)
+        }
+        ModelContinuation::StatelessConversation { .. } => provider.provider_response_id.is_none(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn condition(operator: &str, value: Value) -> AiGraphqlSubscriptionCondition {
+        serde_json::from_value(json!({
+            "field": "sequence",
+            "operator": operator,
+            "value": value,
+        }))
+        .expect("condition should deserialize")
+    }
+
+    #[test]
+    fn ordered_conditions_preserve_integers_above_f64_precision() {
+        let data = json!({"Event": {"sequence": 9_007_199_254_740_993_u64}});
+        assert!(
+            condition_matches(
+                "Event",
+                Some(&condition("greater_than", json!(9_007_199_254_740_992_u64),)),
+                &data,
+            )
+            .expect("exact integer comparison should succeed")
+        );
+        assert!(
+            !condition_matches(
+                "Event",
+                Some(&condition("equal", json!(9_007_199_254_740_992_u64))),
+                &data,
+            )
+            .expect("exact equality should succeed")
+        );
+    }
+
+    #[test]
+    fn malformed_source_state_is_quarantined_not_retried() {
+        for error in [
+            crate::AiSubscriptionSourceError::InvalidPosition,
+            crate::AiSubscriptionSourceError::InvalidEvent,
+            crate::AiSubscriptionSourceError::LimitExceeded,
+        ] {
+            assert!(source_state_is_invalid(&error));
+        }
+        assert!(!source_state_is_invalid(
+            &crate::AiSubscriptionSourceError::Unavailable
+        ));
+    }
+
+    #[test]
+    fn condition_rejects_unknown_or_non_scalar_shape() {
+        let missing = json!({"Event": {"other": 1}});
+        assert!(matches!(
+            condition_matches("Event", Some(&condition("equal", json!(1))), &missing,),
+            Err(AiError::ToolExecutionFailed)
+        ));
+        let composite = json!({"Event": {"sequence": {"nested": 1}}});
+        assert!(matches!(
+            condition_matches(
+                "Event",
+                Some(&condition("greater_than", json!(1))),
+                &composite,
+            ),
+            Err(AiError::ToolExecutionFailed)
+        ));
     }
 }

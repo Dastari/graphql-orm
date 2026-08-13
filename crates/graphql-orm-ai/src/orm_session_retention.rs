@@ -27,10 +27,12 @@ use crate::{AiError, AiRunState, AiScope, AiSessionRetentionReport, AiSessionRet
 
 pub(crate) const MAXIMUM_RETENTION_SECONDS: i64 = 315_576_000;
 const RUN_CHECKPOINT_RETENTION_POLICY: &str = "graphql_orm_ai.run_checkpoint.retention_purge";
-const PROTECTED_RUN_CHECKPOINT_KINDS: [&str; 3] = [
+const PROTECTED_RUN_CHECKPOINT_KINDS: [&str; 5] = [
     "provider_turn_persisted",
     "tool_batch_persisted",
     "supervised_tool_batch_persisted",
+    "subscription_wait_parked",
+    "subscription_wait_adopted",
 ];
 const MAXIMUM_TITLE_MUTATION_DELETES_PER_PASS: i64 = 5_000;
 
@@ -1236,6 +1238,19 @@ impl OrmAiSessionRetentionService {
                                 }
                             }
                         }
+                    }
+                    if deletion_cutoff_reached
+                        && !tool_payload_purge_blocked
+                        && !purge_terminal_subscription_waits(
+                            tx,
+                            session.id,
+                            run_limit_with_lookahead,
+                            usize::try_from(run_limit)
+                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?,
+                        )
+                        .await?
+                    {
+                        tool_payload_purge_blocked = true;
                     }
 
                     let mut attachment_cleanups_requested = 0usize;
@@ -4009,6 +4024,86 @@ fn proposal_state_is_terminal(proposal: &AiProposalRecord, now: i64) -> bool {
             && proposal
                 .expires_at
                 .is_some_and(|expires_at| expires_at <= now))
+}
+
+async fn purge_terminal_subscription_waits(
+    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+    session_id: Uuid,
+    limit_with_lookahead: i64,
+    maximum: usize,
+) -> Result<bool, OrmPublicError> {
+    let waiters = tx
+        .query::<AiSubscriptionWaiterRecord>()
+        .filter(AiSubscriptionWaiterRecordWhereInput {
+            session_id: Some(UuidFilter {
+                eq: Some(session_id),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .default_order()
+        .limit(limit_with_lookahead)
+        .fetch_all()
+        .await
+        .map_err(OrmPublicError::from)?;
+    if waiters.len() > maximum {
+        return Ok(false);
+    }
+    for waiter in waiters {
+        let run = tx
+            .find_by_id::<AiRunRecord>(&waiter.run_id)
+            .await
+            .map_err(OrmPublicError::from)?
+            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+        let call = tx
+            .find_by_id::<AiToolCallRecord>(&waiter.tool_call_id)
+            .await
+            .map_err(OrmPublicError::from)?
+            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+        let state = AiRunState::from_persisted(&run.state)
+            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+        if run.session_id != session_id
+            || call.run_id != run.id
+            || !state.is_terminal()
+            || !tool_call_state_is_terminal(&call.state)
+            || call.payload_purged_at.is_none()
+            || call.protected_arguments.is_some()
+            || call.protected_result.is_some()
+            || !matches!(waiter.state.as_str(), "cancelled" | "failed" | "adopted")
+        {
+            return Ok(false);
+        }
+        let adoptions = tx
+            .query::<AiSubscriptionWaitAdoptionRecord>()
+            .filter(AiSubscriptionWaitAdoptionRecordWhereInput {
+                waiter_id: Some(UuidFilter {
+                    eq: Some(waiter.id),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .limit(2)
+            .fetch_all()
+            .await
+            .map_err(OrmPublicError::from)?;
+        if adoptions.len() > 1
+            || (waiter.state == "adopted"
+                && adoptions
+                    .first()
+                    .is_none_or(|adoption| adoption.state != "consumed"))
+        {
+            return Ok(false);
+        }
+        if let Some(adoption) = adoptions.first() {
+            tx.delete_by_id::<AiSubscriptionWaitAdoptionRecord>(&adoption.id)
+                .await
+                .map_err(OrmPublicError::from)?;
+        }
+        tx.delete_by_id::<AiSubscriptionWaiterRecord>(&waiter.id)
+            .await
+            .map_err(OrmPublicError::from)?;
+    }
+    Ok(true)
 }
 
 fn validate_tool_call(call: &AiToolCallRecord, run_ids: &[Uuid]) -> Result<(), OrmPublicError> {
