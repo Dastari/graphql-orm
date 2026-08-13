@@ -66,6 +66,16 @@ eligible for a durable wait. A custom subscription may declare bounded
 `replay_then_live` semantics only beside its resolver; downstream runtimes must
 still register and verify the matching authoritative cursor/watermark source.
 
+Typed grouped aggregates are additive. Every `GraphQLEntity` now emits a
+closed aggregate-field enum for repository use, while no GraphQL root is added
+unless the entity declares `aggregate = true`. That opt-in changes the schema
+and operation catalogue by adding the bounded aggregate query. Decimal fields
+must declare `#[graphql_orm(decimal(precision = P, scale = S))]`; SQLite stores
+their exact scaled integer representation while PostgreSQL and SQL Server use
+native fixed-precision types. Adding a new Decimal column is an ordinary
+application schema migration, but adopting this release without declaring one
+requires no database or stored-data migration.
+
 ## 0.21.1 agql-auth 0.15 session-bound delegation alignment
 
 Update `graphql-orm` and `graphql-orm-macros` together to 0.21.1 at one

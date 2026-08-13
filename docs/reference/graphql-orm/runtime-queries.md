@@ -151,5 +151,7 @@ entity, or serialized runtime-schema API changed. Third-party backends remain
 source-compatible and explicitly unsupported for runtime execution until they
 provide exact runtime decoding on a supported dialect. Validated one-layer
 relation batching is described in [Runtime relations](runtime-relations.md).
-Relation predicates on parent collections, aggregates beyond exact count,
-dynamic GraphQL, runtime writes, and runtime migrations remain deferred.
+Relation predicates on parent collections, dynamic-schema aggregates beyond
+exact count, dynamic GraphQL, runtime writes, and runtime migrations remain
+deferred. Static generated entities use the separate
+[typed grouped aggregate](typed-aggregates.md) API.

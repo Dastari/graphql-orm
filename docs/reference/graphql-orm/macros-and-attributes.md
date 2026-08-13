@@ -51,7 +51,7 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `default_sort` | string | no declared default |
 | `schema_policy` | `"managed"`, `"external_read_only"`, `"external_writable"`, `"validate_only"`, or `"plan_only"` | no declared policy |
 | `auth` | `"required"`, `"optional"`, or `"none"` | schema-root mode, otherwise runtime compatibility default |
-| `schema_only`, `append_only`, `repository_mutations`, `backup` | boolean | `false`, except `backup` has no explicit declaration |
+| `schema_only`, `append_only`, `repository_mutations`, `aggregate`, `backup` | boolean | `false`, except `backup` has no explicit declaration; `aggregate = true` opts into a bounded generated GraphQL aggregate root |
 | `retention_purge` | nonempty policy-key string | absent |
 | `keyset`, `read_policy`, `write_policy`, `notify`, `notify_with` | string | absent |
 | `backup_export_order`, `backup_restore_order` | integer | absent |
@@ -106,6 +106,7 @@ still subject to entity policy and backend/schema-policy restrictions.
 | `#[graphql_orm(read_policy = "…", write_policy = "…")]` | policy identifiers for runtime enforcement |
 | `#[graphql_orm(version)]` | optimistic-version field; is not writable and is omitted from inputs |
 | `#[graphql_orm(default = "SQL expression" | false)]` | explicit SQL default or disables the implicit default; one declaration only |
+| `#[graphql_orm(decimal(precision = P, scale = S))]` | required for `rust_decimal::Decimal`; portable precision is 1 through 18 and scale must not exceed precision |
 | `#[graphql_orm(auto_generated = bool)]` | declares whether the value is database-generated |
 | `#[date_field]`, `#[boolean_field]`, `#[json_field]`, `#[graphql_orm(json)]` | type metadata; JSON disables filter/order generation |
 | `#[transform(write = "…", read = "…")]` | names generated write/read transforms |

@@ -39,6 +39,12 @@ semantic owner: `graphql-orm-operation-catalog` **0.2.0**.
   separately registered authoritative runtime source.
 - Added canonical aggregate semantic enums and the opt-in `Aggregate`
   operation category for the typed aggregate implementation to consume.
+- Added database-executed typed grouped aggregates with multiple `COUNT`,
+  `MIN`, `MAX`, and `SUM` metrics, deterministic nullable-key ordering, bounded
+  result groups, generated-filter and field-policy checks, and portable exact
+  Decimal values. `aggregate = true` opts an entity into a generated GraphQL
+  aggregate root and operation-catalog entry; existing schemas gain no root by
+  default.
 
 The semantic catalogue is discovery and disclosure-shape metadata only. It
 does not authorize resolvers, fields, rows, provider egress, or database work.

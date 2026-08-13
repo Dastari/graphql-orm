@@ -104,6 +104,11 @@ README remains project-neutral.
   versioned public API graph for descriptions, typed fields, relationships,
   capabilities, classification, export disposition, and root coordinates.
   It omits physical and policy internals and remains non-authoritative.
+- **Typed aggregates:** every public persisted readable field participates in a
+  closed generated aggregate-field enum. Repository code can group and compute
+  multiple `COUNT`, `MIN`, `MAX`, and `SUM` expressions in the database;
+  `aggregate = true` separately opts a schema into a generated bounded
+  aggregate query root.
 
 ## Errors and security boundaries
 
@@ -119,6 +124,7 @@ enforce row/field/database limits appropriate to the application.
 - [Macro and attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md)
 - [Backends and multi-backend workspaces](../../docs/reference/graphql-orm/backends.md)
 - [Entities and relations](../../docs/reference/graphql-orm/entities-and-relations.md)
+- [Typed grouped aggregates](../../docs/reference/graphql-orm/typed-aggregates.md)
 - [Runtime writes and repository operations](../../docs/reference/graphql-orm/runtime-and-writes.md)
 - [Schema management](../../docs/reference/graphql-orm/schema-management.md)
 - [Strict authorization](../../docs/reference/graphql-orm/strict-authorization.md)
