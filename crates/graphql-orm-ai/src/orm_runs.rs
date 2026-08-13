@@ -720,14 +720,6 @@ impl OrmAiRunService {
         self.cancellation(lease).await
     }
 
-    #[cfg(all(
-        any(feature = "sqlite", feature = "postgres"),
-        feature = "provider-openai"
-    ))]
-    pub(crate) const fn lease_ttl(&self) -> Duration {
-        self.limits.lease_ttl
-    }
-
     /// Claims the oldest eligible queued/retry-scheduled run.
     ///
     /// The claim and immutable attempt fact commit atomically. Concurrent

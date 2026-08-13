@@ -201,6 +201,7 @@ pub use orm_sessions::*;
 pub use orm_skills::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_subscription_waits::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_subscriptions::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_supervised::*;
