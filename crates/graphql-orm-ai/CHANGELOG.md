@@ -20,7 +20,27 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-No changes recorded after 0.77.1.
+### Added
+
+- `AiToolCatalog::register_query_capability_catalog`, provider-definition
+  projection and `AiRuntime::execute_query_capability` connect the canonical
+  finished-schema semantic graph to closed automatic GraphQL read plans.
+  Nested relationships and opt-in aggregate roots compile into exact
+  server-authored documents, variables, disclosure contracts and drift
+  fingerprints without model-authored GraphQL or static per-query profiles.
+
+### Security
+
+- Automatic capability registration is discovery only. Execution still
+  requires readiness, a freshly rehydrated principal, current host target/tool
+  policy, ordinary resolver authorization, exact offered capability and plan
+  fingerprints, bounded output and selected-field disclosure validation.
+  Secret and `NeverExport` fields are absent from provider schemas.
+
+### Schema
+
+- AI schema module remains `0.57.0`. This additive compiler/runtime API changes
+  no entity, table, column, index, constraint, backup or persistent semantics.
 
 ## [0.77.1] - 2026-08-13
 

@@ -3,17 +3,18 @@ title: "graphql-orm-ai-tool-profiles"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-08-13
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # `graphql-orm-ai-tool-profiles`
 
-`graphql-orm-ai-tool-profiles` compiles reviewed, least-disclosure GraphQL
-tool profiles against a finished SDL into fingerprinted descriptors and
-versioned subgraph manifests. It is backend-neutral and can be used by a
-subgraph without selecting the `graphql-orm-ai` persistence runtime.
+`graphql-orm-ai-tool-profiles` compiles reviewed static profiles and automatic,
+least-disclosure GraphQL query capabilities against a finished SDL. It emits
+closed provider schemas, exact server-owned documents, disclosure contracts,
+fingerprints, and versioned subgraph manifests. It is backend-neutral and can
+be used without selecting the `graphql-orm-ai` persistence runtime.
 
 It does not enable resolvers, mint authority, perform introspection, execute
 GraphQL, grant provider egress, or make a generated resolver an AI tool. Those
@@ -23,7 +24,7 @@ are separate runtime decisions and must remain default-deny.
 
 ```toml
 [dependencies]
-graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "fac98d99e64c841a34d2d0096cdf928c3f9a7c6f", version = "0.3.0" }
+graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.4.0" }
 serde_json = "1"
 ```
 
@@ -60,6 +61,67 @@ current `GraphqlOperationCatalog` and an implementation of
 is the fail-closed default. The compiler rejects hidden/stale operations,
 subscriptions, and generated operations not classified as reviewed application
 operations. Resolver discovery alone never admits a tool.
+
+## Automatic typed query capabilities
+
+`AiGraphqlQueryCapabilityCatalog::compile` consumes the complete finished SDL
+and its canonical `GraphqlSemanticCatalog`. Compilation is all-or-nothing: each
+public `Query` root becomes one stable finite capability, and an undeclared,
+stale, ambiguous, unsupported, or excessive root makes readiness fail.
+
+```rust,no_run
+# use graphql_orm_ai_tool_profiles::{AiGraphqlQueryCapabilityCatalog, AiGraphqlQueryCapabilityLimits, GraphqlExecutionTargetId};
+# use graphql_orm_operation_catalog::GraphqlSemanticCatalog;
+# fn example(sdl: &str, semantics: &GraphqlSemanticCatalog) -> Result<(), Box<dyn std::error::Error>> {
+let capabilities = AiGraphqlQueryCapabilityCatalog::compile(
+    "inventory",
+    GraphqlExecutionTargetId::parse("inventory.graphql")?,
+    sdl,
+    semantics,
+    AiGraphqlQueryCapabilityLimits::default(),
+)?;
+
+let capability = capabilities.capabilities().next().ok_or("no Query roots")?;
+let compiled = capability.compile(serde_json::json!({
+    "arguments": { "id": "item-1" },
+    "fields": { "id": true, "displayName": true },
+    "relationships": {
+        "children": {
+            "arguments": {},
+            "fields": { "id": true },
+            "relationships": {},
+            "maximumItems": 10
+        }
+    }
+}))?;
+# let _ = compiled;
+# Ok(()) }
+```
+
+The model supplies only this closed typed plan. It cannot choose a target,
+GraphQL root, document, variable names, hidden fields, unbounded relationship,
+or disclosure policy. Secret and `NeverExport` fields are structurally absent.
+The compiler binds the exact target, SDL, semantic operation, selection,
+variables schema, disclosure shape, limits, and plan fingerprint. Registration
+is discovery only; a fresh target/current-principal policy and the ordinary
+resolver remain authoritative at execution.
+
+Opt-in aggregate roots use the same catalogue and a fixed result projection.
+Their filters, grouping, metrics, operators, and group limits remain typed and
+server bounded.
+
+## Bounded replayable subscription contracts
+
+`AiGraphqlSubscriptionCapabilityCatalog` is the compiler boundary used by a
+durable waiter implementation. It emits capabilities only for roots whose
+canonical semantics declare `ReplayThenLive`; described `BestEffort` roots
+remain ineligible. A plan selects a
+bounded event projection, positive timeout and event ceiling, plus at most one
+top-level typed condition admitted by that root. The condition field must also
+be selected. `AiCompiledGraphqlSubscription` carries the exact document,
+variables, disclosure contract and all schema/catalogue/operation/plan
+fingerprints. This package does not maintain subscriptions, persist waiters,
+or resume an agent.
 
 ## Building blocks and limits
 

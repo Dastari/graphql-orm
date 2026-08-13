@@ -19,6 +19,23 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased: automatic semantic GraphQL query capabilities (schema remains 0.57.0)
+
+Subgraphs that want automatic bounded reads compile
+`AiGraphqlQueryCapabilityCatalog` from their exact finished SDL and canonical
+`GraphqlSemanticCatalog`, register the complete set in `AiToolCatalog`, and
+retain the capability fingerprint supplied with each provider definition.
+Call `AiRuntime::execute_query_capability` with that exact fingerprint and the
+closed provider plan. Do not accept a GraphQL document, target or descriptor
+from the provider.
+
+The addition does not enable any root. Install a fresh descriptor-driven host
+policy and preserve current-principal plus ordinary resolver authorization.
+Existing explicit profiles and manifest wire version 2 remain supported.
+
+No AI schema, GraphQL SDL, table, column, constraint, backup, data migration or
+backfill is required. AI schema module `0.57.0` remains current.
+
 ## 0.77.1: independent provider feature builds (schema remains 0.57.0)
 
 Update the AI package to 0.77.1 at the same reviewed full Git revision as its

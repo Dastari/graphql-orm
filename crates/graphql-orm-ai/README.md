@@ -3,7 +3,7 @@ title: "graphql-orm-ai"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-08-13
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -65,12 +65,38 @@ the compiled test-backed recipe and the missing reusable bootstrap API.
 - Default-deny application tools with server-authored documents and static
   disclosure schemas; consequential work is exact-preview and one-shot
   approval bound.
+- Backend-neutral automatic query capabilities compiled from the finished SDL
+  and canonical semantic catalogue into closed typed plans. Nested
+  relationships and opt-in aggregate roots remain explicitly bounded, and
+  Secret/`NeverExport` fields never enter provider schemas.
 - Provider-neutral adapters plus deterministic network-free mocks.
 - Optional provider profiles, attachments, skills, UI intents, rules, and
   usage/pricing controls, each behind independent proof and policy boundaries.
 
 Detailed mechanics stay in the task-oriented [documentation index](docs/README.md)
 rather than hiding the quick start behind an implementation inventory.
+
+## Automatic GraphQL query execution
+
+An owning subgraph builds `AiGraphqlQueryCapabilityCatalog` only after its SDL
+and `GraphqlSemanticCatalog` are complete. `AiToolCatalog` registers that
+complete catalogue for discovery and projects individual closed provider tool
+definitions. When the provider returns a plan, call
+`AiRuntime::execute_query_capability` with the stable ID, exact offered
+capability fingerprint, typed plan and invocation context.
+
+That boundary compiles the plan into one exact GraphQL document, variables,
+selection/disclosure schema and dynamic descriptor. The authenticated bridge
+then rehydrates the principal, invokes current target/tool policy, builds the
+canonical request context, and lets the ordinary resolver authorize the call.
+Registration alone remains default-deny. The runtime enforces descriptor byte
+and record bounds and rejects response fields outside the selected disclosure
+shape.
+
+Mutation and subscription execution do not use the query path. The
+backend-neutral profile package can compile a bounded `ReplayThenLive`
+subscription observation for the durable waiter subsystem, but it does not
+start a subscription or retain authority.
 
 ## Features and capability boundary
 

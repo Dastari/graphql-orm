@@ -12,7 +12,7 @@ supersedes: []
 
 `graphql-orm-ai` is at crate version `0.77.0` with AI schema module
 `0.57.0`. It uses workspace `graphql-orm` `0.21.1`, backend-neutral
-`graphql-orm-ai-tool-profiles` `0.3.0`, and external `agql-auth`
+`graphql-orm-ai-tool-profiles` `0.4.0`, and external `agql-auth`
 `0.15.0` at `e841ffd382082ad7419be259fe957f949b956ff7`.
 
 The active work order, dependencies, and exit gates are maintained in the
