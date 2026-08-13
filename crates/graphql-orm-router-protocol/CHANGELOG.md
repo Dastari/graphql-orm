@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## 0.2.1 - 2026-08-13
+
+- Published the maintained protocol configuration and example navigation from
+  the coordinated documentation overhaul. Protocol wire 1.0 and all public
+  data contracts are unchanged; no migration is required.
+
 ## 0.2.0 - 2026-08-11
 
 - Added optional project-neutral `DescriptorExtension` values. Each extension

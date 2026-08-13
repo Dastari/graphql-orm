@@ -16,7 +16,7 @@ supersedes: []
 ## Dependency
 
 ```toml
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.21.1", features = ["sqlite", "auth-agql"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.22.0", features = ["sqlite", "auth-agql"] }
 # Host applications may depend on agql-auth directly as well. The optional
 # graphql-orm auth-agql feature pins the exact upstream release:
 # git = "https://github.com/Dastari/agql-auth.git"
@@ -105,7 +105,7 @@ of retaining only the older role/scope/tenant subset.
 
 Update any direct `agql-auth` dependency to the exact 0.15.0 revision above at
 the same time as `graphql-orm`. This prevents Cargo from resolving separate
-package/type universes. Version 0.21.1 keeps the identity, role, scope, tenant,
+package/type universes. Version 0.22.0 keeps the identity, role, scope, tenant,
 organization, actor, correlation, token-reference, and policy-version mappings,
 but hardens the public bridge projection: arbitrary custom claims are no longer
 copied, and malformed or token/session-inconsistent assurance is omitted. If a

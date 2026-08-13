@@ -26,26 +26,28 @@ Use this workspace when you want to:
 
 - build a Rust + `async-graphql` service on SQLite or PostgreSQL, with explicit
   application-controlled schema ownership;
-- expose a safe generated GraphQL read layer over an existing SQL Server
-  schema; or
+- expose a safe generated GraphQL read layer, or deliberately enabled
+  generated DML, over an existing SQL Server schema; or
 - compose independent storage, backup, AI, operation-catalog, and Federation
   router packages without making them dependencies of the core ORM.
 
 It is not a hosted GraphQL service, an authentication provider, or a database
-administration system. SQL Server support is deliberately read/query-only.
+administration system. SQL Server compatibility constructors remain
+physically read-only; generated DML requires the explicit `ExternalWritable`
+connection and schema policy.
 Schema construction never applies migrations; applications choose and execute
 schema changes explicitly.
 
 ## Install
 
 Packages are distributed from this repository, not crates.io. Pin the reviewed
-release revision, not a moving branch or tag. The current `graphql-orm` 0.21.0
-release is tag `graphql-orm-v0.21.0` at
-`fac98d99e64c841a34d2d0096cdf928c3f9a7c6f`:
+release revision, not a moving branch or tag. The current coordinated
+`graphql-orm` version is 0.22.0. Replace the placeholder below with the final
+reviewed full SHA for the release:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "fac98d99e64c841a34d2d0096cdf928c3f9a7c6f", version = "0.21.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.22.0", default-features = false, features = ["sqlite"] }
 ```
 
 Choose exactly the backend support needed by each service. Cargo can unify
@@ -61,7 +63,7 @@ release.
 | --- | --- | --- | --- | --- |
 | SQLite (`sqlite`) | Yes | Yes | Yes | `Managed` |
 | PostgreSQL (`postgres`) | Yes | Yes | Yes | `Managed` or externally owned |
-| Microsoft SQL Server (`mssql`) | Yes | No | No | `ExternalReadOnly` |
+| Microsoft SQL Server (`mssql`) | Yes | Yes, when explicitly enabled | No | `ExternalReadOnly` or `ExternalWritable` |
 
 Backend features compile database support. `SchemaPolicy` separately decides
 whether the application owns the schema: `Managed`, `ValidateOnly`, `PlanOnly`,
@@ -89,7 +91,8 @@ others as ORM features.
 ## Maturity and security boundaries
 
 SQLite and PostgreSQL support managed schemas and generated writes. SQL Server
-is intentionally query-only. The generated API supplies query limits and
+supports externally managed reads and deliberate `ExternalWritable` DML, but
+not managed migrations or backups. The generated API supplies query limits and
 policy hooks, but it does not make an application public-service ready by
 itself: install authentication, authorization, disclosure policy, rate limits,
 transport security, and operational controls in the host application.

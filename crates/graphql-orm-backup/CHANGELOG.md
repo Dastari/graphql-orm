@@ -10,6 +10,14 @@ supersedes: []
 
 # Changelog
 
+## 0.7.1 - 2026-08-13
+
+- Published the maintained backup configuration catalogue, provider-neutral
+  examples, and current monorepo navigation. The manifest wire, repository
+  layout, public API, and restore semantics are unchanged.
+- Aligned current workspace guidance with `graphql-orm` 0.22.0 and
+  `graphql-orm-storage` 0.6.1. No schema or data migration is required.
+
 ## 0.7.0
 
 - Consolidated into the `graphql-orm` workspace and aligned the public storage

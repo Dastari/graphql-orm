@@ -18,7 +18,7 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
-## [Unreleased]
+## [0.78.0] - 2026-08-13
 
 ### Added
 

@@ -172,9 +172,9 @@ What remains missing from the production adapter chain is:
 6. records the exact recovery epoch; and
 7. opens readiness only for that applied, zero-fatal epoch.
 
-`graphql-orm-backup` 0.7.0, ORM 0.21.1, and storage 0.6.0 resolve through one
+`graphql-orm-backup` 0.7.1, ORM 0.22.0, and storage 0.6.1 resolve through one
 workspace and one database/metadata/storage type universe. AI schema module
-0.54.0 also includes finalized local attachment and artifact object keys in
+0.58.0 also includes finalized local attachment and artifact object keys in
 the confidential database export while continuing to redact quarantine,
 upload-token, provider, credential, and secret references.
 

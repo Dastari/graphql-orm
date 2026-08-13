@@ -31,7 +31,7 @@ retention, or restore proofs remain closed.
 
 ## Dependencies
 
-- `graphql-orm` 0.21.1 schema-module, transaction, fencing, operation-metadata,
+- `graphql-orm` 0.22.0 schema-module, transaction, fencing, operation-metadata,
   and restore contracts.
 - `graphql-orm-backup` 0.7 snapshot, repository, verification, and restore
   orchestration.
@@ -59,7 +59,7 @@ retention, or restore proofs remain closed.
 
 ## Current checkpoint
 
-Package 0.77.0 and AI schema module 0.57.0 provide the protected runtime,
+Package 0.78.0 and AI schema module 0.58.0 provide the protected runtime,
 provider adapters, exact completed-batch adoption, retention foundations,
 restore planning, and readiness observation contracts. Database-derived
 collection covers bounded conservative run classification, approval and

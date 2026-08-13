@@ -10,6 +10,14 @@ supersedes: []
 
 # graphql-orm-router-protocol migration guide
 
+## Crate 0.2.0 to 0.2.1 (protocol major remains 1)
+
+Version 0.2.1 publishes maintained protocol documentation and navigation. The
+wire format, required-semantics behavior, public data contracts, and protocol
+major remain unchanged. No descriptor or persisted-data migration is required;
+Git consumers should update selected monorepo packages to the same reviewed
+full revision and regenerate `Cargo.lock`.
+
 ## Crate 0.1.0 to 0.2.0 (protocol major remains 1)
 
 `SubgraphDescriptor` adds an optional `extensions` vector. Constructor users

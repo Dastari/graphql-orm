@@ -31,7 +31,6 @@ git -C "${repository_root}" worktree add --detach "${baseline_root}" "${base}" >
 
 packages=(
   graphql-orm
-  graphql-orm-macros
   graphql-orm-operation-catalog
   graphql-orm-ai-tool-profiles
   graphql-orm-storage
@@ -40,6 +39,10 @@ packages=(
   graphql-orm-router-protocol
   graphql-orm-router
 )
+
+# `cargo-semver-checks` has no proc-macro target mode. Macro compatibility is
+# covered by the aligned package-version gate plus the full compile/trybuild
+# matrix, so this runner checks only packages with a Rust library target.
 
 checked=0
 for package in "${packages[@]}"; do

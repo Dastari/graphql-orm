@@ -25,7 +25,7 @@ This unpublished package is Git-only:
 
 ```toml
 [dependencies]
-graphql-orm-router-protocol = { git = "https://github.com/Dastari/graphql-orm.git", rev = "fac98d99e64c841a34d2d0096cdf928c3f9a7c6f", version = "0.2.0" }
+graphql-orm-router-protocol = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.2.1" }
 ```
 
 ## Minimal descriptor route

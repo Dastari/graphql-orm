@@ -19,7 +19,7 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
-## Unreleased: durable bounded subscription waits (crate 0.77.1 to 0.78.0; schema 0.57.0 to 0.58.0)
+## 0.78.0: durable bounded subscription waits (schema 0.57.0 to 0.58.0)
 
 Apply `AiSchemaModule` `0.58.0` with run, coordinator, cancellation, retention,
 restore and provider workers stopped. The additive migration creates private
@@ -45,7 +45,7 @@ from ordinary run workers. Source registration and catalogue discovery grant
 no authority. Best-effort sources are ineligible, and model-authored GraphQL,
 arbitrary predicates, raw cursors and indefinite monitors remain unsupported.
 
-## Unreleased: parked provider sessions across durable waits (schema 0.58.0)
+## 0.78.0: parked provider sessions across durable waits (schema 0.58.0)
 
 Apply the coordinated AI schema module `0.58.0` before enabling approval or
 subscription suspension of a provider-retained turn. The migration adds
@@ -96,7 +96,7 @@ the existing provider-session restore audit keeps every restored binding
 closed. The package version and schema constant are intentionally updated
 together as `graphql-orm-ai` 0.78.0 / schema 0.58.0.
 
-## Unreleased: generated GraphQL query and mutation capabilities (schema remains 0.58.0)
+## 0.78.0: generated GraphQL query and mutation capabilities (schema remains 0.58.0)
 
 Subgraphs that want automatic bounded reads compile
 `AiGraphqlQueryCapabilityCatalog` from their exact finished SDL and canonical

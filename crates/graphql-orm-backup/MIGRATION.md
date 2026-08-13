@@ -10,6 +10,15 @@ supersedes: []
 
 # Migration Guide
 
+## 0.7.0 to 0.7.1
+
+Version 0.7.1 publishes the maintained documentation and examples and aligns
+the workspace with `graphql-orm` 0.22.0 and `graphql-orm-storage` 0.6.1. The
+public API, snapshot manifest, repository-key layout, restore preflight, and
+persisted data are unchanged. No data migration is required; Git consumers
+should update every selected monorepo package to the same reviewed full
+revision and regenerate `Cargo.lock`.
+
 ## 0.6.0 to 0.7.0: repository consolidation
 
 The source repository is now

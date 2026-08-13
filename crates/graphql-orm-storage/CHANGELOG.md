@@ -10,6 +10,14 @@ supersedes: []
 
 # Changelog
 
+## 0.6.1 - 2026-08-13
+
+- Published the maintained configuration catalogue, backup-integration guide,
+  and checked-in local-storage example from the coordinated monorepo docs
+  overhaul. The storage API and persistence contracts are unchanged.
+- Aligned current workspace guidance with `graphql-orm` 0.22.0 and
+  `graphql-orm-backup` 0.7.1. No data migration is required.
+
 ## 0.6.0
 
 - Consolidated the crate into the `graphql-orm` workspace with one root

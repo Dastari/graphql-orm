@@ -35,7 +35,7 @@ Those repository keys should not be forced through primary object metadata.
 
 ## Adapter Shape
 
-`graphql-orm-backup` 0.7.0 exposes this adapter:
+`graphql-orm-backup` 0.7.1 exposes this adapter:
 
 ```rust
 pub struct BlobStoreBackupRepository {
