@@ -24,6 +24,7 @@ tool-free, and network-free; production integration comes later.
 ## How-to
 
 - [Run a durable provider turn](worker-provider-turn.md).
+- [Run a durable bounded subscription wait](durable-subscription-waits.md).
 - [Add a read-only application-tool loop](read-only-tool-loop.md) or [supervised mutations](supervised-tool-loop.md).
 - [Set budgets and report usage](usage-and-budgets.md).
 - [Use OpenAI](openai-background.md), [Anthropic](anthropic.md), [xAI](xai.md), [Ollama](ollama.md), or an [OpenAI-compatible endpoint](openai-compatible.md).

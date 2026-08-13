@@ -19,7 +19,7 @@ use crate::{
     AiApprovalBinding, AiApprovalId, AiApprovalRule, AiCanonicalActionPreview, AiDataSourceRef,
     AiDestinationTrust, AiEgressCapability, AiEgressDecisionAudit, AiEgressManifest, AiError,
     AiProviderCallResult, AiRunCompletion, AiRunLease, AiRunState, AiRuntime, AiScope,
-    AiSessionAction, AiSourceTrust, AiToolCallId, AiToolDescriptor, AiToolId,
+    AiSessionAction, AiSessionId, AiSourceTrust, AiToolCallId, AiToolDescriptor, AiToolId,
     AiToolOperationDomain, AiToolOperationKind, AiToolRisk, ContentProtectionContext,
     DataClassification, GraphqlInvocationContext, ModelInputBlock, OrmAiApprovalService,
     OrmAiRunService, ToolGraphqlRequest, ToolMaturity,
@@ -165,6 +165,38 @@ pub struct AiToolResultEgressRoute {
 }
 
 impl AiToolResultEgressRoute {
+    pub(crate) fn subscription_wait_manifest(
+        &self,
+        scope: AiScope,
+        session_id: AiSessionId,
+        run_id: crate::AiRunId,
+        provider_kind: impl Into<String>,
+        provider_model: impl Into<String>,
+        source: AiDataSourceRef,
+        estimated_bytes: u64,
+    ) -> AiEgressManifest {
+        AiEgressManifest {
+            provider_profile_id: self.provider_profile_id.clone(),
+            provider_kind: provider_kind.into(),
+            model: provider_model.into(),
+            destination: self.destination.clone(),
+            destination_trust: self.destination_trust,
+            capability: AiEgressCapability::ToolResult,
+            scope,
+            session_id: Some(session_id),
+            run_id: Some(run_id),
+            sources: vec![source],
+            estimated_bytes,
+            estimated_tokens: 0,
+            attachment_count: 0,
+            purpose: self.purpose.clone(),
+            retention: self.retention.clone(),
+            residency: self.residency.clone(),
+            policy_version: self.policy_version.clone(),
+            consent_reference: self.consent_reference.clone(),
+        }
+    }
+
     pub(crate) fn from_checkpoint_value(value: serde_json::Value) -> Result<Self, AiError> {
         let route: Self = serde_json::from_value(value).map_err(|_| AiError::PersistenceFailed)?;
         route.validate()?;

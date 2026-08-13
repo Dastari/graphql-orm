@@ -220,6 +220,29 @@ impl AiReplayableSubscriptionEvent {
     pub fn data(&self) -> &serde_json::Value {
         &self.data
     }
+
+    pub(crate) fn checkpoint_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "eventId": self.event_id,
+            "position": self.position,
+            "data": self.data,
+        })
+    }
+
+    pub(crate) fn from_checkpoint_value(
+        value: serde_json::Value,
+    ) -> Result<Self, AiSubscriptionSourceError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Snapshot {
+            event_id: String,
+            position: AiSubscriptionReplayPosition,
+            data: serde_json::Value,
+        }
+        let snapshot = serde_json::from_value::<Snapshot>(value)
+            .map_err(|_| AiSubscriptionSourceError::InvalidEvent)?;
+        Self::new(snapshot.event_id, snapshot.position, snapshot.data)
+    }
 }
 
 /// One replay-then-live source item.

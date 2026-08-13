@@ -85,6 +85,8 @@ mod orm_session_title_work;
 mod orm_sessions;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_skills;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_subscription_waits;
 mod orm_subscriptions;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_supervised;
@@ -197,6 +199,8 @@ pub use orm_session_title_work::*;
 pub use orm_sessions::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_skills::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_subscription_waits::*;
 pub use orm_subscriptions::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_supervised::*;

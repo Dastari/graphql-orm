@@ -32,6 +32,8 @@ uncertain budget, or reopen a restored runtime.
 | Uncertain budget without authoritative usage | Full reservation remains held |
 | Live approval wait | Bounded current-policy keep/cancel/recovery classification |
 | Restored approval/tool/provider wait | `RecoveryRequired`; never live-resumed |
+| Same-database replayable subscription wait | Reclaim only from its exact protected cursor and waiter fence |
+| Portable-restored subscription wait | `RecoveryRequired`; protected cursor/outcome are deliberately redacted |
 | Released attachment/local blob | Exact fenced cleanup; ambiguity retains reference |
 | Provider-file artifact | Exact profile-bound deletion/absence proof or retained blocked state |
 | Protected message/proposal/tool/approval/context/checkpoint content | Bounded age/deleting-session dependency proof or retained blocked state |

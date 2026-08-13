@@ -19,6 +19,32 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased: durable bounded subscription waits (crate 0.77.1 to 0.78.0; schema 0.57.0 to 0.58.0)
+
+Apply `AiSchemaModule` `0.58.0` with run, coordinator, cancellation, retention,
+restore and provider workers stopped. The additive migration creates private
+`graphql_orm_ai_subscription_waiters` and
+`graphql_orm_ai_subscription_wait_adoptions` tables and their generated
+indexes. No existing row is backfilled and existing subscriptions remain
+best-effort unless their canonical semantic descriptor explicitly advertises
+`ReplayThenLive` and the deployment registers the matching authenticated
+source.
+
+Wait variables, projection, completion condition, replay cursor and adopted
+result are protected. Portable backups deliberately redact those columns, so
+restored live waiters must converge to `RecoveryRequired`; do not manufacture
+or skip a cursor. Same-database process restart can reclaim an exact valid
+waiter through its short worker fence. Registration and every event/adoption
+boundary rehydrate the stored credential-free `PrincipalReference`, check the
+exact target policy and current rules, and preserve ordinary subscription
+resolver authorization.
+
+Construct `AiSubscriptionCheckpointAdopter` around the wait service and the
+existing coordinator adopter, and run the bounded waiter worker separately
+from ordinary run workers. Source registration and catalogue discovery grant
+no authority. Best-effort sources are ineligible, and model-authored GraphQL,
+arbitrary predicates, raw cursors and indefinite monitors remain unsupported.
+
 ## Unreleased: automatic semantic GraphQL query capabilities (schema remains 0.57.0)
 
 Subgraphs that want automatic bounded reads compile

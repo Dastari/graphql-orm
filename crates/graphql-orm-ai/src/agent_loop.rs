@@ -83,6 +83,27 @@ pub(crate) struct AiStatelessConversationEvidence {
 }
 
 impl AiAgentContinuation {
+    pub(crate) fn from_subscription_result(
+        continuation: ModelContinuation,
+        call_id: String,
+        tool_id: String,
+        output: serde_json::Value,
+        transfer: AiEgressManifest,
+        replay_transfers: Vec<AiEgressManifest>,
+    ) -> Result<Self, AiError> {
+        let candidate = Self {
+            continuation,
+            input: vec![ModelInputBlock::ToolResult {
+                call_id,
+                tool_id,
+                output,
+            }],
+            transfers: vec![transfer],
+            replay_transfers,
+        };
+        Self::from_checkpoint_value(candidate.checkpoint_value())
+    }
+
     pub(crate) fn from_persisted_results(
         continuation: ModelContinuation,
         completed_tools: &[AiPersistedApplicationToolCall],

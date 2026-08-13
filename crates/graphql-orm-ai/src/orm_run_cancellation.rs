@@ -369,6 +369,7 @@ impl AiRunCancellationService for OrmAiRunCancellationService {
 
                     cancel_active_tool_calls(tx, &run, maximum_active_tool_calls, now_unix).await?;
                     cancel_background_submission(tx, &run, now_unix).await?;
+                    cancel_subscription_wait(tx, &run).await?;
 
                     let request_sequence = session
                         .stream_head
@@ -542,7 +543,11 @@ async fn cancel_active_tool_calls(
                 ..Default::default()
             }),
             state: Some(StringFilter {
-                in_list: Some(vec!["executing".to_owned(), "waiting_approval".to_owned()]),
+                in_list: Some(vec![
+                    "executing".to_owned(),
+                    "waiting_approval".to_owned(),
+                    "waiting_subscription".to_owned(),
+                ]),
                 ..Default::default()
             }),
             ..Default::default()
@@ -626,6 +631,87 @@ async fn cancel_active_tool_calls(
         ) {
             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
         }
+    }
+    Ok(())
+}
+
+async fn cancel_subscription_wait(
+    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+    run: &AiRunRecord,
+) -> Result<(), OrmPublicError> {
+    let waiters = tx
+        .query::<AiSubscriptionWaiterRecord>()
+        .filter(AiSubscriptionWaiterRecordWhereInput {
+            run_id: Some(UuidFilter {
+                eq: Some(run.id),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .limit(2)
+        .fetch_all()
+        .await
+        .map_err(OrmPublicError::from)?;
+    if waiters.len() > 1 {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    }
+    let Some(waiter) = waiters.into_iter().next() else {
+        return Ok(());
+    };
+    if matches!(waiter.state.as_str(), "waiting" | "claimed")
+        && !matches!(
+            tx.compare_and_swap::<AiSubscriptionWaiterRecord>(
+                &waiter.id,
+                waiter.row_version,
+                AiSubscriptionWaiterRecordWhereInput::default(),
+                UpdateAiSubscriptionWaiterRecordInput {
+                    state: Some("cancelled".to_owned()),
+                    claim_owner: Some(None),
+                    claim_expires_at: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(OrmPublicError::from)?,
+            ConditionalUpdateOutcome::Updated(_)
+        )
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
+    let adoptions = tx
+        .query::<AiSubscriptionWaitAdoptionRecord>()
+        .filter(AiSubscriptionWaitAdoptionRecordWhereInput {
+            waiter_id: Some(UuidFilter {
+                eq: Some(waiter.id),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .limit(2)
+        .fetch_all()
+        .await
+        .map_err(OrmPublicError::from)?;
+    if adoptions.len() > 1 {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    }
+    if let Some(adoption) = adoptions.into_iter().next()
+        && matches!(adoption.state.as_str(), "queued" | "claimed")
+        && !matches!(
+            tx.compare_and_swap::<AiSubscriptionWaitAdoptionRecord>(
+                &adoption.id,
+                adoption.row_version,
+                AiSubscriptionWaitAdoptionRecordWhereInput::default(),
+                UpdateAiSubscriptionWaitAdoptionRecordInput {
+                    state: Some("cancelled".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(OrmPublicError::from)?,
+            ConditionalUpdateOutcome::Updated(_)
+        )
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
     }
     Ok(())
 }

@@ -22,6 +22,15 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ### Added
 
+- Durable bounded subscription waits now bind canonical `ReplayThenLive`
+  capabilities to authenticated source registrations, protected replay
+  cursors, exact current-principal/rule/target checks, separately authorized
+  provider egress, and the existing coordinator queue. One source item is
+  examined per short-lived fenced claim; event, timeout and event-limit
+  adoption commits cursor progress and the queued continuation atomically.
+- `AiSubscriptionCheckpointAdopter` composes wait adoption with the existing
+  checkpoint adopter so resumption rechecks the source event and disclosure
+  before consuming the one-shot continuation.
 - `AiToolCatalog::register_query_capability_catalog`, provider-definition
   projection and `AiRuntime::execute_query_capability` connect the canonical
   finished-schema semantic graph to closed automatic GraphQL read plans.
@@ -43,8 +52,10 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ### Schema
 
-- AI schema module remains `0.57.0`. This additive compiler/runtime API changes
-  no entity, table, column, index, constraint, backup or persistent semantics.
+- AI schema module `0.58.0` adds private subscription waiter and one-shot
+  adoption tables. Protected plans, cursors and outcomes are backup-redacted;
+  portable restore therefore treats live waits as recovery-required, while an
+  unchanged database may reclaim an exact cursor after restart.
 
 ## [0.77.1] - 2026-08-13
 

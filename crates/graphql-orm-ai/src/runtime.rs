@@ -541,6 +541,55 @@ impl AiRuntime {
         })
     }
 
+    pub(crate) fn validate_compiled_subscription_event(
+        &self,
+        descriptor: &AiToolDescriptor,
+        disclosure_schema: &crate::AiDisclosureSchema,
+        response: ToolGraphqlResponse,
+        authorization: &AiToolPreauthorization,
+    ) -> Result<AiToolExecutionResult, AiError> {
+        if !self
+            .generated_graphql_target_policy
+            .allows_subscription(descriptor)
+            || descriptor.maturity > self.maximum_tool_maturity
+            || authorization.tool_fingerprint != descriptor.fingerprint
+            || response.error_codes.len() > 32
+            || response.error_codes.iter().any(|code| {
+                code.is_empty()
+                    || code.len() > 100
+                    || !code.bytes().all(|byte| {
+                        byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'
+                    })
+            })
+            || response
+                .application_audit_ref
+                .as_ref()
+                .is_some_and(|reference| {
+                    reference.is_empty()
+                        || reference.len() > 1_024
+                        || !reference.bytes().all(|byte| byte.is_ascii_graphic())
+                })
+        {
+            return Err(AiError::ToolExecutionFailed);
+        }
+        let response_bytes = serde_json::to_vec(&response.data)
+            .map_err(|_| AiError::ToolExecutionFailed)?
+            .len() as u64;
+        if response_bytes > descriptor.maximum_result_bytes {
+            return Err(AiError::ToolExecutionFailed);
+        }
+        let disclosure = disclosure_schema
+            .evaluate_graphql_with_record_limit(&response.data, descriptor.maximum_result_records)
+            .map_err(|_| AiError::ToolExecutionFailed)?;
+        Ok(AiToolExecutionResult {
+            response,
+            disclosure,
+            tool_fingerprint: descriptor.fingerprint.clone(),
+            policy_version: authorization.policy_version.clone(),
+            authorization_state_digest: authorization.authorization_state_digest.clone(),
+        })
+    }
+
     /// Executes one exact classified automatic mutation under fresh authority.
     ///
     /// Durable callers must persist a pre-effect checkpoint before invoking

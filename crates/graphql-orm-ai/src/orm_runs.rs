@@ -630,6 +630,10 @@ pub(crate) struct PreparedToolCallFinish {
 }
 
 impl OrmAiRunService {
+    pub(crate) const fn lease_ttl(&self) -> Duration {
+        self.limits.lease_ttl
+    }
+
     /// Creates an ORM-backed run service.
     pub fn new(
         database: Database<DefaultWriteBackend>,
@@ -4341,7 +4345,6 @@ pub(crate) async fn append_terminal_run_event(
         _ => false,
     };
     if run.id.is_nil()
-        || run.attempt_id.is_none()
         || run.lease_generation <= 0
         || session.id != run.session_id
         || !valid_session_state
