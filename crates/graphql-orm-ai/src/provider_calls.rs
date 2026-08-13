@@ -338,6 +338,49 @@ impl AiProviderCallPlan {
         )
     }
 
+    /// Creates an initial provider call exposing target-approved generated queries.
+    ///
+    /// No per-capability [`AiToolPolicySet`] entry is required. The exact
+    /// target/schema/semantic policy controls discovery, while fresh
+    /// descriptor-driven policy and ordinary resolver authorization remain
+    /// mandatory at execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error unless every definition is an exact registered
+    /// generated query admitted by the target policy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_generated_queries(
+        provider_kind: ProviderKind,
+        request: ModelRequest,
+        budget: AiBudgetReservationRequest,
+        transfers: Vec<AiEgressManifest>,
+        correlation_id: impl Into<String>,
+        catalog: &crate::AiToolCatalog,
+        targets: &crate::AiGeneratedGraphqlTargetPolicySet,
+    ) -> Result<Self, AiError> {
+        if request.tools.is_empty()
+            || request.continuation.is_some()
+            || request
+                .input
+                .iter()
+                .any(|block| matches!(block, crate::ModelInputBlock::ToolResult { .. }))
+        {
+            return Err(AiError::InvalidInput(
+                "initial generated-query provider plan is invalid".to_owned(),
+            ));
+        }
+        Self::new_with_bound_generated_queries(
+            provider_kind,
+            request,
+            budget,
+            transfers,
+            correlation_id,
+            catalog,
+            targets,
+        )
+    }
+
     /// Creates an initial provider call that may expose explicitly enabled
     /// read-only queries and supervised one-shot application mutations.
     ///
@@ -384,6 +427,45 @@ impl AiProviderCallPlan {
         )
     }
 
+    /// Creates an initial provider call exposing only generated mutations
+    /// explicitly classified `Automatic` or `ApprovalRequired`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for malformed initial input, target-policy denial,
+    /// a prohibited mutation, or a stale capability definition.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_classified_mutations(
+        provider_kind: ProviderKind,
+        request: ModelRequest,
+        budget: AiBudgetReservationRequest,
+        transfers: Vec<AiEgressManifest>,
+        correlation_id: impl Into<String>,
+        catalog: &crate::AiToolCatalog,
+        targets: &crate::AiGeneratedGraphqlTargetPolicySet,
+    ) -> Result<Self, AiError> {
+        if request.tools.is_empty()
+            || request.continuation.is_some()
+            || request
+                .input
+                .iter()
+                .any(|block| matches!(block, crate::ModelInputBlock::ToolResult { .. }))
+        {
+            return Err(AiError::InvalidInput(
+                "initial classified-mutation provider plan is invalid".to_owned(),
+            ));
+        }
+        Self::new_with_bound_classified_mutations(
+            provider_kind,
+            request,
+            budget,
+            transfers,
+            correlation_id,
+            catalog,
+            targets,
+        )
+    }
+
     fn new_with_bound_tools(
         provider_kind: ProviderKind,
         request: ModelRequest,
@@ -410,6 +492,91 @@ impl AiProviderCallPlan {
                 approval: AiApprovalRule::None,
             })
             .collect();
+        let mut plan = Self::new_internal(
+            provider_kind,
+            request,
+            budget,
+            transfers,
+            correlation_id.into(),
+            true,
+        )?;
+        plan.tool_rule_bindings = bindings;
+        Ok(plan)
+    }
+
+    fn new_with_bound_generated_queries(
+        provider_kind: ProviderKind,
+        request: ModelRequest,
+        budget: AiBudgetReservationRequest,
+        transfers: Vec<AiEgressManifest>,
+        correlation_id: impl Into<String>,
+        catalog: &crate::AiToolCatalog,
+        targets: &crate::AiGeneratedGraphqlTargetPolicySet,
+    ) -> Result<Self, AiError> {
+        if request.tools.is_empty() {
+            return Err(AiError::InvalidInput(
+                "generated-query provider plan has no tools".to_owned(),
+            ));
+        }
+        for definition in &request.tools {
+            catalog.validate_generated_query_model_definition(definition, targets)?;
+        }
+        let bindings = request
+            .tools
+            .iter()
+            .map(|definition| AiPlanToolRuleBinding {
+                fingerprint: definition.fingerprint.clone(),
+                maturity: ToolMaturity::ReadOnly,
+                approval: AiApprovalRule::None,
+            })
+            .collect();
+        let mut plan = Self::new_internal(
+            provider_kind,
+            request,
+            budget,
+            transfers,
+            correlation_id.into(),
+            true,
+        )?;
+        plan.tool_rule_bindings = bindings;
+        Ok(plan)
+    }
+
+    fn new_with_bound_classified_mutations(
+        provider_kind: ProviderKind,
+        request: ModelRequest,
+        budget: AiBudgetReservationRequest,
+        transfers: Vec<AiEgressManifest>,
+        correlation_id: impl Into<String>,
+        catalog: &crate::AiToolCatalog,
+        targets: &crate::AiGeneratedGraphqlTargetPolicySet,
+    ) -> Result<Self, AiError> {
+        if request.tools.is_empty() {
+            return Err(AiError::InvalidInput(
+                "classified-mutation provider plan has no tools".to_owned(),
+            ));
+        }
+        let mut bindings = Vec::with_capacity(request.tools.len());
+        for definition in &request.tools {
+            let policy =
+                catalog.validate_generated_mutation_model_definition(definition, targets)?;
+            let (maturity, approval) = match policy {
+                graphql_orm::graphql::orm::AiMutationExecutionPolicy::Automatic => {
+                    (ToolMaturity::AutonomousWrite, AiApprovalRule::None)
+                }
+                graphql_orm::graphql::orm::AiMutationExecutionPolicy::ApprovalRequired => {
+                    (ToolMaturity::SupervisedWrite, AiApprovalRule::OneShot)
+                }
+                graphql_orm::graphql::orm::AiMutationExecutionPolicy::Prohibited => {
+                    return Err(AiError::Forbidden);
+                }
+            };
+            bindings.push(AiPlanToolRuleBinding {
+                fingerprint: definition.fingerprint.clone(),
+                maturity,
+                approval,
+            });
+        }
         let mut plan = Self::new_internal(
             provider_kind,
             request,
@@ -621,13 +788,31 @@ impl AiProviderCallPlan {
             })
     }
 
-    pub(crate) fn has_only_supervised_tools(&self) -> bool {
+    pub(crate) fn has_only_classified_mutations(&self) -> bool {
         !self.tool_rule_bindings.is_empty()
             && self.tool_rule_bindings.len() == self.request.tools.len()
             && self.tool_rule_bindings.iter().all(|binding| {
-                binding.maturity == ToolMaturity::SupervisedWrite
-                    && binding.approval == AiApprovalRule::OneShot
+                matches!(
+                    (binding.maturity, binding.approval),
+                    (ToolMaturity::AutonomousWrite, AiApprovalRule::None)
+                        | (ToolMaturity::SupervisedWrite, AiApprovalRule::OneShot)
+                )
             })
+    }
+
+    pub(crate) fn classified_mutation_binding(
+        &self,
+        fingerprint: &str,
+    ) -> Option<(ToolMaturity, AiApprovalRule)> {
+        let mut matches = self
+            .tool_rule_bindings
+            .iter()
+            .filter(|binding| binding.fingerprint == fingerprint);
+        let binding = matches.next()?;
+        matches
+            .next()
+            .is_none()
+            .then_some((binding.maturity, binding.approval))
     }
 
     pub(crate) fn uses_provider_retained_continuation(&self) -> bool {
@@ -705,6 +890,15 @@ impl AiProviderCallPlan {
                                     binding.maturity,
                                     binding.approval,
                                 ) != Some(AiApprovalRule::OneShot)
+                            }
+                            (ToolMaturity::AutonomousWrite, AiApprovalRule::None)
+                                if allow_supervised =>
+                            {
+                                rules.constrain_tool(
+                                    &binding.fingerprint,
+                                    binding.maturity,
+                                    binding.approval,
+                                ) != Some(AiApprovalRule::None)
                             }
                             _ => true,
                         }

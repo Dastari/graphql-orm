@@ -15,8 +15,9 @@ use crate::{
     AiAgentRecoveryPhase, AiAgentRuleResolver, AiAgentRunControl, AiApplicationToolCallContext,
     AiApprovalId, AiError, AiProviderCallPlan, AiRequestedConsequentialToolCall, AiResolvedRuleSet,
     AiRuleRunUsage, AiRunCompletion, AiRunLease, AiRunState, AiScope, AiSupervisedResumeOutcome,
-    AiToolCallId, AiToolResultEgressRoute, OrmAiConsequentialToolCallService,
-    OrmAiCoordinatorCheckpointService, OrmAiSupervisedResumeService,
+    AiToolCallId, AiToolResultEgressRoute, OrmAiApplicationToolCallService,
+    OrmAiConsequentialToolCallService, OrmAiCoordinatorCheckpointService,
+    OrmAiSupervisedResumeService,
 };
 
 /// Deployment bounds for the sequential supervised coordinator.
@@ -64,12 +65,12 @@ impl AiSupervisedAgentCoordinatorLimits {
     }
 }
 
-/// One host-planned provider turn exposing only supervised one-shot mutations.
+/// One host-planned provider turn exposing only classified mutations.
 ///
 /// Construction proves the plan is provider-retained, contains only immutable
-/// `SupervisedWrite`/`OneShot` bindings, targets the exact resolved-rule scope,
-/// and has a valid server-owned result route. It grants no provider, budget,
-/// egress, approval, mutation, or resolver authority.
+/// `AutonomousWrite`/`None` or `SupervisedWrite`/`OneShot` bindings, targets the
+/// exact resolved-rule scope, and has a valid server-owned result route. It
+/// grants no provider, budget, egress, approval, mutation, or resolver authority.
 pub struct AiSupervisedAgentTurnPlan {
     provider_call: AiProviderCallPlan,
     result_egress_route: AiToolResultEgressRoute,
@@ -78,7 +79,7 @@ pub struct AiSupervisedAgentTurnPlan {
 }
 
 impl AiSupervisedAgentTurnPlan {
-    /// Creates an exact supervised-only provider turn.
+    /// Creates an exact classified-mutation provider turn.
     ///
     /// # Errors
     ///
@@ -91,12 +92,12 @@ impl AiSupervisedAgentTurnPlan {
         rules: AiResolvedRuleSet,
         uses_byok: bool,
     ) -> Result<Self, AiError> {
-        if !provider_call.has_only_supervised_tools()
+        if !provider_call.has_only_classified_mutations()
             || !provider_call.uses_provider_retained_continuation()
             || provider_call.scope() != rules.target_scope()
         {
             return Err(AiError::InvalidInput(
-                "supervised turn is not exactly bound".to_owned(),
+                "classified mutation turn is not exactly bound".to_owned(),
             ));
         }
         result_egress_route.validate()?;
@@ -133,6 +134,14 @@ impl AiSupervisedAgentTurnPlan {
             self.uses_byok,
         )
     }
+}
+
+fn plan_binding(
+    plan: &AiProviderCallPlan,
+    result: &crate::AiProviderCallResult,
+) -> Option<(crate::ToolMaturity, crate::AiApprovalRule)> {
+    let call = result.tool_calls().first()?;
+    plan.classified_mutation_binding(call.tool_fingerprint())
 }
 
 /// Host-owned construction of supervised initial and continuation turns.
@@ -215,6 +224,34 @@ pub trait AiAgentSupervisedApprovalStager: Send + Sync {
         expires_at: time::OffsetDateTime,
         recent_mfa_required: bool,
     ) -> Result<AiSupervisedApprovalWait, AiError>;
+}
+
+/// Fenced execution boundary for one generated automatic mutation.
+#[async_trait]
+pub trait AiAgentAutomaticMutationExecutor: Send + Sync {
+    /// Persists the pre-effect fence, executes once, and converges every
+    /// post-effect ambiguity to `RecoveryRequired`.
+    async fn execute(
+        &self,
+        lease: &AiRunLease,
+        result: &crate::AiProviderCallResult,
+        context: AiApplicationToolCallContext,
+        route: AiToolResultEgressRoute,
+    ) -> Result<crate::AiConsequentialToolCallOutcome, AiError>;
+}
+
+#[async_trait]
+impl AiAgentAutomaticMutationExecutor for OrmAiApplicationToolCallService {
+    async fn execute(
+        &self,
+        lease: &AiRunLease,
+        result: &crate::AiProviderCallResult,
+        context: AiApplicationToolCallContext,
+        route: AiToolResultEgressRoute,
+    ) -> Result<crate::AiConsequentialToolCallOutcome, AiError> {
+        self.execute_automatic_mutation(lease, result, context, route)
+            .await
+    }
 }
 
 #[async_trait]
@@ -362,6 +399,7 @@ pub struct AiSupervisedAgentCoordinator {
     checkpoint_writer: Arc<dyn AiAgentCheckpointWriter>,
     checkpoint_control: Arc<dyn AiAgentSupervisedCheckpointControl>,
     approval_stager: Arc<dyn AiAgentSupervisedApprovalStager>,
+    automatic_executor: Arc<dyn AiAgentAutomaticMutationExecutor>,
     resume_executor: Arc<dyn AiAgentSupervisedResumeExecutor>,
     rule_resolver: Arc<dyn AiAgentRuleResolver>,
     planner: Arc<dyn AiSupervisedAgentTurnPlanner>,
@@ -379,6 +417,7 @@ impl AiSupervisedAgentCoordinator {
         checkpoint_writer: Arc<dyn AiAgentCheckpointWriter>,
         checkpoint_control: Arc<dyn AiAgentSupervisedCheckpointControl>,
         approval_stager: Arc<dyn AiAgentSupervisedApprovalStager>,
+        automatic_executor: Arc<dyn AiAgentAutomaticMutationExecutor>,
         resume_executor: Arc<dyn AiAgentSupervisedResumeExecutor>,
         rule_resolver: Arc<dyn AiAgentRuleResolver>,
         planner: Arc<dyn AiSupervisedAgentTurnPlanner>,
@@ -392,6 +431,7 @@ impl AiSupervisedAgentCoordinator {
             checkpoint_writer,
             checkpoint_control,
             approval_stager,
+            automatic_executor,
             resume_executor,
             rule_resolver,
             planner,
@@ -608,6 +648,7 @@ impl AiSupervisedAgentCoordinator {
                     .await;
             }
         }
+        let classified_bindings = provider_plan.clone();
         let result = match self
             .execute_provider_with_heartbeats(&mut lease, provider_plan)
             .await
@@ -745,14 +786,22 @@ impl AiSupervisedAgentCoordinator {
                         .finish_failed(&lease, &guard, "supervised_continuation_limit_reached")
                         .await;
                 }
+                let binding = match plan_binding(&classified_bindings, &result) {
+                    Some(binding) => binding,
+                    None => {
+                        return self
+                            .finish_failed(&lease, &guard, "classified_mutation_binding_missing")
+                            .await;
+                    }
+                };
                 let rules = match self.rule_resolver.resolve_rules(&lease, &scope).await {
                     Ok(current)
                         if current.rules().fingerprint() == planned_rules.fingerprint()
                             && current.rules().constrain_tool(
                                 result.tool_calls()[0].tool_fingerprint(),
-                                crate::ToolMaturity::SupervisedWrite,
-                                crate::AiApprovalRule::OneShot,
-                            ) == Some(crate::AiApprovalRule::OneShot) =>
+                                binding.0,
+                                binding.1,
+                            ) == Some(binding.1) =>
                     {
                         current
                     }
@@ -774,6 +823,58 @@ impl AiSupervisedAgentCoordinator {
                     correlation_id,
                     result.budget_reservation_id().0.to_string(),
                 )?;
+                if binding
+                    == (
+                        crate::ToolMaturity::AutonomousWrite,
+                        crate::AiApprovalRule::None,
+                    )
+                {
+                    let outcome = match self
+                        .automatic_executor
+                        .execute(&lease, &result, context, route)
+                        .await
+                    {
+                        Ok(outcome) => outcome,
+                        Err(_) => {
+                            return self
+                                .finish_recovery(
+                                    &lease,
+                                    &guard,
+                                    AiAgentRecoveryPhase::ApplicationTool,
+                                    "automatic_mutation_uncertain",
+                                    result.provider_response_id(),
+                                )
+                                .await;
+                        }
+                    };
+                    let Some(persisted) = outcome.persisted() else {
+                        return Ok(AiSupervisedAgentRunOutcome::RecoveryRequired {
+                            phase: AiAgentRecoveryPhase::ApplicationTool,
+                            provider_turns: guard.provider_turns(),
+                            total_tool_calls: guard.total_tool_calls(),
+                        });
+                    };
+                    if guard.observe_tool_result(persisted).is_err() {
+                        return self
+                            .finish_recovery(
+                                persisted.lease(),
+                                &guard,
+                                AiAgentRecoveryPhase::ApplicationTool,
+                                "automatic_mutation_result_invalid",
+                                result.provider_response_id(),
+                            )
+                            .await;
+                    }
+                    return self
+                        .finish_recovery(
+                            persisted.lease(),
+                            &guard,
+                            AiAgentRecoveryPhase::ApplicationTool,
+                            "automatic_mutation_checkpoint_required",
+                            result.provider_response_id(),
+                        )
+                        .await;
+                }
                 let expires_at = self
                     .clock
                     .now()
@@ -1139,6 +1240,25 @@ mod tests {
         saw_checkpoint: AtomicBool,
     }
 
+    struct TestAutomaticExecutor;
+
+    #[async_trait]
+    impl AiAgentAutomaticMutationExecutor for TestAutomaticExecutor {
+        async fn execute(
+            &self,
+            _lease: &AiRunLease,
+            _result: &crate::AiProviderCallResult,
+            _context: AiApplicationToolCallContext,
+            _route: AiToolResultEgressRoute,
+        ) -> Result<crate::AiConsequentialToolCallOutcome, AiError> {
+            Err(AiError::Conflict)
+        }
+    }
+
+    fn unused_automatic() -> Arc<TestAutomaticExecutor> {
+        Arc::new(TestAutomaticExecutor)
+    }
+
     #[async_trait]
     impl AiAgentSupervisedApprovalStager for TestApprovalStager {
         async fn stage(
@@ -1411,6 +1531,7 @@ mod tests {
                 consumed: AtomicBool::new(false),
             }),
             stager.clone(),
+            unused_automatic(),
             unused_resume(),
             Arc::new(TestRuleResolver),
             Arc::new(TestPlanner {
@@ -1476,6 +1597,7 @@ mod tests {
                 consumed: AtomicBool::new(false),
             }),
             stager.clone(),
+            unused_automatic(),
             unused_resume(),
             Arc::new(TestRuleResolver),
             Arc::new(TestPlanner {
@@ -1535,6 +1657,7 @@ mod tests {
                 consumed: AtomicBool::new(false),
             }),
             stager.clone(),
+            unused_automatic(),
             unused_resume(),
             Arc::new(TestRuleResolver),
             Arc::new(TestPlanner {
@@ -1601,6 +1724,7 @@ mod tests {
                 calls: AtomicUsize::new(0),
                 saw_checkpoint: AtomicBool::new(false),
             }),
+            unused_automatic(),
             unused_resume(),
             Arc::new(TestRuleResolver),
             planner.clone(),
@@ -1661,6 +1785,7 @@ mod tests {
                 calls: AtomicUsize::new(0),
                 saw_checkpoint: AtomicBool::new(false),
             }),
+            unused_automatic(),
             unused_resume(),
             Arc::new(ChangingRuleResolver(AtomicUsize::new(0))),
             Arc::new(TestPlanner {
@@ -1724,6 +1849,7 @@ mod tests {
                 calls: AtomicUsize::new(0),
                 saw_checkpoint: AtomicBool::new(false),
             }),
+            unused_automatic(),
             unused_resume(),
             Arc::new(TestRuleResolver),
             Arc::new(TestPlanner {
@@ -1781,6 +1907,7 @@ mod tests {
                 calls: AtomicUsize::new(0),
                 saw_checkpoint: AtomicBool::new(false),
             }),
+            unused_automatic(),
             Arc::new(TestResumeExecutor {
                 outcome: Mutex::new(Some(AiSupervisedResumeOutcome::RecoveryRequired {
                     tool_call_id: claim.tool_call_id(),

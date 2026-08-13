@@ -172,6 +172,14 @@ impl AiGeneratedGraphqlTargetPolicySet {
         })
     }
 
+    pub(crate) fn allows_query_capability(&self, capability: &AiGraphqlQueryCapability) -> bool {
+        self.0.get(capability.target_id()).is_some_and(|binding| {
+            binding.queries
+                && binding.finished_schema_fingerprint == capability.finished_schema_fingerprint()
+                && binding.semantic_catalog_fingerprint == capability.semantic_catalog_fingerprint()
+        })
+    }
+
     pub(crate) fn allows_mutation(
         &self,
         descriptor: &AiToolDescriptor,
@@ -191,6 +199,23 @@ impl AiGeneratedGraphqlTargetPolicySet {
                         binding.approval_required_mutations
                             && descriptor.maturity == ToolMaturity::SupervisedWrite
                             && descriptor.approval == AiApprovalRule::OneShot
+                    }
+                    AiMutationExecutionPolicy::Prohibited => false,
+                }
+        })
+    }
+
+    pub(crate) fn allows_mutation_capability(
+        &self,
+        capability: &AiGraphqlMutationCapability,
+    ) -> bool {
+        self.0.get(capability.target_id()).is_some_and(|binding| {
+            binding.finished_schema_fingerprint == capability.finished_schema_fingerprint()
+                && binding.semantic_catalog_fingerprint == capability.semantic_catalog_fingerprint()
+                && match capability.execution_policy() {
+                    AiMutationExecutionPolicy::Automatic => binding.automatic_mutations,
+                    AiMutationExecutionPolicy::ApprovalRequired => {
+                        binding.approval_required_mutations
                     }
                     AiMutationExecutionPolicy::Prohibited => false,
                 }
@@ -229,9 +254,25 @@ impl AiGeneratedGraphqlTargetPolicySet {
 
     /// Returns a deterministic fingerprint of the complete exact target policy.
     pub fn fingerprint(&self) -> String {
-        let encoded = serde_json::to_vec(self)
-            .expect("generated GraphQL target policy contains only serializable values");
-        hex::encode(Sha256::digest(encoded))
+        let mut digest = Sha256::new();
+        digest.update(b"generated-graphql-target-policy-v1\0");
+        for (target, binding) in &self.0 {
+            for value in [
+                target.as_str(),
+                &binding.finished_schema_fingerprint,
+                &binding.semantic_catalog_fingerprint,
+            ] {
+                digest.update(value.len().to_be_bytes());
+                digest.update(value.as_bytes());
+            }
+            digest.update([
+                u8::from(binding.queries),
+                u8::from(binding.automatic_mutations),
+                u8::from(binding.approval_required_mutations),
+                u8::from(binding.replayable_subscriptions),
+            ]);
+        }
+        hex::encode(digest.finalize())
     }
 }
 
@@ -871,6 +912,47 @@ impl AiToolCatalog {
             return Err(AiError::Forbidden);
         }
         Ok(())
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn validate_generated_query_model_definition(
+        &self,
+        definition: &ModelToolDefinition,
+        targets: &AiGeneratedGraphqlTargetPolicySet,
+    ) -> Result<(), AiError> {
+        let id = AiToolId::parse(definition.tool_id.clone())?;
+        let capability = self.query_capabilities.get(&id).ok_or(AiError::Forbidden)?;
+        if !targets.allows_query_capability(capability)
+            || definition.fingerprint != capability.fingerprint()
+            || definition.description != capability.description()
+            || definition.parameters != *capability.argument_schema()
+            || !definition.strict
+        {
+            return Err(AiError::Forbidden);
+        }
+        Ok(())
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn validate_generated_mutation_model_definition(
+        &self,
+        definition: &ModelToolDefinition,
+        targets: &AiGeneratedGraphqlTargetPolicySet,
+    ) -> Result<AiMutationExecutionPolicy, AiError> {
+        let id = AiToolId::parse(definition.tool_id.clone())?;
+        let capability = self
+            .mutation_capabilities
+            .get(&id)
+            .ok_or(AiError::Forbidden)?;
+        if !targets.allows_mutation_capability(capability)
+            || definition.fingerprint != capability.fingerprint()
+            || definition.description != capability.description()
+            || definition.parameters != *capability.argument_schema()
+            || !definition.strict
+        {
+            return Err(AiError::Forbidden);
+        }
+        Ok(capability.execution_policy())
     }
 
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
