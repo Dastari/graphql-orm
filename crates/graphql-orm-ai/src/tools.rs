@@ -936,6 +936,30 @@ impl AiToolCatalog {
     }
 
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn validate_read_capability_model_definition(
+        &self,
+        definition: &ModelToolDefinition,
+        static_policy: &AiToolPolicySet,
+        generated_targets: &AiGeneratedGraphqlTargetPolicySet,
+    ) -> Result<(), AiError> {
+        let id = AiToolId::parse(definition.tool_id.clone())?;
+        let registered_kinds = usize::from(self.tools.contains_key(&id))
+            + usize::from(self.query_capabilities.contains_key(&id))
+            + usize::from(self.mutation_capabilities.contains_key(&id))
+            + usize::from(self.subscription_capabilities.contains_key(&id));
+        if registered_kinds != 1 {
+            return Err(AiError::Forbidden);
+        }
+        if self.tools.contains_key(&id) {
+            return self.validate_read_only_model_definition(definition, static_policy);
+        }
+        if self.query_capabilities.contains_key(&id) {
+            return self.validate_generated_query_model_definition(definition, generated_targets);
+        }
+        Err(AiError::Forbidden)
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn validate_generated_mutation_model_definition(
         &self,
         definition: &ModelToolDefinition,

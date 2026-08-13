@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.78.1", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.78.2", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -68,6 +68,8 @@ the compiled test-backed recipe and the missing reusable bootstrap API.
 - Backend-neutral automatic query capabilities compiled from the finished SDL
   and canonical semantic catalogue into closed typed plans. Nested
   relationships and opt-in aggregate roots remain explicitly bounded, and
+  one read-only provider plan may expose these capabilities beside exact
+  legacy/static read descriptors without duplicating either policy contract.
   Secret/`NeverExport` fields never enter provider schemas.
 - Provider-neutral adapters plus deterministic network-free mocks.
 - Optional provider profiles, attachments, skills, UI intents, rules, and

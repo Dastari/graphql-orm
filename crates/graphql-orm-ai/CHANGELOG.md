@@ -18,6 +18,29 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.78.2] - 2026-08-13
+
+### Added
+
+- `AiProviderCallPlan::new_with_read_capabilities` and
+  `new_continuation_with_read_capabilities` admit one provider-visible set of
+  exact static read descriptors and automatic generated query capabilities.
+  The registered `AiToolCatalog` alone classifies each stable ID; static and
+  generated entries retain their independent exact policy validation.
+
+### Security
+
+- Mixed admission rejects unknown or colliding IDs, mutations,
+  subscriptions, stale definitions and stale target/schema/semantic-catalogue
+  bindings. A denial in one catalogue kind cannot fall through to the other.
+  Execution still uses fresh principal, host policy, resolver authorization,
+  disclosure, egress, budget and durable coordinator fences.
+
+### Schema
+
+- AI schema module remains `0.59.0`. This release changes no persistence
+  entity, table, column, index, constraint or stored semantic meaning.
+
 ## [0.78.1] - 2026-08-13
 
 ### Fixed

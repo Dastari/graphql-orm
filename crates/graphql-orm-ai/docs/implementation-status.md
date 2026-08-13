@@ -10,9 +10,9 @@ supersedes: []
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.78.1` with AI schema module
-`0.59.0`. It uses workspace `graphql-orm` `0.22.0`, backend-neutral
-`graphql-orm-ai-tool-profiles` `0.4.0`, and external `agql-auth`
+`graphql-orm-ai` is at crate version `0.78.2` with AI schema module
+`0.59.0`. It uses workspace `graphql-orm` `0.22.1`, backend-neutral
+`graphql-orm-ai-tool-profiles` `0.4.1`, and external `agql-auth`
 `0.15.0` at `e841ffd382082ad7419be259fe957f949b956ff7`.
 
 The active work order, dependencies, and exit gates are maintained in the
@@ -70,8 +70,12 @@ verification evidence belongs in the focused guides.
   fingerprinting; neither path grants ordinary application authority.
 - Application tools require an explicit catalog, static disclosure contract,
   current host policy, and ordinary resolver authorization. Read-only and the
-  bounded sequential supervised path are implemented; broader mixed,
-  parallel, and stateless consequential execution remains closed.
+  bounded sequential supervised path are implemented; mixed, parallel, and
+  stateless consequential execution remains closed.
+- Read-only provider plans may expose exact static descriptors and generated
+  query capabilities together. Catalogue kind is server-derived, each kind
+  retains its own exact policy, and retained/stateless continuations consume
+  only the crate-owned opaque continuation proof.
 - Owning subgraphs can compile the same canonical generated/custom GraphQL
   tool manifests through `graphql-orm-ai-tool-profiles` without selecting an
   AI persistence backend. The runtime consumes those exact wire values and

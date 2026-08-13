@@ -19,6 +19,26 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.78.2: mixed static and generated read plans (schema remains 0.59.0)
+
+No database, data, GraphQL SDL, backup, restore or AI schema-module migration
+is required. Existing static-only `AiProviderCallPlan::new_with_tools` and
+generated-only `new_with_generated_queries` call sites remain valid.
+
+Hosts that deliberately expose both kinds in one read-only provider turn may
+replace the initial constructor with `new_with_read_capabilities`, passing the
+same registered `AiToolCatalog`, exact static `AiToolPolicySet` and exact
+`AiGeneratedGraphqlTargetPolicySet` already used by the runtime. Replace a
+stateless or checkpoint-adopted read-tool continuation constructor with
+`new_continuation_with_read_capabilities`. Provider-retained execution uses
+that same continuation constructor because the crate-owned opaque
+`AiAgentContinuation` selects provider-response versus bounded stateless
+history; there is no host-authored retained-result route.
+
+Do not copy generated capabilities into static descriptors or create static
+policy rows for them. Catalogue registration remains discovery only, and the
+ordinary fresh-principal authorization and resolver path remains unchanged.
+
 ## 0.78.1: atomic retained approval waits (schema 0.58.0 to 0.59.0)
 
 Apply `AiSchemaModule` `0.59.0` with run, approval, provider-session,

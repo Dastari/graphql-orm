@@ -381,6 +381,58 @@ impl AiProviderCallPlan {
         )
     }
 
+    /// Creates an initial provider call exposing a closed mixture of static
+    /// read descriptors and automatic generated query capabilities.
+    ///
+    /// Each offered definition is classified only by its unique registered
+    /// [`crate::AiToolCatalog`] entry. Static descriptors must pass the exact
+    /// [`AiToolPolicySet`], while generated queries must pass the exact target,
+    /// finished-schema, and semantic-catalogue policy. A denial in either
+    /// branch cannot fall through to the other branch. Registration and this
+    /// policy snapshot remain discovery controls rather than execution
+    /// authority; every actual call still rehydrates the principal and invokes
+    /// ordinary resolver authorization.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for ordinary initial-plan binding failures or when
+    /// any offered definition is not one uniquely registered, currently
+    /// admitted read capability. Unknown, colliding, mutation, subscription,
+    /// stale, disabled, or mismatched definitions fail closed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_read_capabilities(
+        provider_kind: ProviderKind,
+        request: ModelRequest,
+        budget: AiBudgetReservationRequest,
+        transfers: Vec<AiEgressManifest>,
+        correlation_id: impl Into<String>,
+        catalog: &crate::AiToolCatalog,
+        static_policy: &AiToolPolicySet,
+        generated_targets: &crate::AiGeneratedGraphqlTargetPolicySet,
+    ) -> Result<Self, AiError> {
+        if request.tools.is_empty()
+            || request.continuation.is_some()
+            || request
+                .input
+                .iter()
+                .any(|block| matches!(block, crate::ModelInputBlock::ToolResult { .. }))
+        {
+            return Err(AiError::InvalidInput(
+                "initial read-capability provider plan is invalid".to_owned(),
+            ));
+        }
+        Self::new_with_bound_read_capabilities(
+            provider_kind,
+            request,
+            budget,
+            transfers,
+            correlation_id,
+            catalog,
+            static_policy,
+            generated_targets,
+        )
+    }
+
     /// Creates an initial provider call that may expose explicitly enabled
     /// read-only queries and supervised one-shot application mutations.
     ///
@@ -542,6 +594,50 @@ impl AiProviderCallPlan {
         Ok(plan)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_bound_read_capabilities(
+        provider_kind: ProviderKind,
+        request: ModelRequest,
+        budget: AiBudgetReservationRequest,
+        transfers: Vec<AiEgressManifest>,
+        correlation_id: impl Into<String>,
+        catalog: &crate::AiToolCatalog,
+        static_policy: &AiToolPolicySet,
+        generated_targets: &crate::AiGeneratedGraphqlTargetPolicySet,
+    ) -> Result<Self, AiError> {
+        if request.tools.is_empty() {
+            return Err(AiError::InvalidInput(
+                "read-capability provider plan has no tools".to_owned(),
+            ));
+        }
+        for definition in &request.tools {
+            catalog.validate_read_capability_model_definition(
+                definition,
+                static_policy,
+                generated_targets,
+            )?;
+        }
+        let bindings = request
+            .tools
+            .iter()
+            .map(|definition| AiPlanToolRuleBinding {
+                fingerprint: definition.fingerprint.clone(),
+                maturity: ToolMaturity::ReadOnly,
+                approval: AiApprovalRule::None,
+            })
+            .collect();
+        let mut plan = Self::new_internal(
+            provider_kind,
+            request,
+            budget,
+            transfers,
+            correlation_id.into(),
+            true,
+        )?;
+        plan.tool_rule_bindings = bindings;
+        Ok(plan)
+    }
+
     fn new_with_bound_classified_mutations(
         provider_kind: ProviderKind,
         request: ModelRequest,
@@ -663,6 +759,47 @@ impl AiProviderCallPlan {
             correlation_id,
             catalog,
             policy,
+        )
+    }
+
+    /// Creates a subsequent read-only turn that retains one exact mixed
+    /// static/generated capability set and installs one opaque bounded-loop
+    /// continuation.
+    ///
+    /// This is the continuation counterpart to
+    /// [`Self::new_with_read_capabilities`]. The crate-owned continuation
+    /// installs either the provider-retained response binding or the complete
+    /// bounded stateless history and its exact tool-result transfers. Hosts do
+    /// not construct result routes, replay messages, or capability kinds.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for malformed continuation bindings, ordinary
+    /// provider-plan failures, or any unknown, colliding, disabled, stale,
+    /// mismatched, mutation, or subscription definition.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_continuation_with_read_capabilities(
+        provider_kind: ProviderKind,
+        mut request: ModelRequest,
+        budget: AiBudgetReservationRequest,
+        mut transfers: Vec<AiEgressManifest>,
+        correlation_id: impl Into<String>,
+        continuation: crate::AiAgentContinuation,
+        catalog: &crate::AiToolCatalog,
+        static_policy: &AiToolPolicySet,
+        generated_targets: &crate::AiGeneratedGraphqlTargetPolicySet,
+    ) -> Result<Self, AiError> {
+        let tool_transfers = continuation.apply_with_transfers(&mut request)?;
+        transfers.extend(tool_transfers);
+        Self::new_with_bound_read_capabilities(
+            provider_kind,
+            request,
+            budget,
+            transfers,
+            correlation_id,
+            catalog,
+            static_policy,
+            generated_targets,
         )
     }
 
@@ -3519,7 +3656,9 @@ mod tests {
         GraphqlEntitySemanticMetadata, GraphqlOperationCatalog, GraphqlOperationKind,
         GraphqlSemanticArgumentDescriptor, GraphqlSemanticCatalog, GraphqlSemanticClassification,
         GraphqlSemanticExport, GraphqlSemanticFieldMetadata, GraphqlSemanticOperationDescriptor,
-        GraphqlSemanticTypeKind, GraphqlSemanticTypeRef, OrmSchemaModule, TransactionMode,
+        GraphqlSemanticTypeKind, GraphqlSemanticTypeRef, GraphqlSubscriptionConditionField,
+        GraphqlSubscriptionConditionOperator, GraphqlSubscriptionObservationDescriptor,
+        GraphqlSubscriptionReplayMode, OrmSchemaModule, TransactionMode,
     };
     use graphql_orm::graphql::pagination::KeysetConnectionInput;
     use graphql_orm::prelude::{Database, SqliteBackend};
@@ -3595,6 +3734,26 @@ mod tests {
     }
 
     struct Resolver(AuthPrincipal);
+
+    struct CountingResolver {
+        principal: AuthPrincipal,
+        resolutions: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl CurrentPrincipalResolver for CountingResolver {
+        async fn resolve(
+            &self,
+            reference: &agql_auth::PrincipalReference,
+        ) -> agql_auth::AuthResult<ResolvedPrincipal> {
+            self.resolutions.fetch_add(1, Ordering::SeqCst);
+            ResolvedPrincipal::new(
+                reference.clone(),
+                self.principal.clone(),
+                OffsetDateTime::now_utc(),
+            )
+        }
+    }
 
     #[async_trait]
     impl CurrentPrincipalResolver for Resolver {
@@ -3718,6 +3877,17 @@ mod tests {
                     }}),
                     error_codes: Vec::new(),
                     application_audit_ref: Some("application-audit-automatic-1".to_owned()),
+                });
+            }
+            if request.document.contains(" GeneratedRecord(") {
+                self.completed.fetch_add(1, Ordering::SeqCst);
+                return Ok(ToolGraphqlResponse {
+                    data: json!({"GeneratedRecord": {
+                        "recordId": request.variables.get("v0"),
+                        "subject": subject,
+                    }}),
+                    error_codes: Vec::new(),
+                    application_audit_ref: Some("application-audit-generated-read-1".to_owned()),
                 });
             }
             let data = if request.document.contains(" updateRecord(") {
@@ -4181,9 +4351,19 @@ mod tests {
         tool_policy_version: Arc<AtomicUsize>,
         fail_execution: Arc<AtomicBool>,
         completed_executions: Arc<AtomicUsize>,
+        principal_resolutions: Arc<AtomicUsize>,
+        generated_query_id: Option<AiToolId>,
+        generated_query_fingerprint: Option<String>,
+        generated_target_policy: AiGeneratedGraphqlTargetPolicySet,
         automatic_mutation_id: Option<AiToolId>,
         automatic_mutation_fingerprint: Option<String>,
     }
+
+    const GENERATED_QUERY_SDL: &str = r#"
+        schema { query: Query }
+        type Query { GeneratedRecord(recordId: ID!): Record! }
+        type Record { recordId: ID!, subject: String! }
+    "#;
 
     const GENERATED_MUTATION_SDL: &str = r#"
         schema { query: Query, mutation: Mutation }
@@ -4255,6 +4435,132 @@ mod tests {
         )
         .expect("automatic mutation capabilities should compile");
         (semantics, catalog)
+    }
+
+    fn generated_query_catalog() -> (GraphqlSemanticCatalog, AiGraphqlQueryCapabilityCatalog) {
+        let scalar = |field_name: &str, scalar_name: &str| GraphqlSemanticFieldMetadata {
+            field_name: field_name.to_owned(),
+            description: format!("Reviewed public {field_name}."),
+            type_ref: GraphqlSemanticTypeRef::named(
+                scalar_name,
+                GraphqlSemanticTypeKind::Scalar,
+                false,
+            ),
+            selectable: true,
+            filter_operators: Vec::new(),
+            sortable: false,
+            groupable: false,
+            aggregate_operators: Vec::new(),
+            aggregate_value_kind: None,
+            relationship: None,
+            classification: GraphqlSemanticClassification::Internal,
+            export: GraphqlSemanticExport::Exportable,
+            has_field_policy: false,
+        };
+        let entity = GraphqlEntitySemanticMetadata {
+            entity_name: "Record".to_owned(),
+            description: "A reviewed application record.".to_owned(),
+            default_classification: GraphqlSemanticClassification::Internal,
+            fields: vec![scalar("recordId", "ID"), scalar("subject", "String")].into_boxed_slice(),
+        };
+        let operation = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Query,
+            "GeneratedRecord",
+            "Read one reviewed application record.",
+            vec![GraphqlSemanticArgumentDescriptor {
+                graphql_name: "recordId".to_owned(),
+                description: "Reviewed record identifier.".to_owned(),
+                type_ref: GraphqlSemanticTypeRef::named(
+                    "ID",
+                    GraphqlSemanticTypeKind::Scalar,
+                    false,
+                ),
+            }],
+            GraphqlSemanticTypeRef::named("Record", GraphqlSemanticTypeKind::Object, false),
+            true,
+        )
+        .expect("test query semantics should validate");
+        let semantics = GraphqlSemanticCatalog::compose_with_custom(
+            [entity],
+            &GraphqlOperationCatalog::compose(std::iter::empty()),
+            [operation],
+        )
+        .expect("test query catalogue should validate");
+        let catalog = AiGraphqlQueryCapabilityCatalog::compile(
+            "generated-read",
+            GraphqlExecutionTargetId::parse("generated-read-application")
+                .expect("generated read target should validate"),
+            GENERATED_QUERY_SDL,
+            &semantics,
+            AiGraphqlQueryCapabilityLimits::default(),
+        )
+        .expect("generated query capabilities should compile");
+        (semantics, catalog)
+    }
+
+    fn generated_subscription_catalog() -> AiGraphqlSubscriptionCapabilityCatalog {
+        let scalar = |field_name: &str| GraphqlSemanticFieldMetadata {
+            field_name: field_name.to_owned(),
+            description: format!("Reviewed public {field_name}."),
+            type_ref: GraphqlSemanticTypeRef::named(
+                "String",
+                GraphqlSemanticTypeKind::Scalar,
+                false,
+            ),
+            selectable: true,
+            filter_operators: Vec::new(),
+            sortable: false,
+            groupable: false,
+            aggregate_operators: Vec::new(),
+            aggregate_value_kind: None,
+            relationship: None,
+            classification: GraphqlSemanticClassification::Internal,
+            export: GraphqlSemanticExport::Exportable,
+            has_field_policy: true,
+        };
+        let entity = GraphqlEntitySemanticMetadata {
+            entity_name: "Record".to_owned(),
+            description: "A reviewed replayable record event.".to_owned(),
+            default_classification: GraphqlSemanticClassification::Internal,
+            fields: vec![scalar("recordId"), scalar("subject")].into_boxed_slice(),
+        };
+        let operation = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Subscription,
+            "RecordChanged",
+            "Observe reviewed record changes.",
+            Vec::new(),
+            GraphqlSemanticTypeRef::named("Record", GraphqlSemanticTypeKind::Object, false),
+            true,
+        )
+        .expect("test subscription semantics should validate")
+        .with_subscription_observation(GraphqlSubscriptionObservationDescriptor {
+            replay_mode: GraphqlSubscriptionReplayMode::ReplayThenLive,
+            maximum_duration_seconds: Some(120),
+            maximum_events: Some(20),
+            condition_fields: vec![GraphqlSubscriptionConditionField {
+                field_name: "recordId".to_owned(),
+                operators: vec![GraphqlSubscriptionConditionOperator::Equal],
+            }],
+        })
+        .expect("test replayable subscription should validate");
+        let semantics = GraphqlSemanticCatalog::compose_with_custom(
+            [entity],
+            &GraphqlOperationCatalog::compose(std::iter::empty()),
+            [operation],
+        )
+        .expect("test subscription catalogue should validate");
+        AiGraphqlSubscriptionCapabilityCatalog::compile(
+            "generated-subscription",
+            GraphqlExecutionTargetId::parse("generated-subscription-application")
+                .expect("subscription target should validate"),
+            "schema { query: Query, subscription: Subscription }\n\
+             type Query { health: Boolean! }\n\
+             type Subscription { RecordChanged: Record! }\n\
+             type Record { recordId: String!, subject: String! }",
+            &semantics,
+            AiGraphqlSubscriptionCapabilityLimits::default(),
+        )
+        .expect("test subscription capabilities should compile")
     }
 
     async fn fixture(events: Vec<ProviderEvent>) -> Fixture {
@@ -4555,6 +4861,34 @@ mod tests {
                 .expect("supervised write should register");
         }
         let mut generated_target_policy = AiGeneratedGraphqlTargetPolicySet::new();
+        let mut generated_query_id = None;
+        let mut generated_query_fingerprint = None;
+        let mut generated_query_schema_fingerprint = None;
+        if include_static_tools {
+            let (query_semantics, query_catalog) = generated_query_catalog();
+            let generated_query = query_catalog
+                .capabilities()
+                .next()
+                .expect("one generated query should compile");
+            generated_query_id = Some(generated_query.id().clone());
+            generated_query_fingerprint = Some(generated_query.fingerprint().to_owned());
+            generated_query_schema_fingerprint =
+                Some(query_catalog.finished_schema_fingerprint().to_owned());
+            generated_target_policy
+                .bind(
+                    AiGeneratedGraphqlTargetPolicyBinding::new(
+                        generated_query.target_id().clone(),
+                        query_catalog.finished_schema_fingerprint(),
+                        query_semantics.fingerprint.clone(),
+                    )
+                    .expect("generated read target binding should validate")
+                    .allow_queries(),
+                )
+                .expect("generated read target should bind once");
+            tool_catalog
+                .register_query_capability_catalog(&query_catalog)
+                .expect("generated query catalogue should register");
+        }
         let mut automatic_mutation_id = None;
         let mut automatic_mutation_fingerprint = None;
         let mut automatic_schema_fingerprint = None;
@@ -4608,13 +4942,34 @@ mod tests {
                 })
                 .expect("generated target should register");
         }
+        if let Some(schema_fingerprint) = generated_query_schema_fingerprint {
+            targets
+                .register(GraphqlExecutionTarget {
+                    id: GraphqlExecutionTargetId::parse("generated-read-application")
+                        .expect("generated read target ID should parse"),
+                    class: GraphqlExecutionTargetClass::Local,
+                    audience: None,
+                    resource_type: None,
+                    resource_id: None,
+                    schema_fingerprint,
+                })
+                .expect("generated read target should register");
+        }
         let tool_policy_version = Arc::new(AtomicUsize::new(1));
         let fail_execution = Arc::new(AtomicBool::new(false));
         let completed_executions = Arc::new(AtomicUsize::new(0));
+        let principal_resolutions = Arc::new(AtomicUsize::new(0));
+        let generated_authorization = AiGeneratedGraphqlAuthorizationPolicy::new(
+            generated_target_policy.clone(),
+            Arc::new(AllowTools(tool_policy_version.clone())),
+        );
         let runtime = AiRuntime::builder()
-            .principal_resolver(Arc::new(Resolver(principal.clone())))
+            .principal_resolver(Arc::new(CountingResolver {
+                principal: principal.clone(),
+                resolutions: principal_resolutions.clone(),
+            }))
             .access_policy(access_policy)
-            .tool_authorization_policy(Arc::new(AllowTools(tool_policy_version.clone())))
+            .tool_authorization_policy(Arc::new(generated_authorization))
             .request_context_factory(Arc::new(ContextFactory))
             .graphql_executor(Arc::new(Executor {
                 fail: fail_execution.clone(),
@@ -4647,7 +5002,7 @@ mod tests {
             } else {
                 ToolMaturity::AutonomousWrite
             })
-            .generated_graphql_target_policy(generated_target_policy)
+            .generated_graphql_target_policy(generated_target_policy.clone())
             .tool_catalog(tool_catalog)
             .secret_store(Arc::new(EnvironmentSecretStore::new()))
             .content_protection_policy_resolver(Arc::new(ProtectionPolicy))
@@ -4682,6 +5037,10 @@ mod tests {
             tool_policy_version,
             fail_execution,
             completed_executions,
+            principal_resolutions,
+            generated_query_id,
+            generated_query_fingerprint,
+            generated_target_policy,
             automatic_mutation_id,
             automatic_mutation_fingerprint,
         }
@@ -7516,6 +7875,443 @@ mod tests {
         .expect("registered enabled read-only tool plan should validate")
     }
 
+    fn static_read_policy(fixture: &Fixture) -> AiToolPolicySet {
+        let descriptor = fixture
+            .runtime
+            .tool_catalog()
+            .descriptor(&AiToolId::parse("records.read").expect("tool ID should parse"))
+            .expect("static read tool should be registered");
+        let mut policy = AiToolPolicySet::new(ToolMaturity::ReadOnly);
+        policy.bind(AiToolPolicyBinding {
+            tool_id: descriptor.id.clone(),
+            fingerprint: descriptor.fingerprint.clone(),
+            enabled: true,
+        });
+        policy
+    }
+
+    fn mixed_read_definitions(fixture: &Fixture) -> Vec<ModelToolDefinition> {
+        let static_id = AiToolId::parse("records.read").expect("tool ID should parse");
+        let generated_id = fixture
+            .generated_query_id
+            .as_ref()
+            .expect("mixed fixture should expose its generated query");
+        vec![
+            fixture
+                .runtime
+                .tool_catalog()
+                .read_only_model_definition(&static_id, "records_read")
+                .expect("static read definition should project"),
+            fixture
+                .runtime
+                .tool_catalog()
+                .query_capability_model_definition(generated_id, "generated_record")
+                .expect("generated query definition should project"),
+        ]
+    }
+
+    fn mixed_read_plan(fixture: &Fixture) -> AiProviderCallPlan {
+        read_capability_plan_with(
+            fixture,
+            mixed_read_definitions(fixture),
+            &static_read_policy(fixture),
+            &fixture.generated_target_policy,
+        )
+        .expect("mixed read capability plan should validate")
+    }
+
+    fn read_capability_plan_with(
+        fixture: &Fixture,
+        definitions: Vec<ModelToolDefinition>,
+        static_policy: &AiToolPolicySet,
+        generated_targets: &AiGeneratedGraphqlTargetPolicySet,
+    ) -> Result<AiProviderCallPlan, AiError> {
+        let mut base = plan(fixture);
+        base.request.tools = definitions;
+        base.transfers[0].estimated_bytes = base.request.conservative_egress_bytes();
+        AiProviderCallPlan::new_with_read_capabilities(
+            base.provider_kind,
+            base.request,
+            base.budget,
+            base.transfers,
+            base.correlation_id,
+            fixture.runtime.tool_catalog(),
+            static_policy,
+            generated_targets,
+        )
+    }
+
+    fn static_read_request(fixture: &Fixture, correlation_id: &str) -> ToolGraphqlRequest {
+        let descriptor = fixture
+            .runtime
+            .tool_catalog()
+            .descriptor(&AiToolId::parse("records.read").expect("tool ID should parse"))
+            .expect("static read tool should be registered");
+        let contract = descriptor
+            .graphql_contract
+            .clone()
+            .expect("static read tool should bind GraphQL");
+        ToolGraphqlRequest {
+            document: descriptor.document.clone(),
+            operation_name: contract.operation_name.clone(),
+            contract,
+            variables: json!({"recordId": correlation_id}),
+            invocation: GraphqlInvocationContext {
+                run_id: fixture.lease.run_id(),
+                tool_call_id: AiToolCallId::new(),
+                scope: fixture.scope.clone(),
+                correlation_id: correlation_id.to_owned(),
+                causation_id: correlation_id.to_owned(),
+                delegation_reference: None,
+                idempotency_key: None,
+            },
+        }
+    }
+
+    fn generated_read_plan() -> serde_json::Value {
+        json!({
+            "arguments": {"recordId": "generated-1"},
+            "fields": {"recordId": true, "subject": true},
+            "relationships": {}
+        })
+    }
+
+    fn generated_read_invocation(
+        fixture: &Fixture,
+        correlation_id: &str,
+    ) -> GraphqlInvocationContext {
+        GraphqlInvocationContext {
+            run_id: fixture.lease.run_id(),
+            tool_call_id: AiToolCallId::new(),
+            scope: fixture.scope.clone(),
+            correlation_id: correlation_id.to_owned(),
+            causation_id: correlation_id.to_owned(),
+            delegation_reference: None,
+            idempotency_key: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_read_plan_classifies_each_definition_without_policy_fallthrough() {
+        let fixture = fixture(Vec::new()).await;
+        let plan = mixed_read_plan(&fixture);
+        assert_eq!(plan.request.tools.len(), 2);
+        assert_eq!(plan.tool_rule_bindings.len(), 2);
+        assert!(plan.tool_rule_bindings.iter().all(|binding| {
+            binding.maturity == ToolMaturity::ReadOnly && binding.approval == AiApprovalRule::None
+        }));
+
+        let definitions = mixed_read_definitions(&fixture);
+        assert!(matches!(
+            read_capability_plan_with(
+                &fixture,
+                definitions.clone(),
+                &AiToolPolicySet::new(ToolMaturity::ReadOnly),
+                &fixture.generated_target_policy,
+            ),
+            Err(AiError::Forbidden)
+        ));
+        let mut static_policy_with_generated_id = static_read_policy(&fixture);
+        static_policy_with_generated_id.bind(AiToolPolicyBinding {
+            tool_id: fixture
+                .generated_query_id
+                .clone()
+                .expect("generated query ID should exist"),
+            fingerprint: fixture
+                .generated_query_fingerprint
+                .clone()
+                .expect("generated query fingerprint should exist"),
+            enabled: true,
+        });
+        assert!(matches!(
+            read_capability_plan_with(
+                &fixture,
+                definitions.clone(),
+                &static_policy_with_generated_id,
+                &AiGeneratedGraphqlTargetPolicySet::new(),
+            ),
+            Err(AiError::Forbidden)
+        ));
+
+        let mut unknown = definitions.clone();
+        unknown[0].tool_id = "unregistered.read".to_owned();
+        assert!(matches!(
+            read_capability_plan_with(
+                &fixture,
+                unknown,
+                &static_read_policy(&fixture),
+                &fixture.generated_target_policy,
+            ),
+            Err(AiError::Forbidden)
+        ));
+
+        let mut kind_confused = definitions.clone();
+        kind_confused[0].tool_id = definitions[1].tool_id.clone();
+        assert!(matches!(
+            read_capability_plan_with(
+                &fixture,
+                kind_confused,
+                &static_read_policy(&fixture),
+                &fixture.generated_target_policy,
+            ),
+            Err(AiError::Forbidden)
+        ));
+
+        let mut stale_static = definitions.clone();
+        stale_static[0].fingerprint = "0".repeat(64);
+        assert!(matches!(
+            read_capability_plan_with(
+                &fixture,
+                stale_static,
+                &static_read_policy(&fixture),
+                &fixture.generated_target_policy,
+            ),
+            Err(AiError::Forbidden)
+        ));
+
+        let mut stale_generated = definitions;
+        stale_generated[1].fingerprint = "f".repeat(64);
+        assert!(matches!(
+            read_capability_plan_with(
+                &fixture,
+                stale_generated,
+                &static_read_policy(&fixture),
+                &fixture.generated_target_policy,
+            ),
+            Err(AiError::Forbidden)
+        ));
+
+        let (query_semantics, query_catalog) = generated_query_catalog();
+        let query_capability = query_catalog
+            .capabilities()
+            .next()
+            .expect("one generated query should compile");
+        for (schema_fingerprint, semantic_fingerprint) in [
+            ("a".repeat(64), query_semantics.fingerprint.clone()),
+            (
+                query_catalog.finished_schema_fingerprint().to_owned(),
+                "b".repeat(64),
+            ),
+        ] {
+            let mut stale_target = AiGeneratedGraphqlTargetPolicySet::new();
+            stale_target
+                .bind(
+                    AiGeneratedGraphqlTargetPolicyBinding::new(
+                        query_capability.target_id().clone(),
+                        schema_fingerprint,
+                        semantic_fingerprint,
+                    )
+                    .expect("stale target binding should remain structurally valid")
+                    .allow_queries(),
+                )
+                .expect("stale target should bind once");
+            assert!(matches!(
+                read_capability_plan_with(
+                    &fixture,
+                    mixed_read_definitions(&fixture),
+                    &static_read_policy(&fixture),
+                    &stale_target,
+                ),
+                Err(AiError::Forbidden)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_read_plan_rejects_registered_generated_mutations() {
+        let automatic_fixture = automatic_mutation_fixture().await;
+        let mutation_id = automatic_fixture
+            .automatic_mutation_id
+            .as_ref()
+            .expect("automatic mutation should be registered");
+        let definition = automatic_fixture
+            .runtime
+            .tool_catalog()
+            .mutation_capability_model_definition(mutation_id, "create_record")
+            .expect("mutation definition should project");
+        assert!(matches!(
+            read_capability_plan_with(
+                &automatic_fixture,
+                vec![definition],
+                &AiToolPolicySet::new(ToolMaturity::ReadOnly),
+                &automatic_fixture.generated_target_policy,
+            ),
+            Err(AiError::Forbidden)
+        ));
+
+        let read_fixture = fixture(Vec::new()).await;
+        let mutation = read_fixture
+            .runtime
+            .tool_catalog()
+            .descriptor(&AiToolId::parse("records.update").expect("tool ID should parse"))
+            .expect("static mutation should be registered");
+        let definition = ModelToolDefinition {
+            tool_id: mutation.id.as_str().to_owned(),
+            provider_name: "records_update".to_owned(),
+            fingerprint: mutation.fingerprint.clone(),
+            description: mutation.description.clone(),
+            parameters: mutation.argument_schema.clone(),
+            strict: true,
+        };
+        let mut static_policy = AiToolPolicySet::new(ToolMaturity::SupervisedWrite);
+        static_policy.bind(AiToolPolicyBinding {
+            tool_id: mutation.id.clone(),
+            fingerprint: mutation.fingerprint.clone(),
+            enabled: true,
+        });
+        assert!(matches!(
+            read_capability_plan_with(
+                &read_fixture,
+                vec![definition],
+                &static_policy,
+                &read_fixture.generated_target_policy,
+            ),
+            Err(AiError::Forbidden)
+        ));
+    }
+
+    #[tokio::test]
+    async fn mixed_read_plan_rejects_registered_subscriptions_and_duplicate_ids() {
+        let fixture = fixture(Vec::new()).await;
+        let subscription_catalog = generated_subscription_catalog();
+        let subscription = subscription_catalog
+            .capabilities()
+            .next()
+            .expect("one subscription capability should compile");
+        let mut subscription_tools = AiToolCatalog::new();
+        subscription_tools
+            .register_subscription_capability_catalog(&subscription_catalog)
+            .expect("subscription capability should register");
+        let definition = subscription_tools
+            .subscription_capability_model_definition(subscription.id(), "record_changed")
+            .expect("subscription definition should project");
+        let mut base = plan(&fixture);
+        base.request.tools = vec![definition];
+        base.transfers[0].estimated_bytes = base.request.conservative_egress_bytes();
+        assert!(matches!(
+            AiProviderCallPlan::new_with_read_capabilities(
+                base.provider_kind,
+                base.request,
+                base.budget,
+                base.transfers,
+                base.correlation_id,
+                &subscription_tools,
+                &AiToolPolicySet::new(ToolMaturity::ReadOnly),
+                &AiGeneratedGraphqlTargetPolicySet::new(),
+            ),
+            Err(AiError::Forbidden)
+        ));
+
+        let (_, query_catalog) = generated_query_catalog();
+        let generated_id = query_catalog
+            .capabilities()
+            .next()
+            .expect("one query capability should compile")
+            .id()
+            .clone();
+        let source_id = AiToolId::parse("records.read").expect("static tool ID should parse");
+        let source = fixture
+            .runtime
+            .tool_catalog()
+            .descriptor(&source_id)
+            .expect("static descriptor should exist");
+        let disclosure = fixture
+            .runtime
+            .tool_catalog()
+            .disclosure_schema(&source_id)
+            .expect("static disclosure should exist")
+            .clone();
+        let colliding = AiToolDescriptor::new(
+            generated_id.as_str(),
+            source.description.clone(),
+            AiToolOperationKind::Query,
+            source.document.clone(),
+            source.argument_schema.clone(),
+        )
+        .expect("colliding static descriptor should validate")
+        .with_result_projection(source.result_projection.clone())
+        .with_graphql_contract(
+            source
+                .graphql_contract
+                .clone()
+                .expect("static descriptor should bind GraphQL"),
+        );
+        let mut colliding_catalog = AiToolCatalog::new();
+        colliding_catalog
+            .register_with_disclosure(colliding, disclosure)
+            .expect("first colliding kind should register");
+        assert!(matches!(
+            colliding_catalog.register_query_capability_catalog(&query_catalog),
+            Err(AiError::AlreadyExists(id)) if id == generated_id.as_str()
+        ));
+    }
+
+    #[tokio::test]
+    async fn current_resolver_revocation_affects_next_static_and_generated_read() {
+        let fixture = fixture(Vec::new()).await;
+        let static_id = AiToolId::parse("records.read").expect("tool ID should parse");
+        let generated_id = fixture
+            .generated_query_id
+            .as_ref()
+            .expect("generated query should be registered");
+        let generated_fingerprint = fixture
+            .generated_query_fingerprint
+            .as_deref()
+            .expect("generated query fingerprint should be retained");
+
+        fixture
+            .runtime
+            .execute_tool(
+                fixture.lease.principal_reference(),
+                &static_id,
+                static_read_request(&fixture, "static-before-revocation"),
+            )
+            .await
+            .expect("static resolver should initially authorize");
+        fixture
+            .runtime
+            .execute_query_capability(
+                fixture.lease.principal_reference(),
+                generated_id,
+                generated_fingerprint,
+                generated_read_plan(),
+                generated_read_invocation(&fixture, "generated-before-revocation"),
+            )
+            .await
+            .expect("generated resolver should initially authorize");
+
+        let resolutions_before = fixture.principal_resolutions.load(Ordering::SeqCst);
+        fixture.fail_execution.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            fixture
+                .runtime
+                .execute_tool(
+                    fixture.lease.principal_reference(),
+                    &static_id,
+                    static_read_request(&fixture, "static-after-revocation"),
+                )
+                .await,
+            Err(AiError::ToolExecutionFailed)
+        ));
+        assert!(matches!(
+            fixture
+                .runtime
+                .execute_query_capability(
+                    fixture.lease.principal_reference(),
+                    generated_id,
+                    generated_fingerprint,
+                    generated_read_plan(),
+                    generated_read_invocation(&fixture, "generated-after-revocation"),
+                )
+                .await,
+            Err(AiError::ToolExecutionFailed)
+        ));
+        assert!(
+            fixture.principal_resolutions.load(Ordering::SeqCst) >= resolutions_before + 2,
+            "each denied invocation must still resolve current authority"
+        );
+    }
+
     fn stateless_tool_plan(fixture: &Fixture) -> AiProviderCallPlan {
         let mut plan = tool_plan(fixture);
         plan.request.continuation_mode = ModelContinuationMode::StatelessReplay;
@@ -8445,6 +9241,157 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mixed_static_and_generated_reads_execute_through_one_fresh_principal_path() {
+        let (_, generated_catalog) = generated_query_catalog();
+        let generated_id = generated_catalog
+            .capabilities()
+            .next()
+            .expect("one generated query should compile")
+            .id()
+            .as_str()
+            .to_owned();
+        let fixture = fixture(vec![
+            ProviderEvent::ResponseStarted {
+                response_id: Some("mixed-read-response".to_owned()),
+            },
+            ProviderEvent::ToolCallStarted {
+                call_id: "static-call".to_owned(),
+                tool_id: "records.read".to_owned(),
+            },
+            ProviderEvent::ToolCallCompleted {
+                call_id: "static-call".to_owned(),
+                arguments: json!({"recordId": "static-1"}),
+            },
+            ProviderEvent::ToolCallStarted {
+                call_id: "generated-call".to_owned(),
+                tool_id: generated_id,
+            },
+            ProviderEvent::ToolCallCompleted {
+                call_id: "generated-call".to_owned(),
+                arguments: json!({
+                    "arguments": {"recordId": "generated-1"},
+                    "fields": {"recordId": true, "subject": true},
+                    "relationships": {}
+                }),
+            },
+            ProviderEvent::Usage {
+                input_tokens: 18,
+                output_tokens: 7,
+                cached_input_tokens: 0,
+            },
+            ProviderEvent::ResponseCompleted {
+                response_id: Some("mixed-read-response".to_owned()),
+            },
+        ])
+        .await;
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate"),
+        );
+        let provider_result = executor
+            .execute(&fixture.lease, mixed_read_plan(&fixture))
+            .await
+            .expect("one mixed provider turn should validate");
+        assert_eq!(provider_result.tool_calls().len(), 2);
+
+        let route = AiToolResultEgressRoute::new(
+            "mock-profile",
+            "local-mock",
+            AiDestinationTrust::Local,
+            "continue_mixed_read_results",
+            "none",
+            "egress-v1",
+        )
+        .expect("test mixed result route should validate");
+        let checkpoint_service = OrmAiCoordinatorCheckpointService::new(
+            fixture.run_service.clone(),
+            Arc::new(Resolver(fixture.principal.clone())),
+            Arc::new(AllowAccess),
+            Arc::new(ProtectionPolicy),
+            Arc::new(DatabaseManagedContentProtector),
+            Arc::new(TestRuleResolver::default()),
+            Arc::new(SystemClock),
+            AiCoordinatorCheckpointLimits::new(256 * 1_024, Duration::seconds(30))
+                .expect("checkpoint limits should validate"),
+        );
+        let mut guard = AiAgentLoopGuard::new(
+            &fixture.lease,
+            AiAgentLoopLimits::new(4, 4).expect("test loop limits should validate"),
+        );
+        guard
+            .observe_provider_turn(&provider_result)
+            .expect("mixed provider turn should bind to the loop guard");
+        let (rules, usage) = test_rule_checkpoint(&fixture.scope, &[&provider_result], 0);
+        let mut current_lease = checkpoint_service
+            .persist_provider_turn(
+                &fixture.lease,
+                &provider_result,
+                &fixture.scope,
+                "mixed-read-test",
+                &route,
+                &rules,
+                usage,
+                guard.provider_turns(),
+                guard.total_tool_calls(),
+            )
+            .await
+            .expect("mixed provider result should checkpoint");
+        let resolutions_before = fixture.principal_resolutions.load(Ordering::SeqCst);
+        let service = OrmAiApplicationToolCallService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            fixture.audit.clone(),
+            Arc::new(SystemClock),
+            AiApplicationToolCallLimits::new(
+                8_192,
+                16_384,
+                4,
+                4,
+                Duration::seconds(30),
+                Duration::seconds(10),
+            )
+            .expect("test tool limits should validate"),
+        );
+        let mut persisted = Vec::new();
+        for tool_call_index in 0..2 {
+            let context = AiApplicationToolCallContext::new(
+                0,
+                tool_call_index,
+                fixture.scope.clone(),
+                "mixed-read-test",
+                "mixed-read-response",
+            )
+            .expect("mixed tool context should validate");
+            let call = service
+                .execute_read_only(&current_lease, &provider_result, context, route.clone())
+                .await
+                .expect("each mixed read should use the ordinary durable service");
+            current_lease = call.lease().clone();
+            persisted.push(call);
+        }
+        assert!(persisted.iter().all(|call| {
+            call.state() == AiApplicationToolCallState::Completed && call.model_input().is_some()
+        }));
+        assert_eq!(
+            persisted
+                .iter()
+                .map(AiPersistedApplicationToolCall::provider_call_id)
+                .collect::<Vec<_>>(),
+            vec!["static-call", "generated-call"]
+        );
+        assert!(
+            fixture.principal_resolutions.load(Ordering::SeqCst) >= resolutions_before + 4,
+            "each invocation must rehydrate before and after ordinary resolver execution"
+        );
+        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn registered_tool_result_is_protected_audited_fenced_and_chainable() {
         let fixture = fixture(vec![
             ProviderEvent::ResponseStarted {
@@ -8834,14 +9781,7 @@ mod tests {
             input: Vec::new(),
             continuation: None,
             continuation_mode: crate::ModelContinuationMode::ProviderRetained,
-            tools: vec![ModelToolDefinition {
-                tool_id: descriptor.id.as_str().to_owned(),
-                provider_name: "records_read".to_owned(),
-                fingerprint: descriptor.fingerprint.clone(),
-                description: descriptor.description.clone(),
-                parameters: descriptor.argument_schema.clone(),
-                strict: true,
-            }],
+            tools: mixed_read_definitions(&fixture),
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
             reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
@@ -8880,7 +9820,7 @@ mod tests {
             Err(AiError::InvalidInput(_))
         ));
         let base = plan(&fixture);
-        let next_plan = AiProviderCallPlan::new_continuation_with_tools(
+        let next_plan = AiProviderCallPlan::new_continuation_with_read_capabilities(
             base.provider_kind,
             next_request,
             base.budget,
@@ -8889,6 +9829,7 @@ mod tests {
             continuation,
             fixture.runtime.tool_catalog(),
             &policy,
+            &fixture.generated_target_policy,
         )
         .expect("continuation should bind request and result manifests");
         next_request = next_plan.request;
@@ -9153,7 +10094,7 @@ mod tests {
             enabled: true,
         });
         let base = plan(&fixture);
-        let next = AiProviderCallPlan::new_continuation_with_tools(
+        let next = AiProviderCallPlan::new_continuation_with_read_capabilities(
             base.provider_kind,
             ModelRequest {
                 model: "mock-model".to_owned(),
@@ -9161,14 +10102,7 @@ mod tests {
                 input: Vec::new(),
                 continuation: None,
                 continuation_mode: ModelContinuationMode::StatelessReplay,
-                tools: vec![ModelToolDefinition {
-                    tool_id: descriptor.id.as_str().to_owned(),
-                    provider_name: "records_read".to_owned(),
-                    fingerprint: descriptor.fingerprint.clone(),
-                    description: descriptor.description.clone(),
-                    parameters: descriptor.argument_schema.clone(),
-                    strict: true,
-                }],
+                tools: mixed_read_definitions(&fixture),
                 builtin_tools: Vec::new(),
                 maximum_builtin_tool_calls: None,
                 reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
@@ -9181,6 +10115,7 @@ mod tests {
             continuation,
             fixture.runtime.tool_catalog(),
             &policy,
+            &fixture.generated_target_policy,
         )
         .expect("stateless continuation plan should remain exact");
         assert!(matches!(

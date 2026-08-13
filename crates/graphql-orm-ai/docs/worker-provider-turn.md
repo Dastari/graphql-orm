@@ -160,13 +160,19 @@ described in the [live-streaming guide](live-streaming.md).
 `AiProviderCallPlan::new` remains the ordinary tool-free constructor.
 `new_with_tools` accepts only exact catalog/policy-matched, idempotent
 application queries at read-only maturity/risk with no approval requirement.
+`new_with_read_capabilities` additionally accepts one closed mixture of those
+static reads and automatic generated queries. It derives each kind from the
+unique catalogue registration, applies the exact static policy or generated
+target/schema/semantic policy without fallback, and produces one canonical
+fingerprint-bound rule-binding set.
 The provider executor bounds and schema-validates every offered call. The ORM
 tool service then persists protected arguments before execution, rehydrates
 current authority, invokes the exact registered GraphQL request, applies the
 static disclosure contract, creates and immutably audits a separate exact
 tool-result egress decision, persists the protected outcome, and renews the
 fence. `AiAgentLoopGuard` binds each result to its opaque provider `call_id`
-before `new_continuation_with_tools` can construct the next request.
+before `new_continuation_with_tools` or the mixed
+`new_continuation_with_read_capabilities` can construct the next request.
 
 The coordinator is restart-adoptable across generations only for an exact
 completed provider-retained or bounded stateless read-only tool batch. The

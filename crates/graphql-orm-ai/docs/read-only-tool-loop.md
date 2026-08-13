@@ -51,6 +51,15 @@ plan associated with the exact offered capability ID and fingerprint; the
 server compiles the GraphQL document, variables, selection and disclosure
 shape.
 
+Use `AiProviderCallPlan::new_with_read_capabilities` when one provider turn
+must retain reviewed static reads while incrementally adopting automatic
+generated queries. Pass the one registered `AiToolCatalog`, exact static
+`AiToolPolicySet` and exact `AiGeneratedGraphqlTargetPolicySet`. The catalogue,
+not the host or model, classifies every offered stable ID. Static entries are
+validated only by the static policy path; generated queries are validated
+only by the target/schema/semantic-catalogue path. Unknown IDs, collisions,
+kind confusion, mutations and subscriptions fail closed.
+
 `AiProviderCallPlan::new` remains the ordinary tool-free constructor.
 `new_with_tools` makes read-only exposure deliberate. Registration and this
 policy snapshot are still not execution authority: each actual call performs
@@ -147,15 +156,21 @@ tool calls. For every turn:
 4. obtain `AiAgentContinuation` only after all expected call IDs have exactly
    one model-visible result.
 
-Use `AiProviderCallPlan::new_continuation_with_tools` for the next provider
-turn. In `ProviderRetained` mode it installs the previous response ID. In
-`StatelessReplay` mode it installs the protected original instructions,
+Use `AiProviderCallPlan::new_continuation_with_tools` for a static-only next
+turn, or `new_continuation_with_read_capabilities` when retaining the mixed
+read set. In `ProviderRetained` mode the opaque `AiAgentContinuation` installs
+the previous response ID. In `StatelessReplay` mode it installs the protected original instructions,
 visible text/JSON user input, exact assistant calls, preceding tool messages,
 and matched current result blocks. Both modes carry the immutable manifests
 for every result as one unit. The normal provider executor still reserves a
 fresh atomic budget and freshly authorizes and audits model inference plus one
 unique `ToolResult` transfer for every historical and current output before
 transport.
+
+There is intentionally no separate public retained-provider continuation
+constructor. The provider mode is sealed inside the crate-owned continuation,
+and both modes use the same mixed validator; hosts never reconstruct result
+messages, response IDs or transfer routes.
 
 Stateless history is bounded to 256 messages/tool results and excludes hidden
 thinking, arbitrary roles, attachments, provider built-ins, output schemas,
