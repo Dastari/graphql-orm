@@ -2343,23 +2343,6 @@ mod tests {
         }
     }
 
-    struct ChangeRulesAfterProvider(AtomicUsize);
-
-    #[async_trait]
-    impl AiAgentRuleResolver for ChangeRulesAfterProvider {
-        async fn resolve_rules(
-            &self,
-            _lease: &AiRunLease,
-            scope: &AiScope,
-        ) -> Result<AiAgentRuleResolution, AiError> {
-            let call = self.0.fetch_add(1, Ordering::SeqCst);
-            AiAgentRuleResolution::new(
-                test_rules_with_fingerprint(scope.clone(), if call < 2 { '1' } else { '4' }),
-                time::OffsetDateTime::now_utc(),
-            )
-        }
-    }
-
     fn principal_reference() -> PrincipalReference {
         AuthPrincipal::User(AuthUser {
             user_id: "supervised-coordinator-user".to_owned(),
