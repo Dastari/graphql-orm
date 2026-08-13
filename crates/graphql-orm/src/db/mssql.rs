@@ -531,6 +531,17 @@ impl MssqlScalar for f64 {
     }
 }
 
+impl MssqlScalar for rust_decimal::Decimal {
+    fn try_get_optional<I>(row: &MssqlRow, index: I) -> crate::Result<Option<Self>>
+    where
+        I: MssqlColumnIndex,
+    {
+        index
+            .try_get_raw::<rust_decimal::Decimal>(&row.inner)
+            .map_err(map_tiberius_error)
+    }
+}
+
 impl<'a> tiberius::IntoSql<'a> for MssqlParamValue {
     fn into_sql(self) -> ColumnData<'a> {
         match self {
