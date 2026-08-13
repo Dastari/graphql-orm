@@ -46,6 +46,7 @@ pub(crate) fn ensure_repository_declaration(input: &DeriveInput) -> syn::Result<
         "repository_entity",
     )?;
     if backend == BackendKind::Mssql
+        && metadata.schema_policy.as_deref() != Some("external_writable")
         && (metadata.upsert.is_some()
             || metadata.repository_mutations
             || metadata.append_only
@@ -54,7 +55,7 @@ pub(crate) fn ensure_repository_declaration(input: &DeriveInput) -> syn::Result<
     {
         return Err(syn::Error::new_spanned(
             input,
-            "repository-only MSSQL entities are read-only; write, append-only, upsert, retention, and mutation-hook options are unsupported",
+            "repository-only MSSQL writes require schema_policy = \"external_writable\"; retention remains unsupported",
         ));
     }
     Ok(())
@@ -205,7 +206,8 @@ fn repository_write_authorizers(
         input.ident.span(),
         "repository_entity",
     )?;
-    let writable_backend = backend != BackendKind::Mssql
+    let writable_backend = (backend != BackendKind::Mssql
+        || metadata.schema_policy.as_deref() == Some("external_writable"))
         && metadata.schema_policy.as_deref() != Some("external_read_only");
     let syn::Data::Struct(data) = &input.data else {
         return Ok((None, None));

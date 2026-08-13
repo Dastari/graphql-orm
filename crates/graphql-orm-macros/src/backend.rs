@@ -114,11 +114,6 @@ pub(crate) fn backend_pool_type_tokens(backend: BackendKind) -> proc_macro2::Tok
     quote! { <#marker as ::graphql_orm::OrmBackend>::Pool }
 }
 
-pub(crate) fn backend_database_type_tokens(backend: BackendKind) -> proc_macro2::TokenStream {
-    let marker = backend_marker_tokens(backend);
-    quote! { <#marker as ::graphql_orm::SqlxBackend>::Database }
-}
-
 pub(crate) fn backend_dialect_expr(backend: BackendKind) -> proc_macro2::TokenStream {
     let marker = backend_marker_tokens(backend);
     quote! { <#marker as ::graphql_orm::OrmBackend>::DIALECT }

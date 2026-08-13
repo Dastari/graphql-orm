@@ -240,7 +240,11 @@ impl MssqlTransaction {
         let client = self.client.as_mut().ok_or_else(|| {
             sqlx::Error::Protocol("SQL Server transaction is no longer active".to_string())
         })?;
-        fetch_rows_with_client(client, sql, values).await
+        let result = fetch_rows_with_client(client, sql, values).await;
+        if result.is_err() {
+            self.poison();
+        }
+        result
     }
 
     pub(crate) async fn execute(
@@ -251,7 +255,11 @@ impl MssqlTransaction {
         let client = self.client.as_mut().ok_or_else(|| {
             sqlx::Error::Protocol("SQL Server transaction is no longer active".to_string())
         })?;
-        execute_with_client(client, sql, values).await
+        let result = execute_with_client(client, sql, values).await;
+        if result.is_err() {
+            self.poison();
+        }
+        result
     }
 
     pub(crate) async fn commit(mut self) -> crate::Result<()> {
@@ -272,6 +280,11 @@ impl MssqlTransaction {
         self.pool.release_client(client).await;
         self.permit.take();
         Ok(())
+    }
+
+    fn poison(&mut self) {
+        self.client.take();
+        self.permit.take();
     }
 }
 
@@ -613,4 +626,33 @@ impl From<&SqlValue> for MssqlParamValue {
 
 fn map_tiberius_error(error: tiberius::error::Error) -> sqlx::Error {
     sqlx::Error::Protocol(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> Config {
+        Config::from_ado_string(
+            "server=tcp:127.0.0.1,1433;database=test;user id=test;password=test;TrustServerCertificate=true",
+        )
+        .expect("test ADO configuration should parse")
+    }
+
+    #[test]
+    fn compatibility_constructors_remain_physically_read_only() {
+        let pool = MssqlPool::new(config());
+        assert_eq!(pool.access_mode(), MssqlAccessMode::ReadOnly);
+        let error = futures::executor::block_on(
+            pool.execute("UPDATE [records] SET [value] = @P1", &[SqlValue::Int(1)]),
+        )
+        .expect_err("a read-only pool must reject DML before connecting");
+        assert!(error.to_string().contains("physically read-only"));
+    }
+
+    #[test]
+    fn writable_mode_requires_the_explicit_constructor() {
+        let pool = MssqlPool::new_external_writable(config());
+        assert_eq!(pool.access_mode(), MssqlAccessMode::ExternalWritable);
+    }
 }

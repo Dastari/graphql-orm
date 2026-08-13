@@ -2280,6 +2280,51 @@ pub fn render_upsert_sql(
         .iter()
         .map(|column| dialect.quote_identifier_path(column))
         .collect::<Vec<_>>();
+    if dialect == DatabaseBackend::Mssql {
+        let placeholder_for = |column: &str| {
+            insert_columns
+                .iter()
+                .position(|candidate| *candidate == column)
+                .and_then(|index| insert_values.get(index))
+                .copied()
+                .expect("validated upsert columns must be present in insert values")
+        };
+        let mut assignments = update_columns
+            .iter()
+            .map(|column| {
+                format!(
+                    "{} = {}",
+                    dialect.quote_identifier_path(column),
+                    placeholder_for(column)
+                )
+            })
+            .collect::<Vec<_>>();
+        if update_updated_at {
+            assignments.push(format!(
+                "{} = {}",
+                dialect.quote_identifier("updated_at"),
+                dialect.current_epoch_expr()
+            ));
+        }
+        let predicates = conflict_columns
+            .iter()
+            .map(|column| {
+                format!(
+                    "{} = {}",
+                    dialect.quote_identifier_path(column),
+                    placeholder_for(column)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        return format!(
+            "UPDATE {quoted_table} WITH (UPDLOCK, HOLDLOCK) SET {} WHERE {predicates}; \
+             IF @@ROWCOUNT = 0 BEGIN INSERT INTO {quoted_table} ({}) VALUES ({}); END",
+            assignments.join(", "),
+            quoted_insert_columns.join(", "),
+            insert_values.join(", "),
+        );
+    }
     let mut set_clauses = update_columns
         .iter()
         .map(|column| {
@@ -2324,6 +2369,26 @@ pub fn render_insert_if_absent_sql(
         .map(|column| dialect.quote_identifier_path(column))
         .collect::<Vec<_>>()
         .join(", ");
+    if dialect == DatabaseBackend::Mssql {
+        let predicates = conflict_columns
+            .iter()
+            .map(|column| {
+                let value = insert_columns
+                    .iter()
+                    .position(|candidate| *candidate == *column)
+                    .and_then(|index| insert_values.get(index))
+                    .copied()
+                    .expect("validated conflict columns must be present in insert values");
+                format!("{} = {value}", dialect.quote_identifier_path(column))
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        return format!(
+            "IF NOT EXISTS (SELECT 1 FROM {table} WITH (UPDLOCK, HOLDLOCK) WHERE {predicates}) \
+             BEGIN INSERT INTO {table} ({columns}) VALUES ({}); END",
+            insert_values.join(", ")
+        );
+    }
     format!(
         "INSERT INTO {table} ({columns}) VALUES ({}) ON CONFLICT ({conflicts}) DO NOTHING",
         insert_values.join(", ")
@@ -3078,7 +3143,8 @@ where
     }
 
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-    pub(crate) async fn fetch_all_in_transaction(
+    #[doc(hidden)]
+    pub async fn fetch_all_in_transaction(
         &self,
         context: &mut MutationContext<'_, B>,
     ) -> crate::Result<Vec<T>>
@@ -3091,7 +3157,8 @@ where
     }
 
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-    pub(crate) async fn fetch_bounded_mutation_sentinel_in_transaction(
+    #[doc(hidden)]
+    pub async fn fetch_bounded_mutation_sentinel_in_transaction(
         &self,
         context: &mut MutationContext<'_, B>,
         limit: MutationLimit,
@@ -3170,7 +3237,8 @@ where
     }
 
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-    pub(crate) async fn fetch_one_in_transaction(
+    #[doc(hidden)]
+    pub async fn fetch_one_in_transaction(
         &self,
         context: &mut MutationContext<'_, B>,
     ) -> crate::Result<Option<T>>
@@ -3404,7 +3472,8 @@ where
     }
 
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-    pub(crate) async fn count_in_transaction(
+    #[doc(hidden)]
+    pub async fn count_in_transaction(
         &self,
         context: &mut MutationContext<'_, B>,
     ) -> crate::Result<i64>

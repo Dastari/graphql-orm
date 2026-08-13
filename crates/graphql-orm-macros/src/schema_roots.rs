@@ -49,6 +49,8 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     };
     let schema_policy_read_only =
         matches!(args.schema_policy.as_deref(), Some("external_read_only"));
+    let backend_writable =
+        backend != BackendKind::Mssql || args.schema_policy.as_deref() == Some("external_writable");
 
     let custom_op_types: Vec<proc_macro2::TokenStream> = query_custom_ops
         .iter()
@@ -91,7 +93,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         .map(ToString::to_string)
         .collect();
     let generated_mutation_is_exposed = |entity: &Ident| {
-        if backend == BackendKind::Mssql || schema_policy_read_only {
+        if !backend_writable || schema_policy_read_only {
             return false;
         }
         match args.generated_mutations {
@@ -117,7 +119,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         .iter()
         .map(|entity| {
             let mutations_exposed = generated_mutation_is_exposed(entity);
-            let subscriptions_exposed = backend != BackendKind::Mssql && !schema_policy_read_only;
+            let subscriptions_exposed = backend_writable && !schema_policy_read_only;
             quote! {
                 (
                     <#entity as ::graphql_orm::graphql::orm::GraphqlOperationMetadata>
@@ -244,7 +246,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         async_graphql_merged_object_derive(),
     );
 
-    if backend == BackendKind::Mssql || schema_policy_read_only {
+    if !backend_writable || schema_policy_read_only {
         if !args.extra_mutation_types.is_empty() {
             return quote! {
                 compile_error!("graphql-orm schema policy is read-only; extra mutation root types are not supported");

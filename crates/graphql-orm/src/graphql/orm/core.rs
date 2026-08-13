@@ -1156,6 +1156,19 @@ where
         Ok(Self::new(db, tx))
     }
 
+    /// Begin a driver-neutral transaction and install its database-visible
+    /// authorization context before any statement is executed.
+    #[doc(hidden)]
+    pub async fn begin_with_auth(
+        db: &'tx crate::db::Database<B>,
+        mode: TransactionMode,
+        auth: Option<&DbAuthContext>,
+    ) -> crate::Result<Self> {
+        let mut tx = B::begin_write_transaction(db.pool(), mode).await?;
+        B::apply_auth_context_to_write_transaction(&mut tx, auth).await?;
+        Ok(Self::new(db, tx))
+    }
+
     pub fn database(&self) -> &crate::db::Database<B> {
         self.db
     }
