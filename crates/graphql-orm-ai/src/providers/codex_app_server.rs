@@ -4190,7 +4190,7 @@ fn project_codex_argument_schema(schema: &Value) -> Result<Value, ProviderError>
         if !valid_identifier(name) {
             return Err(ProviderError::Rejected);
         }
-        projected_properties.insert(name.clone(), project_codex_scalar_schema(property)?);
+        projected_properties.insert(name.clone(), project_codex_schema_node(property, 0)?);
     }
     let required = object
         .get("required")
@@ -4211,12 +4211,63 @@ fn project_codex_argument_schema(schema: &Value) -> Result<Value, ProviderError>
     }))
 }
 
-fn project_codex_scalar_schema(schema: &Value) -> Result<Value, ProviderError> {
+fn project_codex_schema_node(schema: &Value, depth: usize) -> Result<Value, ProviderError> {
+    if depth > 16 {
+        return Err(ProviderError::Rejected);
+    }
     let object = schema.as_object().ok_or(ProviderError::Rejected)?;
+    if let Some(any_of) = object.get("anyOf") {
+        if object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "anyOf" | "description"))
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let alternatives = any_of.as_array().ok_or(ProviderError::Rejected)?;
+        let [value, null] = alternatives.as_slice() else {
+            return Err(ProviderError::Rejected);
+        };
+        let (value, null) = if null.get("type").and_then(Value::as_str) == Some("null") {
+            (value, null)
+        } else if value.get("type").and_then(Value::as_str) == Some("null") {
+            (null, value)
+        } else {
+            return Err(ProviderError::Rejected);
+        };
+        if null.as_object().is_none_or(|object| object.len() != 1) {
+            return Err(ProviderError::Rejected);
+        }
+        let mut projected = project_codex_schema_node(value, depth + 1)?;
+        if let Some(description) = object.get("description") {
+            let description = description.as_str().ok_or(ProviderError::Rejected)?;
+            validate_codex_schema_description(description)?;
+            projected
+                .as_object_mut()
+                .ok_or(ProviderError::Rejected)?
+                .insert(
+                    "description".to_owned(),
+                    Value::String(description.to_owned()),
+                );
+        }
+        return Ok(projected);
+    }
     if object.keys().any(|key| {
         !matches!(
             key.as_str(),
-            "type" | "description" | "enum" | "minLength" | "maxLength" | "minimum" | "maximum"
+            "type"
+                | "description"
+                | "enum"
+                | "minLength"
+                | "maxLength"
+                | "minimum"
+                | "maximum"
+                | "properties"
+                | "required"
+                | "additionalProperties"
+                | "items"
+                | "minItems"
+                | "maxItems"
+                | "uniqueItems"
         )
     }) {
         return Err(ProviderError::Rejected);
@@ -4225,7 +4276,10 @@ fn project_codex_scalar_schema(schema: &Value) -> Result<Value, ProviderError> {
         .get("type")
         .and_then(Value::as_str)
         .ok_or(ProviderError::Rejected)?;
-    if !matches!(schema_type, "string" | "integer" | "number" | "boolean") {
+    if !matches!(
+        schema_type,
+        "string" | "integer" | "number" | "boolean" | "object" | "array"
+    ) {
         return Err(ProviderError::Rejected);
     }
     let description = object
@@ -4233,9 +4287,7 @@ fn project_codex_scalar_schema(schema: &Value) -> Result<Value, ProviderError> {
         .map(|value| value.as_str().ok_or(ProviderError::Rejected))
         .transpose()?
         .unwrap_or_default();
-    if description.len() > 2_000 || description.chars().any(char::is_control) {
-        return Err(ProviderError::Rejected);
-    }
+    validate_codex_schema_description(description)?;
     let mut constraint_notes = Vec::new();
     match schema_type {
         "string" => {
@@ -4279,6 +4331,115 @@ fn project_codex_scalar_schema(schema: &Value) -> Result<Value, ProviderError> {
                 return Err(ProviderError::Rejected);
             }
         }
+        "object" => {
+            if object.contains_key("enum")
+                || object.contains_key("minLength")
+                || object.contains_key("maxLength")
+                || object.contains_key("minimum")
+                || object.contains_key("maximum")
+                || object.contains_key("items")
+                || object.contains_key("minItems")
+                || object.contains_key("maxItems")
+                || object.contains_key("uniqueItems")
+                || object.get("additionalProperties").and_then(Value::as_bool) != Some(false)
+            {
+                return Err(ProviderError::Rejected);
+            }
+            let properties = object
+                .get("properties")
+                .and_then(Value::as_object)
+                .ok_or(ProviderError::Rejected)?;
+            if properties.len() > 128 {
+                return Err(ProviderError::Rejected);
+            }
+            let mut projected_properties = serde_json::Map::new();
+            for (name, property) in properties {
+                if !valid_identifier(name) {
+                    return Err(ProviderError::Rejected);
+                }
+                projected_properties.insert(
+                    name.clone(),
+                    project_codex_schema_node(property, depth + 1)?,
+                );
+            }
+            let required = object
+                .get("required")
+                .and_then(Value::as_array)
+                .ok_or(ProviderError::Rejected)?;
+            let mut required_names = BTreeSet::new();
+            for value in required {
+                let name = value.as_str().ok_or(ProviderError::Rejected)?;
+                if !properties.contains_key(name) || !required_names.insert(name.to_owned()) {
+                    return Err(ProviderError::Rejected);
+                }
+            }
+            let mut projected = serde_json::Map::from_iter([
+                ("type".to_owned(), Value::String("object".to_owned())),
+                ("properties".to_owned(), Value::Object(projected_properties)),
+                ("required".to_owned(), Value::Array(required.clone())),
+                ("additionalProperties".to_owned(), Value::Bool(false)),
+            ]);
+            if !description.is_empty() {
+                projected.insert(
+                    "description".to_owned(),
+                    Value::String(description.to_owned()),
+                );
+            }
+            return Ok(Value::Object(projected));
+        }
+        "array" => {
+            if object.contains_key("enum")
+                || object.contains_key("minLength")
+                || object.contains_key("maxLength")
+                || object.contains_key("minimum")
+                || object.contains_key("maximum")
+                || object.contains_key("properties")
+                || object.contains_key("required")
+                || object.contains_key("additionalProperties")
+            {
+                return Err(ProviderError::Rejected);
+            }
+            let items = object.get("items").ok_or(ProviderError::Rejected)?;
+            let minimum = optional_u64(object, "minItems")?;
+            let maximum = optional_u64(object, "maxItems")?;
+            if minimum
+                .zip(maximum)
+                .is_some_and(|(minimum, maximum)| minimum > maximum)
+            {
+                return Err(ProviderError::Rejected);
+            }
+            if object
+                .get("uniqueItems")
+                .is_some_and(|value| value.as_bool().is_none())
+            {
+                return Err(ProviderError::Rejected);
+            }
+            if let Some(minimum) = minimum {
+                constraint_notes.push(format!("minimum items {minimum}"));
+            }
+            if let Some(maximum) = maximum {
+                constraint_notes.push(format!("maximum items {maximum}"));
+            }
+            let mut projected = serde_json::Map::from_iter([
+                ("type".to_owned(), Value::String("array".to_owned())),
+                (
+                    "items".to_owned(),
+                    project_codex_schema_node(items, depth + 1)?,
+                ),
+            ]);
+            if object.get("uniqueItems").and_then(Value::as_bool) == Some(true) {
+                projected.insert("uniqueItems".to_owned(), Value::Bool(true));
+            }
+            let projected_description =
+                projected_codex_description(description, &constraint_notes)?;
+            if !projected_description.is_empty() {
+                projected.insert(
+                    "description".to_owned(),
+                    Value::String(projected_description),
+                );
+            }
+            return Ok(Value::Object(projected));
+        }
         _ => unreachable!("schema type was closed above"),
     }
     let mut projected = serde_json::Map::new();
@@ -4298,25 +4459,44 @@ fn project_codex_scalar_schema(schema: &Value) -> Result<Value, ProviderError> {
         }
         projected.insert("enum".to_owned(), Value::Array(values.clone()));
     }
-    if !description.is_empty() || !constraint_notes.is_empty() {
-        let mut projected_description = description.to_owned();
-        if !constraint_notes.is_empty() {
-            if !projected_description.is_empty() {
-                projected_description.push(' ');
-            }
-            projected_description.push_str("Accepted value constraints: ");
-            projected_description.push_str(&constraint_notes.join(", "));
-            projected_description.push('.');
-        }
-        if projected_description.len() > 4_096 {
-            return Err(ProviderError::Rejected);
-        }
+    let projected_description = projected_codex_description(description, &constraint_notes)?;
+    if !projected_description.is_empty() {
         projected.insert(
             "description".to_owned(),
             Value::String(projected_description),
         );
     }
     Ok(Value::Object(projected))
+}
+
+fn validate_codex_schema_description(description: &str) -> Result<(), ProviderError> {
+    if description.len() > 2_000
+        || description
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(ProviderError::Rejected);
+    }
+    Ok(())
+}
+
+fn projected_codex_description(
+    description: &str,
+    constraint_notes: &[String],
+) -> Result<String, ProviderError> {
+    let mut projected = description.to_owned();
+    if !constraint_notes.is_empty() {
+        if !projected.is_empty() {
+            projected.push(' ');
+        }
+        projected.push_str("Accepted value constraints: ");
+        projected.push_str(&constraint_notes.join(", "));
+        projected.push('.');
+    }
+    if projected.len() > 4_096 {
+        return Err(ProviderError::Rejected);
+    }
+    Ok(projected)
 }
 
 fn optional_u64(
@@ -5202,6 +5382,91 @@ pub(crate) mod tests {
         let substituted_projection = project_codex_dynamic_tools(&[substituted])
             .expect("syntactically valid substituted descriptor should project distinctly");
         assert_ne!(projected.fingerprints, substituted_projection.fingerprints);
+    }
+
+    #[test]
+    fn finite_relational_query_plan_projects_without_generic_schema_passthrough() {
+        let tool = ModelToolDefinition {
+            tool_id: "inventory.query.records.auto".to_owned(),
+            provider_name: "inventory_records".to_owned(),
+            fingerprint: "a".repeat(64),
+            description: "Read reviewed inventory records.".to_owned(),
+            parameters: json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "arguments": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "anyOf": [
+                                    { "type": "string", "maxLength": 80 },
+                                    { "type": "null" }
+                                ]
+                            }
+                        },
+                        "required": [],
+                        "additionalProperties": false
+                    },
+                    "fields": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["id", "name"] },
+                        "uniqueItems": true,
+                        "maxItems": 2
+                    },
+                    "relationships": {
+                        "type": "object",
+                        "properties": {
+                            "children": {
+                                "type": "object",
+                                "properties": {
+                                    "fields": {
+                                        "type": "array",
+                                        "items": { "type": "string", "enum": ["id"] },
+                                        "maxItems": 1,
+                                        "uniqueItems": true
+                                    },
+                                    "maximumItems": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 25
+                                    }
+                                },
+                                "required": ["fields", "maximumItems"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "required": [],
+                        "additionalProperties": false
+                    }
+                },
+                "required": ["arguments", "fields", "relationships"],
+                "additionalProperties": false
+            }),
+            strict: true,
+        };
+        let projected = project_codex_dynamic_tools(&[tool])
+            .expect("finite nested capability schema should project");
+        let schema = &projected.protocol_values[0]["inputSchema"];
+        assert_eq!(
+            schema
+                .pointer("/properties/relationships/properties/children/type")
+                .and_then(Value::as_str),
+            Some("object")
+        );
+        assert_eq!(
+            schema
+                .pointer("/properties/fields/items/enum/1")
+                .and_then(Value::as_str),
+            Some("name")
+        );
+        assert!(
+            schema
+                .pointer("/properties/relationships/properties/children/properties/maximumItems/description")
+                .and_then(Value::as_str)
+                .is_some_and(|description| description.contains("maximum 25"))
+        );
+        assert!(schema.to_string().find("anyOf").is_none());
     }
 
     #[test]
