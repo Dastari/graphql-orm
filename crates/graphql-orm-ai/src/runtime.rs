@@ -1150,6 +1150,153 @@ fn is_supervised_one_shot_mutation(descriptor: &AiToolDescriptor) -> bool {
         )
 }
 
+#[cfg(test)]
+mod mutation_binding_tests {
+    use serde_json::json;
+    use time::{Duration, OffsetDateTime};
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::{
+        AiApprovalGrant, AiApprovalId, AiApprovalState, AiDisclosureRule, AiDisclosureSchema,
+        AiDisclosureShape, AiRunId, AiScope, AiSessionId, AiToolCallId, AiToolRisk,
+        DataClassification, GraphqlExecutionTargetId, GraphqlOperationContract,
+    };
+
+    const CAPABILITY_FINGERPRINT: &str =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+
+    fn operation(field: &str) -> GraphqlOperationContract {
+        let document = format!("mutation {field} {{ {field} }}");
+        GraphqlOperationContract::new(
+            GraphqlExecutionTargetId::parse("inventory.graphql")
+                .expect("test target should validate"),
+            "2222222222222222222222222222222222222222222222222222222222222222",
+            field,
+            &document,
+            "projection-v1",
+            "disclosure-v1",
+        )
+        .expect("test operation should validate")
+    }
+
+    fn prepared(operation: GraphqlOperationContract) -> AiPreparedGraphqlMutation {
+        let document = format!(
+            "mutation {} {{ {} }}",
+            operation.operation_name, operation.operation_name
+        );
+        let descriptor = AiToolDescriptor::new(
+            "inventory.mutation.update",
+            "Update one inventory record.",
+            AiToolOperationKind::Mutation,
+            document.clone(),
+            json!({"type": "object", "additionalProperties": false}),
+        )
+        .expect("test descriptor should validate")
+        .with_graphql_contract(operation.clone())
+        .with_maturity(ToolMaturity::SupervisedWrite)
+        .with_risk(AiToolRisk::NonIdempotentWrite, AiApprovalRule::OneShot)
+        .with_idempotent(false);
+        let request = ToolGraphqlRequest {
+            document,
+            operation_name: operation.operation_name.clone(),
+            contract: operation,
+            variables: json!({}),
+            invocation: GraphqlInvocationContext {
+                run_id: AiRunId(Uuid::new_v4()),
+                tool_call_id: AiToolCallId::new(),
+                scope: AiScope::new("tenant", "runtime-mutation-binding"),
+                correlation_id: "runtime-mutation-binding".to_owned(),
+                causation_id: "runtime-mutation-binding".to_owned(),
+                delegation_reference: None,
+                idempotency_key: None,
+            },
+        };
+        AiPreparedGraphqlMutation {
+            execution_policy: AiMutationExecutionPolicy::ApprovalRequired,
+            capability_fingerprint: CAPABILITY_FINGERPRINT.to_owned(),
+            plan_fingerprint: "3333333333333333333333333333333333333333333333333333333333333333"
+                .to_owned(),
+            descriptor,
+            disclosure_schema: AiDisclosureSchema::new(
+                "test-v1",
+                AiDisclosureShape::scalar(AiDisclosureRule::exportable(DataClassification::Public)),
+            )
+            .expect("test disclosure should validate"),
+            request,
+        }
+    }
+
+    fn binding(operation: GraphqlOperationContract) -> AiApprovalBinding {
+        AiApprovalBinding {
+            tool_call_id: AiToolCallId::new(),
+            session_id: AiSessionId(Uuid::new_v4()),
+            scope: AiScope::new("tenant", "runtime-mutation-binding"),
+            tool_fingerprint: CAPABILITY_FINGERPRINT.to_owned(),
+            argument_hash: "4444444444444444444444444444444444444444444444444444444444444444"
+                .to_owned(),
+            operation,
+            principal_reference_fingerprint:
+                "5555555555555555555555555555555555555555555555555555555555555555".to_owned(),
+            delegated_actor_subject: None,
+            delegation_reference: None,
+            policy_version: "policy-v1".to_owned(),
+            authorization_state_digest: "authority-v1".to_owned(),
+            resources: Vec::new(),
+            preview_hash: "6666666666666666666666666666666666666666666666666666666666666666"
+                .to_owned(),
+        }
+    }
+
+    fn consumed(binding: &AiApprovalBinding) -> ConsumedAiApproval {
+        let now = OffsetDateTime::now_utc();
+        let grant = AiApprovalGrant {
+            id: AiApprovalId::new(),
+            binding_hash: binding.stable_hash(),
+            approver_subject: "approver".to_owned(),
+            state: AiApprovalState::Approved,
+            approved_at: now - Duration::seconds(1),
+            expires_at: now + Duration::minutes(5),
+        };
+        ConsumedAiApproval::new(
+            grant
+                .authorize(binding, now)
+                .expect("test approval should authorize"),
+            now,
+        )
+    }
+
+    #[test]
+    fn dynamic_approval_binds_capability_and_compiled_operation_independently() {
+        let compiled_operation = operation("UpdateInventory");
+        let prepared = prepared(compiled_operation.clone());
+        let binding = binding(compiled_operation);
+        let approval = consumed(&binding);
+        assert!(approved_prepared_mutation_matches(
+            &prepared, &approval, &binding
+        ));
+
+        let mut swapped_capability = binding.clone();
+        swapped_capability.tool_fingerprint =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned();
+        let swapped_approval = consumed(&swapped_capability);
+        assert!(!approved_prepared_mutation_matches(
+            &prepared,
+            &swapped_approval,
+            &swapped_capability,
+        ));
+
+        let mut swapped_operation = binding.clone();
+        swapped_operation.operation = operation("DeleteInventory");
+        let swapped_approval = consumed(&swapped_operation);
+        assert!(!approved_prepared_mutation_matches(
+            &prepared,
+            &swapped_approval,
+            &swapped_operation,
+        ));
+    }
+}
+
 /// Runtime builder with fail-closed required dependencies.
 #[derive(Default)]
 #[must_use]
