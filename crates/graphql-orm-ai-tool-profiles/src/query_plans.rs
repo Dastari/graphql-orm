@@ -237,6 +237,11 @@ impl AiGraphqlQueryCapability {
         &self.semantic_catalog.fingerprint
     }
 
+    /// Returns the exact semantic operation fingerprint.
+    pub fn semantic_operation_fingerprint(&self) -> &str {
+        &self.operation.fingerprint
+    }
+
     /// Returns whether this is an opt-in generated aggregate root.
     pub fn is_aggregate(&self) -> bool {
         self.operation.generated_category == Some(GeneratedGraphqlOperationCategory::Aggregate)
@@ -781,6 +786,11 @@ impl AiGraphqlMutationCapability {
     /// Returns the canonical semantic-catalogue fingerprint.
     pub fn semantic_catalog_fingerprint(&self) -> &str {
         self.base.semantic_catalog_fingerprint()
+    }
+
+    /// Returns the exact semantic operation fingerprint.
+    pub fn semantic_operation_fingerprint(&self) -> &str {
+        self.base.semantic_operation_fingerprint()
     }
 
     /// Returns the reviewed execution classification.

@@ -59,7 +59,7 @@ pub struct AiApprovalBinding {
     pub session_id: AiSessionId,
     /// Scope and optional tenant boundary.
     pub scope: AiScope,
-    /// Exact reviewed tool descriptor fingerprint.
+    /// Exact reviewed static descriptor or generated capability fingerprint.
     pub tool_fingerprint: String,
     /// Canonical validated variables/arguments hash.
     pub argument_hash: String,

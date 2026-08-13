@@ -12,7 +12,8 @@ use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{StringFilter, UuidFilter};
 use graphql_orm::graphql::orm::{
-    ConditionalUpdateOutcome, DefaultWriteBackend, TransactionError, TransactionMode,
+    AiMutationExecutionPolicy, ConditionalUpdateOutcome, DefaultWriteBackend, TransactionError,
+    TransactionMode,
 };
 use graphql_orm::graphql::pagination::{
     KeysetConnectionInput, KeysetWindowDirection, ValidatedKeysetConnection,
@@ -725,25 +726,47 @@ impl OrmAiApprovalService {
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .ok_or(AiError::NotFound)?;
         let tool_id = AiToolId::parse(call.tool_id.clone())?;
-        let descriptor = self
-            .tool_catalog
-            .descriptor(&tool_id)
-            .ok_or(AiError::Forbidden)?;
         if call.run_id != lease.run_id().0
             || call.lease_generation != lease.lease_generation()
             || call.state != expected_state
             || call.argument_hash != binding.argument_hash
             || call.tool_fingerprint != binding.tool_fingerprint
-            || descriptor.fingerprint != binding.tool_fingerprint
-            || descriptor.graphql_contract.as_ref() != Some(&binding.operation)
-            || descriptor.operation_kind != AiToolOperationKind::Mutation
-            || descriptor.operation_domain != AiToolOperationDomain::Application
-            || descriptor.maturity != ToolMaturity::SupervisedWrite
-            || descriptor.approval != crate::AiApprovalRule::OneShot
-            || matches!(
-                descriptor.risk,
-                AiToolRisk::ReadOnly | AiToolRisk::Proposal | AiToolRisk::Secret
-            )
+        {
+            return Err(AiError::Forbidden);
+        }
+        if let Some(descriptor) = self.tool_catalog.descriptor(&tool_id) {
+            if descriptor.fingerprint != binding.tool_fingerprint
+                || descriptor.graphql_contract.as_ref() != Some(&binding.operation)
+                || descriptor.operation_kind != AiToolOperationKind::Mutation
+                || descriptor.operation_domain != AiToolOperationDomain::Application
+                || descriptor.maturity != ToolMaturity::SupervisedWrite
+                || descriptor.approval != crate::AiApprovalRule::OneShot
+                || matches!(
+                    descriptor.risk,
+                    AiToolRisk::ReadOnly | AiToolRisk::Proposal | AiToolRisk::Secret
+                )
+            {
+                return Err(AiError::Forbidden);
+            }
+            return Ok(());
+        }
+        let capability = self
+            .tool_catalog
+            .mutation_capability(&tool_id)
+            .ok_or(AiError::Forbidden)?;
+        let semantic = binding
+            .operation
+            .semantic_operation()
+            .ok_or(AiError::Forbidden)?;
+        if capability.fingerprint() != binding.tool_fingerprint
+            || capability.execution_policy() != AiMutationExecutionPolicy::ApprovalRequired
+            || capability.target_id() != &binding.operation.target_id
+            || capability.finished_schema_fingerprint() != binding.operation.schema_fingerprint
+            || capability.semantic_catalog_fingerprint() != semantic.catalog_fingerprint()
+            || capability.semantic_operation_fingerprint() != semantic.operation_fingerprint()
+            || capability.field_name() != semantic.field_name()
+            || semantic.kind().graphql_orm_kind()
+                != graphql_orm::graphql::orm::GraphqlOperationKind::Mutation
         {
             return Err(AiError::Forbidden);
         }

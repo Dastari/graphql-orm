@@ -487,6 +487,12 @@ pub struct OrmAiApplicationToolCallService {
     limits: AiApplicationToolCallLimits,
 }
 
+#[derive(Clone, Copy)]
+enum UnapprovedToolMode {
+    ReadOnly,
+    AutomaticMutation,
+}
+
 impl OrmAiApplicationToolCallService {
     /// Creates a protected ORM-backed application-tool service.
     pub fn new(
@@ -529,33 +535,63 @@ impl OrmAiApplicationToolCallService {
         context: AiApplicationToolCallContext,
         route: AiToolResultEgressRoute,
     ) -> Result<AiPersistedApplicationToolCall, AiError> {
+        match self
+            .execute_unapproved(
+                lease,
+                provider_result,
+                context,
+                route,
+                UnapprovedToolMode::ReadOnly,
+            )
+            .await?
+        {
+            AiConsequentialToolCallOutcome::Persisted(call) => Ok(*call),
+            AiConsequentialToolCallOutcome::RecoveryRequired { .. } => Err(AiError::Conflict),
+        }
+    }
+
+    /// Executes one exact generated mutation classified `Automatic`.
+    ///
+    /// The service compiles and freshly preauthorizes the closed plan, then
+    /// atomically persists the exact capability/plan/fence before invoking the
+    /// resolver. Any timeout or uncertain post-checkpoint execution closes the
+    /// run as `RecoveryRequired`; automatic mutations are never replayed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error before the pre-effect checkpoint for invalid
+    /// bindings or authority denial. After that boundary, execution ambiguity
+    /// is returned as a durable recovery-required outcome.
+    pub async fn execute_automatic_mutation(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        context: AiApplicationToolCallContext,
+        route: AiToolResultEgressRoute,
+    ) -> Result<AiConsequentialToolCallOutcome, AiError> {
+        self.execute_unapproved(
+            lease,
+            provider_result,
+            context,
+            route,
+            UnapprovedToolMode::AutomaticMutation,
+        )
+        .await
+    }
+
+    async fn execute_unapproved(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        context: AiApplicationToolCallContext,
+        route: AiToolResultEgressRoute,
+        mode: UnapprovedToolMode,
+    ) -> Result<AiConsequentialToolCallOutcome, AiError> {
         self.validate_outer_binding(lease, provider_result, &context, &route)?;
         let provider_call = provider_result
             .tool_calls()
             .get(context.tool_call_index)
             .ok_or_else(|| AiError::InvalidInput("tool call index is out of bounds".to_owned()))?;
-        let descriptor = self
-            .runtime
-            .tool_catalog()
-            .descriptor(provider_call.tool_id())
-            .cloned()
-            .ok_or(AiError::Forbidden)?;
-        let disclosure_fingerprint = self
-            .runtime
-            .tool_catalog()
-            .disclosure_schema(provider_call.tool_id())
-            .map(|schema| schema.fingerprint.clone())
-            .ok_or(AiError::Forbidden)?;
-        if descriptor.fingerprint != provider_call.tool_fingerprint()
-            || descriptor.operation_kind != AiToolOperationKind::Query
-            || descriptor.operation_domain != AiToolOperationDomain::Application
-            || descriptor.maturity != ToolMaturity::ReadOnly
-            || descriptor.risk != AiToolRisk::ReadOnly
-            || descriptor.approval != AiApprovalRule::None
-            || !descriptor.idempotent
-        {
-            return Err(AiError::Forbidden);
-        }
         let argument_bytes = serde_json::to_vec(provider_call.arguments())
             .map_err(|_| AiError::InvalidInput("invalid tool arguments".to_owned()))?;
         if argument_bytes.len() > self.limits.maximum_argument_bytes {
@@ -583,29 +619,120 @@ impl OrmAiApplicationToolCallService {
         let id = AiToolCallId::new();
         let provider_call_key = provider_call_key(lease, provider_call.call_id());
         let argument_hash = canonical_json_hash(provider_call.arguments())?;
-        let idempotency_key = format!("ai-tool:{provider_call_key}");
-        let contract = descriptor
-            .graphql_contract
-            .clone()
-            .ok_or(AiError::Forbidden)?;
-        let request = ToolGraphqlRequest {
-            document: descriptor.document.clone(),
-            operation_name: contract.operation_name.clone(),
-            contract,
-            variables: provider_call.arguments().clone(),
-            invocation: GraphqlInvocationContext {
-                run_id: lease.run_id(),
-                tool_call_id: id,
-                scope: context.scope.clone(),
-                correlation_id: context.correlation_id.clone(),
-                causation_id: context.causation_id.clone(),
-                delegation_reference: context.delegation_reference.clone(),
-                idempotency_key: Some(idempotency_key.clone()),
-            },
+        let idempotency_key = matches!(mode, UnapprovedToolMode::ReadOnly)
+            .then(|| format!("ai-tool:{provider_call_key}"));
+        let invocation = GraphqlInvocationContext {
+            run_id: lease.run_id(),
+            tool_call_id: id,
+            scope: context.scope.clone(),
+            correlation_id: context.correlation_id.clone(),
+            causation_id: context.causation_id.clone(),
+            delegation_reference: context.delegation_reference.clone(),
+            idempotency_key: idempotency_key.clone(),
         };
-        self.runtime
-            .preauthorize_tool(lease.principal_reference(), &descriptor.id, &request)
-            .await?;
+        let (descriptor, disclosure_fingerprint, request, generated_query, prepared_mutation) =
+            match mode {
+                UnapprovedToolMode::ReadOnly => {
+                    if let Some(descriptor) = self
+                        .runtime
+                        .tool_catalog()
+                        .descriptor(provider_call.tool_id())
+                        .cloned()
+                    {
+                        let disclosure_fingerprint = self
+                            .runtime
+                            .tool_catalog()
+                            .disclosure_schema(provider_call.tool_id())
+                            .map(|schema| schema.fingerprint.clone())
+                            .ok_or(AiError::Forbidden)?;
+                        if descriptor.fingerprint != provider_call.tool_fingerprint()
+                            || descriptor.operation_kind != AiToolOperationKind::Query
+                            || descriptor.operation_domain != AiToolOperationDomain::Application
+                            || descriptor.maturity != ToolMaturity::ReadOnly
+                            || descriptor.risk != AiToolRisk::ReadOnly
+                            || descriptor.approval != AiApprovalRule::None
+                            || !descriptor.idempotent
+                        {
+                            return Err(AiError::Forbidden);
+                        }
+                        let contract = descriptor
+                            .graphql_contract
+                            .clone()
+                            .ok_or(AiError::Forbidden)?;
+                        let request = ToolGraphqlRequest {
+                            document: descriptor.document.clone(),
+                            operation_name: contract.operation_name.clone(),
+                            contract,
+                            variables: provider_call.arguments().clone(),
+                            invocation,
+                        };
+                        self.runtime
+                            .preauthorize_tool(
+                                lease.principal_reference(),
+                                &descriptor.id,
+                                &request,
+                            )
+                            .await?;
+                        (descriptor, disclosure_fingerprint, request, false, None)
+                    } else {
+                        let compiled = self.runtime.tool_catalog().compile_query_capability(
+                            provider_call.tool_id(),
+                            provider_call.tool_fingerprint(),
+                            provider_call.arguments().clone(),
+                        )?;
+                        let (descriptor, disclosure, variables) = compiled.into_parts();
+                        let contract = descriptor
+                            .graphql_contract
+                            .clone()
+                            .ok_or(AiError::Forbidden)?;
+                        let request = ToolGraphqlRequest {
+                            document: descriptor.document.clone(),
+                            operation_name: contract.operation_name.clone(),
+                            contract,
+                            variables,
+                            invocation,
+                        };
+                        (
+                            descriptor,
+                            disclosure.fingerprint.clone(),
+                            request,
+                            true,
+                            None,
+                        )
+                    }
+                }
+                UnapprovedToolMode::AutomaticMutation => {
+                    let prepared = self.runtime.prepare_mutation_capability(
+                        provider_call.tool_id(),
+                        provider_call.tool_fingerprint(),
+                        provider_call.arguments().clone(),
+                        invocation,
+                    )?;
+                    if prepared.execution_policy()
+                        != graphql_orm::graphql::orm::AiMutationExecutionPolicy::Automatic
+                    {
+                        return Err(AiError::Forbidden);
+                    }
+                    self.runtime
+                        .preauthorize_prepared_mutation(lease.principal_reference(), &prepared)
+                        .await?;
+                    let descriptor = prepared.descriptor().clone();
+                    let disclosure_fingerprint = descriptor
+                        .graphql_contract
+                        .as_ref()
+                        .ok_or(AiError::Forbidden)?
+                        .disclosure_schema_fingerprint
+                        .clone();
+                    let request = prepared.request().clone();
+                    (
+                        descriptor,
+                        disclosure_fingerprint,
+                        request,
+                        false,
+                        Some(prepared),
+                    )
+                }
+            };
         let protected_arguments = self
             .protect(
                 &policy,
@@ -623,7 +750,7 @@ impl OrmAiApplicationToolCallService {
         let started_payload = json!({
             "toolCallId": id.0,
             "runId": lease.run_id().0,
-            "toolId": descriptor.id.as_str(),
+            "toolId": provider_call.tool_id().as_str(),
         });
         let protected_started_event = self
             .protect(
@@ -665,12 +792,12 @@ impl OrmAiApplicationToolCallService {
                     tool_call_index: i64::try_from(context.tool_call_index).map_err(|_| {
                         AiError::InvalidInput("tool call index is invalid".to_owned())
                     })?,
-                    tool_id: descriptor.id.as_str().to_owned(),
-                    tool_fingerprint: descriptor.fingerprint.clone(),
+                    tool_id: provider_call.tool_id().as_str().to_owned(),
+                    tool_fingerprint: provider_call.tool_fingerprint().to_owned(),
                     protected_arguments,
                     argument_hash,
-                    risk: "read_only".to_owned(),
-                    idempotency_key: Some(idempotency_key.clone()),
+                    risk: risk_value(descriptor.risk).to_owned(),
+                    idempotency_key: idempotency_key.clone(),
                     correlation_id: context.correlation_id.clone(),
                     causation_id: context.causation_id.clone(),
                     delegation_reference: context.delegation_reference.clone(),
@@ -690,13 +817,36 @@ impl OrmAiApplicationToolCallService {
             .await?;
         let lease = &active_lease;
 
-        let execution = tokio::time::timeout(
-            self.limits.maximum_execution_time.unsigned_abs(),
-            self.runtime
-                .execute_tool(lease.principal_reference(), &descriptor.id, request),
-        )
-        .await
-        .unwrap_or(Err(AiError::ToolExecutionFailed));
+        if matches!(mode, UnapprovedToolMode::AutomaticMutation)
+            && self.run_service.cancellation(lease).await?.is_some()
+        {
+            return Err(AiError::Conflict);
+        }
+
+        let execution =
+            tokio::time::timeout(self.limits.maximum_execution_time.unsigned_abs(), async {
+                if generated_query {
+                    self.runtime
+                        .execute_query_capability(
+                            lease.principal_reference(),
+                            provider_call.tool_id(),
+                            provider_call.tool_fingerprint(),
+                            provider_call.arguments().clone(),
+                            request.invocation.clone(),
+                        )
+                        .await
+                } else if let Some(prepared) = prepared_mutation {
+                    self.runtime
+                        .execute_prepared_automatic_mutation(lease.principal_reference(), prepared)
+                        .await
+                } else {
+                    self.runtime
+                        .execute_tool(lease.principal_reference(), &descriptor.id, request)
+                        .await
+                }
+            })
+            .await
+            .unwrap_or(Err(AiError::ToolExecutionFailed));
         let (
             state,
             model_output,
@@ -717,6 +867,20 @@ impl OrmAiApplicationToolCallService {
                 Some(result.authorization_state_digest().to_owned()),
                 result.response().application_audit_ref.clone(),
             ),
+            Err(_) if matches!(mode, UnapprovedToolMode::AutomaticMutation) => {
+                self.run_service
+                    .finish(
+                        lease,
+                        AiRunCompletion::new(
+                            AiRunState::RecoveryRequired,
+                            "automatic_mutation_uncertain",
+                            Some("automatic_mutation_uncertain".to_owned()),
+                            provider_result.provider_response_id().map(str::to_owned),
+                        )?,
+                    )
+                    .await?;
+                return Ok(AiConsequentialToolCallOutcome::RecoveryRequired { tool_call_id: id });
+            }
             Err(_) => (
                 AiApplicationToolCallState::ExecutionFailed,
                 json!({"data": null, "errorCodes": ["AI_TOOL_EXECUTION_FAILED"]}),
@@ -736,7 +900,7 @@ impl OrmAiApplicationToolCallService {
         let outbound_bytes = output_bytes
             .len()
             .checked_add(provider_call.call_id().len())
-            .and_then(|bytes| bytes.checked_add(descriptor.id.as_str().len()))
+            .and_then(|bytes| bytes.checked_add(provider_call.tool_id().as_str().len()))
             .ok_or_else(|| AiError::InvalidInput("tool result is too large".to_owned()))?;
 
         self.current_access(lease, &context.scope).await?;
@@ -793,7 +957,7 @@ impl OrmAiApplicationToolCallService {
                     state,
                     Some(ModelInputBlock::ToolResult {
                         call_id: provider_call.call_id().to_owned(),
-                        tool_id: descriptor.id.as_str().to_owned(),
+                        tool_id: provider_call.tool_id().as_str().to_owned(),
                         output: model_output.clone(),
                     }),
                     Some(decision.id.0),
@@ -827,7 +991,7 @@ impl OrmAiApplicationToolCallService {
                 json!({
                     "toolCallId": id.0,
                     "runId": lease.run_id().0,
-                    "toolId": descriptor.id.as_str(),
+                    "toolId": provider_call.tool_id().as_str(),
                     "state": final_state.as_str(),
                 }),
             )
@@ -844,7 +1008,7 @@ impl OrmAiApplicationToolCallService {
                 json!({
                     "toolCallId": id.0,
                     "runId": lease.run_id().0,
-                    "toolId": descriptor.id.as_str(),
+                    "toolId": provider_call.tool_id().as_str(),
                     "state": final_state.as_str(),
                 }),
             )
@@ -871,7 +1035,7 @@ impl OrmAiApplicationToolCallService {
                     protected_inbox_event,
                     correlation_id: context.correlation_id,
                     expected_provider_call_key: provider_call_key,
-                    expected_tool_fingerprint: descriptor.fingerprint,
+                    expected_tool_fingerprint: provider_call.tool_fingerprint().to_owned(),
                     expected_owner_principal_kind: session.owner_principal_kind,
                     expected_owner_subject: session.owner_subject,
                     expected_scope_kind: context.scope.kind,
@@ -880,14 +1044,16 @@ impl OrmAiApplicationToolCallService {
                 },
             )
             .await?;
-        Ok(AiPersistedApplicationToolCall {
-            id,
-            provider_call_id: provider_call.call_id().to_owned(),
-            state: final_state,
-            model_input,
-            egress_manifest: decision_id.map(|_| manifest),
-            lease: renewed,
-        })
+        Ok(AiConsequentialToolCallOutcome::Persisted(Box::new(
+            AiPersistedApplicationToolCall {
+                id,
+                provider_call_id: provider_call.call_id().to_owned(),
+                state: final_state,
+                model_input,
+                egress_manifest: decision_id.map(|_| manifest),
+                lease: renewed,
+            },
+        )))
     }
 
     fn validate_outer_binding(
@@ -1059,14 +1225,6 @@ impl OrmAiConsequentialToolCallService {
             .tool_calls()
             .get(context.tool_call_index)
             .ok_or_else(|| AiError::InvalidInput("tool call index is out of bounds".to_owned()))?;
-        let descriptor = self
-            .application_tools
-            .runtime
-            .tool_catalog()
-            .descriptor(provider_call.tool_id())
-            .cloned()
-            .ok_or(AiError::Forbidden)?;
-        validate_supervised_descriptor(&descriptor, provider_call.tool_fingerprint())?;
         let argument_bytes = serde_json::to_vec(provider_call.arguments())
             .map_err(|_| AiError::InvalidInput("invalid tool arguments".to_owned()))?;
         if argument_bytes.len() > self.application_tools.limits.maximum_argument_bytes {
@@ -1099,22 +1257,65 @@ impl OrmAiConsequentialToolCallService {
         let id = AiToolCallId::new();
         let provider_call_key = provider_call_key(lease, provider_call.call_id());
         let argument_hash = canonical_json_hash(provider_call.arguments())?;
-        let idempotency_key = descriptor
-            .idempotent
-            .then(|| format!("ai-tool:{provider_call_key}"));
-        let request = build_tool_request(
-            lease,
-            id,
-            &descriptor,
-            provider_call.arguments().clone(),
-            &context,
-            idempotency_key.clone(),
-        )?;
-        let preauthorization = self
-            .application_tools
-            .runtime
-            .preauthorize_tool(lease.principal_reference(), &descriptor.id, &request)
-            .await?;
+        let idempotency_key = None;
+        let invocation = GraphqlInvocationContext {
+            run_id: lease.run_id(),
+            tool_call_id: id,
+            scope: context.scope.clone(),
+            correlation_id: context.correlation_id.clone(),
+            causation_id: context.causation_id.clone(),
+            delegation_reference: context.delegation_reference.clone(),
+            idempotency_key: None,
+        };
+        let (descriptor, request, preauthorization, binding_fingerprint) = if let Some(descriptor) =
+            self.application_tools
+                .runtime
+                .tool_catalog()
+                .descriptor(provider_call.tool_id())
+                .cloned()
+        {
+            validate_supervised_descriptor(&descriptor, provider_call.tool_fingerprint())?;
+            let request = build_tool_request(
+                lease,
+                id,
+                &descriptor,
+                provider_call.arguments().clone(),
+                &context,
+                None,
+            )?;
+            let preauthorization = self
+                .application_tools
+                .runtime
+                .preauthorize_tool(lease.principal_reference(), &descriptor.id, &request)
+                .await?;
+            let fingerprint = descriptor.fingerprint.clone();
+            (descriptor, request, preauthorization, fingerprint)
+        } else {
+            let prepared = self.application_tools.runtime.prepare_mutation_capability(
+                provider_call.tool_id(),
+                provider_call.tool_fingerprint(),
+                provider_call.arguments().clone(),
+                invocation,
+            )?;
+            if prepared.execution_policy()
+                != graphql_orm::graphql::orm::AiMutationExecutionPolicy::ApprovalRequired
+            {
+                return Err(AiError::Forbidden);
+            }
+            let preauthorization = self
+                .application_tools
+                .runtime
+                .preauthorize_prepared_mutation(lease.principal_reference(), &prepared)
+                .await?;
+            let descriptor = prepared.descriptor().clone();
+            let request = prepared.request().clone();
+            (
+                descriptor,
+                request,
+                preauthorization,
+                provider_call.tool_fingerprint().to_owned(),
+            )
+        };
         let preview = self
             .preview_builder
             .build_preview(preauthorization.principal(), &descriptor, &request)
@@ -1123,6 +1324,7 @@ impl OrmAiConsequentialToolCallService {
             lease,
             id,
             &descriptor,
+            &binding_fingerprint,
             &argument_hash,
             &context.scope,
             context.delegation_reference.clone(),
@@ -1159,7 +1361,7 @@ impl OrmAiConsequentialToolCallService {
                         AiError::InvalidInput("tool call index is invalid".to_owned())
                     })?,
                     tool_id: descriptor.id.as_str().to_owned(),
-                    tool_fingerprint: descriptor.fingerprint.clone(),
+                    tool_fingerprint: binding_fingerprint,
                     protected_arguments,
                     argument_hash,
                     risk: risk_value(descriptor.risk).to_owned(),
@@ -1240,20 +1442,7 @@ impl OrmAiConsequentialToolCallService {
             tenant_id: session.tenant_id.clone(),
         };
         validate_session_binding(&session, lease, &scope)?;
-        let descriptor = self
-            .application_tools
-            .runtime
-            .tool_catalog()
-            .descriptor(&AiToolId::parse(call.tool_id.clone())?)
-            .cloned()
-            .ok_or(AiError::Forbidden)?;
-        validate_supervised_descriptor(&descriptor, &call.tool_fingerprint)?;
-        let disclosure_schema_fingerprint = descriptor
-            .graphql_contract
-            .as_ref()
-            .ok_or(AiError::Forbidden)?
-            .disclosure_schema_fingerprint
-            .clone();
+        let tool_id = AiToolId::parse(call.tool_id.clone())?;
         let provider_kind = call
             .provider_kind
             .clone()
@@ -1330,19 +1519,72 @@ impl OrmAiConsequentialToolCallService {
             causation_id: causation_id.clone(),
             delegation_reference: call.delegation_reference.clone(),
         };
-        let request = build_tool_request(
-            lease,
+        let invocation = GraphqlInvocationContext {
+            run_id: lease.run_id(),
             tool_call_id,
-            &descriptor,
-            arguments,
-            &context,
-            call.idempotency_key.clone(),
-        )?;
-        let preauthorization = self
-            .application_tools
-            .runtime
-            .preauthorize_tool(lease.principal_reference(), &descriptor.id, &request)
-            .await?;
+            scope: scope.clone(),
+            correlation_id: correlation_id.clone(),
+            causation_id: causation_id.clone(),
+            delegation_reference: call.delegation_reference.clone(),
+            idempotency_key: call.idempotency_key.clone(),
+        };
+        let (descriptor, request, preauthorization, binding_fingerprint, prepared) =
+            if let Some(descriptor) = self
+                .application_tools
+                .runtime
+                .tool_catalog()
+                .descriptor(&tool_id)
+                .cloned()
+            {
+                validate_supervised_descriptor(&descriptor, &call.tool_fingerprint)?;
+                let request = build_tool_request(
+                    lease,
+                    tool_call_id,
+                    &descriptor,
+                    arguments,
+                    &context,
+                    call.idempotency_key.clone(),
+                )?;
+                let preauthorization = self
+                    .application_tools
+                    .runtime
+                    .preauthorize_tool(lease.principal_reference(), &descriptor.id, &request)
+                    .await?;
+                let fingerprint = descriptor.fingerprint.clone();
+                (descriptor, request, preauthorization, fingerprint, None)
+            } else {
+                let prepared = self.application_tools.runtime.prepare_mutation_capability(
+                    &tool_id,
+                    &call.tool_fingerprint,
+                    arguments,
+                    invocation,
+                )?;
+                if prepared.execution_policy()
+                    != graphql_orm::graphql::orm::AiMutationExecutionPolicy::ApprovalRequired
+                {
+                    return Err(AiError::Forbidden);
+                }
+                let preauthorization = self
+                    .application_tools
+                    .runtime
+                    .preauthorize_prepared_mutation(lease.principal_reference(), &prepared)
+                    .await?;
+                let descriptor = prepared.descriptor().clone();
+                let request = prepared.request().clone();
+                (
+                    descriptor,
+                    request,
+                    preauthorization,
+                    call.tool_fingerprint.clone(),
+                    Some(prepared),
+                )
+            };
+        let disclosure_schema_fingerprint = descriptor
+            .graphql_contract
+            .as_ref()
+            .ok_or(AiError::Forbidden)?
+            .disclosure_schema_fingerprint
+            .clone();
         let preview = self
             .preview_builder
             .build_preview(preauthorization.principal(), &descriptor, &request)
@@ -1351,6 +1593,7 @@ impl OrmAiConsequentialToolCallService {
             lease,
             tool_call_id,
             &descriptor,
+            &binding_fingerprint,
             &call.argument_hash,
             &scope,
             call.delegation_reference.clone(),
@@ -1362,20 +1605,38 @@ impl OrmAiConsequentialToolCallService {
             .consume_approval(lease, approval_id, &binding, &preview)
             .await?;
         let (approval, running_lease) = consumed.into_parts();
-        let execution = tokio::time::timeout(
-            self.application_tools
-                .limits
-                .maximum_execution_time
-                .unsigned_abs(),
-            self.application_tools.runtime.execute_approved_tool(
-                running_lease.principal_reference(),
-                &descriptor.id,
-                request,
-                &approval,
-                &binding,
-            ),
-        )
-        .await;
+        let execution = if let Some(prepared) = prepared {
+            tokio::time::timeout(
+                self.application_tools
+                    .limits
+                    .maximum_execution_time
+                    .unsigned_abs(),
+                self.application_tools
+                    .runtime
+                    .execute_approved_prepared_mutation(
+                        running_lease.principal_reference(),
+                        prepared,
+                        &approval,
+                        &binding,
+                    ),
+            )
+            .await
+        } else {
+            tokio::time::timeout(
+                self.application_tools
+                    .limits
+                    .maximum_execution_time
+                    .unsigned_abs(),
+                self.application_tools.runtime.execute_approved_tool(
+                    running_lease.principal_reference(),
+                    &descriptor.id,
+                    request,
+                    &approval,
+                    &binding,
+                ),
+            )
+            .await
+        };
         let result = match execution {
             Ok(Ok(result)) => result,
             Ok(Err(_)) | Err(_) => {
@@ -1626,7 +1887,7 @@ impl OrmAiConsequentialToolCallService {
                     protected_inbox_event,
                     correlation_id,
                     expected_provider_call_key: call.provider_call_key,
-                    expected_tool_fingerprint: descriptor.fingerprint,
+                    expected_tool_fingerprint: call.tool_fingerprint,
                     expected_owner_principal_kind: session.owner_principal_kind,
                     expected_owner_subject: session.owner_subject,
                     expected_scope_kind: scope.kind,
@@ -1755,20 +2016,23 @@ fn build_approval_binding(
     lease: &AiRunLease,
     tool_call_id: AiToolCallId,
     descriptor: &AiToolDescriptor,
+    binding_fingerprint: &str,
     argument_hash: &str,
     scope: &AiScope,
     delegation_reference: Option<String>,
     preauthorization: &crate::AiToolPreauthorization,
     preview: &AiCanonicalActionPreview,
 ) -> Result<AiApprovalBinding, AiError> {
-    if preauthorization.tool_fingerprint() != descriptor.fingerprint {
+    if preauthorization.tool_fingerprint() != descriptor.fingerprint
+        || !valid_sha256_fingerprint(binding_fingerprint)
+    {
         return Err(AiError::Conflict);
     }
     let binding = AiApprovalBinding {
         tool_call_id,
         session_id: lease.session_id(),
         scope: scope.clone(),
-        tool_fingerprint: descriptor.fingerprint.clone(),
+        tool_fingerprint: binding_fingerprint.to_owned(),
         argument_hash: argument_hash.to_owned(),
         operation: descriptor
             .graphql_contract
@@ -1786,6 +2050,13 @@ fn build_approval_binding(
     };
     binding.validate(preview)?;
     Ok(binding)
+}
+
+fn valid_sha256_fingerprint(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn validate_session_binding(

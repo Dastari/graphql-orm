@@ -1,11 +1,15 @@
 //! Runtime registration and current-principal policy for canonical AI tools.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use agql_auth::ResolvedPrincipal;
 use async_trait::async_trait;
-use graphql_orm::graphql::orm::{GraphqlOperationCatalog, GraphqlOperationKind};
+use graphql_orm::graphql::orm::{
+    AiMutationExecutionPolicy, GraphqlOperationCatalog, GraphqlOperationKind,
+};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{AiApprovalRule, AiToolRisk, ModelToolDefinition};
 use crate::{
@@ -13,8 +17,8 @@ use crate::{
     AiGeneratedGraphqlOperationPolicy, AiGraphqlMutationCapability,
     AiGraphqlMutationCapabilityCatalog, AiGraphqlQueryCapability, AiGraphqlQueryCapabilityCatalog,
     AiGraphqlToolManifestCatalog, AiScope, AiToolDescriptor, AiToolId, AiToolOperationDomain,
-    AiToolOperationKind, DataClassification, ToolGraphqlRequest, ToolMaturity,
-    contains_forbidden_graphql_name,
+    AiToolOperationKind, DataClassification, GraphqlExecutionTargetId, ToolGraphqlRequest,
+    ToolMaturity, contains_forbidden_graphql_name,
 };
 
 const JSON_SCHEMA_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
@@ -31,6 +35,248 @@ pub struct AiToolCatalog {
 struct RegisteredAiTool {
     descriptor: AiToolDescriptor,
     disclosure_schema: Option<AiDisclosureSchema>,
+}
+
+/// Explicit deployment policy for generated GraphQL capabilities on one
+/// exact logical target and active schema/semantic graph.
+///
+/// This binding is not resolver authority. It only admits capability classes
+/// to the ordinary fresh-principal, exact-operation, resolver, and disclosure
+/// checks. Every capability class is disabled until explicitly enabled.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiGeneratedGraphqlTargetPolicyBinding {
+    target_id: GraphqlExecutionTargetId,
+    finished_schema_fingerprint: String,
+    semantic_catalog_fingerprint: String,
+    queries: bool,
+    automatic_mutations: bool,
+    approval_required_mutations: bool,
+    replayable_subscriptions: bool,
+}
+
+impl AiGeneratedGraphqlTargetPolicyBinding {
+    /// Creates a default-deny binding for one exact active target contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless both fingerprints are lowercase SHA-256 hex.
+    pub fn new(
+        target_id: GraphqlExecutionTargetId,
+        finished_schema_fingerprint: impl Into<String>,
+        semantic_catalog_fingerprint: impl Into<String>,
+    ) -> Result<Self, AiError> {
+        let binding = Self {
+            target_id,
+            finished_schema_fingerprint: finished_schema_fingerprint.into(),
+            semantic_catalog_fingerprint: semantic_catalog_fingerprint.into(),
+            queries: false,
+            automatic_mutations: false,
+            approval_required_mutations: false,
+            replayable_subscriptions: false,
+        };
+        binding.validate()?;
+        Ok(binding)
+    }
+
+    /// Explicitly admits generated read capabilities for this exact binding.
+    pub fn allow_queries(mut self) -> Self {
+        self.queries = true;
+        self
+    }
+
+    /// Explicitly admits classified automatic mutations for this exact binding.
+    pub fn allow_automatic_mutations(mut self) -> Self {
+        self.automatic_mutations = true;
+        self
+    }
+
+    /// Explicitly admits classified one-shot approval mutations for this binding.
+    pub fn allow_approval_required_mutations(mut self) -> Self {
+        self.approval_required_mutations = true;
+        self
+    }
+
+    /// Explicitly admits bounded replayable subscriptions for this binding.
+    pub fn allow_replayable_subscriptions(mut self) -> Self {
+        self.replayable_subscriptions = true;
+        self
+    }
+
+    /// Returns the exact logical target.
+    pub fn target_id(&self) -> &GraphqlExecutionTargetId {
+        &self.target_id
+    }
+
+    /// Returns the exact active finished-SDL fingerprint.
+    pub fn finished_schema_fingerprint(&self) -> &str {
+        &self.finished_schema_fingerprint
+    }
+
+    /// Returns the exact active semantic-catalogue fingerprint.
+    pub fn semantic_catalog_fingerprint(&self) -> &str {
+        &self.semantic_catalog_fingerprint
+    }
+
+    fn validate(&self) -> Result<(), AiError> {
+        if !is_sha256(&self.finished_schema_fingerprint)
+            || !is_sha256(&self.semantic_catalog_fingerprint)
+        {
+            return Err(AiError::InvalidConfiguration(
+                "generated GraphQL target fingerprints are invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Default-deny deployment policy for generated GraphQL capabilities.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AiGeneratedGraphqlTargetPolicySet(
+    BTreeMap<GraphqlExecutionTargetId, AiGeneratedGraphqlTargetPolicyBinding>,
+);
+
+impl AiGeneratedGraphqlTargetPolicySet {
+    /// Creates an empty default-deny target policy.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds one exact target binding without replacing existing policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed fingerprints or a duplicate target.
+    pub fn bind(&mut self, binding: AiGeneratedGraphqlTargetPolicyBinding) -> Result<(), AiError> {
+        binding.validate()?;
+        if self.0.contains_key(binding.target_id()) {
+            return Err(AiError::AlreadyExists(
+                binding.target_id().as_str().to_owned(),
+            ));
+        }
+        self.0.insert(binding.target_id.clone(), binding);
+        Ok(())
+    }
+
+    pub(crate) fn allows_query(&self, descriptor: &AiToolDescriptor) -> bool {
+        self.matching(descriptor).is_some_and(|binding| {
+            binding.queries
+                && descriptor.operation_kind == AiToolOperationKind::Query
+                && descriptor.maturity == ToolMaturity::ReadOnly
+                && descriptor.risk == AiToolRisk::ReadOnly
+                && descriptor.approval == AiApprovalRule::None
+                && descriptor.idempotent
+        })
+    }
+
+    pub(crate) fn allows_mutation(
+        &self,
+        descriptor: &AiToolDescriptor,
+        policy: AiMutationExecutionPolicy,
+    ) -> bool {
+        self.matching(descriptor).is_some_and(|binding| {
+            descriptor.operation_kind == AiToolOperationKind::Mutation
+                && !descriptor.idempotent
+                && descriptor.risk == AiToolRisk::NonIdempotentWrite
+                && match policy {
+                    AiMutationExecutionPolicy::Automatic => {
+                        binding.automatic_mutations
+                            && descriptor.maturity == ToolMaturity::AutonomousWrite
+                            && descriptor.approval == AiApprovalRule::None
+                    }
+                    AiMutationExecutionPolicy::ApprovalRequired => {
+                        binding.approval_required_mutations
+                            && descriptor.maturity == ToolMaturity::SupervisedWrite
+                            && descriptor.approval == AiApprovalRule::OneShot
+                    }
+                    AiMutationExecutionPolicy::Prohibited => false,
+                }
+        })
+    }
+
+    pub(crate) fn allows_subscription(&self, descriptor: &AiToolDescriptor) -> bool {
+        self.matching(descriptor).is_some_and(|binding| {
+            binding.replayable_subscriptions
+                && descriptor.operation_kind == AiToolOperationKind::Subscription
+                && descriptor.maturity == ToolMaturity::ReadOnly
+                && descriptor.risk == AiToolRisk::ReadOnly
+                && descriptor.approval == AiApprovalRule::None
+                && descriptor.idempotent
+        })
+    }
+
+    fn matching(
+        &self,
+        descriptor: &AiToolDescriptor,
+    ) -> Option<&AiGeneratedGraphqlTargetPolicyBinding> {
+        let contract = descriptor.graphql_contract.as_ref()?;
+        let semantic = contract.semantic_operation()?;
+        let binding = self.0.get(&contract.target_id)?;
+        (binding.finished_schema_fingerprint == contract.schema_fingerprint
+            && binding.semantic_catalog_fingerprint == semantic.catalog_fingerprint())
+        .then_some(binding)
+    }
+
+    fn allows_generated_descriptor(&self, descriptor: &AiToolDescriptor) -> bool {
+        self.allows_query(descriptor)
+            || self.allows_mutation(descriptor, AiMutationExecutionPolicy::Automatic)
+            || self.allows_mutation(descriptor, AiMutationExecutionPolicy::ApprovalRequired)
+            || self.allows_subscription(descriptor)
+    }
+
+    /// Returns a deterministic fingerprint of the complete exact target policy.
+    pub fn fingerprint(&self) -> String {
+        let encoded = serde_json::to_vec(self)
+            .expect("generated GraphQL target policy contains only serializable values");
+        hex::encode(Sha256::digest(encoded))
+    }
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+/// Fresh-principal authorization adapter for exact generated GraphQL targets.
+///
+/// Generated semantic descriptors matching the target policy are admitted
+/// without a per-capability ID list; static tools delegate to the host's
+/// existing policy. A generated descriptor that is absent or stale in the
+/// exact target policy is denied and cannot fall through to static policy.
+#[derive(Clone)]
+pub struct AiGeneratedGraphqlAuthorizationPolicy {
+    targets: AiGeneratedGraphqlTargetPolicySet,
+    static_tools: Arc<dyn AiToolAuthorizationPolicy>,
+}
+
+impl std::fmt::Debug for AiGeneratedGraphqlAuthorizationPolicy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiGeneratedGraphqlAuthorizationPolicy")
+            .field("target_policy_fingerprint", &self.targets.fingerprint())
+            .finish_non_exhaustive()
+    }
+}
+
+impl AiGeneratedGraphqlAuthorizationPolicy {
+    /// Creates a generated-target adapter with an independent static-tool fallback.
+    pub fn new(
+        targets: AiGeneratedGraphqlTargetPolicySet,
+        static_tools: Arc<dyn AiToolAuthorizationPolicy>,
+    ) -> Self {
+        Self {
+            targets,
+            static_tools,
+        }
+    }
+
+    /// Creates an adapter that denies all static application tools.
+    pub fn generated_only(targets: AiGeneratedGraphqlTargetPolicySet) -> Self {
+        Self::new(targets, Arc::new(DenyAllAiToolAuthorizationPolicy))
+    }
 }
 
 impl AiToolCatalog {
@@ -306,6 +552,13 @@ impl AiToolCatalog {
     /// This is discovery only and grants neither authority nor approval.
     pub fn mutation_capabilities(&self) -> impl Iterator<Item = &AiGraphqlMutationCapability> {
         self.mutation_capabilities.values()
+    }
+
+    /// Returns one exact classified mutation capability for revalidation.
+    ///
+    /// This remains discovery metadata and does not grant execution authority.
+    pub fn mutation_capability(&self, id: &AiToolId) -> Option<&AiGraphqlMutationCapability> {
+        self.mutation_capabilities.get(id)
     }
 
     /// Projects one registered automatic query capability for a provider.
@@ -681,6 +934,75 @@ impl AiToolAuthorizationPolicy for DenyAllAiToolAuthorizationPolicy {
     ) -> AiToolAuthorizationDecision {
         AiToolAuthorizationDecision::deny("default_deny", "deny-all")
     }
+}
+
+#[async_trait]
+impl AiToolAuthorizationPolicy for AiGeneratedGraphqlAuthorizationPolicy {
+    async fn authorize(
+        &self,
+        principal: &ResolvedPrincipal,
+        scope: &AiScope,
+        descriptor: &AiToolDescriptor,
+        variables: &serde_json::Value,
+    ) -> AiToolAuthorizationDecision {
+        if descriptor
+            .graphql_contract
+            .as_ref()
+            .is_some_and(|contract| contract.semantic_operation().is_some())
+        {
+            if !self.targets.allows_generated_descriptor(descriptor) {
+                return AiToolAuthorizationDecision::deny(
+                    "generated_graphql_target_denied",
+                    format!("generated-graphql-v1:{}", self.targets.fingerprint()),
+                );
+            }
+            let policy_version = format!("generated-graphql-v1:{}", self.targets.fingerprint());
+            let state = serde_json::json!({
+                "policy": policy_version,
+                "principal": principal.reference(),
+                "scope": scope,
+                "tool": descriptor.fingerprint,
+                "variables": canonical_json_digest(variables),
+            });
+            let state_digest = serde_json::to_vec(&state)
+                .map(|encoded| hex::encode(Sha256::digest(encoded)))
+                .unwrap_or_default();
+            if state_digest.is_empty() {
+                return AiToolAuthorizationDecision::deny(
+                    "generated_graphql_state_invalid",
+                    policy_version,
+                );
+            }
+            return AiToolAuthorizationDecision::allow(
+                "generated_graphql_exact_target",
+                policy_version,
+                state_digest,
+            );
+        }
+        self.static_tools
+            .authorize(principal, scope, descriptor, variables)
+            .await
+    }
+}
+
+fn canonical_json_digest(value: &serde_json::Value) -> String {
+    fn canonical(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(object) => serde_json::Value::Object(
+                object
+                    .iter()
+                    .map(|(key, value)| (key.clone(), canonical(value)))
+                    .collect(),
+            ),
+            serde_json::Value::Array(values) => {
+                serde_json::Value::Array(values.iter().map(canonical).collect())
+            }
+            _ => value.clone(),
+        }
+    }
+    serde_json::to_vec(&canonical(value))
+        .map(|encoded| hex::encode(Sha256::digest(encoded)))
+        .unwrap_or_default()
 }
 
 /// Scope tool policy. Absence always means disabled.

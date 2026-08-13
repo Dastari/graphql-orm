@@ -9,17 +9,17 @@ use agql_auth::{CurrentPrincipalResolver, PrincipalReference, ResolvedPrincipal}
 use crate::{
     AiAccessPolicy, AiApprovalBinding, AiApprovalRule, AiContentProtectionPolicyResolver,
     AiContentProtector, AiDeploymentEgressBoundary, AiDisclosureEvaluation, AiEgressDecision,
-    AiEgressManifest, AiEgressPolicy, AiError, AiProposalCatalog, AiProvider, AiSchemaModule,
-    AiSecretStore, AiToolAuthorizationDecision, AiToolAuthorizationPolicy, AiToolCatalog,
-    AiToolDescriptor, AiToolId, AiToolOperationDomain, AiToolOperationKind,
-    AuthenticatedGraphqlExecutor, AuthenticatedToolBridge, ConsumedAiApproval,
+    AiEgressManifest, AiEgressPolicy, AiError, AiGeneratedGraphqlTargetPolicySet,
+    AiProposalCatalog, AiProvider, AiSchemaModule, AiSecretStore, AiToolAuthorizationDecision,
+    AiToolAuthorizationPolicy, AiToolCatalog, AiToolDescriptor, AiToolId, AiToolOperationDomain,
+    AiToolOperationKind, AuthenticatedGraphqlExecutor, AuthenticatedToolBridge, ConsumedAiApproval,
     GraphqlExecutionTargetRegistry, GraphqlInvocationContext, GraphqlRequestContextFactory,
     ModelRequest, ProviderBackgroundBinding, ProviderBackgroundObservation,
     ProviderBackgroundRetrievalBinding, ProviderBackgroundRetrievalContext,
     ProviderBackgroundSubmission, ProviderError, ProviderEventStream, ProviderKind,
     ProviderRequestContext, ToolGraphqlRequest, ToolGraphqlResponse, ToolMaturity,
 };
-use graphql_orm::graphql::orm::{OrmSchemaModule, SchemaModuleCatalog};
+use graphql_orm::graphql::orm::{AiMutationExecutionPolicy, OrmSchemaModule, SchemaModuleCatalog};
 
 /// Host-attested inputs accepted by the current runtime start gate.
 ///
@@ -95,6 +95,7 @@ pub struct AiRuntime {
     egress_policy: Arc<dyn AiEgressPolicy>,
     deployment_egress: AiDeploymentEgressBoundary,
     maximum_tool_maturity: ToolMaturity,
+    generated_graphql_target_policy: AiGeneratedGraphqlTargetPolicySet,
     tool_catalog: AiToolCatalog,
     proposal_catalog: AiProposalCatalog,
     secret_store: Arc<dyn AiSecretStore>,
@@ -128,6 +129,49 @@ pub struct AiToolPreauthorization {
     tool_fingerprint: String,
     policy_version: String,
     authorization_state_digest: String,
+}
+
+/// Exact compiled mutation plan admitted by deployment target policy.
+///
+/// This value is crate-constructed and is neither current-user authority nor
+/// one-shot approval. A durable coordinator may reconstruct it from the
+/// protected provider plan and exact capability fingerprint before each
+/// preauthorization or execution boundary.
+#[derive(Clone, Debug)]
+pub struct AiPreparedGraphqlMutation {
+    execution_policy: AiMutationExecutionPolicy,
+    capability_fingerprint: String,
+    plan_fingerprint: String,
+    descriptor: AiToolDescriptor,
+    disclosure_schema: crate::AiDisclosureSchema,
+    request: ToolGraphqlRequest,
+}
+
+impl AiPreparedGraphqlMutation {
+    /// Returns the semantic execution classification.
+    pub const fn execution_policy(&self) -> AiMutationExecutionPolicy {
+        self.execution_policy
+    }
+
+    /// Returns the provider-visible capability fingerprint.
+    pub fn capability_fingerprint(&self) -> &str {
+        &self.capability_fingerprint
+    }
+
+    /// Returns the exact closed-plan fingerprint.
+    pub fn plan_fingerprint(&self) -> &str {
+        &self.plan_fingerprint
+    }
+
+    /// Returns the compiled execution descriptor.
+    pub fn descriptor(&self) -> &AiToolDescriptor {
+        &self.descriptor
+    }
+
+    /// Returns the compiled exact GraphQL request.
+    pub fn request(&self) -> &ToolGraphqlRequest {
+        &self.request
+    }
 }
 
 impl AiToolPreauthorization {
@@ -354,7 +398,10 @@ impl AiRuntime {
             plan,
         )?;
         let (descriptor, disclosure_schema, variables) = compiled.into_parts();
-        if descriptor.maturity > self.maximum_tool_maturity
+        if !self
+            .generated_graphql_target_policy
+            .allows_query(&descriptor)
+            || descriptor.maturity > self.maximum_tool_maturity
             || descriptor.operation_kind != AiToolOperationKind::Query
             || descriptor.operation_domain != AiToolOperationDomain::Application
             || descriptor.approval != AiApprovalRule::None
@@ -379,6 +426,181 @@ impl AiRuntime {
             .await
             .map_err(|_| AiError::ToolExecutionFailed)?;
         self.finish_tool_execution(&descriptor, &disclosure_schema, response, authorization)
+    }
+
+    /// Compiles and target-policy admits one registered classified mutation.
+    ///
+    /// The returned value is not authority and cannot execute by itself. It
+    /// binds the exact provider capability, closed plan, target, active
+    /// finished SDL, semantic catalogue, document, variables, and disclosure
+    /// contract for subsequent durable automatic or supervised handling.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for readiness, capability/plan drift, a disabled exact
+    /// target binding, prohibited classification, or maturity mismatch.
+    pub fn prepare_mutation_capability(
+        &self,
+        capability_id: &AiToolId,
+        capability_fingerprint: &str,
+        plan: serde_json::Value,
+        invocation: GraphqlInvocationContext,
+    ) -> Result<AiPreparedGraphqlMutation, AiError> {
+        if !self.start_gate.is_ready() {
+            return Err(AiError::RuntimeNotReady);
+        }
+        let compiled = self.tool_catalog.compile_mutation_capability(
+            capability_id,
+            capability_fingerprint,
+            plan,
+        )?;
+        let execution_policy = compiled.execution_policy();
+        let plan_fingerprint = compiled.plan_fingerprint().to_owned();
+        let compiled_capability_fingerprint = compiled.capability_fingerprint().to_owned();
+        let (compiled_policy, descriptor, disclosure_schema, variables) = compiled.into_parts();
+        if execution_policy != compiled_policy
+            || compiled_capability_fingerprint != capability_fingerprint
+            || descriptor.maturity > self.maximum_tool_maturity
+            || !self
+                .generated_graphql_target_policy
+                .allows_mutation(&descriptor, execution_policy)
+        {
+            return Err(AiError::Forbidden);
+        }
+        let contract = descriptor
+            .graphql_contract
+            .clone()
+            .ok_or(AiError::Forbidden)?;
+        let request = ToolGraphqlRequest {
+            document: descriptor.document.clone(),
+            operation_name: contract.operation_name.clone(),
+            contract,
+            variables,
+            invocation,
+        };
+        Ok(AiPreparedGraphqlMutation {
+            execution_policy,
+            capability_fingerprint: compiled_capability_fingerprint,
+            plan_fingerprint,
+            descriptor,
+            disclosure_schema,
+            request,
+        })
+    }
+
+    /// Rehydrates and evaluates current host policy for one exact prepared
+    /// mutation without executing it.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for target-policy drift or fresh-principal/policy denial.
+    pub async fn preauthorize_prepared_mutation(
+        &self,
+        principal_reference: &PrincipalReference,
+        prepared: &AiPreparedGraphqlMutation,
+    ) -> Result<AiToolPreauthorization, AiError> {
+        self.validate_prepared_mutation(prepared)?;
+        let (principal, authorization) = self
+            .tool_bridge
+            .preauthorize(principal_reference, &prepared.descriptor, &prepared.request)
+            .await
+            .map_err(|_| AiError::Forbidden)?;
+        Ok(AiToolPreauthorization {
+            principal,
+            tool_fingerprint: prepared.descriptor.fingerprint.clone(),
+            policy_version: authorization.policy_version,
+            authorization_state_digest: authorization.authorization_state_digest,
+        })
+    }
+
+    /// Executes one exact classified automatic mutation under fresh authority.
+    ///
+    /// Durable callers must persist a pre-effect checkpoint before invoking
+    /// this method. Any timeout, execution error, or post-call persistence
+    /// ambiguity must converge the owning run to `RecoveryRequired` and must
+    /// never automatically replay the mutation.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for a non-automatic classification, target drift, current
+    /// policy/resolver denial, or bounded disclosure failure.
+    pub async fn execute_prepared_automatic_mutation(
+        &self,
+        principal_reference: &PrincipalReference,
+        prepared: AiPreparedGraphqlMutation,
+    ) -> Result<AiToolExecutionResult, AiError> {
+        self.validate_prepared_mutation(&prepared)?;
+        if prepared.execution_policy != AiMutationExecutionPolicy::Automatic {
+            return Err(AiError::Forbidden);
+        }
+        let (response, authorization) = self
+            .tool_bridge
+            .execute(principal_reference, &prepared.descriptor, prepared.request)
+            .await
+            .map_err(|_| AiError::ToolExecutionFailed)?;
+        self.finish_tool_execution(
+            &prepared.descriptor,
+            &prepared.disclosure_schema,
+            response,
+            authorization,
+        )
+    }
+
+    /// Executes one exact prepared mutation after one-shot approval consumption.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for a changed compiled plan/target, stale approval binding,
+    /// non-supervised classification, changed fresh authority, resolver
+    /// ambiguity, or disclosure failure.
+    pub async fn execute_approved_prepared_mutation(
+        &self,
+        principal_reference: &PrincipalReference,
+        prepared: AiPreparedGraphqlMutation,
+        approval: &ConsumedAiApproval,
+        binding: &AiApprovalBinding,
+    ) -> Result<AiToolExecutionResult, AiError> {
+        self.validate_prepared_mutation(&prepared)?;
+        if prepared.execution_policy != AiMutationExecutionPolicy::ApprovalRequired
+            || approval.binding_hash() != binding.stable_hash()
+            || approval.approval_id().0.is_nil()
+            || prepared.capability_fingerprint != binding.tool_fingerprint
+            || prepared.descriptor.graphql_contract.as_ref() != Some(&binding.operation)
+        {
+            return Err(AiError::Forbidden);
+        }
+        let (response, authorization) = self
+            .tool_bridge
+            .execute_bound(
+                principal_reference,
+                &prepared.descriptor,
+                prepared.request,
+                &binding.policy_version,
+                &binding.authorization_state_digest,
+            )
+            .await
+            .map_err(|_| AiError::ToolExecutionFailed)?;
+        self.finish_tool_execution(
+            &prepared.descriptor,
+            &prepared.disclosure_schema,
+            response,
+            authorization,
+        )
+    }
+
+    fn validate_prepared_mutation(
+        &self,
+        prepared: &AiPreparedGraphqlMutation,
+    ) -> Result<(), AiError> {
+        if !self.start_gate.is_ready()
+            || prepared.descriptor.maturity > self.maximum_tool_maturity
+            || !self
+                .generated_graphql_target_policy
+                .allows_mutation(&prepared.descriptor, prepared.execution_policy)
+        {
+            return Err(AiError::Forbidden);
+        }
+        Ok(())
     }
 
     /// Rehydrates and evaluates current host tool policy for an exact
@@ -857,6 +1079,7 @@ pub struct AiRuntimeBuilder {
     egress_policy: Option<Arc<dyn AiEgressPolicy>>,
     deployment_egress: Option<AiDeploymentEgressBoundary>,
     maximum_tool_maturity: Option<ToolMaturity>,
+    generated_graphql_target_policy: AiGeneratedGraphqlTargetPolicySet,
     tool_catalog: AiToolCatalog,
     proposal_catalog: AiProposalCatalog,
     secret_store: Option<Arc<dyn AiSecretStore>>,
@@ -920,6 +1143,18 @@ impl AiRuntimeBuilder {
     /// Sets immutable deployment tool-maturity cap.
     pub fn maximum_tool_maturity(mut self, maturity: ToolMaturity) -> Self {
         self.maximum_tool_maturity = Some(maturity);
+        self
+    }
+
+    /// Sets explicit exact-target policy for generated GraphQL capabilities.
+    ///
+    /// An omitted or empty policy denies every generated query and mutation;
+    /// static application tools retain their existing independent policy.
+    pub fn generated_graphql_target_policy(
+        mut self,
+        policy: AiGeneratedGraphqlTargetPolicySet,
+    ) -> Self {
+        self.generated_graphql_target_policy = policy;
         self
     }
 
@@ -1036,6 +1271,7 @@ impl AiRuntimeBuilder {
             egress_policy,
             deployment_egress,
             maximum_tool_maturity,
+            generated_graphql_target_policy: self.generated_graphql_target_policy,
             tool_catalog: self.tool_catalog,
             proposal_catalog: self.proposal_catalog,
             secret_store,
