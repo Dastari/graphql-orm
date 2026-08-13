@@ -131,13 +131,19 @@ impl DecimalDef {
 
     /// Creates a validated decimal definition.
     pub const fn new(precision: u8, scale: u8) -> Result<Self, DecimalConfigurationError> {
-        if precision == 0
-            || precision > Self::MAXIMUM_PORTABLE_PRECISION
-            || scale > precision
-        {
+        if precision == 0 || precision > Self::MAXIMUM_PORTABLE_PRECISION || scale > precision {
             return Err(DecimalConfigurationError);
         }
         Ok(Self { precision, scale })
+    }
+
+    /// Creates a definition already validated by a trusted macro.
+    #[doc(hidden)]
+    pub const fn macro_validated(precision: u8, scale: u8) -> Self {
+        match Self::new(precision, scale) {
+            Ok(value) => value,
+            Err(_) => panic!("macro emitted an invalid decimal definition"),
+        }
     }
 
     /// Total number of decimal digits retained by this definition.
@@ -168,10 +174,7 @@ impl DecimalDef {
     }
 
     /// Converts a validated decimal to SQLite's canonical scaled integer.
-    pub fn to_scaled_i64(
-        self,
-        value: rust_decimal::Decimal,
-    ) -> Result<i64, DecimalValueError> {
+    pub fn to_scaled_i64(self, value: rust_decimal::Decimal) -> Result<i64, DecimalValueError> {
         let normalized = self.normalize(value)?;
         i64::try_from(normalized.mantissa()).map_err(|_| DecimalValueError::Precision)
     }

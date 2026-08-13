@@ -45,4 +45,5 @@ field-case-upper = []
 convert_case = "0.7"
 proc-macro2 = "1"
 quote = "1"
+rust_decimal = { workspace = true }
 syn = { version = "2", features = ["full", "parsing", "extra-traits", "visit-mut"] }

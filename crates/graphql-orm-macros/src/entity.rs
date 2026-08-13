@@ -23,6 +23,7 @@ pub(crate) struct EntityMetadata {
     /// Dedicated entity-policy key enabling host-only bounded retention purge.
     pub(crate) retention_policy: Option<String>,
     pub(crate) repository_mutations: bool,
+    pub(crate) aggregate: bool,
     pub(crate) keyset: Option<String>,
     pub(crate) backup_enabled: Option<bool>,
     pub(crate) backup_export_order: Option<i32>,
@@ -193,6 +194,10 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitBool = value.parse()?;
                     metadata.repository_mutations = lit.value;
+                } else if meta.path.is_ident("aggregate") {
+                    let value = meta.value()?;
+                    let lit: syn::LitBool = value.parse()?;
+                    metadata.aggregate = lit.value;
                 } else if meta.path.is_ident("keyset") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
@@ -2595,6 +2600,7 @@ fn generate_entity_impl(
     let mut filter_to_entity_match = Vec::new();
     let mut filter_is_empty_checks = Vec::new();
     let mut filter_contains_spatial_checks = Vec::new();
+    let mut filter_referenced_field_checks = Vec::new();
     let mut from_row_fields = Vec::new();
     let mut relation_metadata_defs = Vec::new();
     let mut search_field_defs = Vec::new();
@@ -2605,11 +2611,17 @@ fn generate_entity_impl(
     let mut object_field_methods = Vec::new();
     let mut repository_field_policy_defs = Vec::new();
     let mut semantic_field_defs = Vec::new();
+    let mut aggregate_field_variants = Vec::new();
+    let mut aggregate_field_match_arms = Vec::new();
     let semantic_argument_case = selected_argument_case();
     let semantic_where_argument = apply_graphql_case("where", semantic_argument_case);
     let semantic_order_by_argument = apply_graphql_case("order_by", semantic_argument_case);
     let semantic_page_argument = apply_graphql_case("page", semantic_argument_case);
     let parsed_fields = collect_parsed_fields(fields.iter())?;
+    let aggregate_field_name = syn::Ident::new(
+        &format!("{}AggregateField", struct_name),
+        struct_name.span(),
+    );
 
     for parsed_field in &parsed_fields {
         let field = &parsed_field.field;
@@ -2978,6 +2990,7 @@ fn generate_entity_impl(
             let groupable = !field_meta.is_json_field
                 && field_meta.spatial.is_none()
                 && !is_byte_vec_type(field_type);
+            let is_boolean = type_name == "bool" || field_meta.is_boolean_field;
             let aggregate_operators = if is_numeric {
                 quote! { vec![
                     ::graphql_orm::graphql::orm::GraphqlAggregateOperator::Count,
@@ -2985,7 +2998,7 @@ fn generate_entity_impl(
                     ::graphql_orm::graphql::orm::GraphqlAggregateOperator::Max,
                     ::graphql_orm::graphql::orm::GraphqlAggregateOperator::Sum,
                 ] }
-            } else if groupable {
+            } else if groupable && !is_boolean {
                 quote! { vec![
                     ::graphql_orm::graphql::orm::GraphqlAggregateOperator::Count,
                     ::graphql_orm::graphql::orm::GraphqlAggregateOperator::Min,
@@ -3002,7 +3015,7 @@ fn generate_entity_impl(
                 } else {
                     quote! { Some(::graphql_orm::graphql::orm::GraphqlAggregateValueKind::Integral) }
                 }
-            } else if groupable {
+            } else if groupable && !is_boolean {
                 quote! { Some(::graphql_orm::graphql::orm::GraphqlAggregateValueKind::Text) }
             } else {
                 quote! { Some(::graphql_orm::graphql::orm::GraphqlAggregateValueKind::Count) }
@@ -3050,6 +3063,85 @@ fn generate_entity_impl(
                     sensitive: #sensitive,
                 }
             });
+            if field_meta.read && !field_meta.is_private {
+                let variant = syn::Ident::new(&rust_name.to_case(Case::Pascal), field.span());
+                let column_name = field_meta
+                    .db_column
+                    .as_deref()
+                    .unwrap_or(rust_name.as_str());
+                let scalar_type = option_inner_type(field_type).unwrap_or(field_type);
+                let aggregate_nullable = is_option_type(field_type);
+                let type_name = type_path_last_ident(scalar_type)
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                let kind = if let Some((precision, scale)) = field_meta.decimal {
+                    quote! {
+                        ::graphql_orm::graphql::orm::AggregateFieldKind::Decimal(
+                            ::graphql_orm::graphql::orm::DecimalDef::macro_validated(#precision, #scale)
+                        )
+                    }
+                } else if matches!(
+                    type_name.as_str(),
+                    "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
+                ) {
+                    quote! { ::graphql_orm::graphql::orm::AggregateFieldKind::Integral }
+                } else if matches!(type_name.as_str(), "f32" | "f64") {
+                    quote! { ::graphql_orm::graphql::orm::AggregateFieldKind::Floating }
+                } else if type_name == "bool" || field_meta.is_boolean_field {
+                    quote! { ::graphql_orm::graphql::orm::AggregateFieldKind::Boolean }
+                } else {
+                    quote! { ::graphql_orm::graphql::orm::AggregateFieldKind::Text }
+                };
+                let groupable = !field_meta.is_json_field
+                    && field_meta.spatial.is_none()
+                    && !is_byte_vec_type(scalar_type);
+                let operators = if field_meta.decimal.is_some()
+                    || matches!(
+                        type_name.as_str(),
+                        "i8" | "i16"
+                            | "i32"
+                            | "i64"
+                            | "isize"
+                            | "u8"
+                            | "u16"
+                            | "u32"
+                            | "u64"
+                            | "usize"
+                            | "f32"
+                            | "f64"
+                    ) {
+                    quote! { &[
+                        ::graphql_orm::graphql::orm::GraphqlAggregateOperator::Count,
+                        ::graphql_orm::graphql::orm::GraphqlAggregateOperator::Min,
+                        ::graphql_orm::graphql::orm::GraphqlAggregateOperator::Max,
+                        ::graphql_orm::graphql::orm::GraphqlAggregateOperator::Sum,
+                    ] }
+                } else if groupable && type_name != "bool" && !field_meta.is_boolean_field {
+                    quote! { &[
+                        ::graphql_orm::graphql::orm::GraphqlAggregateOperator::Count,
+                        ::graphql_orm::graphql::orm::GraphqlAggregateOperator::Min,
+                        ::graphql_orm::graphql::orm::GraphqlAggregateOperator::Max,
+                    ] }
+                } else {
+                    quote! { &[::graphql_orm::graphql::orm::GraphqlAggregateOperator::Count] }
+                };
+                aggregate_field_variants.push(quote! { #variant });
+                aggregate_field_match_arms.push(quote! {
+                    #aggregate_field_name::#variant => {
+                        static FIELD: ::graphql_orm::graphql::orm::AggregateFieldRef =
+                            ::graphql_orm::graphql::orm::AggregateFieldRef::generated(
+                                #rust_name,
+                                #graphql_name,
+                                #column_name,
+                                #kind,
+                                #aggregate_nullable,
+                                #groupable,
+                                #operators,
+                            );
+                        &FIELD
+                    }
+                });
+            }
         }
         let db_col = field_meta
             .db_column
@@ -3308,8 +3400,7 @@ fn generate_entity_impl(
             .decimal
             .map(|(precision, scale)| {
                 quote! {
-                    Some(::graphql_orm::graphql::orm::DecimalDef::new(#precision, #scale)
-                        .expect("macro-validated decimal definition"))
+                    Some(::graphql_orm::graphql::orm::DecimalDef::macro_validated(#precision, #scale))
                 }
             })
             .unwrap_or_else(|| quote! { None });
@@ -3469,7 +3560,18 @@ fn generate_entity_impl(
                 "default = false only suppresses the implicit created_at or updated_at default",
             ));
         }
-        let default_val = field_meta.default.clone().or_else(|| {
+        let explicit_default = match (field_meta.default.as_deref(), field_meta.decimal) {
+            (Some(value), Some((precision, scale))) => Some(decimal_default_sql(
+                backend,
+                value,
+                precision,
+                scale,
+                field.span(),
+            )?),
+            (Some(value), None) => Some(value.to_owned()),
+            (None, _) => None,
+        };
+        let default_val = explicit_default.or_else(|| {
             if !field_meta.suppress_implicit_default
                 && (rust_name == "created_at" || rust_name == "updated_at")
             {
@@ -3521,6 +3623,13 @@ fn generate_entity_impl(
         // Generate WhereInput field for filterable fields
         if field_meta.filter {
             if let Some(ref filter_type) = field_meta.filterable {
+                let filter_field_name =
+                    rust_ident_from_graphql_name(&graphql_name, field_name.span());
+                filter_referenced_field_checks.push(quote! {
+                    if self.#filter_field_name.is_some() {
+                        fields.push(#graphql_name);
+                    }
+                });
                 let (
                     input_field,
                     sql_gen,
@@ -3761,6 +3870,58 @@ fn generate_entity_impl(
     let where_input_name = syn::Ident::new(&where_input_name_str, struct_name.span());
     let order_by_name = syn::Ident::new(&order_by_name_str, struct_name.span());
     let struct_name_str = struct_name.to_string();
+    if entity_meta.aggregate && aggregate_field_variants.is_empty() {
+        return Err(syn::Error::new(
+            struct_name.span(),
+            "aggregate = true requires at least one public persisted readable field",
+        ));
+    }
+    let aggregate_field_name_str = aggregate_field_name.to_string();
+    let aggregate_field_definition = if aggregate_field_variants.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+        /// Closed public fields accepted by typed aggregate queries for this entity.
+        #[derive(
+            ::graphql_orm::async_graphql::Enum,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            PartialEq,
+        )]
+        #[graphql(name = #aggregate_field_name_str, rename_items = #field_case_rule)]
+        pub enum #aggregate_field_name {
+            #(#aggregate_field_variants),*
+        }
+
+        impl ::graphql_orm::graphql::orm::TypedAggregateField<#struct_name>
+            for #aggregate_field_name
+        {
+            fn aggregate_field(self) -> &'static ::graphql_orm::graphql::orm::AggregateFieldRef {
+                match self {
+                    #(#aggregate_field_match_arms),*
+                }
+            }
+        }
+
+        impl #struct_name {
+            /// Begins a policy-aware typed grouped aggregate query.
+            pub fn aggregate<'a>(
+                db: &'a ::graphql_orm::db::Database<#backend_marker>,
+            ) -> ::graphql_orm::graphql::orm::GroupedAggregateQuery<
+                'a,
+                Self,
+                #where_input_name,
+                #aggregate_field_name,
+                #backend_marker,
+            > {
+                ::graphql_orm::graphql::orm::GroupedAggregateQuery::new(db)
+            }
+        }
+        }
+    };
     let projection_definitions = generate_projection_definitions(
         backend,
         struct_name,
@@ -3907,6 +4068,7 @@ fn generate_entity_impl(
         #search_schema_impl
         #searchable_entity_impl
         #projection_definitions
+        #aggregate_field_definition
 
         // WhereInput for filtering
         #[derive(::graphql_orm::async_graphql::InputObject, Default, Clone, Debug)]
@@ -3990,6 +4152,33 @@ fn generate_entity_impl(
 
             fn is_empty(&self) -> bool {
                 self.__gom_is_empty()
+            }
+
+            fn referenced_fields(&self) -> Vec<&'static str> {
+                let mut fields = Vec::new();
+                #(#filter_referenced_field_checks)*
+                if let Some(and_filters) = &self.and {
+                    for filter in and_filters {
+                        fields.extend(
+                            ::graphql_orm::graphql::orm::DatabaseFilter::referenced_fields(filter)
+                        );
+                    }
+                }
+                if let Some(or_filters) = &self.or {
+                    for filter in or_filters {
+                        fields.extend(
+                            ::graphql_orm::graphql::orm::DatabaseFilter::referenced_fields(filter)
+                        );
+                    }
+                }
+                if let Some(filter) = &self.not {
+                    fields.extend(
+                        ::graphql_orm::graphql::orm::DatabaseFilter::referenced_fields(filter.as_ref())
+                    );
+                }
+                fields.sort_unstable();
+                fields.dedup();
+                fields
             }
 
             fn requires_in_memory_filtering(
@@ -4706,6 +4895,53 @@ fn generate_filter_field(
     let no_spatial_check = quote! {};
 
     match filter_type {
+        "decimal" => {
+            let Some((precision, scale)) = field_meta.decimal else {
+                return Err(syn::Error::new(
+                    field_name.span(),
+                    "filterable(type = \"decimal\") requires decimal metadata",
+                ));
+            };
+            let input = quote! {
+                #[graphql(name = #graphql_name)]
+                pub #filter_field_name: Option<::graphql_orm::graphql::filters::DecimalFilter>,
+            };
+            let sql = quote! {
+                if let Some(ref f) = self.#filter_field_name {
+                    let definition = ::graphql_orm::graphql::orm::DecimalDef::macro_validated(
+                        #precision,
+                        #scale,
+                    );
+                    for (value, operator) in [
+                        (f.eq, "="),
+                        (f.ne, "!="),
+                        (f.lt, "<"),
+                        (f.lte, "<="),
+                        (f.gt, ">"),
+                        (f.gte, ">="),
+                    ] {
+                        if let Some(value) = value {
+                            match ::graphql_orm::graphql::orm::DecimalValue::new(value, definition) {
+                                Ok(value) => {
+                                    let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                                    conditions.push(format!("{} {} {}", #db_col, operator, placeholder));
+                                    values.push(::graphql_orm::graphql::orm::SqlValue::Decimal(value));
+                                }
+                                Err(_) => conditions.push("1 = 0".to_owned()),
+                            }
+                        }
+                    }
+                    if let Some(is_null) = f.is_null {
+                        conditions.push(format!(
+                            "{} IS {}NULL",
+                            #db_col,
+                            if is_null { "" } else { "NOT " }
+                        ));
+                    }
+                }
+            };
+            Ok((input, sql, quote! {}, is_empty_check, no_spatial_check))
+        }
         "spatial" => {
             let Some(spatial) = &field_meta.spatial else {
                 return Err(syn::Error::new(
@@ -5400,9 +5636,13 @@ fn generate_row_field_assignment(
         });
     }
     if let Some((precision, scale)) = meta.decimal {
+        if let Some(inner_type) = option_inner_type(field_type) {
+            return generate_option_row_field_assignment(
+                backend, field_name, inner_type, db_col, meta,
+            );
+        }
         let definition = quote! {
-            ::graphql_orm::graphql::orm::DecimalDef::new(#precision, #scale)
-                .expect("macro-validated decimal definition")
+            ::graphql_orm::graphql::orm::DecimalDef::macro_validated(#precision, #scale)
         };
         let value = match backend {
             BackendKind::Sqlite => quote! {{
@@ -5562,8 +5802,7 @@ fn generate_option_row_field_assignment(
     };
     if let Some((precision, scale)) = meta.decimal {
         let definition = quote! {
-            ::graphql_orm::graphql::orm::DecimalDef::new(#precision, #scale)
-                .expect("macro-validated decimal definition")
+            ::graphql_orm::graphql::orm::DecimalDef::macro_validated(#precision, #scale)
         };
         let value = match backend {
             BackendKind::Sqlite => quote! {{
@@ -5935,4 +6174,33 @@ pub(crate) fn rust_type_to_sql_type(
     }
 
     "TEXT".to_string()
+}
+
+fn decimal_default_sql(
+    backend: BackendKind,
+    value: &str,
+    precision: u8,
+    scale: u8,
+    span: proc_macro2::Span,
+) -> syn::Result<String> {
+    use std::str::FromStr;
+
+    let parsed = rust_decimal::Decimal::from_str(value)
+        .map_err(|_| syn::Error::new(span, "decimal defaults must be exact decimal literals"))?;
+    let mut normalized = parsed;
+    normalized.rescale(u32::from(scale));
+    if normalized != parsed
+        || normalized.mantissa().unsigned_abs().to_string().len() > usize::from(precision)
+    {
+        return Err(syn::Error::new(
+            span,
+            "decimal default exceeds its declared precision or scale",
+        ));
+    }
+    match backend {
+        BackendKind::Sqlite => i64::try_from(normalized.mantissa())
+            .map(|value| value.to_string())
+            .map_err(|_| syn::Error::new(span, "decimal default exceeds SQLite's exact range")),
+        BackendKind::Postgres | BackendKind::Mssql => Ok(normalized.to_string()),
+    }
 }

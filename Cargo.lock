@@ -3175,6 +3175,7 @@ dependencies = [
  "convert_case 0.7.1",
  "proc-macro2",
  "quote",
+ "rust_decimal",
  "syn 2.0.117",
 ]
 

@@ -924,8 +924,7 @@ fn push_create_input_sql_value_tokens(
 ) -> proc_macro2::TokenStream {
     if let Some((precision, scale)) = meta.decimal {
         let definition = quote! {
-            ::graphql_orm::graphql::orm::DecimalDef::new(#precision, #scale)
-                .expect("macro-validated decimal definition")
+            ::graphql_orm::graphql::orm::DecimalDef::macro_validated(#precision, #scale)
         };
         if is_option_type(field_type) {
             quote! {
@@ -1308,6 +1307,8 @@ pub(crate) fn generate_graphql_operations(
     };
     let list_operation_authorization = authorization_tokens("list");
     let list_requires_scopes = requires_scopes_tokens("list");
+    let aggregate_operation_authorization = authorization_tokens("aggregate");
+    let aggregate_requires_scopes = requires_scopes_tokens("aggregate");
     let search_operation_authorization = authorization_tokens("search");
     let search_requires_scopes = requires_scopes_tokens("search");
     let keyset_list_operation_authorization = authorization_tokens("keyset_list");
@@ -1742,6 +1743,14 @@ pub(crate) fn generate_graphql_operations(
     let subscriptions_struct =
         syn::Ident::new(&format!("{}Subscriptions", struct_name), struct_name.span());
     let where_input = syn::Ident::new(&format!("{}WhereInput", struct_name), struct_name.span());
+    let aggregate_field = syn::Ident::new(
+        &format!("{}AggregateField", struct_name),
+        struct_name.span(),
+    );
+    let aggregate_metric_input = syn::Ident::new(
+        &format!("{}AggregateMetricInput", struct_name),
+        struct_name.span(),
+    );
     let order_by_input =
         syn::Ident::new(&format!("{}OrderByInput", struct_name), struct_name.span());
     let create_input = syn::Ident::new(&format!("Create{}Input", struct_name), struct_name.span());
@@ -1764,6 +1773,8 @@ pub(crate) fn generate_graphql_operations(
     let field_case = selected_field_case();
     let field_case_rule = selected_field_case_rule();
     let list_query_name = apply_graphql_case(&plural_name, resolver_case);
+    let aggregate_query_name =
+        apply_graphql_case(&format!("{}Aggregate", plural_name), resolver_case);
     let search_query_name = apply_graphql_case(&format!("{}Search", plural_name), resolver_case);
     let single_query_name = apply_graphql_case(&struct_name_str, resolver_case);
     let create_mutation_name = apply_graphql_case(&format!("create{}", struct_name), resolver_case);
@@ -1781,6 +1792,9 @@ pub(crate) fn generate_graphql_operations(
     let search_arg_name = apply_graphql_case("search", argument_case);
     let order_by_arg_name = apply_graphql_case("orderBy", argument_case);
     let page_arg_name = apply_graphql_case("page", argument_case);
+    let group_by_arg_name = apply_graphql_case("groupBy", argument_case);
+    let metrics_arg_name = apply_graphql_case("metrics", argument_case);
+    let group_limit_arg_name = apply_graphql_case("groupLimit", argument_case);
     let id_arg_name = apply_graphql_case("id", argument_case);
     let input_arg_name = apply_graphql_case("input", argument_case);
     let filter_arg_name = apply_graphql_case("filter", argument_case);
@@ -1788,10 +1802,14 @@ pub(crate) fn generate_graphql_operations(
     let search_arg_description = semantic_argument_description(&search_arg_name);
     let order_by_arg_description = semantic_argument_description(&order_by_arg_name);
     let page_arg_description = semantic_argument_description(&page_arg_name);
+    let group_by_arg_description = semantic_argument_description(&group_by_arg_name);
+    let metrics_arg_description = semantic_argument_description(&metrics_arg_name);
+    let group_limit_arg_description = semantic_argument_description(&group_limit_arg_name);
     let id_arg_description = semantic_argument_description(&id_arg_name);
     let input_arg_description = semantic_argument_description(&input_arg_name);
     let filter_arg_description = semantic_argument_description(&filter_arg_name);
     let list_operation_description = format!("List {struct_name_str} records");
+    let aggregate_operation_description = format!("Aggregate {struct_name_str} records");
     let single_operation_description = format!("Read one {struct_name_str} records");
     let search_operation_description = format!("Search {struct_name_str} records");
     let keyset_operation_description = format!("Page through {struct_name_str} records");
@@ -1888,6 +1906,12 @@ pub(crate) fn generate_graphql_operations(
                 ScopeTemplateArgumentSpec::complex(order_by_arg_name.clone()),
                 ScopeTemplateArgumentSpec::complex(page_arg_name.clone()),
             ],
+            "aggregate" => vec![
+                ScopeTemplateArgumentSpec::complex(where_arg_name.clone()),
+                ScopeTemplateArgumentSpec::complex(group_by_arg_name.clone()),
+                ScopeTemplateArgumentSpec::complex(metrics_arg_name.clone()),
+                ScopeTemplateArgumentSpec::complex(group_limit_arg_name.clone()),
+            ],
             "search" => vec![
                 ScopeTemplateArgumentSpec::complex(search_arg_name.clone()),
                 ScopeTemplateArgumentSpec::complex(where_arg_name.clone()),
@@ -1938,6 +1962,7 @@ pub(crate) fn generate_graphql_operations(
         scope_enforcement_tokens(category, operation_authorizations.get(category), &arguments)
     };
     let list_scope_enforcement = scope_enforcement("list")?;
+    let aggregate_scope_enforcement = scope_enforcement("aggregate")?;
     let search_scope_enforcement = scope_enforcement("search")?;
     let keyset_list_scope_enforcement = scope_enforcement("keyset_list")?;
     let single_read_scope_enforcement = scope_enforcement("single_read")?;
@@ -2861,8 +2886,7 @@ pub(crate) fn generate_graphql_operations(
                 }
             } else if let Some((precision, scale)) = meta.decimal {
                 let definition = quote! {
-                    ::graphql_orm::graphql::orm::DecimalDef::new(#precision, #scale)
-                        .expect("macro-validated decimal definition")
+                    ::graphql_orm::graphql::orm::DecimalDef::macro_validated(#precision, #scale)
                 };
                 let graphql_tokens = if is_already_optional {
                     quote! {
@@ -6054,6 +6078,77 @@ pub(crate) fn generate_graphql_operations(
             )
         }
     };
+    let aggregate_definitions = if entity_meta.aggregate {
+        quote! {
+            /// One reviewed aggregate expression for this entity.
+            #[derive(Clone, Debug, ::graphql_orm::async_graphql::InputObject)]
+            #[graphql(rename_fields = #field_case_rule)]
+            pub struct #aggregate_metric_input {
+                /// Canonical aggregate operator.
+                pub operator: ::graphql_orm::graphql::orm::GraphqlAggregateInputOperator,
+                /// Selected public field. Omit only for row count.
+                pub field: Option<#aggregate_field>,
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let aggregate_query_method = if entity_meta.aggregate {
+        quote! {
+            #[doc = #aggregate_operation_description]
+            #[graphql(name = #aggregate_query_name, #aggregate_requires_scopes #authenticated_directive)]
+            async fn aggregate(
+                &self,
+                ctx: &::graphql_orm::async_graphql::Context<'_>,
+                #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: Option<#where_input>,
+                #[graphql(name = #group_by_arg_name, desc = #group_by_arg_description)] group_by: Vec<#aggregate_field>,
+                #[graphql(name = #metrics_arg_name, desc = #metrics_arg_description)] metrics: Vec<#aggregate_metric_input>,
+                #[graphql(name = #group_limit_arg_name, desc = #group_limit_arg_description)] group_limit: i32,
+            ) -> ::graphql_orm::async_graphql::Result<Vec<::graphql_orm::graphql::orm::GraphqlAggregateResultRow>> {
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                #aggregate_scope_enforcement
+                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                )?;
+                let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                let auth_context = ctx
+                    .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
+                    .cloned();
+                let mut query = #struct_name::aggregate(db).with_auth(auth_context.as_ref());
+                if let Some(filter) = where_input {
+                    query = query.filter(filter);
+                }
+                for field in group_by {
+                    query = query.group_by(field).map_err(
+                        ::graphql_orm::graphql::errors::graphql_error_from_sqlx
+                    )?;
+                }
+                for metric in metrics {
+                    use ::graphql_orm::graphql::orm::GraphqlAggregateInputOperator as Operator;
+                    query = match (metric.operator, metric.field) {
+                        (Operator::Count, Some(field)) => query.count(field),
+                        (Operator::Count, None) => query.count_rows(),
+                        (Operator::Min, Some(field)) => query.min(field),
+                        (Operator::Max, Some(field)) => query.max(field),
+                        (Operator::Sum, Some(field)) => query.sum(field),
+                        (_, None) => Err(::graphql_orm::sqlx::Error::Protocol(
+                            "aggregate metric field is required for this operator".to_owned()
+                        )),
+                    }.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                }
+                query = query.group_limit(i64::from(group_limit)).map_err(
+                    ::graphql_orm::graphql::errors::graphql_error_from_sqlx
+                )?;
+                let rows = query.fetch_with_graphql_context(ctx).await.map_err(
+                    ::graphql_orm::graphql::errors::graphql_error_from_sqlx
+                )?;
+                Ok(rows.into_iter().map(Into::into).collect())
+            }
+        }
+    } else {
+        quote! {}
+    };
     let backend_name = backend.name();
     let descriptor = |kind: proc_macro2::TokenStream,
                       category: proc_macro2::TokenStream,
@@ -6106,6 +6201,21 @@ pub(crate) fn generate_graphql_operations(
             #list_operation_authorization,
         )
     });
+    if entity_meta.aggregate {
+        operation_descriptors.push(descriptor(
+            quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
+            quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Aggregate },
+            &aggregate_query_name,
+            vec![
+                argument_descriptor(&where_arg_name, quote! { Option<#where_input> }),
+                argument_descriptor(&group_by_arg_name, quote! { Vec<#aggregate_field> }),
+                argument_descriptor(&metrics_arg_name, quote! { Vec<#aggregate_metric_input> }),
+                argument_descriptor(&group_limit_arg_name, quote! { i32 }),
+            ],
+            quote! { Vec<::graphql_orm::graphql::orm::GraphqlAggregateResultRow> },
+            &aggregate_operation_authorization,
+        ));
+    }
     if has_search {
         operation_descriptors.push(descriptor(
             quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
@@ -6335,6 +6445,7 @@ pub(crate) fn generate_graphql_operations(
             }
 
             #search_connection_definitions
+            #aggregate_definitions
 
             // ============================================================================
             // Query Struct
@@ -6345,6 +6456,8 @@ pub(crate) fn generate_graphql_operations(
 
             #[::graphql_orm::async_graphql::Object]
             impl #queries_struct {
+                #aggregate_query_method
+
                 #[doc = #list_operation_description]
                 #[graphql(name = #list_query_name, #list_requires_scopes #authenticated_directive)]
                 async fn list(
@@ -6727,12 +6840,16 @@ pub(crate) fn generate_graphql_operations(
         // Query Struct
         // ============================================================================
 
+        #aggregate_definitions
+
         /// Generated queries for #struct_name
         #[derive(Default)]
         pub struct #queries_struct;
 
         #[::graphql_orm::async_graphql::Object]
         impl #queries_struct {
+            #aggregate_query_method
+
             /// Get a list of #plural_name with optional filtering, sorting, and pagination
             #[doc = #list_operation_description]
             #[graphql(name = #list_query_name, #list_requires_scopes #authenticated_directive)]

@@ -177,6 +177,35 @@ pub struct IntFilter {
     pub is_null: Option<bool>,
 }
 
+/// Exact comparison predicates for a fixed-precision decimal column.
+#[derive(async_graphql::InputObject, Clone, Debug, Default)]
+#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
+#[cfg_attr(
+    feature = "field-case-screaming-snake",
+    graphql(rename_fields = "SCREAMING_SNAKE_CASE")
+)]
+#[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
+#[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
+pub struct DecimalFilter {
+    /// Equals.
+    pub eq: Option<rust_decimal::Decimal>,
+    /// Does not equal.
+    pub ne: Option<rust_decimal::Decimal>,
+    /// Less than.
+    pub lt: Option<rust_decimal::Decimal>,
+    /// Less than or equal.
+    pub lte: Option<rust_decimal::Decimal>,
+    /// Greater than.
+    pub gt: Option<rust_decimal::Decimal>,
+    /// Greater than or equal.
+    pub gte: Option<rust_decimal::Decimal>,
+    /// Null predicate.
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "isnull"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "ISNULL"))]
+    pub is_null: Option<bool>,
+}
+
 #[derive(async_graphql::InputObject, Clone, Debug, Default)]
 #[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
 #[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]

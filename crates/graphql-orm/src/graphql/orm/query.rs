@@ -5,7 +5,7 @@ use super::PostgresBackend;
 #[cfg(feature = "sqlite")]
 use super::SqliteBackend;
 use super::core::{
-    ColumnDef, DbAuthContext, EntityMetadata, IndexDef, RelationMetadata, SchemaPolicy,
+    ColumnDef, DbAuthContext, DecimalDef, EntityMetadata, IndexDef, RelationMetadata, SchemaPolicy,
     SearchIndexDef, SqlValue,
 };
 use super::dialect::{DatabaseBackend, SqlDialect, current_backend};
@@ -148,6 +148,16 @@ pub trait ReadProjection<B: OrmBackend = DefaultBackend>:
 pub trait DatabaseFilter {
     fn to_sql_conditions(&self) -> (Vec<String>, Vec<SqlValue>);
     fn is_empty(&self) -> bool;
+
+    /// Public field identities referenced by active predicates.
+    ///
+    /// Generated filters override this so aggregate execution can authorize
+    /// every predicate field before the database observes it. A handwritten
+    /// filter that does not provide this evidence cannot be used by the
+    /// policy-aware aggregate builder.
+    fn referenced_fields(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
 
     /// Return true when at least one predicate must be evaluated against decoded
     /// Rust entities instead of being rendered entirely into SQL.
@@ -475,6 +485,286 @@ pub struct AggregateQuery {
     pub function: AggregateFunction,
     pub column: Option<String>,
     pub filter: Option<FilterExpression>,
+}
+
+/// Portable scalar family for one generated aggregate field.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum AggregateFieldKind {
+    /// Signed or unsigned integral values stored through the portable integer contract.
+    Integral,
+    /// Exact fixed-precision decimal values.
+    Decimal(DecimalDef),
+    /// IEEE floating-point values.
+    Floating,
+    /// Text and text-rendered comparable scalar values.
+    Text,
+    /// Boolean values.
+    Boolean,
+}
+
+/// Closed generated field evidence accepted by the aggregate builder.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct AggregateFieldRef {
+    /// Stable Rust field identity used by repository policy metadata.
+    rust_name: &'static str,
+    /// Public GraphQL/policy field identity.
+    api_name: &'static str,
+    /// Physical column identity emitted only by trusted generated metadata.
+    #[doc(hidden)]
+    column_name: &'static str,
+    /// Portable scalar family.
+    kind: AggregateFieldKind,
+    /// Whether SQL NULL is possible.
+    nullable: bool,
+    /// Whether this field may be grouped.
+    groupable: bool,
+    /// Canonical supported aggregate operators.
+    operators: &'static [super::GraphqlAggregateOperator],
+}
+
+impl AggregateFieldRef {
+    /// Creates immutable evidence emitted by `GraphQLEntity`.
+    ///
+    /// This is a macro ABI. Applications should use the generated aggregate
+    /// field enum instead of constructing field evidence directly.
+    #[doc(hidden)]
+    pub const fn generated(
+        rust_name: &'static str,
+        api_name: &'static str,
+        column_name: &'static str,
+        kind: AggregateFieldKind,
+        nullable: bool,
+        groupable: bool,
+        operators: &'static [super::GraphqlAggregateOperator],
+    ) -> Self {
+        Self {
+            rust_name,
+            api_name,
+            column_name,
+            kind,
+            nullable,
+            groupable,
+            operators,
+        }
+    }
+
+    /// Public GraphQL field identity.
+    pub const fn api_name(&self) -> &'static str {
+        self.api_name
+    }
+
+    /// Portable scalar family.
+    pub const fn kind(&self) -> AggregateFieldKind {
+        self.kind
+    }
+
+    /// Whether this field can contain SQL `NULL`.
+    pub const fn nullable(&self) -> bool {
+        self.nullable
+    }
+
+    /// Whether this field supports grouping.
+    pub const fn groupable(&self) -> bool {
+        self.groupable
+    }
+
+    /// Canonical supported aggregate operators.
+    pub const fn operators(&self) -> &'static [super::GraphqlAggregateOperator] {
+        self.operators
+    }
+}
+
+/// Implemented by macro-generated per-entity aggregate field enums.
+pub trait TypedAggregateField<T: Entity>: Copy + Eq + Send + Sync + 'static {
+    /// Returns immutable generated field evidence.
+    fn aggregate_field(self) -> &'static AggregateFieldRef;
+}
+
+/// One requested aggregate expression.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AggregateExpression {
+    /// Aggregate operator.
+    operator: super::GraphqlAggregateOperator,
+    /// Selected field, or `None` for row count.
+    field: Option<AggregateFieldRef>,
+}
+
+/// One exact decoded grouped or aggregate scalar.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AggregateValue {
+    /// SQL NULL for minimum, maximum, sum, or a nullable grouping key.
+    Null,
+    /// Non-negative count.
+    Count(i64),
+    /// Widened signed integral aggregate or grouping value.
+    Integral(i128),
+    /// Exact fixed-precision decimal.
+    Decimal(rust_decimal::Decimal),
+    /// Floating-point aggregate or grouping value.
+    Floating(f64),
+    /// Text or canonically rendered comparable value.
+    Text(String),
+    /// Boolean grouping value.
+    Boolean(bool),
+}
+
+/// One named grouping key or aggregate result.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AggregateResultValue {
+    /// Public field name, or `None` for row count.
+    pub field: Option<&'static str>,
+    /// Aggregate operator for metrics; absent for grouping keys.
+    pub operator: Option<super::GraphqlAggregateOperator>,
+    /// Decoded value.
+    pub value: AggregateValue,
+}
+
+/// One deterministically ordered aggregate result group.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AggregateResultRow {
+    /// Grouping values in declaration order.
+    pub groups: Vec<AggregateResultValue>,
+    /// Aggregate metrics in declaration order.
+    pub metrics: Vec<AggregateResultValue>,
+}
+
+/// GraphQL aggregate operator used by generated opt-in aggregate inputs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, async_graphql::Enum)]
+pub enum GraphqlAggregateInputOperator {
+    /// Count matching rows or non-null values.
+    Count,
+    /// Minimum non-null value.
+    Min,
+    /// Maximum non-null value.
+    Max,
+    /// Sum non-null numeric values.
+    Sum,
+}
+
+impl From<GraphqlAggregateInputOperator> for super::GraphqlAggregateOperator {
+    fn from(value: GraphqlAggregateInputOperator) -> Self {
+        match value {
+            GraphqlAggregateInputOperator::Count => Self::Count,
+            GraphqlAggregateInputOperator::Min => Self::Min,
+            GraphqlAggregateInputOperator::Max => Self::Max,
+            GraphqlAggregateInputOperator::Sum => Self::Sum,
+        }
+    }
+}
+
+/// Portable scalar family exposed by generated aggregate result entries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, async_graphql::Enum)]
+pub enum GraphqlAggregateResultKind {
+    /// SQL NULL.
+    Null,
+    /// Non-negative count.
+    Count,
+    /// Widened integral value serialized exactly as decimal text.
+    Integral,
+    /// Exact fixed-precision decimal serialized as decimal text.
+    Decimal,
+    /// Floating-point value serialized using Rust's finite scalar form.
+    Floating,
+    /// Text value.
+    Text,
+    /// Boolean value.
+    Boolean,
+}
+
+/// One typed entry in a generated aggregate result.
+#[derive(Clone, Debug, PartialEq, async_graphql::SimpleObject)]
+#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
+#[cfg_attr(
+    feature = "field-case-screaming-snake",
+    graphql(rename_fields = "SCREAMING_SNAKE_CASE")
+)]
+#[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
+#[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
+pub struct GraphqlAggregateResultValue {
+    /// Public field name; absent only for row count.
+    pub field: Option<String>,
+    /// Canonical operator name; absent for group keys.
+    pub operator: Option<String>,
+    /// Portable scalar family.
+    pub kind: GraphqlAggregateResultKind,
+    /// Exact bounded scalar representation; absent for SQL NULL.
+    pub value: Option<String>,
+}
+
+/// One generated aggregate result group.
+#[derive(Clone, Debug, PartialEq, async_graphql::SimpleObject)]
+#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
+#[cfg_attr(
+    feature = "field-case-screaming-snake",
+    graphql(rename_fields = "SCREAMING_SNAKE_CASE")
+)]
+#[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
+#[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
+pub struct GraphqlAggregateResultRow {
+    /// Group keys in requested order.
+    pub groups: Vec<GraphqlAggregateResultValue>,
+    /// Metrics in requested order.
+    pub metrics: Vec<GraphqlAggregateResultValue>,
+}
+
+impl From<AggregateResultValue> for GraphqlAggregateResultValue {
+    fn from(value: AggregateResultValue) -> Self {
+        let (kind, rendered) = match value.value {
+            AggregateValue::Null => (GraphqlAggregateResultKind::Null, None),
+            AggregateValue::Count(value) => {
+                (GraphqlAggregateResultKind::Count, Some(value.to_string()))
+            }
+            AggregateValue::Integral(value) => (
+                GraphqlAggregateResultKind::Integral,
+                Some(value.to_string()),
+            ),
+            AggregateValue::Decimal(value) => {
+                (GraphqlAggregateResultKind::Decimal, Some(value.to_string()))
+            }
+            AggregateValue::Floating(value) => (
+                GraphqlAggregateResultKind::Floating,
+                Some(value.to_string()),
+            ),
+            AggregateValue::Text(value) => (GraphqlAggregateResultKind::Text, Some(value)),
+            AggregateValue::Boolean(value) => {
+                (GraphqlAggregateResultKind::Boolean, Some(value.to_string()))
+            }
+        };
+        Self {
+            field: value.field.map(str::to_owned),
+            operator: value
+                .operator
+                .map(|operator| aggregate_operator_sql(operator).to_owned()),
+            kind,
+            value: rendered,
+        }
+    }
+}
+
+impl From<AggregateResultRow> for GraphqlAggregateResultRow {
+    fn from(value: AggregateResultRow) -> Self {
+        Self {
+            groups: value.groups.into_iter().map(Into::into).collect(),
+            metrics: value.metrics.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// Validated internal grouped aggregate query representation.
+#[derive(Clone, Debug, PartialEq)]
+struct GroupedAggregateSqlQuery {
+    /// Trusted table identity from entity metadata.
+    table: &'static str,
+    /// Grouping fields in declaration order.
+    groups: Vec<AggregateFieldRef>,
+    /// Aggregate expressions in declaration order.
+    metrics: Vec<AggregateExpression>,
+    /// Fully SQL-renderable filter.
+    filter: Option<FilterExpression>,
+    /// Positive maximum result groups.
+    group_limit: i64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1409,6 +1699,551 @@ pub fn render_aggregate_query(dialect: DatabaseBackend, query: &AggregateQuery) 
     }
 
     RenderedQuery { sql, values }
+}
+
+fn aggregate_group_projection(dialect: DatabaseBackend, column: &str, alias: &str) -> String {
+    match dialect {
+        DatabaseBackend::Mssql => format!("CAST({column} AS NVARCHAR(4000)) AS {alias}"),
+        _ => format!("CAST({column} AS TEXT) AS {alias}"),
+    }
+}
+
+fn aggregate_metric_projection(
+    dialect: DatabaseBackend,
+    expression: &AggregateExpression,
+    alias: &str,
+) -> String {
+    use super::GraphqlAggregateOperator as Operator;
+    let column = expression
+        .field
+        .map(|field| dialect.quote_identifier_path(field.column_name));
+    let argument = column.as_deref().unwrap_or("*");
+    let kind = expression.field.map(|field| field.kind);
+    match (expression.operator, kind, dialect) {
+        (Operator::Count, _, DatabaseBackend::Mssql) => {
+            format!("COUNT_BIG({argument}) AS {alias}")
+        }
+        (Operator::Count, _, _) => format!("COUNT({argument}) AS {alias}"),
+        (Operator::Sum, Some(AggregateFieldKind::Integral), DatabaseBackend::Postgres) => {
+            format!("CAST(SUM(CAST({argument} AS NUMERIC(38,0))) AS TEXT) AS {alias}")
+        }
+        (Operator::Sum, Some(AggregateFieldKind::Integral), DatabaseBackend::Mssql) => {
+            format!("CAST(SUM(CAST({argument} AS DECIMAL(38,0))) AS NVARCHAR(64)) AS {alias}")
+        }
+        (Operator::Sum, Some(AggregateFieldKind::Decimal(_)), DatabaseBackend::Postgres) => {
+            format!("CAST(SUM({argument}) AS TEXT) AS {alias}")
+        }
+        (Operator::Sum, Some(AggregateFieldKind::Decimal(_)), DatabaseBackend::Mssql) => {
+            format!("CAST(SUM({argument}) AS NVARCHAR(64)) AS {alias}")
+        }
+        (operator, Some(AggregateFieldKind::Decimal(_)), DatabaseBackend::Postgres) => {
+            format!(
+                "CAST({}({argument}) AS TEXT) AS {alias}",
+                aggregate_operator_sql(operator)
+            )
+        }
+        (operator, Some(AggregateFieldKind::Decimal(_)), DatabaseBackend::Mssql) => format!(
+            "CAST({}({argument}) AS NVARCHAR(64)) AS {alias}",
+            aggregate_operator_sql(operator)
+        ),
+        (operator, Some(AggregateFieldKind::Text), DatabaseBackend::Postgres) => format!(
+            "CAST({}({argument}) AS TEXT) AS {alias}",
+            aggregate_operator_sql(operator)
+        ),
+        (operator, Some(AggregateFieldKind::Text), DatabaseBackend::Mssql) => format!(
+            "CAST({}({argument}) AS NVARCHAR(4000)) AS {alias}",
+            aggregate_operator_sql(operator)
+        ),
+        (operator, _, _) => {
+            format!(
+                "{}({argument}) AS {alias}",
+                aggregate_operator_sql(operator)
+            )
+        }
+    }
+}
+
+fn aggregate_operator_sql(operator: super::GraphqlAggregateOperator) -> &'static str {
+    #[allow(unreachable_patterns)]
+    match operator {
+        super::GraphqlAggregateOperator::Count => "COUNT",
+        super::GraphqlAggregateOperator::Min => "MIN",
+        super::GraphqlAggregateOperator::Max => "MAX",
+        super::GraphqlAggregateOperator::Sum => "SUM",
+        _ => unreachable!("unsupported aggregate operator from a newer catalogue"),
+    }
+}
+
+/// Renders one validated multi-expression grouped aggregate query.
+fn render_grouped_aggregate_query(
+    dialect: DatabaseBackend,
+    query: &GroupedAggregateSqlQuery,
+) -> RenderedQuery {
+    let quoted_groups = query
+        .groups
+        .iter()
+        .map(|field| dialect.quote_identifier_path(field.column_name))
+        .collect::<Vec<_>>();
+    let mut projections = quoted_groups
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            aggregate_group_projection(dialect, column, &format!("__gom_group_{index:03}"))
+        })
+        .collect::<Vec<_>>();
+    projections.extend(query.metrics.iter().enumerate().map(|(index, expression)| {
+        aggregate_metric_projection(dialect, expression, &format!("__gom_metric_{index:03}"))
+    }));
+
+    let mut sql = format!("SELECT {} FROM {}", projections.join(", "), query.table);
+    let mut values = Vec::new();
+    let mut next_index = 1usize;
+    if let Some(filter) = &query.filter {
+        let where_sql = render_filter_expression(dialect, filter, &mut next_index, &mut values);
+        if !where_sql.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_sql);
+        }
+    }
+    if !quoted_groups.is_empty() {
+        sql.push_str(" GROUP BY ");
+        sql.push_str(&quoted_groups.join(", "));
+        sql.push_str(" ORDER BY ");
+        sql.push_str(
+            &quoted_groups
+                .iter()
+                .flat_map(|column| {
+                    [
+                        format!("CASE WHEN {column} IS NULL THEN 0 ELSE 1 END ASC"),
+                        format!("{column} ASC"),
+                    ]
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        sql.push_str(&dialect.render_pagination(Some(query.group_limit), 0));
+    }
+    RenderedQuery { sql, values }
+}
+
+/// Policy-aware typed multi-expression aggregate builder.
+pub struct GroupedAggregateQuery<'a, T, F, A, B: OrmBackend = DefaultBackend>
+where
+    T: Entity,
+    F: DatabaseFilter,
+    A: TypedAggregateField<T>,
+{
+    db: &'a crate::db::Database<B>,
+    auth: Option<DbAuthContext>,
+    filter: Option<F>,
+    groups: Vec<AggregateFieldRef>,
+    metrics: Vec<AggregateExpression>,
+    group_limit: i64,
+    _entity: PhantomData<(T, A)>,
+}
+
+impl<'a, T, F, A, B> GroupedAggregateQuery<'a, T, F, A, B>
+where
+    B: OrmBackend,
+    T: Entity,
+    F: DatabaseFilter,
+    A: TypedAggregateField<T>,
+{
+    /// Creates an aggregate builder with the database's bounded default group limit.
+    pub fn new(db: &'a crate::db::Database<B>) -> Self {
+        let group_limit = db
+            .pagination_config()
+            .resolve_page(None, true)
+            .limit
+            .unwrap_or(PaginationConfig::SECURE_DEFAULT_LIMIT);
+        Self {
+            db,
+            auth: None,
+            filter: None,
+            groups: Vec::new(),
+            metrics: Vec::new(),
+            group_limit,
+            _entity: PhantomData,
+        }
+    }
+
+    /// Applies backend transaction-local authorization such as PostgreSQL RLS context.
+    pub fn with_auth(mut self, auth: Option<&DbAuthContext>) -> Self {
+        self.auth = auth.cloned();
+        self
+    }
+
+    /// Applies one generated typed filter.
+    pub fn filter(mut self, filter: F) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    /// Adds one grouping field in deterministic declaration order.
+    pub fn group_by(mut self, field: A) -> crate::Result<Self> {
+        let field = *field.aggregate_field();
+        if !field.groupable || self.groups.contains(&field) || self.groups.len() >= 16 {
+            return Err(invalid_aggregate(
+                "invalid or duplicate aggregate grouping field",
+            ));
+        }
+        self.groups.push(field);
+        Ok(self)
+    }
+
+    /// Adds a row-count metric.
+    pub fn count_rows(self) -> crate::Result<Self> {
+        self.push_metric(super::GraphqlAggregateOperator::Count, None)
+    }
+
+    /// Adds a non-null-value count metric.
+    pub fn count(self, field: A) -> crate::Result<Self> {
+        self.push_metric(
+            super::GraphqlAggregateOperator::Count,
+            Some(*field.aggregate_field()),
+        )
+    }
+
+    /// Adds a minimum metric.
+    pub fn min(self, field: A) -> crate::Result<Self> {
+        self.push_metric(
+            super::GraphqlAggregateOperator::Min,
+            Some(*field.aggregate_field()),
+        )
+    }
+
+    /// Adds a maximum metric.
+    pub fn max(self, field: A) -> crate::Result<Self> {
+        self.push_metric(
+            super::GraphqlAggregateOperator::Max,
+            Some(*field.aggregate_field()),
+        )
+    }
+
+    /// Adds an exact sum metric.
+    pub fn sum(self, field: A) -> crate::Result<Self> {
+        self.push_metric(
+            super::GraphqlAggregateOperator::Sum,
+            Some(*field.aggregate_field()),
+        )
+    }
+
+    fn push_metric(
+        mut self,
+        operator: super::GraphqlAggregateOperator,
+        field: Option<AggregateFieldRef>,
+    ) -> crate::Result<Self> {
+        if self.metrics.len() >= 32 {
+            return Err(invalid_aggregate("too many aggregate expressions"));
+        }
+        if let Some(field) = field
+            && !field.operators.contains(&operator)
+        {
+            return Err(invalid_aggregate(
+                "aggregate operator is not valid for field",
+            ));
+        }
+        if self
+            .metrics
+            .iter()
+            .any(|metric| metric.operator == operator && metric.field == field)
+        {
+            return Err(invalid_aggregate("duplicate aggregate expression"));
+        }
+        self.metrics.push(AggregateExpression { operator, field });
+        Ok(self)
+    }
+
+    /// Sets a positive result-group bound that may not exceed the database maximum.
+    pub fn group_limit(mut self, limit: i64) -> crate::Result<Self> {
+        if limit <= 0
+            || self
+                .db
+                .pagination_config()
+                .max_limit
+                .is_some_and(|maximum| limit > maximum)
+        {
+            return Err(invalid_aggregate(
+                "aggregate group limit is outside configured bounds",
+            ));
+        }
+        self.group_limit = limit;
+        Ok(self)
+    }
+
+    async fn authorize(
+        &self,
+        graphql_context: Option<&async_graphql::Context<'_>>,
+    ) -> crate::Result<()> {
+        let metadata = T::metadata();
+        let surface = if graphql_context.is_some() {
+            super::core::EntityAccessSurface::GraphqlQuery
+        } else {
+            super::core::EntityAccessSurface::Repository
+        };
+        self.db
+            .ensure_entity_access(
+                graphql_context,
+                metadata.entity_name,
+                metadata.read_policy,
+                super::core::EntityAccessKind::Read,
+                surface,
+            )
+            .await
+            .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
+        if self.db.row_policy().is_some() {
+            return Err(invalid_aggregate(
+                "aggregate queries require database row security or a typed SQL-renderable filter",
+            ));
+        }
+        let mut fields = self
+            .groups
+            .iter()
+            .chain(
+                self.metrics
+                    .iter()
+                    .filter_map(|metric| metric.field.as_ref()),
+            )
+            .map(|field| field.api_name)
+            .collect::<Vec<_>>();
+        if let Some(filter) = &self.filter {
+            if filter.requires_in_memory_filtering(B::DIALECT) {
+                return Err(invalid_aggregate(
+                    "aggregate filters must be rendered completely by the database",
+                ));
+            }
+            let referenced = filter.referenced_fields();
+            if !filter.is_empty() && referenced.is_empty() {
+                return Err(invalid_aggregate(
+                    "aggregate filter did not provide field authorization evidence",
+                ));
+            }
+            fields.extend(referenced);
+        }
+        fields.sort_unstable();
+        fields.dedup();
+        for field_name in fields {
+            let field = T::repository_field_policies()
+                .iter()
+                .find(|field| field.api_name == field_name)
+                .ok_or_else(|| invalid_aggregate("aggregate field policy metadata is missing"))?;
+            if let Some(context) = graphql_context {
+                self.db
+                    .ensure_readable_field(
+                        context,
+                        metadata.entity_name,
+                        field.api_name,
+                        field.read_policy,
+                        None,
+                    )
+                    .await
+                    .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
+            } else {
+                self.db
+                    .ensure_repository_readable_field(
+                        None,
+                        metadata.entity_name,
+                        field.api_name,
+                        field.read_policy,
+                        None,
+                    )
+                    .await
+                    .map_err(crate::graphql::errors::sqlx_error_from_public)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Executes aggregation in the database and decodes bounded result groups.
+    pub async fn fetch(self) -> crate::Result<Vec<AggregateResultRow>> {
+        self.fetch_authorized(None).await
+    }
+
+    /// Executes aggregation for a generated GraphQL resolver using GraphQL field policy context.
+    #[doc(hidden)]
+    pub async fn fetch_with_graphql_context(
+        self,
+        context: &async_graphql::Context<'_>,
+    ) -> crate::Result<Vec<AggregateResultRow>> {
+        self.fetch_authorized(Some(context)).await
+    }
+
+    async fn fetch_authorized(
+        self,
+        context: Option<&async_graphql::Context<'_>>,
+    ) -> crate::Result<Vec<AggregateResultRow>> {
+        if self.metrics.is_empty() {
+            return Err(invalid_aggregate(
+                "at least one aggregate expression is required",
+            ));
+        }
+        self.authorize(context).await?;
+        let filter = self
+            .filter
+            .as_ref()
+            .and_then(DatabaseFilter::to_filter_expression);
+        let query = GroupedAggregateSqlQuery {
+            table: T::TABLE_NAME,
+            groups: self.groups.clone(),
+            metrics: self.metrics.clone(),
+            filter,
+            group_limit: self.group_limit,
+        };
+        let rendered = render_grouped_aggregate_query(B::DIALECT, &query);
+        let rows = B::fetch_rows_with_auth(
+            self.db.pool(),
+            &rendered.sql,
+            &rendered.values,
+            self.auth.as_ref(),
+        )
+        .await?;
+        rows.iter()
+            .map(|row| decode_aggregate_row::<B>(row, &query.groups, &query.metrics))
+            .collect()
+    }
+}
+
+fn invalid_aggregate(message: &'static str) -> sqlx::Error {
+    sqlx::Error::Protocol(message.to_owned())
+}
+
+fn decode_group_value<B: OrmBackend>(
+    row: &B::Row,
+    alias: &str,
+    field: AggregateFieldRef,
+) -> crate::Result<AggregateValue> {
+    let Some(value) = B::try_get_optional_string(row, alias)? else {
+        return Ok(AggregateValue::Null);
+    };
+    match field.kind {
+        AggregateFieldKind::Integral => value
+            .parse::<i128>()
+            .map(AggregateValue::Integral)
+            .map_err(|_| invalid_aggregate("invalid integral aggregate group value")),
+        AggregateFieldKind::Decimal(definition) if B::DIALECT == DatabaseBackend::Sqlite => value
+            .parse::<i64>()
+            .map(|value| AggregateValue::Decimal(definition.from_scaled_i64(value)))
+            .map_err(|_| invalid_aggregate("invalid decimal aggregate group value")),
+        AggregateFieldKind::Decimal(definition) => value
+            .parse::<rust_decimal::Decimal>()
+            .map_err(|_| invalid_aggregate("invalid decimal aggregate group value"))
+            .and_then(|value| {
+                definition
+                    .normalize(value)
+                    .map_err(|_| invalid_aggregate("invalid decimal aggregate group value"))
+            })
+            .map(AggregateValue::Decimal),
+        AggregateFieldKind::Floating => value
+            .parse::<f64>()
+            .map(AggregateValue::Floating)
+            .map_err(|_| invalid_aggregate("invalid floating aggregate group value")),
+        AggregateFieldKind::Boolean => match value.as_str() {
+            "1" | "true" | "TRUE" => Ok(AggregateValue::Boolean(true)),
+            "0" | "false" | "FALSE" => Ok(AggregateValue::Boolean(false)),
+            _ => Err(invalid_aggregate("invalid boolean aggregate group value")),
+        },
+        AggregateFieldKind::Text => Ok(AggregateValue::Text(value)),
+    }
+}
+
+fn decode_metric_value<B: OrmBackend>(
+    row: &B::Row,
+    alias: &str,
+    metric: AggregateExpression,
+) -> crate::Result<AggregateValue> {
+    use super::GraphqlAggregateOperator as Operator;
+    if metric.operator == Operator::Count {
+        return B::try_get_i64(row, alias).map(AggregateValue::Count);
+    }
+    let field = metric
+        .field
+        .ok_or_else(|| invalid_aggregate("aggregate field is missing"))?;
+    match field.kind {
+        AggregateFieldKind::Integral
+            if metric.operator == Operator::Sum && B::DIALECT != DatabaseBackend::Sqlite =>
+        {
+            let value = B::try_get_optional_string(row, alias)?;
+            value
+                .map(|value| {
+                    value
+                        .parse::<i128>()
+                        .map(AggregateValue::Integral)
+                        .map_err(|_| invalid_aggregate("integral aggregate overflow"))
+                })
+                .transpose()
+                .map(|value| value.unwrap_or(AggregateValue::Null))
+        }
+        AggregateFieldKind::Integral => B::try_get_optional_i64(row, alias).map(|value| {
+            value
+                .map(|value| AggregateValue::Integral(i128::from(value)))
+                .unwrap_or(AggregateValue::Null)
+        }),
+        AggregateFieldKind::Decimal(definition) if B::DIALECT == DatabaseBackend::Sqlite => {
+            B::try_get_optional_i64(row, alias).map(|value| {
+                value
+                    .map(|value| AggregateValue::Decimal(definition.from_scaled_i64(value)))
+                    .unwrap_or(AggregateValue::Null)
+            })
+        }
+        AggregateFieldKind::Decimal(definition) => {
+            let value = B::try_get_optional_string(row, alias)?;
+            value
+                .map(|value| {
+                    value
+                        .parse::<rust_decimal::Decimal>()
+                        .map_err(|_| invalid_aggregate("invalid decimal aggregate value"))
+                        .and_then(|value| {
+                            definition
+                                .normalize(value)
+                                .map_err(|_| invalid_aggregate("invalid decimal aggregate value"))
+                        })
+                        .map(AggregateValue::Decimal)
+                })
+                .transpose()
+                .map(|value| value.unwrap_or(AggregateValue::Null))
+        }
+        AggregateFieldKind::Floating => B::try_get_optional_f64(row, alias).map(|value| {
+            value
+                .map(AggregateValue::Floating)
+                .unwrap_or(AggregateValue::Null)
+        }),
+        AggregateFieldKind::Text => B::try_get_optional_string(row, alias).map(|value| {
+            value
+                .map(AggregateValue::Text)
+                .unwrap_or(AggregateValue::Null)
+        }),
+        AggregateFieldKind::Boolean => Err(invalid_aggregate("boolean min/max is not portable")),
+    }
+}
+
+fn decode_aggregate_row<B: OrmBackend>(
+    row: &B::Row,
+    groups: &[AggregateFieldRef],
+    metrics: &[AggregateExpression],
+) -> crate::Result<AggregateResultRow> {
+    let groups = groups
+        .iter()
+        .enumerate()
+        .map(|(index, field)| {
+            Ok(AggregateResultValue {
+                field: Some(field.api_name),
+                operator: None,
+                value: decode_group_value::<B>(row, &format!("__gom_group_{index:03}"), *field)?,
+            })
+        })
+        .collect::<crate::Result<Vec<_>>>()?;
+    let metrics = metrics
+        .iter()
+        .enumerate()
+        .map(|(index, metric)| {
+            Ok(AggregateResultValue {
+                field: metric.field.map(|field| field.api_name),
+                operator: Some(metric.operator),
+                value: decode_metric_value::<B>(row, &format!("__gom_metric_{index:03}"), *metric)?,
+            })
+        })
+        .collect::<crate::Result<Vec<_>>>()?;
+    Ok(AggregateResultRow { groups, metrics })
 }
 
 pub fn render_delete_query(dialect: DatabaseBackend, query: &DeleteQuery) -> RenderedQuery {
@@ -3038,5 +3873,76 @@ where
         let rows = B::fetch_rows_on(executor, rendered.sql, rendered.values).await?;
         let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
         B::try_get_i64(row, "count")
+    }
+}
+
+#[cfg(test)]
+mod grouped_aggregate_tests {
+    use super::*;
+
+    const OPERATORS: &[super::super::GraphqlAggregateOperator] = &[
+        super::super::GraphqlAggregateOperator::Count,
+        super::super::GraphqlAggregateOperator::Min,
+        super::super::GraphqlAggregateOperator::Max,
+        super::super::GraphqlAggregateOperator::Sum,
+    ];
+
+    fn field(name: &'static str, kind: AggregateFieldKind) -> AggregateFieldRef {
+        AggregateFieldRef::generated(name, name, name, kind, false, true, OPERATORS)
+    }
+
+    #[test]
+    fn grouped_renderer_widens_integral_sum_and_limits_groups() {
+        let query = GroupedAggregateSqlQuery {
+            table: "work_records",
+            groups: vec![field("team", AggregateFieldKind::Text)],
+            metrics: vec![AggregateExpression {
+                operator: super::super::GraphqlAggregateOperator::Sum,
+                field: Some(field("units", AggregateFieldKind::Integral)),
+            }],
+            filter: None,
+            group_limit: 25,
+        };
+        let sqlite = render_grouped_aggregate_query(DatabaseBackend::Sqlite, &query);
+        let postgres = render_grouped_aggregate_query(DatabaseBackend::Postgres, &query);
+        let mssql = render_grouped_aggregate_query(DatabaseBackend::Mssql, &query);
+        assert!(sqlite.sql.contains("SUM(\"units\")"));
+        assert!(postgres.sql.contains("NUMERIC(38,0)"));
+        assert!(mssql.sql.contains("DECIMAL(38,0)"));
+        assert!(sqlite.sql.ends_with("LIMIT 25"));
+        assert!(mssql.sql.ends_with("OFFSET 0 ROWS FETCH NEXT 25 ROWS ONLY"));
+    }
+
+    #[test]
+    fn grouped_renderer_uses_collision_free_aliases_and_explicit_null_ordering() {
+        let query = GroupedAggregateSqlQuery {
+            table: "work_records",
+            groups: vec![
+                field("team", AggregateFieldKind::Text),
+                field("category", AggregateFieldKind::Text),
+            ],
+            metrics: vec![
+                AggregateExpression {
+                    operator: super::super::GraphqlAggregateOperator::Count,
+                    field: None,
+                },
+                AggregateExpression {
+                    operator: super::super::GraphqlAggregateOperator::Max,
+                    field: Some(field("units", AggregateFieldKind::Integral)),
+                },
+            ],
+            filter: None,
+            group_limit: 10,
+        };
+        let rendered = render_grouped_aggregate_query(DatabaseBackend::Postgres, &query);
+        assert!(rendered.sql.contains("__gom_group_000"));
+        assert!(rendered.sql.contains("__gom_group_001"));
+        assert!(rendered.sql.contains("__gom_metric_000"));
+        assert!(rendered.sql.contains("__gom_metric_001"));
+        assert!(
+            rendered
+                .sql
+                .contains("CASE WHEN \"team\" IS NULL THEN 0 ELSE 1 END ASC")
+        );
     }
 }
