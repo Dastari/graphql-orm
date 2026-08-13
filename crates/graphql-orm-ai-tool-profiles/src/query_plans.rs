@@ -724,13 +724,15 @@ pub struct AiGraphqlSubscriptionCapabilityCatalog {
 }
 
 impl AiGraphqlSubscriptionCapabilityCatalog {
-    /// Compiles every finished-SDL Subscription root, rejecting non-replayable
-    /// or undeclared roots instead of silently omitting them.
+    /// Validates every finished-SDL Subscription root and compiles exactly the
+    /// roots that declare replay-then-live delivery. Described best-effort
+    /// roots remain ineligible and receive no durable execution path.
     ///
     /// # Errors
     ///
-    /// Returns an error for schema/semantic drift, best-effort delivery,
-    /// invalid observation bounds, unsafe fields, or capacity exhaustion.
+    /// Returns an error for schema/semantic drift, missing observation
+    /// semantics, invalid replayable bounds, unsafe fields, or capacity
+    /// exhaustion that would omit a replayable root.
     pub fn compile(
         subgraph_id: &str,
         target_id: GraphqlExecutionTargetId,
@@ -767,7 +769,18 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
                 "finished GraphQL Subscription roots and semantic operations differ",
             ));
         }
-        if operations.len() > limits.query.maximum_capabilities as usize {
+        let replayable_count = operations
+            .iter()
+            .filter(|operation| {
+                operation
+                    .subscription_observation
+                    .as_ref()
+                    .is_some_and(|observation| {
+                        observation.replay_mode == GraphqlSubscriptionReplayMode::ReplayThenLive
+                    })
+            })
+            .count();
+        if replayable_count > limits.query.maximum_capabilities as usize {
             return Err(configuration_error(
                 "subscription capability capacity would omit active roots",
             ));
@@ -780,9 +793,7 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
                 .as_ref()
                 .ok_or_else(|| configuration_error("subscription has no observation semantics"))?;
             if observation.replay_mode != GraphqlSubscriptionReplayMode::ReplayThenLive {
-                return Err(configuration_error(
-                    "best-effort subscriptions cannot be durable capabilities",
-                ));
+                continue;
             }
             let maximum_duration_seconds = observation
                 .maximum_duration_seconds
@@ -3297,15 +3308,56 @@ mod tests {
 
     #[test]
     fn best_effort_subscription_is_not_a_durable_capability() {
-        assert!(matches!(
-            AiGraphqlSubscriptionCapabilityCatalog::compile(
-                "inventory",
-                GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
-                &subscription_sdl(),
-                &subscription_semantic_catalog(GraphqlSubscriptionReplayMode::BestEffort),
-                AiGraphqlSubscriptionCapabilityLimits::default(),
-            ),
-            Err(AiError::InvalidConfiguration(_))
-        ));
+        let catalog = AiGraphqlSubscriptionCapabilityCatalog::compile(
+            "inventory",
+            GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
+            &subscription_sdl(),
+            &subscription_semantic_catalog(GraphqlSubscriptionReplayMode::BestEffort),
+            AiGraphqlSubscriptionCapabilityLimits::default(),
+        )
+        .expect("best-effort semantics remain valid but ineligible");
+        assert_eq!(catalog.capabilities().count(), 0);
+    }
+
+    #[test]
+    fn mixed_subscription_schema_compiles_only_replayable_root() {
+        let base = subscription_semantic_catalog(GraphqlSubscriptionReplayMode::ReplayThenLive);
+        let best_effort = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Subscription,
+            "StatusTick",
+            "Observe best-effort status ticks.",
+            Vec::new(),
+            GraphqlSemanticTypeRef::named("Parent", GraphqlSemanticTypeKind::Object, false),
+            true,
+        )
+        .expect("best-effort subscription")
+        .with_subscription_observation(GraphqlSubscriptionObservationDescriptor {
+            replay_mode: GraphqlSubscriptionReplayMode::BestEffort,
+            maximum_duration_seconds: None,
+            maximum_events: None,
+            condition_fields: Vec::new(),
+        })
+        .expect("best-effort observation");
+        let semantics = GraphqlSemanticCatalog::compose_with_custom(
+            base.entities,
+            &GraphqlOperationCatalog::compose(std::iter::empty()),
+            base.operations.into_iter().chain([best_effort]),
+        )
+        .expect("mixed subscription semantics");
+        let sdl = subscription_sdl().replace(
+            "type Subscription { ParentChanged(id: ID): Parent! }",
+            "type Subscription { ParentChanged(id: ID): Parent!, StatusTick: Parent! }",
+        );
+        let catalog = AiGraphqlSubscriptionCapabilityCatalog::compile(
+            "inventory",
+            GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
+            &sdl,
+            &semantics,
+            AiGraphqlSubscriptionCapabilityLimits::default(),
+        )
+        .expect("mixed subscription catalogue");
+        let capabilities = catalog.capabilities().collect::<Vec<_>>();
+        assert_eq!(capabilities.len(), 1);
+        assert_eq!(capabilities[0].field_name(), "ParentChanged");
     }
 }
