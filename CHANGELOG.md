@@ -45,12 +45,25 @@ semantic owner: `graphql-orm-operation-catalog` **0.2.0**.
   Decimal values. `aggregate = true` opts an entity into a generated GraphQL
   aggregate root and operation-catalog entry; existing schemas gain no root by
   default.
+- Refactored write and transaction capabilities away from SQLx-specific
+  traits. SQL Server now supports deliberate `ExternalWritable` entity DML
+  through native Tiberius connections while every compatibility constructor
+  remains physically read-only. The applicable generated surface includes
+  scalar/composite insert, update, delete, upsert, bounded mutation,
+  insert-if-absent, versioned compare-and-swap, bulk helpers, hooks, events,
+  subscriptions, commit and rollback.
+- SQL Server upserts use a locked update/insert transaction rather than
+  `MERGE`; transactions discard a Tiberius client after cancellation or an
+  indeterminate error. Fixed-decimal and JSON values have native validated
+  MSSQL bind/decode paths.
 
 The semantic catalogue is discovery and disclosure-shape metadata only. It
 does not authorize resolvers, fields, rows, provider egress, or database work.
 There is no database, stored-data, backup, or migration-history change. SDL
 descriptions and semantic/catalogue fingerprints change where new generated
-documentation participates.
+documentation participates. MSSQL write adoption is an explicit application
+configuration change against an externally managed schema; the ORM still does
+not create or migrate SQL Server tables.
 
 ## 0.21.1 - 2026-08-13
 

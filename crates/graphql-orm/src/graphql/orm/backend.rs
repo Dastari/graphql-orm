@@ -228,8 +228,8 @@ pub trait RlsIntrospectionBackend: OrmBackend {
 /// Backend capability for applying explicit schema migrations.
 ///
 /// SQLite and Postgres implement this trait. MSSQL intentionally does not,
-/// which keeps migration application unavailable for the read-only SQL Server
-/// backend at compile time in generic APIs.
+/// which keeps migration application unavailable even when entity DML is
+/// deliberately enabled for an externally managed SQL Server schema.
 pub trait MigrationBackend: IntrospectionBackend + WriteBackend {
     /// Prepare backend-owned migration infrastructure such as history tables.
     async fn prepare_migration_runtime(pool: &Self::Pool) -> crate::Result<()>;

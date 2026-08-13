@@ -30,9 +30,10 @@
 //! - `mssql`
 //!
 //! SQLite and Postgres support reads, writes, subscriptions, schema
-//! validation, planning, and explicit migrations. MSSQL is read/query-only and
-//! uses Tiberius instead of SQLx because current SQLx does not support SQL
-//! Server.
+//! validation, planning, and explicit migrations. MSSQL uses Tiberius instead
+//! of SQLx and defaults to physically read-only access; deliberate
+//! `ExternalWritable` pools support entity DML against externally managed
+//! schemas but not migrations, managed search, or backups.
 //!
 //! When exactly one backend feature is enabled, compatibility aliases
 //! `DbPool` and `DbRow` are exported. When multiple backend features are
@@ -542,7 +543,7 @@ pub mod types;
 #[cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
 pub mod generated_api_absence_probes {}
 
-/// Compile-time probes proving that MSSQL entities remain read-only.
+/// Compile-time probes proving that MSSQL entities remain read-only by default.
 ///
 /// These paired examples differ only by the write-helper reference. The first
 /// proves the generated read-only entity itself compiles:

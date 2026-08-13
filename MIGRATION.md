@@ -76,6 +76,30 @@ native fixed-precision types. Adding a new Decimal column is an ordinary
 application schema migration, but adopting this release without declaring one
 requires no database or stored-data migration.
 
+SQL Server compatibility constructors remain physically read-only, so existing
+MSSQL applications acquire no write authority after upgrading. To adopt DML
+against an externally managed schema, change both boundaries explicitly:
+
+```rust,ignore
+#[repository_entity(
+    backend = "mssql",
+    table = "dbo.WorkItems",
+    schema_policy = "external_writable"
+)]
+struct WorkItem { /* externally reviewed columns */ }
+
+let database = Database::<MssqlBackend>
+    ::connect_ado_external_writable(connection_string)
+    .await?;
+```
+
+Review the database principal, table contract, entity/field/row policies,
+upsert key uniqueness, and transaction behavior before adopting this mode.
+`ExternalWritable` permits generated row DML only. It does not enable SQL
+Server migration planning/application, managed RLS/search structures,
+runtime-schema writes, or backup/restore. No ORM schema or stored-data
+migration is performed by this release.
+
 ## 0.21.1 agql-auth 0.15 session-bound delegation alignment
 
 Update `graphql-orm` and `graphql-orm-macros` together to 0.21.1 at one

@@ -46,8 +46,8 @@ struct OauthState {
 ```
 
 The opt-in requires at least two explicitly declared, persisted, non-null, host-supplied primary
-key fields. Key order is declaration order. Nullable, generated, skipped, relation, read-only, and
-MSSQL key configurations fail during macro expansion. Existing composite read-only entities do not
+key fields. Key order is declaration order. Nullable, generated, skipped, relation, and read-only
+key configurations fail during macro expansion. Existing composite read-only entities do not
 change unless `repository_mutations = true` is added.
 
 The macro generates `OauthStateKey`, `CreateOauthStateInput`, and `UpdateOauthStateInput`. These
@@ -157,5 +157,6 @@ default-allow. PostgreSQL `transaction_with_auth` installs the normal transactio
 Callback error, cancellation, panic, constraint failure, and commit failure use the existing ORM
 transaction rollback behavior; queued events/actions are released only after a successful commit.
 
-SQLite and PostgreSQL are supported write backends. MSSQL remains intentionally read-only and
-rejects `repository_mutations = true` at compile time.
+SQLite and PostgreSQL are managed write backends. MSSQL supports this composite-key DML surface only
+for an `external_writable` entity and explicitly writable Tiberius pool; SQL Server schema ownership
+and migration application remain external.

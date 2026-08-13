@@ -1,4 +1,4 @@
-error: repository_mutations are not available for the read-only MSSQL backend
+error: MSSQL repository_mutations require schema_policy = "external_writable"
   --> tests/ui/mssql_composite_mutation_unavailable.rs:11:8
    |
 11 | struct PrivateGrant {

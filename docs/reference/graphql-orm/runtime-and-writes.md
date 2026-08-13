@@ -25,7 +25,8 @@ let database =
 
 Postgres uses `Database::<PostgresBackend>::connect_postgres(database_url)`. MSSQL uses
 `Database::<MssqlBackend>::connect_ado(connection_string)` and defaults to the read-only external
-schema policy.
+schema policy. Deliberate SQL Server DML uses
+`Database::<MssqlBackend>::connect_ado_external_writable(connection_string)`.
 
 Use `Database::new(pool)` for compatibility or `Database::builder(pool)` when the application
 intentionally owns raw driver-specific pool setup.
@@ -47,14 +48,11 @@ For atomic multi-entity state machines, versioned CAS, and immutable ledgers, se
 [Portable Persistence Primitives](../../architecture/portable-persistence.md).
 
 SQLite and Postgres support generated write helpers when the entity and root derive allow them.
-
-MSSQL is read-only:
-
-- no generated mutation roots
-- no generated subscription roots
-- no generated write helpers
-- no migration application
-- `Database::<MssqlBackend>::connect_ado` configures Tiberius as read-only
+MSSQL supports the applicable generated entity DML, transactions, hooks, policies, events, and
+subscriptions only through an explicitly writable Tiberius pool paired with
+`schema_policy = "external_writable"`. It does not support migration application, managed search,
+backup/restore, or runtime-schema writes. `Database::<MssqlBackend>::connect_ado` remains physically
+read-only.
 
 For external databases, prefer explicit policy:
 
@@ -65,6 +63,14 @@ let database = Database::builder(pool)
 ```
 
 `ExternalReadOnly` rejects entity writes and schema application. `ExternalWritable` can allow entity writes on write-capable backends while still rejecting schema application.
+
+```rust
+let database = Database::<MssqlBackend>::connect_ado_external_writable(connection_string).await?;
+```
+
+The SQL Server transaction pins one Tiberius client. Successful commit or rollback returns it to the
+pool; protocol failure, cancellation, or drop discards it so a client with indeterminate transaction
+state cannot be reused. SQL Server upserts use locked update/insert statements rather than `MERGE`.
 
 ## Repository Helpers
 
@@ -305,7 +311,9 @@ the requested page.
 
 ## Subscriptions
 
-Generated subscriptions are available for write-capable backends when roots include subscription support. They are not generated for MSSQL because the MSSQL backend is read-only.
+Generated subscriptions are available for write-capable entities when roots include subscription
+support. An `ExternalWritable` MSSQL entity participates in the same in-process change-event path;
+an external write made outside the ORM is not automatically observed.
 
 The runtime uses request-local event senders attached to `Database`. Subscriptions observe changes emitted by generated write paths.
 

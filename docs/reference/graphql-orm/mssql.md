@@ -1,5 +1,5 @@
 ---
-title: "Microsoft SQL Server Read-Only Backend"
+title: "Microsoft SQL Server Backend"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
@@ -8,12 +8,12 @@ review_by: 2027-02-01
 supersedes: []
 ---
 
-# Microsoft SQL Server Read-Only Backend
+# Microsoft SQL Server Backend
 
-The `mssql` feature enables SQL Server as a read/query-only backend. It is intended for existing
-databases where `graphql-orm` should provide the same generated entity, filter, ordering,
-pagination, relation, policy, and async-graphql read paths without taking ownership of schema
-management or writes.
+The `mssql` feature supports existing SQL Server schemas through Tiberius. Compatibility
+constructors remain physically read-only. Applications may deliberately opt a separately
+configured connection into `ExternalWritable` entity DML; managed migrations, runtime-schema
+management, full-text search maintenance, and backup/restore remain unsupported.
 
 SQL Server support uses [`tiberius`](https://crates.io/crates/tiberius). Current SQLx releases do
 not provide an MSSQL driver.
@@ -60,14 +60,14 @@ the macro emits a compile-time error. In multi-backend builds, schema roots must
 explicit backend types such as `graphql_orm::db::Database::<graphql_orm::MssqlBackend>`.
 
 Migration capability is backend-gated. SQLite and Postgres implement migration application; SQL
-Server does not. SQL Server is read-only, and attempting to apply migrations through MSSQL fails at
-compile time when the `MigrationBackend` bound is required.
+Server does not. Attempting to apply migrations through MSSQL fails at compile time when the
+`MigrationBackend` bound is required, including for an `ExternalWritable` database.
 
 The SQL Server driver dependencies are also feature-gated. `tiberius`, `tokio-util`, and the Tokio
 TCP support required by Tiberius are optional dependencies and are activated only by the `mssql`
 feature. SQLite and Postgres projects do not build the SQL Server runtime path.
 
-## Read-Only Contract
+## Capability Contract
 
 Under `mssql`, generated GraphQL schemas contain:
 
@@ -80,16 +80,20 @@ Under `mssql`, generated GraphQL schemas contain:
   `find_by_key`, `count_all`, `count`, and compatibility raw-pool helpers such as `query`,
   `get_by_key`, and `count_query`
 
-Under `mssql`, generated schemas do not contain:
+An entity declared with `schema_policy = "external_read_only"` does not contain:
 
 - create, update, delete, or upsert mutations
-- mutation repository helpers
+- mutation repository helpers or subscriptions
 - migration runners
 - schema diffing or schema creation APIs
 - backup/restore APIs
 
-Attempting to use generated write helpers under `mssql` fails at compile time when the helper is not
-generated. Lower-level write execution is also rejected with a clear read-only runtime error.
+An entity declared with `schema_policy = "external_writable"` may generate the normal applicable
+repository and GraphQL DML surface: insert/bulk insert, key and bounded predicate update/delete,
+upsert/bulk upsert, insert-if-absent, versioned compare-and-swap, composite-key writes, transactions,
+hooks, policies, change events, and subscriptions. This mode still cannot manage the physical
+schema, search structures, RLS, or backups. Unsupported entity features continue to fail during
+macro expansion rather than silently degrading.
 
 ## Connections
 
@@ -113,6 +117,48 @@ let schema = schema_builder(database)
 The database handle reuses Tiberius connections and avoids opening one connection per resolver.
 Advanced callers can still create `graphql_orm::db::mssql::MssqlPool` directly and pass it to
 `Database::<MssqlBackend>::builder(pool)` when they need driver-specific setup.
+
+Writable access requires both an explicitly writable physical pool and the external-writable schema
+contract:
+
+```rust
+let database = graphql_orm::db::Database::<graphql_orm::MssqlBackend>
+    ::connect_ado_external_writable(
+        "server=tcp:127.0.0.1,1433;\
+         database=ApplicationDb;\
+         user id=application_writer;\
+         password=<secret>;\
+         TrustServerCertificate=true",
+    )
+    .await?;
+```
+
+Declare only reviewed entities as writable:
+
+```rust
+#[derive(RepositoryEntity, Clone, Debug)]
+#[repository_entity(
+    backend = "mssql",
+    table = "dbo.WorkItems",
+    plural = "WorkItems",
+    schema_policy = "external_writable",
+    upsert = "external_key"
+)]
+struct WorkItem {
+    #[primary_key]
+    id: uuid::Uuid,
+    #[unique]
+    external_key: String,
+    value: String,
+    #[graphql_orm(version, default = "0")]
+    version: i64,
+}
+```
+
+`connect_ado`, `MssqlPool::new`, and `MssqlPool::with_max_connections` always configure Tiberius as
+read-only. Changing only `SchemaPolicy` cannot turn those pools into writable connections. The
+explicit `connect_ado_external_writable`, `new_external_writable`, and
+`with_max_connections_external_writable` constructors are the only writable entry points.
 
 ## Mapping Existing Tables
 
@@ -362,7 +408,7 @@ request-scoped loaders where needed.
 
 ## Type Notes
 
-The initial MSSQL backend supports the common SQL Server scalar shapes used by generated read paths:
+The MSSQL backend supports these common scalar shapes for generated reads and writes:
 
 - integer types: `int`, `bigint`, `smallint`, `tinyint`
 - `bit`
@@ -371,9 +417,12 @@ The initial MSSQL backend supports the common SQL Server scalar shapes used by g
 - `date`, `datetime`, and `datetime2` decoded to Rust strings when mapped to `String`
 - `uniqueidentifier` mapped to `uuid::Uuid`
 - floating point values
+- fixed decimals declared with `#[graphql_orm(decimal(precision = P, scale = S))]` and mapped to
+  `rust_decimal::Decimal`; the portable declaration permits precision `1..=18` and
+  `scale <= precision`
+- JSON values serialized into compatible text columns and decoded with strict JSON validation
 
-Decimal/numeric columns should be mapped to supported Rust numeric/string types that match the
-precision needs of the application. SQL Server-specific types such as `xml`, `hierarchyid`,
+SQL Server-specific types such as `xml`, `hierarchyid`,
 `geography`, `geometry`, `sql_variant`, `rowversion`, and table-valued columns are not first-class
 ORM scalar types in this phase.
 
@@ -385,7 +434,7 @@ Pure SQL rendering tests run with the default test suite:
 cargo test -p graphql-orm --test query_ir
 ```
 
-MSSQL compile-time read-only checks run with the MSSQL feature:
+MSSQL compile-time policy checks run with the MSSQL feature:
 
 ```bash
 cargo test -p graphql-orm --no-default-features --features mssql --test mssql_write_unavailable_ui
@@ -397,26 +446,21 @@ Composite-key read rendering and MSSQL read-only schema checks are covered by:
 cargo test -p graphql-orm --no-default-features --features mssql --test composite_primary_keys
 ```
 
-The live MSSQL integration test is opt-in. Set `MSSQL_TEST_DATABASE_URL` to an ADO.NET-style
-connection string for a disposable database/user that can create and drop test tables:
+The owned DML and aggregate parity test is opt-in. It starts the repository-pinned SQL Server image,
+publishes it on loopback only, creates a unique test database, verifies ownership before removal,
+and asserts that the container is absent afterward. It never accepts an ambient database URL:
 
 ```bash
-MSSQL_TEST_DATABASE_URL='server=tcp:127.0.0.1,1433;database=tempdb;user id=sa;password=Your_strong_password123;TrustServerCertificate=true' \
-  cargo test -p graphql-orm --no-default-features --features mssql --test mssql_integration
+cargo test -p graphql-orm --no-default-features --features mssql \
+  --test mssql_writes -- --ignored --nocapture
 ```
 
-With Docker, one possible local server is:
+It verifies physical read-only defaults, deliberate writable DML, generated keys and defaults,
+native decimal/JSON/binary/date-time values, single and composite keys, bounded mutations,
+concurrent upsert locking, compare-and-swap, commit/rollback, cancellation socket disposal, and
+typed grouped aggregate parity. Docker must be available to the test user.
 
-```bash
-docker run --rm -e ACCEPT_EULA=Y \
-  -e MSSQL_SA_PASSWORD=Your_strong_password123 \
-  -p 1433:1433 \
-  mcr.microsoft.com/mssql/server:2022-latest
-```
-
-Do not run migrations or generated writes against managed production or other
-legacy SQL Server databases in this
-phase. Use `SchemaPolicy::ExternalReadOnly` at runtime and `schema_policy = "external_read_only"`
-in the entity/root macros. The migration path is to port one simple read-only entity first, then a
-relation-heavy entity, and only then replace the old local SQL Server-specific GraphQL read path
-with the generic MSSQL backend.
+Do not point the owned test or schema-management APIs at application databases. Start adoption with
+`ExternalReadOnly`; enable `ExternalWritable` only after the externally managed table contract,
+database principal permissions, policies, concurrency semantics, and rollback behavior have been
+reviewed. Writable adoption changes application behavior but performs no ORM schema migration.

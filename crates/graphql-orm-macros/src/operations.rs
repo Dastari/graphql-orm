@@ -1463,7 +1463,7 @@ pub(crate) fn generate_graphql_operations(
         if !backend_writable {
             return Err(syn::Error::new_spanned(
                 struct_name,
-                "repository_mutations are not available for the read-only MSSQL backend",
+                "MSSQL repository_mutations require schema_policy = \"external_writable\"",
             ));
         }
         if schema_policy_read_only || entity_meta.append_only {

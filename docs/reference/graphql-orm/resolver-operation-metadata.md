@@ -145,7 +145,9 @@ generated-surface component.
   current composite mutation opt-in remains repository-only.
 - Append-only entities report reads, create, and subscription, but no
   update/delete/upsert resolver categories.
-- External-read-only entities and MSSQL report only generated reads.
+- External-read-only entities report only generated reads. External-writable
+  MSSQL entities report the generated DML categories supported by their
+  declaration while schema management remains absent.
 - Schema-root generated mutation `none`/allowlist/denylist policy changes
   mutation exposure and catalog fingerprints without disabling repository
   writes or generated subscriptions. Root-level read-only policy marks both

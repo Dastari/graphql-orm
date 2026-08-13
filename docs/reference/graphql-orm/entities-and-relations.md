@@ -111,8 +111,10 @@ query {
 Runtime metadata exposes all keys through `PRIMARY_KEYS` and `Entity::metadata().primary_keys`.
 `PRIMARY_KEY` remains the first key for compatibility.
 
-Composite-key writes are not generated yet. SQLite/Postgres read support works, and MSSQL remains
-read-only.
+Composite-key writes are opt-in through `repository_mutations = true`; see
+[Composite-key repository mutations](composite-mutations.md). SQLite and PostgreSQL support the
+managed write contract. MSSQL supports the same applicable repository DML only for an explicitly
+external-writable entity and pool.
 
 ## Full-Text Search
 

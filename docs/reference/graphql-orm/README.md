@@ -45,8 +45,9 @@ guidance for the core ORM package.
   [PostgreSQL](postgres.md), then define entities and roots with the
   [macro reference](macros-and-attributes.md).
 - Integrate an externally owned SQL Server schema through the
-  [read-only MSSQL guide](mssql.md); do not use generated schema changes or
-  writes for that backend.
+  [MSSQL guide](mssql.md); compatibility constructors stay physically
+  read-only, while deliberate `ExternalWritable` DML never grants managed
+  schema changes.
 - Use [repository-only entities](repository-only-entities.md) when typed Rust
   data access is required without a GraphQL object or generated resolver.
 - Add relations, generated CRUD, hooks, and subscriptions using

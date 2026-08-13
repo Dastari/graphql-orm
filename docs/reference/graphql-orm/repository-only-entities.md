@@ -176,6 +176,8 @@ indexes, RLS metadata, and backup descriptors. Changing only the code-generation
 surface requires no DDL or data migration.
 
 SQLite and PostgreSQL support the normal applicable read/write contract. MSSQL
-supports the existing static read-only contract; repository-only declarations
-with write, upsert, append-only, retention, or mutation-hook options fail at
-macro expansion rather than silently dropping behavior.
+supports static reads by default and the applicable repository DML contract
+only for `schema_policy = "external_writable"` entities on an explicitly
+writable Tiberius pool. Managed migrations, backup/restore, retention tables,
+and managed search structures remain unsupported and fail at macro expansion
+rather than silently dropping behavior.

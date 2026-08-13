@@ -12,8 +12,9 @@ supersedes: []
 
 `graphql-orm` turns annotated Rust structs into typed database metadata,
 `async-graphql` objects, query/filter/order inputs, and—when requested—CRUD
-resolver types. It supports managed SQLite and PostgreSQL schemas, and a
-read-only SQL Server integration for externally owned tables.
+resolver types. It supports managed SQLite and PostgreSQL schemas plus
+read-only or deliberately `ExternalWritable` SQL Server integration for
+externally owned tables.
 
 It is not a database server, migration runner, HTTP framework, authorization
 system, or a promise that a generated field is safe to expose. Applications
@@ -39,7 +40,7 @@ repository reference, or build matching local rustdoc with
 | --- | --- | --- |
 | `sqlite` (default) | SQLx SQLite, Tokio runtime, migrations, GeoJSON spatial support | spatial predicates run in Rust; no SQLite spatial index is created |
 | `postgres` | SQLx PostgreSQL + Rustls, migrations, native PostGIS/FTS paths | requires a PostgreSQL deployment and compatible extensions for spatial use |
-| `mssql` | Tiberius SQL Server reads | read/query-only; no generated writes, subscriptions, migrations, or runtime-schema row decoding |
+| `mssql` | Tiberius SQL Server reads and deliberate external-schema DML | compatibility constructors remain physically read-only; no managed migrations, backup/restore, search maintenance, or runtime-schema row decoding |
 | `change-journal` | change-journal API surface | does not itself configure a journal |
 | `auth-agql` | one-way `agql-auth` bridge | does not install authentication or grant scopes |
 | `router-protocol` | project-neutral generated operation export | does not run a router |
@@ -90,8 +91,9 @@ README remains project-neutral.
 - **Entity vs. repository entity:** `GraphQLEntity` creates a GraphQL surface;
   `RepositoryEntity` creates typed persistence APIs with no GraphQL types.
 - **Schema policy:** managed SQLite/PostgreSQL schemas may be planned and
-  explicitly applied. An externally owned SQL Server table should use
-  `external_read_only` and never receives generated schema mutation.
+  explicitly applied. An externally owned SQL Server table uses
+  `external_read_only` by default or deliberate `external_writable` DML;
+  neither mode receives generated schema mutation.
 - **Generated operations:** `GraphQLOperations` emits potential root fields;
   `schema_roots!` chooses which generated mutations are exposed and creates the
   schema builders plus discovery catalog.
@@ -128,4 +130,4 @@ enforce row/field/database limits appropriate to the application.
 - [Runtime writes and repository operations](../../docs/reference/graphql-orm/runtime-and-writes.md)
 - [Schema management](../../docs/reference/graphql-orm/schema-management.md)
 - [Strict authorization](../../docs/reference/graphql-orm/strict-authorization.md)
-- [SQL Server read-only integration](../../docs/reference/graphql-orm/mssql.md)
+- [SQL Server integration](../../docs/reference/graphql-orm/mssql.md)

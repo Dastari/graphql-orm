@@ -1,4 +1,4 @@
-error: repository-only MSSQL entities are read-only; write, append-only, upsert, retention, and mutation-hook options are unsupported
+error: repository-only MSSQL writes require schema_policy = "external_writable"; retention remains unsupported
   --> tests/ui/repository_only_mssql_writes.rs:4:1
    |
  4 | / #[repository_entity(

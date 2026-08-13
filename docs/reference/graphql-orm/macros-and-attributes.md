@@ -59,10 +59,12 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `unique_composite` | comma-separated columns | at least two columns; repeatable |
 | `index`, `unique_index` | `"a,b"` or `(name = "…", columns = ["…"], directions = ["asc" | "desc"])` | at least one column; direction count must match columns |
 
-`schema_policy = "external_read_only"`, and the MSSQL backend, suppress
-generated mutations and subscriptions. Schema policy controls schema ownership,
-not application authorization. See [schema management](schema-management.md)
-and [SQL Server](mssql.md).
+`schema_policy = "external_read_only"` suppresses generated mutations and
+subscriptions on every backend. MSSQL requires `external_read_only` or
+`external_writable`; the latter generates only capabilities implemented by the
+external-schema DML contract. Schema policy controls schema ownership, not
+application authorization. See [schema management](schema-management.md) and
+[SQL Server](mssql.md).
 
 ### Entity-level `graphql_orm` options
 
@@ -209,8 +211,9 @@ itself, and handwritten result objects deriving `GraphQLSemanticObject`.
 `generated_mutations` defaults to `"all"`; it accepts
 `"all"`, `"none"`, `"allowlist"`, or `"denylist"`. An allowlist/denylist
 requires its matching nonempty list, and every listed entity must be in
-`entities`. Read-only MSSQL/policy roots use empty mutation and subscription
-types regardless of the requested exposure.
+`entities`. External-read-only roots use empty mutation and subscription types
+regardless of requested exposure. External-writable MSSQL roots may compose
+generated DML and in-process subscriptions, but never schema-management roots.
 
 `schema_roots!` also emits `graphql_orm_semantic_catalog()`. The strict,
 versioned value contains public API names, safe descriptions, typed field and

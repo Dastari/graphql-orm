@@ -27,13 +27,19 @@ Available backend features:
 - `postgres` - PostgreSQL read/write/query/migration support using SQLx's
   PostgreSQL driver, Tokio runtime, and Rustls; it does not activate
   `sqlx-sqlite`
-- `mssql` - Microsoft SQL Server read/query-only support through Tiberius; it
-  activates neither SQLx SQLite nor SQLx PostgreSQL
+- `mssql` - Microsoft SQL Server reads and deliberate external-schema DML
+  through Tiberius; compatibility constructors remain physically read-only,
+  and the feature activates neither SQLx SQLite nor SQLx PostgreSQL
 
 SQLite and PostgreSQL also implement equivalent owned runtime-schema row
 decoding with exact backend types. MSSQL static generated reads remain
 supported, but MSSQL runtime-schema decoding is explicitly unsupported in this
 release. See [Runtime records](runtime-records.md#backend-mappings).
+
+SQL Server schema ownership remains external. `ExternalWritable` supports the
+generated entity/repository DML and transaction contracts, but not managed
+migrations, backup/restore, runtime-schema writes, managed full-text indexes,
+or managed RLS. See [Microsoft SQL Server](mssql.md).
 
 Optional non-backend features:
 
@@ -102,8 +108,8 @@ Full-text search is exposed through the same generated API on supported backends
 - SQLite creates an FTS5 virtual table with the `unicode61` tokenizer by default. If native FTS
   execution is unavailable at runtime and fallback is enabled, query helpers can fall back to the
   deterministic Rust scorer over loaded entities.
-- MSSQL has metadata and diagnostics for future support, but managed execution is not implemented in
-  this pass.
+- MSSQL has metadata and diagnostics for future support, but managed full-text
+  execution and maintenance are not implemented in this pass.
 
 Search documents are denormalized per entity. Local `searchable(...)` fields are maintained by
 generated ORM writes. Writes made outside `graphql-orm` require an explicit rebuild before native
@@ -146,7 +152,7 @@ USING fts5(
 
 Future MySQL support should use `FULLTEXT` indexes for local fields and the same denormalized shadow
 table strategy when related fields are included. Future MSSQL support should target full-text
-catalogs and `CONTAINSTABLE`/`FREETEXTTABLE`; current MSSQL support remains read/query-only.
+catalogs and `CONTAINSTABLE`/`FREETEXTTABLE`; current MSSQL DML does not maintain a search index.
 
 ## Single-Backend Builds
 

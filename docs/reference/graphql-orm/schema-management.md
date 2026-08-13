@@ -299,4 +299,7 @@ not enable PostGIS and do not create spatial indexes. Introspection sees those c
 planner treats the declared spatial metadata as compatible with that storage so repeated validation
 does not rebuild the table just because the target entity marks the field as spatial.
 
-MSSQL is read-only in this phase. It can be used for queries and read-only validation where supported, but it does not implement migration application or write capability traits.
+MSSQL schema management remains read-only: SQL Server does not implement migration application,
+managed schema mutation, or backup capability traits. This is independent of entity DML;
+an explicitly writable Tiberius pool with `SchemaPolicy::ExternalWritable` may mutate rows in an
+externally managed schema while schema planning/application remains unavailable.
