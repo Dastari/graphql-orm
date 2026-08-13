@@ -10,7 +10,7 @@ use super::core::{
 };
 use super::dialect::{DatabaseBackend, SqlDialect, current_backend};
 use super::{DefaultBackend, OrmBackend, SqlxBackend};
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 use super::{MutationContext, MutationLimit, WriteBackend};
 use crate::graphql::pagination::{Connection, Edge, PageInfo, encode_cursor};
 use std::any::Any;
@@ -92,7 +92,7 @@ pub trait Entity: DatabaseEntity + DatabaseSchema + EntityRelations + DatabaseSe
     }
 
     /// Authorize fields supplied by a generated repository create input.
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     fn authorize_repository_create_fields<'a, B: OrmBackend>(
         _db: &'a crate::db::Database<B>,
         _input: &'a (dyn Any + Send + Sync),
@@ -101,7 +101,7 @@ pub trait Entity: DatabaseEntity + DatabaseSchema + EntityRelations + DatabaseSe
     }
 
     /// Authorize fields supplied by a generated repository update input.
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     fn authorize_repository_update_fields<'a, B: OrmBackend>(
         _db: &'a crate::db::Database<B>,
         _existing: Option<&'a (dyn Any + Send + Sync)>,
@@ -1857,7 +1857,7 @@ where
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 /// Transaction-bound backend-neutral query for one projection DTO.
 pub struct TransactionProjectionQuery<'ctx, 'tx, P, B: WriteBackend>
 where
@@ -1867,12 +1867,10 @@ where
     state: ProjectionQueryState<P, B>,
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 impl<'ctx, 'tx, P, B> TransactionProjectionQuery<'ctx, 'tx, P, B>
 where
     B: WriteBackend,
-    for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
-        sqlx::Executor<'c, Database = B::Database> + Send,
     P: ReadProjection<B>,
 {
     pub(crate) fn new(context: &'ctx mut MutationContext<'tx, B>) -> Self {
@@ -1920,7 +1918,10 @@ where
         let rendered = self
             .state
             .render(self.context.database().pagination_config(), forced_limit);
-        let rows = B::fetch_rows_on(self.context.executor(), rendered.sql, rendered.values).await?;
+        let rows = self
+            .context
+            .fetch_rows(&rendered.sql, &rendered.values)
+            .await?;
         ProjectionQueryState::<P, B>::decode(rows)
     }
 
@@ -2241,15 +2242,27 @@ where
         self.apply_in_memory_filtering(rows, PaginationConfig::default(), false)
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
-    pub(crate) async fn fetch_bounded_mutation_sentinel_on<'e, E>(
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) async fn fetch_all_in_transaction(
         &self,
-        executor: E,
+        context: &mut MutationContext<'_, B>,
+    ) -> crate::Result<Vec<T>>
+    where
+        B: WriteBackend,
+    {
+        let rendered = render_select_query(B::DIALECT, &self.build_select_query());
+        let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
+        self.apply_in_memory_filtering(rows, PaginationConfig::default(), false)
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) async fn fetch_bounded_mutation_sentinel_in_transaction(
+        &self,
+        context: &mut MutationContext<'_, B>,
         limit: MutationLimit,
     ) -> crate::Result<Vec<T>>
     where
-        B: SqlxBackend,
-        E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
+        B: WriteBackend,
     {
         if self.requires_in_memory_filtering() {
             return Err(crate::graphql::errors::sqlx_error_from_public(
@@ -2287,7 +2300,7 @@ where
             B::DIALECT,
             &query.build_select_query_with_config(pagination, false),
         );
-        let rows = B::fetch_rows_on(executor, rendered.sql, rendered.values).await?;
+        let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
         query.apply_in_memory_filtering(rows, pagination, false)
     }
 
@@ -2319,6 +2332,21 @@ where
         E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
     {
         Ok(self.fetch_all_on(executor).await?.into_iter().next())
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) async fn fetch_one_in_transaction(
+        &self,
+        context: &mut MutationContext<'_, B>,
+    ) -> crate::Result<Option<T>>
+    where
+        B: WriteBackend,
+    {
+        Ok(self
+            .fetch_all_in_transaction(context)
+            .await?
+            .into_iter()
+            .next())
     }
 
     pub async fn count<P>(&self, provider: &P) -> crate::Result<i64>
@@ -2536,6 +2564,29 @@ where
         query.sorts.clear();
         let rendered = render_select_query(B::DIALECT, &query);
         let rows = B::fetch_rows_on(executor, rendered.sql, rendered.values).await?;
+        let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+        B::try_get_i64(row, "count")
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) async fn count_in_transaction(
+        &self,
+        context: &mut MutationContext<'_, B>,
+    ) -> crate::Result<i64>
+    where
+        B: WriteBackend,
+    {
+        if self.requires_in_memory_filtering() {
+            let mut query = self.clone();
+            query.page = None;
+            return Ok(query.fetch_all_in_transaction(context).await?.len() as i64);
+        }
+        let mut query = self.build_select_query();
+        query.count_only = true;
+        query.pagination = None;
+        query.sorts.clear();
+        let rendered = render_select_query(B::DIALECT, &query);
+        let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
         let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
         B::try_get_i64(row, "count")
     }

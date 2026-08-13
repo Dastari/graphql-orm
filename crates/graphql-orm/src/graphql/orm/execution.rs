@@ -3,7 +3,7 @@ use super::core::{
     SchemaPolicy, SchemaStage, SqlValue, record_executed_query,
 };
 use super::migrations::build_migration_plan;
-use super::{MigrationBackend, OrmBackend, SqlxBackend};
+use super::{MigrationBackend, OrmBackend, SqlxBackend, WriteBackend};
 use std::collections::HashSet;
 
 pub const MIGRATION_HISTORY_TABLE: &str = "__graphql_orm_migrations";
@@ -896,13 +896,33 @@ async fn insert_postgres_history_row(
     Ok(())
 }
 
-pub async fn execute_with_binds<B: SqlxBackend>(
+pub async fn execute_with_binds<B: WriteBackend>(
     sql: &str,
     values: &[SqlValue],
     pool: &B::Pool,
-) -> crate::Result<B::QueryResult> {
+) -> crate::Result<B::WriteResult> {
     record_executed_query();
     B::execute_with_binds(pool, sql, values).await
+}
+
+/// Execute a bound statement through an ORM-owned driver-neutral transaction.
+pub async fn execute_in_transaction<B: WriteBackend>(
+    transaction: &mut B::Transaction<'_>,
+    sql: &str,
+    values: &[SqlValue],
+) -> crate::Result<B::WriteResult> {
+    record_executed_query();
+    B::execute_in_transaction(transaction, sql, values).await
+}
+
+/// Fetch rows through an ORM-owned driver-neutral transaction.
+pub async fn fetch_rows_in_transaction<B: WriteBackend>(
+    transaction: &mut B::Transaction<'_>,
+    sql: &str,
+    values: &[SqlValue],
+) -> crate::Result<Vec<B::Row>> {
+    record_executed_query();
+    B::fetch_rows_in_transaction(transaction, sql, values).await
 }
 
 pub async fn fetch_rows<B: OrmBackend>(

@@ -3,7 +3,7 @@ use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
 use crate::graphql::orm::{
     DefaultBackend, OrmBackend, PaginationConfig, SchemaManager, SchemaPolicy,
 };
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 use crate::graphql::orm::{TransactionBackend, WriteBackend};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -20,7 +20,7 @@ struct EventSenders {
 
 const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 256;
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 tokio::task_local! {
     static ORM_TRANSACTION_ACTIVE: bool;
 }
@@ -142,7 +142,7 @@ impl<B: OrmBackend> Database<B> {
         }
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     pub fn with_mutation_hook<H>(pool: B::Pool, hook: H) -> Self
     where
         B: WriteBackend,
@@ -229,7 +229,7 @@ impl<B: OrmBackend> Database<B> {
         }
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     pub fn with_write_input_transform<H>(pool: B::Pool, transform: H) -> Self
     where
         B: WriteBackend,
@@ -253,7 +253,7 @@ impl<B: OrmBackend> Database<B> {
         }
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     pub fn with_hooks<M, E, F>(
         pool: B::Pool,
         mutation_hook: M,
@@ -355,7 +355,7 @@ impl<B: OrmBackend> Database<B> {
         self.change_journal_enabled
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     pub fn set_mutation_hook<H>(&mut self, hook: H)
     where
         B: WriteBackend,
@@ -365,7 +365,7 @@ impl<B: OrmBackend> Database<B> {
         self.mutation_hook = Some(Arc::new(hook));
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     pub fn mutation_hook(&self) -> Option<&Arc<dyn crate::graphql::orm::MutationHook<B>>>
     where
         B: WriteBackend,
@@ -408,7 +408,7 @@ impl<B: OrmBackend> Database<B> {
         self.row_policy.as_ref()
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     pub fn set_write_input_transform<H>(&mut self, transform: H)
     where
         B: WriteBackend,
@@ -418,7 +418,7 @@ impl<B: OrmBackend> Database<B> {
         self.write_input_transform = Some(Arc::new(transform));
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     pub fn write_input_transform(
         &self,
     ) -> Option<&Arc<dyn crate::graphql::orm::WriteInputTransform<B>>>
@@ -430,7 +430,7 @@ impl<B: OrmBackend> Database<B> {
         })
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     pub fn set_post_commit_error_handler<H>(&mut self, handler: H)
     where
         B: WriteBackend,
@@ -440,7 +440,7 @@ impl<B: OrmBackend> Database<B> {
         self.post_commit_error_handler = Some(Arc::new(handler));
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     pub fn post_commit_error_handler(
         &self,
     ) -> Option<&Arc<dyn crate::graphql::orm::PostCommitErrorHandler<B>>>
@@ -510,7 +510,7 @@ impl<B: OrmBackend> Database<B> {
         let _ = sender.send(event);
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     pub async fn report_post_commit_error(&self, error: String)
     where
         B: WriteBackend,
@@ -1059,7 +1059,7 @@ impl<B: OrmBackend> Database<B> {
         }
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     pub async fn run_before_create(
         &self,
         ctx: Option<&async_graphql::Context<'_>>,
@@ -1078,7 +1078,7 @@ impl<B: OrmBackend> Database<B> {
             .await
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     pub async fn run_before_create_with_context(
         &self,
         write_ctx: &mut crate::graphql::orm::WriteInputContext<'_, '_, B>,
@@ -1094,7 +1094,7 @@ impl<B: OrmBackend> Database<B> {
         }
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     pub async fn run_before_update(
         &self,
         ctx: Option<&async_graphql::Context<'_>>,
@@ -1114,7 +1114,7 @@ impl<B: OrmBackend> Database<B> {
             .await
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     pub async fn run_before_update_with_context(
         &self,
         write_ctx: &mut crate::graphql::orm::WriteInputContext<'_, '_, B>,
@@ -1133,7 +1133,7 @@ impl<B: OrmBackend> Database<B> {
         }
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     pub async fn run_before_upsert(
         &self,
         ctx: Option<&async_graphql::Context<'_>>,
@@ -1152,7 +1152,7 @@ impl<B: OrmBackend> Database<B> {
             .await
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     pub async fn run_before_upsert_with_context(
         &self,
         write_ctx: &mut crate::graphql::orm::WriteInputContext<'_, '_, B>,
@@ -1169,7 +1169,7 @@ impl<B: OrmBackend> Database<B> {
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 impl<B> Database<B>
 where
     B: TransactionBackend,
@@ -1194,8 +1194,6 @@ where
         callback: F,
     ) -> Result<T, crate::graphql::orm::TransactionError>
     where
-        for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
-            sqlx::Executor<'c, Database = B::Database> + Send,
         F: for<'tx> FnOnce(
             &'tx mut crate::graphql::orm::RetentionContext<'_, B>,
         ) -> futures::future::BoxFuture<
@@ -1222,8 +1220,6 @@ where
         callback: F,
     ) -> Result<T, crate::graphql::orm::TransactionError>
     where
-        for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
-            sqlx::Executor<'c, Database = B::Database> + Send,
         F: for<'tx> FnOnce(
             &'tx mut crate::graphql::orm::RetentionContext<'_, B>,
         ) -> futures::future::BoxFuture<
@@ -1245,13 +1241,13 @@ where
 
         ORM_TRANSACTION_ACTIVE
             .scope(true, async move {
-                let mut tx = B::begin_orm_transaction(
+                let mut tx = B::begin_write_transaction(
                     self.pool(),
                     crate::graphql::orm::TransactionMode::StateMachine,
                 )
                 .await
                 .map_err(classify_transaction_error::<B>)?;
-                B::apply_auth_context_to_transaction(&mut tx, auth)
+                B::apply_auth_context_to_write_transaction(&mut tx, auth)
                     .await
                     .map_err(classify_transaction_error::<B>)?;
                 B::clear_retention_context(&mut tx)
@@ -1259,13 +1255,21 @@ where
                     .map_err(classify_transaction_error::<B>)?;
                 let mutation = crate::graphql::orm::MutationContext::new(self, tx);
                 let mut context = crate::graphql::orm::RetentionContext::new(mutation);
-                let value = callback(&mut context).await.map_err(|error| {
-                    if error.is_retryable() {
-                        crate::graphql::orm::TransactionError::Retryable(error)
-                    } else {
-                        crate::graphql::orm::TransactionError::Rejected(error)
+                let value = match callback(&mut context).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let classified = if error.is_retryable() {
+                            crate::graphql::orm::TransactionError::Retryable(error)
+                        } else {
+                            crate::graphql::orm::TransactionError::Rejected(error)
+                        };
+                        context
+                            .rollback()
+                            .await
+                            .map_err(classify_transaction_error::<B>)?;
+                        return Err(classified);
                     }
-                })?;
+                };
                 context
                     .commit_and_emit()
                     .await
@@ -1333,20 +1337,28 @@ where
 
         ORM_TRANSACTION_ACTIVE
             .scope(true, async move {
-                let mut tx = B::begin_orm_transaction(self.pool(), mode)
+                let mut tx = B::begin_write_transaction(self.pool(), mode)
                     .await
                     .map_err(classify_transaction_error::<B>)?;
-                B::apply_auth_context_to_transaction(&mut tx, auth)
+                B::apply_auth_context_to_write_transaction(&mut tx, auth)
                     .await
                     .map_err(classify_transaction_error::<B>)?;
                 let mut context = crate::graphql::orm::MutationContext::new(self, tx);
-                let value = callback(&mut context).await.map_err(|error| {
-                    if error.is_retryable() {
-                        crate::graphql::orm::TransactionError::Retryable(error)
-                    } else {
-                        crate::graphql::orm::TransactionError::Rejected(error)
+                let value = match callback(&mut context).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let classified = if error.is_retryable() {
+                            crate::graphql::orm::TransactionError::Retryable(error)
+                        } else {
+                            crate::graphql::orm::TransactionError::Rejected(error)
+                        };
+                        context
+                            .rollback()
+                            .await
+                            .map_err(classify_transaction_error::<B>)?;
+                        return Err(classified);
                     }
-                })?;
+                };
                 context
                     .commit_and_emit()
                     .await
@@ -1357,13 +1369,13 @@ where
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 fn classify_transaction_error<B: TransactionBackend>(
     error: sqlx::Error,
 ) -> crate::graphql::orm::TransactionError {
     use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
     let internal = error.to_string();
-    if B::is_retryable_transaction_error(&error) {
+    if B::is_retryable_write_error(&error) {
         crate::graphql::orm::TransactionError::Retryable(
             OrmPublicError::new(OrmErrorCode::ServiceUnavailable).with_internal(internal),
         )

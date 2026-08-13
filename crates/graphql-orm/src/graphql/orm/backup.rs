@@ -386,8 +386,6 @@ pub(crate) async fn record_change_journal_event<B>(
 ) -> crate::Result<()>
 where
     B: super::WriteBackend,
-    for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
-        sqlx::Executor<'c, Database = B::Database> + Send,
 {
     if !cfg!(feature = "change-journal")
         || !hook_ctx.database().change_journal_enabled()
@@ -432,7 +430,7 @@ where
         SqlValue::Null,
         SqlValue::Null,
     ];
-    execute_with_binds_on::<B, _>(hook_ctx.executor(), &sql, &values).await?;
+    hook_ctx.execute(&sql, &values).await?;
     Ok(())
 }
 

@@ -2,10 +2,10 @@ use super::dialect::DatabaseBackend;
 use super::query::{
     ChangeAction, DatabaseEntity, DatabaseSchema, DatabaseSearchSchema, EntityRelations,
 };
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 use super::query::{DatabaseFilter, DatabaseOrderBy, Entity, EntityQuery, FromSqlRow};
 use super::{DefaultBackend, OrmBackend};
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 use super::{DefaultWriteBackend, WriteBackend};
 use crate::graphql::auth::{AuthExt, AuthSubject};
 use std::any::Any;
@@ -558,12 +558,12 @@ impl MutationEvent {
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 trait DeferredEventEmitter<B: OrmBackend>: Send {
     fn emit(self: Box<Self>, db: &crate::db::Database<B>);
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 trait PostCommitActionRunner<B: OrmBackend>: Send {
     fn run(
         self: Box<Self>,
@@ -571,7 +571,7 @@ trait PostCommitActionRunner<B: OrmBackend>: Send {
     ) -> futures::future::BoxFuture<'static, Result<(), String>>;
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 struct DeferredEvent<T>
 where
     T: Clone + Send + Sync + 'static,
@@ -579,7 +579,7 @@ where
     event: T,
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 impl<T, B> DeferredEventEmitter<B> for DeferredEvent<T>
 where
     B: OrmBackend,
@@ -590,12 +590,12 @@ where
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 struct DeferredAction<F> {
     action: Option<F>,
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 impl<F, Fut, E, B> PostCommitActionRunner<B> for DeferredAction<F>
 where
     B: OrmBackend,
@@ -615,10 +615,10 @@ where
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     db: &'tx crate::db::Database<B>,
-    tx: sqlx::Transaction<'tx, B::Database>,
+    tx: B::Transaction<'tx>,
     deferred_events: Vec<Box<dyn DeferredEventEmitter<B>>>,
     deferred_actions: Vec<Box<dyn PostCommitActionRunner<B>>>,
 }
@@ -630,13 +630,13 @@ pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
 /// or its auth-aware counterpart. It intentionally exposes append/query
 /// operations and generated bounded purge, but no raw executor or ordinary
 /// update/delete surface.
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub struct RetentionContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     mutation: MutationContext<'tx, B>,
     poisoned: bool,
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub struct MutationQuery<'ctx, 'tx, T, B: WriteBackend = DefaultWriteBackend>
 where
     T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
@@ -645,12 +645,10 @@ where
     query: EntityQuery<T, B>,
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 impl<'ctx, 'tx, T, B> MutationQuery<'ctx, 'tx, T, B>
 where
     B: WriteBackend,
-    for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
-        sqlx::Executor<'c, Database = B::Database> + Send,
     T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
 {
     fn new(hook_ctx: &'ctx mut MutationContext<'tx, B>) -> Self {
@@ -733,7 +731,7 @@ where
             .await
             .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
         let query = self.query;
-        let rows = query.fetch_all_on(self.hook_ctx.executor()).await?;
+        let rows = query.fetch_all_in_transaction(self.hook_ctx).await?;
         authorize_repository_rows::<T, B>(self.hook_ctx.database(), rows).await
     }
 
@@ -751,7 +749,7 @@ where
             .await
             .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
         let query = self.query;
-        let row = query.fetch_one_on(self.hook_ctx.executor()).await?;
+        let row = query.fetch_one_in_transaction(self.hook_ctx).await?;
         let Some(row) = row else {
             return Ok(None);
         };
@@ -781,7 +779,7 @@ where
             ));
         }
         let query = self.query;
-        query.count_on(self.hook_ctx.executor()).await
+        query.count_in_transaction(self.hook_ctx).await
     }
 
     pub async fn exists(self) -> crate::Result<bool> {
@@ -789,7 +787,7 @@ where
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub struct WriteInputContext<'ctx, 'tx, B: WriteBackend = DefaultWriteBackend> {
     graphql_ctx: Option<&'ctx async_graphql::Context<'ctx>>,
     entity_name: &'static str,
@@ -798,7 +796,7 @@ pub struct WriteInputContext<'ctx, 'tx, B: WriteBackend = DefaultWriteBackend> {
     mutation_ctx: Option<&'ctx mut MutationContext<'tx, B>>,
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub struct WriteQuery<'ctx, 'write, 'tx, T, B: WriteBackend = DefaultWriteBackend>
 where
     T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
@@ -807,7 +805,7 @@ where
     query: EntityQuery<T, B>,
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 impl<'ctx, 'write, B> WriteInputContext<'ctx, 'write, B>
 where
     B: WriteBackend,
@@ -904,12 +902,10 @@ where
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 impl<'ctx, 'write, 'tx, T, B> WriteQuery<'ctx, 'write, 'tx, T, B>
 where
     B: WriteBackend,
-    for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
-        sqlx::Executor<'c, Database = B::Database> + Send,
     T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
 {
     pub fn filter<F>(mut self, filter: F) -> Self
@@ -955,7 +951,7 @@ where
     pub async fn fetch_all(self) -> crate::Result<Vec<T>> {
         let query = self.query;
         if let Some(hook_ctx) = self.write_ctx.mutation_ctx.as_deref_mut() {
-            query.fetch_all_on(hook_ctx.executor()).await
+            query.fetch_all_in_transaction(hook_ctx).await
         } else {
             query.fetch_all(self.write_ctx.database()).await
         }
@@ -964,7 +960,7 @@ where
     pub async fn fetch_one(self) -> crate::Result<Option<T>> {
         let query = self.query;
         if let Some(hook_ctx) = self.write_ctx.mutation_ctx.as_deref_mut() {
-            query.fetch_one_on(hook_ctx.executor()).await
+            query.fetch_one_in_transaction(hook_ctx).await
         } else {
             query.fetch_one(self.write_ctx.database()).await
         }
@@ -973,7 +969,7 @@ where
     pub async fn count(self) -> crate::Result<i64> {
         let query = self.query;
         if let Some(hook_ctx) = self.write_ctx.mutation_ctx.as_deref_mut() {
-            query.count_on(hook_ctx.executor()).await
+            query.count_in_transaction(hook_ctx).await
         } else {
             query.count(self.write_ctx.database()).await
         }
@@ -984,18 +980,30 @@ where
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 impl<'tx, B> MutationContext<'tx, B>
 where
     B: WriteBackend,
 {
-    pub fn new(db: &'tx crate::db::Database<B>, tx: sqlx::Transaction<'tx, B::Database>) -> Self {
+    /// Construct a context from a backend-owned transaction.
+    #[doc(hidden)]
+    pub fn new(db: &'tx crate::db::Database<B>, tx: B::Transaction<'tx>) -> Self {
         Self {
             db,
             tx,
             deferred_events: Vec::new(),
             deferred_actions: Vec::new(),
         }
+    }
+
+    /// Begin a driver-neutral transaction for generated repository code.
+    #[doc(hidden)]
+    pub async fn begin(
+        db: &'tx crate::db::Database<B>,
+        mode: TransactionMode,
+    ) -> crate::Result<Self> {
+        let tx = B::begin_write_transaction(db.pool(), mode).await?;
+        Ok(Self::new(db, tx))
     }
 
     pub fn database(&self) -> &crate::db::Database<B> {
@@ -1025,12 +1033,30 @@ where
             .auth_subject()
     }
 
-    pub fn executor(&mut self) -> &mut <B::Database as sqlx::Database>::Connection
-    where
-        for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
-            sqlx::Executor<'c, Database = B::Database> + Send,
-    {
-        self.tx.as_mut()
+    /// Fetch bound rows on this context's pinned transaction.
+    #[doc(hidden)]
+    pub async fn fetch_rows(
+        &mut self,
+        sql: &str,
+        values: &[SqlValue],
+    ) -> crate::Result<Vec<B::Row>> {
+        B::fetch_rows_in_transaction(&mut self.tx, sql, values).await
+    }
+
+    /// Execute a bound statement on this context's pinned transaction.
+    #[doc(hidden)]
+    pub async fn execute(
+        &mut self,
+        sql: &str,
+        values: &[SqlValue],
+    ) -> crate::Result<B::WriteResult> {
+        B::execute_in_transaction(&mut self.tx, sql, values).await
+    }
+
+    /// Exact affected-row count for a backend write result.
+    #[doc(hidden)]
+    pub fn rows_affected(result: &B::WriteResult) -> u64 {
+        B::rows_affected(result)
     }
 
     /// Execute the exact one-row-look-ahead selection used only by generated
@@ -1047,12 +1073,10 @@ where
         limit: MutationLimit,
     ) -> crate::Result<Vec<T>>
     where
-        for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
-            sqlx::Executor<'c, Database = B::Database> + Send,
         T: DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
     {
         query
-            .fetch_bounded_mutation_sentinel_on(self.executor(), limit)
+            .fetch_bounded_mutation_sentinel_in_transaction(self, limit)
             .await
     }
 
@@ -1087,7 +1111,7 @@ where
             deferred_events,
             deferred_actions,
         } = self;
-        tx.commit().await?;
+        B::commit_write_transaction(tx).await?;
         for event in deferred_events {
             event.emit(db);
         }
@@ -1099,15 +1123,18 @@ where
         Ok(())
     }
 
+    /// Roll back and consume this transaction without emitting side effects.
+    #[doc(hidden)]
+    pub async fn rollback(self) -> crate::Result<()> {
+        B::rollback_write_transaction(self.tx).await
+    }
+
     pub async fn run_mutation_hook<'a>(
         &'a mut self,
         ctx: Option<&'a async_graphql::Context<'_>>,
         event: &'a MutationEvent,
     ) -> async_graphql::Result<()>
-    where
-        for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
-            sqlx::Executor<'c, Database = B::Database> + Send,
-    {
+where {
         if let Some(hook) = self.db.mutation_hook() {
             hook.on_mutation(ctx, self, event).await?;
         }
@@ -1210,8 +1237,6 @@ where
 
     pub fn query<'a, T>(&'a mut self) -> MutationQuery<'a, 'tx, T, B>
     where
-        for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
-            sqlx::Executor<'c, Database = B::Database> + Send,
         T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
     {
         MutationQuery::new(self)
@@ -1221,8 +1246,6 @@ where
     /// Only the projection's declared columns are selected and decoded.
     pub fn project<'a, P>(&'a mut self) -> super::query::TransactionProjectionQuery<'a, 'tx, P, B>
     where
-        for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
-            sqlx::Executor<'c, Database = B::Database> + Send,
         P: super::query::ReadProjection<B>,
     {
         super::query::TransactionProjectionQuery::new(self)
@@ -1450,12 +1473,27 @@ where
     }
 }
 
+// Compatibility access for existing SQLx-backed generated write paths. New
+// backend-neutral code uses `fetch_rows` and `execute`; MSSQL deliberately has
+// no SQLx executor.
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+impl<'tx, B> MutationContext<'tx, B>
+where
+    B: super::SqlxBackend
+        + WriteBackend<Transaction<'tx> = sqlx::Transaction<'tx, <B as super::SqlxBackend>::Database>>,
+{
+    #[doc(hidden)]
+    pub fn executor(
+        &mut self,
+    ) -> &mut <<B as super::SqlxBackend>::Database as sqlx::Database>::Connection {
+        &mut self.tx
+    }
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 impl<'tx, B> RetentionContext<'tx, B>
 where
     B: super::TransactionBackend,
-    for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
-        sqlx::Executor<'c, Database = B::Database> + Send,
 {
     pub(crate) fn new(mutation: MutationContext<'tx, B>) -> Self {
         Self {
@@ -1473,6 +1511,10 @@ where
         }
         B::clear_retention_context(&mut self.mutation.tx).await?;
         self.mutation.commit_and_emit().await
+    }
+
+    pub(crate) async fn rollback(self) -> crate::Result<()> {
+        self.mutation.rollback().await
     }
 
     /// Append a row through the entity's normal generated insert path.
@@ -1619,7 +1661,7 @@ where
         let (sql, values) = EntityQuery::<T, B>::new()
             .filter(&filter)
             .build_delete_sql();
-        let execution = B::execute_with_binds_on(self.mutation.executor(), sql, values).await;
+        let execution = self.mutation.execute(&sql, &values).await;
         let cleared = B::clear_retention_context(&mut self.mutation.tx).await;
         let result = execution?;
         cleared?;
@@ -1667,7 +1709,7 @@ where
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 async fn authorize_repository_row<T, B>(db: &crate::db::Database<B>, row: &T) -> crate::Result<bool>
 where
     T: Entity,
@@ -1714,7 +1756,7 @@ where
     Ok(true)
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 async fn authorize_repository_rows<T, B>(
     db: &crate::db::Database<B>,
     rows: Vec<T>,
@@ -1732,7 +1774,7 @@ where
     Ok(visible)
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 async fn ensure_transaction_entity_write_access<T: Entity, B: WriteBackend>(
     db: &crate::db::Database<B>,
 ) -> crate::Result<()> {
@@ -1748,7 +1790,7 @@ async fn ensure_transaction_entity_write_access<T: Entity, B: WriteBackend>(
     .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub trait MutationHook<B: WriteBackend = DefaultWriteBackend>: Send + Sync {
     fn on_mutation<'a>(
         &'a self,
@@ -1758,7 +1800,7 @@ pub trait MutationHook<B: WriteBackend = DefaultWriteBackend>: Send + Sync {
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<()>>;
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub trait MutationContextInsert<B: WriteBackend = DefaultWriteBackend>: Sized {
     type CreateInput;
 
@@ -1770,7 +1812,7 @@ pub trait MutationContextInsert<B: WriteBackend = DefaultWriteBackend>: Sized {
 
 /// Macro-generated capability implemented only for append-only entities that
 /// explicitly declare a dedicated retention policy.
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub trait RetentionPurge<B: super::TransactionBackend = DefaultWriteBackend>:
     Entity + FromSqlRow<B> + serde::Serialize + Clone + Send + Sync + 'static
 {
@@ -1787,7 +1829,7 @@ pub trait RetentionPurge<B: super::TransactionBackend = DefaultWriteBackend>:
     ) -> futures::future::BoxFuture<'a, crate::Result<()>>;
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub trait MutationContextUpsert<B: WriteBackend = DefaultWriteBackend>: Sized {
     type UpsertInput;
 
@@ -1797,7 +1839,7 @@ pub trait MutationContextUpsert<B: WriteBackend = DefaultWriteBackend>: Sized {
     ) -> futures::future::BoxFuture<'a, crate::Result<UpsertOutcome<Self>>>;
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub trait MutationContextUpdateById<B: WriteBackend = DefaultWriteBackend>: Sized {
     type Id;
     type UpdateInput;
@@ -1809,7 +1851,7 @@ pub trait MutationContextUpdateById<B: WriteBackend = DefaultWriteBackend>: Size
     ) -> futures::future::BoxFuture<'a, crate::Result<Option<Self>>>;
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub trait MutationContextUpdateWhere<B: WriteBackend = DefaultWriteBackend>: Sized {
     type WhereInput;
     type UpdateInput;
@@ -1821,7 +1863,7 @@ pub trait MutationContextUpdateWhere<B: WriteBackend = DefaultWriteBackend>: Siz
     ) -> futures::future::BoxFuture<'a, crate::Result<i64>>;
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub trait MutationContextCompareAndSwap<B: WriteBackend = DefaultWriteBackend>: Sized {
     type Id;
     type Expected;
@@ -1836,7 +1878,7 @@ pub trait MutationContextCompareAndSwap<B: WriteBackend = DefaultWriteBackend>: 
     ) -> futures::future::BoxFuture<'a, crate::Result<ConditionalUpdateOutcome<Self>>>;
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub trait MutationContextDeleteById<B: WriteBackend = DefaultWriteBackend>: Sized {
     type Id;
 
@@ -1846,7 +1888,7 @@ pub trait MutationContextDeleteById<B: WriteBackend = DefaultWriteBackend>: Size
     ) -> futures::future::BoxFuture<'a, crate::Result<bool>>;
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub trait MutationContextDeleteWhere<B: WriteBackend = DefaultWriteBackend>: Sized {
     type WhereInput;
 
@@ -1856,7 +1898,7 @@ pub trait MutationContextDeleteWhere<B: WriteBackend = DefaultWriteBackend>: Siz
     ) -> futures::future::BoxFuture<'a, crate::Result<i64>>;
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub trait MutationContextFindById<B: WriteBackend = DefaultWriteBackend>: Sized {
     type Id;
 
@@ -1866,7 +1908,7 @@ pub trait MutationContextFindById<B: WriteBackend = DefaultWriteBackend>: Sized 
     ) -> futures::future::BoxFuture<'a, crate::Result<Option<Self>>>;
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub trait MutationContextFindByKey<B: WriteBackend = DefaultWriteBackend>: Sized {
     type Key;
 
@@ -1876,7 +1918,7 @@ pub trait MutationContextFindByKey<B: WriteBackend = DefaultWriteBackend>: Sized
     ) -> futures::future::BoxFuture<'a, crate::Result<Option<Self>>>;
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub trait MutationContextUpdateByKey<B: WriteBackend = DefaultWriteBackend>: Sized {
     type Key;
     type UpdateInput;
@@ -1888,7 +1930,7 @@ pub trait MutationContextUpdateByKey<B: WriteBackend = DefaultWriteBackend>: Siz
     ) -> futures::future::BoxFuture<'a, crate::Result<Option<Self>>>;
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub trait MutationContextDeleteByKey<B: WriteBackend = DefaultWriteBackend>: Sized {
     type Key;
 
@@ -1898,7 +1940,7 @@ pub trait MutationContextDeleteByKey<B: WriteBackend = DefaultWriteBackend>: Siz
     ) -> futures::future::BoxFuture<'a, crate::Result<bool>>;
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub trait MutationContextInsertIfAbsent<B: WriteBackend = DefaultWriteBackend>: Sized {
     type CreateInput;
 
@@ -1908,7 +1950,7 @@ pub trait MutationContextInsertIfAbsent<B: WriteBackend = DefaultWriteBackend>: 
     ) -> futures::future::BoxFuture<'a, crate::Result<InsertIfAbsentOutcome<Self>>>;
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub trait MutationContextBoundedUpdateWhere<B: WriteBackend = DefaultWriteBackend>: Sized {
     type WhereInput;
     type UpdateInput;
@@ -1921,7 +1963,7 @@ pub trait MutationContextBoundedUpdateWhere<B: WriteBackend = DefaultWriteBacken
     ) -> futures::future::BoxFuture<'a, crate::Result<BoundedMutationOutcome>>;
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub trait MutationContextBoundedDeleteWhere<B: WriteBackend = DefaultWriteBackend>: Sized {
     type WhereInput;
 
@@ -1932,7 +1974,7 @@ pub trait MutationContextBoundedDeleteWhere<B: WriteBackend = DefaultWriteBacken
     ) -> futures::future::BoxFuture<'a, crate::Result<BoundedMutationOutcome>>;
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub trait MutationContextPredicateUpdate<B: WriteBackend = DefaultWriteBackend>: Sized {
     type Key;
     type Expected;
@@ -1946,7 +1988,7 @@ pub trait MutationContextPredicateUpdate<B: WriteBackend = DefaultWriteBackend>:
     ) -> futures::future::BoxFuture<'a, crate::Result<PredicateUpdateOutcome<Self>>>;
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub trait MutationContextKeysetPage<B: WriteBackend = DefaultWriteBackend>: Sized {
     type Filter;
 
@@ -1964,7 +2006,7 @@ pub trait MutationContextKeysetPage<B: WriteBackend = DefaultWriteBackend>: Size
 }
 
 /// Generated repository contract for bounded bidirectional keyset reads.
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub trait MutationContextKeysetConnectionPage<B: WriteBackend = DefaultWriteBackend>:
     Sized
 {
@@ -2195,7 +2237,7 @@ pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>>;
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub trait WriteInputTransform<B: WriteBackend = DefaultWriteBackend>: Send + Sync {
     fn before_create_with_context<'a>(
         &'a self,

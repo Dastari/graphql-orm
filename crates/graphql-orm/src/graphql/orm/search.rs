@@ -998,21 +998,19 @@ impl<B: OrmBackend> PoolProvider<B> for PoolRef<'_, B> {
 
 /// Upsert a generated search document inside an existing write transaction.
 pub async fn upsert_search_document_on<B>(
-    executor: &mut <B::Database as sqlx::Database>::Connection,
+    context: &mut super::MutationContext<'_, B>,
     index: &SearchIndexDef,
     document: &SearchDocument,
 ) -> crate::Result<()>
 where
     B: WriteBackend,
-    for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
-        sqlx::Executor<'c, Database = B::Database> + Send,
 {
     match B::DIALECT {
         DatabaseBackend::Postgres => {
-            upsert_postgres_search_document_on::<B>(executor, index, document).await
+            upsert_postgres_search_document_on::<B>(context, index, document).await
         }
         DatabaseBackend::Sqlite => {
-            upsert_sqlite_search_document_on::<B>(executor, index, document).await
+            upsert_sqlite_search_document_on::<B>(context, index, document).await
         }
         DatabaseBackend::Mysql | DatabaseBackend::Mssql => Err(sqlx::Error::Protocol(format!(
             "full-text search execution is not implemented for {}",
@@ -1022,14 +1020,12 @@ where
 }
 
 async fn upsert_postgres_search_document_on<B>(
-    executor: &mut <B::Database as sqlx::Database>::Connection,
+    context: &mut super::MutationContext<'_, B>,
     index: &SearchIndexDef,
     document: &SearchDocument,
 ) -> crate::Result<()>
 where
     B: WriteBackend,
-    for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
-        sqlx::Executor<'c, Database = B::Database> + Send,
 {
     let table = search_table_name(index.table_name);
     let sql = format!(
@@ -1057,28 +1053,23 @@ where
         SqlValue::String(document.text_for_weight(SearchWeight::D)),
         SqlValue::Int(current_epoch_seconds()),
     ];
-    super::execute_with_binds_on::<B, _>(&mut *executor, &sql, &values).await?;
+    context.execute(&sql, &values).await?;
     Ok(())
 }
 
 async fn upsert_sqlite_search_document_on<B>(
-    executor: &mut <B::Database as sqlx::Database>::Connection,
+    context: &mut super::MutationContext<'_, B>,
     index: &SearchIndexDef,
     document: &SearchDocument,
 ) -> crate::Result<()>
 where
     B: WriteBackend,
-    for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
-        sqlx::Executor<'c, Database = B::Database> + Send,
 {
     let table = sqlite_fts_table_name(index.table_name);
     let delete_sql = format!("DELETE FROM {table} WHERE entity_pk = ?");
-    super::execute_with_binds_on::<B, _>(
-        &mut *executor,
-        &delete_sql,
-        &[SqlValue::String(document.entity_pk.clone())],
-    )
-    .await?;
+    context
+        .execute(&delete_sql, &[SqlValue::String(document.entity_pk.clone())])
+        .await?;
     let insert_sql = format!(
         "INSERT INTO {table} \
          (entity_pk, weight_a, weight_b, weight_c, weight_d, document_text) \
@@ -1092,20 +1083,18 @@ where
         SqlValue::String(document.text_for_weight(SearchWeight::D)),
         SqlValue::String(document.document_text()),
     ];
-    super::execute_with_binds_on::<B, _>(&mut *executor, &insert_sql, &values).await?;
+    context.execute(&insert_sql, &values).await?;
     Ok(())
 }
 
 /// Delete a generated search document inside an existing write transaction.
 pub async fn delete_search_document_on<B>(
-    executor: &mut <B::Database as sqlx::Database>::Connection,
+    context: &mut super::MutationContext<'_, B>,
     index: &SearchIndexDef,
     entity_pk: &str,
 ) -> crate::Result<()>
 where
     B: WriteBackend,
-    for<'c> &'c mut <B::Database as sqlx::Database>::Connection:
-        sqlx::Executor<'c, Database = B::Database> + Send,
 {
     let table = match B::DIALECT {
         DatabaseBackend::Postgres => search_table_name(index.table_name),
@@ -1118,12 +1107,9 @@ where
         }
     };
     let sql = format!("DELETE FROM {table} WHERE entity_pk = ?");
-    super::execute_with_binds_on::<B, _>(
-        &mut *executor,
-        &sql,
-        &[SqlValue::String(entity_pk.to_string())],
-    )
-    .await?;
+    context
+        .execute(&sql, &[SqlValue::String(entity_pk.to_string())])
+        .await?;
     Ok(())
 }
 

@@ -4614,12 +4614,14 @@ pub(crate) fn generate_graphql_operations(
                 let rows = ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
                     .fetch_all(db)
                     .await?;
-                let mut tx = db.pool().begin().await?;
-                let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::new(db, tx);
+                let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
+                    db,
+                    ::graphql_orm::graphql::orm::TransactionMode::Default,
+                ).await?;
                 for entity in &rows {
                     let document = <Self as ::graphql_orm::graphql::orm::SearchableEntity>::search_document(entity);
                     ::graphql_orm::graphql::orm::upsert_search_document_on::<#backend_marker>(
-                        hook_ctx.executor(),
+                        &mut hook_ctx,
                         index,
                         &document,
                     ).await?;
@@ -4641,11 +4643,13 @@ pub(crate) fn generate_graphql_operations(
                 let Some(entity) = Self::find_by_key(db, id).await? else {
                     return Ok(());
                 };
-                let mut tx = db.pool().begin().await?;
-                let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::new(db, tx);
+                let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
+                    db,
+                    ::graphql_orm::graphql::orm::TransactionMode::Default,
+                ).await?;
                 let document = <Self as ::graphql_orm::graphql::orm::SearchableEntity>::search_document(&entity);
                 ::graphql_orm::graphql::orm::upsert_search_document_on::<#backend_marker>(
-                    hook_ctx.executor(),
+                    &mut hook_ctx,
                     index,
                     &document,
                 ).await?;
@@ -4664,7 +4668,7 @@ pub(crate) fn generate_graphql_operations(
                         ::graphql_orm::graphql::orm::ChangeAction::Deleted => {
                             let key = <Self as ::graphql_orm::graphql::orm::SearchableEntity>::search_key(entity);
                             ::graphql_orm::graphql::orm::delete_search_document_on::<#backend_marker>(
-                                hook_ctx.executor(),
+                                hook_ctx,
                                 index,
                                 &key,
                             ).await?;
@@ -4673,7 +4677,7 @@ pub(crate) fn generate_graphql_operations(
                         | ::graphql_orm::graphql::orm::ChangeAction::Updated => {
                             let document = <Self as ::graphql_orm::graphql::orm::SearchableEntity>::search_document(entity);
                             ::graphql_orm::graphql::orm::upsert_search_document_on::<#backend_marker>(
-                                hook_ctx.executor(),
+                                hook_ctx,
                                 index,
                                 &document,
                             ).await?;

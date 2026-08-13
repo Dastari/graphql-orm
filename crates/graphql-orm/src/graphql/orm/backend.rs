@@ -101,22 +101,84 @@ pub trait SqlxBackend: OrmBackend {
     }
 }
 
-pub trait WriteBackend: SqlxBackend {}
+/// Driver-neutral capability for executing entity data mutations.
+///
+/// Implementations own their transaction handle and never expose a driver
+/// connection through generated repository APIs. [`SqlxBackend`] remains the
+/// SQLx-specific read/execution adapter used by SQLite and PostgreSQL, while
+/// this trait also permits non-SQLx drivers such as Tiberius.
+pub trait WriteBackend: OrmBackend {
+    /// Backend-specific result from a statement that does not return rows.
+    type WriteResult: Send + 'static;
+
+    /// One connection-pinned transaction owned by this backend.
+    type Transaction<'pool>: Send + 'pool
+    where
+        Self: 'pool;
+
+    /// Exact affected-row count for a completed write result.
+    fn rows_affected(result: &Self::WriteResult) -> u64;
+
+    /// Execute a bound statement directly on the pool.
+    fn execute_with_binds<'a>(
+        pool: &'a Self::Pool,
+        sql: &'a str,
+        values: &'a [SqlValue],
+    ) -> BoxFuture<'a, crate::Result<Self::WriteResult>>;
+
+    /// Begin a connection-pinned ORM transaction.
+    fn begin_write_transaction<'a>(
+        pool: &'a Self::Pool,
+        mode: super::core::TransactionMode,
+    ) -> BoxFuture<'a, crate::Result<Self::Transaction<'a>>>;
+
+    /// Fetch rows through the pinned transaction.
+    fn fetch_rows_in_transaction<'a>(
+        transaction: &'a mut Self::Transaction<'_>,
+        sql: &'a str,
+        values: &'a [SqlValue],
+    ) -> BoxFuture<'a, crate::Result<Vec<Self::Row>>>;
+
+    /// Execute a bound statement through the pinned transaction.
+    fn execute_in_transaction<'a>(
+        transaction: &'a mut Self::Transaction<'_>,
+        sql: &'a str,
+        values: &'a [SqlValue],
+    ) -> BoxFuture<'a, crate::Result<Self::WriteResult>>;
+
+    /// Apply transaction-local database authorization state.
+    fn apply_auth_context_to_write_transaction<'a>(
+        _transaction: &'a mut Self::Transaction<'_>,
+        _auth: Option<&'a DbAuthContext>,
+    ) -> BoxFuture<'a, crate::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Commit and consume the transaction.
+    fn commit_write_transaction<'a>(
+        transaction: Self::Transaction<'a>,
+    ) -> BoxFuture<'a, crate::Result<()>>
+    where
+        Self: 'a;
+
+    /// Roll back and consume the transaction.
+    fn rollback_write_transaction<'a>(
+        transaction: Self::Transaction<'a>,
+    ) -> BoxFuture<'a, crate::Result<()>>
+    where
+        Self: 'a;
+
+    /// Classify a safe public backend error as transaction-retryable.
+    fn is_retryable_write_error(error: &sqlx::Error) -> bool;
+}
 
 /// Backend capability used by the public ORM-managed transaction runner.
 pub trait TransactionBackend: WriteBackend {
-    fn begin_orm_transaction<'a>(
-        pool: &'a Self::Pool,
-        mode: super::core::TransactionMode,
-    ) -> BoxFuture<'a, crate::Result<sqlx::Transaction<'a, Self::Database>>>;
-
-    fn is_retryable_transaction_error(error: &sqlx::Error) -> bool;
-
     /// Establish the narrowly scoped append-only retention bypass for one
     /// generated entity in the current transaction.
     #[doc(hidden)]
     fn set_retention_context<'a>(
-        _tx: &'a mut sqlx::Transaction<'_, Self::Database>,
+        _tx: &'a mut Self::Transaction<'_>,
         _table_name: &'a str,
     ) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async {
@@ -131,7 +193,7 @@ pub trait TransactionBackend: WriteBackend {
     /// a successful commit from inheriting capability.
     #[doc(hidden)]
     fn clear_retention_context<'a>(
-        _tx: &'a mut sqlx::Transaction<'_, Self::Database>,
+        _tx: &'a mut Self::Transaction<'_>,
     ) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async {
             Err(sqlx::Error::Protocol(
@@ -384,13 +446,26 @@ impl SqlxBackend for SqliteBackend {
 }
 
 #[cfg(feature = "sqlite")]
-impl WriteBackend for SqliteBackend {}
-#[cfg(feature = "sqlite")]
-impl TransactionBackend for SqliteBackend {
-    fn begin_orm_transaction<'a>(
+impl WriteBackend for SqliteBackend {
+    type WriteResult = sqlx::sqlite::SqliteQueryResult;
+    type Transaction<'pool> = sqlx::Transaction<'pool, sqlx::Sqlite>;
+
+    fn rows_affected(result: &Self::WriteResult) -> u64 {
+        result.rows_affected()
+    }
+
+    fn execute_with_binds<'a>(
+        pool: &'a Self::Pool,
+        sql: &'a str,
+        values: &'a [SqlValue],
+    ) -> BoxFuture<'a, crate::Result<Self::WriteResult>> {
+        <Self as SqlxBackend>::execute_with_binds(pool, sql, values)
+    }
+
+    fn begin_write_transaction<'a>(
         pool: &'a Self::Pool,
         mode: super::core::TransactionMode,
-    ) -> BoxFuture<'a, crate::Result<sqlx::Transaction<'a, Self::Database>>> {
+    ) -> BoxFuture<'a, crate::Result<Self::Transaction<'a>>> {
         Box::pin(async move {
             match mode {
                 super::core::TransactionMode::Default => pool.begin().await,
@@ -401,15 +476,49 @@ impl TransactionBackend for SqliteBackend {
         })
     }
 
-    fn is_retryable_transaction_error(error: &sqlx::Error) -> bool {
+    fn fetch_rows_in_transaction<'a>(
+        transaction: &'a mut Self::Transaction<'_>,
+        sql: &'a str,
+        values: &'a [SqlValue],
+    ) -> BoxFuture<'a, crate::Result<Vec<Self::Row>>> {
+        let sql = sql.to_string();
+        let values = values.to_vec();
+        <Self as SqlxBackend>::fetch_rows_on(transaction.as_mut(), sql, values)
+    }
+
+    fn execute_in_transaction<'a>(
+        transaction: &'a mut Self::Transaction<'_>,
+        sql: &'a str,
+        values: &'a [SqlValue],
+    ) -> BoxFuture<'a, crate::Result<Self::WriteResult>> {
+        let sql = sql.to_string();
+        let values = values.to_vec();
+        <Self as SqlxBackend>::execute_with_binds_on(transaction.as_mut(), sql, values)
+    }
+
+    fn commit_write_transaction<'a>(
+        transaction: Self::Transaction<'a>,
+    ) -> BoxFuture<'a, crate::Result<()>> {
+        Box::pin(async move { transaction.commit().await })
+    }
+
+    fn rollback_write_transaction<'a>(
+        transaction: Self::Transaction<'a>,
+    ) -> BoxFuture<'a, crate::Result<()>> {
+        Box::pin(async move { transaction.rollback().await })
+    }
+
+    fn is_retryable_write_error(error: &sqlx::Error) -> bool {
         error
             .as_database_error()
             .and_then(|error| error.code())
             .is_some_and(|code| matches!(code.as_ref(), "5" | "6" | "261" | "262" | "517"))
     }
-
+}
+#[cfg(feature = "sqlite")]
+impl TransactionBackend for SqliteBackend {
     fn set_retention_context<'a>(
-        tx: &'a mut sqlx::Transaction<'_, Self::Database>,
+        tx: &'a mut Self::Transaction<'_>,
         table_name: &'a str,
     ) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
@@ -428,7 +537,7 @@ impl TransactionBackend for SqliteBackend {
     }
 
     fn clear_retention_context<'a>(
-        tx: &'a mut sqlx::Transaction<'_, Self::Database>,
+        tx: &'a mut Self::Transaction<'_>,
     ) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
             sqlx::query("DELETE FROM __graphql_orm_retention_context")
@@ -626,33 +735,87 @@ impl SqlxBackend for PostgresBackend {
 }
 
 #[cfg(feature = "postgres")]
-impl WriteBackend for PostgresBackend {}
-#[cfg(feature = "postgres")]
-impl TransactionBackend for PostgresBackend {
-    fn begin_orm_transaction<'a>(
+impl WriteBackend for PostgresBackend {
+    type WriteResult = sqlx::postgres::PgQueryResult;
+    type Transaction<'pool> = sqlx::Transaction<'pool, sqlx::Postgres>;
+
+    fn rows_affected(result: &Self::WriteResult) -> u64 {
+        result.rows_affected()
+    }
+
+    fn execute_with_binds<'a>(
+        pool: &'a Self::Pool,
+        sql: &'a str,
+        values: &'a [SqlValue],
+    ) -> BoxFuture<'a, crate::Result<Self::WriteResult>> {
+        <Self as SqlxBackend>::execute_with_binds(pool, sql, values)
+    }
+
+    fn begin_write_transaction<'a>(
         pool: &'a Self::Pool,
         mode: super::core::TransactionMode,
-    ) -> BoxFuture<'a, crate::Result<sqlx::Transaction<'a, Self::Database>>> {
+    ) -> BoxFuture<'a, crate::Result<Self::Transaction<'a>>> {
         Box::pin(async move {
-            let mut tx = pool.begin().await?;
+            let mut transaction = pool.begin().await?;
             if mode == super::core::TransactionMode::StateMachine {
                 sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
-                    .execute(tx.as_mut())
+                    .execute(transaction.as_mut())
                     .await?;
             }
-            Ok(tx)
+            Ok(transaction)
         })
     }
 
-    fn is_retryable_transaction_error(error: &sqlx::Error) -> bool {
+    fn fetch_rows_in_transaction<'a>(
+        transaction: &'a mut Self::Transaction<'_>,
+        sql: &'a str,
+        values: &'a [SqlValue],
+    ) -> BoxFuture<'a, crate::Result<Vec<Self::Row>>> {
+        let sql = sql.to_string();
+        let values = values.to_vec();
+        <Self as SqlxBackend>::fetch_rows_on(transaction.as_mut(), sql, values)
+    }
+
+    fn execute_in_transaction<'a>(
+        transaction: &'a mut Self::Transaction<'_>,
+        sql: &'a str,
+        values: &'a [SqlValue],
+    ) -> BoxFuture<'a, crate::Result<Self::WriteResult>> {
+        let sql = sql.to_string();
+        let values = values.to_vec();
+        <Self as SqlxBackend>::execute_with_binds_on(transaction.as_mut(), sql, values)
+    }
+
+    fn apply_auth_context_to_write_transaction<'a>(
+        transaction: &'a mut Self::Transaction<'_>,
+        auth: Option<&'a DbAuthContext>,
+    ) -> BoxFuture<'a, crate::Result<()>> {
+        <Self as SqlxBackend>::apply_auth_context_to_transaction(transaction, auth)
+    }
+
+    fn commit_write_transaction<'a>(
+        transaction: Self::Transaction<'a>,
+    ) -> BoxFuture<'a, crate::Result<()>> {
+        Box::pin(async move { transaction.commit().await })
+    }
+
+    fn rollback_write_transaction<'a>(
+        transaction: Self::Transaction<'a>,
+    ) -> BoxFuture<'a, crate::Result<()>> {
+        Box::pin(async move { transaction.rollback().await })
+    }
+
+    fn is_retryable_write_error(error: &sqlx::Error) -> bool {
         error
             .as_database_error()
             .and_then(|error| error.code())
             .is_some_and(|code| matches!(code.as_ref(), "40001" | "40P01" | "55P03"))
     }
-
+}
+#[cfg(feature = "postgres")]
+impl TransactionBackend for PostgresBackend {
     fn set_retention_context<'a>(
-        tx: &'a mut sqlx::Transaction<'_, Self::Database>,
+        tx: &'a mut Self::Transaction<'_>,
         table_name: &'a str,
     ) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
@@ -665,7 +828,7 @@ impl TransactionBackend for PostgresBackend {
     }
 
     fn clear_retention_context<'a>(
-        tx: &'a mut sqlx::Transaction<'_, Self::Database>,
+        tx: &'a mut Self::Transaction<'_>,
     ) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async move {
             sqlx::query("SELECT set_config('graphql_orm.retention_entity', '', true)")
