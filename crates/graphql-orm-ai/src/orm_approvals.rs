@@ -431,6 +431,7 @@ impl OrmAiApprovalService {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn request_parked_approval_with_id(
         &self,
         lease: &AiRunLease,
