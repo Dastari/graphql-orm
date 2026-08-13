@@ -7,6 +7,7 @@ use std::sync::Arc;
 use agql_auth::Clock;
 use async_trait::async_trait;
 use time::Duration;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::{
@@ -73,6 +74,7 @@ impl AiSupervisedAgentCoordinatorLimits {
 /// grants no provider, budget, egress, approval, mutation, or resolver authority.
 pub struct AiSupervisedAgentTurnPlan {
     provider_call: AiProviderCallPlan,
+    provider_session: Option<crate::AiProviderSessionTurnPlan>,
     result_egress_route: AiToolResultEgressRoute,
     rules: AiResolvedRuleSet,
     uses_byok: bool,
@@ -103,10 +105,31 @@ impl AiSupervisedAgentTurnPlan {
         result_egress_route.validate()?;
         Ok(Self {
             provider_call,
+            provider_session: None,
             result_egress_route,
             rules,
             uses_byok,
         })
+    }
+
+    /// Binds this turn to one exact durable provider-session contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns a conflict unless the provider/model/registration contract is
+    /// exact for the already-validated provider call.
+    pub fn with_provider_session(
+        mut self,
+        session: crate::AiProviderSessionTurnPlan,
+    ) -> Result<Self, AiError> {
+        if !self
+            .provider_call
+            .matches_provider_session_descriptor(session.descriptor())
+        {
+            return Err(AiError::Conflict);
+        }
+        self.provider_session = Some(session);
+        Ok(self)
     }
 
     fn is_continuation(&self) -> bool {
@@ -117,6 +140,7 @@ impl AiSupervisedAgentTurnPlan {
         self,
     ) -> (
         AiProviderCallPlan,
+        Option<crate::AiProviderSessionTurnPlan>,
         AiScope,
         String,
         AiToolResultEgressRoute,
@@ -127,6 +151,7 @@ impl AiSupervisedAgentTurnPlan {
         let correlation_id = self.provider_call.correlation_id().to_owned();
         (
             self.provider_call,
+            self.provider_session,
             scope,
             correlation_id,
             self.result_egress_route,
@@ -486,6 +511,7 @@ pub struct AiSupervisedAgentCoordinator {
     planner: Arc<dyn AiSupervisedAgentTurnPlanner>,
     clock: Arc<dyn Clock>,
     limits: AiSupervisedAgentCoordinatorLimits,
+    provider_session_service: Option<Arc<dyn crate::AiProviderSessionService>>,
 }
 
 impl AiSupervisedAgentCoordinator {
@@ -518,6 +544,30 @@ impl AiSupervisedAgentCoordinator {
             planner,
             clock,
             limits,
+            provider_session_service: None,
+        }
+    }
+
+    /// Enables retained-session execution, wait reclaim, and terminal commit.
+    #[must_use]
+    pub fn with_provider_session_service(
+        mut self,
+        service: Arc<dyn crate::AiProviderSessionService>,
+    ) -> Self {
+        self.provider_session_service = Some(service);
+        self
+    }
+
+    async fn invalidate_result_provider_session(
+        &self,
+        result: &crate::AiProviderCallResult,
+        reason: &str,
+    ) {
+        if let (Some(service), Some(claim)) = (
+            &self.provider_session_service,
+            result.provider_session_claim(),
+        ) {
+            let _ = service.require_cleanup(claim, reason).await;
         }
     }
 
@@ -707,8 +757,15 @@ impl AiSupervisedAgentCoordinator {
                 .finish_failed(&lease, &guard, "supervised_provider_turn_limit_reached")
                 .await;
         }
-        let (provider_plan, scope, correlation_id, route, planned_rules, uses_byok) =
-            plan.into_parts();
+        let (
+            provider_plan,
+            provider_session,
+            scope,
+            correlation_id,
+            route,
+            planned_rules,
+            uses_byok,
+        ) = plan.into_parts();
         let resolution = match self.rule_resolver.resolve_rules(&lease, &scope).await {
             Ok(resolution) if resolution.rules().fingerprint() == planned_rules.fingerprint() => {
                 resolution
@@ -814,12 +871,66 @@ impl AiSupervisedAgentCoordinator {
             }
         }
         let classified_bindings = provider_plan.clone();
-        let result = match self
-            .execute_provider_with_heartbeats(&mut lease, provider_plan)
+        let reclaimed = if adopted.is_some() && provider_session.is_some() {
+            let Some(service) = &self.provider_session_service else {
+                return self
+                    .finish_recovery(
+                        &lease,
+                        &guard,
+                        AiAgentRecoveryPhase::ProviderTurn,
+                        "provider_session_reclaim_service_unavailable",
+                        None,
+                    )
+                    .await;
+            };
+            match service.reclaim_after_wait(&lease).await {
+                Ok(claim) => Some((service.clone(), claim)),
+                Err(_) => {
+                    return self
+                        .finish_recovery(
+                            &lease,
+                            &guard,
+                            AiAgentRecoveryPhase::ProviderTurn,
+                            "provider_session_wait_reclaim_failed",
+                            None,
+                        )
+                        .await;
+                }
+            }
+        } else {
+            None
+        };
+        let provider_result = if let Some(session_plan) = provider_session {
+            let Some(service) = &self.provider_session_service else {
+                return self
+                    .finish_recovery(
+                        &lease,
+                        &guard,
+                        AiAgentRecoveryPhase::ProviderTurn,
+                        "provider_session_service_unavailable",
+                        None,
+                    )
+                    .await;
+            };
+            self.execute_retained_provider_with_heartbeats(
+                &mut lease,
+                provider_plan,
+                session_plan,
+                service.clone(),
+            )
             .await
-        {
+        } else {
+            self.execute_provider_with_heartbeats(&mut lease, provider_plan)
+                .await
+        };
+        let result = match provider_result {
             Ok(result) => result,
             Err(SupervisedProviderTurnFailure::Provider) => {
+                if let Some((service, claim)) = &reclaimed {
+                    let _ = service
+                        .require_cleanup(claim, "provider_session_reclaimed_handoff_failed")
+                        .await;
+                }
                 return self
                     .finish_recovery(
                         &lease,
@@ -835,6 +946,11 @@ impl AiSupervisedAgentCoordinator {
         let observed = match guard.observe_provider_turn(&result) {
             Ok(observed) => observed,
             Err(_) => {
+                self.invalidate_result_provider_session(
+                    &result,
+                    "provider_session_turn_binding_failed",
+                )
+                .await;
                 return self
                     .finish_recovery(
                         &lease,
@@ -849,6 +965,11 @@ impl AiSupervisedAgentCoordinator {
         let current_rules = match self.rule_resolver.resolve_rules(&lease, &scope).await {
             Ok(current) if current.rules().fingerprint() == planned_rules.fingerprint() => current,
             _ => {
+                self.invalidate_result_provider_session(
+                    &result,
+                    "provider_session_rule_changed_after_provider",
+                )
+                .await;
                 return self
                     .finish_recovery(
                         &lease,
@@ -867,6 +988,11 @@ impl AiSupervisedAgentCoordinator {
         ) {
             Ok(usage) => usage,
             Err(_) => {
+                self.invalidate_result_provider_session(
+                    &result,
+                    "provider_session_rule_budget_exceeded",
+                )
+                .await;
                 return self
                     .finish_recovery(
                         &lease,
@@ -895,6 +1021,11 @@ impl AiSupervisedAgentCoordinator {
         {
             Ok(renewed) => renewed,
             Err(_) => {
+                self.invalidate_result_provider_session(
+                    &result,
+                    "provider_session_checkpoint_uncertain",
+                )
+                .await;
                 return self
                     .finish_recovery(
                         &lease,
@@ -911,6 +1042,14 @@ impl AiSupervisedAgentCoordinator {
                 let persisted = match self.output_writer.persist_output(&lease, &result).await {
                     Ok(persisted) => persisted,
                     Err(_) => {
+                        if let (Some(service), Some(claim)) = (
+                            &self.provider_session_service,
+                            result.provider_session_claim(),
+                        ) {
+                            let _ = service
+                                .require_cleanup(claim, "provider_session_output_uncertain")
+                                .await;
+                        }
                         return self
                             .finish_recovery(
                                 &lease,
@@ -924,13 +1063,77 @@ impl AiSupervisedAgentCoordinator {
                 };
                 let message_id = persisted.message_id();
                 lease = persisted.into_lease();
+                if self.run_control.cancellation(&lease).await?.is_some() {
+                    self.invalidate_result_provider_session(
+                        &result,
+                        "provider_session_cancelled_after_output",
+                    )
+                    .await;
+                    return self
+                        .finish_recovery(
+                            &lease,
+                            &guard,
+                            AiAgentRecoveryPhase::ProviderOutput,
+                            "supervised_cancelled_after_output",
+                            result.provider_response_id(),
+                        )
+                        .await;
+                }
+                let provider_session_commit = match result.provider_session_commit(message_id) {
+                    Ok(Some(commit)) => {
+                        let Some(service) = &self.provider_session_service else {
+                            self.invalidate_result_provider_session(
+                                &result,
+                                "provider_session_commit_service_unavailable",
+                            )
+                            .await;
+                            return self
+                                .finish_recovery(
+                                    &lease,
+                                    &guard,
+                                    AiAgentRecoveryPhase::ProviderOutput,
+                                    "provider_session_commit_service_unavailable",
+                                    result.provider_response_id(),
+                                )
+                                .await;
+                        };
+                        let claim = result.provider_session_claim().ok_or(AiError::Conflict)?;
+                        Some((service.clone(), claim.clone(), commit))
+                    }
+                    Ok(None) => None,
+                    Err(_) => {
+                        if let (Some(service), Some(claim)) = (
+                            &self.provider_session_service,
+                            result.provider_session_claim(),
+                        ) {
+                            let _ = service
+                                .require_cleanup(claim, "provider_session_commit_proof_invalid")
+                                .await;
+                        }
+                        None
+                    }
+                };
                 let completion = AiRunCompletion::new(
                     AiRunState::Completed,
                     "supervised_agent_completed",
                     None,
                     result.provider_response_id().map(str::to_owned),
                 )?;
-                self.run_control.finish(&lease, completion).await?;
+                if let Err(error) = self.run_control.finish(&lease, completion).await {
+                    if let Some((service, claim, _)) = &provider_session_commit {
+                        let _ = service
+                            .require_cleanup(claim, "provider_session_terminal_write_uncertain")
+                            .await;
+                    }
+                    return Err(error);
+                }
+                if let Some((service, claim, commit)) = provider_session_commit
+                    && service.commit_turn(&lease, &claim, commit).await.is_err()
+                {
+                    let _ = service
+                        .require_cleanup(&claim, "provider_session_commit_uncertain")
+                        .await;
+                }
                 Ok(AiSupervisedAgentRunOutcome::Completed {
                     message_id,
                     provider_turns: guard.provider_turns(),
@@ -1173,6 +1376,45 @@ impl AiSupervisedAgentCoordinator {
                         .heartbeat(lease)
                         .await
                         .map_err(SupervisedProviderTurnFailure::LeaseLost)?;
+                }
+            }
+        }
+    }
+
+    async fn execute_retained_provider_with_heartbeats(
+        &self,
+        lease: &mut AiRunLease,
+        plan: AiProviderCallPlan,
+        session_plan: crate::AiProviderSessionTurnPlan,
+        session_service: Arc<dyn crate::AiProviderSessionService>,
+    ) -> Result<crate::AiProviderCallResult, SupervisedProviderTurnFailure> {
+        let lease_state = Arc::new(Mutex::new(lease.clone()));
+        let provider = self.provider_executor.execute_retained_turn(
+            lease_state.clone(),
+            plan,
+            session_plan,
+            session_service,
+            None,
+        );
+        tokio::pin!(provider);
+        let delay = self.limits.heartbeat_interval.unsigned_abs();
+        loop {
+            let heartbeat = tokio::time::sleep(delay);
+            tokio::pin!(heartbeat);
+            tokio::select! {
+                result = &mut provider => {
+                    *lease = lease_state.lock().await.clone();
+                    return result.map_err(|_| SupervisedProviderTurnFailure::Provider);
+                }
+                () = &mut heartbeat => {
+                    let current = lease_state.lock().await.clone();
+                    let renewed = self
+                        .run_control
+                        .heartbeat(&current)
+                        .await
+                        .map_err(SupervisedProviderTurnFailure::LeaseLost)?;
+                    *lease = renewed.clone();
+                    *lease_state.lock().await = renewed;
                 }
             }
         }
