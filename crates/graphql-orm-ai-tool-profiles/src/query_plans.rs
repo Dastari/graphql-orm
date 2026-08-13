@@ -29,6 +29,7 @@ pub const AI_GRAPHQL_QUERY_CAPABILITY_VERSION: u16 = 1;
 
 const JSON_SCHEMA_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
 const MAXIMUM_DESCRIPTION_BYTES: usize = 1_024;
+const MAXIMUM_PROVIDER_SCHEMA_BYTES: usize = 1024 * 1024;
 
 /// Immutable deployment ceilings for automatic GraphQL query capabilities.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -140,9 +141,11 @@ pub struct AiGraphqlRelationshipQueryPlan {
     /// Exact typed relationship arguments, excluding the server-owned limit.
     #[serde(default)]
     pub arguments: Map<String, Value>,
-    /// Public scalar or enum fields selected from the related entity.
+    /// Public scalar or enum fields selected from the related entity. Values
+    /// must be `true`; the closed object form preserves per-field descriptions
+    /// in provider schemas.
     #[serde(default)]
-    pub fields: Vec<String>,
+    pub fields: BTreeMap<String, bool>,
     /// Explicit nested relationship selections.
     #[serde(default)]
     pub relationships: BTreeMap<String, AiGraphqlRelationshipQueryPlan>,
@@ -158,9 +161,10 @@ pub struct AiGraphqlQueryPlan {
     /// Exact typed root arguments, excluding any server-owned result limit.
     #[serde(default)]
     pub arguments: Map<String, Value>,
-    /// Public scalar or enum fields selected from the root entity.
+    /// Public scalar or enum fields selected from the root entity. Values must
+    /// be `true`; the closed object form preserves per-field descriptions.
     #[serde(default)]
-    pub fields: Vec<String>,
+    pub fields: BTreeMap<String, bool>,
     /// Explicit relationship selections.
     #[serde(default)]
     pub relationships: BTreeMap<String, AiGraphqlRelationshipQueryPlan>,
@@ -255,17 +259,30 @@ impl AiGraphqlQueryCapability {
                 let maximum = plan.maximum_items.unwrap_or(1);
                 wrap_projection_route(route, entity_projection, entity_disclosure, maximum)
             }
-            QueryOutput::Scalar { classification } => {
+            QueryOutput::Scalar {
+                classification,
+                maximum_items,
+            } => {
                 if !plan.fields.is_empty()
                     || !plan.relationships.is_empty()
-                    || plan.maximum_items.is_some()
+                    || maximum_items.is_some() != plan.maximum_items.is_some()
+                    || plan.maximum_items.is_some_and(|requested| {
+                        requested == 0 || maximum_items.is_none_or(|maximum| requested > maximum)
+                    })
                 {
                     return Err(input_error("scalar query plans cannot select fields"));
                 }
-                (
-                    String::new(),
-                    AiDisclosureShape::scalar(AiDisclosureRule::exportable(*classification)),
-                )
+                let scalar =
+                    AiDisclosureShape::scalar(AiDisclosureRule::exportable(*classification));
+                let disclosure = match plan.maximum_items {
+                    Some(maximum) => AiDisclosureShape::list(
+                        AiDisclosureRule::exportable(*classification),
+                        maximum,
+                        scalar,
+                    ),
+                    None => scalar,
+                };
+                (String::new(), disclosure)
             }
             QueryOutput::Aggregate {
                 projection,
@@ -313,6 +330,10 @@ impl AiGraphqlQueryCapability {
         };
         async_graphql::parser::parse_query(&document)
             .map_err(|_| configuration_error("compiled query document is invalid"))?;
+        let disclosure = AiDisclosureShape::object(
+            AiDisclosureRule::exportable(maximum_classification(&disclosure)),
+            [(self.operation.field_name.clone(), disclosure)],
+        );
         let disclosure_schema = AiDisclosureSchema::new(
             format!("automatic-query-v{AI_GRAPHQL_QUERY_CAPABILITY_VERSION}"),
             disclosure,
@@ -402,6 +423,18 @@ impl AiGraphqlQueryCapabilityCatalog {
         validate_limits(limits)?;
         let schema = FinishedSchema::parse(finished_sdl)?;
         validate_semantic_entities_against_schema(&schema, semantic_catalog)?;
+        let schema_query_roots = schema.query_root_fields()?;
+        let semantic_query_roots = semantic_catalog
+            .operations
+            .iter()
+            .filter(|operation| operation.kind == GraphqlOperationKind::Query)
+            .map(|operation| operation.field_name.as_str())
+            .collect::<BTreeSet<_>>();
+        if schema_query_roots != semantic_query_roots {
+            return Err(configuration_error(
+                "finished GraphQL Query roots and semantic operations differ",
+            ));
+        }
         let finished_schema_fingerprint = hex::encode(Sha256::digest(finished_sdl.as_bytes()));
         let operations = semantic_catalog
             .operations
@@ -535,6 +568,7 @@ enum QueryOutput {
     },
     Scalar {
         classification: DataClassification,
+        maximum_items: Option<u32>,
     },
     Aggregate {
         projection: String,
@@ -547,7 +581,7 @@ impl QueryOutput {
         match self {
             Self::Entity { route, .. } => route.iter().any(|segment| segment.is_list),
             Self::Aggregate { .. } => true,
-            Self::Scalar { .. } => false,
+            Self::Scalar { maximum_items, .. } => maximum_items.is_some(),
         }
     }
 }
@@ -598,10 +632,9 @@ impl FinishedSchema {
         for definition in &document.definitions {
             if let TypeSystemDefinition::Schema(schema) = definition
                 && let Some(query) = &schema.node.query
+                && query_root.replace(query.node.to_string()).is_some()
             {
-                if query_root.replace(query.node.to_string()).is_some() {
-                    return Err(configuration_error("finished schema repeats query root"));
-                }
+                return Err(configuration_error("finished schema repeats query root"));
             }
         }
         for definition in document.definitions {
@@ -687,6 +720,15 @@ impl FinishedSchema {
         self.object_field(&self.query_root, name)
     }
 
+    fn query_root_fields(&self) -> Result<BTreeSet<&str>, AiError> {
+        let Some(SchemaType::Object(fields)) = self.types.get(&self.query_root) else {
+            return Err(configuration_error(
+                "finished GraphQL Query root is missing",
+            ));
+        };
+        Ok(fields.keys().map(String::as_str).collect())
+    }
+
     fn object_field(&self, type_name: &str, name: &str) -> Result<&SchemaField, AiError> {
         let Some(SchemaType::Object(fields)) = self.types.get(type_name) else {
             return Err(configuration_error("GraphQL object type is missing"));
@@ -710,6 +752,14 @@ fn compile_capability(
     validate_operation_against_schema(operation, root_field)?;
     let output = resolve_query_output(schema, semantic_catalog, operation, &root_field.ty, limits)?;
     let argument_schema = build_plan_schema(schema, semantic_catalog, operation, &output, limits)?;
+    if serde_json::to_vec(&argument_schema)
+        .map(|encoded| encoded.len() > MAXIMUM_PROVIDER_SCHEMA_BYTES)
+        .unwrap_or(true)
+    {
+        return Err(configuration_error(
+            "query capability schema exceeds the provider contract",
+        ));
+    }
     jsonschema::validator_for(&argument_schema)
         .map_err(|_| configuration_error("generated query plan schema is invalid"))?;
     let id = AiToolId::parse(stable_capability_id(subgraph_id, &operation.field_name))?;
@@ -781,12 +831,17 @@ fn validate_semantic_entities_against_schema(
             let actual = fields.get(&field.field_name).ok_or_else(|| {
                 configuration_error("semantic entity field is absent from finished SDL")
             })?;
-            if actual.ty != render_type_ref(&field.type_ref) {
-                return Err(configuration_error(
-                    "semantic entity field type has drifted from finished SDL",
-                ));
-            }
             if let Some(relationship) = &field.relationship {
+                let (_, route) =
+                    resolve_specific_entity_route(schema, &relationship.target, &actual.ty, 8)?;
+                let actual_many = route.iter().any(|segment| segment.is_list);
+                if actual_many
+                    != (relationship.cardinality == GraphqlSemanticRelationshipCardinality::Many)
+                {
+                    return Err(configuration_error(
+                        "semantic relationship cardinality has drifted from finished SDL",
+                    ));
+                }
                 if actual.arguments.len() != relationship.arguments.len()
                     || relationship.arguments.iter().any(|argument| {
                         actual
@@ -799,10 +854,17 @@ fn validate_semantic_entities_against_schema(
                         "semantic relationship arguments have drifted from finished SDL",
                     ));
                 }
-            } else if !actual.arguments.is_empty() {
-                return Err(configuration_error(
-                    "semantic scalar field unexpectedly accepts arguments",
-                ));
+            } else {
+                if actual.ty != render_type_ref(&field.type_ref) {
+                    return Err(configuration_error(
+                        "semantic entity field type has drifted from finished SDL",
+                    ));
+                }
+                if !actual.arguments.is_empty() {
+                    return Err(configuration_error(
+                        "semantic scalar field unexpectedly accepts arguments",
+                    ));
+                }
             }
         }
     }
@@ -824,8 +886,21 @@ fn resolve_query_output(
         schema.types.get(named),
         Some(SchemaType::Scalar | SchemaType::Enum(_)) | None
     ) {
+        let maximum_items = if list_item_type(graphql_type).is_some() {
+            Some(
+                semantic_root_list_bound(&operation.result_type)
+                    .filter(|maximum| *maximum > 0)
+                    .ok_or_else(|| {
+                        configuration_error("scalar list query has no positive semantic bound")
+                    })?
+                    .min(limits.maximum_result_records),
+            )
+        } else {
+            None
+        };
         return Ok(QueryOutput::Scalar {
             classification: DataClassification::Internal,
+            maximum_items,
         });
     }
     if catalog
@@ -862,7 +937,9 @@ fn aggregate_output(
             "aggregate query result is not bounded-list shaped",
         ));
     }
-    let row = named_type(list_item_type(graphql_type).expect("list checked"))?;
+    let row_type = list_item_type(graphql_type)
+        .ok_or_else(|| configuration_error("aggregate query result is not a list"))?;
+    let row = named_type(row_type)?;
     let Some(SchemaType::Object(row_fields)) = schema.types.get(row) else {
         return Err(configuration_error("aggregate result row is missing"));
     };
@@ -961,7 +1038,7 @@ fn build_plan_schema(
             let selection = selection_schema(schema, catalog, entity, limits, 0, &mut Vec::new())?;
             let selection = selection
                 .as_object()
-                .expect("selection schema is object")
+                .ok_or_else(|| configuration_error("selection schema is not an object"))?
                 .clone();
             for (name, value) in selection {
                 if name == "required" {
@@ -985,7 +1062,20 @@ fn build_plan_schema(
             );
             required.push(Value::String("maximumItems".to_owned()));
         }
-        QueryOutput::Scalar { .. } => {}
+        QueryOutput::Scalar {
+            maximum_items: Some(maximum),
+            ..
+        } => {
+            properties.insert(
+                "maximumItems".to_owned(),
+                bounded_integer_schema(1, i64::from(*maximum)),
+            );
+            required.push(Value::String("maximumItems".to_owned()));
+        }
+        QueryOutput::Scalar {
+            maximum_items: None,
+            ..
+        } => {}
     }
     Ok(json!({
         "$schema": JSON_SCHEMA_2020_12,
@@ -1015,8 +1105,13 @@ fn selection_schema(
         .fields
         .iter()
         .filter(|field| selectable_exportable_scalar(field))
-        .map(|field| Value::String(field.field_name.clone()))
-        .collect::<Vec<_>>();
+        .map(|field| {
+            (
+                field.field_name.clone(),
+                json!({ "type": "boolean", "description": field.description }),
+            )
+        })
+        .collect::<Map<_, _>>();
     let mut relationship_properties = Map::new();
     for field in entity.fields.iter().filter(|field| {
         depth + 1 < limits.maximum_depth
@@ -1025,7 +1120,11 @@ fn selection_schema(
             && field.classification != GraphqlSemanticClassification::Secret
             && field.relationship.is_some()
     }) {
-        let relationship = field.relationship.as_ref().expect("filtered");
+        let Some(relationship) = field.relationship.as_ref() else {
+            return Err(configuration_error(
+                "semantic relationship selection is missing relationship metadata",
+            ));
+        };
         if ancestry.iter().any(|name| name == &relationship.target) {
             continue;
         }
@@ -1058,7 +1157,9 @@ fn selection_schema(
             depth + 1,
             ancestry,
         )?;
-        let nested_object = nested.as_object().expect("selection schema object");
+        let nested_object = nested
+            .as_object()
+            .ok_or_else(|| configuration_error("nested selection schema is not an object"))?;
         let mut properties = Map::from_iter([("arguments".to_owned(), arguments)]);
         properties.extend(
             nested_object["properties"]
@@ -1101,11 +1202,11 @@ fn selection_schema(
         ));
     }
     let fields = json!({
-        "type": "array",
+        "type": "object",
         "description": format!("Selected public fields from {entity_name}."),
-        "items": { "type": "string", "enum": scalar_fields },
-        "uniqueItems": true,
-        "maxItems": limits.maximum_selected_fields,
+        "properties": scalar_fields,
+        "required": [],
+        "additionalProperties": false,
     });
     Ok(json!({
         "properties": {
@@ -1195,7 +1296,15 @@ fn input_type_schema(
     }
     let named = named_type(graphql_type)?;
     let mut value = match schema.types.get(named) {
-        Some(SchemaType::Enum(values)) => json!({ "type": "string", "enum": values }),
+        Some(SchemaType::Enum(values)) => {
+            let values = restricted_enum_values(catalog, named, values);
+            if values.is_empty() {
+                return Err(configuration_error(
+                    "query enum has no exportable semantic values",
+                ));
+            }
+            json!({ "type": "string", "enum": values })
+        }
         Some(SchemaType::InputObject(fields)) => {
             if ancestry.iter().any(|name| name == named) {
                 return Err(configuration_error(
@@ -1253,6 +1362,47 @@ fn restrict_input_fields(
             })
         })
         .map(|(name, field)| (name.clone(), field.clone()))
+        .collect()
+}
+
+fn restricted_enum_values(
+    catalog: &GraphqlSemanticCatalog,
+    enum_name: &str,
+    values: &[String],
+) -> Vec<String> {
+    let entity = catalog
+        .entities
+        .iter()
+        .filter(|entity| enum_name.starts_with(&entity.entity_name))
+        .max_by_key(|entity| entity.entity_name.len());
+    let Some(entity) = entity else {
+        return values.to_vec();
+    };
+    if !enum_name[entity.entity_name.len()..]
+        .to_ascii_lowercase()
+        .contains("aggregatefield")
+    {
+        return values.to_vec();
+    }
+    values
+        .iter()
+        .filter(|value| {
+            entity.fields.iter().any(|field| {
+                semantic_name_key(&field.field_name) == semantic_name_key(value)
+                    && field.export == GraphqlSemanticExport::Exportable
+                    && field.classification != GraphqlSemanticClassification::Secret
+                    && (field.groupable || !field.aggregate_operators.is_empty())
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+fn semantic_name_key(value: &str) -> String {
+    value
+        .bytes()
+        .filter(|byte| byte.is_ascii_alphanumeric())
+        .map(|byte| byte.to_ascii_lowercase() as char)
         .collect()
 }
 
@@ -1362,10 +1512,10 @@ impl<'a> CompileContext<'a> {
             return Err(input_error("query relationship depth exceeds its bound"));
         }
         let entity = semantic_entity(&self.capability.semantic_catalog, entity_name)?;
-        let supplied_fields = plan.fields.iter().collect::<BTreeSet<_>>();
-        if supplied_fields.len() != plan.fields.len() {
-            return Err(input_error("query selection repeats a field"));
+        if plan.fields.values().any(|selected| !selected) {
+            return Err(input_error("query selection flags must be true"));
         }
+        let supplied_fields = plan.fields.keys().collect::<BTreeSet<_>>();
         let mut rendered = Vec::new();
         let mut disclosure_fields = BTreeMap::new();
         for field in &entity.fields {
@@ -1504,7 +1654,7 @@ impl<'a> CompileContext<'a> {
 }
 
 struct EntityPlanRef<'a> {
-    fields: &'a [String],
+    fields: &'a BTreeMap<String, bool>,
     relationships: &'a BTreeMap<String, AiGraphqlRelationshipQueryPlan>,
 }
 
@@ -1545,7 +1695,7 @@ fn unique_entity_route(
             }
         }
     }
-    results.sort_by(|left, right| left.1.len().cmp(&right.1.len()));
+    results.sort_by_key(|result| result.1.len());
     let Some(first) = results.first().cloned() else {
         return Err(configuration_error(
             "query result does not reach a semantic entity",
@@ -1677,6 +1827,13 @@ fn semantic_list_bound(type_ref: &GraphqlSemanticTypeRef) -> Result<u32, AiError
         _ => Err(configuration_error(
             "semantic collection relationship has no positive bound",
         )),
+    }
+}
+
+fn semantic_root_list_bound(type_ref: &GraphqlSemanticTypeRef) -> Option<u32> {
+    match type_ref {
+        GraphqlSemanticTypeRef::List { maximum_items, .. } => *maximum_items,
+        GraphqlSemanticTypeRef::Named { .. } => None,
     }
 }
 
@@ -1854,7 +2011,7 @@ fn validate_public_token(value: &str, label: &str) -> Result<(), AiError> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
     {
-        return Err(configuration_error(&format!("{label} is invalid")));
+        return Err(configuration_error(format!("{label} is invalid")));
     }
     Ok(())
 }
@@ -1962,9 +2119,12 @@ mod tests {
           id: String!
           name: String!
           credential: String!
-          children(page: PageInput): [Child!]!
+          children(page: PageInput): ChildConnection!
         }
         type Child { id: String!, label: String! }
+        type ChildConnection { edges: [ChildEdge!]!, pageInfo: PageInfo! }
+        type ChildEdge { node: Child!, cursor: String! }
+        type PageInfo { totalCount: Int!, hasNextPage: Boolean! }
         input PageInput { limit: Int, offset: Int }
         enum AggregateOperator { COUNT SUM }
         input AggregateMetric { operator: AggregateOperator!, field: String }
@@ -2096,11 +2256,19 @@ mod tests {
         .expect("semantic catalogue validates")
     }
 
+    fn query_sdl() -> String {
+        SDL.replace(
+            "          ParentAggregate(groupLimit: Int!, metrics: [AggregateMetric!]!): [AggregateRow!]!\n",
+            "",
+        )
+    }
+
     fn catalog() -> AiGraphqlQueryCapabilityCatalog {
+        let sdl = query_sdl();
         AiGraphqlQueryCapabilityCatalog::compile(
             "inventory",
             GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
-            SDL,
+            &sdl,
             &semantic_catalog(),
             AiGraphqlQueryCapabilityLimits::default(),
         )
@@ -2160,11 +2328,11 @@ mod tests {
         let compiled = capability
             .compile(json!({
                 "arguments": { "id": "parent-1" },
-                "fields": ["id", "name"],
+                "fields": { "id": true, "name": true },
                 "relationships": {
                     "children": {
                         "arguments": {},
-                        "fields": ["id", "label"],
+                        "fields": { "id": true, "label": true },
                         "relationships": {},
                         "maximumItems": 2
                     }
@@ -2181,7 +2349,7 @@ mod tests {
             compiled
                 .descriptor()
                 .document
-                .contains("children(page: $v1) { id label }")
+                .contains("children(page: $v1) { edges { node { id label } } }")
         );
         assert_eq!(compiled.variables()["v0"], json!("parent-1"));
         assert_eq!(compiled.variables()["v1"]["limit"], json!(2));
@@ -2201,12 +2369,16 @@ mod tests {
         compiled
             .disclosure_schema()
             .evaluate(&json!({
-                "id": "parent-1",
-                "name": "Reviewed",
-                "children": [
-                    { "id": "child-1", "label": "First" },
-                    { "id": "child-2", "label": "Second" }
-                ]
+                "ReadParent": {
+                    "id": "parent-1",
+                    "name": "Reviewed",
+                    "children": {
+                        "edges": [
+                            { "node": { "id": "child-1", "label": "First" } },
+                            { "node": { "id": "child-2", "label": "Second" } }
+                        ]
+                    }
+                }
             }))
             .expect("exact selected result discloses");
     }
@@ -2218,26 +2390,26 @@ mod tests {
         for plan in [
             json!({
                 "arguments": { "id": "parent-1" },
-                "fields": ["credential"],
+                "fields": { "credential": true },
                 "relationships": {}
             }),
             json!({
                 "arguments": { "id": "parent-1" },
-                "fields": ["unknown"],
+                "fields": { "unknown": true },
                 "relationships": {}
             }),
             json!({
                 "arguments": { "id": "parent-1" },
-                "fields": ["id"],
+                "fields": { "id": true },
                 "relationships": {
                     "children": {
-                        "arguments": {}, "fields": ["id"], "relationships": {}
+                        "arguments": {}, "fields": { "id": true }, "relationships": {}
                     }
                 }
             }),
             json!({
                 "arguments": { "id": "parent-1", "extra": true },
-                "fields": ["id"],
+                "fields": { "id": true },
                 "relationships": {}
             }),
         ] {
@@ -2262,7 +2434,7 @@ mod tests {
         );
         let plan = json!({
             "arguments": { "id": "parent-1" },
-            "fields": ["id"],
+            "fields": { "id": true },
             "relationships": {}
         });
         let first_query = first_capability.compile(plan.clone()).expect("first query");
@@ -2305,7 +2477,7 @@ mod tests {
             semantic.operations.into_iter().chain([duplicate]),
         )
         .expect("catalog");
-        let sdl = SDL.replace(
+        let sdl = query_sdl().replace(
             "ReadParent(id: ID!): Parent!",
             "ReadParent(id: ID!): Parent!\nAnotherParent: Parent!",
         );
@@ -2316,6 +2488,24 @@ mod tests {
                 &sdl,
                 &semantic,
                 limits,
+            ),
+            Err(AiError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn finished_schema_custom_query_without_semantics_fails_readiness() {
+        let sdl = query_sdl().replace(
+            "ReadParent(id: ID!): Parent!",
+            "ReadParent(id: ID!): Parent!\nUndeclaredCustomRoot: String!",
+        );
+        assert!(matches!(
+            AiGraphqlQueryCapabilityCatalog::compile(
+                "inventory",
+                GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
+                &sdl,
+                &semantic_catalog(),
+                AiGraphqlQueryCapabilityLimits::default(),
             ),
             Err(AiError::InvalidConfiguration(_))
         ));

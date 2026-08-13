@@ -341,15 +341,18 @@ impl AiRuntime {
         &self,
         principal_reference: &PrincipalReference,
         capability_id: &AiToolId,
+        capability_fingerprint: &str,
         plan: serde_json::Value,
         invocation: GraphqlInvocationContext,
     ) -> Result<AiToolExecutionResult, AiError> {
         if !self.start_gate.is_ready() {
             return Err(AiError::RuntimeNotReady);
         }
-        let compiled = self
-            .tool_catalog
-            .compile_query_capability(capability_id, plan)?;
+        let compiled = self.tool_catalog.compile_query_capability(
+            capability_id,
+            capability_fingerprint,
+            plan,
+        )?;
         let (descriptor, disclosure_schema, variables) = compiled.into_parts();
         if descriptor.maturity > self.maximum_tool_maturity
             || descriptor.operation_kind != AiToolOperationKind::Query

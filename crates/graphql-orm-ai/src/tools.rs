@@ -304,12 +304,14 @@ impl AiToolCatalog {
     pub fn compile_query_capability(
         &self,
         id: &AiToolId,
+        expected_capability_fingerprint: &str,
         plan: serde_json::Value,
     ) -> Result<AiCompiledGraphqlQuery, AiError> {
-        self.query_capabilities
-            .get(id)
-            .ok_or(AiError::Forbidden)?
-            .compile(plan)
+        let capability = self.query_capabilities.get(id).ok_or(AiError::Forbidden)?;
+        if capability.fingerprint() != expected_capability_fingerprint {
+            return Err(AiError::Forbidden);
+        }
+        capability.compile(plan)
     }
 
     /// Builds one provider-facing definition from the exact registered
