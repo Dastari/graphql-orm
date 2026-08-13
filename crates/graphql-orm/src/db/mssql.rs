@@ -411,6 +411,10 @@ impl From<&SqlValue> for MssqlParamValue {
             SqlValue::IntNull => Self::NullInt,
             SqlValue::Float(value) => Self::Float(*value),
             SqlValue::FloatNull => Self::NullFloat,
+            // The writable MSSQL capability replaces this read-path-compatible
+            // textual bind with Tiberius' native DECIMAL transport.
+            SqlValue::Decimal(value) => Self::String(value.value().to_string()),
+            SqlValue::DecimalNull(_) => Self::NullString,
             SqlValue::Bool(value) => Self::Bool(*value),
             SqlValue::BoolNull => Self::NullBool,
             SqlValue::Null => Self::NullString,

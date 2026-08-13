@@ -859,6 +859,7 @@ pub(crate) struct FieldMetadata {
     pub(crate) graphql_name: Option<String>,
     pub(crate) serde_name: Option<String>,
     pub(crate) db_column: Option<String>,
+    pub(crate) decimal: Option<(u8, u8)>,
     pub(crate) description: Option<String>,
     pub(crate) classification: Option<String>,
     pub(crate) non_exportable: bool,
@@ -1006,6 +1007,7 @@ impl Default for FieldMetadata {
             graphql_name: None,
             serde_name: None,
             db_column: None,
+            decimal: None,
             description: None,
             classification: None,
             non_exportable: false,
@@ -1523,6 +1525,45 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             meta.db_column = Some(lit.value());
+                        } else if nested.path.is_ident("decimal") {
+                            if meta.decimal.is_some() {
+                                return Err(syn::Error::new(
+                                    nested.path.span(),
+                                    "decimal may only be declared once per field",
+                                ));
+                            }
+                            let mut precision = None;
+                            let mut scale = None;
+                            nested.parse_nested_meta(|decimal_meta| {
+                                if decimal_meta.path.is_ident("precision") {
+                                    let value = decimal_meta.value()?;
+                                    let lit: syn::LitInt = value.parse()?;
+                                    precision = Some(lit.base10_parse::<u8>()?);
+                                } else if decimal_meta.path.is_ident("scale") {
+                                    let value = decimal_meta.value()?;
+                                    let lit: syn::LitInt = value.parse()?;
+                                    scale = Some(lit.base10_parse::<u8>()?);
+                                } else {
+                                    return Err(syn::Error::new(
+                                        decimal_meta.path.span(),
+                                        "unsupported decimal option; expected precision or scale",
+                                    ));
+                                }
+                                Ok(())
+                            })?;
+                            let precision = precision.ok_or_else(|| {
+                                syn::Error::new(nested.path.span(), "decimal requires precision")
+                            })?;
+                            let scale = scale.ok_or_else(|| {
+                                syn::Error::new(nested.path.span(), "decimal requires scale")
+                            })?;
+                            if precision == 0 || precision > 18 || scale > precision {
+                                return Err(syn::Error::new(
+                                    nested.path.span(),
+                                    "decimal requires 1 <= precision <= 18 and scale <= precision",
+                                ));
+                            }
+                            meta.decimal = Some((precision, scale));
                         } else if nested.path.is_ident("default") {
                             if meta.default.is_some() || meta.suppress_implicit_default {
                                 return Err(syn::Error::new(
@@ -1858,6 +1899,21 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
         }
         meta.classification = Some("secret".to_owned());
         meta.non_exportable = true;
+    }
+
+    let field_type = option_inner_type(&field.ty).unwrap_or(&field.ty);
+    let is_decimal = type_path_last_ident(field_type).is_some_and(|ident| ident == "Decimal");
+    if is_decimal && meta.decimal.is_none() {
+        return Err(syn::Error::new_spanned(
+            field,
+            "rust_decimal::Decimal fields require #[graphql_orm(decimal(precision = P, scale = S))]",
+        ));
+    }
+    if !is_decimal && meta.decimal.is_some() {
+        return Err(syn::Error::new_spanned(
+            field,
+            "decimal metadata is only valid on rust_decimal::Decimal fields",
+        ));
     }
 
     Ok(meta)
@@ -3248,6 +3304,15 @@ fn generate_entity_impl(
             backup_policy_tokens(field_meta.backup_policy.as_deref(), field.span())?;
         let logical_type = backup_value_kind_tokens(field_type, &field_meta);
         let sql_type = rust_type_to_sql_type(backend, field_type, &field_meta);
+        let decimal_tokens = field_meta
+            .decimal
+            .map(|(precision, scale)| {
+                quote! {
+                    Some(::graphql_orm::graphql::orm::DecimalDef::new(#precision, #scale)
+                        .expect("macro-validated decimal definition"))
+                }
+            })
+            .unwrap_or_else(|| quote! { None });
         let spatial_tokens = if let Some(spatial) = &field_meta.spatial {
             if backend == BackendKind::Mssql {
                 return Err(syn::Error::new(
@@ -3432,6 +3497,7 @@ fn generate_entity_impl(
                 rust_name: #rust_name,
                 api_name: #graphql_name,
                 sql_type: #sql_type,
+                decimal: #decimal_tokens,
                 spatial: #spatial_tokens,
                 search: #search_tokens,
                 logical_type: #logical_type,
@@ -5328,11 +5394,24 @@ fn generate_row_field_assignment(
             },
         });
     }
-
     if meta.is_boolean_field {
         return Ok(quote! {
             #field_name: #bool_expr,
         });
+    }
+    if let Some((precision, scale)) = meta.decimal {
+        let definition = quote! {
+            ::graphql_orm::graphql::orm::DecimalDef::new(#precision, #scale)
+                .expect("macro-validated decimal definition")
+        };
+        let value = match backend {
+            BackendKind::Sqlite => quote! {{
+                let value: i64 = row.try_get(#db_col)?;
+                #definition.from_scaled_i64(value)
+            }},
+            BackendKind::Postgres | BackendKind::Mssql => quote! { row.try_get(#db_col)? },
+        };
+        return Ok(quote! { #field_name: #value, });
     }
 
     if meta.spatial.is_some() {
@@ -5396,6 +5475,7 @@ fn generate_row_field_assignment(
                         #field_name: row.try_get(#db_col)?,
                     });
                 }
+                "Decimal" => unreachable!("Decimal fields require validated decimal metadata"),
                 "bool" => {
                     return Ok(quote! {
                         #field_name: #bool_expr,
@@ -5480,6 +5560,20 @@ fn generate_option_row_field_assignment(
                 .map_err(|e| ::graphql_orm::sqlx::Error::Decode(e.into()))?
         }}
     };
+    if let Some((precision, scale)) = meta.decimal {
+        let definition = quote! {
+            ::graphql_orm::graphql::orm::DecimalDef::new(#precision, #scale)
+                .expect("macro-validated decimal definition")
+        };
+        let value = match backend {
+            BackendKind::Sqlite => quote! {{
+                let value: Option<i64> = row.try_get(#db_col)?;
+                value.map(|value| #definition.from_scaled_i64(value))
+            }},
+            BackendKind::Postgres | BackendKind::Mssql => quote! { row.try_get(#db_col)? },
+        };
+        return Ok(quote! { #field_name: #value, });
+    }
     if let syn::Type::Path(inner_path) = inner_type {
         if let Some(segment) = inner_path.path.segments.last() {
             let inner_name = segment.ident.to_string();
@@ -5757,6 +5851,13 @@ pub(crate) fn rust_type_to_sql_type(
             BackendKind::Sqlite => "TEXT",
         }
         .to_string();
+    }
+    if let Some((precision, scale)) = meta.decimal {
+        return match backend {
+            BackendKind::Sqlite => "INTEGER".to_string(),
+            BackendKind::Postgres => format!("NUMERIC({precision},{scale})"),
+            BackendKind::Mssql => format!("DECIMAL({precision},{scale})"),
+        };
     }
 
     // Infer from Rust type first (so f64 becomes REAL not INTEGER for "number" filter)

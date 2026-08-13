@@ -44,6 +44,10 @@ pub enum SqlValue {
     Float(f64),
     /// Typed null for floating point values.
     FloatNull,
+    /// Exact fixed-precision decimal value with its validated storage definition.
+    Decimal(DecimalValue),
+    /// Typed null for an exact fixed-precision decimal column.
+    DecimalNull(DecimalDef),
     /// Boolean value.
     Bool(bool),
     /// Typed null for boolean values.
@@ -77,6 +81,12 @@ pub fn composite_key_id(values: &[SqlValue]) -> String {
             SqlValue::Uuid(value) => format!("u:{value}"),
             SqlValue::Int(value) => format!("i:{value}"),
             SqlValue::Float(value) => format!("f:{:016x}", value.to_bits()),
+            SqlValue::Decimal(value) => format!(
+                "d{}:{}:{}",
+                value.definition().precision(),
+                value.definition().scale(),
+                value.value()
+            ),
             SqlValue::Bool(value) => format!("b:{value}"),
             SqlValue::Json(value) => {
                 let encoded = serde_json::to_string(value).unwrap_or_default();
@@ -88,6 +98,7 @@ pub fn composite_key_id(values: &[SqlValue]) -> String {
             | SqlValue::UuidNull
             | SqlValue::IntNull
             | SqlValue::FloatNull
+            | SqlValue::DecimalNull(_)
             | SqlValue::BoolNull
             | SqlValue::Null => "n".to_string(),
         }
@@ -101,6 +112,142 @@ pub fn composite_key_id(values: &[SqlValue]) -> String {
         id.push_str(&component(value));
     }
     id
+}
+
+/// Validated portable fixed-precision decimal storage definition.
+///
+/// The precision ceiling of 18 is deliberate: it permits the same value to be
+/// represented losslessly as a scaled `i64` on SQLite and as `NUMERIC` or
+/// `DECIMAL` on PostgreSQL and SQL Server.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct DecimalDef {
+    precision: u8,
+    scale: u8,
+}
+
+impl DecimalDef {
+    /// Maximum portable precision supported by every ORM backend.
+    pub const MAXIMUM_PORTABLE_PRECISION: u8 = 18;
+
+    /// Creates a validated decimal definition.
+    pub const fn new(precision: u8, scale: u8) -> Result<Self, DecimalConfigurationError> {
+        if precision == 0
+            || precision > Self::MAXIMUM_PORTABLE_PRECISION
+            || scale > precision
+        {
+            return Err(DecimalConfigurationError);
+        }
+        Ok(Self { precision, scale })
+    }
+
+    /// Total number of decimal digits retained by this definition.
+    pub const fn precision(self) -> u8 {
+        self.precision
+    }
+
+    /// Number of digits retained after the decimal point.
+    pub const fn scale(self) -> u8 {
+        self.scale
+    }
+
+    /// Validates and normalizes a decimal value without rounding.
+    pub fn normalize(
+        self,
+        value: rust_decimal::Decimal,
+    ) -> Result<rust_decimal::Decimal, DecimalValueError> {
+        let mut normalized = value;
+        normalized.rescale(u32::from(self.scale));
+        if normalized != value {
+            return Err(DecimalValueError::Scale);
+        }
+        let digits = normalized.mantissa().unsigned_abs().to_string().len();
+        if digits > usize::from(self.precision) {
+            return Err(DecimalValueError::Precision);
+        }
+        Ok(normalized)
+    }
+
+    /// Converts a validated decimal to SQLite's canonical scaled integer.
+    pub fn to_scaled_i64(
+        self,
+        value: rust_decimal::Decimal,
+    ) -> Result<i64, DecimalValueError> {
+        let normalized = self.normalize(value)?;
+        i64::try_from(normalized.mantissa()).map_err(|_| DecimalValueError::Precision)
+    }
+
+    /// Decodes SQLite's canonical scaled integer representation.
+    pub fn from_scaled_i64(self, value: i64) -> rust_decimal::Decimal {
+        rust_decimal::Decimal::from_i128_with_scale(i128::from(value), u32::from(self.scale))
+    }
+}
+
+/// Invalid portable decimal precision or scale.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DecimalConfigurationError;
+
+impl std::fmt::Display for DecimalConfigurationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("invalid portable decimal definition")
+    }
+}
+
+impl std::error::Error for DecimalConfigurationError {}
+
+/// Stable category for a decimal value that cannot be represented exactly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DecimalValueError {
+    /// The value would require rounding to fit the declared scale.
+    Scale,
+    /// The value exceeds the declared precision.
+    Precision,
+}
+
+impl std::fmt::Display for DecimalValueError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Scale => "decimal value exceeds declared scale",
+            Self::Precision => "decimal value exceeds declared precision",
+        })
+    }
+}
+
+impl std::error::Error for DecimalValueError {}
+
+/// Exact decimal bind value paired with its validated storage definition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DecimalValue {
+    value: rust_decimal::Decimal,
+    definition: DecimalDef,
+}
+
+impl DecimalValue {
+    /// Creates a decimal bind value, rejecting precision or scale loss.
+    pub fn new(
+        value: rust_decimal::Decimal,
+        definition: DecimalDef,
+    ) -> Result<Self, DecimalValueError> {
+        Ok(Self {
+            value: definition.normalize(value)?,
+            definition,
+        })
+    }
+
+    /// Returns the normalized exact value.
+    pub const fn value(self) -> rust_decimal::Decimal {
+        self.value
+    }
+
+    /// Returns the validated storage definition.
+    pub const fn definition(self) -> DecimalDef {
+        self.definition
+    }
+
+    /// Returns SQLite's canonical scaled-integer representation.
+    pub fn scaled_i64(self) -> i64 {
+        i64::try_from(self.value.mantissa())
+            .expect("validated portable decimal mantissa always fits i64")
+    }
 }
 
 /// Request-local database authorization context for PostgreSQL RLS and
@@ -2351,6 +2498,19 @@ where
     Ok(SqlValue::Json(json))
 }
 
+/// Converts a Decimal to an exact backend-neutral bind value.
+pub fn decimal_sql_value<E>(
+    value: rust_decimal::Decimal,
+    definition: DecimalDef,
+) -> Result<SqlValue, E>
+where
+    E: OrmResultError,
+{
+    DecimalValue::new(value, definition)
+        .map(SqlValue::Decimal)
+        .map_err(|error| E::from_sqlx_error(sqlx::Error::Encode(Box::new(error))))
+}
+
 pub fn entity_state<T>(value: &T) -> crate::Result<EntityState>
 where
     T: serde::Serialize + Clone + Send + Sync + 'static,
@@ -2414,6 +2574,8 @@ pub struct ColumnDef {
     /// applied. Defaults to `name` for hand-built definitions.
     pub api_name: &'static str,
     pub sql_type: &'static str,
+    /// Exact portable decimal definition when the column stores a decimal.
+    pub decimal: Option<DecimalDef>,
     pub spatial: Option<SpatialColumnDef>,
     pub search: Option<SearchFieldDef>,
     pub logical_type: BackupValueKind,
@@ -2452,6 +2614,7 @@ impl ColumnDef {
             rust_name: name,
             api_name: name,
             sql_type,
+            decimal: None,
             spatial: None,
             search: None,
             logical_type: BackupValueKind::String,
@@ -2519,6 +2682,12 @@ impl ColumnDef {
         self
     }
 
+    /// Marks this column as an exact fixed-precision decimal.
+    pub const fn decimal(mut self, definition: DecimalDef) -> Self {
+        self.decimal = Some(definition);
+        self
+    }
+
     pub const fn backup_policy(mut self, policy: ColumnBackupPolicy) -> Self {
         self.backup_policy = policy;
         self
@@ -2553,6 +2722,8 @@ pub struct FieldMetadata {
     /// applied. Defaults to `name` for hand-built definitions.
     pub api_name: &'static str,
     pub sql_type: &'static str,
+    /// Exact portable decimal definition when the field stores a decimal.
+    pub decimal: Option<DecimalDef>,
     pub spatial: Option<SpatialColumnDef>,
     pub search: Option<SearchFieldDef>,
     pub logical_type: BackupValueKind,
@@ -2579,6 +2750,7 @@ impl From<&ColumnDef> for FieldMetadata {
             rust_name: value.rust_name,
             api_name: value.api_name,
             sql_type: value.sql_type,
+            decimal: value.decimal,
             spatial: value.spatial,
             search: value.search,
             logical_type: value.logical_type,

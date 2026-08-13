@@ -922,7 +922,28 @@ fn push_create_input_sql_value_tokens(
     meta: &FieldMetadata,
     error_ty: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    if let Some(spatial) = &meta.spatial {
+    if let Some((precision, scale)) = meta.decimal {
+        let definition = quote! {
+            ::graphql_orm::graphql::orm::DecimalDef::new(#precision, #scale)
+                .expect("macro-validated decimal definition")
+        };
+        if is_option_type(field_type) {
+            quote! {
+                match #field_access {
+                    Some(value) => bind_values.push(
+                        ::graphql_orm::graphql::orm::decimal_sql_value::<#error_ty>(value, #definition)?
+                    ),
+                    None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::DecimalNull(#definition)),
+                }
+            }
+        } else {
+            quote! {
+                bind_values.push(
+                    ::graphql_orm::graphql::orm::decimal_sql_value::<#error_ty>(#field_access, #definition)?
+                );
+            }
+        }
+    } else if let Some(spatial) = &meta.spatial {
         if backend == BackendKind::Sqlite {
             let geometry_type = spatial_geometry_type_tokens(
                 &spatial.geometry_type,
@@ -2377,7 +2398,24 @@ pub(crate) fn generate_graphql_operations(
 
             // Generate bind value push based on field type
             // We push to bind_values vector to avoid lifetime issues with ::graphql_orm::sqlx::query
-            if meta.spatial.is_some() {
+            if meta.decimal.is_some() {
+                insert_binds_graphql.push(push_create_input_sql_value_tokens(
+                    backend,
+                    struct_name,
+                    quote! { input.#field_name.clone() },
+                    field_type,
+                    &meta,
+                    quote! { ::graphql_orm::async_graphql::Error },
+                ));
+                insert_binds_repo.push(push_create_input_sql_value_tokens(
+                    backend,
+                    struct_name,
+                    quote! { input.#field_name.clone() },
+                    field_type,
+                    &meta,
+                    quote! { ::graphql_orm::sqlx::Error },
+                ));
+            } else if meta.spatial.is_some() {
                 insert_binds_graphql.push(push_create_input_sql_value_tokens(
                     backend,
                     struct_name,
@@ -2821,6 +2859,61 @@ pub(crate) fn generate_graphql_operations(
                     update_field_checks_graphql.push(update_tokens.clone());
                     update_field_checks_repo.push(update_tokens);
                 }
+            } else if let Some((precision, scale)) = meta.decimal {
+                let definition = quote! {
+                    ::graphql_orm::graphql::orm::DecimalDef::new(#precision, #scale)
+                        .expect("macro-validated decimal definition")
+                };
+                let graphql_tokens = if is_already_optional {
+                    quote! {
+                        if let Some(ref value) = input.#field_name {
+                            changed_fields.push(#db_col);
+                            set_clauses.push(format!("{} = ?", #db_col));
+                            match value {
+                                Some(value) => values.push(
+                                    ::graphql_orm::graphql::orm::decimal_sql_value::<::graphql_orm::async_graphql::Error>(*value, #definition)?
+                                ),
+                                None => values.push(::graphql_orm::graphql::orm::SqlValue::DecimalNull(#definition)),
+                            }
+                        }
+                    }
+                } else {
+                    quote! {
+                        if let Some(value) = input.#field_name {
+                            changed_fields.push(#db_col);
+                            set_clauses.push(format!("{} = ?", #db_col));
+                            values.push(
+                                ::graphql_orm::graphql::orm::decimal_sql_value::<::graphql_orm::async_graphql::Error>(value, #definition)?
+                            );
+                        }
+                    }
+                };
+                let repository_tokens = if is_already_optional {
+                    quote! {
+                        if let Some(ref value) = input.#field_name {
+                            changed_fields.push(#db_col);
+                            set_clauses.push(format!("{} = ?", #db_col));
+                            match value {
+                                Some(value) => values.push(
+                                    ::graphql_orm::graphql::orm::decimal_sql_value::<::graphql_orm::sqlx::Error>(*value, #definition)?
+                                ),
+                                None => values.push(::graphql_orm::graphql::orm::SqlValue::DecimalNull(#definition)),
+                            }
+                        }
+                    }
+                } else {
+                    quote! {
+                        if let Some(value) = input.#field_name {
+                            changed_fields.push(#db_col);
+                            set_clauses.push(format!("{} = ?", #db_col));
+                            values.push(
+                                ::graphql_orm::graphql::orm::decimal_sql_value::<::graphql_orm::sqlx::Error>(value, #definition)?
+                            );
+                        }
+                    }
+                };
+                update_field_checks_graphql.push(graphql_tokens);
+                update_field_checks_repo.push(repository_tokens);
             } else if is_already_optional
                 && option_inner_type(field_type)
                     .and_then(type_path_last_ident)

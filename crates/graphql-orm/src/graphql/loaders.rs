@@ -181,6 +181,7 @@ fn sql_value_key_part(value: &crate::graphql::orm::SqlValue) -> String {
         crate::graphql::orm::SqlValue::Uuid(value) => value.to_string(),
         crate::graphql::orm::SqlValue::Int(value) => value.to_string(),
         crate::graphql::orm::SqlValue::Float(value) => value.to_string(),
+        crate::graphql::orm::SqlValue::Decimal(value) => value.value().to_string(),
         crate::graphql::orm::SqlValue::Bool(value) => value.to_string(),
         crate::graphql::orm::SqlValue::Bytes(value) => String::from_utf8_lossy(value).to_string(),
         crate::graphql::orm::SqlValue::Json(value) => value.to_string(),
@@ -190,6 +191,7 @@ fn sql_value_key_part(value: &crate::graphql::orm::SqlValue) -> String {
         | crate::graphql::orm::SqlValue::UuidNull
         | crate::graphql::orm::SqlValue::IntNull
         | crate::graphql::orm::SqlValue::FloatNull
+        | crate::graphql::orm::SqlValue::DecimalNull(_)
         | crate::graphql::orm::SqlValue::BoolNull
         | crate::graphql::orm::SqlValue::Null => String::new(),
     }
