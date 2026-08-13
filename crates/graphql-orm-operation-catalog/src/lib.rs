@@ -415,6 +415,7 @@ pub struct GeneratedGraphqlOperationDescriptor {
     schema_signature: &'static str,
     fingerprint: String,
     authorization: GraphqlAuthorizationRequirement,
+    ai_mutation_execution: AiMutationExecutionPolicy,
     authorization_fingerprint: String,
     router_export_fingerprint: String,
 }
@@ -495,6 +496,47 @@ impl GeneratedGraphqlOperationDescriptor {
         )
     }
 
+    /// Constructs macro-generated resolver metadata with static authorization
+    /// and a closed AI mutation execution classification.
+    ///
+    /// This constructor is public only for derive output. Non-mutation callers
+    /// are normalized to the prohibited classification.
+    #[allow(clippy::too_many_arguments)]
+    #[doc(hidden)]
+    pub fn generated_with_authorization_and_ai_policy(
+        entity_rust_type: &'static str,
+        entity_name: &'static str,
+        table_name: &'static str,
+        backend: &'static str,
+        kind: GraphqlOperationKind,
+        category: GeneratedGraphqlOperationCategory,
+        field_name: &'static str,
+        arguments: Vec<GraphqlOperationArgumentDescriptor>,
+        rust_result_type: &'static str,
+        graphql_result_type: impl Into<String>,
+        schema_signature: &'static str,
+        authorization: GraphqlAuthorizationRequirement,
+        ai_mutation_execution: AiMutationExecutionPolicy,
+    ) -> Self {
+        let description = default_operation_description(category, entity_name);
+        Self::generated_with_authorization_description_and_ai_policy(
+            entity_rust_type,
+            entity_name,
+            table_name,
+            backend,
+            kind,
+            category,
+            field_name,
+            description,
+            arguments,
+            rust_result_type,
+            graphql_result_type,
+            schema_signature,
+            authorization,
+            ai_mutation_execution,
+        )
+    }
+
     /// Constructs generated resolver metadata with static authorization and
     /// one model-safe public description.
     ///
@@ -518,6 +560,47 @@ impl GeneratedGraphqlOperationDescriptor {
         schema_signature: &'static str,
         authorization: GraphqlAuthorizationRequirement,
     ) -> Self {
+        Self::generated_with_authorization_description_and_ai_policy(
+            entity_rust_type,
+            entity_name,
+            table_name,
+            backend,
+            kind,
+            category,
+            field_name,
+            description,
+            arguments,
+            rust_result_type,
+            graphql_result_type,
+            schema_signature,
+            authorization,
+            AiMutationExecutionPolicy::Prohibited,
+        )
+    }
+
+    /// Constructs generated resolver metadata with canonical public semantics.
+    ///
+    /// This constructor is emitted by the derive macro. The AI policy is
+    /// descriptive, defaults closed, and intentionally does not alter the
+    /// legacy resolver or authorization fingerprints.
+    #[allow(clippy::too_many_arguments)]
+    #[doc(hidden)]
+    pub fn generated_with_authorization_description_and_ai_policy(
+        entity_rust_type: &'static str,
+        entity_name: &'static str,
+        table_name: &'static str,
+        backend: &'static str,
+        kind: GraphqlOperationKind,
+        category: GeneratedGraphqlOperationCategory,
+        field_name: &'static str,
+        description: impl Into<String>,
+        arguments: Vec<GraphqlOperationArgumentDescriptor>,
+        rust_result_type: &'static str,
+        graphql_result_type: impl Into<String>,
+        schema_signature: &'static str,
+        authorization: GraphqlAuthorizationRequirement,
+        ai_mutation_execution: AiMutationExecutionPolicy,
+    ) -> Self {
         let mut descriptor = Self {
             entity_rust_type,
             entity_name,
@@ -533,6 +616,11 @@ impl GeneratedGraphqlOperationDescriptor {
             schema_signature,
             fingerprint: String::new(),
             authorization,
+            ai_mutation_execution: if kind == GraphqlOperationKind::Mutation {
+                ai_mutation_execution
+            } else {
+                AiMutationExecutionPolicy::Prohibited
+            },
             authorization_fingerprint: String::new(),
             router_export_fingerprint: String::new(),
         };
@@ -624,6 +712,13 @@ impl GeneratedGraphqlOperationDescriptor {
     /// Returns the core-owned static authorization declaration.
     pub const fn authorization(&self) -> &GraphqlAuthorizationRequirement {
         &self.authorization
+    }
+
+    /// Returns the closed AI mutation execution classification.
+    ///
+    /// Queries and subscriptions return [`AiMutationExecutionPolicy::Prohibited`].
+    pub const fn ai_mutation_execution(&self) -> AiMutationExecutionPolicy {
+        self.ai_mutation_execution
     }
 
     /// Returns the authorization-only generated descriptor fingerprint.
@@ -852,6 +947,11 @@ impl GraphqlResolverOperationDescriptor {
     /// Returns the generated field's core-owned authorization declaration.
     pub const fn authorization(&self) -> &GraphqlAuthorizationRequirement {
         self.generated.authorization()
+    }
+
+    /// Returns the generated root's closed AI mutation execution classification.
+    pub const fn ai_mutation_execution(&self) -> AiMutationExecutionPolicy {
+        self.generated.ai_mutation_execution()
     }
 
     /// Returns the exposure-resolved authorization fingerprint.

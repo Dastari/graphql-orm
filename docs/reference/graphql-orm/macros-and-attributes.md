@@ -52,6 +52,7 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `schema_policy` | `"managed"`, `"external_read_only"`, `"external_writable"`, `"validate_only"`, or `"plan_only"` | no declared policy |
 | `auth` | `"required"`, `"optional"`, or `"none"` | schema-root mode, otherwise runtime compatibility default |
 | `schema_only`, `append_only`, `repository_mutations`, `aggregate`, `backup` | boolean | `false`, except `backup` has no explicit declaration; `aggregate = true` opts into a bounded generated GraphQL aggregate root |
+| `ai_mutations` | `(create = "…", upsert = "…", update = "…", update_many = "…", delete = "…", delete_many = "…")` | each value is `"automatic"`, `"approval_required"`, or `"prohibited"`; omitted categories are prohibited |
 | `retention_purge` | nonempty policy-key string | absent |
 | `keyset`, `read_policy`, `write_policy`, `notify`, `notify_with` | string | absent |
 | `backup_export_order`, `backup_restore_order` | integer | absent |
@@ -181,6 +182,52 @@ whitespace, control characters, or braces. Templates may use only balanced
 This creates a generated resolver guard and operation-catalog metadata. It
 does not authorize custom resolvers, replace field/row/database policy, or
 make an arbitrary scope template safe.
+
+## AI mutation execution classification
+
+Mutation execution is prohibited by default. An entity may classify only the
+generated categories it deliberately exposes:
+
+```rust,ignore
+#[graphql_entity(
+    table = "reviewed_tasks",
+    plural = "ReviewedTasks",
+    ai_mutations(
+        create = "automatic",
+        update = "approval_required",
+        delete = "prohibited"
+    )
+)]
+struct ReviewedTask { /* public fields */ }
+```
+
+`automatic` is reserved for bounded low-consequence work under the current
+user's ordinary resolver authority. `approval_required` prepares one exact
+server-authored request for expiring one-shot human approval. `prohibited` is
+absent from executable AI capabilities. The declaration changes only canonical
+semantic metadata; it does not enable an AI runtime, satisfy tool/target policy,
+or weaken resolver, field, row, tenant, assurance, or database authorization.
+
+Handwritten mutations use the existing resolver macro rather than a separate
+AI catalogue:
+
+```rust,ignore
+#[graphql_orm_custom_operations(
+    kind = "mutation",
+    authorization = true,
+    ai_execution = "approval_required"
+)]
+#[async_graphql::Object]
+impl ApplicationMutations {
+    /// Applies one reviewed bounded change.
+    async fn apply_change(&self, input: ApplyChangeInput) -> ApplyChangeResult {
+        // Ordinary application authorization remains authoritative.
+    }
+}
+```
+
+`ai_execution` is accepted only for mutation roots and defaults to
+`prohibited` when omitted.
 
 ## `schema_roots!`
 

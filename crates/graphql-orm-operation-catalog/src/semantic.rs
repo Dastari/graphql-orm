@@ -368,6 +368,25 @@ pub enum GraphqlSemanticOperationSource {
     Custom,
 }
 
+/// Closed AI execution classification for one public mutation root.
+///
+/// This is descriptive capability metadata, not authority. Resolver, tenant,
+/// row, field, assurance, approval, and database policy remain authoritative
+/// at execution time. Mutations default to [`Self::Prohibited`].
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiMutationExecutionPolicy {
+    /// A bounded low-consequence mutation may execute under freshly resolved
+    /// ordinary application authority without a per-call human approval.
+    Automatic,
+    /// The exact target, arguments, preview, and authority require one
+    /// expiring human approval before a single execution.
+    ApprovalRequired,
+    /// The mutation is absent from executable AI capabilities.
+    #[default]
+    Prohibited,
+}
+
 /// Canonical semantic descriptor for one public root operation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -391,6 +410,9 @@ pub struct GraphqlSemanticOperationDescriptor {
     pub is_exposed: bool,
     /// Whether an authoritative fixed or dynamic authorization policy exists.
     pub has_authorization_policy: bool,
+    /// Closed AI execution classification. Present only for mutation roots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_mutation_execution: Option<AiMutationExecutionPolicy>,
     /// Subscription observation semantics. Absent for queries and mutations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscription_observation: Option<GraphqlSubscriptionObservationDescriptor>,
@@ -602,6 +624,7 @@ impl GraphqlSemanticCatalog {
             result_type: &'a GraphqlSemanticTypeRef,
             is_exposed: bool,
             has_authorization_policy: bool,
+            ai_mutation_execution: Option<AiMutationExecutionPolicy>,
             subscription_observation: &'a Option<GraphqlSubscriptionObservationDescriptor>,
         }
         let input = FingerprintInput {
@@ -621,6 +644,7 @@ impl GraphqlSemanticCatalog {
                     result_type: &operation.result_type,
                     is_exposed: operation.is_exposed,
                     has_authorization_policy: operation.has_authorization_policy,
+                    ai_mutation_execution: operation.ai_mutation_execution,
                     subscription_observation: &operation.subscription_observation,
                 })
                 .collect(),
@@ -659,6 +683,8 @@ impl GraphqlSemanticOperationDescriptor {
                 operation.authorization(),
                 crate::GraphqlAuthorizationRequirement::Public
             ),
+            ai_mutation_execution: (operation.kind() == GraphqlOperationKind::Mutation)
+                .then_some(operation.ai_mutation_execution()),
             subscription_observation: (operation.kind() == GraphqlOperationKind::Subscription)
                 .then_some(GraphqlSubscriptionObservationDescriptor {
                     replay_mode: GraphqlSubscriptionReplayMode::BestEffort,
@@ -696,12 +722,39 @@ impl GraphqlSemanticOperationDescriptor {
             result_type,
             is_exposed: true,
             has_authorization_policy,
+            ai_mutation_execution: (kind == GraphqlOperationKind::Mutation)
+                .then_some(AiMutationExecutionPolicy::Prohibited),
             subscription_observation: None,
             fingerprint: String::new(),
         };
         validate_operation_structure(&descriptor)?;
         descriptor.fingerprint = descriptor.compute_fingerprint();
         Ok(descriptor)
+    }
+
+    /// Classifies one custom mutation for AI execution.
+    ///
+    /// This declaration does not register the operation, authorize a user,
+    /// satisfy resolver policy, or grant approval. An omitted classification
+    /// remains [`AiMutationExecutionPolicy::Prohibited`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when attached to a query or subscription.
+    pub fn with_ai_mutation_execution(
+        mut self,
+        policy: AiMutationExecutionPolicy,
+    ) -> Result<Self, GraphqlSemanticError> {
+        if self.kind != GraphqlOperationKind::Mutation {
+            return Err(GraphqlSemanticError::new(
+                "AI mutation execution policy is invalid for this operation",
+            ));
+        }
+        self.ai_mutation_execution = Some(policy);
+        self.fingerprint.clear();
+        validate_operation_structure(&self)?;
+        self.fingerprint = self.compute_fingerprint();
+        Ok(self)
     }
 
     /// Attaches bounded observation semantics to a custom subscription.
@@ -849,6 +902,21 @@ fn validate_operation_structure(
             ));
         }
         (None, _) => {}
+    }
+    match (operation.ai_mutation_execution, operation.kind) {
+        (Some(_), GraphqlOperationKind::Mutation)
+        | (None, GraphqlOperationKind::Query)
+        | (None, GraphqlOperationKind::Subscription) => {}
+        (Some(_), _) => {
+            return Err(GraphqlSemanticError::new(
+                "non-mutation operation has AI mutation execution policy",
+            ));
+        }
+        (None, GraphqlOperationKind::Mutation) => {
+            return Err(GraphqlSemanticError::new(
+                "mutation operation lacks AI execution policy",
+            ));
+        }
     }
     if operation.source == GraphqlSemanticOperationSource::Generated
         && operation.generated_category.is_none()

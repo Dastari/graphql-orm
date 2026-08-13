@@ -84,6 +84,7 @@ read-only policy.
 | `GraphqlSemanticClassification` / `GraphqlSemanticExport` | inherited classification and structural provider-export eligibility; neither authorizes disclosure |
 | `GraphqlAggregateOperator` / `GraphqlAggregateValueKind` | canonical portable aggregate capabilities used by field and generated-operation metadata |
 | `GraphqlSubscriptionObservationDescriptor` | truthful best-effort or replay-then-live subscription semantics plus bounded wait and closed condition capabilities; metadata alone does not register a runtime replay source |
+| `AiMutationExecutionPolicy` | closed `Automatic`, `ApprovalRequired`, or default `Prohibited` classification for public mutations; metadata never grants execution or resolver authority |
 | discovery fingerprint | algorithm `graphql-orm-sha256-len-v1`; detects generated declaration/exposure drift, not authorization or disclosure |
 | authorization fingerprint | algorithm `graphql-orm-authorization-sha256-len-v2`; binds core static authorization separately |
 | router-export fingerprint | algorithm `graphql-orm-router-export-sha256-len-v1`; combines the previous two for protocol adapters |
@@ -92,6 +93,14 @@ Argument descriptors retain declaration order for discovery fingerprints.
 Catalog operations are sorted deterministically. Scope sets are canonicalized
 for authorization fingerprinting. None of these SHA-256 values are signatures
 or capabilities.
+
+Mutation classification is declared beside the owning resolver metadata.
+Generated entities use the `ai_mutations(...)` category map and handwritten
+roots use `ai_execution` on `graphql_orm_custom_operations`. An omitted
+classification is `Prohibited`; queries remain separately eligible reads and
+subscriptions use the observation contract. Runtime target enablement, current
+principal resolution, ordinary resolver authorization, disclosure, and any
+one-shot approval are separate mandatory boundaries.
 
 ## Errors and migration
 

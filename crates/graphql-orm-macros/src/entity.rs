@@ -24,6 +24,8 @@ pub(crate) struct EntityMetadata {
     pub(crate) retention_policy: Option<String>,
     pub(crate) repository_mutations: bool,
     pub(crate) aggregate: bool,
+    /// Explicit AI execution policy by generated mutation category.
+    pub(crate) ai_mutations: std::collections::BTreeMap<String, String>,
     pub(crate) keyset: Option<String>,
     pub(crate) backup_enabled: Option<bool>,
     pub(crate) backup_export_order: Option<i32>,
@@ -198,6 +200,50 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitBool = value.parse()?;
                     metadata.aggregate = lit.value;
+                } else if meta.path.is_ident("ai_mutations") {
+                    meta.parse_nested_meta(|operation| {
+                        let Some(category) = operation.path.get_ident().map(ToString::to_string)
+                        else {
+                            return Err(operation.error(
+                                "AI mutation category must be a simple identifier",
+                            ));
+                        };
+                        if !matches!(
+                            category.as_str(),
+                            "create"
+                                | "upsert"
+                                | "update"
+                                | "update_many"
+                                | "delete"
+                                | "delete_many"
+                        ) {
+                            return Err(operation.error(
+                                "AI mutation category must be create, upsert, update, update_many, delete, or delete_many",
+                            ));
+                        }
+                        let value = operation.value()?;
+                        let lit: syn::LitStr = value.parse()?;
+                        let policy = lit.value();
+                        if !matches!(
+                            policy.as_str(),
+                            "automatic" | "approval_required" | "prohibited"
+                        ) {
+                            return Err(syn::Error::new(
+                                lit.span(),
+                                "AI mutation policy must be automatic, approval_required, or prohibited",
+                            ));
+                        }
+                        if metadata
+                            .ai_mutations
+                            .insert(category.clone(), policy)
+                            .is_some()
+                        {
+                            return Err(operation.error(format!(
+                                "duplicate AI mutation category `{category}`"
+                            )));
+                        }
+                        Ok(())
+                    })?;
                 } else if meta.path.is_ident("keyset") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;

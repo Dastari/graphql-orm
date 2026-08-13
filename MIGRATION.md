@@ -66,6 +66,14 @@ eligible for a durable wait. A custom subscription may declare bounded
 `replay_then_live` semantics only beside its resolver; downstream runtimes must
 still register and verify the matching authoritative cursor/watermark source.
 
+Public mutations now carry a closed AI execution classification in semantic
+catalogue v1. Existing declarations remain `Prohibited` and therefore acquire
+no AI capability. Opt in generated categories with `ai_mutations(...)`, or add
+`ai_execution = "automatic" | "approval_required" | "prohibited"` to an
+existing mutation `graphql_orm_custom_operations` declaration. This changes
+semantic fingerprints only. It does not change SDL, resolver behavior,
+database schema, stored rows, or authorization.
+
 Typed grouped aggregates are additive. Every `GraphQLEntity` now emits a
 closed aggregate-field enum for repository use, while no GraphQL root is added
 unless the entity declares `aggregate = true`. That opt-in changes the schema

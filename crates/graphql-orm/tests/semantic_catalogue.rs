@@ -26,7 +26,8 @@ fn field_name(camel: &'static str, pascal: &'static str) -> &'static str {
 #[graphql_entity(
     table = "semantic_records",
     plural = "SemanticRecords",
-    classification = "confidential"
+    classification = "confidential",
+    ai_mutations(create = "automatic", update = "approval_required")
 )]
 #[graphql(complex)]
 struct SemanticRecord {
@@ -74,6 +75,9 @@ impl graphql_orm::graphql::loaders::BatchLoadEntity for SemanticRecord {
 struct ReviewedQueries;
 
 #[derive(Default)]
+struct ReviewedMutations;
+
+#[derive(Default)]
 struct ReviewedSubscriptions;
 
 /// Reviewed status result.
@@ -102,6 +106,19 @@ impl ReviewedQueries {
 }
 
 #[graphql_orm_custom_operations(
+    kind = "mutation",
+    authorization = true,
+    ai_execution = "approval_required"
+)]
+#[graphql_orm::async_graphql::Object]
+impl ReviewedMutations {
+    /// Applies one reviewed bounded status change.
+    async fn apply_reviewed_status(&self, enabled: bool) -> bool {
+        enabled
+    }
+}
+
+#[graphql_orm_custom_operations(
     kind = "subscription",
     authorization = true,
     observation = "replay_then_live",
@@ -121,8 +138,9 @@ impl ReviewedSubscriptions {
 schema_roots! {
     entities: [SemanticRecord],
     extra_query_types: [ReviewedQueries],
+    extra_mutation_types: [ReviewedMutations],
     extra_subscription_types: [ReviewedSubscriptions],
-    semantic_custom_operations: [ReviewedQueries, ReviewedSubscriptions],
+    semantic_custom_operations: [ReviewedQueries, ReviewedMutations, ReviewedSubscriptions],
     semantic_types: [ReviewedStatus],
 }
 
@@ -232,6 +250,52 @@ fn entity_and_custom_root_semantics_are_canonical_and_safe() {
     );
     assert_eq!(observation.maximum_duration_seconds, Some(300));
     assert_eq!(observation.maximum_events, Some(16));
+
+    let automatic_create = catalog
+        .operations
+        .iter()
+        .find(|operation| {
+            operation.kind == GraphqlOperationKind::Mutation
+                && operation.generated_category == Some(GeneratedGraphqlOperationCategory::Create)
+        })
+        .expect("generated create mutation semantics");
+    assert_eq!(
+        automatic_create.ai_mutation_execution,
+        Some(AiMutationExecutionPolicy::Automatic)
+    );
+    let approval_update = catalog
+        .operations
+        .iter()
+        .find(|operation| {
+            operation.kind == GraphqlOperationKind::Mutation
+                && operation.generated_category == Some(GeneratedGraphqlOperationCategory::Update)
+        })
+        .expect("generated update mutation semantics");
+    assert_eq!(
+        approval_update.ai_mutation_execution,
+        Some(AiMutationExecutionPolicy::ApprovalRequired)
+    );
+    let prohibited_delete = catalog
+        .operations
+        .iter()
+        .find(|operation| {
+            operation.kind == GraphqlOperationKind::Mutation
+                && operation.generated_category == Some(GeneratedGraphqlOperationCategory::Delete)
+        })
+        .expect("generated delete mutation semantics");
+    assert_eq!(
+        prohibited_delete.ai_mutation_execution,
+        Some(AiMutationExecutionPolicy::Prohibited)
+    );
+    let custom_mutation = catalog
+        .operations
+        .iter()
+        .find(|operation| operation.field_name == "applyReviewedStatus")
+        .expect("custom mutation semantics");
+    assert_eq!(
+        custom_mutation.ai_mutation_execution,
+        Some(AiMutationExecutionPolicy::ApprovalRequired)
+    );
 
     let payload = catalog.extension_payload().expect("extension payload");
     let decoded = GraphqlSemanticCatalog::from_extension_payload(payload).expect("payload decodes");

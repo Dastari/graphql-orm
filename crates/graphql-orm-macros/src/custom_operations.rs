@@ -12,6 +12,7 @@ use crate::entity::{semantic_doc_description, validate_semantic_description};
 struct CustomRootArgs {
     kind: String,
     authorization: bool,
+    ai_execution: Option<String>,
     observation: Option<String>,
     maximum_duration_seconds: Option<u32>,
     maximum_events: Option<u32>,
@@ -22,6 +23,7 @@ impl Parse for CustomRootArgs {
         let items = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
         let mut kind = None;
         let mut authorization = true;
+        let mut ai_execution = None;
         let mut observation = None;
         let mut maximum_duration_seconds = None;
         let mut maximum_events = None;
@@ -53,6 +55,27 @@ impl Parse for CustomRootArgs {
                     ));
                 };
                 authorization = lit.value;
+            } else if value.path.is_ident("ai_execution") {
+                let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(lit),
+                    ..
+                }) = value.value
+                else {
+                    return Err(syn::Error::new_spanned(
+                        value,
+                        "ai_execution must be a string",
+                    ));
+                };
+                if !matches!(
+                    lit.value().as_str(),
+                    "automatic" | "approval_required" | "prohibited"
+                ) {
+                    return Err(syn::Error::new_spanned(
+                        lit,
+                        "ai_execution must be automatic, approval_required, or prohibited",
+                    ));
+                }
+                ai_execution = Some(lit.value());
             } else if value.path.is_ident("observation") {
                 let syn::Expr::Lit(syn::ExprLit {
                     lit: syn::Lit::Str(lit),
@@ -117,6 +140,12 @@ impl Parse for CustomRootArgs {
                 "observation options are valid only for subscription roots",
             ));
         }
+        if ai_execution.is_some() && kind != "mutation" {
+            return Err(syn::Error::new(
+                input.span(),
+                "ai_execution is valid only for mutation roots",
+            ));
+        }
         if observation.is_some() && (maximum_duration_seconds.is_none() || maximum_events.is_none())
         {
             return Err(syn::Error::new(
@@ -140,6 +169,7 @@ impl Parse for CustomRootArgs {
         Ok(Self {
             kind,
             authorization,
+            ai_execution,
             observation,
             maximum_duration_seconds,
             maximum_events,
@@ -302,6 +332,24 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
             ).expect("custom subscription observation metadata must validate")
         }
     });
+    let ai_execution = args.ai_execution.as_deref().map(|policy| {
+        let policy = match policy {
+            "automatic" => quote! {
+                ::graphql_orm::graphql::orm::AiMutationExecutionPolicy::Automatic
+            },
+            "approval_required" => quote! {
+                ::graphql_orm::graphql::orm::AiMutationExecutionPolicy::ApprovalRequired
+            },
+            "prohibited" => quote! {
+                ::graphql_orm::graphql::orm::AiMutationExecutionPolicy::Prohibited
+            },
+            _ => unreachable!(),
+        };
+        quote! {
+            .with_ai_mutation_execution(#policy)
+            .expect("custom mutation AI execution metadata must validate")
+        }
+    });
     let self_ty = item.self_ty.clone();
     let mut descriptors = Vec::new();
     let mut field_names = std::collections::BTreeSet::new();
@@ -445,6 +493,7 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
                 ).expect("custom resolver result type must be valid GraphQL"),
                 #authorization,
             ).expect("custom resolver semantic metadata must validate")
+            #ai_execution
             #observation
         });
     }

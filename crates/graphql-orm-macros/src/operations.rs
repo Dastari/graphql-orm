@@ -6224,6 +6224,46 @@ pub(crate) fn generate_graphql_operations(
             )
         }
     };
+    let ai_mutation_policy =
+        |category: &str| match entity_meta.ai_mutations.get(category).map(String::as_str) {
+            Some("automatic") => quote! {
+                ::graphql_orm::graphql::orm::AiMutationExecutionPolicy::Automatic
+            },
+            Some("approval_required") => quote! {
+                ::graphql_orm::graphql::orm::AiMutationExecutionPolicy::ApprovalRequired
+            },
+            Some("prohibited") | None => quote! {
+                ::graphql_orm::graphql::orm::AiMutationExecutionPolicy::Prohibited
+            },
+            Some(_) => unreachable!("entity parser validates AI mutation policies"),
+        };
+    let mutation_descriptor =
+        |category: proc_macro2::TokenStream,
+         category_name: &str,
+         field_name: &str,
+         arguments: Vec<proc_macro2::TokenStream>,
+         rust_result_type: proc_macro2::TokenStream,
+         operation_authorization: &proc_macro2::TokenStream| {
+            let policy = ai_mutation_policy(category_name);
+            quote! {
+                ::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor::generated_with_authorization_and_ai_policy(
+                    concat!(module_path!(), "::", stringify!(#struct_name)),
+                    stringify!(#struct_name),
+                    #table_name,
+                    #backend_name,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
+                    #category,
+                    #field_name,
+                    vec![#(#arguments),*],
+                    stringify!(#rust_result_type),
+                    <#rust_result_type as ::graphql_orm::async_graphql::OutputType>
+                        ::qualified_type_name(),
+                    #resolver_schema_signature,
+                    #operation_authorization,
+                    #policy,
+                )
+            }
+        };
 
     let mut operation_descriptors = Vec::new();
     let list_metadata_arguments = vec![
@@ -6327,9 +6367,9 @@ pub(crate) fn generate_graphql_operations(
     });
 
     let create_descriptor = || {
-        descriptor(
-            quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation },
+        mutation_descriptor(
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Create },
+            "create",
             &create_mutation_name,
             vec![argument_descriptor(
                 &input_arg_name,
@@ -6359,9 +6399,9 @@ pub(crate) fn generate_graphql_operations(
     } else if backend_writable && !schema_policy_read_only && !has_composite_primary_key {
         operation_descriptors.push(create_descriptor());
         if graphql_upsert_enabled {
-            operation_descriptors.push(descriptor(
-                quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation },
+            operation_descriptors.push(mutation_descriptor(
                 quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Upsert },
+                "upsert",
                 &upsert_mutation_name,
                 vec![argument_descriptor(
                     &input_arg_name,
@@ -6371,9 +6411,9 @@ pub(crate) fn generate_graphql_operations(
                 &upsert_operation_authorization,
             ));
         }
-        operation_descriptors.push(descriptor(
-            quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation },
+        operation_descriptors.push(mutation_descriptor(
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Update },
+            "update",
             &update_mutation_name,
             vec![
                 argument_descriptor(&id_arg_name, quote! { #pk_type_ty }),
@@ -6382,9 +6422,9 @@ pub(crate) fn generate_graphql_operations(
             quote! { #result_type },
             &update_operation_authorization,
         ));
-        operation_descriptors.push(descriptor(
-            quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation },
+        operation_descriptors.push(mutation_descriptor(
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::UpdateMany },
+            "update_many",
             &update_many_mutation_name,
             vec![
                 argument_descriptor(&where_arg_name, quote! { Option<#where_input> }),
@@ -6393,17 +6433,17 @@ pub(crate) fn generate_graphql_operations(
             quote! { #update_many_result_type },
             &update_many_operation_authorization,
         ));
-        operation_descriptors.push(descriptor(
-            quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation },
+        operation_descriptors.push(mutation_descriptor(
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Delete },
+            "delete",
             &delete_mutation_name,
             vec![argument_descriptor(&id_arg_name, quote! { #pk_type_ty })],
             quote! { #result_type },
             &delete_operation_authorization,
         ));
-        operation_descriptors.push(descriptor(
-            quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation },
+        operation_descriptors.push(mutation_descriptor(
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::DeleteMany },
+            "delete_many",
             &delete_many_mutation_name,
             vec![argument_descriptor(
                 &where_arg_name,

@@ -39,6 +39,12 @@ semantic owner: `graphql-orm-operation-catalog` **0.2.0**.
   separately registered authoritative runtime source.
 - Added canonical aggregate semantic enums and the opt-in `Aggregate`
   operation category for the typed aggregate implementation to consume.
+- Added the canonical `AiMutationExecutionPolicy` semantic classification.
+  Generated `ai_mutations(...)` category declarations and handwritten
+  `graphql_orm_custom_operations(ai_execution = "...")` declarations select
+  `Automatic`, `ApprovalRequired`, or the default `Prohibited` state. The
+  classification participates in semantic fingerprints but grants no runtime
+  authority.
 - Added database-executed typed grouped aggregates with multiple `COUNT`,
   `MIN`, `MAX`, and `SUM` metrics, deterministic nullable-key ordering, bounded
   result groups, generated-filter and field-policy checks, and portable exact
