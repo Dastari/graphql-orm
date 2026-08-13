@@ -3,12 +3,24 @@ title: graphql-orm-router changelog
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-11
+last_reviewed: 2026-08-13
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # Changelog
+
+## 0.1.4 - 2026-08-13
+
+- Updated the optional resource-server-only `agql-auth` adapter to 0.15.0 at
+  exact revision `e841ffd382082ad7419be259fe957f949b956ff7`.
+- JWT validation, scope matching, GraphQL authorization preflight, bearer
+  propagation, and router-administration behavior remain unchanged. The
+  router does not issue session-bound delegations or gain issuer/session-store
+  responsibilities.
+
+No router configuration, descriptor, GraphQL schema, token wire, or stored
+data migration is required.
 
 ## 0.1.3 - 2026-08-11
 

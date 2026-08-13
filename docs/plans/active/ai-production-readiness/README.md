@@ -3,7 +3,7 @@ title: GraphQL ORM AI production-readiness plan
 kind: plan
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-08-13
 review_by: 2026-09-01
 supersedes:
   - crates/graphql-orm-ai/docs/completion-plan.md
@@ -31,12 +31,12 @@ retention, or restore proofs remain closed.
 
 ## Dependencies
 
-- `graphql-orm` 0.21 schema-module, transaction, fencing, operation-metadata,
+- `graphql-orm` 0.21.1 schema-module, transaction, fencing, operation-metadata,
   and restore contracts.
 - `graphql-orm-backup` 0.7 snapshot, repository, verification, and restore
   orchestration.
 - `graphql-orm-storage` 0.6 streaming provider boundary.
-- Exact external `agql-auth` 0.14 revision declared by the workspace.
+- Exact external `agql-auth` 0.15 revision declared by the workspace.
 - Test-owned SQLite and disposable PostgreSQL infrastructure.
 
 ## Acceptance gates
@@ -59,7 +59,7 @@ retention, or restore proofs remain closed.
 
 ## Current checkpoint
 
-Package 0.76.0 and AI schema module 0.56.0 provide the protected runtime,
+Package 0.76.1 and AI schema module 0.56.0 provide the protected runtime,
 provider adapters, exact completed-batch adoption, retention foundations,
 restore planning, and readiness observation contracts. Database-derived
 collection covers bounded conservative run classification, approval and

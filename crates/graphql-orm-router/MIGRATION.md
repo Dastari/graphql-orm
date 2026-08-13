@@ -3,12 +3,24 @@ title: graphql-orm-router migration guide
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-11
+last_reviewed: 2026-08-13
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router migration guide
+
+## 0.1.3 to 0.1.4
+
+Replace the reviewed full-revision pin and rebuild the router. When a host
+also depends directly on `agql-auth`, align it to version 0.15.0 at exact
+revision `e841ffd382082ad7419be259fe957f949b956ff7` so Cargo resolves one auth
+type universe.
+
+The `auth-agql` feature remains a validator and scope-matcher adapter only. It
+does not construct an issuer, session resolver, or delegated token. No router
+configuration, descriptor, GraphQL schema, token wire, or stored-data
+migration is required.
 
 ## 0.1.2 to 0.1.3
 
@@ -79,8 +91,8 @@ New access tokens should use the OAuth space-delimited `scope` claim. The
 legacy `scopes` array is accepted only with `acceptLegacyScopes: true`; a token
 containing conflicting forms is rejected. The optional `auth-agql` feature is
 a validation/matching adapter only and introduces no issuer responsibilities.
-It resolves `agql-auth` 0.14.0 at exact revision
-`413fda3435f060604cd653c11e2cc18a668aace1`; hosts with a direct dependency
+It resolves `agql-auth` 0.15.0 at exact revision
+`e841ffd382082ad7419be259fe957f949b956ff7`; hosts with a direct dependency
 must use the same source and revision. Configure legacy acceptance directly
 with `agql_auth::AccessTokenValidatorBuilder::legacy_scope_claims` before
 wrapping the validator in `AgqlAuthenticationProvider::new`.

@@ -3,7 +3,7 @@ title: "Backend Features"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-13
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -17,7 +17,7 @@ database schema. Schema ownership and migration behavior are controlled by runti
 ## Features
 
 ```toml
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.21.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.21.1", default-features = false, features = ["sqlite"] }
 ```
 
 Available backend features:
@@ -37,8 +37,8 @@ release. See [Runtime records](runtime-records.md#backend-mappings).
 
 Optional non-backend features:
 
-- `auth-agql` - optional one-way bridge from upstream `agql-auth` 0.14
-  (`git` rev `413fda3435f060604cd653c11e2cc18a668aace1`) into `AuthSubject` /
+- `auth-agql` - optional one-way bridge from upstream `agql-auth` 0.15
+  (`git` rev `e841ffd382082ad7419be259fe957f949b956ff7`) into `AuthSubject` /
   `DbAuthContext` and declared assurance evaluation.
 
 The `mssql` feature activates optional `tiberius`, `tokio-util`, and Tokio TCP support. Projects that

@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-11
+last_reviewed: 2026-08-13
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,24 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## 0.21.1 - 2026-08-13
+
+Companion macros crate: `graphql-orm-macros` **0.21.1** under the aligned
+Git-only version policy. The generated macro contract is unchanged.
+
+- Updated the one-way external `agql-auth` integration to 0.15.0 at exact
+  revision `e841ffd382082ad7419be259fe957f949b956ff7`.
+- The existing ORM principal, scope, assurance, actor, tenant, and database
+  authorization projections remain unchanged. Hosts can now share the same
+  auth type universe with applications using the reusable session-bound,
+  access-token-only delegation API.
+- Backend-coexistence coverage proves the SQLite AI runtime, MSSQL application
+  schema, optional ORM auth bridge, and direct auth consumer resolve exactly
+  one reviewed `agql-auth` source.
+
+No database, GraphQL SDL, generated-code, migration-history, backup, or stored
+data migration is required.
 
 ## 0.21.0 - 2026-08-11
 

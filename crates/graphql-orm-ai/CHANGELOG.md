@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-08-13
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -20,7 +20,31 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
-No changes recorded after 0.76.0.
+No changes recorded after 0.76.1.
+
+## [0.76.1] - 2026-08-13
+
+### Changed
+
+- Aligned the complete workspace auth type universe to `agql-auth` 0.15.0 at
+  exact revision `e841ffd382082ad7419be259fe957f949b956ff7`.
+- Added consumer-level compatibility coverage for
+  `VerifiedActiveUserSessionResolver`, `VerifiedActiveUserSession`,
+  `SessionBoundDelegationBinding`, and the prepare/issue session-bound
+  access-token-only methods. The issued credential retains its exact active
+  user session and creates no refresh-store mutation.
+
+### Security
+
+- Existing principal rehydration, scope matching, actor/resource/correlation
+  bindings, and resolver authorization remain unchanged. Session-bound
+  delegation authority is owned by agql-auth and does not give the AI runtime
+  a synthetic session, refresh credential, or generic token-issuance path.
+
+### Schema
+
+- AI schema module remains `0.56.0`. No entity, table, column, index,
+  constraint, backup, restore, or stored-row semantics change.
 
 ## [0.76.0] - 2026-08-12
 

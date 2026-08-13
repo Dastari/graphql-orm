@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-11
+last_reviewed: 2026-08-13
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -12,6 +12,27 @@ supersedes: []
 
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
+
+## 0.21.1 agql-auth 0.15 session-bound delegation alignment
+
+Update `graphql-orm` and `graphql-orm-macros` together to 0.21.1 at one
+reviewed full Git revision. Applications that directly use `agql-auth` must
+align that dependency to the same exact source:
+
+```toml
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "e841ffd382082ad7419be259fe957f949b956ff7", version = "0.15.0" }
+```
+
+The optional `auth-agql` bridge remains a one-way principal projection and
+requires no source changes. Version 0.15 adds upstream session-bound,
+access-token-only delegation types; it does not make the ORM an issuer or
+session authority. Hosts using those APIs must install an authoritative
+`VerifiedActiveUserSessionResolver`, narrow current authority, and retain the
+exact actor, resource, correlation, and registered-operation bindings.
+
+There is no ORM schema, GraphQL SDL, migration-history, backup, stored-data, or
+agql-auth database migration. Remove older direct pins rather than resolving
+two auth package/type universes.
 
 ## 0.21.0 Backend-neutral operation catalog and companion derives
 
@@ -1002,6 +1023,6 @@ access path.
 
 - No JWT, OIDC, cookie, wildcard, or application-specific scope logic was added to `graphql-orm`.
 - PostgreSQL RLS helper functions still use exact scope matching.
-- The current `auth-agql` feature targets `agql-auth` 0.14.0 at revision
-  `413fda3435f060604cd653c11e2cc18a668aace1`; earlier release sections above
+- The current `auth-agql` feature targets `agql-auth` 0.15.0 at revision
+  `e841ffd382082ad7419be259fe957f949b956ff7`; earlier release sections above
   retain their historical pins.

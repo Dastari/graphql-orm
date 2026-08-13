@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-08-13
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -18,6 +18,32 @@ Migration entries preserve the dependency and schema facts for the checkpoint
 they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## 0.76.1: agql-auth 0.15 session-bound delegation alignment (schema remains 0.56.0)
+
+Update every monorepo dependency to one reviewed full revision and align any
+direct auth dependency to:
+
+```toml
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "e841ffd382082ad7419be259fe957f949b956ff7", version = "0.15.0" }
+```
+
+This release makes the upstream `VerifiedActiveUserSessionResolver`, opaque
+`VerifiedActiveUserSession`, `SessionBoundDelegationBinding`, and
+`prepare_session_bound_access_token_only` /
+`issue_session_bound_access_token_only` contracts available in the same type
+universe as AI current-principal rehydration. `graphql-orm-ai` does not issue
+tokens itself and introduces no application-specific delegation API.
+
+Hosts adopting session-bound delegation must follow agql-auth's 0.15 migration:
+install a read-only authoritative active-session resolver, narrow current
+roles/scopes, and bind the actor, resource, correlation ID, and exact reviewed
+operation. Delegated credentials remain non-refreshable and normal resolver
+session assurance remains authoritative.
+
+There is no GraphQL SDL, entity, table, column, index, constraint, backup,
+restore, data, or AI schema-module migration. No backfill is required; AI
+schema module `0.56.0` remains current.
 
 ## 0.76.0: authoritative durable run terminal events (schema 0.55.0 to 0.56.0)
 
