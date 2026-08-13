@@ -15,6 +15,7 @@ struct GroupedAggregatePgRow {
     #[primary_key]
     id: String,
     #[filterable(type = "string")]
+    #[sortable]
     team: Option<String>,
     units: i64,
     hours: f64,
