@@ -132,6 +132,12 @@ impl AiSupervisedAgentTurnPlan {
         Ok(self)
     }
 
+    #[cfg(test)]
+    fn test_with_provider_session(mut self, session: crate::AiProviderSessionTurnPlan) -> Self {
+        self.provider_session = Some(session);
+        self
+    }
+
     fn is_continuation(&self) -> bool {
         self.provider_call.is_continuation()
     }
@@ -478,6 +484,14 @@ pub enum AiSupervisedAgentRunOutcome {
         /// Completed/requested application-tool count.
         total_tool_calls: u32,
     },
+    /// The owner cancellation fence won and no later provider continuation
+    /// was admitted.
+    Cancelled {
+        /// Accepted provider-turn count before cancellation.
+        provider_turns: u32,
+        /// Completed/requested application-tool count before cancellation.
+        total_tool_calls: u32,
+    },
     /// An external boundary was durably closed for privileged recovery.
     RecoveryRequired {
         /// Ambiguous phase.
@@ -582,6 +596,12 @@ impl AiSupervisedAgentCoordinator {
         claimed: &AiRunLease,
     ) -> Result<AiSupervisedAgentRunOutcome, AiError> {
         let lease = self.run_control.start(claimed).await?;
+        if self.run_control.cancellation(&lease).await?.is_some() {
+            return Ok(AiSupervisedAgentRunOutcome::Cancelled {
+                provider_turns: 0,
+                total_tool_calls: 0,
+            });
+        }
         if lease.latest_checkpoint_id().is_some() {
             match self.checkpoint_control.adopt_classified(&lease).await {
                 Ok(Some(AiAdoptedClassifiedMutationBatch::Supervised(adopted))) => {
@@ -931,6 +951,12 @@ impl AiSupervisedAgentCoordinator {
                         .require_cleanup(claim, "provider_session_reclaimed_handoff_failed")
                         .await;
                 }
+                if self.run_control.cancellation(&lease).await?.is_some() {
+                    return Ok(AiSupervisedAgentRunOutcome::Cancelled {
+                        provider_turns: guard.provider_turns(),
+                        total_tool_calls: guard.total_tool_calls(),
+                    });
+                }
                 return self
                     .finish_recovery(
                         &lease,
@@ -943,6 +969,17 @@ impl AiSupervisedAgentCoordinator {
             }
             Err(SupervisedProviderTurnFailure::LeaseLost(error)) => return Err(error),
         };
+        if self.run_control.cancellation(&lease).await?.is_some() {
+            self.invalidate_result_provider_session(
+                &result,
+                "provider_session_cancelled_after_turn",
+            )
+            .await;
+            return Ok(AiSupervisedAgentRunOutcome::Cancelled {
+                provider_turns: guard.provider_turns(),
+                total_tool_calls: guard.total_tool_calls(),
+            });
+        }
         let observed = match guard.observe_provider_turn(&result) {
             Ok(observed) => observed,
             Err(_) => {
@@ -1069,15 +1106,10 @@ impl AiSupervisedAgentCoordinator {
                         "provider_session_cancelled_after_output",
                     )
                     .await;
-                    return self
-                        .finish_recovery(
-                            &lease,
-                            &guard,
-                            AiAgentRecoveryPhase::ProviderOutput,
-                            "supervised_cancelled_after_output",
-                            result.provider_response_id(),
-                        )
-                        .await;
+                    return Ok(AiSupervisedAgentRunOutcome::Cancelled {
+                        provider_turns: guard.provider_turns(),
+                        total_tool_calls: guard.total_tool_calls(),
+                    });
                 }
                 let provider_session_commit = match result.provider_session_commit(message_id) {
                     Ok(Some(commit)) => {
@@ -1110,7 +1142,15 @@ impl AiSupervisedAgentCoordinator {
                                 .require_cleanup(claim, "provider_session_commit_proof_invalid")
                                 .await;
                         }
-                        None
+                        return self
+                            .finish_recovery(
+                                &lease,
+                                &guard,
+                                AiAgentRecoveryPhase::ProviderOutput,
+                                "provider_session_commit_proof_invalid",
+                                result.provider_response_id(),
+                            )
+                            .await;
                     }
                 };
                 let completion = AiRunCompletion::new(
@@ -1145,11 +1185,21 @@ impl AiSupervisedAgentCoordinator {
                 call_count,
             } => {
                 if call_count != 1 || result.provider_response_id().is_none() {
+                    self.invalidate_result_provider_session(
+                        &result,
+                        "provider_session_tool_batch_unsupported",
+                    )
+                    .await;
                     return self
                         .finish_failed(&lease, &guard, "supervised_tool_batch_unsupported")
                         .await;
                 }
                 if !guard.has_provider_turn_capacity() {
+                    self.invalidate_result_provider_session(
+                        &result,
+                        "provider_session_continuation_limit_reached",
+                    )
+                    .await;
                     return self
                         .finish_failed(&lease, &guard, "supervised_continuation_limit_reached")
                         .await;
@@ -1157,6 +1207,11 @@ impl AiSupervisedAgentCoordinator {
                 let binding = match plan_binding(&classified_bindings, &result) {
                     Some(binding) => binding,
                     None => {
+                        self.invalidate_result_provider_session(
+                            &result,
+                            "provider_session_classified_binding_missing",
+                        )
+                        .await;
                         return self
                             .finish_failed(&lease, &guard, "classified_mutation_binding_missing")
                             .await;
@@ -1174,6 +1229,11 @@ impl AiSupervisedAgentCoordinator {
                         current
                     }
                     _ => {
+                        self.invalidate_result_provider_session(
+                            &result,
+                            "provider_session_tool_rule_denied",
+                        )
+                        .await;
                         return self
                             .finish_failed(&lease, &guard, "supervised_tool_rule_denied")
                             .await;
@@ -1182,6 +1242,11 @@ impl AiSupervisedAgentCoordinator {
                 let completed_rule_usage = match rule_usage.accept_tool_calls(1, &rules) {
                     Ok(usage) => usage,
                     Err(_) => {
+                        self.invalidate_result_provider_session(
+                            &result,
+                            "provider_session_rule_steps_exceeded",
+                        )
+                        .await;
                         return self
                             .finish_failed(&lease, &guard, "supervised_rule_steps_exceeded")
                             .await;
@@ -1207,6 +1272,11 @@ impl AiSupervisedAgentCoordinator {
                     {
                         Ok(outcome) => outcome,
                         Err(_) => {
+                            self.invalidate_result_provider_session(
+                                &result,
+                                "provider_session_automatic_mutation_uncertain",
+                            )
+                            .await;
                             return self
                                 .finish_recovery(
                                     &lease,
@@ -1219,6 +1289,11 @@ impl AiSupervisedAgentCoordinator {
                         }
                     };
                     let Some(persisted) = outcome.persisted() else {
+                        self.invalidate_result_provider_session(
+                            &result,
+                            "provider_session_automatic_mutation_recovery",
+                        )
+                        .await;
                         return Ok(AiSupervisedAgentRunOutcome::RecoveryRequired {
                             phase: AiAgentRecoveryPhase::ApplicationTool,
                             provider_turns: guard.provider_turns(),
@@ -1226,6 +1301,11 @@ impl AiSupervisedAgentCoordinator {
                         });
                     };
                     if guard.observe_tool_result(persisted).is_err() {
+                        self.invalidate_result_provider_session(
+                            &result,
+                            "provider_session_automatic_result_invalid",
+                        )
+                        .await;
                         return self
                             .finish_recovery(
                                 persisted.lease(),
@@ -1242,6 +1322,11 @@ impl AiSupervisedAgentCoordinator {
                         .await?
                         .is_some()
                     {
+                        self.invalidate_result_provider_session(
+                            &result,
+                            "provider_session_automatic_cancelled_after_effect",
+                        )
+                        .await;
                         return self
                             .finish_recovery(
                                 persisted.lease(),
@@ -1255,6 +1340,11 @@ impl AiSupervisedAgentCoordinator {
                     let continuation = match guard.continuation() {
                         Ok(continuation) => continuation,
                         Err(_) => {
+                            self.invalidate_result_provider_session(
+                                &result,
+                                "provider_session_automatic_continuation_invalid",
+                            )
+                            .await;
                             return self
                                 .finish_recovery(
                                     persisted.lease(),
@@ -1285,6 +1375,11 @@ impl AiSupervisedAgentCoordinator {
                     {
                         Ok(renewed) => renewed,
                         Err(_) => {
+                            self.invalidate_result_provider_session(
+                                &result,
+                                "provider_session_automatic_checkpoint_uncertain",
+                            )
+                            .await;
                             return self
                                 .finish_recovery(
                                     persisted.lease(),
@@ -1299,6 +1394,11 @@ impl AiSupervisedAgentCoordinator {
                     let adopted = match self.checkpoint_control.adopt_automatic(&lease).await {
                         Ok(Some(adopted)) => adopted,
                         Ok(None) | Err(_) => {
+                            self.invalidate_result_provider_session(
+                                &result,
+                                "provider_session_automatic_adoption_failed",
+                            )
+                            .await;
                             return self
                                 .finish_recovery(
                                     &lease,
@@ -1579,10 +1679,229 @@ mod tests {
         }
     }
 
+    struct RetainedSupervisedProviderExecutor {
+        result: Mutex<Option<crate::AiProviderCallResult>>,
+        claim: crate::AiProviderSessionClaim,
+        reclaimed: Arc<AtomicBool>,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AiAgentProviderTurnExecutor for RetainedSupervisedProviderExecutor {
+        async fn execute_turn(
+            &self,
+            _lease: &AiRunLease,
+            _plan: AiProviderCallPlan,
+        ) -> Result<crate::AiProviderCallResult, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn execute_retained_turn(
+            &self,
+            lease: Arc<tokio::sync::Mutex<AiRunLease>>,
+            _plan: AiProviderCallPlan,
+            _session_plan: crate::AiProviderSessionTurnPlan,
+            _session_service: Arc<dyn crate::AiProviderSessionService>,
+            _execution: Option<Arc<dyn crate::AiProviderDynamicToolExecution>>,
+        ) -> Result<crate::AiProviderCallResult, AiError> {
+            if lease.lock().await.latest_checkpoint_id().is_some()
+                || !self.reclaimed.load(Ordering::SeqCst)
+            {
+                return Err(AiError::Conflict);
+            }
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.result
+                .lock()
+                .expect("retained result lock should not be poisoned")
+                .take()
+                .ok_or(AiError::Conflict)
+                .map(|result| result.test_with_provider_session_claim(self.claim.clone()))
+        }
+    }
+
+    struct RetainedSupervisedSessionService {
+        claim: Mutex<Option<crate::AiProviderSessionClaim>>,
+        run: Arc<TestRunControl>,
+        reclaimed: Arc<AtomicBool>,
+        commits: AtomicUsize,
+        cleanups: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl crate::AiProviderSessionService for RetainedSupervisedSessionService {
+        async fn inspect_for_run(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Option<crate::AiProviderSessionBindingView>, AiError> {
+            Ok(None)
+        }
+
+        async fn bind_for_run(
+            &self,
+            _lease: &AiRunLease,
+            _request: crate::AiProviderSessionBindRequest,
+        ) -> Result<crate::AiProviderSessionClaim, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn claim_for_run(
+            &self,
+            _lease: &AiRunLease,
+            _expected: &crate::AiProviderSessionDescriptor,
+            _expected_transcript_fingerprint: &str,
+        ) -> Result<crate::AiProviderSessionClaim, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn open_for_run(
+            &self,
+            _lease: &AiRunLease,
+            _claim: &crate::AiProviderSessionClaim,
+        ) -> Result<crate::AiOpenedProviderSession, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn heartbeat(
+            &self,
+            _lease: &AiRunLease,
+            claim: &crate::AiProviderSessionClaim,
+        ) -> Result<crate::AiProviderSessionClaim, AiError> {
+            Ok(claim.clone())
+        }
+
+        async fn reclaim_after_wait(
+            &self,
+            lease: &AiRunLease,
+        ) -> Result<crate::AiProviderSessionClaim, AiError> {
+            let claim = self
+                .claim
+                .lock()
+                .expect("retained claim lock should not be poisoned")
+                .take()
+                .ok_or(AiError::Conflict)?;
+            if claim.run_id() != lease.run_id()
+                || claim.attempt_id() != lease.attempt_id()
+                || claim.run_lease_generation() != lease.lease_generation()
+                || lease.latest_checkpoint_id().is_some()
+            {
+                return Err(AiError::Conflict);
+            }
+            self.reclaimed.store(true, Ordering::SeqCst);
+            Ok(claim)
+        }
+
+        async fn commit_turn(
+            &self,
+            _lease: &AiRunLease,
+            claim: &crate::AiProviderSessionClaim,
+            commit: crate::AiProviderSessionCommit,
+        ) -> Result<crate::AiProviderSessionBindingView, AiError> {
+            if self.run.final_states() != [AiRunState::Completed]
+                || !self.reclaimed.load(Ordering::SeqCst)
+            {
+                return Err(AiError::Conflict);
+            }
+            self.commits.fetch_add(1, Ordering::SeqCst);
+            Ok(crate::AiProviderSessionBindingView {
+                binding_id: claim.binding_id(),
+                session_id: claim.session_id(),
+                scope: test_scope(),
+                descriptor: claim.descriptor().clone(),
+                state: crate::AiProviderSessionState::Active,
+                through_message_sequence: commit.through_message_sequence(),
+                transcript_fingerprint: commit.transcript_fingerprint().to_owned(),
+                provider_expires_at: None,
+                idle_expires_at: time::OffsetDateTime::now_utc() + Duration::minutes(5),
+                absolute_expires_at: time::OffsetDateTime::now_utc() + Duration::hours(1),
+                row_version: 2,
+            })
+        }
+
+        async fn require_cleanup(
+            &self,
+            _claim: &crate::AiProviderSessionClaim,
+            _reason_code: &str,
+        ) -> Result<(), AiError> {
+            self.cleanups.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn claim_cleanup(
+            &self,
+            _worker_id: &str,
+        ) -> Result<Option<crate::AiProviderSessionCleanupClaim>, AiError> {
+            Ok(None)
+        }
+
+        async fn open_for_cleanup(
+            &self,
+            _claim: &crate::AiProviderSessionCleanupClaim,
+            _policy: &crate::AiContentProtectionPolicy,
+        ) -> Result<crate::AiProviderSessionDeletionRequest, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn complete_cleanup(
+            &self,
+            _claim: &crate::AiProviderSessionCleanupClaim,
+            _proof: crate::AiProviderSessionAbsenceProof,
+        ) -> Result<(), AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn schedule_cleanup_retry(
+            &self,
+            _claim: &crate::AiProviderSessionCleanupClaim,
+            _delay: Duration,
+            _reason_code: &str,
+        ) -> Result<(), AiError> {
+            Err(AiError::Conflict)
+        }
+    }
+
     struct TestPlanner {
         scope: AiScope,
         route: AiToolResultEgressRoute,
         continuation_count: AtomicUsize,
+    }
+
+    struct RetainedSupervisedPlanner {
+        scope: AiScope,
+        route: AiToolResultEgressRoute,
+        provider_session: crate::AiProviderSessionTurnPlan,
+        continuation_count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AiSupervisedAgentTurnPlanner for RetainedSupervisedPlanner {
+        async fn initial_plan(
+            &self,
+            lease: &AiRunLease,
+        ) -> Result<AiSupervisedAgentTurnPlan, AiError> {
+            Ok(AiSupervisedAgentTurnPlan::new(
+                AiProviderCallPlan::test_supervised_plan(lease, self.scope.clone(), false),
+                self.route.clone(),
+                test_rules(self.scope.clone()),
+                false,
+            )?
+            .test_with_provider_session(self.provider_session.clone()))
+        }
+
+        async fn continuation_plan(
+            &self,
+            lease: &AiRunLease,
+            _provider_turns: u32,
+            _continuation: AiAgentContinuation,
+        ) -> Result<AiSupervisedAgentTurnPlan, AiError> {
+            self.continuation_count.fetch_add(1, Ordering::SeqCst);
+            Ok(AiSupervisedAgentTurnPlan::new(
+                AiProviderCallPlan::test_supervised_plan(lease, self.scope.clone(), true),
+                self.route.clone(),
+                test_rules(self.scope.clone()),
+                false,
+            )?
+            .test_with_provider_session(self.provider_session.clone()))
+        }
     }
 
     #[async_trait]
@@ -2024,6 +2343,23 @@ mod tests {
         }
     }
 
+    struct ChangeRulesAfterProvider(AtomicUsize);
+
+    #[async_trait]
+    impl AiAgentRuleResolver for ChangeRulesAfterProvider {
+        async fn resolve_rules(
+            &self,
+            _lease: &AiRunLease,
+            scope: &AiScope,
+        ) -> Result<AiAgentRuleResolution, AiError> {
+            let call = self.0.fetch_add(1, Ordering::SeqCst);
+            AiAgentRuleResolution::new(
+                test_rules_with_fingerprint(scope.clone(), if call < 2 { '1' } else { '4' }),
+                time::OffsetDateTime::now_utc(),
+            )
+        }
+    }
+
     fn principal_reference() -> PrincipalReference {
         AuthPrincipal::User(AuthUser {
             user_id: "supervised-coordinator-user".to_owned(),
@@ -2095,6 +2431,38 @@ mod tests {
             "egress-v1",
         )
         .expect("test route should validate")
+    }
+
+    fn retained_descriptor() -> crate::AiProviderSessionDescriptor {
+        crate::AiProviderSessionDescriptor::new(
+            crate::ProviderKind::OpenAi,
+            "coordinator-test-profile",
+            "coordinator-test-model",
+            "a".repeat(64),
+            "test-provider-retained/v1",
+            "b".repeat(64),
+        )
+        .expect("retained test descriptor should validate")
+    }
+
+    fn retained_claim(
+        lease: &AiRunLease,
+        descriptor: crate::AiProviderSessionDescriptor,
+    ) -> crate::AiProviderSessionClaim {
+        crate::AiProviderSessionClaim {
+            binding_id: Uuid::new_v4(),
+            session_id: lease.session_id(),
+            run_id: lease.run_id(),
+            attempt_id: lease.attempt_id(),
+            run_lease_generation: lease.lease_generation(),
+            binding_claim_generation: 1,
+            binding_row_version: 1,
+            claim_expires_at: time::OffsetDateTime::now_utc() + Duration::minutes(5),
+            through_message_sequence: 0,
+            transcript_fingerprint: "c".repeat(64),
+            principal_reference: lease.principal_reference().clone(),
+            descriptor,
+        }
     }
 
     fn test_manifest(lease: &AiRunLease) -> AiEgressManifest {
@@ -2190,6 +2558,92 @@ mod tests {
                 total_tool_calls: 0,
             })),
         })
+    }
+
+    #[tokio::test]
+    async fn approved_retained_continuation_reclaims_then_commits_terminal_turn() {
+        let base = AiRunLease::test_running(principal_reference());
+        let checkpoint_id = Uuid::new_v4();
+        let claimed = base.test_with_checkpoint(checkpoint_id);
+        let control = Arc::new(TestCheckpointControl {
+            adopted: Mutex::new(Some(adopted_checkpoint(&base, checkpoint_id))),
+            consumed: AtomicBool::new(false),
+        });
+        let descriptor = retained_descriptor();
+        let claim = retained_claim(&claimed, descriptor.clone());
+        let reclaimed = Arc::new(AtomicBool::new(false));
+        let provider = Arc::new(RetainedSupervisedProviderExecutor {
+            result: Mutex::new(Some(crate::AiProviderCallResult::test_result(
+                &claimed,
+                Some("test-previous-response".to_owned()),
+                "supervised-retained-final",
+                Vec::new(),
+            ))),
+            claim: claim.clone(),
+            reclaimed: reclaimed.clone(),
+            calls: AtomicUsize::new(0),
+        });
+        let run = Arc::new(TestRunControl::new());
+        let sessions = Arc::new(RetainedSupervisedSessionService {
+            claim: Mutex::new(Some(claim)),
+            run: run.clone(),
+            reclaimed,
+            commits: AtomicUsize::new(0),
+            cleanups: AtomicUsize::new(0),
+        });
+        let planner = Arc::new(RetainedSupervisedPlanner {
+            scope: test_scope(),
+            route: test_route(),
+            provider_session: crate::AiProviderSessionTurnPlan::new(descriptor, "c".repeat(64))
+                .expect("retained plan should validate"),
+            continuation_count: AtomicUsize::new(0),
+        });
+        let coordinator = AiSupervisedAgentCoordinator::new(
+            run.clone(),
+            provider.clone(),
+            Arc::new(TestOutputWriter),
+            Arc::new(TestCheckpointWriter {
+                provider_checkpoints: AtomicUsize::new(0),
+            }),
+            control.clone(),
+            Arc::new(TestApprovalStager {
+                calls: AtomicUsize::new(0),
+                saw_checkpoint: AtomicBool::new(false),
+            }),
+            unused_automatic(),
+            unused_resume(),
+            Arc::new(TestRuleResolver),
+            planner.clone(),
+            Arc::new(FixedClock::new(time::OffsetDateTime::now_utc())),
+            limits(),
+        )
+        .with_provider_session_service(sessions.clone());
+
+        let outcome = coordinator
+            .execute_claimed(&claimed)
+            .await
+            .expect("retained supervised continuation should complete");
+
+        assert!(
+            matches!(
+                outcome,
+                AiSupervisedAgentRunOutcome::Completed {
+                    provider_turns: 2,
+                    total_tool_calls: 1,
+                    ..
+                }
+            ),
+            "unexpected outcome: {outcome:?}; provider calls {}; reclaimed {}; final states {:?}",
+            provider.calls.load(Ordering::SeqCst),
+            sessions.reclaimed.load(Ordering::SeqCst),
+            run.final_states(),
+        );
+        assert!(control.consumed.load(Ordering::SeqCst));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(planner.continuation_count.load(Ordering::SeqCst), 1);
+        assert_eq!(sessions.commits.load(Ordering::SeqCst), 1);
+        assert_eq!(sessions.cleanups.load(Ordering::SeqCst), 0);
+        assert_eq!(run.final_states(), vec![AiRunState::Completed]);
     }
 
     #[tokio::test]
