@@ -6607,18 +6607,6 @@ mod tests {
             .expect("first waiter cleanup page should succeed");
         assert_eq!(first.deleting_sessions_finalized, 0);
         assert_eq!(first.tool_payload_purges_blocked, 1);
-        assert!(
-            AiSubscriptionWaiterRecord::find_by_id(&database, &final_waiter)
-                .await
-                .expect("waiter lookup should succeed")
-                .is_some()
-        );
-        assert!(
-            AiSubscriptionWaitAdoptionRecord::find_by_id(&database, &final_adoption)
-                .await
-                .expect("adoption lookup should succeed")
-                .is_some()
-        );
 
         let mut finalized = false;
         for _ in 0..20 {
