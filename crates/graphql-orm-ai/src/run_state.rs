@@ -24,6 +24,10 @@ pub enum AiRunState {
     /// Waiting for an exactly bound provider background response. This state
     /// has no active worker lease and can only be advanced by reconciliation.
     WaitingProvider,
+    /// Waiting for one bounded replay-then-live subscription observation.
+    /// This state has no run/coordinator/provider lease; the separately
+    /// fenced waiter worker may atomically queue one exact continuation.
+    WaitingSubscription,
     /// Eligible after a retry deadline.
     RetryScheduled,
     /// Restore/crash left an uncertain side effect requiring review.
@@ -71,6 +75,7 @@ impl AiRunTerminalEvent {
             | AiRunState::WaitingTool
             | AiRunState::WaitingReauth
             | AiRunState::WaitingProvider
+            | AiRunState::WaitingSubscription
             | AiRunState::RetryScheduled => None,
         }
     }
@@ -118,6 +123,7 @@ impl AiRunState {
             Self::WaitingTool => "waiting_tool",
             Self::WaitingReauth => "waiting_reauth",
             Self::WaitingProvider => "waiting_provider",
+            Self::WaitingSubscription => "waiting_subscription",
             Self::RetryScheduled => "retry_scheduled",
             Self::RecoveryRequired => "recovery_required",
             Self::Completed => "completed",
@@ -136,6 +142,7 @@ impl AiRunState {
             "waiting_tool" => Some(Self::WaitingTool),
             "waiting_reauth" => Some(Self::WaitingReauth),
             "waiting_provider" => Some(Self::WaitingProvider),
+            "waiting_subscription" => Some(Self::WaitingSubscription),
             "retry_scheduled" => Some(Self::RetryScheduled),
             "recovery_required" => Some(Self::RecoveryRequired),
             "completed" => Some(Self::Completed),
@@ -161,6 +168,7 @@ impl AiRunState {
                     | Self::WaitingTool
                     | Self::WaitingReauth
                     | Self::WaitingProvider
+                    | Self::WaitingSubscription
                     | Self::RetryScheduled
                     | Self::Completed
                     | Self::Failed
@@ -189,6 +197,10 @@ impl AiRunState {
                 Self::Queued | Self::Cancelled | Self::Failed | Self::RecoveryRequired
             ),
             Self::WaitingProvider => matches!(next, Self::Cancelled),
+            Self::WaitingSubscription => matches!(
+                next,
+                Self::Queued | Self::Cancelled | Self::Failed | Self::RecoveryRequired
+            ),
             Self::RecoveryRequired | Self::Completed | Self::Failed | Self::Cancelled => false,
         }
     }

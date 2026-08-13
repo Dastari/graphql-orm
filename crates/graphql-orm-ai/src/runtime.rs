@@ -513,6 +513,34 @@ impl AiRuntime {
         })
     }
 
+    pub(crate) async fn preauthorize_compiled_subscription(
+        &self,
+        principal_reference: &PrincipalReference,
+        descriptor: &AiToolDescriptor,
+        request: &ToolGraphqlRequest,
+    ) -> Result<AiToolPreauthorization, AiError> {
+        if !self.start_gate.is_ready()
+            || !self
+                .generated_graphql_target_policy
+                .allows_subscription(descriptor)
+            || descriptor.maturity > self.maximum_tool_maturity
+            || descriptor.graphql_contract.as_ref() != Some(&request.contract)
+        {
+            return Err(AiError::Forbidden);
+        }
+        let (principal, authorization) = self
+            .tool_bridge
+            .preauthorize(principal_reference, descriptor, request)
+            .await
+            .map_err(|_| AiError::Forbidden)?;
+        Ok(AiToolPreauthorization {
+            principal,
+            tool_fingerprint: descriptor.fingerprint.clone(),
+            policy_version: authorization.policy_version,
+            authorization_state_digest: authorization.authorization_state_digest,
+        })
+    }
+
     /// Executes one exact classified automatic mutation under fresh authority.
     ///
     /// Durable callers must persist a pre-effect checkpoint before invoking

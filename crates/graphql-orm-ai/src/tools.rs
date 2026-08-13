@@ -13,9 +13,10 @@ use sha2::{Digest, Sha256};
 
 use crate::{AiApprovalRule, AiToolRisk, ModelToolDefinition};
 use crate::{
-    AiCompiledGraphqlMutation, AiCompiledGraphqlQuery, AiDisclosureSchema, AiError,
-    AiGeneratedGraphqlOperationPolicy, AiGraphqlMutationCapability,
+    AiCompiledGraphqlMutation, AiCompiledGraphqlQuery, AiCompiledGraphqlSubscription,
+    AiDisclosureSchema, AiError, AiGeneratedGraphqlOperationPolicy, AiGraphqlMutationCapability,
     AiGraphqlMutationCapabilityCatalog, AiGraphqlQueryCapability, AiGraphqlQueryCapabilityCatalog,
+    AiGraphqlSubscriptionCapability, AiGraphqlSubscriptionCapabilityCatalog,
     AiGraphqlToolManifestCatalog, AiScope, AiToolDescriptor, AiToolId, AiToolOperationDomain,
     AiToolOperationKind, DataClassification, GraphqlExecutionTargetId, ToolGraphqlRequest,
     ToolMaturity, contains_forbidden_graphql_name,
@@ -29,6 +30,7 @@ pub struct AiToolCatalog {
     tools: BTreeMap<AiToolId, RegisteredAiTool>,
     query_capabilities: BTreeMap<AiToolId, AiGraphqlQueryCapability>,
     mutation_capabilities: BTreeMap<AiToolId, AiGraphqlMutationCapability>,
+    subscription_capabilities: BTreeMap<AiToolId, AiGraphqlSubscriptionCapability>,
 }
 
 #[derive(Clone, Debug)]
@@ -317,6 +319,7 @@ impl AiToolCatalog {
             if self.tools.contains_key(capability.id())
                 || self.query_capabilities.contains_key(capability.id())
                 || self.mutation_capabilities.contains_key(capability.id())
+                || self.subscription_capabilities.contains_key(capability.id())
             {
                 return Err(AiError::AlreadyExists(capability.id().as_str().to_owned()));
             }
@@ -347,11 +350,42 @@ impl AiToolCatalog {
             if self.tools.contains_key(capability.id())
                 || self.query_capabilities.contains_key(capability.id())
                 || self.mutation_capabilities.contains_key(capability.id())
+                || self.subscription_capabilities.contains_key(capability.id())
             {
                 return Err(AiError::AlreadyExists(capability.id().as_str().to_owned()));
             }
         }
         self.mutation_capabilities.extend(
+            catalog
+                .capabilities()
+                .map(|capability| (capability.id().clone(), capability.clone())),
+        );
+        Ok(())
+    }
+
+    /// Registers a complete replayable subscription-capability set.
+    ///
+    /// Registration publishes only a closed typed plan contract. It neither
+    /// registers a durable source nor grants execution or disclosure authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stable-ID collision with any registered tool or
+    /// generated capability.
+    pub fn register_subscription_capability_catalog(
+        &mut self,
+        catalog: &AiGraphqlSubscriptionCapabilityCatalog,
+    ) -> Result<(), AiError> {
+        for capability in catalog.capabilities() {
+            if self.tools.contains_key(capability.id())
+                || self.query_capabilities.contains_key(capability.id())
+                || self.mutation_capabilities.contains_key(capability.id())
+                || self.subscription_capabilities.contains_key(capability.id())
+            {
+                return Err(AiError::AlreadyExists(capability.id().as_str().to_owned()));
+            }
+        }
+        self.subscription_capabilities.extend(
             catalog
                 .capabilities()
                 .map(|capability| (capability.id().clone(), capability.clone())),
@@ -510,6 +544,7 @@ impl AiToolCatalog {
         if self.tools.contains_key(&descriptor.id)
             || self.query_capabilities.contains_key(&descriptor.id)
             || self.mutation_capabilities.contains_key(&descriptor.id)
+            || self.subscription_capabilities.contains_key(&descriptor.id)
         {
             return Err(AiError::AlreadyExists(descriptor.id.as_str().to_owned()));
         }
@@ -559,6 +594,14 @@ impl AiToolCatalog {
     /// This remains discovery metadata and does not grant execution authority.
     pub fn mutation_capability(&self, id: &AiToolId) -> Option<&AiGraphqlMutationCapability> {
         self.mutation_capabilities.get(id)
+    }
+
+    /// Returns all registered replayable subscription capabilities in stable
+    /// ID order. Discovery grants no source or user authority.
+    pub fn subscription_capabilities(
+        &self,
+    ) -> impl Iterator<Item = &AiGraphqlSubscriptionCapability> {
+        self.subscription_capabilities.values()
     }
 
     /// Projects one registered automatic query capability for a provider.
@@ -664,6 +707,63 @@ impl AiToolCatalog {
     ) -> Result<AiCompiledGraphqlMutation, AiError> {
         let capability = self
             .mutation_capabilities
+            .get(id)
+            .ok_or(AiError::Forbidden)?;
+        if capability.fingerprint() != expected_capability_fingerprint {
+            return Err(AiError::Forbidden);
+        }
+        capability.compile(plan)
+    }
+
+    /// Projects one registered subscription capability for a provider.
+    ///
+    /// The definition contains only the finite typed plan schema; it exposes
+    /// no GraphQL document, target, cursor, transport, or credential.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an absent capability or invalid provider alias.
+    pub fn subscription_capability_model_definition(
+        &self,
+        id: &AiToolId,
+        provider_name: impl Into<String>,
+    ) -> Result<ModelToolDefinition, AiError> {
+        let capability = self
+            .subscription_capabilities
+            .get(id)
+            .ok_or(AiError::Forbidden)?;
+        let definition = ModelToolDefinition {
+            tool_id: capability.id().as_str().to_owned(),
+            provider_name: provider_name.into(),
+            fingerprint: capability.fingerprint().to_owned(),
+            description: capability.description().to_owned(),
+            parameters: capability.argument_schema().clone(),
+            strict: true,
+        };
+        definition.validate().map_err(|_| {
+            AiError::InvalidConfiguration(
+                "automatic subscription provider alias is invalid".to_owned(),
+            )
+        })?;
+        Ok(definition)
+    }
+
+    /// Compiles one closed provider-authored subscription plan.
+    ///
+    /// Compilation does not register a replay source, authorize a principal,
+    /// open a subscription, persist a waiter, or disclose an event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an absent/stale capability or invalid typed plan.
+    pub fn compile_subscription_capability(
+        &self,
+        id: &AiToolId,
+        expected_capability_fingerprint: &str,
+        plan: serde_json::Value,
+    ) -> Result<AiCompiledGraphqlSubscription, AiError> {
+        let capability = self
+            .subscription_capabilities
             .get(id)
             .ok_or(AiError::Forbidden)?;
         if capability.fingerprint() != expected_capability_fingerprint {

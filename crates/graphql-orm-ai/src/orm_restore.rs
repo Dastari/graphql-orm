@@ -579,6 +579,7 @@ impl CollectedRows {
                 | AiRunState::WaitingTool
                 | AiRunState::WaitingReauth
                 | AiRunState::WaitingProvider
+                | AiRunState::WaitingSubscription
                 | AiRunState::RecoveryRequired => AiExternalEffectState::Uncertain,
             };
             runs.push(AiRestoredRun {

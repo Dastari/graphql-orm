@@ -90,6 +90,10 @@ macro_rules! uuid_id {
 uuid_id!(AiSessionId, "AI session identifier.");
 uuid_id!(AiRunId, "AI run identifier.");
 uuid_id!(AiToolCallId, "AI tool-call identifier.");
+uuid_id!(
+    AiSubscriptionWaiterId,
+    "AI durable subscription-waiter identifier."
+);
 uuid_id!(AiApprovalId, "AI approval identifier.");
 uuid_id!(AiBudgetReservationId, "AI budget-reservation identifier.");
 uuid_id!(AiProposalId, "AI proposal identifier.");

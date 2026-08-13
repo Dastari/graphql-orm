@@ -2103,7 +2103,7 @@ fn protection_context(
     }
 }
 
-fn provider_call_key(lease: &AiRunLease, provider_call_id: &str) -> String {
+pub(crate) fn provider_call_key(lease: &AiRunLease, provider_call_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(lease.run_id().0.as_bytes());
     hasher.update([0]);
@@ -2111,7 +2111,7 @@ fn provider_call_key(lease: &AiRunLease, provider_call_id: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn canonical_json_hash(value: &serde_json::Value) -> Result<String, AiError> {
+pub(crate) fn canonical_json_hash(value: &serde_json::Value) -> Result<String, AiError> {
     let canonical = canonical_json(value);
     let encoded = serde_json::to_vec(&canonical)
         .map_err(|_| AiError::InvalidInput("tool arguments are not canonical JSON".to_owned()))?;

@@ -1166,6 +1166,222 @@ pub(crate) struct AiRunCancellationRequestRecord {
     pub requested_at: i64,
 }
 
+/// Private, protected one-shot replay-then-live subscription waiter.
+///
+/// The row contains only safe drift/fencing metadata in ordinary columns.
+/// Typed variables, projection, condition and the opaque replay cursor are
+/// protected and unavailable through generated reads. Portable backups redact
+/// the cursor, so only same-database restart may reclaim a live waiter.
+#[backend_selected_graphql_entity(
+    table = "graphql_orm_ai_subscription_waiters",
+    plural = "GraphqlOrmAiSubscriptionWaiters",
+    default_sort = "updated_at ASC, id ASC",
+    unique_index = "run_id",
+    index(
+        name = "idx_graphql_orm_ai_subscription_waiters_claim",
+        columns = ["state", "claim_expires_at", "updated_at", "id"],
+        directions = ["asc", "asc", "asc", "asc"]
+    ),
+    index(
+        name = "idx_graphql_orm_ai_subscription_waiters_expiry",
+        columns = ["state", "expires_at", "id"],
+        directions = ["asc", "asc", "asc"]
+    )
+)]
+#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
+#[cfg_attr(
+    any(feature = "sqlite", feature = "postgres"),
+    derive(GraphQLEntity, GraphQLOperations)
+)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub(crate) struct AiSubscriptionWaiterRecord {
+    /// Waiter identity.
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "uuid")]
+    pub id: graphql_orm::uuid::Uuid,
+    /// Exact suspended run; at most one waiter exists for a run.
+    #[unique]
+    #[filterable(type = "uuid")]
+    pub run_id: graphql_orm::uuid::Uuid,
+    /// Owning AI session.
+    #[filterable(type = "uuid")]
+    pub session_id: graphql_orm::uuid::Uuid,
+    /// Tool call completed by this one-shot observation.
+    #[unique]
+    #[filterable(type = "uuid")]
+    pub tool_call_id: graphql_orm::uuid::Uuid,
+    /// Attempt that registered the wait.
+    pub source_attempt_id: graphql_orm::uuid::Uuid,
+    /// Fencing generation that registered the wait.
+    pub source_lease_generation: i64,
+    /// Exact provider-turn checkpoint from which the wait was parked.
+    pub source_checkpoint_id: graphql_orm::uuid::Uuid,
+    /// Verified hash of the exact provider-turn checkpoint.
+    pub source_checkpoint_fingerprint: String,
+    /// Exact coordinator checkpoint proving protected wait persistence and
+    /// lease release were atomic.
+    pub parked_checkpoint_id: graphql_orm::uuid::Uuid,
+    /// Verified hash of the parked coordinator checkpoint.
+    pub parked_checkpoint_fingerprint: String,
+    /// Safe owner kind copied from the authoritative session.
+    pub owner_principal_kind: String,
+    /// Safe owner subject copied from the authoritative session.
+    pub owner_subject: String,
+    /// Exact safe principal reference used to rehydrate current authority at
+    /// every source-open, event, adoption and resumed-continuation boundary.
+    /// It never contains a bearer credential.
+    #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
+    pub principal_reference: serde_json::Value,
+    /// Stable hash of the exact serialized principal reference.
+    pub principal_reference_fingerprint: String,
+    /// Deterministic scope identity.
+    #[filterable(type = "string")]
+    pub scope_key: String,
+    /// Exact scope kind.
+    pub scope_kind: String,
+    /// Exact scope ID.
+    pub scope_id: String,
+    /// Exact tenant boundary.
+    pub tenant_id: Option<String>,
+    /// Deployment-owned logical GraphQL target ID.
+    pub target_id: String,
+    /// Exact registered replay source ID.
+    pub source_id: String,
+    /// Exact replay-source registration fingerprint.
+    pub source_registration_fingerprint: String,
+    /// Active semantic-catalogue fingerprint.
+    pub semantic_catalog_fingerprint: String,
+    /// Exact semantic subscription-operation fingerprint.
+    pub operation_fingerprint: String,
+    /// Active finished-schema fingerprint.
+    pub target_schema_fingerprint: String,
+    /// Exact compiled subscription capability fingerprint.
+    pub capability_fingerprint: String,
+    /// Exact compiled typed-plan fingerprint.
+    pub plan_fingerprint: String,
+    /// Exact server-compiled subscription descriptor fingerprint.
+    pub compiled_descriptor_fingerprint: String,
+    /// Server-authored GraphQL operation name.
+    pub operation_name: String,
+    /// Hash of the server-authored subscription document.
+    pub operation_document_hash: String,
+    /// Selected event-projection fingerprint.
+    pub result_projection_fingerprint: String,
+    /// Selected disclosure-schema fingerprint.
+    pub disclosure_schema_fingerprint: String,
+    /// Canonical typed-variable fingerprint.
+    pub variables_fingerprint: String,
+    /// Canonical closed-condition fingerprint.
+    pub condition_fingerprint: String,
+    /// Complete immutable waiter binding fingerprint.
+    #[unique]
+    pub waiter_fingerprint: String,
+    /// Protected compiled variables, projection, condition, continuation and
+    /// result-egress route. It contains no principal credential.
+    #[backup(redact)]
+    #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
+    pub protected_request: Option<serde_json::Value>,
+    /// Fingerprint of the current opaque replay cursor/watermark.
+    pub cursor_fingerprint: String,
+    /// Protected opaque replay cursor. Portable backup deliberately redacts
+    /// it so restored deployments cannot claim durable replay continuity.
+    #[backup(redact)]
+    #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
+    pub protected_cursor: Option<serde_json::Value>,
+    /// Number of authorized projected events already examined.
+    pub events_examined: i64,
+    /// Positive immutable event ceiling.
+    pub maximum_events: i64,
+    /// Exclusive waiter expiry.
+    #[filterable(type = "number")]
+    pub expires_at: i64,
+    /// Waiting/claimed/adopted/cancelled/expired/recovery-required lifecycle.
+    #[filterable(type = "string")]
+    pub state: String,
+    /// Current bounded waiter worker, never a coordinator/provider lease.
+    pub claim_owner: Option<String>,
+    /// Monotonic waiter-worker fencing generation.
+    pub claim_generation: i64,
+    /// Exclusive waiter-worker lease expiry.
+    #[filterable(type = "number")]
+    pub claim_expires_at: Option<i64>,
+    /// Creation timestamp.
+    #[sortable]
+    pub created_at: i64,
+    /// Last durable cursor/lifecycle update timestamp.
+    #[sortable]
+    pub updated_at: i64,
+    /// CAS version.
+    #[graphql_orm(version, default = "0")]
+    pub row_version: i64,
+}
+
+/// Exact one-shot event/limit adoption queued back onto the ordinary run.
+///
+/// A unique waiter link makes event adoption and continuation queueing
+/// idempotent. The protected result is opened only after fresh authority is
+/// established by the resumed run; it is not browser-visible.
+#[backend_selected_graphql_entity(
+    table = "graphql_orm_ai_subscription_wait_adoptions",
+    plural = "GraphqlOrmAiSubscriptionWaitAdoptions",
+    default_sort = "queued_at ASC, id ASC",
+    unique_index = "waiter_id"
+)]
+#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
+#[cfg_attr(
+    any(feature = "sqlite", feature = "postgres"),
+    derive(GraphQLEntity, GraphQLOperations)
+)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub(crate) struct AiSubscriptionWaitAdoptionRecord {
+    /// Adoption identity.
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "uuid")]
+    pub id: graphql_orm::uuid::Uuid,
+    /// Exact waiter; at most one outcome can be adopted.
+    #[unique]
+    #[filterable(type = "uuid")]
+    pub waiter_id: graphql_orm::uuid::Uuid,
+    /// Exact run re-entering the ordinary queue.
+    #[filterable(type = "uuid")]
+    pub run_id: graphql_orm::uuid::Uuid,
+    /// Exact subscription tool call receiving the result.
+    #[filterable(type = "uuid")]
+    pub tool_call_id: graphql_orm::uuid::Uuid,
+    /// Matched/timeout/event-limit safe outcome kind.
+    pub outcome_kind: String,
+    /// Stable source event identity/fingerprint, absent for limit outcomes.
+    pub source_event_fingerprint: Option<String>,
+    /// Cursor committed atomically with this adoption.
+    pub cursor_fingerprint: String,
+    /// Complete protected-outcome hash.
+    pub outcome_fingerprint: String,
+    /// Exact queued-continuation checkpoint fingerprint. The checkpoint ID is
+    /// the adoption ID so the link cannot be swapped.
+    pub checkpoint_fingerprint: String,
+    /// Protected selected event or typed bounded limit result.
+    #[backup(redact)]
+    #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
+    pub protected_outcome: Option<serde_json::Value>,
+    /// Queued/claimed/consumed/recovery-required lifecycle.
+    #[filterable(type = "string")]
+    pub state: String,
+    /// Timestamp when the existing run queue became authoritative.
+    #[sortable]
+    pub queued_at: i64,
+    /// Fresh run attempt that claimed this adoption, when any.
+    pub claimed_attempt_id: Option<graphql_orm::uuid::Uuid>,
+    /// Fresh run generation that claimed this adoption, when any.
+    pub claimed_lease_generation: Option<i64>,
+    /// Timestamp after a protected continuation consumed the adoption.
+    pub consumed_at: Option<i64>,
+    /// CAS version.
+    #[graphql_orm(version, default = "0")]
+    pub row_version: i64,
+}
+
 /// Immutable run-attempt/fence history.
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_run_attempts",
@@ -1202,10 +1418,13 @@ pub(crate) struct AiRunAttemptRecord {
     pub outcome_code: Option<String>,
 }
 
-/// Immutable terminal/retry/recovery fact for one run attempt.
+/// Immutable lease-release fact for one run attempt.
 ///
 /// Attempt claims and their outcomes are separate append-only rows so worker
-/// history never depends on mutating an already-recorded fence claim.
+/// history never depends on mutating an already-recorded fence claim. Most
+/// outcomes are terminal, retry or recovery facts; a bounded subscription wait
+/// records `waiting_subscription` because that transition deliberately ends
+/// the run-worker lease while leaving the separately fenced waiter live.
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_run_attempt_outcomes",
     plural = "GraphqlOrmAiRunAttemptOutcomes",
@@ -2209,6 +2428,8 @@ impl OrmSchemaModule for AiSchemaModule {
                 AiAttachmentArtifactRecord::metadata(),
                 AiRunRecord::metadata(),
                 AiRunCancellationRequestRecord::metadata(),
+                AiSubscriptionWaiterRecord::metadata(),
+                AiSubscriptionWaitAdoptionRecord::metadata(),
                 AiRunAttemptRecord::metadata(),
                 AiRunAttemptOutcomeRecord::metadata(),
                 AiRunStepRecord::metadata(),
