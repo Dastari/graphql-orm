@@ -186,6 +186,62 @@ impl AiDisclosureSchema {
         evaluate_node(value, &self.root, 0)
     }
 
+    /// Returns the checked worst-case record count for an application GraphQL
+    /// result envelope.
+    ///
+    /// The disclosure root and its one selected GraphQL root field are
+    /// transport envelopes and do not count. Each object or scalar result row
+    /// below that field counts once. List entries count as records, sibling
+    /// collections add, and nested collection fanout multiplies. `None`
+    /// reports arithmetic overflow or an ambiguous envelope shape.
+    pub fn maximum_graphql_record_count(&self) -> Option<u64> {
+        let AiDisclosureShape::Object { fields, .. } = &self.root else {
+            return None;
+        };
+        if fields.len() != 1 {
+            return None;
+        }
+        let result = fields.values().next()?;
+        maximum_record_count(result)
+    }
+
+    /// Evaluates a GraphQL result and enforces an exact total record ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fail-closed error for the ordinary disclosure failures, an
+    /// ambiguous GraphQL envelope, arithmetic overflow, or a total record
+    /// count above `maximum_records`.
+    pub fn evaluate_graphql_with_record_limit(
+        &self,
+        value: &serde_json::Value,
+        maximum_records: u32,
+    ) -> Result<AiDisclosureEvaluation, AiDisclosureError> {
+        if maximum_records == 0 {
+            return Err(AiDisclosureError::RecordLimitExceeded);
+        }
+        let evaluation = self.evaluate(value)?;
+        let object = value.as_object().ok_or(AiDisclosureError::ShapeMismatch)?;
+        let AiDisclosureShape::Object { fields, .. } = &self.root else {
+            return Err(AiDisclosureError::ShapeMismatch);
+        };
+        if fields.len() != 1 {
+            return Err(AiDisclosureError::ShapeMismatch);
+        }
+        let (field_name, result_shape) = fields
+            .iter()
+            .next()
+            .ok_or(AiDisclosureError::ShapeMismatch)?;
+        let result = object
+            .get(field_name)
+            .ok_or(AiDisclosureError::ShapeMismatch)?;
+        let actual = actual_record_count(result, result_shape, 0)?;
+        if actual > u64::from(maximum_records) {
+            return Err(AiDisclosureError::RecordLimitExceeded);
+        }
+        Ok(evaluation)
+    }
+
     /// Returns the greatest explicit list-cardinality bound in the schema.
     #[doc(hidden)]
     pub fn maximum_list_bound(&self) -> u32 {
@@ -211,6 +267,31 @@ fn maximum_list_bound(shape: &AiDisclosureShape) -> u32 {
             item,
             ..
         } => (*maximum_items).max(maximum_list_bound(item)),
+    }
+}
+
+fn maximum_record_count(shape: &AiDisclosureShape) -> Option<u64> {
+    match shape {
+        AiDisclosureShape::Scalar { .. } => Some(1),
+        AiDisclosureShape::Object { fields, .. } => {
+            fields.values().try_fold(1_u64, |total, field| {
+                total.checked_add(maximum_nested_record_count(field)?)
+            })
+        }
+        AiDisclosureShape::List {
+            maximum_items,
+            item,
+            ..
+        } => u64::from(*maximum_items).checked_mul(maximum_record_count(item)?),
+    }
+}
+
+fn maximum_nested_record_count(shape: &AiDisclosureShape) -> Option<u64> {
+    match shape {
+        AiDisclosureShape::Scalar { .. } => Some(0),
+        AiDisclosureShape::Object { .. } | AiDisclosureShape::List { .. } => {
+            maximum_record_count(shape)
+        }
     }
 }
 
@@ -249,6 +330,10 @@ pub enum AiDisclosureError {
     /// A result list exceeds its registered model-visible item bound.
     #[error("tool result exceeds its disclosure list bound")]
     ListLimitExceeded,
+    /// The complete result contains more records than its exact descriptor
+    /// budget, including sibling and nested collections.
+    #[error("tool result exceeds its total record bound")]
+    RecordLimitExceeded,
 }
 
 fn evaluate_node(
@@ -320,4 +405,164 @@ fn merge_evaluation(target: &mut AiDisclosureEvaluation, source: AiDisclosureEva
     target.selected_node_count = target
         .selected_node_count
         .saturating_add(source.selected_node_count);
+}
+
+fn actual_record_count(
+    value: &serde_json::Value,
+    shape: &AiDisclosureShape,
+    depth: usize,
+) -> Result<u64, AiDisclosureError> {
+    if depth > MAXIMUM_DISCLOSURE_SCHEMA_DEPTH {
+        return Err(AiDisclosureError::ShapeMismatch);
+    }
+    if value.is_null() {
+        return Ok(0);
+    }
+    match shape {
+        AiDisclosureShape::Scalar { .. } => Ok(1),
+        AiDisclosureShape::Object { fields, .. } => {
+            let object = value.as_object().ok_or(AiDisclosureError::ShapeMismatch)?;
+            object.iter().try_fold(1_u64, |total, (name, value)| {
+                let shape = fields.get(name).ok_or(AiDisclosureError::UnknownField)?;
+                total
+                    .checked_add(actual_nested_record_count(value, shape, depth + 1)?)
+                    .ok_or(AiDisclosureError::RecordLimitExceeded)
+            })
+        }
+        AiDisclosureShape::List {
+            maximum_items,
+            item,
+            ..
+        } => {
+            let list = value.as_array().ok_or(AiDisclosureError::ShapeMismatch)?;
+            if list.len() > *maximum_items as usize {
+                return Err(AiDisclosureError::ListLimitExceeded);
+            }
+            list.iter().try_fold(0_u64, |total, value| {
+                total
+                    .checked_add(actual_record_count(value, item, depth + 1)?)
+                    .ok_or(AiDisclosureError::RecordLimitExceeded)
+            })
+        }
+    }
+}
+
+fn actual_nested_record_count(
+    value: &serde_json::Value,
+    shape: &AiDisclosureShape,
+    depth: usize,
+) -> Result<u64, AiDisclosureError> {
+    match shape {
+        AiDisclosureShape::Scalar { .. } => Ok(0),
+        AiDisclosureShape::Object { .. } | AiDisclosureShape::List { .. } => {
+            actual_record_count(value, shape, depth)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn rule() -> AiDisclosureRule {
+        AiDisclosureRule::exportable(DataClassification::Internal)
+    }
+
+    fn record() -> AiDisclosureShape {
+        AiDisclosureShape::object(
+            rule(),
+            [("id".to_owned(), AiDisclosureShape::scalar(rule()))],
+        )
+    }
+
+    fn schema(result: AiDisclosureShape) -> AiDisclosureSchema {
+        AiDisclosureSchema::new(
+            "records-v1",
+            AiDisclosureShape::object(rule(), [("Records".to_owned(), result)]),
+        )
+        .expect("test disclosure")
+    }
+
+    #[test]
+    fn sibling_lists_add_at_the_total_record_boundary() {
+        let schema = schema(AiDisclosureShape::object(
+            rule(),
+            [
+                ("id".to_owned(), AiDisclosureShape::scalar(rule())),
+                (
+                    "left".to_owned(),
+                    AiDisclosureShape::list(rule(), 2, record()),
+                ),
+                (
+                    "right".to_owned(),
+                    AiDisclosureShape::list(rule(), 3, record()),
+                ),
+            ],
+        ));
+        assert_eq!(schema.maximum_graphql_record_count(), Some(6));
+        let result = json!({
+            "Records": {
+                "id": "root",
+                "left": [{"id":"l1"}, {"id":"l2"}],
+                "right": [{"id":"r1"}, {"id":"r2"}, {"id":"r3"}]
+            }
+        });
+        assert!(
+            schema
+                .evaluate_graphql_with_record_limit(&result, 6)
+                .is_ok()
+        );
+        assert_eq!(
+            schema.evaluate_graphql_with_record_limit(&result, 5),
+            Err(AiDisclosureError::RecordLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn nested_lists_multiply_at_the_total_record_boundary() {
+        let nested = AiDisclosureShape::object(
+            rule(),
+            [
+                ("id".to_owned(), AiDisclosureShape::scalar(rule())),
+                (
+                    "children".to_owned(),
+                    AiDisclosureShape::list(rule(), 3, record()),
+                ),
+            ],
+        );
+        let schema = schema(AiDisclosureShape::list(rule(), 2, nested));
+        assert_eq!(schema.maximum_graphql_record_count(), Some(8));
+        let result = json!({
+            "Records": [
+                {"id":"p1", "children":[{"id":"1"},{"id":"2"},{"id":"3"}]},
+                {"id":"p2", "children":[{"id":"4"},{"id":"5"},{"id":"6"}]}
+            ]
+        });
+        assert!(
+            schema
+                .evaluate_graphql_with_record_limit(&result, 8)
+                .is_ok()
+        );
+        assert_eq!(
+            schema.evaluate_graphql_with_record_limit(&result, 7),
+            Err(AiDisclosureError::RecordLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn scalar_list_items_count_as_records_but_object_fields_do_not() {
+        let schema = schema(AiDisclosureShape::list(
+            rule(),
+            3,
+            AiDisclosureShape::scalar(rule()),
+        ));
+        assert_eq!(schema.maximum_graphql_record_count(), Some(3));
+        assert!(
+            schema
+                .evaluate_graphql_with_record_limit(&json!({"Records":["a", "b", "c"]}), 3)
+                .is_ok()
+        );
+    }
 }

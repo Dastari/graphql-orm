@@ -333,7 +333,16 @@ impl AiGraphqlQueryCapability {
                         "aggregate query plans use a fixed result shape",
                     ));
                 }
-                (projection.clone(), disclosure.clone())
+                (
+                    projection.clone(),
+                    exact_aggregate_disclosure(
+                        disclosure,
+                        &plan.arguments,
+                        plan.maximum_items.ok_or_else(|| {
+                            input_error("aggregate result group bound is missing")
+                        })?,
+                    )?,
+                )
             }
         };
         context.ensure_totals()?;
@@ -409,6 +418,14 @@ impl AiGraphqlQueryCapability {
             },
             disclosure,
         )?;
+        if disclosure_schema
+            .maximum_graphql_record_count()
+            .is_none_or(|records| records > u64::from(self.limits.maximum_result_records))
+        {
+            return Err(input_error(
+                "operation selection exceeds the total result record budget",
+            ));
+        }
         let projection_fingerprint = sha256_json(&json!({
             "capability": self.fingerprint,
             "plan": plan_fingerprint,
@@ -502,6 +519,71 @@ impl AiGraphqlQueryCapability {
             variables: Value::Object(variables),
         })
     }
+}
+
+fn exact_aggregate_disclosure(
+    disclosure: &AiDisclosureShape,
+    arguments: &Map<String, Value>,
+    maximum_groups: u32,
+) -> Result<AiDisclosureShape, AiError> {
+    let list_length = |expected: &str| {
+        arguments
+            .iter()
+            .find(|(name, _)| semantic_name_key(name) == semantic_name_key(expected))
+            .and_then(|(_, value)| value.as_array())
+            .map(|items| u32::try_from(items.len()).unwrap_or(u32::MAX))
+            .unwrap_or(0)
+            .max(1)
+    };
+    let AiDisclosureShape::List { rule, item, .. } = disclosure else {
+        return Err(configuration_error(
+            "aggregate disclosure root is not a list",
+        ));
+    };
+    let AiDisclosureShape::Object {
+        rule: item_rule,
+        fields,
+    } = item.as_ref()
+    else {
+        return Err(configuration_error(
+            "aggregate disclosure row is not an object",
+        ));
+    };
+    let mut fields = fields.clone();
+    for (expected, maximum_items) in [
+        ("groups", list_length("groupBy")),
+        ("metrics", list_length("metrics")),
+    ] {
+        let name = fields
+            .keys()
+            .find(|name| name.eq_ignore_ascii_case(expected))
+            .cloned()
+            .ok_or_else(|| configuration_error("aggregate disclosure field is missing"))?;
+        let shape = fields
+            .remove(&name)
+            .ok_or_else(|| configuration_error("aggregate disclosure field is missing"))?;
+        let AiDisclosureShape::List { rule, item, .. } = shape else {
+            return Err(configuration_error(
+                "aggregate disclosure field is not a list",
+            ));
+        };
+        fields.insert(
+            name,
+            AiDisclosureShape::List {
+                rule,
+                maximum_items,
+                item,
+            },
+        );
+    }
+    Ok(AiDisclosureShape::list(
+        *rule,
+        maximum_groups,
+        AiDisclosureShape::Object {
+            rule: *item_rule,
+            fields,
+        },
+    ))
 }
 
 /// Complete finite capability set for one active finished schema.

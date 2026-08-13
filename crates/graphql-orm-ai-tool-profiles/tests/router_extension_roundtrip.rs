@@ -105,7 +105,7 @@ fn complex_manifest() -> AiGraphqlToolManifest {
         ],
         disclosure,
         32 * 1024,
-        5,
+        12,
     )
     .with_inputs([
         AiGraphqlProfileInput::string("Query", "Ticket text to find", true, 1, 120),

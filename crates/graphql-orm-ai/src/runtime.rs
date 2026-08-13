@@ -506,7 +506,7 @@ impl AiRuntime {
             return Err(AiError::ToolExecutionFailed);
         }
         let disclosure = disclosure_schema
-            .evaluate(&response.data)
+            .evaluate_graphql_with_record_limit(&response.data, descriptor.maximum_result_records)
             .map_err(|_| AiError::ToolExecutionFailed)?;
         Ok(AiToolExecutionResult {
             response,

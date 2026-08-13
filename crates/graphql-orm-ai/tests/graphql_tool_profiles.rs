@@ -113,7 +113,7 @@ fn count_profile() -> AiGraphqlToolProfile {
             )]),
         ),
         4096,
-        1,
+        2,
     )
     .with_arguments([AiGraphqlArgumentPlan::new(
         "page",
@@ -155,7 +155,7 @@ fn list_profile() -> AiGraphqlToolProfile {
             ]),
         ),
         32 * 1024,
-        25,
+        27,
     )
     .with_inputs([
         AiGraphqlProfileInput::string("Query", "Label text to find", true, 1, 100),
@@ -311,7 +311,7 @@ fn browser_result_previews_are_explicit_bounded_and_fingerprinted() {
                 count_profile().with_browser_result_preview(
                     AiBrowserResultPreviewPolicy::new(
                         4_096,
-                        2,
+                        3,
                         4,
                         DataClassification::Confidential,
                     )
@@ -354,7 +354,7 @@ fn semantic_aliases_custom_roots_and_explicit_relationships_compile_safely() {
             ]),
         ),
         16 * 1024,
-        3,
+        4,
     )
     .with_inputs([AiGraphqlProfileInput::string(
         "RecordNo",

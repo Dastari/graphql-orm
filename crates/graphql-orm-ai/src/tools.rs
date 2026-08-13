@@ -210,7 +210,9 @@ impl AiToolCatalog {
         if contract.disclosure_schema_fingerprint != disclosure_schema.fingerprint
             || contract.operation_name.trim().is_empty()
             || descriptor.result_projection.trim().is_empty()
-            || disclosure_schema.maximum_list_bound() > descriptor.maximum_result_records
+            || disclosure_schema
+                .maximum_graphql_record_count()
+                .is_none_or(|records| records > u64::from(descriptor.maximum_result_records))
         {
             return Err(AiError::InvalidConfiguration(
                 "tool disclosure or projection contract is stale".to_owned(),

@@ -1481,7 +1481,10 @@ fn validate_profile_shape(profile: &AiGraphqlToolProfile) -> Result<(), AiError>
     if profile.inputs.len() > MAXIMUM_PROFILE_INPUTS
         || profile.maximum_result_bytes == 0
         || profile.maximum_result_records == 0
-        || profile.disclosure_schema.maximum_list_bound() > profile.maximum_result_records
+        || profile
+            .disclosure_schema
+            .maximum_graphql_record_count()
+            .is_none_or(|records| records > u64::from(profile.maximum_result_records))
         || profile.selections.is_empty()
         || profile.browser_result_preview.is_some_and(|preview| {
             preview.maximum_bytes > profile.maximum_result_bytes
