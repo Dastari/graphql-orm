@@ -22,6 +22,11 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ### Added
 
+- Retained approval waits now atomically persist the exact protected
+  `approval_wait_parked` checkpoint, close the source attempt as nonterminal,
+  and release its ordinary run lease in the same transaction as the one-shot
+  approval. Confirmation can be repaired only from that exact graph; an
+  approved wait receives a fresh fenced attempt only after confirmation.
 - Durable bounded subscription waits now bind canonical `ReplayThenLive`
   capabilities to authenticated source registrations, protected replay
   cursors, exact current-principal/rule/target checks, separately authorized

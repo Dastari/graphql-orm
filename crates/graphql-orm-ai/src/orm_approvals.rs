@@ -22,9 +22,10 @@ use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::orm_runs::{
-    PreparedApprovalConsumption, PreparedApprovalRequest, PreparedApprovalWaitCancellation,
-    PreparedApprovalWaitOutcome, PreparedApprovalWaitReconciliation, PreparedToolLifecycleEvent,
-    coordinator_checkpoint_hash, validate_worker_id,
+    PreparedApprovalConsumption, PreparedApprovalProviderWait, PreparedApprovalRequest,
+    PreparedApprovalWaitCancellation, PreparedApprovalWaitOutcome,
+    PreparedApprovalWaitReconciliation, PreparedToolLifecycleEvent, coordinator_checkpoint_hash,
+    validate_worker_id,
 };
 use crate::persistence::*;
 use crate::{
@@ -284,12 +285,17 @@ impl AiRequestedApproval {
         self.approval_id
     }
 
-    /// Renewed waiting-approval lease.
+    /// Waiting-approval fence proof.
+    ///
+    /// Stateless waits retain their renewed active lease. Retained-provider
+    /// waits have atomically released the ordinary lease; this value carries
+    /// only the exact source attempt and latest parked checkpoint for the
+    /// confirmation handoff and cannot authorize another run mutation.
     pub fn lease(&self) -> &AiRunLease {
         &self.lease
     }
 
-    /// Consumes the result and returns the renewed lease.
+    /// Consumes the result and returns its waiting fence proof.
     pub fn into_lease(self) -> AiRunLease {
         self.lease
     }
@@ -413,6 +419,51 @@ impl OrmAiApprovalService {
         expires_at: OffsetDateTime,
         recent_mfa_required: bool,
     ) -> Result<AiRequestedApproval, AiError> {
+        self.request_approval_inner(
+            lease,
+            approval_id,
+            binding,
+            preview,
+            expires_at,
+            recent_mfa_required,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn request_parked_approval_with_id(
+        &self,
+        lease: &AiRunLease,
+        approval_id: AiApprovalId,
+        binding: AiApprovalBinding,
+        preview: AiCanonicalActionPreview,
+        expires_at: OffsetDateTime,
+        recent_mfa_required: bool,
+        parked: &crate::AiProviderSessionParkedWait,
+    ) -> Result<AiRequestedApproval, AiError> {
+        self.request_approval_inner(
+            lease,
+            approval_id,
+            binding,
+            preview,
+            expires_at,
+            recent_mfa_required,
+            Some(parked),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn request_approval_inner(
+        &self,
+        lease: &AiRunLease,
+        approval_id: AiApprovalId,
+        binding: AiApprovalBinding,
+        preview: AiCanonicalActionPreview,
+        expires_at: OffsetDateTime,
+        recent_mfa_required: bool,
+        parked: Option<&crate::AiProviderSessionParkedWait>,
+    ) -> Result<AiRequestedApproval, AiError> {
         if approval_id.0.is_nil() {
             return Err(AiError::InvalidInput(
                 "approval identity is invalid".to_owned(),
@@ -498,6 +549,20 @@ impl OrmAiApprovalService {
             .await?;
         let (owner_kind, owner_subject) = principal_identity(resolved.principal());
         let binding_hash = binding.stable_hash();
+        let parked_provider_wait = match parked {
+            Some(parked) => Some(
+                self.prepare_parked_provider_wait(
+                    lease,
+                    approval_id,
+                    binding.tool_call_id,
+                    &binding.scope,
+                    parked,
+                    &protection,
+                )
+                .await?,
+            ),
+            None => None,
+        };
         let prepared = PreparedApprovalRequest {
             id: approval_id.0,
             tool_call_id: binding.tool_call_id.0,
@@ -529,9 +594,98 @@ impl OrmAiApprovalService {
             expected_scope_kind: binding.scope.kind,
             expected_scope_id: binding.scope.id,
             expected_tenant_id: binding.scope.tenant_id,
+            parked_provider_wait,
         };
         let lease = self.run_service.request_approval(lease, prepared).await?;
         Ok(AiRequestedApproval { approval_id, lease })
+    }
+
+    async fn prepare_parked_provider_wait(
+        &self,
+        lease: &AiRunLease,
+        approval_id: AiApprovalId,
+        tool_call_id: crate::AiToolCallId,
+        scope: &AiScope,
+        parked: &crate::AiProviderSessionParkedWait,
+        protection: &AiContentProtectionPolicy,
+    ) -> Result<PreparedApprovalProviderWait, AiError> {
+        if parked.wait() != crate::AiProviderSessionWaitIdentity::approval(approval_id)
+            || parked.source_run_id != lease.run_id()
+            || parked.source_attempt_id != lease.attempt_id()
+            || parked.source_run_lease_generation != lease.lease_generation()
+            || lease.latest_checkpoint_id() != Some(parked.source_checkpoint_id)
+        {
+            return Err(AiError::Conflict);
+        }
+        let source =
+            AiRunCheckpointRecord::find_by_id(&self.database, &parked.source_checkpoint_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::Conflict)?;
+        let reservation_id = source.budget_reservation_id.ok_or(AiError::Conflict)?;
+        let reservation = AiBudgetReservationRecord::find_by_id(&self.database, &reservation_id)
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::Conflict)?;
+        if source.run_id != lease.run_id().0
+            || source.attempt_id != lease.attempt_id()
+            || source.lease_generation != lease.lease_generation()
+            || source.checkpoint_kind != "provider_turn_persisted"
+            || source.checkpoint_hash != parked.source_checkpoint_fingerprint
+            || reservation.run_id != lease.run_id().0
+            || reservation.attempt_id != lease.attempt_id()
+            || reservation.lease_generation != lease.lease_generation()
+            || reservation.state != "committed"
+        {
+            return Err(AiError::Conflict);
+        }
+        let parked_checkpoint_id = Uuid::new_v4();
+        let plaintext = serde_json::json!({
+            "formatVersion": 1,
+            "kind": "approval_wait_parked",
+            "approvalId": approval_id.0,
+            "toolCallId": tool_call_id.0,
+            "sourceCheckpointId": source.id,
+            "sourceCheckpointFingerprint": source.checkpoint_hash,
+            "providerSessionBindingId": parked.binding_id,
+            "providerSessionParkGeneration": parked.park_generation,
+            "providerSessionContinuationFingerprint": parked.continuation_fingerprint,
+        });
+        let protected_parked_checkpoint = self
+            .protect_value(
+                protection,
+                content_context(
+                    "graphql_orm_ai_run_checkpoints",
+                    parked_checkpoint_id,
+                    "protected_state",
+                    scope,
+                ),
+                plaintext,
+            )
+            .await?;
+        let parked_checkpoint_fingerprint = coordinator_checkpoint_hash(
+            lease.run_id(),
+            lease.attempt_id(),
+            lease.lease_generation(),
+            parked_checkpoint_id,
+            "approval_wait_parked",
+            &reservation.provider_kind,
+            &reservation.provider_model,
+            source.provider_response_id.as_deref(),
+            reservation_id,
+            &protected_parked_checkpoint,
+        )?;
+        Ok(PreparedApprovalProviderWait {
+            source_checkpoint_id: source.id,
+            source_checkpoint_fingerprint: source.checkpoint_hash,
+            parked_checkpoint_id,
+            parked_checkpoint_fingerprint,
+            protected_parked_checkpoint,
+            provider_kind: reservation.provider_kind,
+            provider_model: reservation.provider_model,
+            provider_response_id: source.provider_response_id,
+            budget_reservation_id: reservation_id,
+        })
     }
 
     /// Atomically consumes an approved grant and returns the run to `Running`.
@@ -1409,6 +1563,8 @@ impl OrmAiApprovalWaitReconciliationService {
                                         .checkpoint
                                         .clone()
                                         .expect("valid approval linkage has a checkpoint"),
+                                    parked_checkpoint: snapshot.parked_checkpoint.clone(),
+                                    attempt_outcome: snapshot.attempt_outcome.clone(),
                                     next_approval_state,
                                     call_state: call_state.to_owned(),
                                 },
@@ -1527,7 +1683,7 @@ impl OrmAiApprovalWaitReconciliationService {
                             .map_err(OrmPublicError::from)?,
                         None => None,
                     };
-                    let checkpoint = match run.latest_checkpoint_id {
+                    let latest_checkpoint = match run.latest_checkpoint_id {
                         Some(checkpoint_id) => tx
                             .query::<AiRunCheckpointRecord>()
                             .filter(AiRunCheckpointRecordWhereInput {
@@ -1542,6 +1698,52 @@ impl OrmAiApprovalWaitReconciliationService {
                             .await
                             .map_err(OrmPublicError::from)?,
                         None => None,
+                    };
+                    let (checkpoint, parked_checkpoint, attempt_outcome) = match latest_checkpoint {
+                        Some(latest) if latest.checkpoint_kind == "approval_wait_parked" => {
+                            let candidates = tx
+                                .query::<AiRunCheckpointRecord>()
+                                .filter(AiRunCheckpointRecordWhereInput {
+                                    run_id: Some(UuidFilter {
+                                        eq: Some(run.id),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                })
+                                .limit(4_097)
+                                .fetch_all()
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            let source = candidates
+                                .into_iter()
+                                .filter(|candidate| {
+                                    candidate.checkpoint_kind == "provider_turn_persisted"
+                                        && candidate.attempt_id == latest.attempt_id
+                                        && candidate.lease_generation == latest.lease_generation
+                                        && candidate.provider_response_id
+                                            == latest.provider_response_id
+                                        && candidate.budget_reservation_id
+                                            == latest.budget_reservation_id
+                                })
+                                .collect::<Vec<_>>();
+                            let source = (source.len() == 1).then(|| source[0].clone());
+                            let outcome = tx
+                                .query::<AiRunAttemptOutcomeRecord>()
+                                .filter(AiRunAttemptOutcomeRecordWhereInput {
+                                    attempt_id: Some(UuidFilter {
+                                        eq: Some(latest.attempt_id),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                })
+                                .limit(1)
+                                .fetch_one()
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            (source, Some(latest), outcome)
+                        }
+                        Some(latest) => (Some(latest), None, None),
+                        None => (None, None, None),
                     };
                     let reservation = match checkpoint
                         .as_ref()
@@ -1561,6 +1763,8 @@ impl OrmAiApprovalWaitReconciliationService {
                         step,
                         approval,
                         checkpoint,
+                        parked_checkpoint,
+                        attempt_outcome,
                         reservation,
                     })
                 })
@@ -1633,6 +1837,8 @@ struct ApprovalWaitSnapshot {
     step: Option<AiRunStepRecord>,
     approval: Option<AiApprovalRecord>,
     checkpoint: Option<AiRunCheckpointRecord>,
+    parked_checkpoint: Option<AiRunCheckpointRecord>,
+    attempt_outcome: Option<AiRunAttemptOutcomeRecord>,
     reservation: Option<AiBudgetReservationRecord>,
 }
 
@@ -1679,8 +1885,11 @@ fn approval_wait_linkage_is_valid(
     else {
         return false;
     };
-    let Some(attempt_id) = snapshot.run.attempt_id else {
-        return false;
+    let parked_checkpoint = snapshot.parked_checkpoint.as_ref();
+    let attempt_id = match (snapshot.run.attempt_id, parked_checkpoint) {
+        (Some(attempt_id), None) => attempt_id,
+        (None, Some(checkpoint)) => checkpoint.attempt_id,
+        _ => return false,
     };
     let Some(provider_response_id) = checkpoint
         .provider_response_id
@@ -1709,6 +1918,63 @@ fn approval_wait_linkage_is_valid(
         budget_reservation_id,
         protected_state,
     );
+    let parked_graph_valid = match parked_checkpoint {
+        Some(parked) => {
+            let Some(parked_state) = parked.protected_state.as_ref().filter(|state| {
+                serde_json::to_vec(state).is_ok_and(|encoded| encoded.len() <= 64 * 1024 * 1024)
+            }) else {
+                return false;
+            };
+            let parked_hash = coordinator_checkpoint_hash(
+                AiRunId(snapshot.run.id),
+                attempt_id,
+                snapshot.run.lease_generation,
+                parked.id,
+                &parked.checkpoint_kind,
+                &reservation.provider_kind,
+                &reservation.provider_model,
+                Some(provider_response_id),
+                budget_reservation_id,
+                parked_state,
+            );
+            let Some(outcome) = snapshot.attempt_outcome.as_ref() else {
+                return false;
+            };
+            snapshot.run.attempt_id.is_none()
+                && snapshot.run.lease_owner.is_none()
+                && snapshot.run.lease_expires_at.is_none()
+                && snapshot.run.lease_heartbeat_at.is_none()
+                && snapshot.run.error_code.as_deref() == Some("approval_wait_parked")
+                && snapshot.run.latest_checkpoint_id == Some(parked.id)
+                && parked.run_id == snapshot.run.id
+                && parked.attempt_id == attempt_id
+                && parked.lease_generation == snapshot.run.lease_generation
+                && parked.checkpoint_kind == "approval_wait_parked"
+                && parked.provider_response_id.as_deref() == Some(provider_response_id)
+                && parked.budget_reservation_id == Some(budget_reservation_id)
+                && parked.assistant_message_id.is_none()
+                && parked_hash.is_ok_and(|expected| parked.checkpoint_hash == expected)
+                && outcome.run_id == snapshot.run.id
+                && outcome.attempt_id == attempt_id
+                && outcome.lease_generation == snapshot.run.lease_generation
+                && outcome.final_state == "waiting_approval"
+                && outcome.outcome_code == "approval_wait_parked"
+                && outcome.provider_response_id.as_deref() == Some(provider_response_id)
+        }
+        None => {
+            snapshot.run.attempt_id == Some(attempt_id)
+                && snapshot
+                    .run
+                    .lease_owner
+                    .as_deref()
+                    .is_some_and(|worker| validate_worker_id(worker).is_ok())
+                && snapshot.run.lease_expires_at.is_some()
+                && snapshot.run.lease_heartbeat_at.is_some()
+                && snapshot.run.error_code.is_none()
+                && snapshot.run.latest_checkpoint_id == Some(checkpoint.id)
+                && snapshot.attempt_outcome.is_none()
+        }
+    };
     let relevant_calls = snapshot
         .calls
         .iter()
@@ -1721,13 +1987,7 @@ fn approval_wait_linkage_is_valid(
     snapshot.calls.len() < 4_097
         && snapshot.run.state == "waiting_approval"
         && snapshot.run.lease_generation > 0
-        && snapshot
-            .run
-            .lease_owner
-            .as_deref()
-            .is_some_and(|worker| validate_worker_id(worker).is_ok())
-        && snapshot.run.lease_expires_at.is_some()
-        && snapshot.run.latest_checkpoint_id == Some(checkpoint.id)
+        && parked_graph_valid
         && checkpoint.run_id == snapshot.run.id
         && checkpoint.attempt_id == attempt_id
         && checkpoint.lease_generation == snapshot.run.lease_generation

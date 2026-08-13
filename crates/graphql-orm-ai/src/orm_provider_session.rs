@@ -2552,8 +2552,25 @@ mod service {
                     .await
                     .map_err(OrmPublicError::from)?
                     .ok_or_else(OrmPublicError::not_found)?;
+                let outcome = tx
+                    .query::<crate::persistence::AiRunAttemptOutcomeRecord>()
+                    .filter(crate::persistence::AiRunAttemptOutcomeRecordWhereInput {
+                        attempt_id: Some(UuidFilter {
+                            eq: Some(source_checkpoint.attempt_id),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })
+                    .limit(1)
+                    .fetch_one()
+                    .await
+                    .map_err(OrmPublicError::from)?
+                    .ok_or_else(OrmPublicError::not_found)?;
                 if run.state != AiRunState::WaitingApproval.as_str()
-                    || run.attempt_id != Some(source_checkpoint.attempt_id)
+                    || run.attempt_id.is_some()
+                    || run.lease_owner.is_some()
+                    || run.lease_expires_at.is_some()
+                    || run.lease_heartbeat_at.is_some()
                     || run.lease_generation != source_checkpoint.lease_generation
                     || run.latest_checkpoint_id != Some(parked_checkpoint.id)
                     || parked_checkpoint.checkpoint_kind != "approval_wait_parked"
@@ -2571,6 +2588,12 @@ mod service {
                     || call.lease_generation != source_checkpoint.lease_generation
                     || call.provider_response_id != source_checkpoint.provider_response_id
                     || call.budget_reservation_id != source_checkpoint.budget_reservation_id
+                    || outcome.attempt_id != source_checkpoint.attempt_id
+                    || outcome.run_id != run.id
+                    || outcome.lease_generation != source_checkpoint.lease_generation
+                    || outcome.final_state != AiRunState::WaitingApproval.as_str()
+                    || outcome.outcome_code != "approval_wait_parked"
+                    || outcome.provider_response_id != source_checkpoint.provider_response_id
                 {
                     return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                 }
@@ -3222,6 +3245,7 @@ mod service {
         use graphql_orm::prelude::SqliteBackend;
 
         use crate::AiProviderCallResult;
+        use crate::persistence::{AiBudgetReservationRecord, AiRunStepRecord};
 
         struct TestAccess;
 
@@ -3348,8 +3372,7 @@ mod service {
             let input_message_id = Uuid::new_v4();
             let attempt_id = Uuid::new_v4();
             let source_checkpoint_id = Uuid::new_v4();
-            let budget_id = Uuid::new_v4();
-            let source_checkpoint_hash = "d".repeat(64);
+            let protected_source = serde_json::json!({"protected": true});
             AiSessionRecord::insert(
                 &database,
                 crate::persistence::CreateAiSessionRecordInput {
@@ -3419,6 +3442,57 @@ mod service {
             )
             .await
             .expect("run should insert");
+            let budget = AiBudgetReservationRecord::insert(
+                &database,
+                crate::persistence::CreateAiBudgetReservationRecordInput {
+                    budget_counter_ids: serde_json::json!([]),
+                    scope_kind: scope.kind.clone(),
+                    scope_id: scope.id.clone(),
+                    tenant_id: scope.tenant_id.clone(),
+                    principal_kind: "user".to_owned(),
+                    principal_subject: principal.subject().to_owned(),
+                    session_id: session_id.0,
+                    run_id: run_id.0,
+                    attempt_id,
+                    lease_generation: 1,
+                    provider_kind: "openai".to_owned(),
+                    provider_model: "coordinator-test-model".to_owned(),
+                    pricing_policy_version: "parked-test-v1".to_owned(),
+                    reserved_input_tokens: 1,
+                    reserved_output_tokens: 1,
+                    reserved_tool_units: 1,
+                    reserved_image_units: 0,
+                    reserved_cost_microunits: 1,
+                    reserved_runs: 1,
+                    actual_input_tokens: Some(1),
+                    actual_cached_input_tokens: Some(0),
+                    actual_output_tokens: Some(1),
+                    actual_tool_units: Some(1),
+                    actual_image_units: Some(0),
+                    actual_cost_microunits: Some(1),
+                    actual_runs: Some(1),
+                    idempotency_key: format!("parked-provider-turn-{run_id:?}"),
+                    state: "committed".to_owned(),
+                    expires_at: (now + Duration::hours(1)).unix_timestamp(),
+                    reconciled_at: Some(now.unix_timestamp()),
+                },
+            )
+            .await
+            .expect("committed parked-turn budget should insert");
+            let budget_id = budget.id;
+            let source_checkpoint_hash = crate::orm_runs::coordinator_checkpoint_hash(
+                run_id,
+                attempt_id,
+                1,
+                source_checkpoint_id,
+                "provider_turn_persisted",
+                "openai",
+                "coordinator-test-model",
+                Some("parked-response"),
+                budget_id,
+                &protected_source,
+            )
+            .expect("source checkpoint hash should construct");
             let source_checkpoint = AiRunCheckpointRecord::insert(
                 &database,
                 crate::persistence::CreateAiRunCheckpointRecordInput {
@@ -3430,7 +3504,7 @@ mod service {
                     provider_response_id: Some("parked-response".to_owned()),
                     budget_reservation_id: Some(budget_id),
                     assistant_message_id: None,
-                    protected_state: Some(serde_json::json!({"protected": true})),
+                    protected_state: Some(protected_source),
                     checkpoint_hash: source_checkpoint_hash.clone(),
                 },
             )
@@ -3575,7 +3649,7 @@ mod service {
                     run_id: fixture.lease.run_id().0,
                     provider_call_key: format!("parked-call-{tool_call_id}"),
                     provider_call_id: "parked-call".to_owned(),
-                    provider_kind: Some("open_ai".to_owned()),
+                    provider_kind: Some("openai".to_owned()),
                     provider_model: Some("coordinator-test-model".to_owned()),
                     provider_response_id: fixture.source_checkpoint.provider_response_id.clone(),
                     budget_reservation_id: fixture.source_checkpoint.budget_reservation_id,
@@ -3596,97 +3670,132 @@ mod service {
                     result_egress_decision_id: None,
                     result_egress_manifest_hash: None,
                     application_audit_ref: None,
-                    approval_id: Some(fixture.approval_id.0),
+                    approval_id: None,
                     idempotency_key: Some(tool_call_id.to_string()),
                     correlation_id: Some("parked-wait-correlation".to_owned()),
                     causation_id: Some(fixture.source_checkpoint.id.to_string()),
                     delegation_reference: None,
                     lease_generation: fixture.lease.lease_generation(),
-                    state: "waiting_approval".to_owned(),
+                    state: "executing".to_owned(),
                     completed_at: None,
                 },
             )
             .await
             .expect("approval tool call should insert");
-            AiApprovalRecord::insert(
+            AiRunStepRecord::insert(
                 &fixture.database,
-                crate::persistence::CreateAiApprovalRecordInput {
-                    id: fixture.approval_id.0,
-                    tool_call_id,
-                    session_id: fixture.lease.session_id().0,
-                    principal_subject: "parked-wait-owner".to_owned(),
-                    principal_reference_fingerprint: "1".repeat(64),
-                    delegated_actor_subject: None,
-                    delegation_reference: None,
-                    argument_hash: "f".repeat(64),
-                    tool_fingerprint: "e".repeat(64),
-                    binding_hash: "2".repeat(64),
-                    execution_target_id: "local-graphql".to_owned(),
-                    target_schema_fingerprint: "3".repeat(64),
-                    operation_name: "UpdateRecord".to_owned(),
-                    operation_document_hash: "4".repeat(64),
-                    result_projection_fingerprint: "5".repeat(64),
-                    disclosure_schema_fingerprint: "6".repeat(64),
-                    policy_version: "approval-v1".to_owned(),
-                    authorization_state_digest: "7".repeat(64),
-                    protected_resource_bindings: Some(serde_json::json!({"protected": true})),
-                    protected_action_preview: Some(serde_json::json!({"protected": true})),
-                    payload_purged_at: None,
-                    action_preview_hash: "8".repeat(64),
-                    state: "pending".to_owned(),
-                    recent_mfa_required: false,
-                    approver_subject: None,
-                    expires_at: (now + Duration::minutes(10)).unix_timestamp(),
-                    decided_at: None,
-                    maximum_uses: 1,
-                    consumed_uses: 0,
-                    consumed_at: None,
-                },
-            )
-            .await
-            .expect("approval should insert");
-            let parked_checkpoint_id = Uuid::new_v4();
-            AiRunCheckpointRecord::insert(
-                &fixture.database,
-                crate::persistence::CreateAiRunCheckpointRecordInput {
-                    id: parked_checkpoint_id,
+                crate::persistence::CreateAiRunStepRecordInput {
+                    id: tool_call_id,
                     run_id: fixture.lease.run_id().0,
-                    attempt_id: fixture.lease.attempt_id(),
+                    step_index: 0,
+                    step_kind: "application_tool".to_owned(),
+                    state: "running".to_owned(),
                     lease_generation: fixture.lease.lease_generation(),
-                    checkpoint_kind: "approval_wait_parked".to_owned(),
-                    provider_response_id: fixture.source_checkpoint.provider_response_id.clone(),
-                    budget_reservation_id: fixture.source_checkpoint.budget_reservation_id,
-                    assistant_message_id: None,
-                    protected_state: Some(serde_json::json!({
-                        "waitId": parked.wait().wait_id(),
-                        "continuationFingerprint": parked.continuation_fingerprint,
-                    })),
-                    checkpoint_hash: "9".repeat(64),
+                    started_at: Some(now.unix_timestamp()),
+                    finished_at: None,
+                    error_code: None,
                 },
             )
             .await
-            .expect("parked checkpoint should insert");
+            .expect("approval run step should insert");
+            let parked_checkpoint_id = Uuid::new_v4();
+            let protected_parked = serde_json::json!({
+                "waitId": parked.wait().wait_id(),
+                "continuationFingerprint": parked.continuation_fingerprint,
+            });
+            let budget_id = fixture
+                .source_checkpoint
+                .budget_reservation_id
+                .expect("source budget should exist");
+            let parked_checkpoint_hash = crate::orm_runs::coordinator_checkpoint_hash(
+                fixture.lease.run_id(),
+                fixture.lease.attempt_id(),
+                fixture.lease.lease_generation(),
+                parked_checkpoint_id,
+                "approval_wait_parked",
+                "openai",
+                "coordinator-test-model",
+                fixture.source_checkpoint.provider_response_id.as_deref(),
+                budget_id,
+                &protected_parked,
+            )
+            .expect("parked checkpoint hash should construct");
+            let run_service = crate::OrmAiRunService::new(
+                fixture.database.clone(),
+                fixture.clock.clone(),
+                crate::AiRunServiceLimits::new(Duration::minutes(5), Duration::hours(1), 16, 2, 8)
+                    .expect("test run limits should validate"),
+            );
+            let waiting_proof = run_service
+                .request_approval(
+                    &fixture.lease,
+                    crate::orm_runs::PreparedApprovalRequest {
+                        id: fixture.approval_id.0,
+                        tool_call_id,
+                        principal_subject: "parked-wait-owner".to_owned(),
+                        principal_reference_fingerprint: "1".repeat(64),
+                        delegated_actor_subject: None,
+                        delegation_reference: None,
+                        argument_hash: "f".repeat(64),
+                        tool_fingerprint: "e".repeat(64),
+                        binding_hash: "2".repeat(64),
+                        execution_target_id: "local-graphql".to_owned(),
+                        target_schema_fingerprint: "3".repeat(64),
+                        operation_name: "UpdateRecord".to_owned(),
+                        operation_document_hash: "4".repeat(64),
+                        result_projection_fingerprint: "5".repeat(64),
+                        disclosure_schema_fingerprint: "6".repeat(64),
+                        policy_version: "approval-v1".to_owned(),
+                        authorization_state_digest: "7".repeat(64),
+                        protected_resource_bindings: serde_json::json!({"protected": true}),
+                        protected_action_preview: serde_json::json!({"protected": true}),
+                        action_preview_hash: "8".repeat(64),
+                        recent_mfa_required: false,
+                        expires_at: (now + Duration::minutes(10)).unix_timestamp(),
+                        event_id: Uuid::new_v4(),
+                        protected_event: serde_json::json!({"protected": true}),
+                        correlation_id: "parked-wait-correlation".to_owned(),
+                        expected_owner_principal_kind: "user".to_owned(),
+                        expected_owner_subject: "parked-wait-owner".to_owned(),
+                        expected_scope_kind: "workspace".to_owned(),
+                        expected_scope_id: "parked-wait-workspace".to_owned(),
+                        expected_tenant_id: Some("parked-wait-tenant".to_owned()),
+                        parked_provider_wait: Some(crate::orm_runs::PreparedApprovalProviderWait {
+                            source_checkpoint_id: fixture.source_checkpoint.id,
+                            source_checkpoint_fingerprint: fixture
+                                .source_checkpoint
+                                .checkpoint_hash
+                                .clone(),
+                            parked_checkpoint_id,
+                            parked_checkpoint_fingerprint: parked_checkpoint_hash.clone(),
+                            protected_parked_checkpoint: protected_parked,
+                            provider_kind: "openai".to_owned(),
+                            provider_model: "coordinator-test-model".to_owned(),
+                            provider_response_id: fixture
+                                .source_checkpoint
+                                .provider_response_id
+                                .clone(),
+                            budget_reservation_id: budget_id,
+                        }),
+                    },
+                )
+                .await
+                .expect("real approval wait transaction should commit");
+            assert_eq!(waiting_proof.state(), AiRunState::WaitingApproval);
+            assert_eq!(
+                waiting_proof.latest_checkpoint_id(),
+                Some(parked_checkpoint_id)
+            );
             let run = AiRunRecord::find_by_id(&fixture.database, &fixture.lease.run_id().0)
                 .await
-                .expect("run lookup should succeed")
-                .expect("run should exist");
-            let updated = AiRunRecord::compare_and_swap(
-                &fixture.database,
-                &run.id,
-                run.row_version,
-                crate::persistence::AiRunRecordWhereInput::default(),
-                crate::persistence::UpdateAiRunRecordInput {
-                    state: Some(AiRunState::WaitingApproval.as_str().to_owned()),
-                    lease_owner: Some(None),
-                    lease_expires_at: Some(None),
-                    lease_heartbeat_at: Some(None),
-                    latest_checkpoint_id: Some(Some(parked_checkpoint_id)),
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("run wait transition should persist");
-            assert!(matches!(updated, ConditionalUpdateOutcome::Updated(_)));
+                .expect("parked run lookup should succeed")
+                .expect("parked run should exist");
+            assert_eq!(run.state, "waiting_approval");
+            assert!(run.attempt_id.is_none());
+            assert!(run.lease_owner.is_none());
+            assert!(run.lease_expires_at.is_none());
+            assert_eq!(run.latest_checkpoint_id, Some(parked_checkpoint_id));
+            assert_eq!(run.error_code.as_deref(), Some("approval_wait_parked"));
             tool_call_id
         }
 
@@ -3706,9 +3815,46 @@ mod service {
                     approval.row_version,
                     crate::persistence::AiApprovalRecordWhereInput::default(),
                     crate::persistence::UpdateAiApprovalRecordInput {
-                        state: Some("consumed".to_owned()),
+                        state: Some("approved".to_owned()),
                         approver_subject: Some(Some("parked-wait-owner".to_owned())),
                         decided_at: Some(Some(now.unix_timestamp())),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("approval consumption should persist"),
+                ConditionalUpdateOutcome::Updated(_)
+            ));
+            let run_service = crate::OrmAiRunService::new(
+                fixture.database.clone(),
+                fixture.clock.clone(),
+                crate::AiRunServiceLimits::new(Duration::minutes(5), Duration::hours(1), 16, 2, 8)
+                    .expect("test run limits should validate"),
+            );
+            let approved = run_service
+                .claim_next_approved("parked-resume-worker")
+                .await
+                .expect("fresh approval claim should succeed")
+                .expect("approved parked wait should be claimable");
+            assert_eq!(approved.approval_id().0, fixture.approval_id.0);
+            assert_eq!(approved.tool_call_id().0, tool_call_id);
+            assert_eq!(
+                approved.lease().lease_generation(),
+                fixture.lease.lease_generation() + 1
+            );
+            let approval = AiApprovalRecord::find_by_id(&fixture.database, &fixture.approval_id.0)
+                .await
+                .expect("claimed approval lookup should succeed")
+                .expect("claimed approval should exist");
+            assert_eq!(approval.state, "resume_claimed");
+            assert!(matches!(
+                AiApprovalRecord::compare_and_swap(
+                    &fixture.database,
+                    &approval.id,
+                    approval.row_version,
+                    crate::persistence::AiApprovalRecordWhereInput::default(),
+                    crate::persistence::UpdateAiApprovalRecordInput {
+                        state: Some("consumed".to_owned()),
                         consumed_uses: Some(1),
                         consumed_at: Some(Some(now.unix_timestamp())),
                         ..Default::default()
@@ -3742,7 +3888,6 @@ mod service {
                 .await
                 .expect("run lookup should succeed")
                 .expect("run should exist");
-            let fresh_attempt = Uuid::new_v4();
             let updated = AiRunRecord::compare_and_swap(
                 &fixture.database,
                 &run.id,
@@ -3750,12 +3895,10 @@ mod service {
                 crate::persistence::AiRunRecordWhereInput::default(),
                 crate::persistence::UpdateAiRunRecordInput {
                     state: Some(AiRunState::Running.as_str().to_owned()),
-                    attempt_id: Some(Some(fresh_attempt)),
-                    lease_owner: Some(Some("parked-resume-worker".to_owned())),
-                    lease_generation: Some(run.lease_generation + 1),
                     lease_expires_at: Some(Some((now + Duration::minutes(5)).unix_timestamp())),
                     lease_heartbeat_at: Some(Some(now.unix_timestamp())),
                     latest_checkpoint_id: Some(None),
+                    error_code: Some(None),
                     ..Default::default()
                 },
             )
@@ -3764,7 +3907,10 @@ mod service {
             let ConditionalUpdateOutcome::Updated(updated) = updated else {
                 panic!("fresh run claim should win")
             };
-            crate::orm_runs::lease_from_record(&updated).expect("fresh lease should validate")
+            let fresh =
+                crate::orm_runs::lease_from_record(&updated).expect("fresh lease should validate");
+            assert_eq!(fresh.attempt_id(), approved.lease().attempt_id());
+            fresh
         }
 
         #[tokio::test]
@@ -3850,6 +3996,88 @@ mod service {
                 fixture.service.reclaim_after_wait(&fresh_lease).await,
                 Err(AiError::Conflict)
             ));
+        }
+
+        #[tokio::test]
+        async fn committed_approval_wait_repairs_confirmation_after_process_loss() {
+            let fixture = parked_wait_fixture().await;
+            let parked = fixture
+                .service
+                .park_for_wait(&fixture.lease, fixture.request.clone())
+                .await
+                .expect("exact provider session should park");
+            let tool_call_id = persist_approval_wait_graph(&fixture, &parked).await;
+            let approval = AiApprovalRecord::find_by_id(&fixture.database, &fixture.approval_id.0)
+                .await
+                .expect("approval lookup should succeed")
+                .expect("approval should exist");
+            assert!(matches!(
+                AiApprovalRecord::compare_and_swap(
+                    &fixture.database,
+                    &approval.id,
+                    approval.row_version,
+                    crate::persistence::AiApprovalRecordWhereInput::default(),
+                    crate::persistence::UpdateAiApprovalRecordInput {
+                        state: Some("approved".to_owned()),
+                        approver_subject: Some(Some("parked-wait-owner".to_owned())),
+                        decided_at: Some(Some(fixture.clock.now().unix_timestamp())),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("approval decision should persist"),
+                ConditionalUpdateOutcome::Updated(_)
+            ));
+            let run_service = crate::OrmAiRunService::new(
+                fixture.database.clone(),
+                fixture.clock.clone(),
+                crate::AiRunServiceLimits::new(Duration::minutes(5), Duration::hours(1), 16, 2, 8)
+                    .expect("test run limits should validate"),
+            );
+            assert!(
+                run_service
+                    .claim_next_approved("premature-approval-worker")
+                    .await
+                    .expect("unconfirmed wait scan should remain safe")
+                    .is_none(),
+                "an approved wait must not claim before exact confirmation"
+            );
+
+            let cleanup = fixture
+                .service
+                .claim_cleanup("parked-wait-repair-worker")
+                .await
+                .expect("maintenance should reconcile the committed wait");
+            assert!(
+                cleanup.is_none(),
+                "an exact committed wait must not be deleted"
+            );
+            let binding =
+                AiProviderSessionBindingRecord::find_by_id(&fixture.database, &fixture.binding_id)
+                    .await
+                    .expect("binding lookup should succeed")
+                    .expect("binding should exist");
+            assert!(binding.parked_confirmed_at.is_some());
+            assert_eq!(
+                binding.parked_checkpoint_id,
+                AiRunRecord::find_by_id(&fixture.database, &fixture.lease.run_id().0)
+                    .await
+                    .expect("run lookup should succeed")
+                    .expect("run should exist")
+                    .latest_checkpoint_id
+            );
+
+            let fresh_lease = consume_approval_and_reclaim_lease(&fixture, tool_call_id).await;
+            let claim = fixture
+                .service
+                .reclaim_after_wait(&fresh_lease)
+                .await
+                .expect("repaired exact wait should reclaim once");
+            fixture
+                .service
+                .open_for_run(&fresh_lease, &claim)
+                .await
+                .expect("repaired retained cursor should open");
         }
 
         #[tokio::test]

@@ -82,7 +82,8 @@ let parked = provider_sessions
 
 // The owning wait transaction persists its exact wait row and parked
 // checkpoint, transitions the run to WaitingApproval/WaitingSubscription,
-// and clears the ordinary run lease.
+// records the nonterminal source-attempt outcome, and clears the ordinary run
+// lease atomically.
 provider_sessions.confirm_parked_wait(&parked).await?;
 
 // After a fresh run claim adopts and consumes the exact one-shot wait result:
@@ -96,6 +97,14 @@ same graph after a crash between the wait transaction and explicit
 confirmation. An expired unconfirmed park, terminal/cancelled run, reset,
 abandoned adoption or expired confirmed wait instead enters the existing
 provider-deletion lifecycle; provider absence is never inferred from expiry.
+
+For a retained approval, `claim_next_approved` does not reuse the closed source
+attempt. It first requires the exact parked provider binding to be confirmed,
+then atomically creates a fresh attempt/generation and refences the pending tool
+call and step. Approval that wins before confirmation remains unclaimed; the
+maintenance pass can confirm the exact durable graph and a later bounded claim
+can proceed. Stateless/non-retained approvals retain the historical in-attempt
+handoff contract.
 
 Only a fully completed provider-retained tool-request turn is suspendable.
 Stateless continuation, an in-flight stream and a provider-native synchronous

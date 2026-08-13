@@ -397,12 +397,15 @@ impl AiRequestedConsequentialToolCall {
         self.approval_id
     }
 
-    /// Renewed lease in `WaitingApproval`.
+    /// Waiting-approval fence proof.
+    ///
+    /// A retained-provider wait has released its ordinary lease atomically;
+    /// its proof is suitable only for the crate-owned confirmation graph.
     pub fn lease(&self) -> &AiRunLease {
         &self.lease
     }
 
-    /// Consumes the staged result and returns its waiting lease.
+    /// Consumes the staged result and returns its waiting fence proof.
     pub fn into_lease(self) -> AiRunLease {
         self.lease
     }
@@ -1380,10 +1383,12 @@ impl OrmAiConsequentialToolCallService {
     /// Fails closed for stale provider/fence/session binding, a disabled or
     /// non-supervised descriptor, malformed/oversized arguments, current
     /// access or tool-policy denial, incomplete preview, unavailable content
-    /// protection, invalid expiry, or persistence ambiguity. If persistence
-    /// fails after the tool row is created but before approval parking, no
-    /// application side effect has occurred and ordinary run recovery remains
-    /// authoritative.
+    /// protection, invalid expiry, or persistence ambiguity. For a retained
+    /// continuation the approval, protected `approval_wait_parked` checkpoint,
+    /// nonterminal source-attempt outcome and ordinary lease release commit in
+    /// one transaction. If staging fails before that transaction, no
+    /// application side effect has occurred and the exact provider binding is
+    /// sent through the existing cleanup boundary.
     pub async fn request_approval(
         &self,
         lease: &AiRunLease,
@@ -1656,17 +1661,30 @@ impl OrmAiConsequentialToolCallService {
             .await;
             return Err(AiError::Conflict);
         }
-        let requested = self
-            .approval_service
-            .request_approval_with_id(
-                &active_lease,
-                approval_id,
-                binding,
-                preview,
-                expires_at,
-                recent_mfa_required,
-            )
-            .await;
+        let requested = if let Some(parked) = parked.as_ref() {
+            self.approval_service
+                .request_parked_approval_with_id(
+                    &active_lease,
+                    approval_id,
+                    binding,
+                    preview,
+                    expires_at,
+                    recent_mfa_required,
+                    parked,
+                )
+                .await
+        } else {
+            self.approval_service
+                .request_approval_with_id(
+                    &active_lease,
+                    approval_id,
+                    binding,
+                    preview,
+                    expires_at,
+                    recent_mfa_required,
+                )
+                .await
+        };
         let requested = match requested {
             Ok(requested) => requested,
             Err(error) => {

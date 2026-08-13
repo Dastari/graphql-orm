@@ -1422,9 +1422,10 @@ pub(crate) struct AiRunAttemptRecord {
 ///
 /// Attempt claims and their outcomes are separate append-only rows so worker
 /// history never depends on mutating an already-recorded fence claim. Most
-/// outcomes are terminal, retry or recovery facts; a bounded subscription wait
-/// records `waiting_subscription` because that transition deliberately ends
-/// the run-worker lease while leaving the separately fenced waiter live.
+/// outcomes are terminal, retry or recovery facts; bounded subscription and
+/// retained-provider approval waits record their nonterminal waiting state
+/// because those transitions deliberately end the run-worker lease while
+/// leaving a separately fenced waiter or one-shot approval live.
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_run_attempt_outcomes",
     plural = "GraphqlOrmAiRunAttemptOutcomes",
