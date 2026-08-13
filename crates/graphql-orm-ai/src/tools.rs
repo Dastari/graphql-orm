@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AiApprovalRule, AiToolRisk, ModelToolDefinition};
 use crate::{
-    AiDisclosureSchema, AiError, AiGeneratedGraphqlOperationPolicy, AiGraphqlToolManifestCatalog,
+    AiCompiledGraphqlQuery, AiDisclosureSchema, AiError, AiGeneratedGraphqlOperationPolicy,
+    AiGraphqlQueryCapability, AiGraphqlQueryCapabilityCatalog, AiGraphqlToolManifestCatalog,
     AiScope, AiToolDescriptor, AiToolId, AiToolOperationDomain, AiToolOperationKind,
     DataClassification, ToolGraphqlRequest, ToolMaturity, contains_forbidden_graphql_name,
 };
@@ -20,6 +21,7 @@ const JSON_SCHEMA_2020_12: &str = "https://json-schema.org/draft/2020-12/schema"
 #[derive(Clone, Debug, Default)]
 pub struct AiToolCatalog {
     tools: BTreeMap<AiToolId, RegisteredAiTool>,
+    query_capabilities: BTreeMap<AiToolId, AiGraphqlQueryCapability>,
 }
 
 #[derive(Clone, Debug)]
@@ -46,6 +48,35 @@ impl AiToolCatalog {
             ));
         }
         self.register_validated(descriptor, None)
+    }
+
+    /// Registers a complete automatic query-capability set for discovery.
+    ///
+    /// Registration is all-or-nothing and grants no execution authority. The
+    /// host must separately install current-principal, target, resolver, and
+    /// disclosure policy before a compiled query can execute.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stable-ID collision with a static tool or
+    /// previously registered automatic query capability.
+    pub fn register_query_capability_catalog(
+        &mut self,
+        catalog: &AiGraphqlQueryCapabilityCatalog,
+    ) -> Result<(), AiError> {
+        for capability in catalog.capabilities() {
+            if self.tools.contains_key(capability.id())
+                || self.query_capabilities.contains_key(capability.id())
+            {
+                return Err(AiError::AlreadyExists(capability.id().as_str().to_owned()));
+            }
+        }
+        self.query_capabilities.extend(
+            catalog
+                .capabilities()
+                .map(|capability| (capability.id().clone(), capability.clone())),
+        );
+        Ok(())
     }
 
     /// Registers a GraphQL tool with its exact static disclosure schema.
@@ -194,7 +225,9 @@ impl AiToolCatalog {
                 "AI control-plane and introspection operations cannot be tools".to_owned(),
             ));
         }
-        if self.tools.contains_key(&descriptor.id) {
+        if self.tools.contains_key(&descriptor.id)
+            || self.query_capabilities.contains_key(&descriptor.id)
+        {
             return Err(AiError::AlreadyExists(descriptor.id.as_str().to_owned()));
         }
         self.tools.insert(
@@ -222,6 +255,61 @@ impl AiToolCatalog {
     /// Returns all registered descriptors.
     pub fn descriptors(&self) -> impl Iterator<Item = &AiToolDescriptor> {
         self.tools.values().map(|tool| &tool.descriptor)
+    }
+
+    /// Returns all automatic query capabilities ordered by stable ID.
+    ///
+    /// This is discovery only and does not imply current authority.
+    pub fn query_capabilities(&self) -> impl Iterator<Item = &AiGraphqlQueryCapability> {
+        self.query_capabilities.values()
+    }
+
+    /// Projects one registered automatic query capability for a provider.
+    ///
+    /// The provider receives a closed typed plan schema. It never receives a
+    /// GraphQL document, target, credential, or authorization rule.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for an absent capability or malformed provider
+    /// alias.
+    pub fn query_capability_model_definition(
+        &self,
+        id: &AiToolId,
+        provider_name: impl Into<String>,
+    ) -> Result<ModelToolDefinition, AiError> {
+        let capability = self.query_capabilities.get(id).ok_or(AiError::Forbidden)?;
+        let definition = ModelToolDefinition {
+            tool_id: capability.id().as_str().to_owned(),
+            provider_name: provider_name.into(),
+            fingerprint: capability.fingerprint().to_owned(),
+            description: capability.description().to_owned(),
+            parameters: capability.argument_schema().clone(),
+            strict: true,
+        };
+        definition.validate().map_err(|_| {
+            AiError::InvalidConfiguration("automatic query provider alias is invalid".to_owned())
+        })?;
+        Ok(definition)
+    }
+
+    /// Compiles one provider-authored typed plan against the exact registered
+    /// semantic capability.
+    ///
+    /// Compilation does not authorize or execute the query.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for an absent capability or invalid closed plan.
+    pub fn compile_query_capability(
+        &self,
+        id: &AiToolId,
+        plan: serde_json::Value,
+    ) -> Result<AiCompiledGraphqlQuery, AiError> {
+        self.query_capabilities
+            .get(id)
+            .ok_or(AiError::Forbidden)?
+            .compile(plan)
     }
 
     /// Builds one provider-facing definition from the exact registered

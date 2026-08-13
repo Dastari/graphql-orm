@@ -13,6 +13,7 @@ mod disclosure;
 mod error;
 mod execution;
 mod profiles;
+mod query_plans;
 mod tools;
 
 pub use data::*;
@@ -20,4 +21,5 @@ pub use disclosure::*;
 pub use error::*;
 pub use execution::*;
 pub use profiles::*;
+pub use query_plans::*;
 pub use tools::*;

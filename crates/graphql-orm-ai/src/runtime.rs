@@ -11,12 +11,13 @@ use crate::{
     AiContentProtector, AiDeploymentEgressBoundary, AiDisclosureEvaluation, AiEgressDecision,
     AiEgressManifest, AiEgressPolicy, AiError, AiProposalCatalog, AiProvider, AiSchemaModule,
     AiSecretStore, AiToolAuthorizationDecision, AiToolAuthorizationPolicy, AiToolCatalog,
-    AiToolDescriptor, AiToolId, AuthenticatedGraphqlExecutor, AuthenticatedToolBridge,
-    ConsumedAiApproval, GraphqlExecutionTargetRegistry, GraphqlRequestContextFactory, ModelRequest,
-    ProviderBackgroundBinding, ProviderBackgroundObservation, ProviderBackgroundRetrievalBinding,
-    ProviderBackgroundRetrievalContext, ProviderBackgroundSubmission, ProviderError,
-    ProviderEventStream, ProviderKind, ProviderRequestContext, ToolGraphqlRequest,
-    ToolGraphqlResponse, ToolMaturity,
+    AiToolDescriptor, AiToolId, AiToolOperationDomain, AiToolOperationKind,
+    AuthenticatedGraphqlExecutor, AuthenticatedToolBridge, ConsumedAiApproval,
+    GraphqlExecutionTargetRegistry, GraphqlInvocationContext, GraphqlRequestContextFactory,
+    ModelRequest, ProviderBackgroundBinding, ProviderBackgroundObservation,
+    ProviderBackgroundRetrievalBinding, ProviderBackgroundRetrievalContext,
+    ProviderBackgroundSubmission, ProviderError, ProviderEventStream, ProviderKind,
+    ProviderRequestContext, ToolGraphqlRequest, ToolGraphqlResponse, ToolMaturity,
 };
 use graphql_orm::graphql::orm::{OrmSchemaModule, SchemaModuleCatalog};
 
@@ -321,6 +322,60 @@ impl AiRuntime {
             .await
             .map_err(|_| AiError::ToolExecutionFailed)?;
         self.finish_tool_execution(descriptor, disclosure_schema, response, authorization)
+    }
+
+    /// Compiles and executes one registered automatic GraphQL query plan.
+    ///
+    /// The plan is closed and typed by the registered semantic capability.
+    /// Compilation produces the exact server-authored document, variables,
+    /// projection, disclosure contract, and fingerprints before the ordinary
+    /// bridge rehydrates the principal and invokes current host policy. Merely
+    /// registering the capability never makes this method succeed.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed when readiness, capability/plan validation, target/schema
+    /// binding, current host policy, ordinary resolver authorization, output
+    /// limits, or disclosure evaluation fails.
+    pub async fn execute_query_capability(
+        &self,
+        principal_reference: &PrincipalReference,
+        capability_id: &AiToolId,
+        plan: serde_json::Value,
+        invocation: GraphqlInvocationContext,
+    ) -> Result<AiToolExecutionResult, AiError> {
+        if !self.start_gate.is_ready() {
+            return Err(AiError::RuntimeNotReady);
+        }
+        let compiled = self
+            .tool_catalog
+            .compile_query_capability(capability_id, plan)?;
+        let (descriptor, disclosure_schema, variables) = compiled.into_parts();
+        if descriptor.maturity > self.maximum_tool_maturity
+            || descriptor.operation_kind != AiToolOperationKind::Query
+            || descriptor.operation_domain != AiToolOperationDomain::Application
+            || descriptor.approval != AiApprovalRule::None
+            || !descriptor.idempotent
+        {
+            return Err(AiError::Forbidden);
+        }
+        let contract = descriptor
+            .graphql_contract
+            .clone()
+            .ok_or(AiError::Forbidden)?;
+        let request = ToolGraphqlRequest {
+            document: descriptor.document.clone(),
+            operation_name: contract.operation_name.clone(),
+            contract,
+            variables,
+            invocation,
+        };
+        let (response, authorization) = self
+            .tool_bridge
+            .execute(principal_reference, &descriptor, request)
+            .await
+            .map_err(|_| AiError::ToolExecutionFailed)?;
+        self.finish_tool_execution(&descriptor, &disclosure_schema, response, authorization)
     }
 
     /// Rehydrates and evaluates current host tool policy for an exact

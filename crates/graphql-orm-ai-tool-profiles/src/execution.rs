@@ -5,8 +5,9 @@ use async_graphql::parser::{
     types::{OperationType, Selection},
 };
 use graphql_orm_operation_catalog::{
-    GRAPHQL_OPERATION_FINGERPRINT_ALGORITHM, GraphqlOperationCatalog, GraphqlOperationKind,
-    GraphqlResolverOperationDescriptor,
+    GRAPHQL_OPERATION_FINGERPRINT_ALGORITHM, GRAPHQL_SEMANTIC_FINGERPRINT_ALGORITHM,
+    GraphqlOperationCatalog, GraphqlOperationKind, GraphqlResolverOperationDescriptor,
+    GraphqlSemanticCatalog, GraphqlSemanticOperationDescriptor,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -92,6 +93,96 @@ pub struct GraphqlGeneratedOperationBinding {
     kind: GraphqlGeneratedOperationKind,
     field_name: String,
     category: String,
+}
+
+/// Exact drift binding to one root in a finished-schema semantic catalogue.
+///
+/// This is descriptive evidence only. It neither admits the root as an AI
+/// capability nor grants resolver, field, row, tenant, or provider authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphqlSemanticOperationBinding {
+    fingerprint_algorithm: String,
+    catalog_fingerprint: String,
+    operation_fingerprint: String,
+    kind: GraphqlGeneratedOperationKind,
+    field_name: String,
+}
+
+impl GraphqlSemanticOperationBinding {
+    fn new(
+        catalog: &GraphqlSemanticCatalog,
+        operation: &GraphqlSemanticOperationDescriptor,
+    ) -> Result<Self, ToolExecutionError> {
+        Ok(Self {
+            fingerprint_algorithm: GRAPHQL_SEMANTIC_FINGERPRINT_ALGORITHM.to_owned(),
+            catalog_fingerprint: catalog.fingerprint.clone(),
+            operation_fingerprint: operation.fingerprint.clone(),
+            kind: GraphqlGeneratedOperationKind::from_orm(operation.kind)?,
+            field_name: operation.field_name.clone(),
+        })
+    }
+
+    /// Returns the semantic fingerprint algorithm identifier.
+    pub fn fingerprint_algorithm(&self) -> &str {
+        &self.fingerprint_algorithm
+    }
+
+    /// Returns the exact semantic-catalogue fingerprint.
+    pub fn catalog_fingerprint(&self) -> &str {
+        &self.catalog_fingerprint
+    }
+
+    /// Returns the exact semantic-operation fingerprint.
+    pub fn operation_fingerprint(&self) -> &str {
+        &self.operation_fingerprint
+    }
+
+    /// Returns the bound root operation kind.
+    pub const fn kind(&self) -> GraphqlGeneratedOperationKind {
+        self.kind
+    }
+
+    /// Returns the exact public root field.
+    pub fn field_name(&self) -> &str {
+        &self.field_name
+    }
+
+    fn has_valid_shape(&self) -> bool {
+        self.fingerprint_algorithm == GRAPHQL_SEMANTIC_FINGERPRINT_ALGORITHM
+            && valid_sha256_fingerprint(&self.catalog_fingerprint)
+            && valid_sha256_fingerprint(&self.operation_fingerprint)
+            && valid_graphql_name(&self.field_name)
+    }
+
+    fn resolve<'a>(
+        &self,
+        catalog: &'a GraphqlSemanticCatalog,
+        operation_name: &str,
+        document: &str,
+    ) -> Result<&'a GraphqlSemanticOperationDescriptor, ToolExecutionError> {
+        if !self.has_valid_shape() || self.catalog_fingerprint != catalog.fingerprint {
+            return Err(ToolExecutionError::StaleContract);
+        }
+        let operation = catalog
+            .operations
+            .iter()
+            .find(|candidate| {
+                candidate.kind == self.kind.graphql_orm_kind()
+                    && candidate.field_name == self.field_name
+            })
+            .ok_or(ToolExecutionError::StaleContract)?;
+        if operation.fingerprint != self.operation_fingerprint
+            || !document_selects_exact_generated_root(
+                document,
+                operation_name,
+                operation.kind,
+                &operation.field_name,
+            )
+        {
+            return Err(ToolExecutionError::StaleContract);
+        }
+        Ok(operation)
+    }
 }
 
 impl GraphqlGeneratedOperationBinding {
@@ -196,6 +287,9 @@ pub struct GraphqlOperationContract {
     /// Optional exact binding to an exposed derive-generated resolver.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated_operation: Option<GraphqlGeneratedOperationBinding>,
+    /// Optional exact binding to the canonical finished-schema semantic root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_operation: Option<GraphqlSemanticOperationBinding>,
 }
 
 impl GraphqlOperationContract {
@@ -220,6 +314,7 @@ impl GraphqlOperationContract {
             result_projection_fingerprint: result_projection_fingerprint.into(),
             disclosure_schema_fingerprint: disclosure_schema_fingerprint.into(),
             generated_operation: None,
+            semantic_operation: None,
         };
         if contract.schema_fingerprint.trim().is_empty()
             || contract.operation_name.trim().is_empty()
@@ -268,6 +363,63 @@ impl GraphqlOperationContract {
         self.generated_operation.as_ref()
     }
 
+    /// Binds this contract to one exact semantic-catalogue query root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolExecutionError::StaleContract`] when the coordinate is
+    /// absent, ambiguous, non-query, or the document does not select it as its
+    /// sole root field.
+    pub fn with_semantic_operation(
+        mut self,
+        catalog: &GraphqlSemanticCatalog,
+        field_name: &str,
+        document: &str,
+    ) -> Result<Self, ToolExecutionError> {
+        if self.document_hash != stable_graphql_document_hash(document) {
+            return Err(ToolExecutionError::StaleContract);
+        }
+        catalog
+            .validate()
+            .map_err(|_| ToolExecutionError::StaleContract)?;
+        let mut matches = catalog.operations.iter().filter(|operation| {
+            operation.kind == GraphqlOperationKind::Query && operation.field_name == field_name
+        });
+        let operation = matches.next().ok_or(ToolExecutionError::StaleContract)?;
+        if matches.next().is_some() {
+            return Err(ToolExecutionError::StaleContract);
+        }
+        let binding = GraphqlSemanticOperationBinding::new(catalog, operation)?;
+        binding.resolve(catalog, &self.operation_name, document)?;
+        self.semantic_operation = Some(binding);
+        Ok(self)
+    }
+
+    /// Returns the semantic-root drift binding, when present.
+    pub const fn semantic_operation(&self) -> Option<&GraphqlSemanticOperationBinding> {
+        self.semantic_operation.as_ref()
+    }
+
+    /// Revalidates the semantic binding against the current canonical graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolExecutionError::StaleContract`] for schema/catalogue,
+    /// operation, coordinate, or document drift.
+    pub fn resolve_semantic_operation<'a>(
+        &self,
+        catalog: &'a GraphqlSemanticCatalog,
+        document: &str,
+    ) -> Result<&'a GraphqlSemanticOperationDescriptor, ToolExecutionError> {
+        if self.document_hash != stable_graphql_document_hash(document) {
+            return Err(ToolExecutionError::StaleContract);
+        }
+        self.semantic_operation
+            .as_ref()
+            .ok_or(ToolExecutionError::StaleContract)?
+            .resolve(catalog, &self.operation_name, document)
+    }
+
     /// Revalidates a generated binding against the current immutable catalog.
     ///
     /// # Errors
@@ -295,6 +447,10 @@ impl GraphqlOperationContract {
         self.generated_operation
             .as_ref()
             .is_none_or(GraphqlGeneratedOperationBinding::has_valid_shape)
+            && self
+                .semantic_operation
+                .as_ref()
+                .is_none_or(GraphqlSemanticOperationBinding::has_valid_shape)
     }
 }
 
@@ -311,6 +467,15 @@ fn valid_sha256_fingerprint(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn valid_graphql_name(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first == b'_' || first.is_ascii_alphabetic())
+        && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
 }
 
 fn document_selects_exact_generated_root(
