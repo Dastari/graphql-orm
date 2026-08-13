@@ -36,6 +36,7 @@ mssql = [
   "dep:tiberius",
   "dep:tokio-util",
   "tokio/net",
+  "tokio/rt",
 ]
 change-journal = []
 auth-agql = ["dep:agql-auth"]

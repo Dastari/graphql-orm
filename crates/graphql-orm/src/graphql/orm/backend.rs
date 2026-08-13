@@ -287,7 +287,10 @@ pub type DefaultWriteBackend = SqliteBackend;
 #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
 pub type DefaultWriteBackend = PostgresBackend;
 
-#[cfg(not(any(feature = "sqlite", feature = "postgres")))]
+#[cfg(all(feature = "mssql", not(any(feature = "sqlite", feature = "postgres"))))]
+pub type DefaultWriteBackend = MssqlBackend;
+
+#[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mssql")))]
 pub type DefaultWriteBackend = NoDefaultBackend;
 
 impl OrmBackend for NoDefaultBackend {
@@ -881,6 +884,70 @@ impl OrmBackend for MssqlBackend {
         <String as crate::db::mssql::MssqlScalar>::try_get_optional(row, column)
     }
 }
+
+#[cfg(feature = "mssql")]
+impl WriteBackend for MssqlBackend {
+    type WriteResult = crate::db::mssql::MssqlWriteResult;
+    type Transaction<'pool> = crate::db::mssql::MssqlTransaction;
+
+    fn rows_affected(result: &Self::WriteResult) -> u64 {
+        result.rows_affected()
+    }
+
+    fn execute_with_binds<'a>(
+        pool: &'a Self::Pool,
+        sql: &'a str,
+        values: &'a [SqlValue],
+    ) -> BoxFuture<'a, crate::Result<Self::WriteResult>> {
+        Box::pin(async move { pool.execute(sql, values).await })
+    }
+
+    fn begin_write_transaction<'a>(
+        pool: &'a Self::Pool,
+        mode: super::core::TransactionMode,
+    ) -> BoxFuture<'a, crate::Result<Self::Transaction<'a>>> {
+        Box::pin(async move { pool.begin_transaction(mode).await })
+    }
+
+    fn fetch_rows_in_transaction<'a>(
+        transaction: &'a mut Self::Transaction<'_>,
+        sql: &'a str,
+        values: &'a [SqlValue],
+    ) -> BoxFuture<'a, crate::Result<Vec<Self::Row>>> {
+        Box::pin(async move { transaction.fetch_rows(sql, values).await })
+    }
+
+    fn execute_in_transaction<'a>(
+        transaction: &'a mut Self::Transaction<'_>,
+        sql: &'a str,
+        values: &'a [SqlValue],
+    ) -> BoxFuture<'a, crate::Result<Self::WriteResult>> {
+        Box::pin(async move { transaction.execute(sql, values).await })
+    }
+
+    fn commit_write_transaction<'a>(
+        transaction: Self::Transaction<'a>,
+    ) -> BoxFuture<'a, crate::Result<()>> {
+        Box::pin(async move { transaction.commit().await })
+    }
+
+    fn rollback_write_transaction<'a>(
+        transaction: Self::Transaction<'a>,
+    ) -> BoxFuture<'a, crate::Result<()>> {
+        Box::pin(async move { transaction.rollback().await })
+    }
+
+    fn is_retryable_write_error(error: &sqlx::Error) -> bool {
+        let message = error.to_string();
+        message.contains("1205") || message.contains("3960") || message.contains("40501")
+    }
+}
+
+#[cfg(feature = "mssql")]
+impl TransactionBackend for MssqlBackend {}
+
+#[cfg(feature = "mssql")]
+impl SubscriptionBackend for MssqlBackend {}
 
 #[cfg(feature = "sqlite")]
 fn bind_sqlite_value<'q>(

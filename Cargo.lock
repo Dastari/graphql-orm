@@ -9005,6 +9005,7 @@ dependencies = [
  "once_cell",
  "pin-project-lite",
  "pretty-hex",
+ "rust_decimal",
  "rustls-native-certs 0.6.3",
  "rustls-pemfile",
  "thiserror 1.0.69",

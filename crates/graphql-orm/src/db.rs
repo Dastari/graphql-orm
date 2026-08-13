@@ -1480,6 +1480,14 @@ impl Database<crate::graphql::orm::MssqlBackend> {
         Ok(Self::new(pool))
     }
 
+    /// Open a deliberately writable SQL Server pool for entity DML against an
+    /// externally managed schema.
+    pub async fn connect_ado_external_writable(connection_string: &str) -> crate::Result<Self> {
+        let pool =
+            crate::db::mssql::MssqlPool::connect_ado_external_writable(connection_string).await?;
+        Ok(Self::base(pool, SchemaPolicy::ExternalWritable))
+    }
+
     pub fn builder(
         pool: <crate::graphql::orm::MssqlBackend as OrmBackend>::Pool,
     ) -> DatabaseBuilder<crate::graphql::orm::MssqlBackend> {

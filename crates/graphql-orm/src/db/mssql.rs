@@ -8,6 +8,37 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 pub type MssqlClient = tiberius::Client<Compat<TcpStream>>;
 
+/// Physical access mode of a SQL Server pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MssqlAccessMode {
+    /// Queries only. This remains the default for every compatibility constructor.
+    ReadOnly,
+    /// Deliberately enabled entity DML against an externally managed schema.
+    ExternalWritable,
+}
+
+/// Exact affected-row result returned by SQL Server DML.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MssqlWriteResult {
+    rows_affected: u64,
+}
+
+impl MssqlWriteResult {
+    pub(crate) fn rows_affected(self) -> u64 {
+        self.rows_affected
+    }
+}
+
+/// One connection-pinned SQL Server transaction.
+///
+/// The client is returned to the pool only after a successful explicit commit
+/// or rollback. Cancellation, protocol errors, and drop discard the socket.
+pub struct MssqlTransaction {
+    pool: MssqlPool,
+    client: Option<MssqlClient>,
+    permit: Option<OwnedSemaphorePermit>,
+}
+
 #[derive(Clone)]
 pub struct MssqlPool {
     inner: Arc<MssqlPoolInner>,
@@ -15,6 +46,7 @@ pub struct MssqlPool {
 
 struct MssqlPoolInner {
     config: Config,
+    access_mode: MssqlAccessMode,
     idle: Mutex<Vec<MssqlClient>>,
     permits: Arc<Semaphore>,
 }
@@ -30,12 +62,14 @@ enum MssqlParamValue {
     Int(i64),
     Float(f64),
     Bool(bool),
+    Decimal(rust_decimal::Decimal),
     NullString,
     NullBytes,
     NullUuid,
     NullInt,
     NullFloat,
     NullBool,
+    NullDecimal,
 }
 
 pub trait MssqlColumnIndex: Copy {
@@ -65,18 +99,50 @@ impl MssqlPool {
         Ok(Self::new(config))
     }
 
+    /// Open a pool that deliberately permits DML against an externally managed schema.
+    pub async fn connect_ado_external_writable(connection_string: &str) -> crate::Result<Self> {
+        let mut config = Config::from_ado_string(connection_string).map_err(map_tiberius_error)?;
+        config.readonly(false);
+        Ok(Self::new_external_writable(config))
+    }
+
     pub fn new(config: Config) -> Self {
         Self::with_max_connections(config, 5)
     }
 
     pub fn with_max_connections(config: Config, max_connections: usize) -> Self {
+        Self::with_access_mode(config, max_connections, MssqlAccessMode::ReadOnly)
+    }
+
+    /// Construct a deliberately writable pool for an externally managed schema.
+    pub fn new_external_writable(config: Config) -> Self {
+        Self::with_max_connections_external_writable(config, 5)
+    }
+
+    /// Construct a deliberately writable pool with a bounded connection count.
+    pub fn with_max_connections_external_writable(config: Config, max_connections: usize) -> Self {
+        Self::with_access_mode(config, max_connections, MssqlAccessMode::ExternalWritable)
+    }
+
+    fn with_access_mode(
+        mut config: Config,
+        max_connections: usize,
+        access_mode: MssqlAccessMode,
+    ) -> Self {
+        config.readonly(matches!(access_mode, MssqlAccessMode::ReadOnly));
         Self {
             inner: Arc::new(MssqlPoolInner {
                 config,
+                access_mode,
                 idle: Mutex::new(Vec::new()),
                 permits: Arc::new(Semaphore::new(max_connections.max(1))),
             }),
         }
+    }
+
+    /// Report the immutable physical access mode.
+    pub fn access_mode(&self) -> MssqlAccessMode {
+        self.inner.access_mode
     }
 
     pub async fn fetch_rows(&self, sql: &str, values: &[SqlValue]) -> crate::Result<Vec<MssqlRow>> {
@@ -87,6 +153,54 @@ impl MssqlPool {
         }
         drop(permit);
         result
+    }
+
+    pub(crate) async fn execute(
+        &self,
+        sql: &str,
+        values: &[SqlValue],
+    ) -> crate::Result<MssqlWriteResult> {
+        self.require_external_writable()?;
+        let (mut client, permit) = self.acquire_client().await?;
+        let result = execute_with_client(&mut client, sql, values).await;
+        if result.is_ok() {
+            self.release_client(client).await;
+        }
+        drop(permit);
+        result
+    }
+
+    pub(crate) async fn begin_transaction(
+        &self,
+        mode: crate::graphql::orm::TransactionMode,
+    ) -> crate::Result<MssqlTransaction> {
+        self.require_external_writable()?;
+        let (mut client, permit) = self.acquire_client().await?;
+        let isolation = match mode {
+            crate::graphql::orm::TransactionMode::Default => "READ COMMITTED",
+            crate::graphql::orm::TransactionMode::StateMachine => "SERIALIZABLE",
+        };
+        execute_control_statement(
+            &mut client,
+            &format!("SET TRANSACTION ISOLATION LEVEL {isolation}; BEGIN TRANSACTION;"),
+        )
+        .await?;
+        Ok(MssqlTransaction {
+            pool: self.clone(),
+            client: Some(client),
+            permit: Some(permit),
+        })
+    }
+
+    fn require_external_writable(&self) -> crate::Result<()> {
+        if self.access_mode() == MssqlAccessMode::ExternalWritable {
+            Ok(())
+        } else {
+            Err(sqlx::Error::Protocol(
+                "SQL Server pool is physically read-only; use the explicit external-writable constructor"
+                    .to_string(),
+            ))
+        }
     }
 
     async fn acquire_client(&self) -> crate::Result<(MssqlClient, OwnedSemaphorePermit)> {
@@ -114,6 +228,50 @@ impl MssqlPool {
 
     async fn release_client(&self, client: MssqlClient) {
         self.inner.idle.lock().await.push(client);
+    }
+}
+
+impl MssqlTransaction {
+    pub(crate) async fn fetch_rows(
+        &mut self,
+        sql: &str,
+        values: &[SqlValue],
+    ) -> crate::Result<Vec<MssqlRow>> {
+        let client = self.client.as_mut().ok_or_else(|| {
+            sqlx::Error::Protocol("SQL Server transaction is no longer active".to_string())
+        })?;
+        fetch_rows_with_client(client, sql, values).await
+    }
+
+    pub(crate) async fn execute(
+        &mut self,
+        sql: &str,
+        values: &[SqlValue],
+    ) -> crate::Result<MssqlWriteResult> {
+        let client = self.client.as_mut().ok_or_else(|| {
+            sqlx::Error::Protocol("SQL Server transaction is no longer active".to_string())
+        })?;
+        execute_with_client(client, sql, values).await
+    }
+
+    pub(crate) async fn commit(mut self) -> crate::Result<()> {
+        let mut client = self.client.take().ok_or_else(|| {
+            sqlx::Error::Protocol("SQL Server transaction is no longer active".to_string())
+        })?;
+        execute_control_statement(&mut client, "COMMIT TRANSACTION;").await?;
+        self.pool.release_client(client).await;
+        self.permit.take();
+        Ok(())
+    }
+
+    pub(crate) async fn rollback(mut self) -> crate::Result<()> {
+        let mut client = self.client.take().ok_or_else(|| {
+            sqlx::Error::Protocol("SQL Server transaction is no longer active".to_string())
+        })?;
+        execute_control_statement(&mut client, "ROLLBACK TRANSACTION;").await?;
+        self.pool.release_client(client).await;
+        self.permit.take();
+        Ok(())
     }
 }
 
@@ -369,12 +527,17 @@ impl<'a> tiberius::IntoSql<'a> for MssqlParamValue {
             Self::Int(value) => ColumnData::I64(Some(value)),
             Self::Float(value) => ColumnData::F64(Some(value)),
             Self::Bool(value) => ColumnData::Bit(Some(value)),
+            Self::Decimal(value) => match tiberius::ToSql::to_sql(&value) {
+                ColumnData::Numeric(value) => ColumnData::Numeric(value),
+                _ => unreachable!("rust_decimal always maps to TDS numeric"),
+            },
             Self::NullString => ColumnData::String(None),
             Self::NullBytes => ColumnData::Binary(None),
             Self::NullUuid => ColumnData::Guid(None),
             Self::NullInt => ColumnData::I64(None),
             Self::NullFloat => ColumnData::F64(None),
             Self::NullBool => ColumnData::Bit(None),
+            Self::NullDecimal => ColumnData::Numeric(None),
         }
     }
 }
@@ -396,6 +559,32 @@ async fn fetch_rows_with_client(
     Ok(rows.into_iter().map(MssqlRow::new).collect())
 }
 
+async fn execute_with_client(
+    client: &mut MssqlClient,
+    sql: &str,
+    values: &[SqlValue],
+) -> crate::Result<MssqlWriteResult> {
+    let mut query = Query::new(sql.to_string());
+    for value in values.iter().map(MssqlParamValue::from) {
+        query.bind(value);
+    }
+    let result = query.execute(client).await.map_err(map_tiberius_error)?;
+    Ok(MssqlWriteResult {
+        rows_affected: result.total(),
+    })
+}
+
+async fn execute_control_statement(client: &mut MssqlClient, sql: &str) -> crate::Result<()> {
+    client
+        .simple_query(sql)
+        .await
+        .map_err(map_tiberius_error)?
+        .into_results()
+        .await
+        .map_err(map_tiberius_error)?;
+    Ok(())
+}
+
 impl From<&SqlValue> for MssqlParamValue {
     fn from(value: &SqlValue) -> Self {
         match value {
@@ -413,8 +602,8 @@ impl From<&SqlValue> for MssqlParamValue {
             SqlValue::FloatNull => Self::NullFloat,
             // The writable MSSQL capability replaces this read-path-compatible
             // textual bind with Tiberius' native DECIMAL transport.
-            SqlValue::Decimal(value) => Self::String(value.value().to_string()),
-            SqlValue::DecimalNull(_) => Self::NullString,
+            SqlValue::Decimal(value) => Self::Decimal(value.value()),
+            SqlValue::DecimalNull(_) => Self::NullDecimal,
             SqlValue::Bool(value) => Self::Bool(*value),
             SqlValue::BoolNull => Self::NullBool,
             SqlValue::Null => Self::NullString,
