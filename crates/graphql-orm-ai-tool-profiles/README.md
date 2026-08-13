@@ -68,6 +68,10 @@ operations. Resolver discovery alone never admits a tool.
 and its canonical `GraphqlSemanticCatalog`. Compilation is all-or-nothing: each
 public `Query` root becomes one stable finite capability, and an undeclared,
 stale, ambiguous, unsupported, or excessive root makes readiness fail.
+Pass the finished public application SDL (for example, ordinary `schema.sdl()`),
+not a Federation transport export containing `_service` or `_entities`. Install
+that same public-SDL fingerprint on the exact `GraphqlExecutionTargetRegistry`
+target. Router/Federation transport fingerprints remain a separate contract.
 
 ```rust,no_run
 # use graphql_orm_ai_tool_profiles::{AiGraphqlQueryCapabilityCatalog, AiGraphqlQueryCapabilityLimits, GraphqlExecutionTargetId};

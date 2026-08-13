@@ -257,12 +257,14 @@ impl AiGraphqlQueryCapability {
         let root_field = self
             .schema
             .operation_root_field(expected_kind, &self.operation.field_name)?;
+        let inject_root_bound = root_bound_argument(&self.schema, root_field, &self.output)?;
         let arguments = context.compile_arguments(
             &root_field.arguments,
             &self.operation.arguments,
             &plan.arguments,
             plan.maximum_items,
             self.output.requires_root_bound(),
+            inject_root_bound,
             "root",
         )?;
 
@@ -503,6 +505,21 @@ impl AiGraphqlQueryCapabilityCatalog {
         {
             return Err(configuration_error(
                 "query capability coverage is incomplete",
+            ));
+        }
+        let total_provider_schema_bytes =
+            capabilities
+                .values()
+                .try_fold(0_usize, |total, capability| {
+                    serde_json::to_vec(&capability.argument_schema)
+                        .ok()
+                        .and_then(|encoded| total.checked_add(encoded.len()))
+                });
+        if total_provider_schema_bytes
+            .is_none_or(|bytes| bytes > limits.maximum_schema_bytes as usize)
+        {
+            return Err(configuration_error(
+                "complete query capability schemas exceed deployment capacity",
             ));
         }
         let fingerprint = sha256_json(&json!({
@@ -861,6 +878,21 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
                 ));
             }
         }
+        let total_provider_schema_bytes =
+            capabilities
+                .values()
+                .try_fold(0_usize, |total, capability| {
+                    serde_json::to_vec(capability.argument_schema())
+                        .ok()
+                        .and_then(|encoded| total.checked_add(encoded.len()))
+                });
+        if total_provider_schema_bytes
+            .is_none_or(|bytes| bytes > limits.query.maximum_schema_bytes as usize)
+        {
+            return Err(configuration_error(
+                "complete subscription capability schemas exceed deployment capacity",
+            ));
+        }
         let fingerprint = sha256_json(&json!({
             "version": AI_GRAPHQL_SUBSCRIPTION_CAPABILITY_VERSION,
             "semantic_catalog_fingerprint": semantic_catalog.fingerprint,
@@ -1051,6 +1083,26 @@ impl QueryOutput {
             Self::Scalar { maximum_items, .. } => maximum_items.is_some(),
         }
     }
+}
+
+fn root_bound_argument(
+    schema: &FinishedSchema,
+    root: &SchemaField,
+    output: &QueryOutput,
+) -> Result<bool, AiError> {
+    let candidates = root
+        .arguments
+        .iter()
+        .filter(|(name, field)| is_page_argument(name, &field.ty, schema))
+        .count();
+    let required = matches!(output, QueryOutput::Aggregate { .. })
+        || matches!(output, QueryOutput::Entity { route, .. } if route.iter().any(|segment| segment.is_list));
+    if candidates > 1 || required && candidates != 1 {
+        return Err(configuration_error(
+            "collection root has no unique server-owned bound argument",
+        ));
+    }
+    Ok(candidates == 1)
 }
 
 #[derive(Clone, Debug)]
@@ -1534,6 +1586,7 @@ fn build_plan_schema(
     limits: AiGraphqlQueryCapabilityLimits,
 ) -> Result<Value, AiError> {
     let root = schema.operation_root_field(operation.kind, &operation.field_name)?;
+    let inject_root_bound = root_bound_argument(schema, root, output)?;
     let argument_descriptions = operation
         .arguments
         .iter()
@@ -1553,7 +1606,7 @@ fn build_plan_schema(
         limits,
         0,
         &mut ancestry,
-        output.requires_root_bound(),
+        inject_root_bound,
     )?;
     let mut properties = Map::from_iter([("arguments".to_owned(), arguments)]);
     let mut required = vec![Value::String("arguments".to_owned())];
@@ -1591,15 +1644,36 @@ fn build_plan_schema(
             ..
         } => {
             properties.insert(
+                "fields".to_owned(),
+                json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+            );
+            properties.insert(
+                "relationships".to_owned(),
+                json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+            );
+            properties.insert(
                 "maximumItems".to_owned(),
                 bounded_integer_schema(1, i64::from(*maximum)),
             );
+            required.push(Value::String("fields".to_owned()));
+            required.push(Value::String("relationships".to_owned()));
             required.push(Value::String("maximumItems".to_owned()));
         }
         QueryOutput::Scalar {
             maximum_items: None,
             ..
-        } => {}
+        } => {
+            properties.insert(
+                "fields".to_owned(),
+                json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+            );
+            properties.insert(
+                "relationships".to_owned(),
+                json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+            );
+            required.push(Value::String("fields".to_owned()));
+            required.push(Value::String("relationships".to_owned()));
+        }
     }
     Ok(json!({
         "$schema": JSON_SCHEMA_2020_12,
@@ -2089,16 +2163,18 @@ impl<'a> CompileContext<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_arguments(
         &mut self,
         schema_fields: &BTreeMap<String, SchemaInput>,
         semantic_fields: &[graphql_orm_operation_catalog::GraphqlSemanticArgumentDescriptor],
         supplied: &Map<String, Value>,
         maximum_items: Option<u32>,
-        require_bound: bool,
+        expect_bound: bool,
+        inject_bound: bool,
         path: &str,
     ) -> Result<Vec<String>, AiError> {
-        if require_bound != maximum_items.is_some() {
+        if expect_bound != maximum_items.is_some() {
             return Err(input_error(
                 "query collection bound is missing or unexpected",
             ));
@@ -2117,7 +2193,7 @@ impl<'a> CompileContext<'a> {
             .map(|field| (field.graphql_name.as_str(), field))
             .collect::<BTreeMap<_, _>>();
         let mut values = supplied.clone();
-        if let Some(maximum) = maximum_items {
+        if let Some(maximum) = maximum_items.filter(|_| inject_bound) {
             inject_page_limit(&self.capability.schema, schema_fields, &mut values, maximum)?;
         }
         if values.keys().any(|name| !schema_fields.contains_key(name)) {
@@ -2229,6 +2305,7 @@ impl<'a> CompileContext<'a> {
                 &relationship.arguments,
                 &relationship_plan.arguments,
                 relationship_plan.maximum_items,
+                relationship.cardinality == GraphqlSemanticRelationshipCardinality::Many,
                 relationship.cardinality == GraphqlSemanticRelationshipCardinality::Many,
                 &format!("{entity_name}.{}", field.field_name),
             )?;
@@ -3160,6 +3237,66 @@ mod tests {
             second_query.plan_fingerprint()
         );
         assert_eq!(first_query.descriptor(), second_query.descriptor());
+    }
+
+    #[test]
+    fn custom_scalar_and_bounded_scalar_list_roots_compile() {
+        let base = semantic_catalog();
+        let health = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Query,
+            "Health",
+            "Read bounded public health status.",
+            Vec::new(),
+            named("String", false),
+            true,
+        )
+        .expect("health semantics");
+        let tags = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Query,
+            "Tags",
+            "Read bounded public tags.",
+            Vec::new(),
+            GraphqlSemanticTypeRef::list(false, Some(10), named("String", false)),
+            true,
+        )
+        .expect("tag semantics");
+        let semantics = GraphqlSemanticCatalog::compose_with_custom(
+            base.entities,
+            &GraphqlOperationCatalog::compose(std::iter::empty()),
+            base.operations.into_iter().chain([health, tags]),
+        )
+        .expect("scalar root semantics");
+        let sdl = query_sdl().replace(
+            "ReadParent(id: ID!): Parent!",
+            "ReadParent(id: ID!): Parent!\nHealth: String!\nTags: [String!]!",
+        );
+        let catalog = AiGraphqlQueryCapabilityCatalog::compile(
+            "inventory",
+            GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
+            &sdl,
+            &semantics,
+            AiGraphqlQueryCapabilityLimits::default(),
+        )
+        .expect("scalar query capabilities");
+        let health = catalog
+            .capabilities()
+            .find(|capability| capability.field_name() == "Health")
+            .expect("health capability")
+            .compile(json!({ "arguments": {}, "fields": {}, "relationships": {} }))
+            .expect("scalar plan");
+        assert!(health.descriptor().document.contains("{ Health }"));
+        let tags = catalog
+            .capabilities()
+            .find(|capability| capability.field_name() == "Tags")
+            .expect("tags capability")
+            .compile(json!({
+                "arguments": {}, "fields": {}, "relationships": {}, "maximumItems": 5
+            }))
+            .expect("bounded scalar-list plan");
+        assert!(tags.descriptor().document.contains("{ Tags }"));
+        tags.disclosure_schema()
+            .evaluate(&json!({ "Tags": ["one", "two"] }))
+            .expect("bounded scalar list discloses");
     }
 
     #[test]
