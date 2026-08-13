@@ -389,6 +389,25 @@ impl MssqlScalar for String {
     }
 }
 
+impl MssqlScalar for serde_json::Value {
+    fn try_get_optional<I>(row: &MssqlRow, index: I) -> crate::Result<Option<Self>>
+    where
+        I: MssqlColumnIndex,
+    {
+        let display = index.display();
+        index
+            .try_get_raw::<&str>(&row.inner)
+            .map_err(map_tiberius_error)?
+            .map(|value| {
+                serde_json::from_str(value).map_err(|error| sqlx::Error::ColumnDecode {
+                    index: display.clone(),
+                    source: error.into(),
+                })
+            })
+            .transpose()
+    }
+}
+
 impl MssqlScalar for Vec<u8> {
     fn try_get_optional<I>(row: &MssqlRow, index: I) -> crate::Result<Option<Self>>
     where

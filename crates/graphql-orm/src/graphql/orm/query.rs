@@ -2375,24 +2375,17 @@ pub fn render_insert_if_absent_sql(
             })
             .collect::<Vec<_>>()
             .join(" AND ");
-        let source_projection = insert_values
-            .iter()
-            .zip(insert_columns)
-            .map(|(value, column)| format!("{value} AS {}", dialect.quote_identifier_path(column)))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let source_projection = insert_values.join(", ");
         let source_columns = insert_columns
             .iter()
             .map(|column| format!("source.{}", dialect.quote_identifier_path(column)))
             .collect::<Vec<_>>()
             .join(", ");
         return format!(
-            "SELECT {source_projection} INTO #graphql_orm_insert_source; \
-             IF NOT EXISTS (SELECT 1 FROM {table} AS target WITH (UPDLOCK, HOLDLOCK) \
-             CROSS JOIN #graphql_orm_insert_source AS source WHERE {predicates}) \
-             BEGIN INSERT INTO {table} ({columns}) SELECT {source_columns} \
-             FROM #graphql_orm_insert_source AS source; END; \
-             DROP TABLE #graphql_orm_insert_source"
+            "INSERT INTO {table} ({columns}) SELECT {source_columns} \
+             FROM (VALUES ({source_projection})) AS source ({columns}) \
+             WHERE NOT EXISTS (SELECT 1 FROM {table} AS target WITH (UPDLOCK, HOLDLOCK) \
+             WHERE {predicates})"
         );
     }
     format!(

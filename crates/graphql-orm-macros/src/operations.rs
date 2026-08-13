@@ -4031,6 +4031,59 @@ pub(crate) fn generate_graphql_operations(
         quote! {}
     };
 
+    let cas_begin_savepoint = if backend == BackendKind::Mssql {
+        quote! { hook_ctx.execute("SAVE TRANSACTION graphql_orm_cas", &[]).await?; }
+    } else {
+        quote! { hook_ctx.execute("SAVEPOINT graphql_orm_cas", &[]).await?; }
+    };
+    let cas_rollback_savepoint = if backend == BackendKind::Mssql {
+        quote! { hook_ctx.execute("ROLLBACK TRANSACTION graphql_orm_cas", &[]).await?; }
+    } else {
+        quote! {
+            hook_ctx.execute("ROLLBACK TO SAVEPOINT graphql_orm_cas", &[]).await?;
+            hook_ctx.execute("RELEASE SAVEPOINT graphql_orm_cas", &[]).await?;
+        }
+    };
+    let cas_release_savepoint = if backend == BackendKind::Mssql {
+        quote! {}
+    } else {
+        quote! { hook_ctx.execute("RELEASE SAVEPOINT graphql_orm_cas", &[]).await?; }
+    };
+    let cas_update_sql = if backend == BackendKind::Mssql {
+        quote! {
+            {
+                let output_columns = <Self as DatabaseEntity>::column_names()
+                    .iter()
+                    .map(|column| format!("INSERTED.{}", dialect.quote_identifier_path(column)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "UPDATE {} SET {} OUTPUT {} WHERE {}",
+                    dialect.quote_identifier_path(#table_name),
+                    set_clauses.join(", "),
+                    output_columns,
+                    predicates.join(" AND "),
+                )
+            }
+        }
+    } else {
+        quote! {
+            {
+                format!(
+                    "UPDATE {} SET {} WHERE {} RETURNING {}",
+                    dialect.quote_identifier_path(#table_name),
+                    set_clauses.join(", "),
+                    predicates.join(" AND "),
+                    <Self as DatabaseEntity>::column_names()
+                        .iter()
+                        .map(|column| dialect.quote_identifier_path(column))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                )
+            }
+        }
+    };
+
     let (cas_helper_methods, cas_trait_impl) = if let Some((_version_ident, _, version_column)) =
         &version_field
     {
@@ -4045,9 +4098,9 @@ pub(crate) fn generate_graphql_operations(
                     expected: #where_input,
                     mut input: #update_input,
                 ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::ConditionalUpdateOutcome<Self>> {
-                    use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow, SqlValue};
+                    use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow, OrmBackend, SqlDialect, SqlValue};
 
-                    hook_ctx.execute("SAVEPOINT graphql_orm_cas", &[],).await?;
+                    #cas_begin_savepoint
 
                     let current_entity = Self::__gom_fetch_by_id_on(hook_ctx, id).await?;
                     let db = hook_ctx.database().clone();
@@ -4075,10 +4128,16 @@ pub(crate) fn generate_graphql_operations(
                         &input as &(dyn ::std::any::Any + Send + Sync),
                     ).await?;
 
-                    let mut set_clauses = vec![format!("{} = {} + 1", #version_column, #version_column)];
+                    let dialect = <#backend_marker as OrmBackend>::DIALECT;
+                    let quoted_version_column = dialect.quote_identifier_path(#version_column);
+                    let mut set_clauses = vec![format!("{quoted_version_column} = {quoted_version_column} + 1")];
                     let mut changed_fields = vec![#version_column];
                     let mut values: Vec<SqlValue> = Vec::new();
                     #(#update_field_checks_repo)*
+                    for (clause, column) in set_clauses.iter_mut().zip(changed_fields.iter()) {
+                        let rhs = clause.split_once('=').map(|(_, rhs)| rhs.trim()).unwrap_or("?");
+                        *clause = format!("{} = {rhs}", dialect.quote_identifier_path(column));
+                    }
                     if #has_updated_at_column {
                         set_clauses.push(format!("updated_at = {}", Self::__gom_current_epoch_expr()));
                     }
@@ -4102,28 +4161,21 @@ pub(crate) fn generate_graphql_operations(
                     let version_placeholder = Self::__gom_placeholder(values.len() + 1);
                     values.push(SqlValue::Int(expected_version));
                     let mut predicates = vec![
-                        format!("{} = {}", Self::PRIMARY_KEY, pk_placeholder),
-                        format!("{} = {}", #version_column, version_placeholder),
-                        format!("{} < {}", #version_column, i64::MAX),
+                        format!("{} = {}", dialect.quote_identifier_path(Self::PRIMARY_KEY), pk_placeholder),
+                        format!("{} = {}", quoted_version_column, version_placeholder),
+                        format!("{} < {}", quoted_version_column, i64::MAX),
                     ];
                     if let Some((clause, expected_values)) = expected_clause {
                         predicates.push(Self::__gom_rebind_sql(&clause, values.len() + 1));
                         values.extend(expected_values);
                     }
-                    let sql = format!(
-                        "UPDATE {} SET {} WHERE {} RETURNING {}",
-                        #table_name,
-                        set_clauses.join(", "),
-                        predicates.join(" AND "),
-                        <Self as DatabaseEntity>::column_names().join(", "),
-                    );
+                    let sql = Self::__gom_rebind_sql(&(#cas_update_sql), 1);
                     let rows = hook_ctx.fetch_rows(&sql, &values,).await?;
                     if rows.len() > 1 {
                         return Err(Self::__gom_runtime_error("conditional update affected more than one row"));
                     }
                     let Some(row) = rows.first() else {
-                        hook_ctx.execute("ROLLBACK TO SAVEPOINT graphql_orm_cas", &[],).await?;
-                        hook_ctx.execute("RELEASE SAVEPOINT graphql_orm_cas", &[],).await?;
+                        #cas_rollback_savepoint
                         return if Self::__gom_fetch_by_id_on(hook_ctx, id).await?.is_some() {
                             Ok(::graphql_orm::graphql::orm::ConditionalUpdateOutcome::Conflict)
                         } else {
@@ -4164,7 +4216,7 @@ pub(crate) fn generate_graphql_operations(
                         ::graphql_orm::graphql::orm::ChangeAction::Updated,
                         Some(&entity),
                     ).await?;
-                    hook_ctx.execute("RELEASE SAVEPOINT graphql_orm_cas", &[],).await?;
+                    #cas_release_savepoint
                     Ok(::graphql_orm::graphql::orm::ConditionalUpdateOutcome::Updated(entity))
                 }
 
@@ -5422,12 +5474,12 @@ pub(crate) fn generate_graphql_operations(
                         before_state: Some(before_state.clone()), after_state: None,
                     }).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
                     let key_start = values.len() + 1;
-                    let sql = format!(
+                    let sql = Self::__gom_rebind_sql(&format!(
                         "UPDATE {} SET {} WHERE {}",
                         dialect.quote_identifier_path(#table_name),
                         set_clauses.join(", "),
                         Self::__gom_key_where_clause_at(key_start),
-                    );
+                    ), 1);
                     values.extend(Self::__gom_key_values(key));
                     let result = hook_ctx.execute(&sql, &values,).await?;
                     match <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&result) {
@@ -5666,12 +5718,12 @@ pub(crate) fn generate_graphql_operations(
                     let key_start = values.len() + 1;
                     let expected_start = key_start + <Self as ::graphql_orm::graphql::orm::DatabaseEntity>::PRIMARY_KEYS.len();
                     let expected_clause = Self::__gom_rebind_sql(expected_clause, expected_start);
-                    let sql = format!(
+                    let sql = Self::__gom_rebind_sql(&format!(
                         "UPDATE {} SET {} WHERE {} AND ({expected_clause})",
                         dialect.quote_identifier_path(#table_name),
                         set_clauses.join(", "),
                         Self::__gom_key_where_clause_at(key_start),
-                    );
+                    ), 1);
                     values.extend(Self::__gom_key_values(key));
                     values.extend(expected_values);
                     let result = hook_ctx.execute(&sql, &values,).await?;
@@ -5904,7 +5956,6 @@ pub(crate) fn generate_graphql_operations(
     let single_bounded_helper_methods = if !has_composite_primary_key
         && !schema_policy_read_only
         && !entity_meta.append_only
-        && backend != BackendKind::Mssql
     {
         quote! {
             #[doc(hidden)]
@@ -6003,7 +6054,6 @@ pub(crate) fn generate_graphql_operations(
     let single_bounded_repository_methods = if !has_composite_primary_key
         && !schema_policy_read_only
         && !entity_meta.append_only
-        && backend != BackendKind::Mssql
     {
         quote! {
             pub async fn update_where_bounded(
@@ -6039,7 +6089,6 @@ pub(crate) fn generate_graphql_operations(
     let single_bounded_trait_impls = if !has_composite_primary_key
         && !schema_policy_read_only
         && !entity_meta.append_only
-        && backend != BackendKind::Mssql
     {
         quote! {
             impl ::graphql_orm::graphql::orm::MutationContextBoundedUpdateWhere<#backend_marker> for #struct_name {
@@ -7943,12 +7992,12 @@ pub(crate) fn generate_graphql_operations(
                     }
                 };
 
-                let sql = format!(
+                let sql = Self::__gom_rebind_sql(&format!(
                     "UPDATE {} SET {} WHERE {}",
                     #table_name,
                     set_clauses.join(", "),
                     where_clause
-                );
+                ), 1);
 
                 values.extend(filter_values);
                 let result = hook_ctx.execute(&sql, &values).await?;
@@ -8540,12 +8589,12 @@ pub(crate) fn generate_graphql_operations(
                     }
                 };
 
-                let sql = format!(
+                let sql = Self::__gom_rebind_sql(&format!(
                     "UPDATE {} SET {} WHERE {}",
                     #table_name,
                     set_clauses.join(", "),
                     where_clause
-                );
+                ), 1);
 
                 values.extend(filter_values);
                 let result = hook_ctx.execute(&sql, &values).await?;
