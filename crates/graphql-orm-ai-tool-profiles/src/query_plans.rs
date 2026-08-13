@@ -11,7 +11,7 @@ use graphql_orm_operation_catalog::{
     GeneratedGraphqlOperationCategory, GraphqlOperationKind, GraphqlSemanticCatalog,
     GraphqlSemanticClassification, GraphqlSemanticExport, GraphqlSemanticFieldMetadata,
     GraphqlSemanticOperationDescriptor, GraphqlSemanticRelationshipCardinality,
-    GraphqlSemanticTypeRef,
+    GraphqlSemanticTypeRef, GraphqlSubscriptionConditionOperator, GraphqlSubscriptionReplayMode,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -26,6 +26,9 @@ use crate::{
 
 /// Current automatic query-capability contract version.
 pub const AI_GRAPHQL_QUERY_CAPABILITY_VERSION: u16 = 1;
+
+/// Current bounded subscription-capability contract version.
+pub const AI_GRAPHQL_SUBSCRIPTION_CAPABILITY_VERSION: u16 = 1;
 
 const JSON_SCHEMA_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
 const MAXIMUM_DESCRIPTION_BYTES: usize = 1_024;
@@ -234,10 +237,26 @@ impl AiGraphqlQueryCapability {
                 "query plan does not match the capability schema",
             ));
         }
-        let plan: AiGraphqlQueryPlan = serde_json::from_value(plan)
+        let typed_plan: AiGraphqlQueryPlan = serde_json::from_value(plan.clone())
             .map_err(|_| input_error("query plan has an invalid shape"))?;
+        self.compile_typed_plan(typed_plan, &plan, GraphqlOperationKind::Query)
+    }
+
+    fn compile_typed_plan(
+        &self,
+        plan: AiGraphqlQueryPlan,
+        fingerprint_plan: &Value,
+        expected_kind: GraphqlOperationKind,
+    ) -> Result<AiCompiledGraphqlQuery, AiError> {
+        if self.operation.kind != expected_kind {
+            return Err(configuration_error(
+                "semantic operation kind does not match the plan compiler",
+            ));
+        }
         let mut context = CompileContext::new(self);
-        let root_field = self.schema.root_query_field(&self.operation.field_name)?;
+        let root_field = self
+            .schema
+            .operation_root_field(expected_kind, &self.operation.field_name)?;
         let arguments = context.compile_arguments(
             &root_field.arguments,
             &self.operation.arguments,
@@ -314,17 +333,22 @@ impl AiGraphqlQueryCapability {
         let plan_fingerprint = sha256_json(&json!({
             "version": AI_GRAPHQL_QUERY_CAPABILITY_VERSION,
             "capability_fingerprint": self.fingerprint,
-            "plan": plan,
+            "plan": fingerprint_plan,
         }));
         let operation_name = format!("AiQuery_{}", &plan_fingerprint[..20]);
+        let operation_keyword = match expected_kind {
+            GraphqlOperationKind::Query => "query",
+            GraphqlOperationKind::Subscription => "subscription",
+            _ => return Err(configuration_error("unsupported plan operation kind")),
+        };
         let document = if projection.is_empty() {
             format!(
-                "query {operation_name}{variable_clause} {{ {}{argument_clause} }}",
+                "{operation_keyword} {operation_name}{variable_clause} {{ {}{argument_clause} }}",
                 self.operation.field_name
             )
         } else {
             format!(
-                "query {operation_name}{variable_clause} {{ {}{argument_clause} {projection} }}",
+                "{operation_keyword} {operation_name}{variable_clause} {{ {}{argument_clause} {projection} }}",
                 self.operation.field_name
             )
         };
@@ -352,8 +376,9 @@ impl AiGraphqlQueryCapability {
             disclosure_schema.fingerprint.clone(),
         )
         .map_err(|_| configuration_error("compiled query contract is invalid"))?
-        .with_semantic_operation(
+        .with_semantic_operation_kind(
             &self.semantic_catalog,
+            expected_kind,
             &self.operation.field_name,
             &document,
         )
@@ -361,7 +386,11 @@ impl AiGraphqlQueryCapability {
         let descriptor = AiToolDescriptor::new(
             self.id.as_str(),
             &self.description,
-            AiToolOperationKind::Query,
+            match expected_kind {
+                GraphqlOperationKind::Query => AiToolOperationKind::Query,
+                GraphqlOperationKind::Subscription => AiToolOperationKind::Subscription,
+                _ => return Err(configuration_error("unsupported plan operation kind")),
+            },
             &document,
             variable_schema,
         )?
@@ -456,6 +485,7 @@ impl AiGraphqlQueryCapabilityCatalog {
                 semantic_catalog,
                 operation,
                 limits,
+                GraphqlOperationKind::Query,
             )?;
             if capabilities
                 .insert(capability.id.clone(), capability)
@@ -515,6 +545,432 @@ impl AiGraphqlQueryCapabilityCatalog {
     /// Returns one exact capability by stable ID.
     pub fn capability(&self, id: &AiToolId) -> Option<&AiGraphqlQueryCapability> {
         self.capabilities.get(id)
+    }
+}
+
+/// Immutable deployment ceilings for bounded subscription capabilities.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiGraphqlSubscriptionCapabilityLimits {
+    /// Shared finite input, selection, result, catalogue, and SDL ceilings.
+    pub query: AiGraphqlQueryCapabilityLimits,
+    /// Deployment maximum duration of one suspended observation.
+    pub maximum_duration_seconds: u32,
+    /// Deployment maximum events examined by one observation.
+    pub maximum_events: u32,
+}
+
+impl AiGraphqlSubscriptionCapabilityLimits {
+    /// Creates validated subscription ceilings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid shared limits or zero/excessive wait
+    /// bounds.
+    pub fn new(
+        query: AiGraphqlQueryCapabilityLimits,
+        maximum_duration_seconds: u32,
+        maximum_events: u32,
+    ) -> Result<Self, AiError> {
+        validate_limits(query)?;
+        if maximum_duration_seconds == 0
+            || maximum_duration_seconds > 31_536_000
+            || maximum_events == 0
+            || maximum_events > 1_000_000
+        {
+            return Err(configuration_error(
+                "automatic subscription capability limits are invalid",
+            ));
+        }
+        Ok(Self {
+            query,
+            maximum_duration_seconds,
+            maximum_events,
+        })
+    }
+}
+
+impl Default for AiGraphqlSubscriptionCapabilityLimits {
+    fn default() -> Self {
+        Self {
+            query: AiGraphqlQueryCapabilityLimits::default(),
+            maximum_duration_seconds: 3_600,
+            maximum_events: 1_000,
+        }
+    }
+}
+
+/// One closed top-level event predicate for a bounded subscription wait.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AiGraphqlSubscriptionCondition {
+    /// Exact selected event field.
+    pub field: String,
+    /// Exact operator admitted by canonical subscription semantics.
+    pub operator: GraphqlSubscriptionConditionOperator,
+    /// Typed comparison value validated against the finished SDL.
+    pub value: Value,
+}
+
+/// Closed provider-authored bounded subscription plan.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AiGraphqlSubscriptionPlan {
+    /// Exact typed root arguments.
+    #[serde(default)]
+    pub arguments: Map<String, Value>,
+    /// Selected public scalar or enum fields; every value must be `true`.
+    #[serde(default)]
+    pub fields: BTreeMap<String, bool>,
+    /// Explicit nested relational selections.
+    #[serde(default)]
+    pub relationships: BTreeMap<String, AiGraphqlRelationshipQueryPlan>,
+    /// Optional closed completion predicate. Absence means the next event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<AiGraphqlSubscriptionCondition>,
+    /// Positive bounded observation timeout.
+    pub timeout_seconds: u32,
+    /// Positive bounded number of events examined.
+    pub maximum_events: u32,
+}
+
+/// One replayable subscription root compiled from finished schema semantics.
+#[derive(Clone, Debug)]
+pub struct AiGraphqlSubscriptionCapability {
+    base: AiGraphqlQueryCapability,
+    maximum_duration_seconds: u32,
+    maximum_events: u32,
+}
+
+impl AiGraphqlSubscriptionCapability {
+    /// Returns the stable capability identity.
+    pub fn id(&self) -> &AiToolId {
+        self.base.id()
+    }
+
+    /// Returns the model-safe semantic description.
+    pub fn description(&self) -> &str {
+        self.base.description()
+    }
+
+    /// Returns the closed finite provider plan schema.
+    pub fn argument_schema(&self) -> &Value {
+        self.base.argument_schema()
+    }
+
+    /// Returns the complete capability fingerprint.
+    pub fn fingerprint(&self) -> &str {
+        self.base.fingerprint()
+    }
+
+    /// Returns the exact public Subscription root field.
+    pub fn field_name(&self) -> &str {
+        self.base.field_name()
+    }
+
+    /// Compiles one bounded plan into an immutable subscription contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for a malformed, stale, hidden, excessive,
+    /// unbounded, or semantically unsupported plan.
+    pub fn compile(&self, plan: Value) -> Result<AiCompiledGraphqlSubscription, AiError> {
+        let validator = jsonschema::validator_for(self.argument_schema())
+            .map_err(|_| configuration_error("subscription capability schema is invalid"))?;
+        if !validator.is_valid(&plan) {
+            return Err(input_error(
+                "subscription plan does not match the capability schema",
+            ));
+        }
+        let typed: AiGraphqlSubscriptionPlan = serde_json::from_value(plan.clone())
+            .map_err(|_| input_error("subscription plan has an invalid shape"))?;
+        if typed.timeout_seconds == 0
+            || typed.timeout_seconds > self.maximum_duration_seconds
+            || typed.maximum_events == 0
+            || typed.maximum_events > self.maximum_events
+        {
+            return Err(input_error("subscription observation bounds are invalid"));
+        }
+        validate_subscription_condition(&self.base, &typed)?;
+        let query_plan = AiGraphqlQueryPlan {
+            arguments: typed.arguments,
+            fields: typed.fields,
+            relationships: typed.relationships,
+            maximum_items: None,
+        };
+        let compiled =
+            self.base
+                .compile_typed_plan(query_plan, &plan, GraphqlOperationKind::Subscription)?;
+        Ok(AiCompiledGraphqlSubscription {
+            capability_fingerprint: compiled.capability_fingerprint,
+            plan_fingerprint: compiled.plan_fingerprint,
+            descriptor: compiled.descriptor,
+            disclosure_schema: compiled.disclosure_schema,
+            variables: compiled.variables,
+            condition: typed.condition,
+            timeout_seconds: typed.timeout_seconds,
+            maximum_events: typed.maximum_events,
+        })
+    }
+}
+
+/// Complete replayable subscription capability set for one finished schema.
+#[derive(Clone, Debug)]
+pub struct AiGraphqlSubscriptionCapabilityCatalog {
+    semantic_catalog_fingerprint: String,
+    finished_schema_fingerprint: String,
+    capabilities: BTreeMap<AiToolId, AiGraphqlSubscriptionCapability>,
+    fingerprint: String,
+}
+
+impl AiGraphqlSubscriptionCapabilityCatalog {
+    /// Compiles every finished-SDL Subscription root, rejecting non-replayable
+    /// or undeclared roots instead of silently omitting them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for schema/semantic drift, best-effort delivery,
+    /// invalid observation bounds, unsafe fields, or capacity exhaustion.
+    pub fn compile(
+        subgraph_id: &str,
+        target_id: GraphqlExecutionTargetId,
+        finished_sdl: &str,
+        semantic_catalog: &GraphqlSemanticCatalog,
+        limits: AiGraphqlSubscriptionCapabilityLimits,
+    ) -> Result<Self, AiError> {
+        validate_public_token(subgraph_id, "subgraph ID")?;
+        semantic_catalog
+            .validate()
+            .map_err(|_| configuration_error("semantic catalogue is invalid"))?;
+        let limits = AiGraphqlSubscriptionCapabilityLimits::new(
+            limits.query,
+            limits.maximum_duration_seconds,
+            limits.maximum_events,
+        )?;
+        if finished_sdl.len() > limits.query.maximum_schema_bytes as usize {
+            return Err(configuration_error("finished GraphQL SDL is too large"));
+        }
+        let schema = FinishedSchema::parse(finished_sdl)?;
+        validate_semantic_entities_against_schema(&schema, semantic_catalog)?;
+        let schema_roots = schema.subscription_root_fields()?;
+        let operations = semantic_catalog
+            .operations
+            .iter()
+            .filter(|operation| operation.kind == GraphqlOperationKind::Subscription)
+            .collect::<Vec<_>>();
+        let semantic_roots = operations
+            .iter()
+            .map(|operation| operation.field_name.as_str())
+            .collect::<BTreeSet<_>>();
+        if schema_roots != semantic_roots {
+            return Err(configuration_error(
+                "finished GraphQL Subscription roots and semantic operations differ",
+            ));
+        }
+        if operations.len() > limits.query.maximum_capabilities as usize {
+            return Err(configuration_error(
+                "subscription capability capacity would omit active roots",
+            ));
+        }
+        let schema_fingerprint = hex::encode(Sha256::digest(finished_sdl.as_bytes()));
+        let mut capabilities = BTreeMap::new();
+        for operation in operations {
+            let observation = operation
+                .subscription_observation
+                .as_ref()
+                .ok_or_else(|| configuration_error("subscription has no observation semantics"))?;
+            if observation.replay_mode != GraphqlSubscriptionReplayMode::ReplayThenLive {
+                return Err(configuration_error(
+                    "best-effort subscriptions cannot be durable capabilities",
+                ));
+            }
+            let maximum_duration_seconds = observation
+                .maximum_duration_seconds
+                .ok_or_else(|| configuration_error("subscription duration is unbounded"))?
+                .min(limits.maximum_duration_seconds);
+            let maximum_events = observation
+                .maximum_events
+                .ok_or_else(|| configuration_error("subscription event count is unbounded"))?
+                .min(limits.maximum_events);
+            let mut base = compile_capability(
+                subgraph_id,
+                target_id.clone(),
+                &schema,
+                &schema_fingerprint,
+                semantic_catalog,
+                operation,
+                limits.query,
+                GraphqlOperationKind::Subscription,
+            )?;
+            base.id = AiToolId::parse(stable_subscription_capability_id(
+                subgraph_id,
+                &operation.field_name,
+            ))?;
+            base.argument_schema = subscription_plan_schema(
+                &schema,
+                semantic_catalog,
+                operation,
+                &base.output,
+                limits.query,
+                maximum_duration_seconds,
+                maximum_events,
+            )?;
+            if serde_json::to_vec(&base.argument_schema)
+                .map(|encoded| encoded.len() > MAXIMUM_PROVIDER_SCHEMA_BYTES)
+                .unwrap_or(true)
+                || jsonschema::validator_for(&base.argument_schema).is_err()
+            {
+                return Err(configuration_error(
+                    "subscription capability schema exceeds the provider contract",
+                ));
+            }
+            base.fingerprint = sha256_json(&json!({
+                "version": AI_GRAPHQL_SUBSCRIPTION_CAPABILITY_VERSION,
+                "id": base.id.as_str(),
+                "target": target_id.as_str(),
+                "schema": schema_fingerprint,
+                "semantic_catalog": semantic_catalog.fingerprint,
+                "operation": operation.fingerprint,
+                "argument_schema": base.argument_schema,
+                "limits": limits,
+                "maximum_duration_seconds": maximum_duration_seconds,
+                "maximum_events": maximum_events,
+            }));
+            let capability = AiGraphqlSubscriptionCapability {
+                base,
+                maximum_duration_seconds,
+                maximum_events,
+            };
+            if capabilities
+                .insert(capability.id().clone(), capability)
+                .is_some()
+            {
+                return Err(configuration_error(
+                    "subscription capability identity collides",
+                ));
+            }
+        }
+        let fingerprint = sha256_json(&json!({
+            "version": AI_GRAPHQL_SUBSCRIPTION_CAPABILITY_VERSION,
+            "semantic_catalog_fingerprint": semantic_catalog.fingerprint,
+            "finished_schema_fingerprint": schema_fingerprint,
+            "capabilities": capabilities.values().map(|capability| json!({
+                "id": capability.id().as_str(),
+                "fingerprint": capability.fingerprint(),
+            })).collect::<Vec<_>>(),
+        }));
+        Ok(Self {
+            semantic_catalog_fingerprint: semantic_catalog.fingerprint.clone(),
+            finished_schema_fingerprint: schema_fingerprint,
+            capabilities,
+            fingerprint,
+        })
+    }
+
+    /// Returns the exact semantic-catalogue fingerprint.
+    pub fn semantic_catalog_fingerprint(&self) -> &str {
+        &self.semantic_catalog_fingerprint
+    }
+
+    /// Returns the exact finished-SDL fingerprint.
+    pub fn finished_schema_fingerprint(&self) -> &str {
+        &self.finished_schema_fingerprint
+    }
+
+    /// Returns the deterministic complete-catalogue fingerprint.
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    /// Returns all capabilities ordered by stable ID.
+    pub fn capabilities(&self) -> impl Iterator<Item = &AiGraphqlSubscriptionCapability> {
+        self.capabilities.values()
+    }
+
+    /// Returns one exact capability.
+    pub fn capability(&self, id: &AiToolId) -> Option<&AiGraphqlSubscriptionCapability> {
+        self.capabilities.get(id)
+    }
+}
+
+/// Exact compiled subscription observation contract for durable registration.
+#[derive(Clone, Debug)]
+pub struct AiCompiledGraphqlSubscription {
+    capability_fingerprint: String,
+    plan_fingerprint: String,
+    descriptor: AiToolDescriptor,
+    disclosure_schema: AiDisclosureSchema,
+    variables: Value,
+    condition: Option<AiGraphqlSubscriptionCondition>,
+    timeout_seconds: u32,
+    maximum_events: u32,
+}
+
+impl AiCompiledGraphqlSubscription {
+    /// Returns the offered capability fingerprint.
+    pub fn capability_fingerprint(&self) -> &str {
+        &self.capability_fingerprint
+    }
+
+    /// Returns the exact complete-plan fingerprint.
+    pub fn plan_fingerprint(&self) -> &str {
+        &self.plan_fingerprint
+    }
+
+    /// Returns the exact server-authored descriptor and document.
+    pub fn descriptor(&self) -> &AiToolDescriptor {
+        &self.descriptor
+    }
+
+    /// Returns the exact disclosure schema for selected event fields.
+    pub fn disclosure_schema(&self) -> &AiDisclosureSchema {
+        &self.disclosure_schema
+    }
+
+    /// Returns the typed root variables.
+    pub fn variables(&self) -> &Value {
+        &self.variables
+    }
+
+    /// Returns the optional closed completion predicate.
+    pub fn condition(&self) -> Option<&AiGraphqlSubscriptionCondition> {
+        self.condition.as_ref()
+    }
+
+    /// Returns the positive observation timeout.
+    pub const fn timeout_seconds(&self) -> u32 {
+        self.timeout_seconds
+    }
+
+    /// Returns the positive event-examination ceiling.
+    pub const fn maximum_events(&self) -> u32 {
+        self.maximum_events
+    }
+
+    /// Decomposes this value for a durable waiter implementation.
+    #[allow(clippy::type_complexity)]
+    pub fn into_parts(
+        self,
+    ) -> (
+        AiToolDescriptor,
+        AiDisclosureSchema,
+        Value,
+        Option<AiGraphqlSubscriptionCondition>,
+        u32,
+        u32,
+        String,
+        String,
+    ) {
+        (
+            self.descriptor,
+            self.disclosure_schema,
+            self.variables,
+            self.condition,
+            self.timeout_seconds,
+            self.maximum_events,
+            self.capability_fingerprint,
+            self.plan_fingerprint,
+        )
     }
 }
 
@@ -595,6 +1051,7 @@ struct OutputRouteSegment {
 #[derive(Clone, Debug)]
 struct FinishedSchema {
     query_root: String,
+    subscription_root: Option<String>,
     types: BTreeMap<String, SchemaType>,
 }
 
@@ -628,6 +1085,7 @@ impl FinishedSchema {
         let document = parse_schema(sdl)
             .map_err(|_| configuration_error("finished GraphQL SDL is invalid"))?;
         let mut query_root = None;
+        let mut subscription_root = None;
         let mut types = BTreeMap::new();
         for definition in &document.definitions {
             if let TypeSystemDefinition::Schema(schema) = definition
@@ -635,6 +1093,16 @@ impl FinishedSchema {
                 && query_root.replace(query.node.to_string()).is_some()
             {
                 return Err(configuration_error("finished schema repeats query root"));
+            }
+            if let TypeSystemDefinition::Schema(schema) = definition
+                && let Some(subscription) = &schema.node.subscription
+                && subscription_root
+                    .replace(subscription.node.to_string())
+                    .is_some()
+            {
+                return Err(configuration_error(
+                    "finished schema repeats subscription root",
+                ));
             }
         }
         for definition in document.definitions {
@@ -713,7 +1181,16 @@ impl FinishedSchema {
         let query_root = query_root
             .or_else(|| types.contains_key("Query").then(|| "Query".to_owned()))
             .ok_or_else(|| configuration_error("finished schema has no query root"))?;
-        Ok(Self { query_root, types })
+        let subscription_root = subscription_root.or_else(|| {
+            types
+                .contains_key("Subscription")
+                .then(|| "Subscription".to_owned())
+        });
+        Ok(Self {
+            query_root,
+            subscription_root,
+            types,
+        })
     }
 
     fn root_query_field(&self, name: &str) -> Result<&SchemaField, AiError> {
@@ -737,8 +1214,42 @@ impl FinishedSchema {
             .get(name)
             .ok_or_else(|| configuration_error("semantic field is absent from finished SDL"))
     }
+
+    fn subscription_root_field(&self, name: &str) -> Result<&SchemaField, AiError> {
+        let root = self
+            .subscription_root
+            .as_deref()
+            .ok_or_else(|| configuration_error("finished schema has no subscription root"))?;
+        self.object_field(root, name)
+    }
+
+    fn subscription_root_fields(&self) -> Result<BTreeSet<&str>, AiError> {
+        let root = self
+            .subscription_root
+            .as_deref()
+            .ok_or_else(|| configuration_error("finished schema has no subscription root"))?;
+        let Some(SchemaType::Object(fields)) = self.types.get(root) else {
+            return Err(configuration_error(
+                "finished GraphQL Subscription root is missing",
+            ));
+        };
+        Ok(fields.keys().map(String::as_str).collect())
+    }
+
+    fn operation_root_field(
+        &self,
+        kind: GraphqlOperationKind,
+        name: &str,
+    ) -> Result<&SchemaField, AiError> {
+        match kind {
+            GraphqlOperationKind::Query => self.root_query_field(name),
+            GraphqlOperationKind::Subscription => self.subscription_root_field(name),
+            _ => Err(configuration_error("unsupported semantic operation kind")),
+        }
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compile_capability(
     subgraph_id: &str,
     target_id: GraphqlExecutionTargetId,
@@ -747,9 +1258,10 @@ fn compile_capability(
     semantic_catalog: &GraphqlSemanticCatalog,
     operation: &GraphqlSemanticOperationDescriptor,
     limits: AiGraphqlQueryCapabilityLimits,
+    expected_kind: GraphqlOperationKind,
 ) -> Result<AiGraphqlQueryCapability, AiError> {
-    let root_field = schema.root_query_field(&operation.field_name)?;
-    validate_operation_against_schema(operation, root_field)?;
+    let root_field = schema.operation_root_field(expected_kind, &operation.field_name)?;
+    validate_operation_against_schema(operation, root_field, expected_kind)?;
     let output = resolve_query_output(schema, semantic_catalog, operation, &root_field.ty, limits)?;
     let argument_schema = build_plan_schema(schema, semantic_catalog, operation, &output, limits)?;
     if serde_json::to_vec(&argument_schema)
@@ -791,8 +1303,9 @@ fn compile_capability(
 fn validate_operation_against_schema(
     operation: &GraphqlSemanticOperationDescriptor,
     root: &SchemaField,
+    expected_kind: GraphqlOperationKind,
 ) -> Result<(), AiError> {
-    if operation.kind != GraphqlOperationKind::Query
+    if operation.kind != expected_kind
         || operation.description.is_empty()
         || operation.description.len() > MAXIMUM_DESCRIPTION_BYTES
         || operation
@@ -1009,7 +1522,7 @@ fn build_plan_schema(
     output: &QueryOutput,
     limits: AiGraphqlQueryCapabilityLimits,
 ) -> Result<Value, AiError> {
-    let root = schema.root_query_field(&operation.field_name)?;
+    let root = schema.operation_root_field(operation.kind, &operation.field_name)?;
     let argument_descriptions = operation
         .arguments
         .iter()
@@ -1084,6 +1597,144 @@ fn build_plan_schema(
         "required": required,
         "additionalProperties": false,
     }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn subscription_plan_schema(
+    schema: &FinishedSchema,
+    catalog: &GraphqlSemanticCatalog,
+    operation: &GraphqlSemanticOperationDescriptor,
+    output: &QueryOutput,
+    limits: AiGraphqlQueryCapabilityLimits,
+    maximum_duration_seconds: u32,
+    maximum_events: u32,
+) -> Result<Value, AiError> {
+    let mut plan = build_plan_schema(schema, catalog, operation, output, limits)?;
+    let object = plan
+        .as_object_mut()
+        .ok_or_else(|| configuration_error("subscription plan schema is not an object"))?;
+    let properties = object
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| configuration_error("subscription plan properties are missing"))?;
+    properties.remove("maximumItems");
+    properties.insert(
+        "timeoutSeconds".to_owned(),
+        bounded_integer_schema(1, i64::from(maximum_duration_seconds)),
+    );
+    properties.insert(
+        "maximumEvents".to_owned(),
+        bounded_integer_schema(1, i64::from(maximum_events)),
+    );
+    let observation = operation
+        .subscription_observation
+        .as_ref()
+        .ok_or_else(|| configuration_error("subscription observation semantics are missing"))?;
+    if !observation.condition_fields.is_empty() {
+        let QueryOutput::Entity { entity, .. } = output else {
+            return Err(configuration_error(
+                "conditional subscription result is not an entity",
+            ));
+        };
+        let entity = semantic_entity(catalog, entity)?;
+        let mut alternatives = Vec::new();
+        for condition in &observation.condition_fields {
+            let semantic_field = entity
+                .fields
+                .iter()
+                .find(|field| field.field_name == condition.field_name)
+                .ok_or_else(|| configuration_error("condition field semantics are missing"))?;
+            if !selectable_exportable_scalar(semantic_field) {
+                return Err(configuration_error(
+                    "condition field is not an exportable scalar",
+                ));
+            }
+            let actual = schema.object_field(&entity.entity_name, &condition.field_name)?;
+            if !actual.arguments.is_empty() || list_item_type(&actual.ty).is_some() {
+                return Err(configuration_error(
+                    "condition field is not a scalar event field",
+                ));
+            }
+            let value_schema = input_type_schema(
+                schema,
+                catalog,
+                &actual.ty,
+                None,
+                limits,
+                0,
+                &mut Vec::new(),
+            )?;
+            alternatives.push(json!({
+                "type": "object",
+                "properties": {
+                    "field": { "const": condition.field_name },
+                    "operator": { "enum": condition.operators },
+                    "value": value_schema,
+                },
+                "required": ["field", "operator", "value"],
+                "additionalProperties": false,
+            }));
+        }
+        properties.insert("condition".to_owned(), json!({ "oneOf": alternatives }));
+    }
+    let required = object
+        .get_mut("required")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| configuration_error("subscription plan requirements are missing"))?;
+    required.retain(|value| value.as_str() != Some("maximumItems"));
+    required.push(Value::String("timeoutSeconds".to_owned()));
+    required.push(Value::String("maximumEvents".to_owned()));
+    Ok(plan)
+}
+
+fn validate_subscription_condition(
+    capability: &AiGraphqlQueryCapability,
+    plan: &AiGraphqlSubscriptionPlan,
+) -> Result<(), AiError> {
+    let Some(condition) = &plan.condition else {
+        return Ok(());
+    };
+    if plan.fields.get(&condition.field) != Some(&true) {
+        return Err(input_error("subscription condition field must be selected"));
+    }
+    let observation = capability
+        .operation
+        .subscription_observation
+        .as_ref()
+        .ok_or_else(|| configuration_error("subscription observation semantics are missing"))?;
+    let declared = observation
+        .condition_fields
+        .iter()
+        .find(|field| field.field_name == condition.field)
+        .ok_or_else(|| input_error("subscription condition field is not admitted"))?;
+    if !declared.operators.contains(&condition.operator) {
+        return Err(input_error(
+            "subscription condition operator is not admitted",
+        ));
+    }
+    let QueryOutput::Entity { entity, .. } = &capability.output else {
+        return Err(input_error(
+            "subscription condition requires an entity event",
+        ));
+    };
+    let field = capability.schema.object_field(entity, &condition.field)?;
+    let value_schema = input_type_schema(
+        &capability.schema,
+        &capability.semantic_catalog,
+        &field.ty,
+        None,
+        capability.limits,
+        0,
+        &mut Vec::new(),
+    )?;
+    let validator = jsonschema::validator_for(&value_schema)
+        .map_err(|_| configuration_error("condition value schema is invalid"))?;
+    if !validator.is_valid(&condition.value) {
+        return Err(input_error(
+            "subscription condition value has the wrong type",
+        ));
+    }
+    Ok(())
 }
 
 fn selection_schema(
@@ -2043,6 +2694,17 @@ fn stable_capability_id(subgraph_id: &str, field_name: &str) -> String {
     )
 }
 
+fn stable_subscription_capability_id(subgraph_id: &str, field_name: &str) -> String {
+    let identity = format!("{subgraph_id}\0subscription\0{field_name}\0bounded-v1");
+    let hash = hex::encode(Sha256::digest(identity.as_bytes()));
+    format!(
+        "{}.subscription.{}.bounded-{}",
+        subgraph_id.to_ascii_lowercase(),
+        field_name.to_ascii_lowercase(),
+        &hash[..16]
+    )
+}
+
 fn find_case_insensitive<'a, T>(
     values: &'a BTreeMap<String, T>,
     expected: &str,
@@ -2104,7 +2766,8 @@ mod tests {
         GraphqlOperationArgumentDescriptor, GraphqlOperationCatalog,
         GraphqlSemanticArgumentDescriptor, GraphqlSemanticFieldMetadata,
         GraphqlSemanticOperationDescriptor, GraphqlSemanticRelationshipDescriptor,
-        GraphqlSemanticTypeKind,
+        GraphqlSemanticTypeKind, GraphqlSubscriptionConditionField,
+        GraphqlSubscriptionObservationDescriptor,
     };
 
     use super::*;
@@ -2314,6 +2977,48 @@ mod tests {
             }),
         )
         .expect("aggregate semantic catalogue")
+    }
+
+    fn subscription_semantic_catalog(
+        replay_mode: GraphqlSubscriptionReplayMode,
+    ) -> GraphqlSemanticCatalog {
+        let base = semantic_catalog();
+        let subscription = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Subscription,
+            "ParentChanged",
+            "Observe reviewed parent changes.",
+            vec![GraphqlSemanticArgumentDescriptor {
+                graphql_name: "id".to_owned(),
+                description: "Optional public parent identity.".to_owned(),
+                type_ref: named("ID", true),
+            }],
+            GraphqlSemanticTypeRef::named("Parent", GraphqlSemanticTypeKind::Object, false),
+            true,
+        )
+        .expect("subscription semantics")
+        .with_subscription_observation(GraphqlSubscriptionObservationDescriptor {
+            replay_mode,
+            maximum_duration_seconds: Some(120),
+            maximum_events: Some(20),
+            condition_fields: vec![GraphqlSubscriptionConditionField {
+                field_name: "id".to_owned(),
+                operators: vec![GraphqlSubscriptionConditionOperator::Equal],
+            }],
+        })
+        .expect("observation semantics");
+        GraphqlSemanticCatalog::compose_with_custom(
+            base.entities,
+            &GraphqlOperationCatalog::compose(std::iter::empty()),
+            base.operations.into_iter().chain([subscription]),
+        )
+        .expect("subscription semantic catalogue")
+    }
+
+    fn subscription_sdl() -> String {
+        query_sdl().replace(
+            "schema { query: Query }",
+            "schema { query: Query, subscription: Subscription }\n        type Subscription { ParentChanged(id: ID): Parent! }",
+        )
     }
 
     #[test]
@@ -2545,5 +3250,62 @@ mod tests {
         ));
         assert_eq!(compiled.variables()["v0"], json!(5));
         assert_eq!(compiled.variables()["v1"][0]["operator"], json!("SUM"));
+    }
+
+    #[test]
+    fn replayable_subscription_compiles_bounded_exact_condition() {
+        let catalog = AiGraphqlSubscriptionCapabilityCatalog::compile(
+            "inventory",
+            GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
+            &subscription_sdl(),
+            &subscription_semantic_catalog(GraphqlSubscriptionReplayMode::ReplayThenLive),
+            AiGraphqlSubscriptionCapabilityLimits::default(),
+        )
+        .expect("replayable subscription capabilities");
+        let capability = catalog.capabilities().next().expect("capability");
+        let compiled = capability
+            .compile(json!({
+                "arguments": { "id": "parent-1" },
+                "fields": { "id": true, "name": true },
+                "relationships": {},
+                "condition": { "field": "id", "operator": "equal", "value": "parent-1" },
+                "timeoutSeconds": 60,
+                "maximumEvents": 10
+            }))
+            .expect("bounded subscription plan");
+        assert!(compiled.descriptor().document.starts_with("subscription "));
+        assert_eq!(compiled.timeout_seconds(), 60);
+        assert_eq!(compiled.maximum_events(), 10);
+        assert_eq!(
+            compiled
+                .descriptor()
+                .graphql_contract
+                .as_ref()
+                .and_then(GraphqlOperationContract::semantic_operation)
+                .map(|binding| binding.kind()),
+            Some(crate::GraphqlGeneratedOperationKind::Subscription)
+        );
+        assert!(matches!(
+            capability.compile(json!({
+                "arguments": {}, "fields": { "name": true }, "relationships": {},
+                "condition": { "field": "id", "operator": "equal", "value": "parent-1" },
+                "timeoutSeconds": 60, "maximumEvents": 10
+            })),
+            Err(AiError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn best_effort_subscription_is_not_a_durable_capability() {
+        assert!(matches!(
+            AiGraphqlSubscriptionCapabilityCatalog::compile(
+                "inventory",
+                GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
+                &subscription_sdl(),
+                &subscription_semantic_catalog(GraphqlSubscriptionReplayMode::BestEffort),
+                AiGraphqlSubscriptionCapabilityLimits::default(),
+            ),
+            Err(AiError::InvalidConfiguration(_))
+        ));
     }
 }

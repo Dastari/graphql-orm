@@ -363,16 +363,18 @@ impl GraphqlOperationContract {
         self.generated_operation.as_ref()
     }
 
-    /// Binds this contract to one exact semantic-catalogue query root.
+    /// Binds this contract to one exact semantic-catalogue root of the
+    /// expected operation kind.
     ///
     /// # Errors
     ///
     /// Returns [`ToolExecutionError::StaleContract`] when the coordinate is
-    /// absent, ambiguous, non-query, or the document does not select it as its
-    /// sole root field.
-    pub fn with_semantic_operation(
+    /// absent, ambiguous, of a different kind, or the document does not
+    /// select it as its sole root field.
+    pub fn with_semantic_operation_kind(
         mut self,
         catalog: &GraphqlSemanticCatalog,
+        kind: GraphqlOperationKind,
         field_name: &str,
         document: &str,
     ) -> Result<Self, ToolExecutionError> {
@@ -382,9 +384,10 @@ impl GraphqlOperationContract {
         catalog
             .validate()
             .map_err(|_| ToolExecutionError::StaleContract)?;
-        let mut matches = catalog.operations.iter().filter(|operation| {
-            operation.kind == GraphqlOperationKind::Query && operation.field_name == field_name
-        });
+        let mut matches = catalog
+            .operations
+            .iter()
+            .filter(|operation| operation.kind == kind && operation.field_name == field_name);
         let operation = matches.next().ok_or(ToolExecutionError::StaleContract)?;
         if matches.next().is_some() {
             return Err(ToolExecutionError::StaleContract);
@@ -393,6 +396,26 @@ impl GraphqlOperationContract {
         binding.resolve(catalog, &self.operation_name, document)?;
         self.semantic_operation = Some(binding);
         Ok(self)
+    }
+
+    /// Binds this contract to one exact semantic-catalogue query root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolExecutionError::StaleContract`] when the coordinate is
+    /// absent, ambiguous, non-query, or not the sole selected root field.
+    pub fn with_semantic_operation(
+        self,
+        catalog: &GraphqlSemanticCatalog,
+        field_name: &str,
+        document: &str,
+    ) -> Result<Self, ToolExecutionError> {
+        self.with_semantic_operation_kind(
+            catalog,
+            GraphqlOperationKind::Query,
+            field_name,
+            document,
+        )
     }
 
     /// Returns the semantic-root drift binding, when present.
