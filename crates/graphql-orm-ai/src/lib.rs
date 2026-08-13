@@ -274,6 +274,7 @@ pub mod prelude {
     };
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub use crate::{
+        AiAdoptedAutomaticMutationBatch, AiAdoptedClassifiedMutationBatch,
         AiAdoptedReadOnlyToolBatch, AiAdoptedSupervisedProviderTurn, AiAdoptedSupervisedToolBatch,
         AiAgentCheckpointAdopter, AiAgentCheckpointWriter, AiAgentProviderOutputWriter,
         AiAgentProviderTurnExecutor, AiAgentRuleResolver, AiAgentRunControl,

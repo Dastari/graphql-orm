@@ -817,10 +817,32 @@ impl OrmAiApplicationToolCallService {
             .await?;
         let lease = &active_lease;
 
-        if matches!(mode, UnapprovedToolMode::AutomaticMutation)
-            && self.run_service.cancellation(lease).await?.is_some()
-        {
-            return Err(AiError::Conflict);
+        if matches!(mode, UnapprovedToolMode::AutomaticMutation) {
+            match self.run_service.cancellation(lease).await {
+                Ok(Some(_)) => {
+                    return self
+                        .mark_automatic_recovery(
+                            lease,
+                            id,
+                            provider_result.provider_response_id().map(str::to_owned),
+                        )
+                        .await;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return match self
+                        .mark_automatic_recovery(
+                            lease,
+                            id,
+                            provider_result.provider_response_id().map(str::to_owned),
+                        )
+                        .await
+                    {
+                        Ok(outcome) => Ok(outcome),
+                        Err(_) => Err(error),
+                    };
+                }
+            }
         }
 
         let execution =
@@ -868,18 +890,13 @@ impl OrmAiApplicationToolCallService {
                 result.response().application_audit_ref.clone(),
             ),
             Err(_) if matches!(mode, UnapprovedToolMode::AutomaticMutation) => {
-                self.run_service
-                    .finish(
+                return self
+                    .mark_automatic_recovery(
                         lease,
-                        AiRunCompletion::new(
-                            AiRunState::RecoveryRequired,
-                            "automatic_mutation_uncertain",
-                            Some("automatic_mutation_uncertain".to_owned()),
-                            provider_result.provider_response_id().map(str::to_owned),
-                        )?,
+                        id,
+                        provider_result.provider_response_id().map(str::to_owned),
                     )
-                    .await?;
-                return Ok(AiConsequentialToolCallOutcome::RecoveryRequired { tool_call_id: id });
+                    .await;
             }
             Err(_) => (
                 AiApplicationToolCallState::ExecutionFailed,
@@ -892,168 +909,208 @@ impl OrmAiApplicationToolCallService {
                 None,
             ),
         };
-        let output_bytes =
-            serde_json::to_vec(&model_output).map_err(|_| AiError::ToolExecutionFailed)?;
-        if output_bytes.len() > self.limits.maximum_model_output_bytes {
-            return Err(AiError::ToolExecutionFailed);
-        }
-        let outbound_bytes = output_bytes
-            .len()
-            .checked_add(provider_call.call_id().len())
-            .and_then(|bytes| bytes.checked_add(provider_call.tool_id().as_str().len()))
-            .ok_or_else(|| AiError::InvalidInput("tool result is too large".to_owned()))?;
+        let finalization: Result<AiConsequentialToolCallOutcome, AiError> = async {
+            let output_bytes =
+                serde_json::to_vec(&model_output).map_err(|_| AiError::ToolExecutionFailed)?;
+            if output_bytes.len() > self.limits.maximum_model_output_bytes {
+                return Err(AiError::ToolExecutionFailed);
+            }
+            let outbound_bytes = output_bytes
+                .len()
+                .checked_add(provider_call.call_id().len())
+                .and_then(|bytes| bytes.checked_add(provider_call.tool_id().as_str().len()))
+                .ok_or_else(|| AiError::InvalidInput("tool result is too large".to_owned()))?;
 
-        self.current_access(lease, &context.scope).await?;
-        let manifest = AiEgressManifest {
-            provider_profile_id: route.provider_profile_id,
-            provider_kind: provider_result.provider_kind().as_str().to_owned(),
-            model: provider_result.provider_model().to_owned(),
-            destination: route.destination,
-            destination_trust: route.destination_trust,
-            capability: AiEgressCapability::ToolResult,
-            scope: context.scope.clone(),
-            session_id: Some(lease.session_id()),
-            run_id: Some(lease.run_id()),
-            sources: vec![AiDataSourceRef {
-                kind: "application_tool_result".to_owned(),
-                reference: id.0.to_string(),
-                classification,
-                trust: source_trust,
-            }],
-            estimated_bytes: u64::try_from(outbound_bytes)
-                .map_err(|_| AiError::InvalidInput("tool result is too large".to_owned()))?,
-            estimated_tokens: 0,
-            attachment_count: 0,
-            purpose: route.purpose,
-            retention: route.retention,
-            residency: route.residency,
-            policy_version: route.policy_version,
-            consent_reference: route.consent_reference,
-        };
-        let decision = self
-            .runtime
-            .authorize_egress(lease.principal_reference(), &manifest)
-            .await?;
-        let audit_result = self.egress_audit.record(&manifest, &decision).await;
-        let (final_state, model_input, decision_id, manifest_hash, final_authorization_code) =
-            if audit_result.is_err() {
-                (
-                    AiApplicationToolCallState::EgressAuditFailed,
-                    None,
-                    None,
-                    None,
-                    "egress_audit_failed".to_owned(),
-                )
-            } else if decision.authorize(&manifest).is_err() {
-                (
-                    AiApplicationToolCallState::EgressDenied,
-                    None,
-                    Some(decision.id.0),
-                    Some(decision.manifest_hash.clone()),
-                    "egress_denied".to_owned(),
-                )
-            } else {
-                (
-                    state,
-                    Some(ModelInputBlock::ToolResult {
-                        call_id: provider_call.call_id().to_owned(),
-                        tool_id: provider_call.tool_id().as_str().to_owned(),
-                        output: model_output.clone(),
-                    }),
-                    Some(decision.id.0),
-                    Some(decision.manifest_hash.clone()),
-                    authorization_code,
-                )
+            self.current_access(lease, &context.scope).await?;
+            let manifest = AiEgressManifest {
+                provider_profile_id: route.provider_profile_id,
+                provider_kind: provider_result.provider_kind().as_str().to_owned(),
+                model: provider_result.provider_model().to_owned(),
+                destination: route.destination,
+                destination_trust: route.destination_trust,
+                capability: AiEgressCapability::ToolResult,
+                scope: context.scope.clone(),
+                session_id: Some(lease.session_id()),
+                run_id: Some(lease.run_id()),
+                sources: vec![AiDataSourceRef {
+                    kind: "application_tool_result".to_owned(),
+                    reference: id.0.to_string(),
+                    classification,
+                    trust: source_trust,
+                }],
+                estimated_bytes: u64::try_from(outbound_bytes)
+                    .map_err(|_| AiError::InvalidInput("tool result is too large".to_owned()))?,
+                estimated_tokens: 0,
+                attachment_count: 0,
+                purpose: route.purpose,
+                retention: route.retention,
+                residency: route.residency,
+                policy_version: route.policy_version,
+                consent_reference: route.consent_reference,
             };
-        let protected_result = self
-            .protect(
-                &policy,
-                protection_context(
-                    "graphql_orm_ai_tool_calls",
-                    id.0,
-                    "protected_result",
-                    &context.scope,
-                ),
-                model_output,
-            )
-            .await?;
-        let event_id = Uuid::new_v4();
-        let inbox_event_id = Uuid::new_v4();
-        let protected_event = self
-            .protect(
-                &policy,
-                protection_context(
-                    "graphql_orm_ai_session_events",
-                    event_id,
-                    "protected_payload",
-                    &context.scope,
-                ),
-                json!({
-                    "toolCallId": id.0,
-                    "runId": lease.run_id().0,
-                    "toolId": provider_call.tool_id().as_str(),
-                    "state": final_state.as_str(),
-                }),
-            )
-            .await?;
-        let protected_inbox_event = self
-            .protect(
-                &policy,
-                protection_context(
-                    "graphql_orm_ai_inbox_events",
-                    inbox_event_id,
-                    "protected_payload",
-                    &context.scope,
-                ),
-                json!({
-                    "toolCallId": id.0,
-                    "runId": lease.run_id().0,
-                    "toolId": provider_call.tool_id().as_str(),
-                    "state": final_state.as_str(),
-                }),
-            )
-            .await?;
-        let renewed = self
-            .run_service
-            .finish_tool_call(
-                lease,
-                PreparedToolCallFinish {
-                    id: id.0,
-                    state: final_state.as_str().to_owned(),
-                    protected_result,
-                    authorization_code: final_authorization_code,
-                    authorization_policy_version: policy_version,
-                    authorization_state_digest,
-                    disclosure_schema_fingerprint: disclosure_fingerprint,
-                    result_classification: classification_value(classification).to_owned(),
-                    result_egress_decision_id: decision_id,
-                    result_egress_manifest_hash: manifest_hash,
-                    application_audit_ref,
-                    event_id,
-                    inbox_event_id,
-                    protected_event,
-                    protected_inbox_event,
-                    correlation_id: context.correlation_id,
-                    expected_provider_call_key: provider_call_key,
-                    expected_tool_fingerprint: provider_call.tool_fingerprint().to_owned(),
-                    expected_owner_principal_kind: session.owner_principal_kind,
-                    expected_owner_subject: session.owner_subject,
-                    expected_scope_kind: context.scope.kind,
-                    expected_scope_id: context.scope.id,
-                    expected_tenant_id: context.scope.tenant_id,
+            let decision = self
+                .runtime
+                .authorize_egress(lease.principal_reference(), &manifest)
+                .await?;
+            let audit_result = self.egress_audit.record(&manifest, &decision).await;
+            let (final_state, model_input, decision_id, manifest_hash, final_authorization_code) =
+                if audit_result.is_err() {
+                    (
+                        AiApplicationToolCallState::EgressAuditFailed,
+                        None,
+                        None,
+                        None,
+                        "egress_audit_failed".to_owned(),
+                    )
+                } else if decision.authorize(&manifest).is_err() {
+                    (
+                        AiApplicationToolCallState::EgressDenied,
+                        None,
+                        Some(decision.id.0),
+                        Some(decision.manifest_hash.clone()),
+                        "egress_denied".to_owned(),
+                    )
+                } else {
+                    (
+                        state,
+                        Some(ModelInputBlock::ToolResult {
+                            call_id: provider_call.call_id().to_owned(),
+                            tool_id: provider_call.tool_id().as_str().to_owned(),
+                            output: model_output.clone(),
+                        }),
+                        Some(decision.id.0),
+                        Some(decision.manifest_hash.clone()),
+                        authorization_code,
+                    )
+                };
+            let protected_result = self
+                .protect(
+                    &policy,
+                    protection_context(
+                        "graphql_orm_ai_tool_calls",
+                        id.0,
+                        "protected_result",
+                        &context.scope,
+                    ),
+                    model_output,
+                )
+                .await?;
+            let event_id = Uuid::new_v4();
+            let inbox_event_id = Uuid::new_v4();
+            let protected_event = self
+                .protect(
+                    &policy,
+                    protection_context(
+                        "graphql_orm_ai_session_events",
+                        event_id,
+                        "protected_payload",
+                        &context.scope,
+                    ),
+                    json!({
+                        "toolCallId": id.0,
+                        "runId": lease.run_id().0,
+                        "toolId": provider_call.tool_id().as_str(),
+                        "state": final_state.as_str(),
+                    }),
+                )
+                .await?;
+            let protected_inbox_event = self
+                .protect(
+                    &policy,
+                    protection_context(
+                        "graphql_orm_ai_inbox_events",
+                        inbox_event_id,
+                        "protected_payload",
+                        &context.scope,
+                    ),
+                    json!({
+                        "toolCallId": id.0,
+                        "runId": lease.run_id().0,
+                        "toolId": provider_call.tool_id().as_str(),
+                        "state": final_state.as_str(),
+                    }),
+                )
+                .await?;
+            let renewed = self
+                .run_service
+                .finish_tool_call(
+                    lease,
+                    PreparedToolCallFinish {
+                        id: id.0,
+                        state: final_state.as_str().to_owned(),
+                        protected_result,
+                        authorization_code: final_authorization_code,
+                        authorization_policy_version: policy_version,
+                        authorization_state_digest,
+                        disclosure_schema_fingerprint: disclosure_fingerprint,
+                        result_classification: classification_value(classification).to_owned(),
+                        result_egress_decision_id: decision_id,
+                        result_egress_manifest_hash: manifest_hash,
+                        application_audit_ref,
+                        event_id,
+                        inbox_event_id,
+                        protected_event,
+                        protected_inbox_event,
+                        correlation_id: context.correlation_id,
+                        expected_provider_call_key: provider_call_key,
+                        expected_tool_fingerprint: provider_call.tool_fingerprint().to_owned(),
+                        expected_owner_principal_kind: session.owner_principal_kind,
+                        expected_owner_subject: session.owner_subject,
+                        expected_scope_kind: context.scope.kind,
+                        expected_scope_id: context.scope.id,
+                        expected_tenant_id: context.scope.tenant_id,
+                    },
+                )
+                .await?;
+            Ok(AiConsequentialToolCallOutcome::Persisted(Box::new(
+                AiPersistedApplicationToolCall {
+                    id,
+                    provider_call_id: provider_call.call_id().to_owned(),
+                    state: final_state,
+                    model_input,
+                    egress_manifest: decision_id.map(|_| manifest),
+                    lease: renewed,
                 },
+            )))
+        }
+        .await;
+        match finalization {
+            Ok(outcome) => Ok(outcome),
+            Err(error) if matches!(mode, UnapprovedToolMode::AutomaticMutation) => {
+                match self
+                    .mark_automatic_recovery(
+                        lease,
+                        id,
+                        provider_result.provider_response_id().map(str::to_owned),
+                    )
+                    .await
+                {
+                    Ok(outcome) => Ok(outcome),
+                    Err(_) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn mark_automatic_recovery(
+        &self,
+        lease: &AiRunLease,
+        tool_call_id: AiToolCallId,
+        provider_response_id: Option<String>,
+    ) -> Result<AiConsequentialToolCallOutcome, AiError> {
+        self.run_service
+            .finish(
+                lease,
+                AiRunCompletion::new(
+                    AiRunState::RecoveryRequired,
+                    "automatic_mutation_uncertain",
+                    Some("automatic_mutation_uncertain".to_owned()),
+                    provider_response_id,
+                )?,
             )
             .await?;
-        Ok(AiConsequentialToolCallOutcome::Persisted(Box::new(
-            AiPersistedApplicationToolCall {
-                id,
-                provider_call_id: provider_call.call_id().to_owned(),
-                state: final_state,
-                model_input,
-                egress_manifest: decision_id.map(|_| manifest),
-                lease: renewed,
-            },
-        )))
+        Ok(AiConsequentialToolCallOutcome::RecoveryRequired { tool_call_id })
     }
 
     fn validate_outer_binding(

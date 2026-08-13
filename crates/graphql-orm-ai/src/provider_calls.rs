@@ -1168,6 +1168,21 @@ impl AiProviderCallPlan {
         }];
         plan
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_automatic_mutation_plan(
+        lease: &AiRunLease,
+        scope: crate::AiScope,
+        continuation: bool,
+    ) -> Self {
+        let mut plan = Self::test_supervised_plan(lease, scope, continuation);
+        plan.tool_rule_bindings = vec![AiPlanToolRuleBinding {
+            fingerprint: "test-fingerprint".to_owned(),
+            maturity: ToolMaturity::AutonomousWrite,
+            approval: AiApprovalRule::None,
+        }];
+        plan
+    }
 }
 
 /// Exact custom application-tool request normalized from one provider turn.

@@ -90,7 +90,7 @@ impl From<AiRuleClassificationInput> for DataClassification {
     }
 }
 
-/// GraphQL tool-maturity ceiling. Autonomous writes are deliberately absent.
+/// GraphQL tool-maturity ceiling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
 #[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
 pub enum AiRuleToolMaturityInput {
@@ -100,6 +100,9 @@ pub enum AiRuleToolMaturityInput {
     ProposalOnly,
     /// Explicitly registered supervised writes with independent approval.
     SupervisedWrite,
+    /// Explicitly classified automatic mutations. Target policy and ordinary
+    /// resolver authority remain independent mandatory gates.
+    AutonomousWrite,
 }
 
 impl From<AiRuleToolMaturityInput> for ToolMaturity {
@@ -108,6 +111,7 @@ impl From<AiRuleToolMaturityInput> for ToolMaturity {
             AiRuleToolMaturityInput::ReadOnly => Self::ReadOnly,
             AiRuleToolMaturityInput::ProposalOnly => Self::ProposalOnly,
             AiRuleToolMaturityInput::SupervisedWrite => Self::SupervisedWrite,
+            AiRuleToolMaturityInput::AutonomousWrite => Self::AutonomousWrite,
         }
     }
 }
@@ -337,19 +341,17 @@ pub struct AiRuleConstraints {
 }
 
 impl AiRuleConstraints {
-    /// Validates bounded, non-secret, non-autonomous constraints.
+    /// Validates bounded, non-secret constraints.
     ///
     /// # Errors
     ///
-    /// Returns an error for secret classification, autonomous-write maturity,
-    /// malformed tool fingerprints, oversized provider/capability allowlists,
+    /// Returns an error for secret classification, malformed tool fingerprints,
+    /// oversized provider/capability allowlists,
     /// invalid capability combinations, or invalid budget ceilings.
     pub fn validate(&self) -> Result<(), AiError> {
-        if self.maximum_classification == DataClassification::Secret
-            || self.maximum_tool_maturity == ToolMaturity::AutonomousWrite
-        {
+        if self.maximum_classification == DataClassification::Secret {
             return Err(AiError::InvalidConfiguration(
-                "hierarchical rules cannot permit secrets or autonomous writes".to_owned(),
+                "hierarchical rules cannot permit secrets".to_owned(),
             ));
         }
         if self

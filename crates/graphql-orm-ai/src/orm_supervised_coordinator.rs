@@ -10,14 +10,14 @@ use time::Duration;
 use uuid::Uuid;
 
 use crate::{
-    AiAdoptedSupervisedToolBatch, AiAgentCheckpointWriter, AiAgentLoopGuard, AiAgentLoopLimits,
-    AiAgentLoopTurn, AiAgentProviderOutputWriter, AiAgentProviderTurnExecutor,
-    AiAgentRecoveryPhase, AiAgentRuleResolver, AiAgentRunControl, AiApplicationToolCallContext,
-    AiApprovalId, AiError, AiProviderCallPlan, AiRequestedConsequentialToolCall, AiResolvedRuleSet,
-    AiRuleRunUsage, AiRunCompletion, AiRunLease, AiRunState, AiScope, AiSupervisedResumeOutcome,
-    AiToolCallId, AiToolResultEgressRoute, OrmAiApplicationToolCallService,
-    OrmAiConsequentialToolCallService, OrmAiCoordinatorCheckpointService,
-    OrmAiSupervisedResumeService,
+    AiAdoptedAutomaticMutationBatch, AiAdoptedSupervisedToolBatch, AiAgentCheckpointWriter,
+    AiAgentLoopGuard, AiAgentLoopLimits, AiAgentLoopTurn, AiAgentProviderOutputWriter,
+    AiAgentProviderTurnExecutor, AiAgentRecoveryPhase, AiAgentRuleResolver, AiAgentRunControl,
+    AiApplicationToolCallContext, AiApprovalId, AiError, AiProviderCallPlan,
+    AiRequestedConsequentialToolCall, AiResolvedRuleSet, AiRuleRunUsage, AiRunCompletion,
+    AiRunLease, AiRunState, AiScope, AiSupervisedResumeOutcome, AiToolCallId,
+    AiToolResultEgressRoute, OrmAiApplicationToolCallService, OrmAiConsequentialToolCallService,
+    OrmAiCoordinatorCheckpointService, OrmAiSupervisedResumeService,
 };
 
 /// Deployment bounds for the sequential supervised coordinator.
@@ -270,9 +270,38 @@ impl AiAgentSupervisedApprovalStager for OrmAiConsequentialToolCallService {
     }
 }
 
+/// Exact classified-mutation checkpoint selected from durable checkpoint
+/// metadata before protected state is opened.
+#[derive(Clone, Debug)]
+pub enum AiAdoptedClassifiedMutationBatch {
+    /// One approved one-shot mutation result.
+    Supervised(AiAdoptedSupervisedToolBatch),
+    /// One explicitly automatic mutation result.
+    Automatic(AiAdoptedAutomaticMutationBatch),
+}
+
 /// Protected supervised-checkpoint adoption and one-shot consumption.
 #[async_trait]
 pub trait AiAgentSupervisedCheckpointControl: Send + Sync {
+    /// Selects and opens the exact classified checkpoint kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for a missing, unknown, malformed, or unauthorized
+    /// linked checkpoint. Implementations must never reinterpret a failed
+    /// proof as another checkpoint kind.
+    async fn adopt_classified(
+        &self,
+        lease: &AiRunLease,
+    ) -> Result<Option<AiAdoptedClassifiedMutationBatch>, AiError> {
+        if let Some(adopted) = self.adopt(lease).await? {
+            return Ok(Some(AiAdoptedClassifiedMutationBatch::Supervised(adopted)));
+        }
+        self.adopt_automatic(lease)
+            .await
+            .map(|adopted| adopted.map(AiAdoptedClassifiedMutationBatch::Automatic))
+    }
+
     /// Reopens the exact linked supervised result under current authority.
     ///
     /// # Errors
@@ -295,10 +324,46 @@ pub trait AiAgentSupervisedCheckpointControl: Send + Sync {
         lease: &AiRunLease,
         adopted: &AiAdoptedSupervisedToolBatch,
     ) -> Result<AiRunLease, AiError>;
+
+    /// Reopens an exact completed automatic-mutation result under current
+    /// authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for malformed, stale, unauthorized, or unprovable
+    /// protected checkpoint state.
+    async fn adopt_automatic(
+        &self,
+        _lease: &AiRunLease,
+    ) -> Result<Option<AiAdoptedAutomaticMutationBatch>, AiError> {
+        Ok(None)
+    }
+
+    /// Consumes an exact automatic-mutation checkpoint before provider
+    /// transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error unless the proof remains linked through the
+    /// current row-version fence.
+    async fn consume_automatic(
+        &self,
+        _lease: &AiRunLease,
+        _adopted: &AiAdoptedAutomaticMutationBatch,
+    ) -> Result<AiRunLease, AiError> {
+        Err(AiError::Conflict)
+    }
 }
 
 #[async_trait]
 impl AiAgentSupervisedCheckpointControl for OrmAiCoordinatorCheckpointService {
+    async fn adopt_classified(
+        &self,
+        lease: &AiRunLease,
+    ) -> Result<Option<AiAdoptedClassifiedMutationBatch>, AiError> {
+        self.adopt_classified_mutation_batch(lease).await
+    }
+
     async fn adopt(
         &self,
         lease: &AiRunLease,
@@ -312,6 +377,22 @@ impl AiAgentSupervisedCheckpointControl for OrmAiCoordinatorCheckpointService {
         adopted: &AiAdoptedSupervisedToolBatch,
     ) -> Result<AiRunLease, AiError> {
         self.consume_supervised_before_provider(lease, adopted)
+            .await
+    }
+
+    async fn adopt_automatic(
+        &self,
+        lease: &AiRunLease,
+    ) -> Result<Option<AiAdoptedAutomaticMutationBatch>, AiError> {
+        self.adopt_automatic_mutation_batch(lease).await
+    }
+
+    async fn consume_automatic(
+        &self,
+        lease: &AiRunLease,
+        adopted: &AiAdoptedAutomaticMutationBatch,
+    ) -> Result<AiRunLease, AiError> {
+        self.consume_automatic_mutation_before_provider(lease, adopted)
             .await
     }
 }
@@ -452,22 +533,25 @@ impl AiSupervisedAgentCoordinator {
     ) -> Result<AiSupervisedAgentRunOutcome, AiError> {
         let lease = self.run_control.start(claimed).await?;
         if lease.latest_checkpoint_id().is_some() {
-            let adopted = match self.checkpoint_control.adopt(&lease).await {
-                Ok(Some(adopted)) => adopted,
+            match self.checkpoint_control.adopt_classified(&lease).await {
+                Ok(Some(AiAdoptedClassifiedMutationBatch::Supervised(adopted))) => {
+                    self.continue_from_adopted(lease, adopted).await
+                }
+                Ok(Some(AiAdoptedClassifiedMutationBatch::Automatic(adopted))) => {
+                    self.continue_from_automatic(lease, adopted).await
+                }
                 Ok(None) | Err(_) => {
                     let guard = AiAgentLoopGuard::new(&lease, self.limits.loop_limits);
-                    return self
-                        .finish_recovery(
-                            &lease,
-                            &guard,
-                            AiAgentRecoveryPhase::ApplicationTool,
-                            "supervised_checkpoint_adoption_failed",
-                            None,
-                        )
-                        .await;
+                    self.finish_recovery(
+                        &lease,
+                        &guard,
+                        AiAgentRecoveryPhase::ApplicationTool,
+                        "classified_mutation_checkpoint_adoption_failed",
+                        None,
+                    )
+                    .await
                 }
-            };
-            self.continue_from_adopted(lease, adopted).await
+            }
         } else {
             let guard = AiAgentLoopGuard::new(&lease, self.limits.loop_limits);
             let plan = match self.planner.initial_plan(&lease).await {
@@ -478,7 +562,7 @@ impl AiSupervisedAgentCoordinator {
                         .await;
                 }
             };
-            self.execute_turn(lease, guard, plan, AiRuleRunUsage::default(), None)
+            self.execute_turn(lease, guard, plan, AiRuleRunUsage::default(), None, None)
                 .await
         }
     }
@@ -565,7 +649,47 @@ impl AiSupervisedAgentCoordinator {
             }
         };
         let usage = adopted.rule_usage();
-        self.execute_turn(lease, guard, plan, usage, Some(&adopted))
+        self.execute_turn(lease, guard, plan, usage, Some(&adopted), None)
+            .await
+    }
+
+    async fn continue_from_automatic(
+        &self,
+        lease: AiRunLease,
+        adopted: AiAdoptedAutomaticMutationBatch,
+    ) -> Result<AiSupervisedAgentRunOutcome, AiError> {
+        let reference = adopted.continuation().chain_reference()?;
+        let guard = AiAgentLoopGuard::resume_after_tool_batch(
+            &lease,
+            self.limits.loop_limits,
+            adopted.provider_turns(),
+            adopted.total_tool_calls(),
+            &reference,
+        )?;
+        let plan = match self
+            .planner
+            .continuation_plan(
+                &lease,
+                adopted.provider_turns(),
+                adopted.continuation().clone(),
+            )
+            .await
+        {
+            Ok(plan)
+                if plan.is_continuation()
+                    && plan.provider_call.scope() == adopted.scope()
+                    && plan.rules.fingerprint() == adopted.rule_fingerprint() =>
+            {
+                plan
+            }
+            _ => {
+                return self
+                    .finish_failed(&lease, &guard, "automatic_continuation_plan_invalid")
+                    .await;
+            }
+        };
+        let usage = adopted.rule_usage();
+        self.execute_turn(lease, guard, plan, usage, None, Some(&adopted))
             .await
     }
 
@@ -576,6 +700,7 @@ impl AiSupervisedAgentCoordinator {
         plan: AiSupervisedAgentTurnPlan,
         mut rule_usage: AiRuleRunUsage,
         adopted: Option<&AiAdoptedSupervisedToolBatch>,
+        adopted_automatic: Option<&AiAdoptedAutomaticMutationBatch>,
     ) -> Result<AiSupervisedAgentRunOutcome, AiError> {
         if !guard.can_begin_provider_turn() {
             return self
@@ -645,6 +770,46 @@ impl AiSupervisedAgentCoordinator {
             {
                 return self
                     .finish_failed(&lease, &guard, "supervised_rule_denied_after_consume")
+                    .await;
+            }
+        } else if let Some(adopted) = adopted_automatic {
+            lease = match self
+                .checkpoint_control
+                .consume_automatic(&lease, adopted)
+                .await
+            {
+                Ok(renewed) => renewed,
+                Err(_) => {
+                    return self
+                        .finish_recovery(
+                            &lease,
+                            &guard,
+                            AiAgentRecoveryPhase::ApplicationTool,
+                            "automatic_checkpoint_consumption_failed",
+                            None,
+                        )
+                        .await;
+                }
+            };
+            let final_rules = match self.rule_resolver.resolve_rules(&lease, &scope).await {
+                Ok(current)
+                    if current.rules().fingerprint() == planned_rules.fingerprint()
+                        && rule_usage.validate(&current).is_ok() =>
+                {
+                    current
+                }
+                _ => {
+                    return self
+                        .finish_failed(&lease, &guard, "automatic_rule_changed_after_consume")
+                        .await;
+                }
+            };
+            if provider_plan
+                .project_supervised_rule_usage(&final_rules, rule_usage, uses_byok)
+                .is_err()
+            {
+                return self
+                    .finish_failed(&lease, &guard, "automatic_rule_denied_after_consume")
                     .await;
             }
         }
@@ -811,16 +976,19 @@ impl AiSupervisedAgentCoordinator {
                             .await;
                     }
                 };
-                if rule_usage.accept_tool_calls(1, &rules).is_err() {
-                    return self
-                        .finish_failed(&lease, &guard, "supervised_rule_steps_exceeded")
-                        .await;
-                }
+                let completed_rule_usage = match rule_usage.accept_tool_calls(1, &rules) {
+                    Ok(usage) => usage,
+                    Err(_) => {
+                        return self
+                            .finish_failed(&lease, &guard, "supervised_rule_steps_exceeded")
+                            .await;
+                    }
+                };
                 let context = AiApplicationToolCallContext::new(
                     provider_turn_index,
                     0,
-                    scope,
-                    correlation_id,
+                    scope.clone(),
+                    correlation_id.clone(),
                     result.budget_reservation_id().0.to_string(),
                 )?;
                 if binding
@@ -831,7 +999,7 @@ impl AiSupervisedAgentCoordinator {
                 {
                     let outcome = match self
                         .automatic_executor
-                        .execute(&lease, &result, context, route)
+                        .execute(&lease, &result, context, route.clone())
                         .await
                     {
                         Ok(outcome) => outcome,
@@ -865,15 +1033,81 @@ impl AiSupervisedAgentCoordinator {
                             )
                             .await;
                     }
-                    return self
-                        .finish_recovery(
+                    if self
+                        .run_control
+                        .cancellation(persisted.lease())
+                        .await?
+                        .is_some()
+                    {
+                        return self
+                            .finish_recovery(
+                                persisted.lease(),
+                                &guard,
+                                AiAgentRecoveryPhase::ApplicationTool,
+                                "automatic_mutation_cancelled_after_effect",
+                                result.provider_response_id(),
+                            )
+                            .await;
+                    }
+                    let continuation = match guard.continuation() {
+                        Ok(continuation) => continuation,
+                        Err(_) => {
+                            return self
+                                .finish_recovery(
+                                    persisted.lease(),
+                                    &guard,
+                                    AiAgentRecoveryPhase::ApplicationTool,
+                                    "automatic_mutation_continuation_invalid",
+                                    result.provider_response_id(),
+                                )
+                                .await;
+                        }
+                    };
+                    lease = match self
+                        .checkpoint_writer
+                        .persist_automatic_mutation_batch(
                             persisted.lease(),
-                            &guard,
-                            AiAgentRecoveryPhase::ApplicationTool,
-                            "automatic_mutation_checkpoint_required",
-                            result.provider_response_id(),
+                            &result,
+                            persisted,
+                            &continuation,
+                            &scope,
+                            &correlation_id,
+                            &route,
+                            &planned_rules,
+                            completed_rule_usage,
+                            guard.provider_turns(),
+                            guard.total_tool_calls(),
                         )
-                        .await;
+                        .await
+                    {
+                        Ok(renewed) => renewed,
+                        Err(_) => {
+                            return self
+                                .finish_recovery(
+                                    persisted.lease(),
+                                    &guard,
+                                    AiAgentRecoveryPhase::ApplicationTool,
+                                    "automatic_mutation_checkpoint_uncertain",
+                                    result.provider_response_id(),
+                                )
+                                .await;
+                        }
+                    };
+                    let adopted = match self.checkpoint_control.adopt_automatic(&lease).await {
+                        Ok(Some(adopted)) => adopted,
+                        Ok(None) | Err(_) => {
+                            return self
+                                .finish_recovery(
+                                    &lease,
+                                    &guard,
+                                    AiAgentRecoveryPhase::ApplicationTool,
+                                    "automatic_mutation_checkpoint_adoption_failed",
+                                    result.provider_response_id(),
+                                )
+                                .await;
+                        }
+                    };
+                    return Box::pin(self.continue_from_automatic(lease, adopted)).await;
                 }
                 let expires_at = self
                     .clock
@@ -1259,6 +1493,224 @@ mod tests {
         Arc::new(TestAutomaticExecutor)
     }
 
+    struct TestSuccessfulAutomaticExecutor {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AiAgentAutomaticMutationExecutor for TestSuccessfulAutomaticExecutor {
+        async fn execute(
+            &self,
+            lease: &AiRunLease,
+            result: &crate::AiProviderCallResult,
+            _context: AiApplicationToolCallContext,
+            _route: AiToolResultEgressRoute,
+        ) -> Result<crate::AiConsequentialToolCallOutcome, AiError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let call = result.tool_calls().first().ok_or(AiError::Conflict)?;
+            Ok(crate::AiConsequentialToolCallOutcome::Persisted(Box::new(
+                AiPersistedApplicationToolCall::test_completed(
+                    lease.clone(),
+                    call.call_id(),
+                    call.tool_id().as_str(),
+                    Some(json!({"updated": true})),
+                    Some(test_manifest(lease)),
+                ),
+            )))
+        }
+    }
+
+    struct TestAutomaticCheckpointWriter {
+        provider_checkpoints: AtomicUsize,
+        automatic_checkpoints: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AiAgentCheckpointWriter for TestAutomaticCheckpointWriter {
+        async fn persist_provider_turn(
+            &self,
+            lease: &AiRunLease,
+            _result: &crate::AiProviderCallResult,
+            _scope: &AiScope,
+            _correlation_id: &str,
+            _route: &AiToolResultEgressRoute,
+            _rules: &AiResolvedRuleSet,
+            _rule_usage: AiRuleRunUsage,
+            _provider_turns: u32,
+            _total_tool_calls: u32,
+        ) -> Result<AiRunLease, AiError> {
+            self.provider_checkpoints.fetch_add(1, Ordering::SeqCst);
+            Ok(lease.test_with_checkpoint(Uuid::new_v4()))
+        }
+
+        async fn persist_tool_batch(
+            &self,
+            _lease: &AiRunLease,
+            _result: &crate::AiProviderCallResult,
+            _completed_tools: &[AiPersistedApplicationToolCall],
+            _continuation: &AiAgentContinuation,
+            _scope: &AiScope,
+            _correlation_id: &str,
+            _route: &AiToolResultEgressRoute,
+            _rules: &AiResolvedRuleSet,
+            _rule_usage: AiRuleRunUsage,
+            _provider_turns: u32,
+            _total_tool_calls: u32,
+        ) -> Result<AiRunLease, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn persist_automatic_mutation_batch(
+            &self,
+            lease: &AiRunLease,
+            result: &crate::AiProviderCallResult,
+            completed_tool: &AiPersistedApplicationToolCall,
+            _continuation: &AiAgentContinuation,
+            _scope: &AiScope,
+            _correlation_id: &str,
+            _route: &AiToolResultEgressRoute,
+            _rules: &AiResolvedRuleSet,
+            _rule_usage: AiRuleRunUsage,
+            _provider_turns: u32,
+            _total_tool_calls: u32,
+        ) -> Result<AiRunLease, AiError> {
+            if result.tool_calls().len() != 1
+                || completed_tool.provider_call_id() != result.tool_calls()[0].call_id()
+            {
+                return Err(AiError::Conflict);
+            }
+            self.automatic_checkpoints.fetch_add(1, Ordering::SeqCst);
+            Ok(lease.test_with_checkpoint(Uuid::new_v4()))
+        }
+    }
+
+    struct TestAutomaticCheckpointControl {
+        consumed: AtomicBool,
+    }
+
+    #[async_trait]
+    impl AiAgentSupervisedCheckpointControl for TestAutomaticCheckpointControl {
+        async fn adopt(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Option<AiAdoptedSupervisedToolBatch>, AiError> {
+            Ok(None)
+        }
+
+        async fn consume(
+            &self,
+            _lease: &AiRunLease,
+            _adopted: &AiAdoptedSupervisedToolBatch,
+        ) -> Result<AiRunLease, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn adopt_automatic(
+            &self,
+            lease: &AiRunLease,
+        ) -> Result<Option<AiAdoptedAutomaticMutationBatch>, AiError> {
+            let checkpoint_id = lease.latest_checkpoint_id().ok_or(AiError::Conflict)?;
+            let result = crate::AiProviderCallResult::test_result(
+                lease,
+                None,
+                "automatic-response",
+                vec![("automatic-call", "test.write", json!({"value": 7}))],
+            );
+            let usage = AiRuleRunUsage::default()
+                .accept_provider_with_web_searches(
+                    result.usage(),
+                    0,
+                    &AiAgentRuleResolution::new(
+                        test_rules(test_scope()),
+                        time::OffsetDateTime::now_utc(),
+                    )?,
+                )
+                .and_then(|usage| {
+                    usage.accept_tool_calls(
+                        1,
+                        &AiAgentRuleResolution::new(
+                            test_rules(test_scope()),
+                            time::OffsetDateTime::now_utc(),
+                        )?,
+                    )
+                })?;
+            let completed = AiPersistedApplicationToolCall::test_completed(
+                lease.clone(),
+                "automatic-call",
+                "test.write",
+                Some(json!({"updated": true})),
+                Some(test_manifest(lease)),
+            );
+            let continuation = AiAgentContinuation::from_persisted_results(
+                ModelContinuation::ProviderResponse {
+                    response_id: "automatic-response".to_owned(),
+                },
+                &[completed],
+                Vec::new(),
+            )?;
+            Ok(Some(AiAdoptedAutomaticMutationBatch::new(
+                crate::AiAdoptedReadOnlyToolBatch::new(
+                    checkpoint_id,
+                    1,
+                    1,
+                    test_scope(),
+                    continuation,
+                    test_rules(test_scope()).fingerprint().to_owned(),
+                    usage,
+                ),
+            )))
+        }
+
+        async fn consume_automatic(
+            &self,
+            lease: &AiRunLease,
+            adopted: &AiAdoptedAutomaticMutationBatch,
+        ) -> Result<AiRunLease, AiError> {
+            if lease.latest_checkpoint_id() != Some(adopted.checkpoint_id())
+                || self.consumed.swap(true, Ordering::SeqCst)
+            {
+                return Err(AiError::Conflict);
+            }
+            Ok(lease.test_without_checkpoint())
+        }
+    }
+
+    struct TestAutomaticPlanner {
+        scope: AiScope,
+        route: AiToolResultEgressRoute,
+        continuation_count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AiSupervisedAgentTurnPlanner for TestAutomaticPlanner {
+        async fn initial_plan(
+            &self,
+            lease: &AiRunLease,
+        ) -> Result<AiSupervisedAgentTurnPlan, AiError> {
+            AiSupervisedAgentTurnPlan::new(
+                AiProviderCallPlan::test_automatic_mutation_plan(lease, self.scope.clone(), false),
+                self.route.clone(),
+                test_rules(self.scope.clone()),
+                false,
+            )
+        }
+
+        async fn continuation_plan(
+            &self,
+            lease: &AiRunLease,
+            _provider_turns: u32,
+            _continuation: AiAgentContinuation,
+        ) -> Result<AiSupervisedAgentTurnPlan, AiError> {
+            self.continuation_count.fetch_add(1, Ordering::SeqCst);
+            AiSupervisedAgentTurnPlan::new(
+                AiProviderCallPlan::test_automatic_mutation_plan(lease, self.scope.clone(), true),
+                self.route.clone(),
+                test_rules(self.scope.clone()),
+                false,
+            )
+        }
+    }
+
     #[async_trait]
     impl AiAgentSupervisedApprovalStager for TestApprovalStager {
         async fn stage(
@@ -1368,7 +1820,7 @@ mod tests {
             AiRuleConstraints {
                 enabled: true,
                 maximum_classification: DataClassification::Restricted,
-                maximum_tool_maturity: ToolMaturity::SupervisedWrite,
+                maximum_tool_maturity: ToolMaturity::AutonomousWrite,
                 approval_requirement: AiRuleApprovalRequirement::DescriptorPolicy,
                 allowed_tool_fingerprints: None,
                 allowed_provider_kinds: None,
@@ -1496,6 +1948,92 @@ mod tests {
                 total_tool_calls: 0,
             })),
         })
+    }
+
+    #[tokio::test]
+    async fn automatic_mutation_checkpoints_once_and_continues_to_final_output() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        let provider = Arc::new(TestProviderExecutor {
+            responses: Mutex::new(VecDeque::from([
+                Ok(crate::AiProviderCallResult::test_result(
+                    &lease,
+                    None,
+                    "automatic-response",
+                    vec![("automatic-call", "test.write", json!({"value": 7}))],
+                )),
+                Ok(crate::AiProviderCallResult::test_result(
+                    &lease,
+                    Some("automatic-response".to_owned()),
+                    "automatic-completed-response",
+                    Vec::new(),
+                )),
+            ])),
+            require_checkpoint_cleared: true,
+            calls: AtomicUsize::new(0),
+        });
+        let checkpoints = Arc::new(TestAutomaticCheckpointWriter {
+            provider_checkpoints: AtomicUsize::new(0),
+            automatic_checkpoints: AtomicUsize::new(0),
+        });
+        let automatic = Arc::new(TestSuccessfulAutomaticExecutor {
+            calls: AtomicUsize::new(0),
+        });
+        let planner = Arc::new(TestAutomaticPlanner {
+            scope: test_scope(),
+            route: test_route(),
+            continuation_count: AtomicUsize::new(0),
+        });
+        let planned = planner
+            .initial_plan(&lease)
+            .await
+            .expect("automatic initial plan should validate");
+        let resolution =
+            AiAgentRuleResolution::new(test_rules(test_scope()), time::OffsetDateTime::now_utc())
+                .expect("automatic test rules should resolve");
+        planned
+            .provider_call
+            .project_supervised_rule_usage(&resolution, AiRuleRunUsage::default(), false)
+            .expect("automatic initial plan should satisfy rules");
+        let coordinator = AiSupervisedAgentCoordinator::new(
+            run.clone(),
+            provider.clone(),
+            Arc::new(TestOutputWriter),
+            checkpoints.clone(),
+            Arc::new(TestAutomaticCheckpointControl {
+                consumed: AtomicBool::new(false),
+            }),
+            Arc::new(TestApprovalStager {
+                calls: AtomicUsize::new(0),
+                saw_checkpoint: AtomicBool::new(false),
+            }),
+            automatic.clone(),
+            unused_resume(),
+            Arc::new(TestRuleResolver),
+            planner.clone(),
+            Arc::new(FixedClock::new(time::OffsetDateTime::now_utc())),
+            limits(),
+        );
+
+        let outcome = coordinator
+            .execute_claimed(&lease)
+            .await
+            .expect("automatic mutation should continue to final output");
+
+        assert!(matches!(
+            outcome,
+            AiSupervisedAgentRunOutcome::Completed {
+                provider_turns: 2,
+                total_tool_calls: 1,
+                ..
+            }
+        ));
+        assert_eq!(automatic.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(checkpoints.provider_checkpoints.load(Ordering::SeqCst), 2);
+        assert_eq!(checkpoints.automatic_checkpoints.load(Ordering::SeqCst), 1);
+        assert_eq!(planner.continuation_count.load(Ordering::SeqCst), 1);
+        assert_eq!(run.final_states(), vec![AiRunState::Completed]);
     }
 
     #[tokio::test]

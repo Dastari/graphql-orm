@@ -687,6 +687,32 @@ pub trait AiAgentCheckpointWriter: Send + Sync {
         provider_turns: u32,
         total_tool_calls: u32,
     ) -> Result<AiRunLease, AiError>;
+
+    /// Persists one exact completed automatic mutation before any provider
+    /// continuation can observe its result.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error unless the exact non-idempotent result is already
+    /// durably complete, protected, egress-authorized, and bound to the
+    /// current provider response, lease, rules, and target authority.
+    #[allow(clippy::too_many_arguments)]
+    async fn persist_automatic_mutation_batch(
+        &self,
+        _lease: &AiRunLease,
+        _result: &AiProviderCallResult,
+        _completed_tool: &AiPersistedApplicationToolCall,
+        _continuation: &AiAgentContinuation,
+        _scope: &AiScope,
+        _correlation_id: &str,
+        _route: &AiToolResultEgressRoute,
+        _rules: &AiResolvedRuleSet,
+        _rule_usage: AiRuleRunUsage,
+        _provider_turns: u32,
+        _total_tool_calls: u32,
+    ) -> Result<AiRunLease, AiError> {
+        Err(AiError::Conflict)
+    }
 }
 
 /// Protected state recovered from one exact completed read-only tool batch.
@@ -757,6 +783,61 @@ impl AiAdoptedReadOnlyToolBatch {
     /// Cumulative authoritative rule-budget usage through this checkpoint.
     pub const fn rule_usage(&self) -> AiRuleRunUsage {
         self.rule_usage
+    }
+
+    pub(crate) fn continuation(&self) -> &AiAgentContinuation {
+        &self.continuation
+    }
+}
+
+/// Current-authority proof for one completed automatic mutation result.
+///
+/// This is deliberately distinct from a read-only tool-batch proof. It binds
+/// one exact non-idempotent result that was durably checkpointed after the
+/// effect, and permits only one checkpoint consumption before continuation.
+/// It never authorizes executing or replaying the mutation.
+#[derive(Clone, Debug)]
+pub struct AiAdoptedAutomaticMutationBatch {
+    inner: AiAdoptedReadOnlyToolBatch,
+}
+
+impl AiAdoptedAutomaticMutationBatch {
+    pub(crate) const fn new(inner: AiAdoptedReadOnlyToolBatch) -> Self {
+        Self { inner }
+    }
+
+    /// Immutable automatic-mutation checkpoint selected for adoption.
+    pub const fn checkpoint_id(&self) -> Uuid {
+        self.inner.checkpoint_id()
+    }
+
+    /// Accepted provider turns preceding the adopted result.
+    pub const fn provider_turns(&self) -> u32 {
+        self.inner.provider_turns()
+    }
+
+    /// Completed tool-call count through the adopted result.
+    pub const fn total_tool_calls(&self) -> u32 {
+        self.inner.total_tool_calls()
+    }
+
+    /// Application scope reauthorized during adoption.
+    pub fn scope(&self) -> &AiScope {
+        self.inner.scope()
+    }
+
+    /// Exact current hierarchical-rule fingerprint.
+    pub fn rule_fingerprint(&self) -> &str {
+        self.inner.rule_fingerprint()
+    }
+
+    /// Cumulative authoritative rule usage through this checkpoint.
+    pub const fn rule_usage(&self) -> AiRuleRunUsage {
+        self.inner.rule_usage()
+    }
+
+    pub(crate) fn continuation(&self) -> &AiAgentContinuation {
+        self.inner.continuation()
     }
 }
 

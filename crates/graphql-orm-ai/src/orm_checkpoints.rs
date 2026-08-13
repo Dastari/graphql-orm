@@ -19,13 +19,43 @@ use crate::orm_runs::{
 };
 use crate::persistence::*;
 use crate::{
-    AiAccessPolicy, AiAdoptedReadOnlyToolBatch, AiAgentCheckpointAdopter, AiAgentCheckpointWriter,
-    AiAgentContinuation, AiAgentRuleResolver, AiContentProtectionPolicy,
+    AiAccessPolicy, AiAdoptedAutomaticMutationBatch, AiAdoptedClassifiedMutationBatch,
+    AiAdoptedReadOnlyToolBatch, AiAgentCheckpointAdopter, AiAgentCheckpointWriter,
+    AiAgentContinuation, AiAgentRuleResolver, AiApprovalRule, AiContentProtectionPolicy,
     AiContentProtectionPolicyResolver, AiContentProtector, AiEgressManifest, AiError,
     AiPersistedApplicationToolCall, AiProviderCallResult, AiResolvedRuleSet, AiRuleRunUsage,
     AiRunLease, AiScope, AiSessionAction, AiToolResultEgressRoute, ContentProtectionContext,
-    ModelInputBlock, OrmAiRunService, ProtectedContentEnvelope, ProviderKind,
+    ModelInputBlock, OrmAiRunService, ProtectedContentEnvelope, ProviderKind, ToolMaturity,
 };
+
+#[derive(Clone, Copy)]
+enum CompletedToolCheckpointClass {
+    ReadOnly,
+    AutomaticMutation,
+}
+
+impl CompletedToolCheckpointClass {
+    const fn checkpoint_kind(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "tool_batch_persisted",
+            Self::AutomaticMutation => "automatic_mutation_batch_persisted",
+        }
+    }
+
+    const fn durable_risk(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::AutomaticMutation => "non_idempotent_write",
+        }
+    }
+
+    const fn rule_binding(self) -> (ToolMaturity, AiApprovalRule) {
+        match self {
+            Self::ReadOnly => (ToolMaturity::ReadOnly, AiApprovalRule::None),
+            Self::AutomaticMutation => (ToolMaturity::AutonomousWrite, AiApprovalRule::None),
+        }
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -935,6 +965,89 @@ impl OrmAiCoordinatorCheckpointService {
             .await
     }
 
+    /// Reopens one exact completed automatic-mutation result under current
+    /// authority without replaying its non-idempotent resolver.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error unless the latest checkpoint is the exact
+    /// automatic-mutation kind and every provider, tool, result, egress,
+    /// principal, rule, and lease binding remains valid.
+    pub async fn adopt_automatic_mutation_batch(
+        &self,
+        lease: &AiRunLease,
+    ) -> Result<Option<AiAdoptedAutomaticMutationBatch>, AiError> {
+        match lease.latest_checkpoint_id() {
+            Some(checkpoint_id) => self
+                .adopt(
+                    lease,
+                    checkpoint_id,
+                    CompletedToolCheckpointClass::AutomaticMutation,
+                )
+                .await
+                .map(AiAdoptedAutomaticMutationBatch::new)
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Selects the exact durable classified-mutation checkpoint kind and then
+    /// applies that kind's closed validation contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for missing, unknown, mismatched, malformed, or
+    /// unauthorized checkpoint state. A failed proof is never retried as a
+    /// different checkpoint class.
+    pub async fn adopt_classified_mutation_batch(
+        &self,
+        lease: &AiRunLease,
+    ) -> Result<Option<AiAdoptedClassifiedMutationBatch>, AiError> {
+        let Some(checkpoint_id) = lease.latest_checkpoint_id() else {
+            return Ok(None);
+        };
+        let checkpoint =
+            AiRunCheckpointRecord::find_by_id(self.run_service.database(), &checkpoint_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        if checkpoint.run_id != lease.run_id().0 {
+            return Err(AiError::Conflict);
+        }
+        match checkpoint.checkpoint_kind.as_str() {
+            "supervised_tool_batch_persisted" => self
+                .adopt_supervised_tool_batch(lease)
+                .await
+                .map(|adopted| adopted.map(AiAdoptedClassifiedMutationBatch::Supervised)),
+            "automatic_mutation_batch_persisted" => self
+                .adopt_automatic_mutation_batch(lease)
+                .await
+                .map(|adopted| adopted.map(AiAdoptedClassifiedMutationBatch::Automatic)),
+            _ => Err(AiError::Conflict),
+        }
+    }
+
+    /// Atomically consumes an adopted automatic-mutation checkpoint before
+    /// any provider continuation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error unless the exact checkpoint remains current under
+    /// the running lease's row-version fence.
+    pub async fn consume_automatic_mutation_before_provider(
+        &self,
+        lease: &AiRunLease,
+        adopted: &AiAdoptedAutomaticMutationBatch,
+    ) -> Result<AiRunLease, AiError> {
+        self.run_service
+            .consume_adoption_checkpoint(
+                lease,
+                adopted.checkpoint_id(),
+                CompletedToolCheckpointClass::AutomaticMutation.checkpoint_kind(),
+            )
+            .await
+    }
+
     async fn adopt_supervised(
         &self,
         lease: &AiRunLease,
@@ -1347,13 +1460,20 @@ impl OrmAiCoordinatorCheckpointService {
         {
             return Err(AiError::Conflict);
         }
+        let completed_class = match checkpoint_kind {
+            "tool_batch_persisted" => Some(CompletedToolCheckpointClass::ReadOnly),
+            "automatic_mutation_batch_persisted" => {
+                Some(CompletedToolCheckpointClass::AutomaticMutation)
+            }
+            _ => None,
+        };
         let completed_tool_count = match checkpoint_kind {
             "provider_turn_persisted" if completed_tools.is_empty() && continuation.is_none() => {
                 total_tool_calls
                     .checked_sub(u32::try_from(result.tool_calls().len()).unwrap_or(u32::MAX))
                     .ok_or(AiError::Conflict)?
             }
-            "tool_batch_persisted"
+            "tool_batch_persisted" | "automatic_mutation_batch_persisted"
                 if !completed_tools.is_empty()
                     && continuation.is_some()
                     && completed_tools.len() == result.tool_calls().len() =>
@@ -1378,6 +1498,16 @@ impl OrmAiCoordinatorCheckpointService {
         let current_rules = self.rule_resolver.resolve_rules(lease, scope).await?;
         if current_rules.rules().fingerprint() != rules.fingerprint()
             || rule_usage.validate(&current_rules).is_err()
+            || completed_class.is_some_and(|class| {
+                let (maturity, approval) = class.rule_binding();
+                result.tool_calls().iter().any(|tool| {
+                    current_rules.rules().constrain_tool(
+                        tool.tool_fingerprint(),
+                        maturity,
+                        approval,
+                    ) != Some(approval)
+                })
+            })
         {
             return Err(AiError::ReauthorizationFailed);
         }
@@ -1415,6 +1545,25 @@ impl OrmAiCoordinatorCheckpointService {
                 || !unique_manifest_hashes.insert(manifest.stable_hash())
             {
                 return Err(AiError::Conflict);
+            }
+            if let Some(class) = completed_class {
+                let call =
+                    AiToolCallRecord::find_by_id(self.run_service.database(), &persisted.id().0)
+                        .await
+                        .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                        .ok_or(AiError::NotFound)?;
+                if call.run_id != lease.run_id().0
+                    || call.lease_generation != lease.lease_generation()
+                    || call.provider_call_id != expected.call_id()
+                    || call.tool_id != expected.tool_id().as_str()
+                    || call.tool_fingerprint != expected.tool_fingerprint()
+                    || call.risk != class.durable_risk()
+                    || call.approval_id.is_some()
+                    || !matches!(call.state.as_str(), "completed" | "execution_failed")
+                    || call.completed_at.is_none()
+                {
+                    return Err(AiError::Conflict);
+                }
             }
             protected_tool_values.push(persisted.checkpoint_value().ok_or(AiError::EgressDenied)?);
             prepared_tools.push(PreparedCoordinatorCheckpointTool {
@@ -1477,6 +1626,15 @@ impl OrmAiCoordinatorCheckpointService {
             || current.reference() != lease.principal_reference()
             || final_rules.rules().fingerprint() != rules.fingerprint()
             || rule_usage.validate(&final_rules).is_err()
+            || completed_class.is_some_and(|class| {
+                let (maturity, approval) = class.rule_binding();
+                result.tool_calls().iter().any(|tool| {
+                    final_rules
+                        .rules()
+                        .constrain_tool(tool.tool_fingerprint(), maturity, approval)
+                        != Some(approval)
+                })
+            })
         {
             return Err(AiError::ReauthorizationFailed);
         }
@@ -1595,6 +1753,7 @@ impl OrmAiCoordinatorCheckpointService {
         &self,
         lease: &AiRunLease,
         checkpoint_id: Uuid,
+        class: CompletedToolCheckpointClass,
     ) -> Result<AiAdoptedReadOnlyToolBatch, AiError> {
         let session =
             AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
@@ -1624,7 +1783,7 @@ impl OrmAiCoordinatorCheckpointService {
             .as_ref()
             .ok_or(AiError::Conflict)?;
         if checkpoint.run_id != lease.run_id().0
-            || checkpoint.checkpoint_kind != "tool_batch_persisted"
+            || checkpoint.checkpoint_kind != class.checkpoint_kind()
             || checkpoint.assistant_message_id.is_some()
         {
             return Err(AiError::Conflict);
@@ -1680,7 +1839,7 @@ impl OrmAiCoordinatorCheckpointService {
         let payload: CoordinatorCheckpointPayload =
             serde_json::from_value(opened).map_err(|_| AiError::PersistenceFailed)?;
         if payload.format_version != 2
-            || payload.checkpoint_kind != "tool_batch_persisted"
+            || payload.checkpoint_kind != class.checkpoint_kind()
             || payload.scope != scope
             || payload.rule_fingerprint.len() != 64
             || payload.rule_usage.provider_calls() != u64::from(payload.provider_turns)
@@ -1728,7 +1887,8 @@ impl OrmAiCoordinatorCheckpointService {
         match (&stateless_evidence, provider_response_id) {
             (None, Some(_)) => {}
             (Some(evidence), None)
-                if provider.previous_response_id.is_none()
+                if matches!(class, CompletedToolCheckpointClass::ReadOnly)
+                    && provider.previous_response_id.is_none()
                     && evidence.provider_turns == payload.provider_turns
                     && u32::try_from(evidence.tools.len()).ok()
                         == Some(payload.total_tool_calls)
@@ -1824,7 +1984,7 @@ impl OrmAiCoordinatorCheckpointService {
                 || call.tool_id != provider_tool.tool_id
                 || call.tool_fingerprint != provider_tool.tool_fingerprint
                 || call.argument_hash != canonical_json_hash(&provider_tool.arguments)?
-                || call.risk != "read_only"
+                || call.risk != class.durable_risk()
                 || call.approval_id.is_some()
                 || call.state != tool.state
                 || !matches!(call.state.as_str(), "completed" | "execution_failed")
@@ -2059,6 +2219,13 @@ impl OrmAiCoordinatorCheckpointService {
             || current.reference() != lease.principal_reference()
             || current_rules.rules().fingerprint() != payload.rule_fingerprint
             || payload.rule_usage.validate(&current_rules).is_err()
+            || provider.tool_calls.iter().any(|tool| {
+                let (maturity, approval) = class.rule_binding();
+                current_rules
+                    .rules()
+                    .constrain_tool(&tool.tool_fingerprint, maturity, approval)
+                    != Some(approval)
+            })
         {
             return Err(AiError::ReauthorizationFailed);
         }
@@ -2135,6 +2302,40 @@ impl AiAgentCheckpointWriter for OrmAiCoordinatorCheckpointService {
         )
         .await
     }
+
+    async fn persist_automatic_mutation_batch(
+        &self,
+        lease: &AiRunLease,
+        result: &AiProviderCallResult,
+        completed_tool: &AiPersistedApplicationToolCall,
+        continuation: &AiAgentContinuation,
+        scope: &AiScope,
+        correlation_id: &str,
+        route: &AiToolResultEgressRoute,
+        rules: &AiResolvedRuleSet,
+        rule_usage: AiRuleRunUsage,
+        provider_turns: u32,
+        total_tool_calls: u32,
+    ) -> Result<AiRunLease, AiError> {
+        if result.tool_calls().len() != 1 {
+            return Err(AiError::Conflict);
+        }
+        self.persist(
+            lease,
+            result,
+            scope,
+            correlation_id,
+            route,
+            rules,
+            rule_usage,
+            provider_turns,
+            total_tool_calls,
+            CompletedToolCheckpointClass::AutomaticMutation.checkpoint_kind(),
+            std::slice::from_ref(completed_tool),
+            Some(continuation),
+        )
+        .await
+    }
 }
 
 #[async_trait]
@@ -2144,7 +2345,10 @@ impl AiAgentCheckpointAdopter for OrmAiCoordinatorCheckpointService {
         lease: &AiRunLease,
     ) -> Result<Option<AiAdoptedReadOnlyToolBatch>, AiError> {
         match lease.latest_checkpoint_id() {
-            Some(checkpoint_id) => self.adopt(lease, checkpoint_id).await.map(Some),
+            Some(checkpoint_id) => self
+                .adopt(lease, checkpoint_id, CompletedToolCheckpointClass::ReadOnly)
+                .await
+                .map(Some),
             None => Ok(None),
         }
     }
