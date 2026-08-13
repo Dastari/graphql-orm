@@ -2419,6 +2419,18 @@ impl AiProviderCallExecutor {
                     .await?,
                 None,
             ),
+            crate::AiProviderSessionRunDisposition::Reclaimed(claim) => {
+                if claim.session_id() != lease.session_id()
+                    || claim.run_id() != lease.run_id()
+                    || claim.attempt_id() != lease.attempt_id()
+                    || claim.run_lease_generation() != lease.lease_generation()
+                    || claim.descriptor() != session_plan.descriptor()
+                    || claim.transcript_fingerprint() != session_plan.transcript_fingerprint()
+                {
+                    return Err(AiError::Conflict);
+                }
+                (*claim, None)
+            }
             crate::AiProviderSessionRunDisposition::New => {
                 let cursor = self
                     .runtime
@@ -3669,11 +3681,19 @@ mod tests {
                     application_audit_ref: Some("application-audit-automatic-1".to_owned()),
                 });
             }
-            Ok(ToolGraphqlResponse {
-                data: json!({
+            let data = if request.document.contains(" updateRecord(") {
+                json!({"updateRecord": {
                     "subject": subject,
                     "recordId": request.variables.get("recordId"),
-                }),
+                }})
+            } else {
+                json!({"record": {
+                    "subject": subject,
+                    "recordId": request.variables.get("recordId"),
+                }})
+            };
+            Ok(ToolGraphqlResponse {
+                data,
                 error_codes: Vec::new(),
                 application_audit_ref: Some("application-audit-1".to_owned()),
             })
@@ -3697,13 +3717,15 @@ mod tests {
             if !self.0.load(Ordering::SeqCst) {
                 return Ok(None);
             }
-            let result_id = result.get("recordId");
+            let result_id = result
+                .get("record")
+                .and_then(|record| record.get("recordId"));
             if result_id != request.variables.get("recordId") {
                 return Ok(None);
             }
-            Ok(Some(json!({
+            Ok(Some(json!({"record": {
                 "recordId": result_id.cloned().unwrap_or_default(),
-            })))
+            }})))
         }
     }
 
@@ -4375,20 +4397,26 @@ mod tests {
             "record-v1",
             AiDisclosureShape::object(
                 AiDisclosureRule::exportable(DataClassification::Internal),
-                [
-                    (
-                        "recordId".to_owned(),
-                        AiDisclosureShape::scalar(AiDisclosureRule::exportable(
-                            DataClassification::Internal,
-                        )),
+                [(
+                    "record".to_owned(),
+                    AiDisclosureShape::object(
+                        AiDisclosureRule::exportable(DataClassification::Internal),
+                        [
+                            (
+                                "recordId".to_owned(),
+                                AiDisclosureShape::scalar(AiDisclosureRule::exportable(
+                                    DataClassification::Internal,
+                                )),
+                            ),
+                            (
+                                "subject".to_owned(),
+                                AiDisclosureShape::scalar(AiDisclosureRule::exportable(
+                                    DataClassification::Internal,
+                                )),
+                            ),
+                        ],
                     ),
-                    (
-                        "subject".to_owned(),
-                        AiDisclosureShape::scalar(AiDisclosureRule::exportable(
-                            DataClassification::Internal,
-                        )),
-                    ),
-                ],
+                )],
             ),
         )
         .expect("tool disclosure should validate");
@@ -4432,20 +4460,26 @@ mod tests {
             "record-update-v1",
             AiDisclosureShape::object(
                 AiDisclosureRule::exportable(DataClassification::Internal),
-                [
-                    (
-                        "recordId".to_owned(),
-                        AiDisclosureShape::scalar(AiDisclosureRule::exportable(
-                            DataClassification::Internal,
-                        )),
+                [(
+                    "updateRecord".to_owned(),
+                    AiDisclosureShape::object(
+                        AiDisclosureRule::exportable(DataClassification::Internal),
+                        [
+                            (
+                                "recordId".to_owned(),
+                                AiDisclosureShape::scalar(AiDisclosureRule::exportable(
+                                    DataClassification::Internal,
+                                )),
+                            ),
+                            (
+                                "subject".to_owned(),
+                                AiDisclosureShape::scalar(AiDisclosureRule::exportable(
+                                    DataClassification::Internal,
+                                )),
+                            ),
+                        ],
                     ),
-                    (
-                        "subject".to_owned(),
-                        AiDisclosureShape::scalar(AiDisclosureRule::exportable(
-                            DataClassification::Internal,
-                        )),
-                    ),
-                ],
+                )],
             ),
         )
         .expect("write disclosure should validate");
@@ -8638,7 +8672,7 @@ mod tests {
             .expect("reviewed browser preview should be present");
         assert_eq!(preview.run_id, fixture.lease.run_id().0);
         assert_eq!(preview.tool_id, "records.read");
-        assert_eq!(preview.preview.0, json!({"recordId": "54"}));
+        assert_eq!(preview.preview.0, json!({"record": {"recordId": "54"}}));
         assert!(matches!(
             preview_service
                 .result_preview(

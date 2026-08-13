@@ -1326,6 +1326,7 @@ pub struct OrmAiConsequentialToolCallService {
     application_tools: OrmAiApplicationToolCallService,
     approval_service: OrmAiApprovalService,
     preview_builder: Arc<dyn AiCanonicalActionPreviewBuilder>,
+    provider_session_service: Option<Arc<dyn crate::AiProviderSessionService>>,
 }
 
 impl OrmAiConsequentialToolCallService {
@@ -1350,7 +1351,18 @@ impl OrmAiConsequentialToolCallService {
             ),
             approval_service,
             preview_builder,
+            provider_session_service: None,
         }
+    }
+
+    /// Enables exact retained-session parking across approval waits.
+    #[must_use]
+    pub fn with_provider_session_service(
+        mut self,
+        service: Arc<dyn crate::AiProviderSessionService>,
+    ) -> Self {
+        self.provider_session_service = Some(service);
+        self
     }
 
     /// Stages one exact provider-requested supervised application mutation and
@@ -1380,6 +1392,11 @@ impl OrmAiConsequentialToolCallService {
         recent_mfa_required: bool,
     ) -> Result<AiRequestedConsequentialToolCall, AiError> {
         validate_provider_binding(&self.application_tools, lease, provider_result, &context)?;
+        if provider_result.provider_session_claim().is_some()
+            && self.provider_session_service.is_none()
+        {
+            return Err(AiError::RuntimeNotReady);
+        }
         let provider_call = provider_result
             .tool_calls()
             .get(context.tool_call_index)
@@ -1503,7 +1520,8 @@ impl OrmAiConsequentialToolCallService {
                 provider_call.arguments().clone(),
             )
             .await?;
-        self.application_tools
+        let active_lease = self
+            .application_tools
             .run_service
             .begin_tool_call(
                 lease,
@@ -1537,10 +1555,149 @@ impl OrmAiConsequentialToolCallService {
                 },
             )
             .await?;
+        let approval_id = AiApprovalId::new();
+        let parked_result = if let (Some(service), Some(_)) = (
+            &self.provider_session_service,
+            provider_result.provider_session_claim(),
+        ) {
+            async {
+                let checkpoint_id = active_lease
+                    .latest_checkpoint_id()
+                    .ok_or(AiError::Conflict)?;
+                let checkpoint = AiRunCheckpointRecord::find_by_id(
+                    self.application_tools.run_service.database(),
+                    &checkpoint_id,
+                )
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::Conflict)?;
+                let request = provider_result.provider_session_wait_park_request(
+                    &active_lease,
+                    crate::AiProviderSessionWaitIdentity::approval(approval_id),
+                    checkpoint.id,
+                    checkpoint.checkpoint_hash,
+                )?;
+                service
+                    .park_for_wait(&active_lease, request)
+                    .await
+                    .map(Some)
+            }
+            .await
+        } else {
+            Ok(None)
+        };
+        let parked = match parked_result {
+            Ok(parked) => parked,
+            Err(error) => {
+                return match self
+                    .mark_consequential_recovery(
+                        &active_lease,
+                        id,
+                        provider_result.provider_response_id().map(str::to_owned),
+                    )
+                    .await
+                {
+                    Ok(_) => Err(AiError::Conflict),
+                    Err(_) => Err(error),
+                };
+            }
+        };
+        let cancelled = match self
+            .application_tools
+            .run_service
+            .cancellation(&active_lease)
+            .await
+        {
+            Ok(cancelled) => cancelled.is_some(),
+            Err(error) => {
+                if let (Some(service), Some(parked)) =
+                    (&self.provider_session_service, parked.as_ref())
+                {
+                    let _ = service
+                        .require_parked_wait_cleanup(
+                            parked,
+                            "provider_session_approval_cancellation_unknown",
+                        )
+                        .await;
+                }
+                return match self
+                    .mark_consequential_recovery(
+                        &active_lease,
+                        id,
+                        provider_result.provider_response_id().map(str::to_owned),
+                    )
+                    .await
+                {
+                    Ok(_) => Err(AiError::Conflict),
+                    Err(_) => Err(error),
+                };
+            }
+        };
+        if cancelled {
+            if let (Some(service), Some(parked)) = (&self.provider_session_service, parked.as_ref())
+            {
+                let _ = service
+                    .require_parked_wait_cleanup(parked, "provider_session_approval_wait_cancelled")
+                    .await;
+            }
+            return match self
+                .mark_consequential_recovery(
+                    &active_lease,
+                    id,
+                    provider_result.provider_response_id().map(str::to_owned),
+                )
+                .await
+            {
+                Ok(_) => Err(AiError::Conflict),
+                Err(error) => Err(error),
+            };
+        }
         let requested = self
             .approval_service
-            .request_approval(lease, binding, preview, expires_at, recent_mfa_required)
-            .await?;
+            .request_approval_with_id(
+                &active_lease,
+                approval_id,
+                binding,
+                preview,
+                expires_at,
+                recent_mfa_required,
+            )
+            .await;
+        let requested = match requested {
+            Ok(requested) => requested,
+            Err(error) => {
+                if let (Some(service), Some(parked)) =
+                    (&self.provider_session_service, parked.as_ref())
+                {
+                    let _ = service
+                        .require_parked_wait_cleanup(
+                            parked,
+                            "provider_session_approval_staging_failed",
+                        )
+                        .await;
+                }
+                return match self
+                    .mark_consequential_recovery(
+                        &active_lease,
+                        id,
+                        provider_result.provider_response_id().map(str::to_owned),
+                    )
+                    .await
+                {
+                    Ok(_) => Err(AiError::Conflict),
+                    Err(_) => Err(error),
+                };
+            }
+        };
+        if let (Some(service), Some(parked)) = (&self.provider_session_service, parked.as_ref()) {
+            // This confirmation is repairable from the exact durable approval
+            // graph if the process stops after the waiting transaction wins.
+            // The unconfirmed parked row and exact WaitingApproval graph are
+            // durable. Restore reconciliation can confirm this exact pair
+            // without replaying the provider call if this best-effort call is
+            // ambiguous.
+            let _ = service.confirm_parked_wait(parked).await;
+        }
         Ok(AiRequestedConsequentialToolCall {
             tool_call_id: id,
             approval_id: requested.approval_id(),

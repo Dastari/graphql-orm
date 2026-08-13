@@ -470,6 +470,7 @@ mod service {
             let expected_owner_kind = expected_owner.0;
             let expected_owner_subject = expected_owner.1.to_owned();
             let lease = lease.clone();
+            let claim_principal_reference = lease.principal_reference().clone();
             let planned = planned.clone();
             self.database
                 .transaction(TransactionMode::StateMachine, move |tx| {
@@ -533,6 +534,23 @@ mod service {
                         }
                         let state = AiProviderSessionState::from_persisted(&binding.state)
                             .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        if state == AiProviderSessionState::Claimed
+                            && binding.claimed_run_id == Some(lease.run_id().0)
+                            && binding.claimed_attempt_id == Some(lease.attempt_id())
+                            && binding.claimed_run_lease_generation
+                                == Some(lease.lease_generation())
+                            && descriptor_from_record(binding).map_err(ai_error_to_orm)?
+                                == *planned.descriptor()
+                            && binding.transcript_fingerprint == planned.transcript_fingerprint()
+                            && binding
+                                .claim_expires_at
+                                .is_some_and(|expiry| expiry > now.unix_timestamp())
+                        {
+                            return claim_from_record(binding, &claim_principal_reference)
+                                .map(Box::new)
+                                .map(AiProviderSessionRunDisposition::Reclaimed)
+                                .map_err(ai_error_to_orm);
+                        }
                         if state == AiProviderSessionState::Active
                             && descriptor_from_record(binding).map_err(ai_error_to_orm)?
                                 == *planned.descriptor()
@@ -1498,6 +1516,62 @@ mod service {
                             binding.id,
                             "provider_session_wait_graph_confirmed",
                             run.id,
+                            now,
+                        )
+                        .await
+                    })
+                })
+                .await
+                .map_err(map_transaction)
+        }
+
+        async fn require_parked_wait_cleanup(
+            &self,
+            parked: &AiProviderSessionParkedWait,
+            reason_code: &str,
+        ) -> Result<(), AiError> {
+            validate_reason_code(reason_code)?;
+            let now = canonical_second(self.clock.now());
+            let parked = parked.clone();
+            let reason_code = reason_code.to_owned();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let binding = tx
+                            .find_by_id::<AiProviderSessionBindingRecord>(&parked.binding_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        validate_parked_proof(&binding, &parked)?;
+                        let outcome = tx
+                            .compare_and_swap::<AiProviderSessionBindingRecord>(
+                                &binding.id,
+                                binding.row_version,
+                                AiProviderSessionBindingRecordWhereInput {
+                                    state: Some(StringFilter {
+                                        eq: Some(
+                                            AiProviderSessionState::ParkedWait.as_str().to_owned(),
+                                        ),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                },
+                                cleanup_required_update(
+                                    reason_code.clone(),
+                                    parked.source_run_id.0,
+                                ),
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        append_audit(
+                            tx,
+                            "ai.provider_session.cleanup_required",
+                            binding.id,
+                            &reason_code,
+                            parked.source_run_id.0,
                             now,
                         )
                         .await
@@ -3714,6 +3788,44 @@ mod service {
             assert!(matches!(
                 fixture.service.reclaim_after_wait(&fixture.lease).await,
                 Err(AiError::Conflict | AiError::ReauthorizationFailed)
+            ));
+        }
+
+        #[tokio::test]
+        async fn failed_wait_handoff_immediately_quarantines_the_exact_park() {
+            let fixture = parked_wait_fixture().await;
+            let parked = fixture
+                .service
+                .park_for_wait(&fixture.lease, fixture.request.clone())
+                .await
+                .expect("exact provider session should park");
+            let mut swapped = parked.clone();
+            swapped.park_generation += 1;
+            assert!(matches!(
+                fixture
+                    .service
+                    .require_parked_wait_cleanup(
+                        &swapped,
+                        "provider_session_approval_staging_failed",
+                    )
+                    .await,
+                Err(AiError::Conflict)
+            ));
+            fixture
+                .service
+                .require_parked_wait_cleanup(&parked, "provider_session_approval_staging_failed")
+                .await
+                .expect("exact failed handoff should require cleanup immediately");
+            let cleanup = fixture
+                .service
+                .claim_cleanup("failed-wait-handoff-cleaner")
+                .await
+                .expect("cleanup scan should succeed")
+                .expect("failed wait handoff should be immediately eligible");
+            assert_eq!(cleanup.binding_id(), fixture.binding_id);
+            assert!(matches!(
+                fixture.service.confirm_parked_wait(&parked).await,
+                Err(AiError::Conflict)
             ));
         }
 

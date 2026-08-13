@@ -393,6 +393,31 @@ impl OrmAiApprovalService {
         expires_at: OffsetDateTime,
         recent_mfa_required: bool,
     ) -> Result<AiRequestedApproval, AiError> {
+        self.request_approval_with_id(
+            lease,
+            AiApprovalId::new(),
+            binding,
+            preview,
+            expires_at,
+            recent_mfa_required,
+        )
+        .await
+    }
+
+    pub(crate) async fn request_approval_with_id(
+        &self,
+        lease: &AiRunLease,
+        approval_id: AiApprovalId,
+        binding: AiApprovalBinding,
+        preview: AiCanonicalActionPreview,
+        expires_at: OffsetDateTime,
+        recent_mfa_required: bool,
+    ) -> Result<AiRequestedApproval, AiError> {
+        if approval_id.0.is_nil() {
+            return Err(AiError::InvalidInput(
+                "approval identity is invalid".to_owned(),
+            ));
+        }
         binding.validate(&preview)?;
         if binding.session_id != lease.session_id()
             || binding.principal_reference_fingerprint
@@ -426,7 +451,6 @@ impl OrmAiApprovalService {
         let protection = self
             .protection_policy(resolved.principal(), &binding.scope)
             .await?;
-        let approval_id = AiApprovalId::new();
         let canonical_resources = canonical_resources(&binding.resources);
         let canonical_preview = canonical_preview(&preview);
         let protected_resources = self

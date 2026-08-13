@@ -519,6 +519,8 @@ pub enum AiProviderSessionRunDisposition {
     New,
     /// The exact active binding can be claimed and resumed.
     Resume(Box<AiProviderSessionBindingView>),
+    /// A confirmed wait was already reclaimed for this exact run fence.
+    Reclaimed(Box<AiProviderSessionClaim>),
     /// Exact provider absence was proven and this run may replace the
     /// tombstone once.
     RebindAllowed(Box<AiProviderSessionRebindAuthorization>),
@@ -1402,6 +1404,16 @@ pub trait AiProviderSessionService: Send + Sync {
     async fn confirm_parked_wait(
         &self,
         _parked: &AiProviderSessionParkedWait,
+    ) -> Result<(), AiError> {
+        Err(AiError::RuntimeNotReady)
+    }
+
+    /// Quarantines one exact parked cursor after its durable wait handoff is
+    /// known to have failed.
+    async fn require_parked_wait_cleanup(
+        &self,
+        _parked: &AiProviderSessionParkedWait,
+        _reason_code: &str,
     ) -> Result<(), AiError> {
         Err(AiError::RuntimeNotReady)
     }
