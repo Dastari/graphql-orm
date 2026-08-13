@@ -3573,6 +3573,7 @@ mod tests {
     use graphql_orm::prelude::SqliteBackend;
 
     use super::*;
+    use crate::{AiProviderSessionBindingRecord, AiSessionRetentionService};
 
     const TEST_NOW: i64 = 1_900_000_000;
 
@@ -3708,6 +3709,26 @@ mod tests {
         confirmations: AtomicUsize,
         cleanup_requests: AtomicUsize,
         invalidate_registration_after_park: AtomicBool,
+    }
+
+    struct EmptySupervisedCheckpointControl;
+
+    #[async_trait]
+    impl crate::AiAgentSupervisedCheckpointControl for EmptySupervisedCheckpointControl {
+        async fn adopt(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Option<crate::AiAdoptedSupervisedToolBatch>, AiError> {
+            Ok(None)
+        }
+
+        async fn consume(
+            &self,
+            _lease: &AiRunLease,
+            _adopted: &crate::AiAdoptedSupervisedToolBatch,
+        ) -> Result<AiRunLease, AiError> {
+            Err(AiError::Conflict)
+        }
     }
 
     #[async_trait]
@@ -4722,6 +4743,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_supervised_adapter_adopts_the_same_wait_once() {
+        let fixture = wait_fixture().await;
+        let registered = fixture.register().await;
+        fixture.source.push(fixture.event(1, "wanted"));
+        assert!(matches!(
+            fixture.service.process_next("supervised-wait-worker").await,
+            Ok(AiSubscriptionWaitWorkerOutcome::Queued { .. })
+        ));
+        let claimed = fixture
+            .run_service
+            .claim_next("supervised-resume-worker")
+            .await
+            .expect("supervised fresh attempt claims")
+            .expect("queued wait adoption exists");
+        let lease = fixture
+            .run_service
+            .start(&claimed)
+            .await
+            .expect("supervised fresh attempt starts");
+        let control = AiSupervisedSubscriptionCheckpointControl::new(
+            fixture.service.clone(),
+            Arc::new(EmptySupervisedCheckpointControl),
+        );
+        let adopted = crate::AiAgentSupervisedCheckpointControl::adopt_classified(&control, &lease)
+            .await
+            .expect("classified adoption validates")
+            .expect("subscription checkpoint classifies");
+        let crate::AiAdoptedClassifiedMutationBatch::Subscription(adopted) = adopted else {
+            panic!("wait checkpoint must not be reinterpreted as a mutation checkpoint");
+        };
+        assert_eq!(
+            adopted.checkpoint_id(),
+            lease.latest_checkpoint_id().expect("wait checkpoint")
+        );
+        let consumed = crate::AiAgentSupervisedCheckpointControl::consume_subscription(
+            &control, &lease, &adopted,
+        )
+        .await
+        .expect("supervised wait consumes");
+        assert!(consumed.latest_checkpoint_id().is_none());
+        assert!(matches!(
+            crate::AiAgentSupervisedCheckpointControl::consume_subscription(
+                &control, &consumed, &adopted,
+            )
+            .await,
+            Err(AiError::Conflict | AiError::NotFound)
+        ));
+        let waiter =
+            AiSubscriptionWaiterRecord::find_by_id(&fixture.database, &registered.waiter_id().0)
+                .await
+                .expect("waiter loads")
+                .expect("waiter exists");
+        assert_eq!(waiter.state, "adopted");
+    }
+
+    #[tokio::test]
     async fn sqlite_wait_claims_are_single_worker_fenced() {
         let fixture = wait_fixture().await;
         let registered = fixture.register().await;
@@ -4779,6 +4856,120 @@ mod tests {
             .expect("revoked run loads")
             .expect("revoked run exists");
         assert_eq!(revoked_run.state, AiRunState::Failed.as_str());
+    }
+
+    #[tokio::test]
+    async fn sqlite_restore_and_retention_treat_recovery_waits_as_closed_tombstones() {
+        let fixture = wait_fixture().await;
+        let registered = fixture.register().await;
+        let waiting_restore = crate::OrmAiRestoreFactCollector::new(fixture.database.clone())
+            .collect("subscription-restore-test")
+            .await
+            .expect("waiting restore facts collect");
+        assert_eq!(
+            waiting_restore
+                .audit_statuses()
+                .get(&crate::AiRestoreAuditKind::CoordinatorCheckpoints),
+            Some(&crate::AiRestoreAuditStatus::Invalid { count: 1 })
+        );
+
+        fixture
+            .source
+            .push(AiReplayableSubscriptionSourceItem::ResetRequired);
+        assert!(matches!(
+            fixture.service.process_next("restore-reset-worker").await,
+            Ok(AiSubscriptionWaitWorkerOutcome::RecoveryRequired { .. })
+        ));
+        let recovered_restore = crate::OrmAiRestoreFactCollector::new(fixture.database.clone())
+            .collect("subscription-restore-test")
+            .await
+            .expect("recovery restore facts collect");
+        assert_ne!(
+            recovered_restore
+                .audit_statuses()
+                .get(&crate::AiRestoreAuditKind::CoordinatorCheckpoints),
+            Some(&crate::AiRestoreAuditStatus::Invalid { count: 1 })
+        );
+        assert!(
+            AiProviderSessionBindingRecord::query(fixture.database.pool())
+                .fetch_all()
+                .await
+                .expect("provider bindings load")
+                .is_empty(),
+            "stateless recovery has an exact provider-session absence proof"
+        );
+
+        AiRetentionPolicyRecord::insert(
+            &fixture.database,
+            CreateAiRetentionPolicyRecordInput {
+                scope_key: Some(ai_scope_key(&fixture.scope)),
+                scope_kind: fixture.scope.kind.clone(),
+                scope_id: fixture.scope.id.clone(),
+                tenant_id: fixture.scope.tenant_id.clone(),
+                message_retention_seconds: Some(60),
+                delta_retention_seconds: 60,
+                raw_payload_retention_seconds: 60,
+                audit_retention_seconds: 60,
+                deleted_content_purge_seconds: 60,
+                provider_file_delete_required: true,
+                inbox_event_retention_seconds: Some(60),
+                inbox_minimum_events: Some(1),
+            },
+        )
+        .await
+        .expect("retention policy inserts");
+        let run = AiRunRecord::find_by_id(&fixture.database, &registered.run_id().0)
+            .await
+            .expect("run loads")
+            .expect("run exists");
+        AiSessionRecord::update_by_id(
+            &fixture.database,
+            &run.session_id,
+            UpdateAiSessionRecordInput {
+                state: Some("deleting".to_owned()),
+                deleted_at: Some(Some(TEST_NOW - 120)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("session deletion state updates")
+        .expect("session remains");
+        let retention = crate::OrmAiSessionRetentionService::new(
+            fixture.database.clone(),
+            fixture.clock.clone(),
+            crate::AiSessionRetentionLimits::default(),
+        );
+        for _ in 0..16 {
+            retention
+                .prune_session_content(None)
+                .await
+                .expect("bounded retention pass succeeds");
+            let session = AiSessionRecord::find_by_id(&fixture.database, &run.session_id)
+                .await
+                .expect("session loads")
+                .expect("redacted session shell remains");
+            if session.state == "deleted" {
+                break;
+            }
+        }
+        let session = AiSessionRecord::find_by_id(&fixture.database, &run.session_id)
+            .await
+            .expect("session loads")
+            .expect("redacted session shell remains");
+        assert_eq!(session.state, "deleted");
+        assert!(
+            AiSubscriptionWaiterRecord::find_by_id(&fixture.database, &registered.waiter_id().0,)
+                .await
+                .expect("waiter lookup succeeds")
+                .is_none()
+        );
+        let call = AiToolCallRecord::find_by_id(&fixture.database, &registered.tool_call_id().0)
+            .await
+            .expect("call loads")
+            .expect("redacted call metadata remains");
+        assert!(call.protected_arguments.is_none());
+        assert!(call.protected_result.is_none());
+        assert!(call.payload_purged_at.is_some());
     }
 
     #[tokio::test]

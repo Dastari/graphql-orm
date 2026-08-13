@@ -165,6 +165,7 @@ pub struct AiToolResultEgressRoute {
 }
 
 impl AiToolResultEgressRoute {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn subscription_wait_manifest(
         &self,
         scope: AiScope,
@@ -1721,6 +1722,7 @@ impl OrmAiConsequentialToolCallService {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn converge_approval_staging_failure(
         &self,
         active_lease: &AiRunLease,

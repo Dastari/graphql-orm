@@ -513,6 +513,7 @@ impl AiRuntime {
         })
     }
 
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) async fn preauthorize_compiled_subscription(
         &self,
         principal_reference: &PrincipalReference,
@@ -541,6 +542,7 @@ impl AiRuntime {
         })
     }
 
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn validate_compiled_subscription_event(
         &self,
         descriptor: &AiToolDescriptor,

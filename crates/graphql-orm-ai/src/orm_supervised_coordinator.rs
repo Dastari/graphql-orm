@@ -839,6 +839,7 @@ impl AiSupervisedAgentCoordinator {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_turn(
         &self,
         mut lease: AiRunLease,
@@ -1008,7 +1009,9 @@ impl AiSupervisedAgentCoordinator {
             }
         }
         let classified_bindings = provider_plan.clone();
-        let reclaimed = if adopted.is_some() && provider_session.is_some() {
+        let resumed_checkpoint =
+            adopted.is_some() || adopted_automatic.is_some() || adopted_subscription.is_some();
+        let reclaimed = if resumed_checkpoint && provider_session.is_some() {
             let Some(service) = &self.provider_session_service else {
                 return self
                     .finish_recovery(
@@ -2688,6 +2691,53 @@ mod tests {
         )
     }
 
+    fn adopted_subscription_checkpoint(
+        lease: &AiRunLease,
+        checkpoint_id: Uuid,
+    ) -> crate::AiAdoptedReadOnlyToolBatch {
+        let old_result = crate::AiProviderCallResult::test_result(
+            lease,
+            None,
+            "test-previous-response",
+            vec![(
+                "subscription-call",
+                "test.subscription",
+                json!({"maximumEvents": 1}),
+            )],
+        );
+        let resolution =
+            AiAgentRuleResolution::new(test_rules(test_scope()), time::OffsetDateTime::now_utc())
+                .expect("test rules should resolve");
+        let usage = AiRuleRunUsage::default()
+            .accept_provider_with_web_searches(old_result.usage(), 0, &resolution)
+            .and_then(|usage| usage.accept_tool_calls(1, &resolution))
+            .expect("subscription usage should fit test rules");
+        let completed = AiPersistedApplicationToolCall::test_completed(
+            lease.clone(),
+            "subscription-call",
+            "test.subscription",
+            Some(json!({"event": {"id": "wanted"}})),
+            Some(test_manifest(lease)),
+        );
+        let continuation = AiAgentContinuation::from_persisted_results(
+            ModelContinuation::ProviderResponse {
+                response_id: "test-previous-response".to_owned(),
+            },
+            &[completed],
+            Vec::new(),
+        )
+        .expect("subscription continuation should bind");
+        crate::AiAdoptedReadOnlyToolBatch::new(
+            checkpoint_id,
+            1,
+            1,
+            test_scope(),
+            continuation,
+            resolution.rules().fingerprint().to_owned(),
+            usage,
+        )
+    }
+
     fn limits() -> AiSupervisedAgentCoordinatorLimits {
         limits_with_provider_turns(4)
     }
@@ -3138,6 +3188,75 @@ mod tests {
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
         assert_eq!(planner.continuation_count.load(Ordering::SeqCst), 1);
         assert_eq!(run.final_states(), vec![AiRunState::Completed]);
+    }
+
+    #[tokio::test]
+    async fn resumed_subscription_cannot_bypass_approval_required_mutation_policy() {
+        let base = AiRunLease::test_running(principal_reference());
+        let checkpoint_id = Uuid::new_v4();
+        let claimed = base.test_with_checkpoint(checkpoint_id);
+        let control = Arc::new(TestSubscriptionCheckpointControl {
+            adopted: Mutex::new(Some(adopted_subscription_checkpoint(&base, checkpoint_id))),
+            consumed: AtomicBool::new(false),
+        });
+        let provider = Arc::new(TestProviderExecutor {
+            responses: Mutex::new(VecDeque::from([Ok(
+                crate::AiProviderCallResult::test_result(
+                    &claimed,
+                    Some("test-previous-response".to_owned()),
+                    "subscription-resume-response",
+                    vec![("write-after-event", "test.write", json!({"value": 7}))],
+                ),
+            )])),
+            require_checkpoint_cleared: true,
+            calls: AtomicUsize::new(0),
+        });
+        let run = Arc::new(TestRunControl::new());
+        let planner = Arc::new(TestPlanner {
+            scope: test_scope(),
+            route: test_route(),
+            continuation_count: AtomicUsize::new(0),
+        });
+        let stager = Arc::new(TestApprovalStager {
+            calls: AtomicUsize::new(0),
+            saw_checkpoint: AtomicBool::new(false),
+        });
+        let coordinator = AiSupervisedAgentCoordinator::new(
+            run.clone(),
+            provider.clone(),
+            Arc::new(TestOutputWriter),
+            Arc::new(TestCheckpointWriter {
+                provider_checkpoints: AtomicUsize::new(0),
+            }),
+            control.clone(),
+            stager.clone(),
+            unused_automatic(),
+            unused_resume(),
+            Arc::new(TestRuleResolver),
+            planner.clone(),
+            Arc::new(FixedClock::new(time::OffsetDateTime::now_utc())),
+            limits(),
+        );
+
+        let outcome = coordinator
+            .execute_claimed(&claimed)
+            .await
+            .expect("resumed subscription should retain mutation classification");
+
+        assert!(matches!(
+            outcome,
+            AiSupervisedAgentRunOutcome::WaitingApproval {
+                provider_turns: 2,
+                total_tool_calls: 2,
+                ..
+            }
+        ));
+        assert!(control.consumed.load(Ordering::SeqCst));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(stager.calls.load(Ordering::SeqCst), 1);
+        assert!(stager.saw_checkpoint.load(Ordering::SeqCst));
+        assert_eq!(planner.continuation_count.load(Ordering::SeqCst), 1);
+        assert!(run.final_states().is_empty());
     }
 
     #[tokio::test]

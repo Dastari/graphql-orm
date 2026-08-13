@@ -802,7 +802,9 @@ impl OrmAiSessionRetentionService {
                                         .ok_or_else(|| {
                                             OrmPublicError::new(OrmErrorCode::InternalError)
                                         })?;
-                                    if run.session_id != session.id || !run_state.is_terminal() {
+                                    if run.session_id != session.id
+                                        || !run_state_is_retention_closed(run_state)
+                                    {
                                         proposal_payload_purge_blocked = true;
                                         break;
                                     }
@@ -1508,7 +1510,9 @@ impl OrmAiSessionRetentionService {
                             };
                             let run_state = AiRunState::from_persisted(&run.state)
                                 .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                            if run.session_id != session.id || !run_state.is_terminal() {
+                            if run.session_id != session.id
+                                || !run_state_is_retention_closed(run_state)
+                            {
                                 messages_blocked += 1;
                                 continue;
                             }
@@ -1840,7 +1844,7 @@ impl OrmAiSessionRetentionService {
                                     && run.session_id == session.id
                                     && run.lease_generation >= 0
                                     && AiRunState::from_persisted(&run.state)
-                                        .is_some_and(AiRunState::is_terminal)
+                                        .is_some_and(run_state_is_retention_closed)
                             });
                             if runs_are_bounded && runs_are_terminal {
                                 for run in runs {
@@ -2349,7 +2353,7 @@ impl OrmAiSessionRetentionService {
                                 || run.lease_generation < 0
                                 || run.latest_checkpoint_id.is_some()
                                 || !AiRunState::from_persisted(&run.state)
-                                    .is_some_and(AiRunState::is_terminal)
+                                    .is_some_and(run_state_is_retention_closed)
                         })
                     {
                         return Ok(false);
@@ -2651,7 +2655,7 @@ impl OrmAiSessionRetentionService {
                         let proposal_run = &proposal_runs[0];
                         if proposal_run.session_id != session_id
                             || !AiRunState::from_persisted(&proposal_run.state)
-                                .is_some_and(AiRunState::is_terminal)
+                                .is_some_and(run_state_is_retention_closed)
                         {
                             return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                         }
@@ -2756,7 +2760,9 @@ impl OrmAiSessionRetentionService {
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                         }
-                        if !state.is_terminal() || run.latest_checkpoint_id.is_some() {
+                        if !run_state_is_retention_closed(state)
+                            || run.latest_checkpoint_id.is_some()
+                        {
                             return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                         }
                         run_fences.insert(run.id, run.lease_generation);
@@ -3112,7 +3118,7 @@ impl OrmAiSessionRetentionService {
                                 return Ok(RawCheckpointPurgeOutcome::Blocked);
                             }
                         }
-                        if state.is_terminal() {
+                        if run_state_is_retention_closed(state) {
                             terminal_runs.insert(run.id, run);
                         }
                     }
@@ -4150,7 +4156,10 @@ fn validate_tool_step(
 ) -> Result<(), OrmPublicError> {
     if step.id != call.id
         || step.run_id != call.run_id
-        || step.step_kind != "application_tool"
+        || !matches!(
+            step.step_kind.as_str(),
+            "application_tool" | "subscription_wait"
+        )
         || step.state != call.state
         || step.lease_generation != call.lease_generation
         || step.started_at.is_none()
@@ -4214,6 +4223,10 @@ fn tool_call_state_is_terminal(state: &str) -> bool {
             | "approval_expired"
             | "recovery_required"
     )
+}
+
+fn run_state_is_retention_closed(state: AiRunState) -> bool {
+    state.is_terminal() || state == AiRunState::RecoveryRequired
 }
 
 fn tool_call_result_required(state: &str) -> bool {

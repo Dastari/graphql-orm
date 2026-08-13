@@ -221,6 +221,7 @@ impl AiReplayableSubscriptionEvent {
         &self.data
     }
 
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn checkpoint_value(&self) -> serde_json::Value {
         serde_json::json!({
             "eventId": self.event_id,
@@ -229,6 +230,7 @@ impl AiReplayableSubscriptionEvent {
         })
     }
 
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn from_checkpoint_value(
         value: serde_json::Value,
     ) -> Result<Self, AiSubscriptionSourceError> {
@@ -271,6 +273,7 @@ pub struct AiReplayableSubscriptionOpenRequest {
 }
 
 impl AiReplayableSubscriptionOpenRequest {
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn new(request: ToolGraphqlRequest, position: AiSubscriptionReplayPosition) -> Self {
         Self { request, position }
     }
@@ -349,6 +352,7 @@ pub enum AiSubscriptionSourceError {
 #[derive(Clone)]
 struct RegisteredReplaySource {
     descriptor: AiReplayableSubscriptionSourceDescriptor,
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     source: Arc<dyn AiReplayableSubscriptionSource>,
 }
 
@@ -393,11 +397,14 @@ impl AiReplayableSubscriptionSourceRegistry {
             descriptor.target_id.clone(),
             descriptor.semantic_operation_fingerprint.clone(),
         );
-        if self
-            .sources
-            .insert(key, RegisteredReplaySource { descriptor, source })
-            .is_some()
-        {
+        #[cfg(not(any(feature = "sqlite", feature = "postgres")))]
+        drop(source);
+        let registered = RegisteredReplaySource {
+            descriptor,
+            #[cfg(any(feature = "sqlite", feature = "postgres"))]
+            source,
+        };
+        if self.sources.insert(key, registered).is_some() {
             return Err(AiError::AlreadyExists(
                 "replayable subscription source".to_owned(),
             ));
@@ -408,9 +415,26 @@ impl AiReplayableSubscriptionSourceRegistry {
     /// Returns whether an exact compiled subscription has a registered source.
     /// Discovery only; this does not authorize opening it.
     pub fn contains_compiled(&self, descriptor: &AiToolDescriptor) -> bool {
-        self.resolve_compiled(descriptor).is_ok()
+        let Some(contract) = descriptor.graphql_contract.as_ref() else {
+            return false;
+        };
+        let Some(semantic) = contract.semantic_operation() else {
+            return false;
+        };
+        let registered = self.sources.get(&(
+            contract.target_id.clone(),
+            semantic.operation_fingerprint().to_owned(),
+        ));
+        descriptor.operation_kind == AiToolOperationKind::Subscription
+            && semantic.kind() == GraphqlGeneratedOperationKind::Subscription
+            && registered.is_some_and(|registered| {
+                registered.descriptor.target_id == contract.target_id
+                    && registered.descriptor.semantic_operation_fingerprint
+                        == semantic.operation_fingerprint()
+            })
     }
 
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn resolve_compiled(
         &self,
         descriptor: &AiToolDescriptor,
@@ -439,6 +463,7 @@ impl AiReplayableSubscriptionSourceRegistry {
     }
 }
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 #[derive(Clone)]
 pub(crate) struct AiResolvedReplaySource {
     pub descriptor: AiReplayableSubscriptionSourceDescriptor,

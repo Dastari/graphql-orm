@@ -172,6 +172,7 @@ impl AiGeneratedGraphqlTargetPolicySet {
         })
     }
 
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn allows_query_capability(&self, capability: &AiGraphqlQueryCapability) -> bool {
         self.0.get(capability.target_id()).is_some_and(|binding| {
             binding.queries
@@ -205,6 +206,7 @@ impl AiGeneratedGraphqlTargetPolicySet {
         })
     }
 
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn allows_mutation_capability(
         &self,
         capability: &AiGraphqlMutationCapability,
