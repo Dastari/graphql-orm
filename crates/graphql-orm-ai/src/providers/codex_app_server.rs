@@ -5154,7 +5154,7 @@ pub(crate) mod tests {
             )],
             disclosure,
             4_096,
-            1,
+            2,
         )
         .with_inputs([crate::AiGraphqlProfileInput::integer(
             "Limit",
