@@ -1218,3 +1218,151 @@ impl AiToolPolicySet {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use agql_auth::{
+        AccessTokenMetadata, AuthPrincipal, AuthUser, ResolvedPrincipal, SessionContext,
+    };
+    use serde_json::json;
+    use time::OffsetDateTime;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::GraphqlOperationContract;
+
+    const SCHEMA_FINGERPRINT: &str =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+    const CATALOG_FINGERPRINT: &str =
+        "2222222222222222222222222222222222222222222222222222222222222222";
+
+    fn generated_query_descriptor(field: &str) -> AiToolDescriptor {
+        let target = GraphqlExecutionTargetId::parse("inventory.graphql")
+            .expect("test target should validate");
+        let document = format!("query {field} {{ {field} }}");
+        let contract = GraphqlOperationContract::new(
+            target,
+            SCHEMA_FINGERPRINT,
+            field,
+            &document,
+            "projection-v1",
+            "disclosure-v1",
+        )
+        .expect("test contract should validate");
+        let mut value = serde_json::to_value(contract).expect("test contract should serialize");
+        value["semantic_operation"] = json!({
+            "fingerprint_algorithm": "graphql-orm-semantic-canonical-json-sha256-v1",
+            "catalog_fingerprint": CATALOG_FINGERPRINT,
+            "operation_fingerprint": "3333333333333333333333333333333333333333333333333333333333333333",
+            "kind": "query",
+            "field_name": field,
+        });
+        let contract = serde_json::from_value(value).expect("semantic contract should decode");
+        AiToolDescriptor::new(
+            format!("inventory.query.{}", field.to_ascii_lowercase()),
+            format!("Read {field}."),
+            AiToolOperationKind::Query,
+            document,
+            json!({
+                "$schema": JSON_SCHEMA_2020_12,
+                "type": "object",
+                "additionalProperties": false,
+            }),
+        )
+        .expect("test descriptor should validate")
+        .with_graphql_contract(contract)
+        .with_result_projection(field)
+    }
+
+    fn principal() -> ResolvedPrincipal {
+        let principal = AuthPrincipal::User(AuthUser {
+            user_id: "generated-query-user".to_owned(),
+            session_id: Uuid::new_v4(),
+            roles: Vec::new(),
+            scopes: Vec::new(),
+            session: SessionContext::default(),
+            token_claims: AccessTokenMetadata {
+                tenant_id: Some("generated-query-tenant".to_owned()),
+                ..AccessTokenMetadata::default()
+            },
+        });
+        ResolvedPrincipal::new(principal.reference(), principal, OffsetDateTime::now_utc())
+            .expect("test principal should resolve")
+    }
+
+    fn target_policy(schema: &str, catalog: &str) -> AiGeneratedGraphqlTargetPolicySet {
+        let mut policy = AiGeneratedGraphqlTargetPolicySet::new();
+        policy
+            .bind(
+                AiGeneratedGraphqlTargetPolicyBinding::new(
+                    GraphqlExecutionTargetId::parse("inventory.graphql")
+                        .expect("test target should validate"),
+                    schema,
+                    catalog,
+                )
+                .expect("test target binding should validate")
+                .allow_queries(),
+            )
+            .expect("test target should bind once");
+        policy
+    }
+
+    #[tokio::test]
+    async fn one_exact_target_policy_admits_new_query_roots_without_tool_ids() {
+        let policy = AiGeneratedGraphqlAuthorizationPolicy::generated_only(target_policy(
+            SCHEMA_FINGERPRINT,
+            CATALOG_FINGERPRINT,
+        ));
+        let principal = principal();
+        let scope =
+            AiScope::new("tenant", "generated-query").with_tenant_id("generated-query-tenant");
+
+        for descriptor in [
+            generated_query_descriptor("ReadInventory"),
+            generated_query_descriptor("ReadNewPublicRoot"),
+        ] {
+            let decision = policy
+                .authorize(&principal, &scope, &descriptor, &json!({}))
+                .await;
+            assert!(decision.is_allowed());
+            assert!(decision.is_complete_allow());
+        }
+    }
+
+    #[tokio::test]
+    async fn registration_alone_and_stale_target_contracts_remain_denied() {
+        let descriptor = generated_query_descriptor("ReadInventory");
+        let principal = principal();
+        let scope =
+            AiScope::new("tenant", "generated-query").with_tenant_id("generated-query-tenant");
+        let unbound = AiGeneratedGraphqlAuthorizationPolicy::generated_only(
+            AiGeneratedGraphqlTargetPolicySet::new(),
+        );
+        assert!(
+            !unbound
+                .authorize(&principal, &scope, &descriptor, &json!({}))
+                .await
+                .is_allowed()
+        );
+        let stale = AiGeneratedGraphqlAuthorizationPolicy::generated_only(target_policy(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            CATALOG_FINGERPRINT,
+        ));
+        assert!(
+            !stale
+                .authorize(&principal, &scope, &descriptor, &json!({}))
+                .await
+                .is_allowed()
+        );
+        let stale = AiGeneratedGraphqlAuthorizationPolicy::generated_only(target_policy(
+            SCHEMA_FINGERPRINT,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ));
+        assert!(
+            !stale
+                .authorize(&principal, &scope, &descriptor, &json!({}))
+                .await
+                .is_allowed()
+        );
+    }
+}

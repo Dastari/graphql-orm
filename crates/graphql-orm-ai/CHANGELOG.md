@@ -37,6 +37,15 @@ checkpoint facts. For the current workspace baseline and active gates, use the
   Nested relationships and opt-in aggregate roots compile into exact
   server-authored documents, variables, disclosure contracts and drift
   fingerprints without model-authored GraphQL or static per-query profiles.
+- `AiGeneratedGraphqlTargetPolicySet` and
+  `AiGeneratedGraphqlAuthorizationPolicy` admit generated queries by one exact
+  logical target plus active finished-SDL/semantic-catalogue binding. Ordinary
+  generated reads no longer require a per-capability `AiToolPolicySet` entry.
+- Classified generated mutations now compile as `Automatic`,
+  `ApprovalRequired`, or `Prohibited`. Prohibited mutations are not offered;
+  approval-required mutations reuse the existing exact one-shot approval
+  lifecycle; automatic mutations use a distinct protected post-effect
+  checkpoint and one-shot continuation proof.
 
 ### Security
 
@@ -49,6 +58,11 @@ checkpoint facts. For the current workspace baseline and active gates, use the
   worst-case total record count against the descriptor ceiling. Runtime
   evaluation independently counts the actual composite result, including
   sibling and nested list expansions, and fails closed above that total.
+- Automatic writes require independent target policy, hierarchical
+  `AutonomousWrite` policy, fresh principal/tool policy and ordinary resolver
+  authorization. Once their pre-effect fence is durable, ambiguity converges
+  to `RecoveryRequired`; a result checkpoint can continue but can never replay
+  the non-idempotent resolver or be adopted as a read-only/approved result.
 
 ### Schema
 

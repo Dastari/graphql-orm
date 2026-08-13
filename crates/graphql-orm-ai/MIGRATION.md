@@ -45,7 +45,7 @@ from ordinary run workers. Source registration and catalogue discovery grant
 no authority. Best-effort sources are ineligible, and model-authored GraphQL,
 arbitrary predicates, raw cursors and indefinite monitors remain unsupported.
 
-## Unreleased: automatic semantic GraphQL query capabilities (schema remains 0.57.0)
+## Unreleased: generated GraphQL query and mutation capabilities (schema remains 0.58.0)
 
 Subgraphs that want automatic bounded reads compile
 `AiGraphqlQueryCapabilityCatalog` from their exact finished SDL and canonical
@@ -59,8 +59,23 @@ The addition does not enable any root. Install a fresh descriptor-driven host
 policy and preserve current-principal plus ordinary resolver authorization.
 Existing explicit profiles and manifest wire version 2 remain supported.
 
-No AI schema, GraphQL SDL, table, column, constraint, backup, data migration or
-backfill is required. AI schema module `0.57.0` remains current.
+For generated reads, install
+`AiGeneratedGraphqlAuthorizationPolicy::generated_only` or wrap the existing
+static policy with `AiGeneratedGraphqlAuthorizationPolicy::new`. Bind the
+exact logical target, finished SDL and semantic catalogue once; do not create
+one static tool-policy row per generated query.
+
+Generated mutations are absent unless their semantic operation is explicitly
+classified. `ApprovalRequired` continues through the existing durable preview,
+one-shot approval and supervised resume services. `Automatic` additionally
+requires target-level opt-in and an `AutonomousWrite` rule ceiling and now
+uses `automatic_mutation_batch_persisted` as its protected continuation
+checkpoint kind. Hosts must not construct, reopen or consume that proof.
+
+These generated query/mutation changes require no additional AI schema,
+GraphQL SDL, table, column, constraint, backup, data migration or backfill.
+AI schema module `0.58.0` remains current after applying the separate durable
+subscription-wait migration above.
 
 The existing descriptor `maximum_result_records` field now enforces the total
 selected GraphQL result rather than the greatest individual list. Review

@@ -638,12 +638,7 @@ impl AiRuntime {
         binding: &AiApprovalBinding,
     ) -> Result<AiToolExecutionResult, AiError> {
         self.validate_prepared_mutation(&prepared)?;
-        if prepared.execution_policy != AiMutationExecutionPolicy::ApprovalRequired
-            || approval.binding_hash() != binding.stable_hash()
-            || approval.approval_id().0.is_nil()
-            || prepared.capability_fingerprint != binding.tool_fingerprint
-            || prepared.descriptor.graphql_contract.as_ref() != Some(&binding.operation)
-        {
+        if !approved_prepared_mutation_matches(&prepared, approval, binding) {
             return Err(AiError::Forbidden);
         }
         let (response, authorization) = self
@@ -1128,6 +1123,18 @@ impl AiRuntime {
         }
         provider.retrieve_background(binding, context).await
     }
+}
+
+fn approved_prepared_mutation_matches(
+    prepared: &AiPreparedGraphqlMutation,
+    approval: &ConsumedAiApproval,
+    binding: &AiApprovalBinding,
+) -> bool {
+    prepared.execution_policy == AiMutationExecutionPolicy::ApprovalRequired
+        && approval.binding_hash() == binding.stable_hash()
+        && !approval.approval_id().0.is_nil()
+        && prepared.capability_fingerprint == binding.tool_fingerprint
+        && prepared.descriptor.graphql_contract.as_ref() == Some(&binding.operation)
 }
 
 fn is_supervised_one_shot_mutation(descriptor: &AiToolDescriptor) -> bool {

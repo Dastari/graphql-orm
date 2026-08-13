@@ -159,12 +159,16 @@ approval/resolver path above, and protects the result plus continuation as
 checkpoint adoption rejects this distinct approval-bearing kind.
 
 `AiSupervisedAgentCoordinator` closes the bounded provider loop for sequential
-provider-retained mutations. Hosts supply `AiSupervisedAgentTurnPlanner`, which
-must return an `AiSupervisedAgentTurnPlan` containing only exact registered
-`SupervisedWrite`/`OneShot` definitions, current hierarchical-rule evidence, a
+provider-retained classified mutations. Hosts supply
+`AiSupervisedAgentTurnPlanner`, which must return an
+`AiSupervisedAgentTurnPlan` containing only exact
+`SupervisedWrite`/`OneShot` or explicitly classified
+`AutonomousWrite`/`None` definitions, current hierarchical-rule evidence, a
 current result-egress route, and fresh provider/egress/atomic-budget planning.
 The wrapper rejects read-only, proposal, mixed, stateless, or otherwise
-inexact plans.
+inexact plans. A deployment must explicitly select the `AutonomousWrite`
+hierarchical-rule ceiling as well as target-level automatic-mutation policy;
+neither switch grants resolver authority.
 
 For a normal queue claim, `execute_claimed` starts the fence, plans the first
 turn, re-resolves current rules, calls the provider with periodic lease
@@ -174,6 +178,18 @@ contain exactly one mutation and a retained provider response ID. The
 coordinator rechecks the mutation fingerprint/rule, verifies another provider
 turn remains available, stages the server-owned preview, and returns
 `WaitingApproval`. It does not heartbeat or poll during human review.
+
+An `Automatic` mutation follows a separate no-approval branch. The ORM tool
+service compiles and freshly preauthorizes the exact generated plan, persists
+the protected call and `WaitingTool` pre-effect fence, rechecks cancellation,
+then invokes the ordinary resolver once. Every failure after that effect
+boundary either durably completes the exact result or converges the run to
+`RecoveryRequired`; the mutation is never replayed. A successful result is
+protected as the distinct `automatic_mutation_batch_persisted` checkpoint.
+The coordinator selects that exact checkpoint kind, reopens its
+`AutonomousWrite`/`None`, non-idempotent, provider, rule, principal, egress and
+lease proofs, consumes it once, and continues the provider normally. It is
+never interpreted as a read-only or approval-bearing checkpoint.
 
 A worker passes the exact one-owner `AiApprovedRunClaim` to
 `execute_approved_claim`. The resume service executes the mutation and protects

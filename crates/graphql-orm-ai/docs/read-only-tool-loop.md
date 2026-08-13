@@ -34,6 +34,23 @@ A model definition is accepted only when all of these are true:
 - provider name, description, JSON Schema, local ID, and fingerprint match the
   registered descriptor exactly.
 
+Canonical generated query capabilities use the descriptor-driven
+`AiGeneratedGraphqlAuthorizationPolicy` instead of one `AiToolPolicySet`
+entry per generated root. Bind the exact logical target, finished-SDL
+fingerprint, and semantic-catalogue fingerprint once with
+`AiGeneratedGraphqlTargetPolicyBinding::allow_queries`. A newly described
+public query root that appears in that same active semantic contract then
+participates without a second tool-ID allowlist. Registration alone, an empty
+target policy, a stale schema/catalogue fingerprint, or a different logical
+target still denies. This discovery gate never replaces fresh-principal
+policy or ordinary resolver authorization.
+
+Use `AiProviderCallPlan::new_with_generated_queries` (and its continuation
+counterpart) for model exposure. The model submits only the closed generated
+plan associated with the exact offered capability ID and fingerprint; the
+server compiles the GraphQL document, variables, selection and disclosure
+shape.
+
 `AiProviderCallPlan::new` remains the ordinary tool-free constructor.
 `new_with_tools` makes read-only exposure deliberate. Registration and this
 policy snapshot are still not execution authority: each actual call performs
