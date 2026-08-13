@@ -1418,6 +1418,21 @@ pub trait AiProviderSessionService: Send + Sync {
         Err(AiError::RuntimeNotReady)
     }
 
+    /// Quarantines the exact cursor when a wait-parking handoff is known to
+    /// have failed but the caller cannot tell whether parking committed.
+    ///
+    /// The crate-owned request binds both the original claim and intended
+    /// wait graph. Implementations may accept only the exact still-claimed
+    /// binding or the exact unconfirmed parked binding produced by that
+    /// request. This is a convergence boundary, not a generic state reset.
+    async fn require_wait_handoff_cleanup(
+        &self,
+        _request: &AiProviderSessionWaitParkRequest,
+        _reason_code: &str,
+    ) -> Result<(), AiError> {
+        Err(AiError::RuntimeNotReady)
+    }
+
     /// Reclaims one confirmed parked cursor for the exact fresh run fence
     /// after its one-shot approval or subscription adoption remains linked.
     ///

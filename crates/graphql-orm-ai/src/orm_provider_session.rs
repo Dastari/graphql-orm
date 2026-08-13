@@ -1581,6 +1581,57 @@ mod service {
                 .map_err(map_transaction)
         }
 
+        async fn require_wait_handoff_cleanup(
+            &self,
+            request: &AiProviderSessionWaitParkRequest,
+            reason_code: &str,
+        ) -> Result<(), AiError> {
+            validate_reason_code(reason_code)?;
+            if !request.has_valid_fingerprint() {
+                return Err(AiError::Conflict);
+            }
+            let now = canonical_second(self.clock.now());
+            let request = request.clone();
+            let reason_code = reason_code.to_owned();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let binding = tx
+                            .find_by_id::<AiProviderSessionBindingRecord>(&request.claim.binding_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        validate_wait_handoff_record(&binding, &request)?;
+                        let outcome = tx
+                            .compare_and_swap::<AiProviderSessionBindingRecord>(
+                                &binding.id,
+                                binding.row_version,
+                                AiProviderSessionBindingRecordWhereInput::default(),
+                                cleanup_required_update(
+                                    reason_code.clone(),
+                                    request.claim.run_id.0,
+                                ),
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        append_audit(
+                            tx,
+                            "ai.provider_session.cleanup_required",
+                            binding.id,
+                            &reason_code,
+                            request.claim.run_id.0,
+                            now,
+                        )
+                        .await
+                    })
+                })
+                .await
+                .map_err(map_transaction)
+        }
+
         async fn reclaim_after_wait(
             &self,
             lease: &AiRunLease,
@@ -2409,6 +2460,39 @@ mod service {
             || (record.parked_confirmed_at.is_none()
                 && record.row_version != parked.binding_row_version)
         {
+            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+        }
+        Ok(())
+    }
+
+    fn validate_wait_handoff_record(
+        record: &AiProviderSessionBindingRecord,
+        request: &AiProviderSessionWaitParkRequest,
+    ) -> Result<(), OrmPublicError> {
+        validate_binding_record(record)?;
+        let exact_claim = record.id == request.claim.binding_id
+            && record.session_id == request.claim.session_id.0
+            && record.claimed_run_id == Some(request.claim.run_id.0)
+            && record.claimed_attempt_id == Some(request.claim.attempt_id)
+            && record.claimed_run_lease_generation == Some(request.claim.run_lease_generation)
+            && record.claim_generation == request.claim.binding_claim_generation
+            && record.through_message_sequence == request.claim.through_message_sequence
+            && record.transcript_fingerprint == request.claim.transcript_fingerprint
+            && descriptor_from_record(record).map_err(ai_error_to_orm)? == request.claim.descriptor;
+        let exact_state = if record.state == AiProviderSessionState::Claimed.as_str() {
+            record.row_version == request.claim.binding_row_version
+        } else if record.state == AiProviderSessionState::ParkedWait.as_str() {
+            persisted_wait_identity(record)? == request.wait
+                && record.parked_source_checkpoint_id == Some(request.source_checkpoint_id)
+                && record.parked_source_checkpoint_fingerprint.as_deref()
+                    == Some(request.source_checkpoint_fingerprint.as_str())
+                && record.parked_continuation_fingerprint.as_deref()
+                    == Some(request.continuation_fingerprint.as_str())
+                && record.parked_confirmed_at.is_none()
+        } else {
+            false
+        };
+        if !exact_claim || !exact_state {
             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
         }
         Ok(())
@@ -3827,6 +3911,60 @@ mod service {
                 fixture.service.confirm_parked_wait(&parked).await,
                 Err(AiError::Conflict)
             ));
+        }
+
+        #[tokio::test]
+        async fn ambiguous_wait_handoff_quarantines_claimed_or_unconfirmed_parked_state() {
+            let claimed = parked_wait_fixture().await;
+            let mut swapped = claimed.request.clone();
+            swapped.wait = AiProviderSessionWaitIdentity::approval(crate::AiApprovalId::new());
+            assert!(matches!(
+                claimed
+                    .service
+                    .require_wait_handoff_cleanup(
+                        &swapped,
+                        "provider_session_approval_park_ambiguous",
+                    )
+                    .await,
+                Err(AiError::Conflict)
+            ));
+            claimed
+                .service
+                .require_wait_handoff_cleanup(
+                    &claimed.request,
+                    "provider_session_approval_request_invalid",
+                )
+                .await
+                .expect("exact still-claimed handoff should require cleanup");
+            let cleanup = claimed
+                .service
+                .claim_cleanup("claimed-handoff-cleaner")
+                .await
+                .expect("claimed handoff cleanup should scan")
+                .expect("claimed cursor must not remain eligible");
+            assert_eq!(cleanup.binding_id(), claimed.binding_id);
+
+            let ambiguous = parked_wait_fixture().await;
+            ambiguous
+                .service
+                .park_for_wait(&ambiguous.lease, ambiguous.request.clone())
+                .await
+                .expect("parking commit should win before response ambiguity");
+            ambiguous
+                .service
+                .require_wait_handoff_cleanup(
+                    &ambiguous.request,
+                    "provider_session_approval_park_ambiguous",
+                )
+                .await
+                .expect("exact unconfirmed parked handoff should require cleanup");
+            let cleanup = ambiguous
+                .service
+                .claim_cleanup("ambiguous-park-cleaner")
+                .await
+                .expect("ambiguous park cleanup should scan")
+                .expect("ambiguous parked cursor must not remain eligible");
+            assert_eq!(cleanup.binding_id(), ambiguous.binding_id);
         }
 
         #[tokio::test]

@@ -1556,11 +1556,11 @@ impl OrmAiConsequentialToolCallService {
             )
             .await?;
         let approval_id = AiApprovalId::new();
-        let parked_result = if let (Some(service), Some(_)) = (
+        let park_request = if let (Some(_), Some(_)) = (
             &self.provider_session_service,
             provider_result.provider_session_claim(),
         ) {
-            async {
+            let request = async {
                 let checkpoint_id = active_lease
                     .latest_checkpoint_id()
                     .ok_or(AiError::Conflict)?;
@@ -1571,36 +1571,54 @@ impl OrmAiConsequentialToolCallService {
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::Conflict)?;
-                let request = provider_result.provider_session_wait_park_request(
+                provider_result.provider_session_wait_park_request(
                     &active_lease,
                     crate::AiProviderSessionWaitIdentity::approval(approval_id),
                     checkpoint.id,
                     checkpoint.checkpoint_hash,
-                )?;
-                service
-                    .park_for_wait(&active_lease, request)
-                    .await
-                    .map(Some)
+                )
             }
-            .await
+            .await;
+            match request {
+                Ok(request) => Some(request),
+                Err(error) => {
+                    return self
+                        .converge_approval_staging_failure(
+                            &active_lease,
+                            id,
+                            provider_result,
+                            None,
+                            None,
+                            "provider_session_approval_request_invalid",
+                            error,
+                        )
+                        .await;
+                }
+            }
         } else {
-            Ok(None)
+            None
         };
-        let parked = match parked_result {
-            Ok(parked) => parked,
-            Err(error) => {
-                return match self
-                    .mark_consequential_recovery(
-                        &active_lease,
-                        id,
-                        provider_result.provider_response_id().map(str::to_owned),
-                    )
-                    .await
-                {
-                    Ok(_) => Err(AiError::Conflict),
-                    Err(_) => Err(error),
-                };
+        let parked = if let (Some(service), Some(request)) =
+            (&self.provider_session_service, park_request.as_ref())
+        {
+            match service.park_for_wait(&active_lease, request.clone()).await {
+                Ok(parked) => Some(parked),
+                Err(error) => {
+                    return self
+                        .converge_approval_staging_failure(
+                            &active_lease,
+                            id,
+                            provider_result,
+                            Some(request),
+                            None,
+                            "provider_session_approval_park_ambiguous",
+                            error,
+                        )
+                        .await;
+                }
             }
+        } else {
+            None
         };
         let cancelled = match self
             .application_tools
@@ -1610,47 +1628,32 @@ impl OrmAiConsequentialToolCallService {
         {
             Ok(cancelled) => cancelled.is_some(),
             Err(error) => {
-                if let (Some(service), Some(parked)) =
-                    (&self.provider_session_service, parked.as_ref())
-                {
-                    let _ = service
-                        .require_parked_wait_cleanup(
-                            parked,
-                            "provider_session_approval_cancellation_unknown",
-                        )
-                        .await;
-                }
-                return match self
-                    .mark_consequential_recovery(
+                return self
+                    .converge_approval_staging_failure(
                         &active_lease,
                         id,
-                        provider_result.provider_response_id().map(str::to_owned),
+                        provider_result,
+                        park_request.as_ref(),
+                        parked.as_ref(),
+                        "provider_session_approval_cancellation_unknown",
+                        error,
                     )
-                    .await
-                {
-                    Ok(_) => Err(AiError::Conflict),
-                    Err(_) => Err(error),
-                };
+                    .await;
             }
         };
         if cancelled {
-            if let (Some(service), Some(parked)) = (&self.provider_session_service, parked.as_ref())
-            {
-                let _ = service
-                    .require_parked_wait_cleanup(parked, "provider_session_approval_wait_cancelled")
-                    .await;
-            }
-            return match self
-                .mark_consequential_recovery(
-                    &active_lease,
-                    id,
-                    provider_result.provider_response_id().map(str::to_owned),
-                )
-                .await
-            {
-                Ok(_) => Err(AiError::Conflict),
-                Err(error) => Err(error),
-            };
+            // Owner cancellation has already atomically terminalized the run,
+            // active tool call, session stream and inbox stream. No resolver
+            // side effect has occurred; only the retained provider cursor
+            // needs exact quarantine before returning the stale-fence result.
+            self.cleanup_approval_handoff(
+                provider_result,
+                park_request.as_ref(),
+                parked.as_ref(),
+                "provider_session_approval_wait_cancelled",
+            )
+            .await;
+            return Err(AiError::Conflict);
         }
         let requested = self
             .approval_service
@@ -1666,27 +1669,17 @@ impl OrmAiConsequentialToolCallService {
         let requested = match requested {
             Ok(requested) => requested,
             Err(error) => {
-                if let (Some(service), Some(parked)) =
-                    (&self.provider_session_service, parked.as_ref())
-                {
-                    let _ = service
-                        .require_parked_wait_cleanup(
-                            parked,
-                            "provider_session_approval_staging_failed",
-                        )
-                        .await;
-                }
-                return match self
-                    .mark_consequential_recovery(
+                return self
+                    .converge_approval_staging_failure(
                         &active_lease,
                         id,
-                        provider_result.provider_response_id().map(str::to_owned),
+                        provider_result,
+                        park_request.as_ref(),
+                        parked.as_ref(),
+                        "provider_session_approval_staging_failed",
+                        error,
                     )
-                    .await
-                {
-                    Ok(_) => Err(AiError::Conflict),
-                    Err(_) => Err(error),
-                };
+                    .await;
             }
         };
         if let (Some(service), Some(parked)) = (&self.provider_session_service, parked.as_ref()) {
@@ -1703,6 +1696,54 @@ impl OrmAiConsequentialToolCallService {
             approval_id: requested.approval_id(),
             lease: requested.into_lease(),
         })
+    }
+
+    async fn cleanup_approval_handoff(
+        &self,
+        provider_result: &AiProviderCallResult,
+        request: Option<&crate::AiProviderSessionWaitParkRequest>,
+        parked: Option<&crate::AiProviderSessionParkedWait>,
+        reason_code: &str,
+    ) {
+        let Some(service) = &self.provider_session_service else {
+            return;
+        };
+        if let Some(parked) = parked {
+            let _ = service
+                .require_parked_wait_cleanup(parked, reason_code)
+                .await;
+        } else if let Some(request) = request {
+            let _ = service
+                .require_wait_handoff_cleanup(request, reason_code)
+                .await;
+        } else if let Some(claim) = provider_result.provider_session_claim() {
+            let _ = service.require_cleanup(claim, reason_code).await;
+        }
+    }
+
+    async fn converge_approval_staging_failure(
+        &self,
+        active_lease: &AiRunLease,
+        tool_call_id: AiToolCallId,
+        provider_result: &AiProviderCallResult,
+        request: Option<&crate::AiProviderSessionWaitParkRequest>,
+        parked: Option<&crate::AiProviderSessionParkedWait>,
+        reason_code: &str,
+        original: AiError,
+    ) -> Result<AiRequestedConsequentialToolCall, AiError> {
+        self.cleanup_approval_handoff(provider_result, request, parked, reason_code)
+            .await;
+        match self
+            .mark_consequential_recovery(
+                active_lease,
+                tool_call_id,
+                provider_result.provider_response_id().map(str::to_owned),
+            )
+            .await
+        {
+            Ok(_) => Err(AiError::Conflict),
+            Err(_) => Err(original),
+        }
     }
 
     /// Rebuilds and consumes one exact approval, then executes the ordinary
