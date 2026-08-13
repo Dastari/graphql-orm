@@ -118,4 +118,6 @@ Portable Decimal fields require explicit precision/scale metadata. SQLite uses
 a checked scaled `i64`; PostgreSQL uses `NUMERIC(P,S)`; SQL Server uses
 `DECIMAL(P,S)`. Decimal defaults are exact literals normalized at macro time,
 and generated decimal filters bind validated values rather than interpolating
-them into SQL.
+them into SQL. Logical backup rows retain the exact Decimal value together with
+its definition, allowing SQLite and PostgreSQL exports to restore without
+rounding or treating a native numeric as text.

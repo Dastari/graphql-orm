@@ -29,6 +29,7 @@ pub enum BackupValue {
     Bool(bool),
     Integer(i64),
     Float(f64),
+    Decimal(super::DecimalValue),
     String(String),
     Uuid(uuid::Uuid),
     Json(serde_json::Value),
@@ -490,7 +491,7 @@ async fn export_table_rows(
                 if column.backup_policy == ColumnBackupPolicy::Redact && !column.is_primary_key {
                     BackupValue::String(REDACTED_BACKUP_VALUE.to_string())
                 } else {
-                    decode_backup_value(&row, &column.column_name, column.logical_type)?
+                    decode_backup_value(&row, column)?
                 };
             values.insert(column.column_name.clone(), value);
         }
@@ -576,7 +577,7 @@ async fn import_table_rows(
                             row.primary_key, entity.table_name, column.column_name
                         ))
                     })?,
-                    column.logical_type,
+                    column,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -657,9 +658,48 @@ fn validate_import_rows(entity: &EntityBackupDescriptor, rows: &[BackupRow]) -> 
                     row.primary_key, entity.table_name, column.column_name
                 )));
             }
+            if column.backup_policy == ColumnBackupPolicy::Include {
+                validate_backup_value(column, value)?;
+            }
         }
     }
     Ok(())
+}
+
+fn validate_backup_value(
+    descriptor: &super::ColumnBackupDescriptor,
+    value: &BackupValue,
+) -> crate::Result<()> {
+    if matches!(value, BackupValue::Null) {
+        return Ok(());
+    }
+    let valid = matches!(
+        (descriptor.logical_type, value),
+        (BackupValueKind::Bool, BackupValue::Bool(_))
+            | (BackupValueKind::Integer, BackupValue::Integer(_))
+            | (BackupValueKind::Float, BackupValue::Float(_))
+            | (BackupValueKind::String, BackupValue::String(_))
+            | (BackupValueKind::Uuid, BackupValue::Uuid(_))
+            | (BackupValueKind::Json, BackupValue::Json(_))
+            | (BackupValueKind::Bytes, BackupValue::Bytes(_))
+    );
+    if valid {
+        return Ok(());
+    }
+    if let (BackupValueKind::Decimal, BackupValue::Decimal(value)) =
+        (descriptor.logical_type, value)
+    {
+        if value.definition() == require_decimal_definition(descriptor)? {
+            return Ok(());
+        }
+        return Err(sqlx::Error::Protocol(
+            "backup decimal definition does not match destination column".to_string(),
+        ));
+    }
+    Err(sqlx::Error::Protocol(format!(
+        "backup value type does not match destination column {}",
+        descriptor.column_name
+    )))
 }
 
 fn export_columns(entity: &EntityBackupDescriptor) -> Vec<&super::ColumnBackupDescriptor> {
@@ -834,9 +874,10 @@ async fn fetch_snapshot_rows(
 #[cfg(feature = "sqlite")]
 fn decode_backup_value(
     row: &crate::DbRow,
-    column: &str,
-    kind: BackupValueKind,
+    descriptor: &super::ColumnBackupDescriptor,
 ) -> crate::Result<BackupValue> {
+    let column = descriptor.column_name.as_str();
+    let kind = descriptor.logical_type;
     match kind {
         BackupValueKind::Null => Ok(BackupValue::Null),
         BackupValueKind::Bool => row.try_get::<Option<i64>, _>(column).map(|value| {
@@ -850,6 +891,19 @@ fn decode_backup_value(
         BackupValueKind::Float => row
             .try_get::<Option<f64>, _>(column)
             .map(|value| value.map(BackupValue::Float).unwrap_or(BackupValue::Null)),
+        BackupValueKind::Decimal => {
+            let definition = require_decimal_definition(descriptor)?;
+            row.try_get::<Option<i64>, _>(column).map(|value| {
+                value
+                    .map(|value| {
+                        BackupValue::Decimal(
+                            super::DecimalValue::new(definition.from_scaled_i64(value), definition)
+                                .expect("scaled i64 is exact for its validated decimal definition"),
+                        )
+                    })
+                    .unwrap_or(BackupValue::Null)
+            })
+        }
         BackupValueKind::String => row
             .try_get::<Option<String>, _>(column)
             .map(|value| value.map(BackupValue::String).unwrap_or(BackupValue::Null)),
@@ -880,9 +934,10 @@ fn decode_backup_value(
 #[cfg(feature = "postgres")]
 fn decode_backup_value(
     row: &crate::DbRow,
-    column: &str,
-    kind: BackupValueKind,
+    descriptor: &super::ColumnBackupDescriptor,
 ) -> crate::Result<BackupValue> {
+    let column = descriptor.column_name.as_str();
+    let kind = descriptor.logical_type;
     match kind {
         BackupValueKind::Null => Ok(BackupValue::Null),
         BackupValueKind::Bool => row
@@ -894,6 +949,19 @@ fn decode_backup_value(
         BackupValueKind::Float => row
             .try_get::<Option<f64>, _>(column)
             .map(|value| value.map(BackupValue::Float).unwrap_or(BackupValue::Null)),
+        BackupValueKind::Decimal => {
+            let definition = require_decimal_definition(descriptor)?;
+            row.try_get::<Option<rust_decimal::Decimal>, _>(column)
+                .and_then(|value| {
+                    value
+                        .map(|value| {
+                            super::DecimalValue::new(value, definition)
+                                .map(BackupValue::Decimal)
+                                .map_err(|error| sqlx::Error::Decode(Box::new(error)))
+                        })
+                        .unwrap_or(Ok(BackupValue::Null))
+                })
+        }
         BackupValueKind::String => row
             .try_get::<Option<String>, _>(column)
             .map(|value| value.map(BackupValue::String).unwrap_or(BackupValue::Null)),
@@ -915,14 +983,18 @@ fn decode_backup_value(
 
 fn backup_value_to_sql_value(
     value: &BackupValue,
-    logical_type: BackupValueKind,
+    descriptor: &super::ColumnBackupDescriptor,
 ) -> crate::Result<SqlValue> {
+    let logical_type = descriptor.logical_type;
     Ok(match value {
         BackupValue::Null => match logical_type {
             BackupValueKind::Null | BackupValueKind::String => SqlValue::StringNull,
             BackupValueKind::Bool => SqlValue::BoolNull,
             BackupValueKind::Integer => SqlValue::IntNull,
             BackupValueKind::Float => SqlValue::FloatNull,
+            BackupValueKind::Decimal => {
+                SqlValue::DecimalNull(require_decimal_definition(descriptor)?)
+            }
             BackupValueKind::Uuid => SqlValue::UuidNull,
             BackupValueKind::Json => SqlValue::JsonNull,
             BackupValueKind::Bytes => SqlValue::BytesNull,
@@ -930,10 +1002,30 @@ fn backup_value_to_sql_value(
         BackupValue::Bool(value) => SqlValue::Bool(*value),
         BackupValue::Integer(value) => SqlValue::Int(*value),
         BackupValue::Float(value) => SqlValue::Float(*value),
+        BackupValue::Decimal(value) => {
+            let definition = require_decimal_definition(descriptor)?;
+            if value.definition() != definition {
+                return Err(sqlx::Error::Protocol(
+                    "backup decimal definition does not match destination column".to_string(),
+                ));
+            }
+            SqlValue::Decimal(*value)
+        }
         BackupValue::String(value) => SqlValue::String(value.clone()),
         BackupValue::Uuid(value) => SqlValue::Uuid(*value),
         BackupValue::Json(value) => SqlValue::Json(value.clone()),
         BackupValue::Bytes(value) => SqlValue::Bytes(value.clone()),
+    })
+}
+
+fn require_decimal_definition(
+    descriptor: &super::ColumnBackupDescriptor,
+) -> crate::Result<super::DecimalDef> {
+    descriptor.decimal.ok_or_else(|| {
+        sqlx::Error::Protocol(format!(
+            "decimal backup column {} is missing its storage definition",
+            descriptor.column_name
+        ))
     })
 }
 
@@ -1017,6 +1109,7 @@ impl BackupValue {
             BackupValue::Bool(value) => value.to_string(),
             BackupValue::Integer(value) => value.to_string(),
             BackupValue::Float(value) => value.to_string(),
+            BackupValue::Decimal(value) => value.value().to_string(),
             BackupValue::String(value) => value.clone(),
             BackupValue::Uuid(value) => value.to_string(),
             BackupValue::Json(value) => value.to_string(),
@@ -1045,6 +1138,12 @@ fn canonical_value(value: &BackupValue) -> String {
         BackupValue::Bool(value) => format!("bool:{value}"),
         BackupValue::Integer(value) => format!("int:{value}"),
         BackupValue::Float(value) => format!("float:{value:?}"),
+        BackupValue::Decimal(value) => format!(
+            "decimal:{}:{}:{}",
+            value.definition().precision(),
+            value.definition().scale(),
+            value.value()
+        ),
         BackupValue::String(value) => format!("string:{value}"),
         BackupValue::Uuid(value) => format!("uuid:{value}"),
         BackupValue::Json(value) => format!("json:{}", canonical_json(value)),
@@ -1088,6 +1187,47 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 mod tests {
     use super::*;
     use crate::graphql::orm::{DeletePolicy, EntityDependencyDescriptor};
+
+    #[test]
+    fn decimal_backup_values_validate_definition_and_wire_shape() {
+        let definition = super::super::DecimalDef::new(12, 2).expect("valid decimal definition");
+        let value = super::super::DecimalValue::new(
+            "1234.50".parse().expect("valid decimal literal"),
+            definition,
+        )
+        .expect("decimal should fit definition");
+        let backup = BackupValue::Decimal(value);
+        let encoded = serde_json::to_value(&backup).expect("decimal backup should serialize");
+        let decoded: BackupValue =
+            serde_json::from_value(encoded.clone()).expect("decimal backup should deserialize");
+        assert_eq!(decoded, backup);
+
+        let mut invalid_definition = encoded;
+        invalid_definition["Decimal"]["definition"]["scale"] = serde_json::json!(13);
+        assert!(serde_json::from_value::<BackupValue>(invalid_definition).is_err());
+
+        let descriptor = super::super::ColumnBackupDescriptor {
+            column_name: "amount".to_string(),
+            rust_field_name: "amount".to_string(),
+            logical_type: BackupValueKind::Decimal,
+            decimal: Some(definition),
+            nullable: false,
+            is_primary_key: false,
+            is_generated: false,
+            backup_policy: ColumnBackupPolicy::Include,
+        };
+        validate_backup_value(&descriptor, &backup).expect("matching definition should validate");
+
+        let different = super::super::DecimalDef::new(10, 2).expect("valid decimal definition");
+        let mismatched = BackupValue::Decimal(
+            super::super::DecimalValue::new(value.value(), different)
+                .expect("value fits narrower definition"),
+        );
+        assert!(validate_backup_value(&descriptor, &mismatched).is_err());
+        assert!(
+            validate_backup_value(&descriptor, &BackupValue::String("1234.50".into())).is_err()
+        );
+    }
 
     #[test]
     fn self_referential_rows_are_ordered_parent_first() {

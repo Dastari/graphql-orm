@@ -2,6 +2,7 @@ use graphql_orm::graphql::orm::{
     ColumnBackupPolicy, Entity, backup_descriptors_from_entities, schema_snapshot_from_entities,
 };
 use graphql_orm::prelude::*;
+use graphql_orm::rust_decimal::Decimal;
 
 #[derive(GraphQLEntity, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 #[graphql_entity(
@@ -28,6 +29,9 @@ struct BackupUser {
     pub session_secret: Option<String>,
 
     pub created_at: i64,
+
+    #[graphql_orm(decimal(precision = 12, scale = 2))]
+    pub balance: Decimal,
 }
 
 #[derive(GraphQLEntity, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -107,6 +111,19 @@ fn generated_entity_metadata_produces_backup_descriptors() {
         .find(|column| column.rust_field_name == "email")
         .expect("email column");
     assert_eq!(email.backup_policy, ColumnBackupPolicy::Include);
+
+    let balance = user
+        .columns
+        .iter()
+        .find(|column| column.rust_field_name == "balance")
+        .expect("decimal balance column");
+    assert_eq!(
+        balance.logical_type,
+        graphql_orm::graphql::orm::BackupValueKind::Decimal
+    );
+    let decimal = balance.decimal.expect("decimal storage definition");
+    assert_eq!(decimal.precision(), 12);
+    assert_eq!(decimal.scale(), 2);
 
     let display_name = user
         .columns

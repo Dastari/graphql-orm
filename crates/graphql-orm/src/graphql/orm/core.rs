@@ -119,10 +119,37 @@ pub fn composite_key_id(values: &[SqlValue]) -> String {
 /// The precision ceiling of 18 is deliberate: it permits the same value to be
 /// represented losslessly as a scaled `i64` on SQLite and as `NUMERIC` or
 /// `DECIMAL` on PostgreSQL and SQL Server.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize)]
+#[serde(into = "DecimalDefWire")]
 pub struct DecimalDef {
     precision: u8,
     scale: u8,
+}
+
+#[derive(Clone, Copy, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct DecimalDefWire {
+    precision: u8,
+    scale: u8,
+}
+
+impl From<DecimalDef> for DecimalDefWire {
+    fn from(value: DecimalDef) -> Self {
+        Self {
+            precision: value.precision,
+            scale: value.scale,
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for DecimalDef {
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
+    where
+        Deserializer: serde::Deserializer<'de>,
+    {
+        let wire = DecimalDefWire::deserialize(deserializer)?;
+        Self::new(wire.precision, wire.scale).map_err(serde::de::Error::custom)
+    }
 }
 
 impl DecimalDef {
@@ -218,10 +245,41 @@ impl std::fmt::Display for DecimalValueError {
 impl std::error::Error for DecimalValueError {}
 
 /// Exact decimal bind value paired with its validated storage definition.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(into = "DecimalValueWire")]
 pub struct DecimalValue {
     value: rust_decimal::Decimal,
     definition: DecimalDef,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct DecimalValueWire {
+    value: String,
+    definition: DecimalDef,
+}
+
+impl From<DecimalValue> for DecimalValueWire {
+    fn from(value: DecimalValue) -> Self {
+        Self {
+            value: value.value.to_string(),
+            definition: value.definition,
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for DecimalValue {
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
+    where
+        Deserializer: serde::Deserializer<'de>,
+    {
+        let wire = DecimalValueWire::deserialize(deserializer)?;
+        let value = wire
+            .value
+            .parse::<rust_decimal::Decimal>()
+            .map_err(serde::de::Error::custom)?;
+        Self::new(value, wire.definition).map_err(serde::de::Error::custom)
+    }
 }
 
 impl DecimalValue {
@@ -2801,6 +2859,7 @@ pub enum BackupValueKind {
     Bool,
     Integer,
     Float,
+    Decimal,
     String,
     Uuid,
     Json,
@@ -3989,6 +4048,9 @@ pub struct ColumnBackupDescriptor {
     pub column_name: String,
     pub rust_field_name: String,
     pub logical_type: BackupValueKind,
+    /// Exact storage definition for [`BackupValueKind::Decimal`].
+    #[serde(default)]
+    pub decimal: Option<DecimalDef>,
     pub nullable: bool,
     pub is_primary_key: bool,
     pub is_generated: bool,
@@ -4383,6 +4445,7 @@ pub fn backup_descriptors_from_entities(
                     column_name: field.name.to_string(),
                     rust_field_name: field.rust_name.to_string(),
                     logical_type: field.logical_type,
+                    decimal: field.decimal,
                     nullable: field.nullable,
                     is_primary_key: field.is_primary_key,
                     is_generated: field.is_generated,
@@ -4474,6 +4537,12 @@ pub fn stable_schema_hash(entities: &[EntityBackupDescriptor]) -> String {
             canonical.push_str(&column.rust_field_name);
             canonical.push('|');
             canonical.push_str(column.logical_type.as_schema_str());
+            if let Some(decimal) = column.decimal {
+                canonical.push('|');
+                canonical.push_str(&decimal.precision().to_string());
+                canonical.push(':');
+                canonical.push_str(&decimal.scale().to_string());
+            }
             canonical.push('|');
             canonical.push_str(if column.nullable {
                 "nullable"
@@ -4817,6 +4886,7 @@ impl BackupValueKind {
             BackupValueKind::Bool => "bool",
             BackupValueKind::Integer => "integer",
             BackupValueKind::Float => "float",
+            BackupValueKind::Decimal => "decimal",
             BackupValueKind::String => "string",
             BackupValueKind::Uuid => "uuid",
             BackupValueKind::Json => "json",

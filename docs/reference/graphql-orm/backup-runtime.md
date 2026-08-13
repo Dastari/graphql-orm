@@ -42,7 +42,10 @@ let snapshot = database.schema_snapshot("20260514_01", &graphql_orm_entity_metad
 
 Rows are exported as `BackupRow` with typed `BackupValue` values. The row format is independent of
 SQLite/PostgreSQL physical storage, so UUIDs, JSON, bytes, numbers, booleans, strings, and nulls
-remain distinguishable.
+remain distinguishable. Exact Decimal values carry their validated precision and scale in both the
+column descriptor and value. SQLite scaled integers and PostgreSQL native numerics therefore
+round-trip through one canonical representation; restore rejects changed definitions, rounding,
+range loss, and value-kind mismatches.
 
 Sensitive columns use `#[backup(redact)]` or `#[backup(exclude)]`.
 

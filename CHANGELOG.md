@@ -56,10 +56,15 @@ semantic owner: `graphql-orm-operation-catalog` **0.2.0**.
   `MERGE`; transactions discard a Tiberius client after cancellation or an
   indeterminate error. Fixed-decimal and JSON values have native validated
   MSSQL bind/decode paths.
+- Logical backups represent Decimal columns as exact validated Decimal values,
+  including precision and scale. SQLite scaled integers and PostgreSQL native
+  numerics now share one canonical backup form, and restore rejects changed
+  definitions or lossy values.
 
 The semantic catalogue is discovery and disclosure-shape metadata only. It
 does not authorize resolvers, fields, rows, provider egress, or database work.
-There is no database, stored-data, backup, or migration-history change. SDL
+There is no database, stored-data, or migration-history change. Decimal-aware
+logical backup descriptors and schema hashes are new in this release. SDL
 descriptions and semantic/catalogue fingerprints change where new generated
 documentation participates. MSSQL write adoption is an explicit application
 configuration change against an externally managed schema; the ORM still does

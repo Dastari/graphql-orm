@@ -74,7 +74,10 @@ must declare `#[graphql_orm(decimal(precision = P, scale = S))]`; SQLite stores
 their exact scaled integer representation while PostgreSQL and SQL Server use
 native fixed-precision types. Adding a new Decimal column is an ordinary
 application schema migration, but adopting this release without declaring one
-requires no database or stored-data migration.
+requires no database or stored-data migration. Logical backups containing a
+Decimal field use the new exact Decimal value kind and include precision/scale
+in the schema hash. Produce and restore those backups with 0.22.0 or later;
+string-typed Decimal backup values are rejected instead of being coerced.
 
 SQL Server compatibility constructors remain physically read-only, so existing
 MSSQL applications acquire no write authority after upgrading. To adopt DML

@@ -1491,6 +1491,10 @@ fn convert_value_kind(field: &FieldMetadata) -> Option<RuntimeValueKind> {
         BackupValueKind::Bool => Some(RuntimeValueKind::Boolean),
         BackupValueKind::Integer => Some(RuntimeValueKind::Integer),
         BackupValueKind::Float => Some(RuntimeValueKind::Float),
+        // Runtime-authored decimal fields are not yet supported. Static entity
+        // metadata retains the exact definition and uses its public scalar
+        // representation when projected into the runtime schema.
+        BackupValueKind::Decimal => Some(RuntimeValueKind::String),
         BackupValueKind::String => Some(RuntimeValueKind::String),
         BackupValueKind::Uuid => Some(RuntimeValueKind::Uuid),
         BackupValueKind::Json => Some(RuntimeValueKind::Json),

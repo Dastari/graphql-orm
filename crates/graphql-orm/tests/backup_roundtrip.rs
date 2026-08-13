@@ -6,6 +6,7 @@ use graphql_orm::graphql::orm::{
     build_migration_plan,
 };
 use graphql_orm::prelude::*;
+use graphql_orm::rust_decimal::Decimal;
 use sqlx::Row;
 use std::collections::BTreeMap;
 
@@ -37,6 +38,8 @@ async fn change_journal_records_generated_repository_writes()
             preferences: None,
             avatar: vec![9, 8, 7],
             nickname: None,
+            balance: Decimal::new(12345, 2),
+            credit_limit: None,
         },
     )
     .await?;
@@ -91,6 +94,16 @@ struct BackupRtAccount {
     pub avatar: Vec<u8>,
 
     pub nickname: Option<String>,
+
+    #[filterable(type = "decimal")]
+    #[sortable]
+    #[graphql_orm(decimal(precision = 12, scale = 2))]
+    pub balance: Decimal,
+
+    #[filterable(type = "decimal")]
+    #[sortable]
+    #[graphql_orm(decimal(precision = 12, scale = 2))]
+    pub credit_limit: Option<Decimal>,
 
     #[sortable]
     pub created_at: i64,
@@ -243,6 +256,8 @@ async fn full_logical_backup_restores_into_empty_database() -> Result<(), Box<dy
             preferences: None,
             avatar: vec![0, 1, 2, 3, 255],
             nickname: Some("countess".to_string()),
+            balance: Decimal::new(987654, 2),
+            credit_limit: Some(Decimal::new(2500000, 2)),
         },
     )
     .await?;
@@ -312,6 +327,8 @@ async fn full_logical_backup_restores_into_empty_database() -> Result<(), Box<dy
     assert_eq!(restored_account.preferences, None);
     assert_eq!(restored_account.avatar, account.avatar);
     assert_eq!(restored_account.nickname, account.nickname);
+    assert_eq!(restored_account.balance, account.balance);
+    assert_eq!(restored_account.credit_limit, account.credit_limit);
     assert_eq!(restored_account.created_at, account.created_at);
     assert_eq!(restored_account.updated_at, account.updated_at);
 

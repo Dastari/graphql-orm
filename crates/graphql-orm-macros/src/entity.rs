@@ -2058,6 +2058,9 @@ fn backup_policy_tokens(
 }
 
 fn backup_value_kind_tokens(ty: &syn::Type, meta: &FieldMetadata) -> proc_macro2::TokenStream {
+    if meta.decimal.is_some() {
+        return quote! { ::graphql_orm::graphql::orm::BackupValueKind::Decimal };
+    }
     if meta.is_json_field {
         return quote! { ::graphql_orm::graphql::orm::BackupValueKind::Json };
     }

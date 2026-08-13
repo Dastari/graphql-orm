@@ -3,6 +3,30 @@
 use graphql_orm::prelude::*;
 use graphql_orm::rust_decimal::Decimal;
 
+fn resolver_name(camel: &'static str, pascal: &'static str) -> &'static str {
+    if cfg!(feature = "resolver-case-pascal") {
+        pascal
+    } else {
+        camel
+    }
+}
+
+fn argument_name(camel: &'static str, pascal: &'static str) -> &'static str {
+    if cfg!(feature = "argument-case-pascal") {
+        pascal
+    } else {
+        camel
+    }
+}
+
+fn field_name(camel: &'static str, pascal: &'static str) -> &'static str {
+    if cfg!(feature = "field-case-pascal") {
+        pascal
+    } else {
+        camel
+    }
+}
+
 /// Work records used to prove database-side grouped aggregation.
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[graphql_entity(
@@ -279,23 +303,35 @@ async fn aggregate_root_is_opt_in_and_catalogued() -> graphql_orm::Result<()> {
     assert_eq!(descriptor.kind(), GraphqlOperationKind::Query);
     assert_eq!(descriptor.arguments().len(), 4);
     assert!(sdl.contains(descriptor.field_name()), "{sdl}");
-    let response = schema
-        .execute(
-            "{ aggregateWorkRecordsAggregate(\
-                groupBy: [team], \
-                metrics: [{operator: COUNT}, {operator: SUM, field: units}], \
-                groupLimit: 10\
-            ) { groups { field kind value } metrics { field operator kind value } } }",
-        )
-        .await;
+    let root = resolver_name(
+        "aggregateWorkRecordsAggregate",
+        "AggregateWorkRecordsAggregate",
+    );
+    let group_by = argument_name("groupBy", "GroupBy");
+    let metrics = argument_name("metrics", "Metrics");
+    let group_limit = argument_name("groupLimit", "GroupLimit");
+    let team = field_name("team", "Team");
+    let units = field_name("units", "Units");
+    let groups = field_name("groups", "Groups");
+    let field = field_name("field", "Field");
+    let kind = field_name("kind", "Kind");
+    let value = field_name("value", "Value");
+    let operator = field_name("operator", "Operator");
+    let query = format!(
+        "{{ {root}({group_by}: [{team}], {metrics}: [{{{operator}: COUNT}}, \
+         {{{operator}: SUM, {field}: {units}}}], {group_limit}: 10) \
+         {{ {groups} {{ {field} {kind} {value} }} {metrics} \
+         {{ {field} {operator} {kind} {value} }} }} }}"
+    );
+    let response = schema.execute(query).await;
     assert!(response.errors.is_empty(), "{:?}", response.errors);
     let data = response
         .data
         .into_json()
         .expect("aggregate response should serialize");
-    let row = &data["aggregateWorkRecordsAggregate"][0];
-    assert_eq!(row["groups"][0]["value"], "alpha");
-    assert_eq!(row["metrics"][0]["value"], "1");
-    assert_eq!(row["metrics"][1]["value"], "3");
+    let row = &data[root][0];
+    assert_eq!(row[groups][0][value], "alpha");
+    assert_eq!(row[metrics][0][value], "1");
+    assert_eq!(row[metrics][1][value], "3");
     Ok(())
 }
