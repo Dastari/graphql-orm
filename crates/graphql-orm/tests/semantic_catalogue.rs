@@ -12,6 +12,14 @@ fn field_name(camel: &'static str, pascal: &'static str) -> &'static str {
     }
 }
 
+fn argument_name(camel: &'static str, pascal: &'static str) -> &'static str {
+    if cfg!(feature = "argument-case-pascal") {
+        pascal
+    } else {
+        camel
+    }
+}
+
 /// A reviewed public record used to validate semantic emission.
 #[derive(
     GraphQLEntity,
@@ -235,6 +243,19 @@ fn entity_and_custom_root_semantics_are_canonical_and_safe() {
         GraphqlSemanticTypeRef::List { maximum_items: Some(limit), .. }
             if limit == PaginationConfig::DEFAULT_MAX_LIMIT as u32
     ));
+    let relationship_order = relationship
+        .arguments
+        .iter()
+        .find(|argument| argument.graphql_name == argument_name("orderBy", "OrderBy"))
+        .expect("relationship ordering contract");
+    assert_eq!(
+        relationship_order.type_ref,
+        GraphqlSemanticTypeRef::named(
+            "SemanticRecordOrderByInput",
+            GraphqlSemanticTypeKind::Object,
+            true,
+        )
+    );
 
     let catalog = graphql_orm_semantic_catalog();
     catalog.validate().expect("generated catalogue validates");

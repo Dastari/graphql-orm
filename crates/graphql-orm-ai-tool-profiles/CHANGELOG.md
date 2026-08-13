@@ -10,6 +10,24 @@ supersedes: []
 
 # Changelog
 
+## [0.4.1] - 2026-08-13
+
+### Fixed
+
+- Automatic capability compilation now accepts the corrected macro-generated
+  relationship argument contract while continuing to compare relationship
+  semantic types byte-for-byte with the finished SDL.
+- Finite provider schemas omit only the recursive `And`/`Or`/`Not`
+  connectives of generated entity `WhereInput` values. Their complete flat
+  typed filter fields remain available; handwritten recursive inputs are still
+  rejected rather than approximated.
+
+### Security
+
+- List-versus-object relationship tampering remains a closed configuration
+  error. Catalogue discovery still grants no execution or disclosure
+  authority.
+
 ## [0.4.0] - 2026-08-13
 
 ### Added

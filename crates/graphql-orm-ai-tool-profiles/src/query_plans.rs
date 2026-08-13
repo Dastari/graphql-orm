@@ -2670,6 +2670,14 @@ fn input_object_schema(
         if exclude_server_bound && is_page_argument(name, &field.ty, schema) {
             continue;
         }
+        // Generated entity filters contain recursive `And`/`Or`/`Not`
+        // connectives. Provider schemas are deliberately finite and do not
+        // use recursive JSON Schema, so expose the complete flat typed filter
+        // surface while omitting only a self-recursive generated connective.
+        // Handwritten recursive inputs retain the existing fail-closed path.
+        if is_generated_filter_self_reference(catalog, &field.ty, ancestry) {
+            continue;
+        }
         let description = descriptions
             .get(name.as_str())
             .copied()
@@ -2694,6 +2702,24 @@ fn input_object_schema(
         "required": required,
         "additionalProperties": false,
     }))
+}
+
+fn is_generated_filter_self_reference(
+    catalog: &GraphqlSemanticCatalog,
+    graphql_type: &str,
+    ancestry: &[String],
+) -> bool {
+    let Some(current) = ancestry.last() else {
+        return false;
+    };
+    let Ok(referenced) = named_type(graphql_type) else {
+        return false;
+    };
+    current == referenced
+        && catalog
+            .entities
+            .iter()
+            .any(|entity| current == &format!("{}WhereInput", entity.entity_name))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4204,6 +4230,54 @@ mod tests {
         tags.disclosure_schema()
             .evaluate(&json!({ "Tags": ["one", "two"] }))
             .expect("bounded scalar list discloses");
+    }
+
+    #[test]
+    fn handwritten_recursive_inputs_remain_unsupported() {
+        let base = semantic_catalog();
+        let search = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Query,
+            "SearchParent",
+            "Search reviewed parent records.",
+            vec![GraphqlSemanticArgumentDescriptor {
+                graphql_name: "input".to_owned(),
+                description: "Recursive custom search expression.".to_owned(),
+                type_ref: GraphqlSemanticTypeRef::named(
+                    "CustomRecursiveInput",
+                    GraphqlSemanticTypeKind::Object,
+                    false,
+                ),
+            }],
+            GraphqlSemanticTypeRef::named("Parent", GraphqlSemanticTypeKind::Object, false),
+            true,
+        )
+        .expect("custom query semantics");
+        let semantics = GraphqlSemanticCatalog::compose_with_custom(
+            base.entities,
+            &GraphqlOperationCatalog::compose(std::iter::empty()),
+            base.operations.into_iter().chain([search]),
+        )
+        .expect("recursive custom input semantics");
+        let sdl = query_sdl()
+            .replace(
+                "ReadParent(id: ID!): Parent!",
+                "ReadParent(id: ID!): Parent!\nSearchParent(input: CustomRecursiveInput!): Parent!",
+            )
+            .replace(
+                "input PageInput { limit: Int, offset: Int }",
+                "input PageInput { limit: Int, offset: Int }\ninput CustomRecursiveInput { next: CustomRecursiveInput }",
+            );
+        assert!(matches!(
+            AiGraphqlQueryCapabilityCatalog::compile(
+                "inventory",
+                GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
+                &sdl,
+                &semantics,
+                AiGraphqlQueryCapabilityLimits::default(),
+            ),
+            Err(AiError::InvalidConfiguration(message))
+                if message == "recursive query inputs are unsupported"
+        ));
     }
 
     #[test]

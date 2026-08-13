@@ -3,9 +3,8 @@ use crate::backend::{
     BackendKind, backend_current_epoch_expr, backend_helper_import_tokens, backend_marker_tokens,
     backend_quote_identifier_path, backend_row_type_tokens, resolve_backend,
 };
-use crate::naming::{
-    apply_graphql_case, graphql_field_name, selected_argument_case, selected_field_case_rule,
-};
+use crate::naming::{graphql_field_name, selected_field_case_rule};
+use crate::relationship_contract::GeneratedRelationshipArgumentContract;
 use syn::spanned::Spanned;
 
 #[derive(Default)]
@@ -2662,10 +2661,6 @@ fn generate_entity_impl(
     let mut semantic_field_defs = Vec::new();
     let mut aggregate_field_variants = Vec::new();
     let mut aggregate_field_match_arms = Vec::new();
-    let semantic_argument_case = selected_argument_case();
-    let semantic_where_argument = apply_graphql_case("where", semantic_argument_case);
-    let semantic_order_by_argument = apply_graphql_case("order_by", semantic_argument_case);
-    let semantic_page_argument = apply_graphql_case("page", semantic_argument_case);
     let parsed_fields = collect_parsed_fields(fields.iter())?;
     let aggregate_field_name = syn::Ident::new(
         &format!("{}AggregateField", struct_name),
@@ -2764,41 +2759,8 @@ fn generate_entity_impl(
                         quote! { ::graphql_orm::graphql::orm::GraphqlSemanticRelationshipCardinality::One }
                     };
                     let relationship_arguments = if is_multiple {
-                        quote! {
-                            vec![
-                                ::graphql_orm::graphql::orm::GraphqlSemanticArgumentDescriptor {
-                                    graphql_name: ::std::string::ToString::to_string(#semantic_where_argument),
-                                    description: ::std::string::ToString::to_string("Filter related records"),
-                                    type_ref: ::graphql_orm::graphql::orm::GraphqlSemanticTypeRef::named(
-                                        concat!(#target_type, "WhereInput"),
-                                        ::graphql_orm::graphql::orm::GraphqlSemanticTypeKind::Object,
-                                        true,
-                                    ),
-                                },
-                                ::graphql_orm::graphql::orm::GraphqlSemanticArgumentDescriptor {
-                                    graphql_name: ::std::string::ToString::to_string(#semantic_order_by_argument),
-                                    description: ::std::string::ToString::to_string("Order related records"),
-                                    type_ref: ::graphql_orm::graphql::orm::GraphqlSemanticTypeRef::list(
-                                        true,
-                                        Some(32),
-                                        ::graphql_orm::graphql::orm::GraphqlSemanticTypeRef::named(
-                                            concat!(#target_type, "OrderByInput"),
-                                            ::graphql_orm::graphql::orm::GraphqlSemanticTypeKind::Object,
-                                            true,
-                                        ),
-                                    ),
-                                },
-                                ::graphql_orm::graphql::orm::GraphqlSemanticArgumentDescriptor {
-                                    graphql_name: ::std::string::ToString::to_string(#semantic_page_argument),
-                                    description: ::std::string::ToString::to_string("Bound the related record page"),
-                                    type_ref: ::graphql_orm::graphql::orm::GraphqlSemanticTypeRef::named(
-                                        "PageInput",
-                                        ::graphql_orm::graphql::orm::GraphqlSemanticTypeKind::Object,
-                                        true,
-                                    ),
-                                },
-                            ]
-                        }
+                        GeneratedRelationshipArgumentContract::to_many(&target_type, field.span())
+                            .semantic_descriptors()
                     } else {
                         quote! { vec![] }
                     };

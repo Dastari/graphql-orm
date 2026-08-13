@@ -10,6 +10,20 @@ supersedes: []
 
 # Migration Guide
 
+## 0.4.0 to 0.4.1: exact generated relationship arguments
+
+Adopt `graphql-orm-ai-tool-profiles` 0.4.1 together with `graphql-orm` and
+`graphql-orm-macros` 0.22.1 at the same reviewed full Git revision. Rebuild the
+finished public SDL, canonical semantic catalogue and automatic query
+capability set. The corrected relationship semantic argument changes semantic
+catalogue and derived capability fingerprints deterministically.
+
+No database, GraphQL SDL, manifest-wire, table, column, constraint, data,
+backfill, or AI schema-module migration is required. Existing target policy,
+fresh-principal, delegation, resolver authorization and disclosure checks are
+unchanged. A consumer-authored catalogue normalization is neither needed nor
+supported.
+
 ## 0.3.0 to 0.4.0: semantic query and bounded subscription capabilities
 
 The automatic capability APIs are additive. Existing explicit profile and

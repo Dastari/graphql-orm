@@ -16,13 +16,13 @@ macro/runtime versions aligned:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.22.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.22.1", default-features = false, features = ["sqlite"] }
 ```
 
 Direct use is supported for tooling that needs the macro package:
 
 ```toml
-graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.22.0", default-features = false, features = ["sqlite"] }
+graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.22.1", default-features = false, features = ["sqlite"] }
 ```
 
 The direct dependency still requires a compatible `graphql-orm` runtime in the
@@ -104,6 +104,12 @@ reads and DML onto one driver-neutral mutation transaction. Existing-row
 decisions use backend write locks, predicate mutations materialize typed
 primary keys before exact-key DML, and absent-key upserts require the runtime's
 state-machine isolation mode. Consumers do not provide SQL or lock clauses.
+
+Generated to-many relation resolvers accept one nullable `OrderByInput`
+object, while generated root list resolvers retain their nullable list of
+non-null ordering objects. The macro derives relation resolver signatures and
+semantic relationship descriptors from the same internal contract so public
+names, nullability and `Where`/`OrderBy`/`Page` shapes remain byte-equivalent.
 
 See [core runtime documentation](../graphql-orm/README.md),
 and the [macro and attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md).

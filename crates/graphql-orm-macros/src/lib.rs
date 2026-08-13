@@ -183,6 +183,7 @@ mod mutation_result;
 mod naming;
 mod operations;
 mod relations;
+mod relationship_contract;
 mod repository;
 mod schema_roots;
 mod semantic_object;

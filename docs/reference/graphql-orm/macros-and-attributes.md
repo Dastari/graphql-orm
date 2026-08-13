@@ -142,6 +142,15 @@ changes the relation cardinality. `emit_fk` is a boolean; `on_delete` and
 `propagate_change` are strings validated for the selected backend/policy.
 Relations are not ordinary persisted fields.
 
+A generated to-many relationship exposes nullable `Where`, `OrderBy`, and
+`Page` objects. In particular, its ordering contract is one nullable
+`ChildOrderByInput`, because one relation-loader query accepts one composed
+ordering object. A generated root list query remains different: it accepts a
+nullable list of non-null order objects, `[ChildOrderByInput!]`. Resolver SDL
+and `graphql_orm_semantic_catalog()` derive these relationship arguments from
+one macro-owned contract; consumers must not normalize or rewrite either
+shape.
+
 ### Search, spatial, and projections
 
 Entity search is enabled by `#[graphql_orm(search(...))]`; fields can then use

@@ -6,7 +6,8 @@ use crate::entity::{
     collect_parsed_fields, has_graphql_complex, parse_entity_metadata,
     relation_change_propagation_tokens, relation_delete_policy_tokens, resolver_auth_mode_tokens,
 };
-use crate::naming::{apply_graphql_case, graphql_field_name, selected_argument_case};
+use crate::naming::graphql_field_name;
+use crate::relationship_contract::GeneratedRelationshipArgumentContract;
 use syn::spanned::Spanned;
 
 struct RelationDef {
@@ -172,10 +173,6 @@ pub(crate) fn generate_graphql_relations(
 
     let graphql_rename_fields = entity_meta.graphql_rename_fields.as_deref();
     let serde_rename_all = entity_meta.serde_rename_all.as_deref();
-    let argument_case = selected_argument_case();
-    let where_arg_name = apply_graphql_case("where", argument_case);
-    let order_by_arg_name = apply_graphql_case("orderBy", argument_case);
-    let page_arg_name = apply_graphql_case("page", argument_case);
     let legacy_graphql_complex = has_graphql_complex(&input.attrs);
     let parsed_fields = collect_parsed_fields(fields.iter())?;
 
@@ -394,9 +391,7 @@ pub(crate) fn generate_graphql_relations(
                 };
                 if *source_is_option {
                     quote! {
-                        let Some(value) = self.#source_field.as_ref() else {
-                            return None;
-                        };
+                        let value = self.#source_field.as_ref()?;
                         relation_sql_values.push(#sql_value_expr);
                         relation_key_parts.push(#key_part_expr);
                     }
@@ -412,15 +407,21 @@ pub(crate) fn generate_graphql_relations(
 
         // Generate type name strings for use in fully-qualified paths
         let target_type_str = &r.target_type_str;
-        let where_input_str = format!("{}WhereInput", r.target_type_str);
-        let order_by_input_str = format!("{}OrderByInput", r.target_type_str);
         let connection_type_str = format!("{}Connection", r.target_type_str);
         let edge_type_str = format!("{}Edge", r.target_type_str);
 
         // Create idents for local use in the macro
         let target_type = syn::Ident::new(target_type_str, struct_name.span());
-        let where_input = syn::Ident::new(&where_input_str, struct_name.span());
-        let order_by_input = syn::Ident::new(&order_by_input_str, struct_name.span());
+        let argument_contract = GeneratedRelationshipArgumentContract::to_many(
+            target_type_str,
+            struct_name.span(),
+        );
+        let where_arg_name = argument_contract.where_name();
+        let order_by_arg_name = argument_contract.order_by_name();
+        let page_arg_name = argument_contract.page_name();
+        let where_rust_type = argument_contract.where_rust_type();
+        let order_by_rust_type = argument_contract.order_by_rust_type();
+        let page_rust_type = argument_contract.page_rust_type();
         let connection_type = syn::Ident::new(&connection_type_str, struct_name.span());
         let edge_type = syn::Ident::new(&edge_type_str, struct_name.span());
         let list_relation_complexity = "{ let requested = page.as_ref().and_then(|page| page.limit).unwrap_or(::graphql_orm::graphql::orm::PaginationConfig::DEFAULT_LIMIT); let capped = requested.max(0).min(::graphql_orm::graphql::orm::PaginationConfig::DEFAULT_MAX_LIMIT); 2 + (capped as usize).saturating_mul(child_complexity) }";
@@ -578,9 +579,9 @@ pub(crate) fn generate_graphql_relations(
                 async fn #field_name(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
-                    #[graphql(name = #where_arg_name)] where_input: Option<#where_input>,
-                    #[graphql(name = #order_by_arg_name)] order_by: Option<#order_by_input>,
-                    #[graphql(name = #page_arg_name)] page: Option<::graphql_orm::graphql::orm::PageInput>,
+                    #[graphql(name = #where_arg_name)] where_input: #where_rust_type,
+                    #[graphql(name = #order_by_arg_name)] order_by: #order_by_rust_type,
+                    #[graphql(name = #page_arg_name)] page: #page_rust_type,
                 ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, DatabaseOrderBy, EntityQuery, SqlValue};
 
@@ -820,9 +821,7 @@ pub(crate) fn generate_graphql_relations(
                     };
                     if *source_is_option {
                         quote! {
-                            let Some(value) = entity.#source_field.as_ref() else {
-                                return None;
-                            };
+                            let value = entity.#source_field.as_ref()?;
                             relation_sql_values.push(#sql_value_expr);
                             relation_key_parts.push(#key_part_expr);
                         }
@@ -849,9 +848,7 @@ pub(crate) fn generate_graphql_relations(
                     };
                     if *source_is_option {
                         quote! {
-                            let Some(value) = entity.#source_field.as_ref() else {
-                                return None;
-                            };
+                            let value = entity.#source_field.as_ref()?;
                             relation_key_parts.push(#key_part_expr);
                         }
                     } else {

@@ -14,6 +14,22 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.22.1 - 2026-08-13
+
+Companion macros crate: `graphql-orm-macros` **0.22.1**.
+
+- Fixed generated to-many relationship semantic metadata so its nullable
+  `OrderBy` object exactly matches the relationship resolver SDL. Generated
+  root list queries retain their existing list-valued `OrderBy` contract.
+- Relationship resolver signatures and semantic argument descriptors now use
+  one macro-owned contract for public names, nullability, `Where`, `OrderBy`,
+  and `Page` types, preventing independent drift across case conventions and
+  backends.
+- Added a complete PascalCase schema/catalogue/capability regression covering
+  single-key, composite-key, one-to-one, nullable and to-many relationships.
+- Optional relationship-key extraction now emits the idiomatic `?` form so
+  generated consumers remain warnings-clean under current Clippy.
+
 ## 0.22.0 - 2026-08-13
 
 Companion macros crate: `graphql-orm-macros` **0.22.0**. Backend-neutral

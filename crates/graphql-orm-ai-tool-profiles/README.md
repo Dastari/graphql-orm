@@ -24,7 +24,7 @@ are separate runtime decisions and must remain default-deny.
 
 ```toml
 [dependencies]
-graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.4.0" }
+graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.4.1" }
 serde_json = "1"
 ```
 
@@ -109,6 +109,13 @@ The compiler binds the exact target, SDL, semantic operation, selection,
 variables schema, disclosure shape, limits, and plan fingerprint. Registration
 is discovery only; a fresh target/current-principal policy and the ordinary
 resolver remain authoritative at execution.
+
+Generated entity `WhereInput` objects contain recursive `And`/`Or`/`Not`
+connectives, which are intentionally absent from the finite provider schema;
+all non-recursive typed filter fields remain available. Handwritten recursive
+inputs still fail readiness rather than being approximated. Relationship
+arguments, including the single nullable to-many `OrderByInput`, must continue
+to match the finished SDL exactly.
 
 Opt-in aggregate roots use the same catalogue and a fixed result projection.
 Their filters, grouping, metrics, operators, and group limits remain typed and

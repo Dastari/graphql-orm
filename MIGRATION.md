@@ -13,6 +13,23 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.22.0 to 0.22.1: relationship semantic argument correction
+
+Update `graphql-orm` and `graphql-orm-macros` together to 0.22.1 at one
+reviewed full Git revision. No resolver SDL, database schema, table, column,
+constraint, data, or AI schema-module migration is required.
+
+The canonical semantic catalogue now describes a generated to-many
+relationship's nullable ordering argument as `ChildOrderByInput`, matching the
+resolver SDL. Root list queries continue to describe and accept
+`[ChildOrderByInput!]` as before. Regenerate semantic catalogues and automatic
+query capability fingerprints after adoption; do not preserve fingerprints
+derived from the incorrect relationship argument shape.
+
+`AiGraphqlQueryCapabilityCatalog::compile` remains strict. Any future
+catalogue/SDL type, nullability, list-item, name, or argument-set mismatch
+continues to fail readiness.
+
 ## 0.22.0 canonical GraphQL semantic catalogue
 
 Update `graphql-orm` and `graphql-orm-macros` together to 0.22.0 at one
