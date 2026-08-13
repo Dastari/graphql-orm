@@ -517,6 +517,19 @@ pub struct OrmAiApplicationToolCallService {
     egress_audit: Arc<dyn AiEgressDecisionAudit>,
     clock: Arc<dyn Clock>,
     limits: AiApplicationToolCallLimits,
+    #[cfg(test)]
+    automatic_mutation_fault: Option<AutomaticMutationTestFault>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AutomaticMutationTestFault {
+    AfterResolver,
+    SerializeResult,
+    BoundResult,
+    ReauthorizeResult,
+    ProtectResult,
+    FinishResult,
 }
 
 #[derive(Clone, Copy)]
@@ -540,7 +553,32 @@ impl OrmAiApplicationToolCallService {
             egress_audit,
             clock,
             limits,
+            #[cfg(test)]
+            automatic_mutation_fault: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_automatic_mutation_fault(
+        mut self,
+        fault: AutomaticMutationTestFault,
+    ) -> Self {
+        self.automatic_mutation_fault = Some(fault);
+        self
+    }
+
+    #[cfg(test)]
+    fn inject_automatic_mutation_fault(
+        &self,
+        mode: UnapprovedToolMode,
+        fault: AutomaticMutationTestFault,
+    ) -> Result<(), AiError> {
+        if matches!(mode, UnapprovedToolMode::AutomaticMutation)
+            && self.automatic_mutation_fault == Some(fault)
+        {
+            return Err(AiError::PersistenceFailed);
+        }
+        Ok(())
     }
 
     /// Executes one exact provider-requested, explicitly enabled read query.
@@ -941,9 +979,32 @@ impl OrmAiApplicationToolCallService {
                 None,
             ),
         };
+        #[cfg(test)]
+        if let Err(error) =
+            self.inject_automatic_mutation_fault(mode, AutomaticMutationTestFault::AfterResolver)
+        {
+            return match self
+                .mark_automatic_recovery(
+                    lease,
+                    id,
+                    provider_result.provider_response_id().map(str::to_owned),
+                )
+                .await
+            {
+                Ok(outcome) => Ok(outcome),
+                Err(_) => Err(error),
+            };
+        }
         let finalization: Result<AiConsequentialToolCallOutcome, AiError> = async {
+            #[cfg(test)]
+            self.inject_automatic_mutation_fault(
+                mode,
+                AutomaticMutationTestFault::SerializeResult,
+            )?;
             let output_bytes =
                 serde_json::to_vec(&model_output).map_err(|_| AiError::ToolExecutionFailed)?;
+            #[cfg(test)]
+            self.inject_automatic_mutation_fault(mode, AutomaticMutationTestFault::BoundResult)?;
             if output_bytes.len() > self.limits.maximum_model_output_bytes {
                 return Err(AiError::ToolExecutionFailed);
             }
@@ -953,6 +1014,11 @@ impl OrmAiApplicationToolCallService {
                 .and_then(|bytes| bytes.checked_add(provider_call.tool_id().as_str().len()))
                 .ok_or_else(|| AiError::InvalidInput("tool result is too large".to_owned()))?;
 
+            #[cfg(test)]
+            self.inject_automatic_mutation_fault(
+                mode,
+                AutomaticMutationTestFault::ReauthorizeResult,
+            )?;
             self.current_access(lease, &context.scope).await?;
             let manifest = AiEgressManifest {
                 provider_profile_id: route.provider_profile_id,
@@ -1015,6 +1081,8 @@ impl OrmAiApplicationToolCallService {
                         authorization_code,
                     )
                 };
+            #[cfg(test)]
+            self.inject_automatic_mutation_fault(mode, AutomaticMutationTestFault::ProtectResult)?;
             let protected_result = self
                 .protect(
                     &policy,
@@ -1063,6 +1131,8 @@ impl OrmAiApplicationToolCallService {
                     }),
                 )
                 .await?;
+            #[cfg(test)]
+            self.inject_automatic_mutation_fault(mode, AutomaticMutationTestFault::FinishResult)?;
             let renewed = self
                 .run_service
                 .finish_tool_call(

@@ -3464,7 +3464,11 @@ mod tests {
     #[cfg(feature = "provider-openai")]
     use graphql_orm::graphql::orm::Entity;
     use graphql_orm::graphql::orm::{
-        ApplyOptions, ConditionalUpdateOutcome, OrmSchemaModule, TransactionMode,
+        AiMutationExecutionPolicy, ApplyOptions, ConditionalUpdateOutcome,
+        GraphqlEntitySemanticMetadata, GraphqlOperationCatalog, GraphqlOperationKind,
+        GraphqlSemanticArgumentDescriptor, GraphqlSemanticCatalog, GraphqlSemanticClassification,
+        GraphqlSemanticExport, GraphqlSemanticFieldMetadata, GraphqlSemanticOperationDescriptor,
+        GraphqlSemanticTypeKind, GraphqlSemanticTypeRef, OrmSchemaModule, TransactionMode,
     };
     use graphql_orm::graphql::pagination::KeysetConnectionInput;
     use graphql_orm::prelude::{Database, SqliteBackend};
@@ -3479,6 +3483,7 @@ mod tests {
         PreparedCoordinatorCheckpoint, PreparedCoordinatorCheckpointTool,
         coordinator_checkpoint_hash,
     };
+    use crate::orm_tools::AutomaticMutationTestFault;
     use crate::persistence::*;
     #[cfg(feature = "provider-openai")]
     use crate::providers::MockBackgroundRetrievalFailure;
@@ -3635,7 +3640,10 @@ mod tests {
         }
     }
 
-    struct Executor(Arc<AtomicBool>);
+    struct Executor {
+        fail: Arc<AtomicBool>,
+        completed: Arc<AtomicUsize>,
+    }
 
     #[async_trait]
     impl AuthenticatedGraphqlExecutor for Executor {
@@ -3644,12 +3652,23 @@ mod tests {
             context: GraphqlRequestContext,
             request: ToolGraphqlRequest,
         ) -> Result<ToolGraphqlResponse, ToolExecutionError> {
-            if self.0.load(Ordering::SeqCst) {
+            if self.fail.load(Ordering::SeqCst) {
                 return Err(ToolExecutionError::Execution);
             }
             let subject = context
                 .downcast_ref::<String>()
                 .ok_or(ToolExecutionError::RequestContext)?;
+            if request.document.contains(" CreateRecord(") {
+                self.completed.fetch_add(1, Ordering::SeqCst);
+                return Ok(ToolGraphqlResponse {
+                    data: json!({"CreateRecord": {
+                        "recordId": "generated-record-1",
+                        "subject": subject,
+                    }}),
+                    error_codes: Vec::new(),
+                    application_audit_ref: Some("application-audit-automatic-1".to_owned()),
+                });
+            }
             Ok(ToolGraphqlResponse {
                 data: json!({
                     "subject": subject,
@@ -4100,6 +4119,81 @@ mod tests {
         scope: AiScope,
         tool_policy_version: Arc<AtomicUsize>,
         fail_execution: Arc<AtomicBool>,
+        completed_executions: Arc<AtomicUsize>,
+        automatic_mutation_id: Option<AiToolId>,
+        automatic_mutation_fingerprint: Option<String>,
+    }
+
+    const GENERATED_MUTATION_SDL: &str = r#"
+        schema { query: Query, mutation: Mutation }
+        type Query { health: Boolean! }
+        type Mutation { CreateRecord(input: RecordInput!): Record! }
+        input RecordInput { subject: String! }
+        type Record { recordId: ID!, subject: String! }
+    "#;
+
+    fn automatic_mutation_catalog() -> (GraphqlSemanticCatalog, AiGraphqlMutationCapabilityCatalog)
+    {
+        let scalar = |field_name: &str, scalar_name: &str| GraphqlSemanticFieldMetadata {
+            field_name: field_name.to_owned(),
+            description: format!("Reviewed public {field_name}."),
+            type_ref: GraphqlSemanticTypeRef::named(
+                scalar_name,
+                GraphqlSemanticTypeKind::Scalar,
+                false,
+            ),
+            selectable: true,
+            filter_operators: Vec::new(),
+            sortable: false,
+            groupable: false,
+            aggregate_operators: Vec::new(),
+            aggregate_value_kind: None,
+            relationship: None,
+            classification: GraphqlSemanticClassification::Internal,
+            export: GraphqlSemanticExport::Exportable,
+            has_field_policy: false,
+        };
+        let entity = GraphqlEntitySemanticMetadata {
+            entity_name: "Record".to_owned(),
+            description: "A reviewed application record.".to_owned(),
+            default_classification: GraphqlSemanticClassification::Internal,
+            fields: vec![scalar("recordId", "ID"), scalar("subject", "String")].into_boxed_slice(),
+        };
+        let operation = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Mutation,
+            "CreateRecord",
+            "Create one reviewed application record.",
+            vec![GraphqlSemanticArgumentDescriptor {
+                graphql_name: "input".to_owned(),
+                description: "Reviewed record input.".to_owned(),
+                type_ref: GraphqlSemanticTypeRef::named(
+                    "RecordInput",
+                    GraphqlSemanticTypeKind::Object,
+                    false,
+                ),
+            }],
+            GraphqlSemanticTypeRef::named("Record", GraphqlSemanticTypeKind::Object, false),
+            true,
+        )
+        .expect("test mutation semantics should validate")
+        .with_ai_mutation_execution(AiMutationExecutionPolicy::Automatic)
+        .expect("automatic classification should validate");
+        let semantics = GraphqlSemanticCatalog::compose_with_custom(
+            [entity],
+            &GraphqlOperationCatalog::compose(std::iter::empty()),
+            [operation],
+        )
+        .expect("test mutation catalogue should validate");
+        let catalog = AiGraphqlMutationCapabilityCatalog::compile(
+            "generated",
+            GraphqlExecutionTargetId::parse("generated-application")
+                .expect("generated target should validate"),
+            GENERATED_MUTATION_SDL,
+            &semantics,
+            AiGraphqlQueryCapabilityLimits::default(),
+        )
+        .expect("automatic mutation capabilities should compile");
+        (semantics, catalog)
     }
 
     async fn fixture(events: Vec<ProviderEvent>) -> Fixture {
@@ -4119,6 +4213,23 @@ mod tests {
     async fn fixture_with_provider_and_access(
         mock: MockProvider,
         access_policy: Arc<dyn AiAccessPolicy>,
+    ) -> Fixture {
+        fixture_with_provider_access_and_static_tools(mock, access_policy, true).await
+    }
+
+    async fn automatic_mutation_fixture() -> Fixture {
+        fixture_with_provider_access_and_static_tools(
+            MockProvider::new(Vec::new()),
+            Arc::new(AllowAccess),
+            false,
+        )
+        .await
+    }
+
+    async fn fixture_with_provider_access_and_static_tools(
+        mock: MockProvider,
+        access_policy: Arc<dyn AiAccessPolicy>,
+        include_static_tools: bool,
     ) -> Fixture {
         let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
             .await
@@ -4311,9 +4422,11 @@ mod tests {
                 .expect("preview limits should validate"),
         );
         let mut tool_catalog = AiToolCatalog::new();
-        tool_catalog
-            .register_with_disclosure(descriptor, disclosure)
-            .expect("tool should register");
+        if include_static_tools {
+            tool_catalog
+                .register_with_disclosure(descriptor, disclosure)
+                .expect("tool should register");
+        }
         let write_document = "mutation UpdateRecord($recordId: ID!) { updateRecord(id: $recordId) { recordId subject } }";
         let write_disclosure = AiDisclosureSchema::new(
             "record-update-v1",
@@ -4363,9 +4476,40 @@ mod tests {
         .with_graphql_contract(write_contract)
         .with_maturity(ToolMaturity::SupervisedWrite)
         .with_risk(AiToolRisk::HighImpact, AiApprovalRule::OneShot);
-        tool_catalog
-            .register_with_disclosure(write_descriptor, write_disclosure)
-            .expect("supervised write should register");
+        if include_static_tools {
+            tool_catalog
+                .register_with_disclosure(write_descriptor, write_disclosure)
+                .expect("supervised write should register");
+        }
+        let mut generated_target_policy = AiGeneratedGraphqlTargetPolicySet::new();
+        let mut automatic_mutation_id = None;
+        let mut automatic_mutation_fingerprint = None;
+        let mut automatic_schema_fingerprint = None;
+        if !include_static_tools {
+            let (mutation_semantics, mutation_catalog) = automatic_mutation_catalog();
+            let automatic_mutation = mutation_catalog
+                .capabilities()
+                .next()
+                .expect("one automatic mutation should compile");
+            automatic_mutation_id = Some(automatic_mutation.id().clone());
+            automatic_mutation_fingerprint = Some(automatic_mutation.fingerprint().to_owned());
+            automatic_schema_fingerprint =
+                Some(mutation_catalog.finished_schema_fingerprint().to_owned());
+            generated_target_policy
+                .bind(
+                    AiGeneratedGraphqlTargetPolicyBinding::new(
+                        automatic_mutation.target_id().clone(),
+                        mutation_catalog.finished_schema_fingerprint(),
+                        mutation_semantics.fingerprint.clone(),
+                    )
+                    .expect("generated target binding should validate")
+                    .allow_automatic_mutations(),
+                )
+                .expect("generated target should bind once");
+            tool_catalog
+                .register_mutation_capability_catalog(&mutation_catalog)
+                .expect("automatic mutation catalogue should register");
+        }
         let mut targets = GraphqlExecutionTargetRegistry::new();
         targets
             .register(GraphqlExecutionTarget {
@@ -4378,14 +4522,31 @@ mod tests {
                 schema_fingerprint: "schema-v1".to_owned(),
             })
             .expect("target should register");
+        if let Some(schema_fingerprint) = automatic_schema_fingerprint {
+            targets
+                .register(GraphqlExecutionTarget {
+                    id: GraphqlExecutionTargetId::parse("generated-application")
+                        .expect("generated target ID should parse"),
+                    class: GraphqlExecutionTargetClass::Local,
+                    audience: None,
+                    resource_type: None,
+                    resource_id: None,
+                    schema_fingerprint,
+                })
+                .expect("generated target should register");
+        }
         let tool_policy_version = Arc::new(AtomicUsize::new(1));
         let fail_execution = Arc::new(AtomicBool::new(false));
+        let completed_executions = Arc::new(AtomicUsize::new(0));
         let runtime = AiRuntime::builder()
             .principal_resolver(Arc::new(Resolver(principal.clone())))
             .access_policy(access_policy)
             .tool_authorization_policy(Arc::new(AllowTools(tool_policy_version.clone())))
             .request_context_factory(Arc::new(ContextFactory))
-            .graphql_executor(Arc::new(Executor(fail_execution.clone())))
+            .graphql_executor(Arc::new(Executor {
+                fail: fail_execution.clone(),
+                completed: completed_executions.clone(),
+            }))
             .graphql_targets(targets)
             .egress_policy(Arc::new(AllowEgress))
             .deployment_egress(AiDeploymentEgressBoundary {
@@ -4408,7 +4569,12 @@ mod tests {
                 maximum_bytes: 16_384,
                 maximum_attachments: 8,
             })
-            .maximum_tool_maturity(ToolMaturity::SupervisedWrite)
+            .maximum_tool_maturity(if include_static_tools {
+                ToolMaturity::SupervisedWrite
+            } else {
+                ToolMaturity::AutonomousWrite
+            })
+            .generated_graphql_target_policy(generated_target_policy)
             .tool_catalog(tool_catalog)
             .secret_store(Arc::new(EnvironmentSecretStore::new()))
             .content_protection_policy_resolver(Arc::new(ProtectionPolicy))
@@ -4442,7 +4608,179 @@ mod tests {
             scope,
             tool_policy_version,
             fail_execution,
+            completed_executions,
+            automatic_mutation_id,
+            automatic_mutation_fingerprint,
         }
+    }
+
+    fn automatic_mutation_result(fixture: &Fixture) -> AiProviderCallResult {
+        let automatic_mutation_id = fixture
+            .automatic_mutation_id
+            .as_ref()
+            .expect("automatic fixture should expose its exact capability");
+        let mut result = AiProviderCallResult::test_result(
+            &fixture.lease,
+            None,
+            "automatic-mutation-response",
+            vec![(
+                "automatic-mutation-call",
+                automatic_mutation_id.as_str(),
+                json!({
+                    "arguments": {"input": {"subject": "created by test"}},
+                    "fields": {"recordId": true, "subject": true},
+                    "relationships": {}
+                }),
+            )],
+        );
+        result.tool_calls[0].tool_fingerprint = fixture
+            .automatic_mutation_fingerprint
+            .clone()
+            .expect("automatic fixture should expose its exact fingerprint");
+        result
+    }
+
+    fn automatic_mutation_context(fixture: &Fixture) -> AiApplicationToolCallContext {
+        AiApplicationToolCallContext::new(
+            0,
+            0,
+            fixture.scope.clone(),
+            "automatic-mutation-fault-test",
+            "automatic-mutation-response",
+        )
+        .expect("automatic mutation context should validate")
+    }
+
+    fn automatic_mutation_route() -> AiToolResultEgressRoute {
+        AiToolResultEgressRoute::new(
+            "mock-profile",
+            "local-mock",
+            AiDestinationTrust::Local,
+            "continue_automatic_mutation_result",
+            "none",
+            "egress-v1",
+        )
+        .expect("automatic mutation egress route should validate")
+    }
+
+    fn automatic_mutation_service(
+        fixture: &Fixture,
+        audit: Arc<dyn AiEgressDecisionAudit>,
+    ) -> OrmAiApplicationToolCallService {
+        OrmAiApplicationToolCallService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            audit,
+            Arc::new(SystemClock),
+            AiApplicationToolCallLimits::new(
+                8_192,
+                16_384,
+                4,
+                4,
+                Duration::seconds(30),
+                Duration::seconds(10),
+            )
+            .expect("automatic mutation tool limits should validate"),
+        )
+    }
+
+    #[tokio::test]
+    async fn automatic_mutation_post_effect_faults_converge_without_replay() {
+        for fault in [
+            AutomaticMutationTestFault::AfterResolver,
+            AutomaticMutationTestFault::SerializeResult,
+            AutomaticMutationTestFault::BoundResult,
+            AutomaticMutationTestFault::ReauthorizeResult,
+            AutomaticMutationTestFault::ProtectResult,
+            AutomaticMutationTestFault::FinishResult,
+        ] {
+            let fixture = automatic_mutation_fixture().await;
+            let result = automatic_mutation_result(&fixture);
+            let service = automatic_mutation_service(&fixture, fixture.audit.clone())
+                .with_automatic_mutation_fault(fault);
+            let outcome = service
+                .execute_automatic_mutation(
+                    &fixture.lease,
+                    &result,
+                    automatic_mutation_context(&fixture),
+                    automatic_mutation_route(),
+                )
+                .await
+                .expect("post-effect failure should durably converge");
+            assert!(matches!(
+                outcome,
+                AiConsequentialToolCallOutcome::RecoveryRequired { .. }
+            ));
+            assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 1);
+            let run = AiRunRecord::find_by_id(&fixture.database, &fixture.lease.run_id().0)
+                .await
+                .expect("run lookup should succeed")
+                .expect("run should remain auditable");
+            assert_eq!(run.state, AiRunState::RecoveryRequired.as_str());
+            assert_eq!(
+                run.error_code.as_deref(),
+                Some("automatic_mutation_uncertain")
+            );
+            let calls = AiToolCallRecord::query(fixture.database.pool())
+                .filter(AiToolCallRecordWhereInput {
+                    run_id: Some(UuidFilter {
+                        eq: Some(fixture.lease.run_id().0),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .limit(2)
+                .fetch_all()
+                .await
+                .expect("automatic call checkpoint should be queryable");
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].state, "executing");
+            assert!(
+                service
+                    .execute_automatic_mutation(
+                        &fixture.lease,
+                        &result,
+                        automatic_mutation_context(&fixture),
+                        automatic_mutation_route(),
+                    )
+                    .await
+                    .is_err(),
+                "terminal recovery must fence replay"
+            );
+            assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_mutation_egress_audit_failure_is_exactly_persisted() {
+        let fixture = automatic_mutation_fixture().await;
+        let result = automatic_mutation_result(&fixture);
+        let service = automatic_mutation_service(&fixture, Arc::new(FailAudit));
+        let outcome = service
+            .execute_automatic_mutation(
+                &fixture.lease,
+                &result,
+                automatic_mutation_context(&fixture),
+                automatic_mutation_route(),
+            )
+            .await
+            .expect("known resolver success and audit failure should persist");
+        let persisted = outcome
+            .persisted()
+            .expect("audit failure is a known durable result");
+        assert_eq!(
+            persisted.state(),
+            AiApplicationToolCallState::EgressAuditFailed
+        );
+        assert!(persisted.model_input().is_none());
+        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 1);
+        let call = AiToolCallRecord::find_by_id(&fixture.database, &persisted.id().0)
+            .await
+            .expect("tool call lookup should succeed")
+            .expect("tool call should remain auditable");
+        assert_eq!(call.state, "egress_audit_failed");
+        assert!(call.protected_result.is_some());
+        assert!(call.completed_at.is_some());
     }
 
     #[tokio::test]
