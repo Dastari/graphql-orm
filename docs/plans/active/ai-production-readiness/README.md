@@ -59,7 +59,7 @@ retention, or restore proofs remain closed.
 
 ## Current checkpoint
 
-Package 0.78.0 and AI schema module 0.58.0 provide the protected runtime,
+Package 0.78.1 and AI schema module 0.59.0 provide the protected runtime,
 provider adapters, exact completed-batch adoption, retention foundations,
 restore planning, and readiness observation contracts. Database-derived
 collection covers bounded conservative run classification, approval and
@@ -70,6 +70,10 @@ A separately configured bounded generated-ORM pass proves stable
 attachment/artifact lifecycle, ownership, session/message parents, and unique
 safe local-object-reference metadata. Protected provider-session cursors are
 backup-redacted and block portable restore until authoritatively drained.
+Retained approval suspension now commits its protected parked checkpoint,
+nonterminal source-attempt outcome and lease release atomically; crash-gap
+confirmation is repairable only from that graph, and approved waits receive a
+fresh fence before consumption and provider reclaim.
 
 Verified manifest plus restored-target object-byte integrity remains a fatal
 incomplete audit. The next implementation slice binds that byte stream to the

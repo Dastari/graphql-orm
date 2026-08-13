@@ -72,8 +72,10 @@ must not perform the mutation.
 6. Build the canonical resource/version preview.
 7. Protect and durably stage arguments plus provider/model/response, settled
    budget reservation, correlation/causation, and safe delegation bindings.
-8. Bind and protect the complete one-shot approval envelope, park the run in
-   `WaitingApproval`, append its event, and return the renewed lease.
+8. Bind and protect the complete one-shot approval envelope and append its
+   event. A retained continuation also atomically appends
+   `approval_wait_parked`, records the source attempt's nonterminal outcome,
+   clears the ordinary lease and returns a non-authoritative waiting proof.
 
 The human reads and decides the request through the authenticated approval
 GraphQL lifecycle. Recent MFA remains a server-owned per-request choice. The UI
@@ -109,14 +111,17 @@ service:
 For a different worker or process, use
 `OrmAiRunService::claim_next_approved`. One state-machine transaction changes
 `approved` to `resume_claimed`, moves `WaitingApproval` to `WaitingTool`,
-replaces the owner/expiry/heartbeat/row-version proof, and appends a redacted
-audit fact. The original attempt and generation remain unchanged because the
-staged approval, provider budget, and tool rows bind them; replacing owner and
-row version immediately fences the staging worker. Two concurrent workers
-cannot both receive an `AiApprovedRunClaim`. The returned claim is still only
-queue ownership: all steps above remain mandatory. Snapshot restore never
-uses this live handoff; restored `WaitingApproval`/`WaitingTool` runs require
-reconciliation even if no external effect was recorded.
+and appends a redacted audit fact. For a retained continuation it first
+requires the exact parked checkpoint to be confirmed, then creates a fresh
+attempt/generation and refences the bound call and step; the closed source
+attempt remains immutable. An approved but unconfirmed graph stays unclaimed
+so maintenance can repair confirmation without replay. Stateless waits retain
+their historical owner/expiry/heartbeat rotation within the same attempt. Two
+concurrent workers cannot both receive an `AiApprovedRunClaim`. The returned
+claim is still only queue ownership: all steps above remain mandatory.
+Snapshot restore never uses this live handoff; restored
+`WaitingApproval`/`WaitingTool` runs require reconciliation even if no external
+effect was recorded.
 Expired approved rows in a bounded handoff window are atomically expired and
 audited before scanning continues, so old waits cannot permanently starve a
 newer eligible handoff.

@@ -19,6 +19,27 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.78.1: atomic retained approval waits (schema 0.58.0 to 0.59.0)
+
+Apply `AiSchemaModule` `0.59.0` with run, approval, provider-session,
+retention, restore and cleanup workers stopped. The module advances because a
+retained approval now gives existing checkpoint and attempt-outcome rows a new
+authoritative persistent meaning: the approval, protected
+`approval_wait_parked` checkpoint, nonterminal source-attempt outcome, latest
+checkpoint pointer and ordinary lease release commit atomically.
+
+This migration changes no table, column, index, constraint, GraphQL SDL or
+public browser payload. Existing rows require no rewrite, data migration or
+backfill. Historical waits are not manufactured or made resumable. After the
+module is applied, newly parked retained approvals use the exact graph;
+stateless approvals retain their existing in-attempt behavior.
+
+An approved retained wait is not claimable until its provider binding confirms
+the exact parked checkpoint. A crash between the atomic wait transaction and
+confirmation remains repairable by the bounded provider-session maintenance
+pass. `claim_next_approved` then creates a fresh attempt/generation and
+refences the exact call and step; it never reopens the closed source attempt.
+
 ## 0.78.0: retention traversal under bounded ORM pagination (schema remains 0.58.0)
 
 No schema or data migration is required. Retention continues to honor the

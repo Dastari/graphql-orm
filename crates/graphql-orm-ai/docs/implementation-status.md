@@ -10,8 +10,8 @@ supersedes: []
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.78.0` with AI schema module
-`0.58.0`. It uses workspace `graphql-orm` `0.22.0`, backend-neutral
+`graphql-orm-ai` is at crate version `0.78.1` with AI schema module
+`0.59.0`. It uses workspace `graphql-orm` `0.22.0`, backend-neutral
 `graphql-orm-ai-tool-profiles` `0.4.0`, and external `agql-auth`
 `0.15.0` at `e841ffd382082ad7419be259fe957f949b956ff7`.
 
@@ -60,6 +60,10 @@ verification evidence belongs in the focused guides.
   GraphQL, backup-redacted, and readiness-blocking on portable restore until
   drained. Provider failures may additionally emit only a closed content-free
   operational category without changing conservative run semantics.
+- Retained human-approval waits atomically release the source lease with a
+  protected parked checkpoint and nonterminal attempt outcome. Exact
+  confirmation is crash-repairable, and only a confirmed graph can create the
+  fresh attempt used for one-shot consumption and provider reclaim.
 - Current rule evidence supports both generated-ORM managed hierarchies and
   immutable deployment-only ceilings with no artificial per-resource policy
   rows. Both paths share exact-principal rehydration and canonical

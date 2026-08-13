@@ -18,15 +18,26 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
-## [0.78.0] - 2026-08-13
+## [0.78.1] - 2026-08-13
 
-### Added
+### Fixed
 
 - Retained approval waits now atomically persist the exact protected
   `approval_wait_parked` checkpoint, close the source attempt as nonterminal,
   and release its ordinary run lease in the same transaction as the one-shot
   approval. Confirmation can be repaired only from that exact graph; an
   approved wait receives a fresh fenced attempt only after confirmation.
+
+### Schema
+
+- AI schema module `0.59.0` records the new retained-approval checkpoint and
+  nonterminal attempt semantics. It changes no table, column, index, or
+  constraint and requires no row rewrite or backfill.
+
+## [0.78.0] - 2026-08-13
+
+### Added
+
 - Durable bounded subscription waits now bind canonical `ReplayThenLive`
   capabilities to authenticated source registrations, protected replay
   cursors, exact current-principal/rule/target checks, separately authorized

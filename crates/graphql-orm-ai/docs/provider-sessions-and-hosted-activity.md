@@ -377,7 +377,8 @@ Parking uses a two-phase state graph:
    source run lease is still current.
 2. The owning wait transaction persists its wait row and parked coordinator
    checkpoint, transitions the run to `WaitingApproval` or
-   `WaitingSubscription`, and clears the ordinary run lease.
+   `WaitingSubscription`, records the source attempt's nonterminal outcome,
+   and clears the ordinary run lease.
 3. `confirm_parked_wait` rehydrates the current owner and confirms that exact
    graph. A cleanup worker may idempotently perform the same confirmation after
    a crash between steps 2 and 3; it cannot confirm a partial or substituted
@@ -385,6 +386,11 @@ Parking uses a two-phase state graph:
 4. The ordinary run queue later creates a fresh fence. Only after the exact
    approval or subscription adoption has been claimed and consumed once does
    `reclaim_after_wait` perform `ParkedWait -> Claimed` for that fence.
+
+For approvals, the queue also requires confirmation before it may claim the
+approved row. The claim creates a fresh attempt/generation and refences the
+exact pending tool call and run step. If approval wins before confirmation,
+the row remains unclaimed until maintenance confirms the unchanged graph.
 
 The reclaim authorization is crate-private and derived from durable adoption
 state. A host cannot turn a state value, UUID or expired wait into resume

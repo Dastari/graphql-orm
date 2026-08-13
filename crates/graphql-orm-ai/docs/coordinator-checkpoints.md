@@ -160,11 +160,15 @@ has been consumed once.
 
 Before the human wait, the coordinator always appends
 `provider_turn_persisted` before asking the consequential service to stage the
-canonical preview and approval. The resulting `WaitingApproval` lease keeps
-that exact checkpoint linked. The staging worker returns and does not heartbeat
-through human time. Only `claim_next_approved` can transfer an approved wait to
-one current worker; approval consumption and ordinary resolver authorization
-still occur before the supervised result checkpoint exists.
+canonical preview and approval. For a retained continuation the same
+transaction appends `approval_wait_parked`, records the source attempt's
+nonterminal outcome, keeps that checkpoint linked and releases the ordinary
+lease. The staging worker returns and does not heartbeat through human time.
+Only an exactly confirmed provider park can be claimed; `claim_next_approved`
+then creates a fresh attempt/generation and refences the call/step. Approval
+consumption and ordinary resolver authorization still occur before the
+supervised result checkpoint exists. Stateless waits preserve their existing
+in-attempt handoff.
 
 Provider-turn checkpoints, incomplete batches, uncheckpointed consequential
 mutations, missing/denied egress, malformed or unprovable stateless history,

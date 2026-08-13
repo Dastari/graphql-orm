@@ -30,7 +30,8 @@ uncertain budget, or reopen a restored runtime.
 | Accepted OpenAI background response | Bounded exact terminal reconciliation |
 | Ambiguous provider/resolver/mutation transport | `RecoveryRequired`; never replay |
 | Uncertain budget without authoritative usage | Full reservation remains held |
-| Live approval wait | Bounded current-policy keep/cancel/recovery classification |
+| Live stateless approval wait | Bounded current-policy keep/cancel/recovery classification under its active in-attempt fence |
+| Live retained approval wait | Lease-free exact parked checkpoint/outcome graph; confirm or cancel/recover, then fresh-attempt claim |
 | Restored approval/tool/provider wait | `RecoveryRequired`; never live-resumed |
 | Same-database replayable subscription wait | Reclaim only from its exact protected cursor and waiter fence |
 | Portable-restored subscription wait | `RecoveryRequired`; protected cursor/outcome are deliberately redacted |
