@@ -79,6 +79,14 @@ checkpoint facts. For the current workspace baseline and active gates, use the
   to `RecoveryRequired`; a result checkpoint can continue but can never replay
   the non-idempotent resolver or be adopted as a read-only/approved result.
 
+### Fixed
+
+- Session-retention completeness proofs now traverse generated ORM pages up
+  to the configured retention bound even when the database pagination maximum
+  is smaller than that bound. Protected content and session shells are never
+  deleted from a clamped partial proof set, while terminal subscription
+  waiter/adoption tombstones drain in bounded mutation-safe batches.
+
 ### Schema
 
 - AI schema module `0.58.0` adds private subscription waiter and one-shot

@@ -19,6 +19,21 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.78.0: retention traversal under bounded ORM pagination (schema remains 0.58.0)
+
+No schema or data migration is required. Retention continues to honor the
+database's configured public pagination maximum. Internal completeness proofs
+now traverse generated ORM pages up to the existing per-session retention
+bound before mutating any all-or-nothing set. Terminal subscription waiter and
+adoption tombstones are removed in bounded batches across retention passes,
+and session finalization independently proves that no waiter, adoption, run,
+or protected checkpoint remains.
+
+Deployments may keep pagination maxima below the retention bounds; they no
+longer need to align those settings to make the look-ahead row visible. The
+change broadens no GraphQL operation, retention limit, raw database access, or
+protected-content disclosure.
+
 ## 0.78.0: durable bounded subscription waits (schema 0.57.0 to 0.58.0)
 
 Apply `AiSchemaModule` `0.58.0` with run, coordinator, cancellation, retention,

@@ -35,6 +35,76 @@ const PROTECTED_RUN_CHECKPOINT_KINDS: [&str; 5] = [
     "subscription_wait_adopted",
 ];
 const MAXIMUM_TITLE_MUTATION_DELETES_PER_PASS: i64 = 5_000;
+const MAXIMUM_RETENTION_QUERY_PAGE: i64 = 100;
+
+struct BoundedRetentionRows<T> {
+    rows: Vec<T>,
+    overflowed: bool,
+}
+
+macro_rules! bounded_retention_rows {
+    ($tx:expr, $record:ty, $filter:expr, $maximum:expr, $page_size:expr) => {{
+        let maximum = $maximum;
+        let capacity = maximum
+            .checked_add(1)
+            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+        let page_size = usize::try_from($page_size)
+            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+        if page_size == 0 {
+            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+        }
+        let mut rows: Vec<$record> = Vec::with_capacity(capacity.min(page_size));
+        let overflowed = loop {
+            let remaining = capacity
+                .checked_sub(rows.len())
+                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+            if remaining == 0 {
+                break true;
+            }
+            let requested = remaining.min(page_size);
+            let requested_i64 = i64::try_from(requested)
+                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+            let mut filter = $filter;
+            if !rows.is_empty() {
+                filter.id = Some(UuidFilter {
+                    not_in: Some(rows.iter().map(|row| row.id).collect()),
+                    ..Default::default()
+                });
+            }
+            let page = $tx
+                .query::<$record>()
+                .filter(filter)
+                .default_order()
+                .limit(requested_i64)
+                .fetch_all()
+                .await
+                .map_err(OrmPublicError::from)?;
+            let page_len = page.len();
+            rows.extend(page);
+            if rows.len() > maximum {
+                break true;
+            }
+            if page_len < requested {
+                break false;
+            }
+        };
+        BoundedRetentionRows { rows, overflowed }
+    }};
+}
+
+fn retention_query_page_size(database: &Database<DefaultWriteBackend>) -> Result<i64, AiError> {
+    let configured = database
+        .pagination_config()
+        .max_limit
+        .unwrap_or(MAXIMUM_RETENTION_QUERY_PAGE);
+    let page_size = configured.min(MAXIMUM_RETENTION_QUERY_PAGE);
+    if page_size <= 0 {
+        return Err(AiError::InvalidConfiguration(
+            "database pagination maximum must permit bounded retention reads".to_owned(),
+        ));
+    }
+    Ok(page_size)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ToolPayloadRetentionMode {
@@ -487,6 +557,7 @@ impl OrmAiSessionRetentionService {
         candidate: AiSessionRecord,
         now: i64,
     ) -> Result<SessionPruneOutcome, AiError> {
+        let retention_query_page_size = retention_query_page_size(&self.database)?;
         let event_limit = i64::try_from(self.limits.maximum_live_delta_events_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid event limit".to_owned()))?;
         let inbox_event_limit = i64::try_from(self.limits.maximum_inbox_events_per_session)
@@ -495,51 +566,24 @@ impl OrmAiSessionRetentionService {
             i64::try_from(self.limits.maximum_context_checkpoints_per_session).map_err(|_| {
                 AiError::InvalidConfiguration("invalid context checkpoint limit".to_owned())
             })?;
-        let context_checkpoint_limit_with_lookahead =
-            context_checkpoint_limit.checked_add(1).ok_or_else(|| {
-                AiError::InvalidConfiguration("invalid context checkpoint limit".to_owned())
-            })?;
         let message_limit = i64::try_from(self.limits.maximum_messages_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid message limit".to_owned()))?;
         let proposal_limit = i64::try_from(self.limits.maximum_proposals_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid proposal limit".to_owned()))?;
-        let proposal_limit_with_lookahead = proposal_limit
-            .checked_add(1)
-            .ok_or_else(|| AiError::InvalidConfiguration("invalid proposal limit".to_owned()))?;
         let proposal_item_limit = i64::try_from(self.limits.maximum_proposal_items_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid proposal-item limit".to_owned()))?;
-        let proposal_item_limit_with_lookahead =
-            proposal_item_limit.checked_add(1).ok_or_else(|| {
-                AiError::InvalidConfiguration("invalid proposal-item limit".to_owned())
-            })?;
         let tool_call_limit = i64::try_from(self.limits.maximum_tool_calls_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid tool-call limit".to_owned()))?;
-        let tool_call_limit_with_lookahead = tool_call_limit
-            .checked_add(1)
-            .ok_or_else(|| AiError::InvalidConfiguration("invalid tool-call limit".to_owned()))?;
         let approval_limit = i64::try_from(self.limits.maximum_approvals_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid approval limit".to_owned()))?;
-        let approval_limit_with_lookahead = approval_limit
-            .checked_add(1)
-            .ok_or_else(|| AiError::InvalidConfiguration("invalid approval limit".to_owned()))?;
         let attachment_limit = i64::try_from(self.limits.maximum_attachments_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid attachment limit".to_owned()))?;
-        let attachment_limit_with_lookahead = attachment_limit
-            .checked_add(1)
-            .ok_or_else(|| AiError::InvalidConfiguration("invalid attachment limit".to_owned()))?;
         let attachment_artifact_limit =
             i64::try_from(self.limits.maximum_attachment_artifacts_per_session).map_err(|_| {
                 AiError::InvalidConfiguration("invalid attachment-artifact limit".to_owned())
             })?;
-        let attachment_artifact_limit_with_lookahead =
-            attachment_artifact_limit.checked_add(1).ok_or_else(|| {
-                AiError::InvalidConfiguration("invalid attachment-artifact limit".to_owned())
-            })?;
         let run_limit = i64::try_from(self.limits.maximum_runs_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid run limit".to_owned()))?;
-        let run_limit_with_lookahead = run_limit
-            .checked_add(1)
-            .ok_or_else(|| AiError::InvalidConfiguration("invalid run limit".to_owned()))?;
         let maximum_blocks = self.limits.maximum_message_blocks_per_session;
         let maximum_context_checkpoints = self.limits.maximum_context_checkpoints_per_session;
         let result = self
@@ -734,58 +778,59 @@ impl OrmAiSessionRetentionService {
                         && inbox_events.is_empty()
                         && context_checkpoint_ids.is_empty()
                     {
-                        let proposals = tx
-                            .query::<AiProposalRecord>()
-                            .filter(AiProposalRecordWhereInput {
+                        let maximum_proposals = usize::try_from(proposal_limit)
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let proposals = bounded_retention_rows!(
+                            tx,
+                            AiProposalRecord,
+                            AiProposalRecordWhereInput {
                                 session_id: Some(UuidFilter {
                                     eq: Some(session.id),
                                     ..Default::default()
                                 }),
                                 ..Default::default()
-                            })
-                            .default_order()
-                            .limit(proposal_limit_with_lookahead)
-                            .fetch_all()
-                            .await
-                            .map_err(OrmPublicError::from)?;
-                        if proposals.len()
-                            > usize::try_from(proposal_limit)
-                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
-                        {
+                            },
+                            maximum_proposals,
+                            retention_query_page_size
+                        );
+                        if proposals.overflowed {
                             proposal_payload_purge_blocked = true;
                         } else {
                             let maximum_items = usize::try_from(proposal_item_limit)
                                 .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                            let mut proposal_groups = Vec::with_capacity(proposals.len());
+                            let mut proposal_groups = Vec::with_capacity(proposals.rows.len());
                             let mut item_count = 0usize;
-                            for proposal in proposals {
+                            for proposal in proposals.rows {
                                 validate_proposal(&proposal, &session)?;
-                                let items = tx
-                                    .query::<AiProposalItemRecord>()
-                                    .filter(AiProposalItemRecordWhereInput {
+                                let remaining_items =
+                                    maximum_items.checked_sub(item_count).ok_or_else(|| {
+                                        OrmPublicError::new(OrmErrorCode::InternalError)
+                                    })?;
+                                let items = bounded_retention_rows!(
+                                    tx,
+                                    AiProposalItemRecord,
+                                    AiProposalItemRecordWhereInput {
                                         proposal_id: Some(UuidFilter {
                                             eq: Some(proposal.id),
                                             ..Default::default()
                                         }),
                                         ..Default::default()
-                                    })
-                                    .default_order()
-                                    .limit(proposal_item_limit_with_lookahead)
-                                    .fetch_all()
-                                    .await
-                                    .map_err(OrmPublicError::from)?;
-                                item_count =
-                                    item_count.checked_add(items.len()).ok_or_else(|| {
-                                        OrmPublicError::new(OrmErrorCode::InternalError)
-                                    })?;
-                                if items.len() > maximum_items || item_count > maximum_items {
+                                    },
+                                    remaining_items,
+                                    retention_query_page_size
+                                );
+                                if items.overflowed {
                                     proposal_payload_purge_blocked = true;
                                     break;
                                 }
-                                for (index, item) in items.iter().enumerate() {
+                                item_count =
+                                    item_count.checked_add(items.rows.len()).ok_or_else(|| {
+                                        OrmPublicError::new(OrmErrorCode::InternalError)
+                                    })?;
+                                for (index, item) in items.rows.iter().enumerate() {
                                     validate_proposal_item(item, proposal.id, index)?;
                                 }
-                                proposal_groups.push((proposal, items));
+                                proposal_groups.push((proposal, items.rows));
                             }
                             if !proposal_payload_purge_blocked {
                                 for (proposal, items) in &proposal_groups {
@@ -927,28 +972,27 @@ impl OrmAiSessionRetentionService {
                             ),
                         };
                         let mut phase_blocked = false;
-                        let runs = tx
-                            .query::<AiRunRecord>()
-                            .filter(AiRunRecordWhereInput {
+                        let maximum_runs = usize::try_from(run_limit)
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let runs = bounded_retention_rows!(
+                            tx,
+                            AiRunRecord,
+                            AiRunRecordWhereInput {
                                 session_id: Some(UuidFilter {
                                     eq: Some(session.id),
                                     ..Default::default()
                                 }),
                                 ..Default::default()
-                            })
-                            .default_order()
-                            .limit(run_limit_with_lookahead)
-                            .fetch_all()
-                            .await
-                            .map_err(OrmPublicError::from)?;
-                        let maximum_runs = usize::try_from(run_limit)
-                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                        if runs.len() > maximum_runs {
+                            },
+                            maximum_runs,
+                            retention_query_page_size
+                        );
+                        if runs.overflowed {
                             phase_blocked = true;
                         }
-                        let mut run_ids = Vec::with_capacity(runs.len());
-                        let mut terminal_runs = HashSet::with_capacity(runs.len());
-                        for run in &runs {
+                        let mut run_ids = Vec::with_capacity(runs.rows.len());
+                        let mut terminal_runs = HashSet::with_capacity(runs.rows.len());
+                        for run in &runs.rows {
                             let state = AiRunState::from_persisted(&run.state)
                                 .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
                             if run.id.is_nil()
@@ -968,30 +1012,35 @@ impl OrmAiSessionRetentionService {
                         }
                         if !phase_blocked {
                             let calls = if run_ids.is_empty() {
-                                Vec::new()
+                                BoundedRetentionRows {
+                                    rows: Vec::new(),
+                                    overflowed: false,
+                                }
                             } else {
-                                tx.query::<AiToolCallRecord>()
-                                    .filter(AiToolCallRecordWhereInput {
+                                let maximum_calls =
+                                    usize::try_from(tool_call_limit).map_err(|_| {
+                                        OrmPublicError::new(OrmErrorCode::InternalError)
+                                    })?;
+                                bounded_retention_rows!(
+                                    tx,
+                                    AiToolCallRecord,
+                                    AiToolCallRecordWhereInput {
                                         run_id: Some(UuidFilter {
                                             in_list: Some(run_ids.clone()),
                                             ..Default::default()
                                         }),
                                         ..Default::default()
-                                    })
-                                    .default_order()
-                                    .limit(tool_call_limit_with_lookahead)
-                                    .fetch_all()
-                                    .await
-                                    .map_err(OrmPublicError::from)?
+                                    },
+                                    maximum_calls,
+                                    retention_query_page_size
+                                )
                             };
-                            let maximum_calls = usize::try_from(tool_call_limit)
-                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                            if calls.len() > maximum_calls {
+                            if calls.overflowed {
                                 phase_blocked = true;
                             }
                             let mut eligible_call_ids = HashSet::new();
                             if !phase_blocked {
-                                for call in &calls {
+                                for call in &calls.rows {
                                     validate_tool_call(call, &run_ids)?;
                                     match tool_payload_retention_mode {
                                         ToolPayloadRetentionMode::DeletingSession => {
@@ -1024,38 +1073,45 @@ impl OrmAiSessionRetentionService {
                                     == ToolPayloadRetentionMode::DeletingSession
                                     || !eligible_call_ids.is_empty())
                             {
-                                tx.query::<AiApprovalRecord>()
-                                    .filter(AiApprovalRecordWhereInput {
+                                let maximum_approvals =
+                                    usize::try_from(approval_limit).map_err(|_| {
+                                        OrmPublicError::new(OrmErrorCode::InternalError)
+                                    })?;
+                                bounded_retention_rows!(
+                                    tx,
+                                    AiApprovalRecord,
+                                    AiApprovalRecordWhereInput {
                                         session_id: Some(UuidFilter {
                                             eq: Some(session.id),
                                             ..Default::default()
                                         }),
                                         ..Default::default()
-                                    })
-                                    .default_order()
-                                    .limit(approval_limit_with_lookahead)
-                                    .fetch_all()
-                                    .await
-                                    .map_err(OrmPublicError::from)?
+                                    },
+                                    maximum_approvals,
+                                    retention_query_page_size
+                                )
                             } else {
-                                Vec::new()
+                                BoundedRetentionRows {
+                                    rows: Vec::new(),
+                                    overflowed: false,
+                                }
                             };
-                            let maximum_approvals = usize::try_from(approval_limit)
-                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                            if approvals.len() > maximum_approvals {
+                            if approvals.overflowed {
                                 phase_blocked = true;
                             }
                             if !phase_blocked {
                                 let calls_by_id = calls
+                                    .rows
                                     .iter()
                                     .map(|call| (call.id, call))
                                     .collect::<HashMap<_, _>>();
                                 let approvals_by_id = approvals
+                                    .rows
                                     .iter()
                                     .map(|approval| (approval.id, approval))
                                     .collect::<HashMap<_, _>>();
                                 let mut eligible_approval_ids = HashSet::new();
-                                for call in &calls {
+                                for call in &calls.rows {
                                     if !eligible_call_ids.contains(&call.id) {
                                         continue;
                                     }
@@ -1122,7 +1178,7 @@ impl OrmAiSessionRetentionService {
                                     }
                                 }
                                 if !phase_blocked {
-                                    for approval in &approvals {
+                                    for approval in &approvals.rows {
                                         let approval_is_in_scope = tool_payload_retention_mode
                                             == ToolPayloadRetentionMode::DeletingSession
                                             || eligible_call_ids.contains(&approval.tool_call_id)
@@ -1143,7 +1199,7 @@ impl OrmAiSessionRetentionService {
                                     }
                                 }
                                 if !phase_blocked {
-                                    for approval in approvals {
+                                    for approval in approvals.rows {
                                         if !eligible_approval_ids.contains(&approval.id) {
                                             continue;
                                         }
@@ -1185,7 +1241,7 @@ impl OrmAiSessionRetentionService {
                                             }
                                         }
                                     }
-                                    for call in calls {
+                                    for call in calls.rows {
                                         if !eligible_call_ids.contains(&call.id) {
                                             continue;
                                         }
@@ -1246,9 +1302,7 @@ impl OrmAiSessionRetentionService {
                         && !purge_terminal_subscription_waits(
                             tx,
                             session.id,
-                            run_limit_with_lookahead,
-                            usize::try_from(run_limit)
-                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?,
+                            retention_query_page_size,
                         )
                         .await?
                     {
@@ -1268,24 +1322,22 @@ impl OrmAiSessionRetentionService {
                         && deleting_approval_payloads_purged == 0
                         && !tool_payload_purge_blocked
                     {
-                        let attachments = tx
-                            .query::<AiAttachmentRecord>()
-                            .filter(AiAttachmentRecordWhereInput {
+                        let maximum_attachments = usize::try_from(attachment_limit)
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let attachments = bounded_retention_rows!(
+                            tx,
+                            AiAttachmentRecord,
+                            AiAttachmentRecordWhereInput {
                                 session_id: Some(UuidFilter {
                                     eq: Some(session.id),
                                     ..Default::default()
                                 }),
                                 ..Default::default()
-                            })
-                            .default_order()
-                            .limit(attachment_limit_with_lookahead)
-                            .fetch_all()
-                            .await
-                            .map_err(OrmPublicError::from)?;
-                        if attachments.len()
-                            > usize::try_from(attachment_limit)
-                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
-                        {
+                            },
+                            maximum_attachments,
+                            retention_query_page_size
+                        );
+                        if attachments.overflowed {
                             attachment_cleanup_blocked = true;
                         } else {
                             let mut remaining_artifact_capacity =
@@ -1293,42 +1345,31 @@ impl OrmAiSessionRetentionService {
                                     OrmPublicError::new(OrmErrorCode::InternalError)
                                 })?;
                             let mut attachments_with_artifacts =
-                                Vec::with_capacity(attachments.len());
-                            for attachment in attachments {
+                                Vec::with_capacity(attachments.rows.len());
+                            for attachment in attachments.rows {
                                 validate_attachment(&attachment, session.id)?;
-                                let artifact_query_limit =
-                                    i64::try_from(remaining_artifact_capacity)
-                                        .map_err(|_| {
-                                            OrmPublicError::new(OrmErrorCode::InternalError)
-                                        })?
-                                        .checked_add(1)
-                                        .ok_or_else(|| {
-                                            OrmPublicError::new(OrmErrorCode::InternalError)
-                                        })?
-                                        .min(attachment_artifact_limit_with_lookahead);
-                                let artifacts = tx
-                                    .query::<AiAttachmentArtifactRecord>()
-                                    .filter(AiAttachmentArtifactRecordWhereInput {
+                                let artifacts = bounded_retention_rows!(
+                                    tx,
+                                    AiAttachmentArtifactRecord,
+                                    AiAttachmentArtifactRecordWhereInput {
                                         attachment_id: Some(UuidFilter {
                                             eq: Some(attachment.id),
                                             ..Default::default()
                                         }),
                                         ..Default::default()
-                                    })
-                                    .default_order()
-                                    .limit(artifact_query_limit)
-                                    .fetch_all()
-                                    .await
-                                    .map_err(OrmPublicError::from)?;
-                                if artifacts.len() > remaining_artifact_capacity {
+                                    },
+                                    remaining_artifact_capacity,
+                                    retention_query_page_size
+                                );
+                                if artifacts.overflowed {
                                     attachment_cleanup_blocked = true;
                                     break;
                                 }
-                                remaining_artifact_capacity -= artifacts.len();
-                                for artifact in &artifacts {
+                                remaining_artifact_capacity -= artifacts.rows.len();
+                                for artifact in &artifacts.rows {
                                     validate_attachment_artifact(artifact, attachment.id)?;
                                 }
-                                attachments_with_artifacts.push((attachment, artifacts));
+                                attachments_with_artifacts.push((attachment, artifacts.rows));
                             }
                             if !attachment_cleanup_blocked {
                                 for (attachment, artifacts) in attachments_with_artifacts {
@@ -1533,58 +1574,53 @@ impl OrmAiSessionRetentionService {
                                 messages_blocked += 1;
                                 continue;
                             }
-                            let block_limit = message
-                                .block_count
-                                .checked_add(1)
-                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                            if usize::try_from(message.block_count).map_or(true, |count| {
-                                count > maximum_blocks.saturating_sub(blocks_deleted)
-                            }) {
+                            let expected_blocks = usize::try_from(message.block_count)
+                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            if expected_blocks > maximum_blocks.saturating_sub(blocks_deleted) {
                                 messages_blocked += 1;
                                 continue;
                             }
-                            let blocks = tx
-                                .query::<AiMessageBlockRecord>()
-                                .filter(AiMessageBlockRecordWhereInput {
+                            let blocks = bounded_retention_rows!(
+                                tx,
+                                AiMessageBlockRecord,
+                                AiMessageBlockRecordWhereInput {
                                     message_id: Some(UuidFilter {
                                         eq: Some(message.id),
                                         ..Default::default()
                                     }),
                                     ..Default::default()
-                                })
-                                .default_order()
-                                .limit(block_limit)
-                                .fetch_all()
-                                .await
-                                .map_err(OrmPublicError::from)?;
-                            if i64::try_from(blocks.len()).ok() != Some(message.block_count)
-                                || blocks.iter().enumerate().any(|(index, block)| {
+                                },
+                                expected_blocks,
+                                retention_query_page_size
+                            );
+                            if blocks.overflowed
+                                || blocks.rows.len() != expected_blocks
+                                || blocks.rows.iter().enumerate().any(|(index, block)| {
                                     block.message_id != message.id
                                         || i64::try_from(index).ok() != Some(block.block_index)
                                 })
                             {
                                 return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                             }
-                            let checkpoints = tx
-                                .query::<AiContextCheckpointRecord>()
-                                .filter(AiContextCheckpointRecordWhereInput {
+                            let checkpoints = bounded_retention_rows!(
+                                tx,
+                                AiContextCheckpointRecord,
+                                AiContextCheckpointRecordWhereInput {
                                     session_id: Some(UuidFilter {
                                         eq: Some(session.id),
                                         ..Default::default()
                                     }),
                                     ..Default::default()
-                                })
-                                .default_order()
-                                .limit(context_checkpoint_limit_with_lookahead)
-                                .fetch_all()
-                                .await
-                                .map_err(OrmPublicError::from)?;
-                            if checkpoints.len() > maximum_context_checkpoints {
+                                },
+                                maximum_context_checkpoints,
+                                retention_query_page_size
+                            );
+                            if checkpoints.overflowed {
                                 messages_blocked += 1;
                                 continue;
                             }
                             let mut invalidated_ids = Vec::new();
-                            for checkpoint in checkpoints {
+                            for checkpoint in checkpoints.rows {
                                 if checkpoint.id.is_nil()
                                     || checkpoint.session_id != session.id
                                     || checkpoint.through_sequence <= 0
@@ -1638,7 +1674,7 @@ impl OrmAiSessionRetentionService {
                             if !matches!(updated, ConditionalUpdateOutcome::Updated(_)) {
                                 return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                             }
-                            for block in blocks {
+                            for block in blocks.rows {
                                 if !tx
                                     .delete_by_id::<AiMessageBlockRecord>(&block.id)
                                     .await
@@ -1760,24 +1796,23 @@ impl OrmAiSessionRetentionService {
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
-                        let remaining_proposals = tx
-                            .query::<AiProposalRecord>()
-                            .filter(AiProposalRecordWhereInput {
+                        let maximum_proposals = usize::try_from(proposal_limit)
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let remaining_proposals = bounded_retention_rows!(
+                            tx,
+                            AiProposalRecord,
+                            AiProposalRecordWhereInput {
                                 session_id: Some(UuidFilter {
                                     eq: Some(session.id),
                                     ..Default::default()
                                 }),
                                 ..Default::default()
-                            })
-                            .default_order()
-                            .limit(proposal_limit_with_lookahead)
-                            .fetch_all()
-                            .await
-                            .map_err(OrmPublicError::from)?;
-                        let proposals_are_exhausted = remaining_proposals.len()
-                            <= usize::try_from(proposal_limit)
-                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
-                            && remaining_proposals.iter().all(|proposal| {
+                            },
+                            maximum_proposals,
+                            retention_query_page_size
+                        );
+                        let proposals_are_exhausted = !remaining_proposals.overflowed
+                            && remaining_proposals.rows.iter().all(|proposal| {
                                 proposal.session_id == session.id
                                     && proposal.payload_purged_at.is_some()
                                     && proposal.protected_payload.is_none()
@@ -1821,25 +1856,23 @@ impl OrmAiSessionRetentionService {
                             && remaining_message_content.is_empty()
                             && remaining_attachments.is_empty()
                         {
-                            let runs = tx
-                                .query::<AiRunRecord>()
-                                .filter(AiRunRecordWhereInput {
+                            let maximum_runs = usize::try_from(run_limit)
+                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            let runs = bounded_retention_rows!(
+                                tx,
+                                AiRunRecord,
+                                AiRunRecordWhereInput {
                                     session_id: Some(UuidFilter {
                                         eq: Some(session.id),
                                         ..Default::default()
                                     }),
                                     ..Default::default()
-                                })
-                                .default_order()
-                                .limit(run_limit_with_lookahead)
-                                .fetch_all()
-                                .await
-                                .map_err(OrmPublicError::from)?;
-                            let runs_are_bounded = runs.len()
-                                <= usize::try_from(run_limit).map_err(|_| {
-                                    OrmPublicError::new(OrmErrorCode::InternalError)
-                                })?;
-                            let runs_are_terminal = runs.iter().all(|run| {
+                                },
+                                maximum_runs,
+                                retention_query_page_size
+                            );
+                            let runs_are_bounded = !runs.overflowed;
+                            let runs_are_terminal = runs.rows.iter().all(|run| {
                                 run.id != Uuid::nil()
                                     && run.session_id == session.id
                                     && run.lease_generation >= 0
@@ -1847,7 +1880,7 @@ impl OrmAiSessionRetentionService {
                                         .is_some_and(run_state_is_retention_closed)
                             });
                             if runs_are_bounded && runs_are_terminal {
-                                for run in runs {
+                                for run in runs.rows {
                                     let Some(checkpoint_id) = run.latest_checkpoint_id else {
                                         continue;
                                     };
@@ -2124,16 +2157,11 @@ impl OrmAiSessionRetentionService {
     }
 
     async fn finalize_deleted_session(&self, session_id: Uuid, now: i64) -> Result<bool, AiError> {
+        let retention_query_page_size = retention_query_page_size(&self.database)?;
         let run_limit = i64::try_from(self.limits.maximum_runs_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid run limit".to_owned()))?;
-        let run_limit_with_lookahead = run_limit
-            .checked_add(1)
-            .ok_or_else(|| AiError::InvalidConfiguration("invalid run limit".to_owned()))?;
         let message_limit = i64::try_from(self.limits.maximum_messages_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid message limit".to_owned()))?;
-        let message_limit_with_lookahead = message_limit
-            .checked_add(1)
-            .ok_or_else(|| AiError::InvalidConfiguration("invalid message limit".to_owned()))?;
         let result = self
             .database
             .transaction(TransactionMode::StateMachine, move |tx| {
@@ -2267,37 +2295,50 @@ impl OrmAiSessionRetentionService {
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
-                    if !remaining_events.is_empty()
-                        || !remaining_inbox.is_empty()
-                        || !remaining_context.is_empty()
-                        || !remaining_message_content.is_empty()
-                        || !remaining_attachments.is_empty()
-                    {
-                        return Ok(false);
-                    }
-
-                    let messages = tx
-                        .query::<AiMessageRecord>()
-                        .filter(AiMessageRecordWhereInput {
+                    let remaining_subscription_waiters = tx
+                        .query::<AiSubscriptionWaiterRecord>()
+                        .filter(AiSubscriptionWaiterRecordWhereInput {
                             session_id: Some(UuidFilter {
                                 eq: Some(session_id),
                                 ..Default::default()
                             }),
                             ..Default::default()
                         })
-                        .default_order()
-                        .limit(message_limit_with_lookahead)
+                        .limit(1)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
-                    if messages.len()
-                        > usize::try_from(message_limit)
-                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
-                        || i64::try_from(messages.len()).ok() != Some(session.message_head)
+                    if !remaining_events.is_empty()
+                        || !remaining_inbox.is_empty()
+                        || !remaining_context.is_empty()
+                        || !remaining_message_content.is_empty()
+                        || !remaining_attachments.is_empty()
+                        || !remaining_subscription_waiters.is_empty()
                     {
                         return Ok(false);
                     }
-                    for (index, message) in messages.iter().enumerate() {
+
+                    let maximum_messages = usize::try_from(message_limit)
+                        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let messages = bounded_retention_rows!(
+                        tx,
+                        AiMessageRecord,
+                        AiMessageRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                        maximum_messages,
+                        retention_query_page_size
+                    );
+                    if messages.overflowed
+                        || i64::try_from(messages.rows.len()).ok() != Some(session.message_head)
+                    {
+                        return Ok(false);
+                    }
+                    for (index, message) in messages.rows.iter().enumerate() {
                         let expected_sequence = i64::try_from(index)
                             .ok()
                             .and_then(|index| index.checked_add(1));
@@ -2330,24 +2371,23 @@ impl OrmAiSessionRetentionService {
                         }
                     }
 
-                    let runs = tx
-                        .query::<AiRunRecord>()
-                        .filter(AiRunRecordWhereInput {
+                    let maximum_runs = usize::try_from(run_limit)
+                        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let runs = bounded_retention_rows!(
+                        tx,
+                        AiRunRecord,
+                        AiRunRecordWhereInput {
                             session_id: Some(UuidFilter {
                                 eq: Some(session_id),
                                 ..Default::default()
                             }),
                             ..Default::default()
-                        })
-                        .default_order()
-                        .limit(run_limit_with_lookahead)
-                        .fetch_all()
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if runs.len()
-                        > usize::try_from(run_limit)
-                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
-                        || runs.iter().any(|run| {
+                        },
+                        maximum_runs,
+                        retention_query_page_size
+                    );
+                    if runs.overflowed
+                        || runs.rows.iter().any(|run| {
                             run.id.is_nil()
                                 || run.session_id != session_id
                                 || run.lease_generation < 0
@@ -2358,11 +2398,27 @@ impl OrmAiSessionRetentionService {
                     {
                         return Ok(false);
                     }
-                    let run_ids = runs.iter().map(|run| run.id).collect::<Vec<_>>();
+                    let run_ids = runs.rows.iter().map(|run| run.id).collect::<Vec<_>>();
                     if !run_ids.is_empty() {
                         let remaining_checkpoints = tx
                             .project::<AiRunCheckpointRetentionProjection>()
                             .filter(AiRunCheckpointRecordWhereInput {
+                                run_id: Some(UuidFilter {
+                                    in_list: Some(run_ids.clone()),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .limit(1)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !remaining_checkpoints.is_empty() {
+                            return Ok(false);
+                        }
+                        let remaining_adoptions = tx
+                            .query::<AiSubscriptionWaitAdoptionRecord>()
+                            .filter(AiSubscriptionWaitAdoptionRecordWhereInput {
                                 run_id: Some(UuidFilter {
                                     in_list: Some(run_ids),
                                     ..Default::default()
@@ -2373,7 +2429,7 @@ impl OrmAiSessionRetentionService {
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
-                        if !remaining_checkpoints.is_empty() {
+                        if !remaining_adoptions.is_empty() {
                             return Ok(false);
                         }
                     }
@@ -2488,32 +2544,17 @@ impl OrmAiSessionRetentionService {
         session_id: Uuid,
         now: i64,
     ) -> Result<DeletingRunCheckpointPurgeOutcome, AiError> {
+        let retention_query_page_size = retention_query_page_size(&self.database)?;
         let proposal_limit = i64::try_from(self.limits.maximum_proposals_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid proposal limit".to_owned()))?;
-        let proposal_limit_with_lookahead = proposal_limit
-            .checked_add(1)
-            .ok_or_else(|| AiError::InvalidConfiguration("invalid proposal limit".to_owned()))?;
         let proposal_item_limit = i64::try_from(self.limits.maximum_proposal_items_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid proposal-item limit".to_owned()))?;
-        let proposal_item_limit_with_lookahead =
-            proposal_item_limit.checked_add(1).ok_or_else(|| {
-                AiError::InvalidConfiguration("invalid proposal-item limit".to_owned())
-            })?;
         let tool_call_limit = i64::try_from(self.limits.maximum_tool_calls_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid tool-call limit".to_owned()))?;
-        let tool_call_limit_with_lookahead = tool_call_limit
-            .checked_add(1)
-            .ok_or_else(|| AiError::InvalidConfiguration("invalid tool-call limit".to_owned()))?;
         let approval_limit = i64::try_from(self.limits.maximum_approvals_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid approval limit".to_owned()))?;
-        let approval_limit_with_lookahead = approval_limit
-            .checked_add(1)
-            .ok_or_else(|| AiError::InvalidConfiguration("invalid approval limit".to_owned()))?;
         let run_limit = i64::try_from(self.limits.maximum_runs_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid run limit".to_owned()))?;
-        let run_limit_with_lookahead = run_limit
-            .checked_add(1)
-            .ok_or_else(|| AiError::InvalidConfiguration("invalid run limit".to_owned()))?;
         let checkpoint_limit = i64::try_from(self.limits.maximum_run_checkpoints_per_session)
             .map_err(|_| {
                 AiError::InvalidConfiguration("invalid run checkpoint limit".to_owned())
@@ -2604,30 +2645,28 @@ impl OrmAiSessionRetentionService {
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
-                    let remaining_proposals = maintenance
-                        .query::<AiProposalRecord>()
-                        .filter(AiProposalRecordWhereInput {
+                    let maximum_proposals = usize::try_from(proposal_limit)
+                        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let remaining_proposals = bounded_retention_rows!(
+                        maintenance,
+                        AiProposalRecord,
+                        AiProposalRecordWhereInput {
                             session_id: Some(UuidFilter {
                                 eq: Some(session_id),
                                 ..Default::default()
                             }),
                             ..Default::default()
-                        })
-                        .default_order()
-                        .limit(proposal_limit_with_lookahead)
-                        .fetch_all()
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if remaining_proposals.len()
-                        > usize::try_from(proposal_limit)
-                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
-                    {
+                        },
+                        maximum_proposals,
+                        retention_query_page_size
+                    );
+                    if remaining_proposals.overflowed {
                         return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                     }
                     let maximum_proposal_items = usize::try_from(proposal_item_limit)
                         .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
                     let mut proposal_item_count = 0usize;
-                    for proposal in remaining_proposals {
+                    for proposal in remaining_proposals.rows {
                         validate_proposal(&proposal, session)?;
                         if proposal.payload_purged_at.is_none()
                             || proposal.protected_payload.is_some()
@@ -2659,29 +2698,29 @@ impl OrmAiSessionRetentionService {
                         {
                             return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                         }
-                        let items = maintenance
-                            .query::<AiProposalItemRecord>()
-                            .filter(AiProposalItemRecordWhereInput {
+                        let remaining_items = maximum_proposal_items
+                            .checked_sub(proposal_item_count)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let items = bounded_retention_rows!(
+                            maintenance,
+                            AiProposalItemRecord,
+                            AiProposalItemRecordWhereInput {
                                 proposal_id: Some(UuidFilter {
                                     eq: Some(proposal.id),
                                     ..Default::default()
                                 }),
                                 ..Default::default()
-                            })
-                            .default_order()
-                            .limit(proposal_item_limit_with_lookahead)
-                            .fetch_all()
-                            .await
-                            .map_err(OrmPublicError::from)?;
-                        proposal_item_count = proposal_item_count
-                            .checked_add(items.len())
-                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                        if items.len() > maximum_proposal_items
-                            || proposal_item_count > maximum_proposal_items
-                        {
+                            },
+                            remaining_items,
+                            retention_query_page_size
+                        );
+                        if items.overflowed {
                             return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                         }
-                        for (index, item) in items.iter().enumerate() {
+                        proposal_item_count = proposal_item_count
+                            .checked_add(items.rows.len())
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        for (index, item) in items.rows.iter().enumerate() {
                             validate_proposal_item(item, proposal.id, index)?;
                             if item.protected_suggested_value.is_some()
                                 || item.protected_rationale.is_some()
@@ -2730,28 +2769,26 @@ impl OrmAiSessionRetentionService {
                         return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                     }
 
-                    let runs = maintenance
-                        .query::<AiRunRecord>()
-                        .filter(AiRunRecordWhereInput {
+                    let maximum_runs = usize::try_from(run_limit)
+                        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let runs = bounded_retention_rows!(
+                        maintenance,
+                        AiRunRecord,
+                        AiRunRecordWhereInput {
                             session_id: Some(UuidFilter {
                                 eq: Some(session_id),
                                 ..Default::default()
                             }),
                             ..Default::default()
-                        })
-                        .default_order()
-                        .limit(run_limit_with_lookahead)
-                        .fetch_all()
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if runs.len()
-                        > usize::try_from(run_limit)
-                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
-                    {
+                        },
+                        maximum_runs,
+                        retention_query_page_size
+                    );
+                    if runs.overflowed {
                         return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                     }
-                    let mut run_fences = HashMap::with_capacity(runs.len());
-                    for run in runs {
+                    let mut run_fences = HashMap::with_capacity(runs.rows.len());
+                    for run in runs.rows {
                         let state = AiRunState::from_persisted(&run.state)
                             .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
                         if run.id.is_nil()
@@ -2768,56 +2805,57 @@ impl OrmAiSessionRetentionService {
                         run_fences.insert(run.id, run.lease_generation);
                     }
                     let run_ids = run_fences.keys().copied().collect::<Vec<_>>();
+                    let maximum_calls = usize::try_from(tool_call_limit)
+                        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
                     let calls = if run_ids.is_empty() {
-                        Vec::new()
+                        BoundedRetentionRows {
+                            rows: Vec::new(),
+                            overflowed: false,
+                        }
                     } else {
-                        maintenance
-                            .query::<AiToolCallRecord>()
-                            .filter(AiToolCallRecordWhereInput {
+                        bounded_retention_rows!(
+                            maintenance,
+                            AiToolCallRecord,
+                            AiToolCallRecordWhereInput {
                                 run_id: Some(UuidFilter {
                                     in_list: Some(run_ids.clone()),
                                     ..Default::default()
                                 }),
                                 ..Default::default()
-                            })
-                            .default_order()
-                            .limit(tool_call_limit_with_lookahead)
-                            .fetch_all()
-                            .await
-                            .map_err(OrmPublicError::from)?
+                            },
+                            maximum_calls,
+                            retention_query_page_size
+                        )
                     };
-                    let approvals = maintenance
-                        .query::<AiApprovalRecord>()
-                        .filter(AiApprovalRecordWhereInput {
+                    let maximum_approvals = usize::try_from(approval_limit)
+                        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let approvals = bounded_retention_rows!(
+                        maintenance,
+                        AiApprovalRecord,
+                        AiApprovalRecordWhereInput {
                             session_id: Some(UuidFilter {
                                 eq: Some(session_id),
                                 ..Default::default()
                             }),
                             ..Default::default()
-                        })
-                        .default_order()
-                        .limit(approval_limit_with_lookahead)
-                        .fetch_all()
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if calls.len()
-                        > usize::try_from(tool_call_limit)
-                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
-                        || approvals.len()
-                            > usize::try_from(approval_limit)
-                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
-                    {
+                        },
+                        maximum_approvals,
+                        retention_query_page_size
+                    );
+                    if calls.overflowed || approvals.overflowed {
                         return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                     }
                     let calls_by_id = calls
+                        .rows
                         .iter()
                         .map(|call| (call.id, call))
                         .collect::<HashMap<_, _>>();
                     let approvals_by_id = approvals
+                        .rows
                         .iter()
                         .map(|approval| (approval.id, approval))
                         .collect::<HashMap<_, _>>();
-                    for call in &calls {
+                    for call in &calls.rows {
                         validate_tool_call(call, &run_ids)?;
                         if !tool_call_state_is_terminal(&call.state)
                             || call.payload_purged_at.is_none()
@@ -2858,7 +2896,7 @@ impl OrmAiSessionRetentionService {
                             return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                         }
                     }
-                    for approval in &approvals {
+                    for approval in &approvals.rows {
                         validate_approval(approval, session_id)?;
                         let Some(call) = calls_by_id.get(&approval.tool_call_id) else {
                             return Err(OrmPublicError::new(OrmErrorCode::InternalError));
@@ -2962,21 +3000,13 @@ impl OrmAiSessionRetentionService {
         session_id: Uuid,
         now: i64,
     ) -> Result<RawCheckpointPurgeOutcome, AiError> {
+        let retention_query_page_size = retention_query_page_size(&self.database)?;
         let run_limit = i64::try_from(self.limits.maximum_runs_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid run limit".to_owned()))?;
-        let run_limit_with_lookahead = run_limit
-            .checked_add(1)
-            .ok_or_else(|| AiError::InvalidConfiguration("invalid run limit".to_owned()))?;
         let tool_call_limit = i64::try_from(self.limits.maximum_tool_calls_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid tool-call limit".to_owned()))?;
-        let tool_call_limit_with_lookahead = tool_call_limit
-            .checked_add(1)
-            .ok_or_else(|| AiError::InvalidConfiguration("invalid tool-call limit".to_owned()))?;
         let approval_limit = i64::try_from(self.limits.maximum_approvals_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid approval limit".to_owned()))?;
-        let approval_limit_with_lookahead = approval_limit
-            .checked_add(1)
-            .ok_or_else(|| AiError::InvalidConfiguration("invalid approval limit".to_owned()))?;
         let checkpoint_limit = i64::try_from(self.limits.maximum_run_checkpoints_per_session)
             .map_err(|_| {
                 AiError::InvalidConfiguration("invalid run checkpoint limit".to_owned())
@@ -3046,29 +3076,27 @@ impl OrmAiSessionRetentionService {
                         .checked_sub(policy.raw_payload_retention_seconds)
                         .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
 
-                    let runs = maintenance
-                        .query::<AiRunRecord>()
-                        .filter(AiRunRecordWhereInput {
+                    let maximum_runs = usize::try_from(run_limit)
+                        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let runs = bounded_retention_rows!(
+                        maintenance,
+                        AiRunRecord,
+                        AiRunRecordWhereInput {
                             session_id: Some(UuidFilter {
                                 eq: Some(session_id),
                                 ..Default::default()
                             }),
                             ..Default::default()
-                        })
-                        .default_order()
-                        .limit(run_limit_with_lookahead)
-                        .fetch_all()
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if runs.len()
-                        > usize::try_from(run_limit)
-                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
-                    {
+                        },
+                        maximum_runs,
+                        retention_query_page_size
+                    );
+                    if runs.overflowed {
                         return Ok(RawCheckpointPurgeOutcome::Blocked);
                     }
                     let mut terminal_runs = HashMap::new();
                     let mut current_checkpoint_ids = HashSet::new();
-                    for run in runs {
+                    for run in runs.rows {
                         let state = AiRunState::from_persisted(&run.state)
                             .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
                         if run.id.is_nil()
@@ -3175,60 +3203,61 @@ impl OrmAiSessionRetentionService {
                         .iter()
                         .map(|checkpoint| checkpoint.run_id)
                         .collect::<HashSet<_>>();
-                    let calls = maintenance
-                        .query::<AiToolCallRecord>()
-                        .filter(AiToolCallRecordWhereInput {
+                    let maximum_calls = usize::try_from(tool_call_limit)
+                        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let calls = bounded_retention_rows!(
+                        maintenance,
+                        AiToolCallRecord,
+                        AiToolCallRecordWhereInput {
                             run_id: Some(UuidFilter {
                                 in_list: Some(eligible_run_ids.iter().copied().collect()),
                                 ..Default::default()
                             }),
                             ..Default::default()
-                        })
-                        .default_order()
-                        .limit(tool_call_limit_with_lookahead)
-                        .fetch_all()
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if calls.len()
-                        > usize::try_from(tool_call_limit)
-                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
-                    {
+                        },
+                        maximum_calls,
+                        retention_query_page_size
+                    );
+                    if calls.overflowed {
                         return Ok(RawCheckpointPurgeOutcome::Blocked);
                     }
-                    let approvals = if calls.is_empty() {
-                        Vec::new()
+                    let maximum_approvals = usize::try_from(approval_limit)
+                        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let approvals = if calls.rows.is_empty() {
+                        BoundedRetentionRows {
+                            rows: Vec::new(),
+                            overflowed: false,
+                        }
                     } else {
-                        maintenance
-                            .query::<AiApprovalRecord>()
-                            .filter(AiApprovalRecordWhereInput {
+                        bounded_retention_rows!(
+                            maintenance,
+                            AiApprovalRecord,
+                            AiApprovalRecordWhereInput {
                                 session_id: Some(UuidFilter {
                                     eq: Some(session_id),
                                     ..Default::default()
                                 }),
                                 ..Default::default()
-                            })
-                            .default_order()
-                            .limit(approval_limit_with_lookahead)
-                            .fetch_all()
-                            .await
-                            .map_err(OrmPublicError::from)?
+                            },
+                            maximum_approvals,
+                            retention_query_page_size
+                        )
                     };
-                    if approvals.len()
-                        > usize::try_from(approval_limit)
-                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
-                    {
+                    if approvals.overflowed {
                         return Ok(RawCheckpointPurgeOutcome::Blocked);
                     }
                     let calls_by_id = calls
+                        .rows
                         .iter()
                         .map(|call| (call.id, call))
                         .collect::<HashMap<_, _>>();
                     let approvals_by_id = approvals
+                        .rows
                         .iter()
                         .map(|approval| (approval.id, approval))
                         .collect::<HashMap<_, _>>();
                     let eligible_run_ids = eligible_run_ids.into_iter().collect::<Vec<_>>();
-                    for call in &calls {
+                    for call in &calls.rows {
                         validate_tool_call(call, &eligible_run_ids)?;
                     }
 
@@ -3360,6 +3389,7 @@ impl OrmAiSessionRetentionService {
                         }
 
                         let relevant_calls = calls
+                            .rows
                             .iter()
                             .filter(|call| {
                                 call.run_id == checkpoint.run_id
@@ -3515,7 +3545,7 @@ impl OrmAiSessionRetentionService {
                             }
                             relevant_call_ids.insert(call.id);
                         }
-                        for approval in &approvals {
+                        for approval in &approvals.rows {
                             if !relevant_call_ids.contains(&approval.tool_call_id) {
                                 continue;
                             }
@@ -4035,8 +4065,7 @@ fn proposal_state_is_terminal(proposal: &AiProposalRecord, now: i64) -> bool {
 async fn purge_terminal_subscription_waits(
     tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
     session_id: Uuid,
-    limit_with_lookahead: i64,
-    maximum: usize,
+    page_size: i64,
 ) -> Result<bool, OrmPublicError> {
     let waiters = tx
         .query::<AiSubscriptionWaiterRecord>()
@@ -4048,13 +4077,11 @@ async fn purge_terminal_subscription_waits(
             ..Default::default()
         })
         .default_order()
-        .limit(limit_with_lookahead)
+        .limit(page_size)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
-    if waiters.len() > maximum {
-        return Ok(false);
-    }
+    let page_was_full = i64::try_from(waiters.len()).ok() == Some(page_size);
     for waiter in waiters {
         let run = tx
             .find_by_id::<AiRunRecord>(&waiter.run_id)
@@ -4111,6 +4138,22 @@ async fn purge_terminal_subscription_waits(
         tx.delete_by_id::<AiSubscriptionWaiterRecord>(&waiter.id)
             .await
             .map_err(OrmPublicError::from)?;
+    }
+    if page_was_full {
+        let remaining = tx
+            .query::<AiSubscriptionWaiterRecord>()
+            .filter(AiSubscriptionWaiterRecordWhereInput {
+                session_id: Some(UuidFilter {
+                    eq: Some(session_id),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .limit(1)
+            .fetch_all()
+            .await
+            .map_err(OrmPublicError::from)?;
+        return Ok(remaining.is_empty());
     }
     Ok(true)
 }
@@ -4485,7 +4528,7 @@ mod tests {
         DatabaseManagedContentProtector, OrmAiAttachmentService, ProviderKind,
     };
     use agql_auth::{AccessTokenMetadata, AuthPrincipal, AuthUser, FixedClock, SessionContext};
-    use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
+    use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule, PaginationConfig};
     use graphql_orm::prelude::SqliteBackend;
     use graphql_orm_storage::{
         BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
@@ -4875,6 +4918,208 @@ mod tests {
         .await
         .expect("session should seed");
         id
+    }
+
+    async fn seed_empty_session(database: &Database<SqliteBackend>, scope: &AiScope) -> Uuid {
+        let id = Uuid::new_v4();
+        AiSessionRecord::insert(
+            database,
+            CreateAiSessionRecordInput {
+                id,
+                owner_principal_kind: "user".to_owned(),
+                owner_subject: "retention-user".to_owned(),
+                tenant_id: scope.tenant_id.clone(),
+                scope_kind: scope.kind.clone(),
+                scope_id: scope.id.clone(),
+                title: "Empty retention test".to_owned(),
+                title_revision: 0,
+                title_source: "default".to_owned(),
+                state: "active".to_owned(),
+                stream_head: 0,
+                message_head: 0,
+                last_activity_at: now().unix_timestamp() - 120,
+                archived_at: None,
+                deleted_at: None,
+            },
+        )
+        .await
+        .expect("empty session should seed");
+        id
+    }
+
+    async fn seed_run_record(
+        database: &Database<SqliteBackend>,
+        session_id: Uuid,
+        run_id: Uuid,
+        state: &str,
+    ) {
+        AiRunRecord::insert(
+            database,
+            CreateAiRunRecordInput {
+                id: run_id,
+                session_id,
+                input_message_id: Uuid::new_v4(),
+                principal_reference: serde_json::json!({"test": true}),
+                state: state.to_owned(),
+                attempt_id: None,
+                lease_owner: None,
+                lease_generation: 0,
+                lease_expires_at: None,
+                lease_heartbeat_at: None,
+                retry_count: 0,
+                next_attempt_at: None,
+                error_code: None,
+                latest_checkpoint_id: None,
+                cancellation_request_id: None,
+                cancellation_requested_at: None,
+            },
+        )
+        .await
+        .expect("run should seed");
+    }
+
+    async fn seed_purged_adopted_waiter(
+        database: &Database<SqliteBackend>,
+        session_id: Uuid,
+        index: usize,
+    ) -> (Uuid, Uuid) {
+        let run_id = Uuid::new_v4();
+        let call_id = Uuid::new_v4();
+        let waiter_id = Uuid::new_v4();
+        let adoption_id = Uuid::new_v4();
+        seed_run_record(database, session_id, run_id, AiRunState::Completed.as_str()).await;
+        AiRunStepRecord::insert(
+            database,
+            CreateAiRunStepRecordInput {
+                id: call_id,
+                run_id,
+                step_index: 0,
+                step_kind: "subscription_wait".to_owned(),
+                state: "completed".to_owned(),
+                lease_generation: 0,
+                started_at: Some(now().unix_timestamp() - 100),
+                finished_at: Some(now().unix_timestamp() - 90),
+                error_code: None,
+            },
+        )
+        .await
+        .expect("subscription step should seed");
+        AiToolCallRecord::insert(
+            database,
+            CreateAiToolCallRecordInput {
+                id: call_id,
+                run_id,
+                provider_call_key: format!("retention-wait:{call_id}"),
+                provider_call_id: format!("provider-{call_id}"),
+                provider_kind: Some("mock".to_owned()),
+                provider_model: Some("retention-test".to_owned()),
+                provider_response_id: Some(format!("response-{call_id}")),
+                budget_reservation_id: None,
+                provider_turn_index: 0,
+                tool_call_index: 0,
+                tool_id: "test.subscription_wait".to_owned(),
+                tool_fingerprint: "tool-fingerprint".to_owned(),
+                protected_arguments: None,
+                argument_hash: "argument-hash".to_owned(),
+                protected_result: None,
+                payload_purged_at: Some(now().unix_timestamp() - 80),
+                risk: "read_only".to_owned(),
+                authorization_code: Some("allowed".to_owned()),
+                authorization_policy_version: Some("policy-v1".to_owned()),
+                authorization_state_digest: Some("auth-state".to_owned()),
+                disclosure_schema_fingerprint: Some("disclosure-fingerprint".to_owned()),
+                result_classification: Some("internal".to_owned()),
+                result_egress_decision_id: None,
+                result_egress_manifest_hash: None,
+                application_audit_ref: None,
+                approval_id: None,
+                idempotency_key: Some(call_id.to_string()),
+                correlation_id: Some(format!("wait-correlation-{index}")),
+                causation_id: Some(format!("wait-causation-{index}")),
+                delegation_reference: None,
+                lease_generation: 0,
+                state: "completed".to_owned(),
+                completed_at: Some(now().unix_timestamp() - 90),
+            },
+        )
+        .await
+        .expect("purged subscription tool call should seed");
+        let source_checkpoint_id = Uuid::new_v4();
+        let parked_checkpoint_id = Uuid::new_v4();
+        AiSubscriptionWaiterRecord::insert(
+            database,
+            CreateAiSubscriptionWaiterRecordInput {
+                id: waiter_id,
+                run_id,
+                session_id,
+                tool_call_id: call_id,
+                source_attempt_id: Uuid::new_v4(),
+                source_lease_generation: 1,
+                source_checkpoint_id,
+                source_checkpoint_fingerprint: format!("source-checkpoint-{index}"),
+                parked_checkpoint_id,
+                parked_checkpoint_fingerprint: format!("parked-checkpoint-{index}"),
+                owner_principal_kind: "user".to_owned(),
+                owner_subject: "retention-user".to_owned(),
+                principal_reference: serde_json::json!({"test": true}),
+                principal_reference_fingerprint: "principal-fingerprint".to_owned(),
+                scope_key: "tenant:retention:retention".to_owned(),
+                scope_kind: "tenant".to_owned(),
+                scope_id: "retention".to_owned(),
+                tenant_id: Some("retention".to_owned()),
+                target_id: "retention-target".to_owned(),
+                source_id: "retention-source".to_owned(),
+                source_registration_fingerprint: "source-registration".to_owned(),
+                semantic_catalog_fingerprint: "semantic-catalog".to_owned(),
+                operation_fingerprint: "operation".to_owned(),
+                target_schema_fingerprint: "target-schema".to_owned(),
+                capability_fingerprint: "capability".to_owned(),
+                plan_fingerprint: "plan".to_owned(),
+                compiled_descriptor_fingerprint: "compiled-descriptor".to_owned(),
+                operation_name: "RetentionSubscription".to_owned(),
+                operation_document_hash: "operation-document".to_owned(),
+                result_projection_fingerprint: "result-projection".to_owned(),
+                disclosure_schema_fingerprint: "disclosure-schema".to_owned(),
+                variables_fingerprint: "variables".to_owned(),
+                condition_fingerprint: "condition".to_owned(),
+                waiter_fingerprint: format!("waiter-{index}"),
+                protected_request: None,
+                cursor_fingerprint: format!("cursor-{index}"),
+                protected_cursor: None,
+                events_examined: 1,
+                maximum_events: 1,
+                expires_at: now().unix_timestamp() - 60,
+                state: "adopted".to_owned(),
+                claim_owner: None,
+                claim_generation: 1,
+                claim_expires_at: None,
+            },
+        )
+        .await
+        .expect("adopted waiter should seed");
+        AiSubscriptionWaitAdoptionRecord::insert(
+            database,
+            CreateAiSubscriptionWaitAdoptionRecordInput {
+                id: adoption_id,
+                waiter_id,
+                run_id,
+                tool_call_id: call_id,
+                outcome_kind: "matched".to_owned(),
+                source_event_fingerprint: Some(format!("event-{index}")),
+                cursor_fingerprint: format!("cursor-{index}"),
+                outcome_fingerprint: format!("outcome-{index}"),
+                checkpoint_fingerprint: format!("adoption-checkpoint-{index}"),
+                protected_outcome: None,
+                state: "consumed".to_owned(),
+                queued_at: now().unix_timestamp() - 90,
+                claimed_attempt_id: Some(Uuid::new_v4()),
+                claimed_lease_generation: Some(2),
+                consumed_at: Some(now().unix_timestamp() - 80),
+            },
+        )
+        .await
+        .expect("consumed adoption should seed");
+        (waiter_id, adoption_id)
     }
 
     async fn seed_message(
@@ -6222,7 +6467,9 @@ mod tests {
 
     #[tokio::test]
     async fn proposal_lookahead_blocks_the_whole_deleting_session_set() {
-        let database = database().await;
+        let database = database()
+            .await
+            .with_pagination_config(PaginationConfig::explicit_only(1));
         let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
         seed_policy(&database, &scope).await;
         let session_id = seed_session(&database, &scope).await;
@@ -6262,6 +6509,149 @@ mod tests {
             assert!(proposal.protected_payload.is_some());
             assert!(proposal.payload_purged_at.is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn clamped_run_lookahead_cannot_hide_an_unsafe_final_run() {
+        let database = database()
+            .await
+            .with_pagination_config(PaginationConfig::explicit_only(2));
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let session_id = seed_empty_session(&database, &scope).await;
+        let first_run = Uuid::new_v4();
+        let second_run = Uuid::new_v4();
+        let unsafe_run = Uuid::new_v4();
+        seed_run_record(
+            &database,
+            session_id,
+            first_run,
+            AiRunState::Completed.as_str(),
+        )
+        .await;
+        seed_run_record(
+            &database,
+            session_id,
+            second_run,
+            AiRunState::Completed.as_str(),
+        )
+        .await;
+        seed_run_record(
+            &database,
+            session_id,
+            unsafe_run,
+            AiRunState::Running.as_str(),
+        )
+        .await;
+        mark_session_deleting(&database, session_id, 120).await;
+        let limits = AiSessionRetentionLimits::default()
+            .with_run_checkpoint_limits(2, 10)
+            .expect("run lookahead limits should validate");
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            Arc::new(FixedClock::new(now())),
+            limits,
+        );
+
+        let report = service
+            .prune_session_content(None)
+            .await
+            .expect("over-bound runs should fail closed without deletion");
+        assert_eq!(report.deleting_sessions_finalized, 0);
+        assert_eq!(report.tool_payload_purges_blocked, 1);
+        let session = AiSessionRecord::find_by_id(&database, &session_id)
+            .await
+            .expect("session lookup should succeed")
+            .expect("session shell must remain");
+        assert_eq!(session.state, "deleting");
+        for run_id in [first_run, second_run, unsafe_run] {
+            assert!(
+                AiRunRecord::find_by_id(&database, &run_id)
+                    .await
+                    .expect("run lookup should succeed")
+                    .is_some(),
+                "no run may be deleted from an incomplete proof set"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_waiters_and_adoptions_drain_in_bounded_pages_before_finalization() {
+        let database = database()
+            .await
+            .with_pagination_config(PaginationConfig::explicit_only(10));
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let session_id = seed_empty_session(&database, &scope).await;
+        let mut final_waiter = Uuid::nil();
+        let mut final_adoption = Uuid::nil();
+        for index in 0..101 {
+            (final_waiter, final_adoption) =
+                seed_purged_adopted_waiter(&database, session_id, index).await;
+        }
+        mark_session_deleting(&database, session_id, 120).await;
+        let limits = AiSessionRetentionLimits::default()
+            .with_run_checkpoint_limits(200, 200)
+            .expect("run limits should validate")
+            .with_tool_payload_limits(200, 200)
+            .expect("tool limits should validate");
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            Arc::new(FixedClock::new(now())),
+            limits,
+        );
+
+        let first = service
+            .prune_session_content(None)
+            .await
+            .expect("first waiter cleanup page should succeed");
+        assert_eq!(first.deleting_sessions_finalized, 0);
+        assert_eq!(first.tool_payload_purges_blocked, 1);
+        assert!(
+            AiSubscriptionWaiterRecord::find_by_id(&database, &final_waiter)
+                .await
+                .expect("waiter lookup should succeed")
+                .is_some()
+        );
+        assert!(
+            AiSubscriptionWaitAdoptionRecord::find_by_id(&database, &final_adoption)
+                .await
+                .expect("adoption lookup should succeed")
+                .is_some()
+        );
+
+        let mut finalized = false;
+        for _ in 0..20 {
+            let report = service
+                .prune_session_content(None)
+                .await
+                .expect("bounded waiter cleanup pass should succeed");
+            if report.deleting_sessions_finalized == 1 {
+                finalized = true;
+                break;
+            }
+        }
+        assert!(
+            finalized,
+            "terminal waiter cleanup must make bounded progress"
+        );
+        assert!(
+            AiSubscriptionWaiterRecord::find_by_id(&database, &final_waiter)
+                .await
+                .expect("waiter lookup should succeed")
+                .is_none()
+        );
+        assert!(
+            AiSubscriptionWaitAdoptionRecord::find_by_id(&database, &final_adoption)
+                .await
+                .expect("adoption lookup should succeed")
+                .is_none()
+        );
+        let session = AiSessionRecord::find_by_id(&database, &session_id)
+            .await
+            .expect("session lookup should succeed")
+            .expect("redacted session shell should remain");
+        assert_eq!(session.state, "deleted");
     }
 
     #[tokio::test]
