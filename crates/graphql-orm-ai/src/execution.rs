@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AiRunId, AiScope, AiToolAuthorizationDecision, AiToolAuthorizationPolicy, AiToolCallId,
-    AiToolDescriptor, GraphqlExecutionTargetId, GraphqlOperationContract, ToolExecutionError,
+    AiToolDescriptor, AiToolId, AiToolOperationKind, GraphqlExecutionTargetId,
+    GraphqlOperationContract, ToolExecutionError,
 };
 
 /// Deployment trust/routing class for authenticated GraphQL execution.
@@ -143,6 +144,158 @@ pub struct GraphqlRequestContext {
     inner: Arc<dyn Any + Send + Sync>,
 }
 
+/// Crate-authored identity of the exact registered tool contract reaching an
+/// authenticated GraphQL execution boundary.
+///
+/// This value is constructed only after the caller has selected the exact
+/// registered descriptor. Generated-query bindings additionally require the
+/// runtime's successful capability compilation and target-policy admission.
+/// It is not user authority, resolver authority, or a substitute for the
+/// current-principal policy decision performed by [`AuthenticatedToolBridge`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiRegisteredToolExecutionBinding {
+    kind: AiRegisteredToolExecutionKind,
+    tool_id: AiToolId,
+    tool_fingerprint: String,
+    operation_kind: AiToolOperationKind,
+    generated_capability_fingerprint: Option<String>,
+}
+
+/// Closed origin of a crate-authored registered tool execution binding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AiRegisteredToolExecutionKind {
+    /// Exact static descriptor admitted through ordinary host tool policy.
+    StaticOperation,
+    /// Exact generated query capability admitted by active target policy.
+    GeneratedQuery,
+    /// Exact generated mutation capability. Remote delegated execution denies
+    /// this kind unless a later separately reviewed contract admits it.
+    GeneratedMutation,
+}
+
+impl AiRegisteredToolExecutionBinding {
+    /// Returns whether the execution came from the static descriptor path or
+    /// the generated-query capability path.
+    pub const fn kind(&self) -> AiRegisteredToolExecutionKind {
+        self.kind
+    }
+
+    /// Returns the exact registered static tool or generated capability ID.
+    pub const fn tool_id(&self) -> &AiToolId {
+        &self.tool_id
+    }
+
+    /// Returns the exact compiled descriptor fingerprint used for current host
+    /// policy and ordinary resolver execution.
+    pub fn tool_fingerprint(&self) -> &str {
+        &self.tool_fingerprint
+    }
+
+    /// Returns the exact GraphQL operation kind.
+    pub const fn operation_kind(&self) -> AiToolOperationKind {
+        self.operation_kind
+    }
+
+    /// Returns the provider-visible registered generated-query capability
+    /// fingerprint, or `None` for a static descriptor.
+    pub fn generated_capability_fingerprint(&self) -> Option<&str> {
+        self.generated_capability_fingerprint.as_deref()
+    }
+
+    pub(crate) fn static_operation(
+        descriptor: &AiToolDescriptor,
+        request: &ToolGraphqlRequest,
+    ) -> Result<Self, ToolExecutionError> {
+        validate_descriptor_request_binding(descriptor, request)?;
+        Ok(Self {
+            kind: AiRegisteredToolExecutionKind::StaticOperation,
+            tool_id: descriptor.id.clone(),
+            tool_fingerprint: descriptor.fingerprint.clone(),
+            operation_kind: descriptor.operation_kind,
+            generated_capability_fingerprint: None,
+        })
+    }
+
+    pub(crate) fn generated_query(
+        capability_id: &AiToolId,
+        capability_fingerprint: &str,
+        descriptor: &AiToolDescriptor,
+        request: &ToolGraphqlRequest,
+    ) -> Result<Self, ToolExecutionError> {
+        validate_descriptor_request_binding(descriptor, request)?;
+        let semantic = request
+            .contract
+            .semantic_operation()
+            .ok_or(ToolExecutionError::StaleContract)?;
+        if descriptor.id != *capability_id
+            || descriptor.operation_kind != AiToolOperationKind::Query
+            || semantic.kind().graphql_orm_kind()
+                != graphql_orm::graphql::orm::GraphqlOperationKind::Query
+            || !valid_sha256(capability_fingerprint)
+        {
+            return Err(ToolExecutionError::StaleContract);
+        }
+        Ok(Self {
+            kind: AiRegisteredToolExecutionKind::GeneratedQuery,
+            tool_id: capability_id.clone(),
+            tool_fingerprint: descriptor.fingerprint.clone(),
+            operation_kind: AiToolOperationKind::Query,
+            generated_capability_fingerprint: Some(capability_fingerprint.to_owned()),
+        })
+    }
+
+    pub(crate) fn generated_mutation(
+        capability_id: &AiToolId,
+        capability_fingerprint: &str,
+        descriptor: &AiToolDescriptor,
+        request: &ToolGraphqlRequest,
+    ) -> Result<Self, ToolExecutionError> {
+        validate_descriptor_request_binding(descriptor, request)?;
+        let semantic = request
+            .contract
+            .semantic_operation()
+            .ok_or(ToolExecutionError::StaleContract)?;
+        if descriptor.id != *capability_id
+            || descriptor.operation_kind != AiToolOperationKind::Mutation
+            || semantic.kind().graphql_orm_kind()
+                != graphql_orm::graphql::orm::GraphqlOperationKind::Mutation
+            || !valid_sha256(capability_fingerprint)
+        {
+            return Err(ToolExecutionError::StaleContract);
+        }
+        Ok(Self {
+            kind: AiRegisteredToolExecutionKind::GeneratedMutation,
+            tool_id: capability_id.clone(),
+            tool_fingerprint: descriptor.fingerprint.clone(),
+            operation_kind: AiToolOperationKind::Mutation,
+            generated_capability_fingerprint: Some(capability_fingerprint.to_owned()),
+        })
+    }
+}
+
+fn validate_descriptor_request_binding(
+    descriptor: &AiToolDescriptor,
+    request: &ToolGraphqlRequest,
+) -> Result<(), ToolExecutionError> {
+    if !descriptor.has_valid_fingerprint()
+        || descriptor.operation_kind == AiToolOperationKind::Internal
+        || descriptor.document != request.document
+        || descriptor.graphql_contract.as_ref() != Some(&request.contract)
+        || descriptor.result_projection != request.contract.result_projection_fingerprint
+        || request.operation_name != request.contract.operation_name
+    {
+        return Err(ToolExecutionError::StaleContract);
+    }
+    Ok(())
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 impl GraphqlRequestContext {
     /// Wraps a host-specific request context.
     pub fn new<T>(context: T) -> Self
@@ -201,6 +354,25 @@ pub trait GraphqlRequestContextFactory: Send + Sync {
         target: &GraphqlExecutionTarget,
         request: &ToolGraphqlRequest,
     ) -> Result<GraphqlRequestContext, ToolExecutionError>;
+
+    /// Builds the canonical envelope with the crate-authored identity of the
+    /// exact registered descriptor or generated-query capability.
+    ///
+    /// The default preserves existing local context factories by delegating to
+    /// [`Self::build`]. Security-sensitive remote factories override this hook
+    /// to bind short-lived delegated authority to `binding`. Callers cannot
+    /// construct a generated binding independently of capability compilation
+    /// and target-policy validation.
+    async fn build_registered(
+        &self,
+        principal: &ResolvedPrincipal,
+        target: &GraphqlExecutionTarget,
+        binding: &AiRegisteredToolExecutionBinding,
+        request: &ToolGraphqlRequest,
+    ) -> Result<GraphqlRequestContext, ToolExecutionError> {
+        let _ = binding;
+        self.build(principal, target, request).await
+    }
 }
 
 /// Executes a server-authored operation against the composed host schema.
@@ -251,6 +423,54 @@ impl AuthenticatedToolBridge {
         descriptor: &AiToolDescriptor,
         request: ToolGraphqlRequest,
     ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
+        let binding = AiRegisteredToolExecutionBinding::static_operation(descriptor, &request)?;
+        self.execute_with_binding(principal_reference, descriptor, request, binding)
+            .await
+    }
+
+    pub(crate) async fn execute_generated_query(
+        &self,
+        principal_reference: &PrincipalReference,
+        capability_id: &AiToolId,
+        capability_fingerprint: &str,
+        descriptor: &AiToolDescriptor,
+        request: ToolGraphqlRequest,
+    ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
+        let binding = AiRegisteredToolExecutionBinding::generated_query(
+            capability_id,
+            capability_fingerprint,
+            descriptor,
+            &request,
+        )?;
+        self.execute_with_binding(principal_reference, descriptor, request, binding)
+            .await
+    }
+
+    pub(crate) async fn execute_generated_mutation(
+        &self,
+        principal_reference: &PrincipalReference,
+        capability_id: &AiToolId,
+        capability_fingerprint: &str,
+        descriptor: &AiToolDescriptor,
+        request: ToolGraphqlRequest,
+    ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
+        let binding = AiRegisteredToolExecutionBinding::generated_mutation(
+            capability_id,
+            capability_fingerprint,
+            descriptor,
+            &request,
+        )?;
+        self.execute_with_binding(principal_reference, descriptor, request, binding)
+            .await
+    }
+
+    async fn execute_with_binding(
+        &self,
+        principal_reference: &PrincipalReference,
+        descriptor: &AiToolDescriptor,
+        request: ToolGraphqlRequest,
+        binding: AiRegisteredToolExecutionBinding,
+    ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
         if request.operation_name != request.contract.operation_name {
             return Err(ToolExecutionError::StaleContract);
         }
@@ -276,7 +496,7 @@ impl AuthenticatedToolBridge {
         }
         let context = self
             .context_factory
-            .build(&principal, target, &request)
+            .build_registered(&principal, target, &binding, &request)
             .await?;
         let response = self.executor.execute(context, request).await?;
         Ok((response, authorization))
@@ -330,6 +550,27 @@ impl AuthenticatedToolBridge {
         expected_policy_version: &str,
         expected_authorization_state_digest: &str,
     ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
+        let binding = AiRegisteredToolExecutionBinding::static_operation(descriptor, &request)?;
+        self.execute_registered_bound(
+            principal_reference,
+            descriptor,
+            request,
+            binding,
+            expected_policy_version,
+            expected_authorization_state_digest,
+        )
+        .await
+    }
+
+    pub(crate) async fn execute_registered_bound(
+        &self,
+        principal_reference: &PrincipalReference,
+        descriptor: &AiToolDescriptor,
+        request: ToolGraphqlRequest,
+        binding: AiRegisteredToolExecutionBinding,
+        expected_policy_version: &str,
+        expected_authorization_state_digest: &str,
+    ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
         let (principal, authorization) = self
             .preauthorize(principal_reference, descriptor, &request)
             .await?;
@@ -343,7 +584,7 @@ impl AuthenticatedToolBridge {
             .validate_contract(&request.contract, &request.document)?;
         let context = self
             .context_factory
-            .build(&principal, target, &request)
+            .build_registered(&principal, target, &binding, &request)
             .await?;
         let response = self.executor.execute(context, request).await?;
         Ok((response, authorization))

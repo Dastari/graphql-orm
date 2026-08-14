@@ -10,14 +10,15 @@ use crate::{
     AiAccessPolicy, AiApprovalBinding, AiApprovalRule, AiContentProtectionPolicyResolver,
     AiContentProtector, AiDeploymentEgressBoundary, AiDisclosureEvaluation, AiEgressDecision,
     AiEgressManifest, AiEgressPolicy, AiError, AiGeneratedGraphqlTargetPolicySet,
-    AiProposalCatalog, AiProvider, AiSchemaModule, AiSecretStore, AiToolAuthorizationDecision,
-    AiToolAuthorizationPolicy, AiToolCatalog, AiToolDescriptor, AiToolId, AiToolOperationDomain,
-    AiToolOperationKind, AuthenticatedGraphqlExecutor, AuthenticatedToolBridge, ConsumedAiApproval,
-    GraphqlExecutionTargetRegistry, GraphqlInvocationContext, GraphqlRequestContextFactory,
-    ModelRequest, ProviderBackgroundBinding, ProviderBackgroundObservation,
-    ProviderBackgroundRetrievalBinding, ProviderBackgroundRetrievalContext,
-    ProviderBackgroundSubmission, ProviderError, ProviderEventStream, ProviderKind,
-    ProviderRequestContext, ToolGraphqlRequest, ToolGraphqlResponse, ToolMaturity,
+    AiProposalCatalog, AiProvider, AiRegisteredToolExecutionBinding, AiSchemaModule, AiSecretStore,
+    AiToolAuthorizationDecision, AiToolAuthorizationPolicy, AiToolCatalog, AiToolDescriptor,
+    AiToolId, AiToolOperationDomain, AiToolOperationKind, AuthenticatedGraphqlExecutor,
+    AuthenticatedToolBridge, ConsumedAiApproval, GraphqlExecutionTargetRegistry,
+    GraphqlInvocationContext, GraphqlRequestContextFactory, ModelRequest,
+    ProviderBackgroundBinding, ProviderBackgroundObservation, ProviderBackgroundRetrievalBinding,
+    ProviderBackgroundRetrievalContext, ProviderBackgroundSubmission, ProviderError,
+    ProviderEventStream, ProviderKind, ProviderRequestContext, ToolGraphqlRequest,
+    ToolGraphqlResponse, ToolMaturity,
 };
 use graphql_orm::graphql::orm::{AiMutationExecutionPolicy, OrmSchemaModule, SchemaModuleCatalog};
 
@@ -422,7 +423,13 @@ impl AiRuntime {
         };
         let (response, authorization) = self
             .tool_bridge
-            .execute(principal_reference, &descriptor, request)
+            .execute_generated_query(
+                principal_reference,
+                capability_id,
+                capability_fingerprint,
+                &descriptor,
+                request,
+            )
             .await
             .map_err(|_| AiError::ToolExecutionFailed)?;
         self.finish_tool_execution(&descriptor, &disclosure_schema, response, authorization)
@@ -614,7 +621,13 @@ impl AiRuntime {
         }
         let (response, authorization) = self
             .tool_bridge
-            .execute(principal_reference, &prepared.descriptor, prepared.request)
+            .execute_generated_mutation(
+                principal_reference,
+                &prepared.descriptor.id,
+                &prepared.capability_fingerprint,
+                &prepared.descriptor,
+                prepared.request,
+            )
             .await
             .map_err(|_| AiError::ToolExecutionFailed)?;
         self.finish_tool_execution(
@@ -643,12 +656,20 @@ impl AiRuntime {
         if !approved_prepared_mutation_matches(&prepared, approval, binding) {
             return Err(AiError::Forbidden);
         }
+        let registered = AiRegisteredToolExecutionBinding::generated_mutation(
+            &prepared.descriptor.id,
+            &prepared.capability_fingerprint,
+            &prepared.descriptor,
+            &prepared.request,
+        )
+        .map_err(|_| AiError::Forbidden)?;
         let (response, authorization) = self
             .tool_bridge
-            .execute_bound(
+            .execute_registered_bound(
                 principal_reference,
                 &prepared.descriptor,
                 prepared.request,
+                registered,
                 &binding.policy_version,
                 &binding.authorization_state_digest,
             )

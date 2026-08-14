@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -17,6 +17,32 @@ Historical development entries below retain their original dependency and
 checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## [0.78.3] - 2026-08-14
+
+### Added
+
+- Remote GraphQL authority issuance now receives a crate-authored
+  `AiRemoteGraphqlCapabilityBinding`. Static reads carry their exact registered
+  descriptor identity; generated queries additionally carry the active target,
+  finished-schema, semantic-catalogue/root and offered capability identities.
+  The binding is read-only to hosts and participates in delegation request
+  serialization, equality, stable hashing and transport matching.
+
+### Security
+
+- Dynamic `AiQuery_*` operation names grant nothing. Generated-query bindings
+  arise only after exact capability compilation and generated-target policy,
+  while static reads retain ordinary static policy. Kind substitution, stale
+  capability data, changed request bindings, mutations and subscriptions fail
+  before private authority issuance. Fresh principal, current host policy,
+  ordinary resolver authorization and short-lived exact authority remain
+  mandatory.
+
+### Schema
+
+- AI schema module remains `0.59.0`. This release changes no persistence
+  entity, stored semantic meaning, table, column, index or constraint.
 
 ## [0.78.2] - 2026-08-13
 

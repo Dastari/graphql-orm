@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -18,6 +18,38 @@ Migration entries preserve the dependency and schema facts for the checkpoint
 they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## 0.78.3: exact remote read-capability delegation (schema remains 0.59.0)
+
+No database, data, GraphQL SDL, backup, restore or AI schema-module migration
+is required. Existing static-only, generated-only and mixed-read provider-call
+constructors are source compatible. Initial, provider-retained and stateless
+continuations retain the same registered tool IDs and fingerprints.
+
+Deploy the updated remote issuer and adapter together. The serialized
+`AiRemoteGraphqlDelegationRequest` now has one required
+`capability_binding`, so its `stable_hash()` intentionally changes. Issuers
+should inspect `request.capability_binding().kind()` and its read-only
+accessors. Preserve the existing exact static allowlist for
+`StaticOperation`. For `GeneratedQuery`, validate the exact capability ID and
+fingerprint plus logical target, finished-schema fingerprint, semantic
+catalogue/operation fingerprints and root field against deployment-owned
+active metadata before minting narrowly scoped short-lived authority. Never
+infer generated eligibility from `AiQuery_*` operation-name syntax.
+
+Do not construct a binding in host code or add a continuation side channel.
+The authenticated runtime supplies it only after catalogue compilation and
+current generated-target admission. Direct calls to the remote adapter's raw
+`GraphqlRequestContextFactory::build` hook now fail closed; execute through
+`AuthenticatedToolBridge`/`AiRuntime`, which invokes the crate-authored
+registered-binding hook after fresh principal and current host policy checks.
+Remote mutation, subscription and internal-operation delegation remains
+closed. Existing local supervised mutation execution is unchanged.
+
+Delegated credentials are ephemeral, so there is no durable credential or
+request-hash migration. Drain in-flight remote requests during a rolling
+upgrade if the deployment transports the serialized request between separately
+versioned processes.
 
 ## 0.78.2: mixed static and generated read plans (schema remains 0.59.0)
 

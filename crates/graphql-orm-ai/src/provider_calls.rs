@@ -7920,6 +7920,21 @@ mod tests {
         .expect("mixed read capability plan should validate")
     }
 
+    fn read_rule_binding_snapshot(
+        plan: &AiProviderCallPlan,
+    ) -> Vec<(String, ToolMaturity, AiApprovalRule)> {
+        plan.tool_rule_bindings
+            .iter()
+            .map(|binding| {
+                (
+                    binding.fingerprint.clone(),
+                    binding.maturity,
+                    binding.approval,
+                )
+            })
+            .collect()
+    }
+
     fn read_capability_plan_with(
         fixture: &Fixture,
         definitions: Vec<ModelToolDefinition>,
@@ -9832,6 +9847,11 @@ mod tests {
             &fixture.generated_target_policy,
         )
         .expect("continuation should bind request and result manifests");
+        assert_eq!(
+            read_rule_binding_snapshot(&next_plan),
+            read_rule_binding_snapshot(&mixed_read_plan(&fixture)),
+            "provider-retained continuation must preserve both exact read capability bindings",
+        );
         next_request = next_plan.request;
         assert!(matches!(
             next_request.continuation,
@@ -10118,6 +10138,11 @@ mod tests {
             &fixture.generated_target_policy,
         )
         .expect("stateless continuation plan should remain exact");
+        assert_eq!(
+            read_rule_binding_snapshot(&next),
+            read_rule_binding_snapshot(&mixed_read_plan(&fixture)),
+            "stateless continuation must preserve both exact read capability bindings",
+        );
         assert!(matches!(
             next.request.continuation,
             Some(ModelContinuation::StatelessConversation { .. })

@@ -3,14 +3,14 @@ title: "Implementation Status"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.78.2` with AI schema module
+`graphql-orm-ai` is at crate version `0.78.3` with AI schema module
 `0.59.0`. It uses workspace `graphql-orm` `0.22.1`, backend-neutral
 `graphql-orm-ai-tool-profiles` `0.4.1`, and external `agql-auth`
 `0.15.0` at `e841ffd382082ad7419be259fe957f949b956ff7`.
@@ -76,6 +76,10 @@ verification evidence belongs in the focused guides.
   query capabilities together. Catalogue kind is server-derived, each kind
   retains its own exact policy, and retained/stateless continuations consume
   only the crate-owned opaque continuation proof.
+- Private remote GraphQL delegation preserves that same server-derived
+  static/generated identity through authority issuance. Generated reads bind
+  the exact target, finished schema, semantic catalogue/root and registered
+  capability; dynamic operation-name conventions grant nothing.
 - Owning subgraphs can compile the same canonical generated/custom GraphQL
   tool manifests through `graphql-orm-ai-tool-profiles` without selecting an
   AI persistence backend. The runtime consumes those exact wire values and

@@ -3,7 +3,7 @@ title: "graphql-orm-ai"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.78.2", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.78.3", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -95,6 +95,14 @@ Registration alone remains default-deny. The runtime enforces descriptor byte
 and total-record bounds and rejects response fields outside the selected
 disclosure shape. Total records include sibling and nested relationship
 expansion, not merely the largest returned list.
+
+Private remote execution carries a crate-authored
+`AiRemoteGraphqlCapabilityBinding` to the deployment issuer. Static reads bind
+their exact registered descriptor; generated reads additionally bind the
+active target, finished schema, semantic catalogue/root and offered capability
+fingerprints. Issuers can therefore authorize an exact generated query without
+interpreting its dynamic operation name. See
+[private remote GraphQL execution](docs/remote-graphql-execution.md).
 
 Mutation and subscription execution do not use the query path. The
 backend-neutral profile package can compile a bounded `ReplayThenLive`

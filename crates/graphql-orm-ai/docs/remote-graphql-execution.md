@@ -3,7 +3,7 @@ title: "Private Remote GraphQL Execution"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -23,6 +23,9 @@ ID, `PrivateRouted` or `PrivateDirect` class, required audience/resource, and
 reviewed schema fingerprint. The registry contains no URL or credential. The
 tool's `GraphqlOperationContract` separately binds the exact server-authored
 document, operation name, result projection, and static disclosure schema.
+`AiRemoteGraphqlCapabilityBinding` identifies whether that validated request
+came from an exact static read descriptor or an automatic generated query. A
+host cannot construct that identity independently of the authenticated bridge.
 
 The ordinary `AuthenticatedToolBridge` remains responsible for current
 principal rehydration and host tool-policy authorization. It passes the exact
@@ -35,7 +38,8 @@ validated request to `AiRemoteAuthenticatedGraphqlAdapter`, which:
 3. constructs a redacted request binding the logical target, audience/resource,
    fresh subject and original actor, scope, schema/operation/document,
    canonical variables, projection/disclosure, run/tool IDs, correlation and
-   causation IDs, safe delegation reference, hashed idempotency key, and expiry;
+   causation IDs, safe delegation reference, hashed idempotency key, expiry,
+   and the crate-authored registered capability identity;
 4. requests one credential from `AiRemoteGraphqlAuthorityIssuer`;
 5. verifies after asynchronous issuance that the returned authority asserts
    the same exact request and has not crossed its configured principal-
@@ -58,6 +62,10 @@ Implement `AiRemoteGraphqlAuthorityIssuer` at the deployment credential
 boundary. It receives the freshly resolved principal and complete redacted
 delegation request, but no incoming bearer token. It must:
 
+- inspect `request.capability_binding()` rather than an operation-name prefix;
+- require the exact static descriptor ID/fingerprint or generated-query
+  capability ID/fingerprint and, for generated queries, the target, finished
+  schema, semantic catalogue/operation and root-field binding;
 - preserve the original human actor for on-behalf-of work;
 - mint authority no broader than the requested audience, resource, scope, and
   exact operation;
@@ -81,6 +89,12 @@ The application resolver remains authoritative for roles, row/field policy,
 tenant/resource boundaries, assurance, rate limits, and current object state.
 Delegation and AI approval do not bypass those checks.
 
+The remote adapter admits only read bindings. Static/generated mutations,
+subscriptions, internal operations and a generated-looking static operation
+name fail before authority issuance. Initial, provider-retained and stateless
+mixed-read plans retain the same exact registered IDs and fingerprints; hosts
+do not reconstruct a tool-result route or add a continuation-side binding.
+
 ## What the adapter does not prove
 
 The crate cannot introspect every proprietary delegated-token format or prove a
@@ -91,4 +105,8 @@ it does not independently validate the secret's claims. Treat issuer and
 transport implementations as security-critical deployment code and verify them
 with product-specific conformance tests outside this project-agnostic crate.
 
-No GraphQL SDL or persistent schema is introduced by this adapter.
+`AiRemoteGraphqlDelegationRequest` JSON now contains the required
+`capability_binding` object and its stable hash therefore changes. Issuer and
+transport services must deploy the updated request contract together; the
+credential is short-lived and no durable row is migrated. No GraphQL SDL or
+persistent schema is introduced by this adapter.
