@@ -18,6 +18,29 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.78.4] - 2026-08-14
+
+### Fixed
+
+- Codex app-server projection now admits an omitted object `required` keyword
+  as the JSON Schema empty set and emits `"required": []` for otherwise closed
+  objects. Canonical generated query relationship-selection and empty scalar
+  field/relationship objects therefore survive `start_persistent_empty_thread`
+  without changing the registered argument schema or its validation.
+
+### Security
+
+- Projection still rejects non-array, duplicate, or unknown `required` names,
+  unknown keywords, unbounded `additionalProperties`, recursive/generic schema
+  passthrough, mutations, and subscriptions. The projected representation is
+  bound into the existing Codex schema-projection fingerprint. Previously
+  admitted static definitions keep the same projected wire shape.
+
+### Schema
+
+- AI schema module remains `0.59.0`. This release changes no persistence
+  entity, stored semantic meaning, table, column, index or constraint.
+
 ## [0.78.3] - 2026-08-14
 
 ### Added

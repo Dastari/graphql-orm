@@ -19,6 +19,32 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.78.4: Codex omitted-required object projection (schema remains 0.59.0)
+
+No database, data, GraphQL SDL, backup, restore or AI schema-module migration
+is required. The authoritative generated query argument schema, operation,
+schema and catalogue fingerprints, target binding, principal rehydration,
+delegated authority, resolver authorization, disclosure, result bounds and
+execution validation are unchanged.
+
+The Codex adapter now treats an omitted object `required` keyword as the
+canonical empty set and writes `"required": []` into the projected app-server
+schema. `additionalProperties` remains exactly `false`. Malformed `required`
+arrays, unknown keywords and unbounded object shapes still fail closed.
+
+Existing provider-session cursors do not need to be drained or recreated.
+Previously admitted static and profile-generated definitions already emitted
+an explicit `required` array, so their projection fingerprints are unchanged.
+Generated query capabilities that omitted `required` never passed thread
+create, so they have no retained cursor to rewrite. After upgrade, recreate
+only those failed readiness probes so the same registered definition set can
+be installed.
+
+Pin `graphql-orm-ai` `0.78.4` at the reviewed full monorepo revision. Leave
+`graphql-orm-ai-tool-profiles` at `0.4.1` unless a later companion change
+requires a coordinated pin. Do not rewrite host-owned argument schemas or
+weaken fingerprint checks.
+
 ## 0.78.3: exact remote read-capability delegation (schema remains 0.59.0)
 
 No database, data, GraphQL SDL, backup, restore or AI schema-module migration

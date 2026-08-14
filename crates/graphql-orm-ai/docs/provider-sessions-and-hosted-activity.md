@@ -3,7 +3,7 @@ title: "Provider Sessions, Hosted Search, and Visible Activity"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-08-14
 review_by: 2027-02-11
 supersedes: []
 ---
@@ -186,11 +186,14 @@ argument schema, stable ID, or descriptor fingerprint into host code. Codex
 0.147.0 accepts a smaller JSON Schema subset than the canonical profile
 contract. The adapter therefore performs one closed deterministic projection:
 it removes only unsupported schema meta/constraint keywords, carries scalar
-bounds into the provider-visible property description, and fingerprints the
-projection together with the exact canonical descriptor. The unmodified
-canonical schema remains authoritative when a dynamic call is admitted and
-again at coordinator execution, so projection cannot weaken the accepted
-argument range.
+bounds into the provider-visible property description, treats an omitted
+object `required` keyword as the JSON Schema empty set and emits
+`"required": []`, and fingerprints the projection together with the exact
+canonical descriptor. The unmodified canonical schema remains authoritative
+when a dynamic call is admitted and again at coordinator execution, so
+projection cannot weaken the accepted argument range. Malformed `required`
+arrays, unknown keywords, and objects that are not `additionalProperties:
+false` still fail closed.
 
 JSON-RPC request identifier zero is valid and is used by Codex 0.147.0 for its
 first server-initiated dynamic call. The actor correlates it in the same

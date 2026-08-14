@@ -4163,6 +4163,25 @@ fn project_codex_dynamic_tools(
     })
 }
 
+fn projected_closed_object_required(
+    object: &serde_json::Map<String, Value>,
+    properties: &serde_json::Map<String, Value>,
+) -> Result<Vec<Value>, ProviderError> {
+    let required = match object.get("required") {
+        None => Vec::new(),
+        Some(Value::Array(values)) => values.clone(),
+        Some(_) => return Err(ProviderError::Rejected),
+    };
+    let mut required_names = BTreeSet::new();
+    for value in &required {
+        let name = value.as_str().ok_or(ProviderError::Rejected)?;
+        if !properties.contains_key(name) || !required_names.insert(name.to_owned()) {
+            return Err(ProviderError::Rejected);
+        }
+    }
+    Ok(required)
+}
+
 fn project_codex_argument_schema(schema: &Value) -> Result<Value, ProviderError> {
     let object = schema.as_object().ok_or(ProviderError::Rejected)?;
     if object.keys().any(|key| {
@@ -4192,17 +4211,7 @@ fn project_codex_argument_schema(schema: &Value) -> Result<Value, ProviderError>
         }
         projected_properties.insert(name.clone(), project_codex_schema_node(property, 0)?);
     }
-    let required = object
-        .get("required")
-        .and_then(Value::as_array)
-        .ok_or(ProviderError::Rejected)?;
-    let mut required_names = BTreeSet::new();
-    for value in required {
-        let name = value.as_str().ok_or(ProviderError::Rejected)?;
-        if !properties.contains_key(name) || !required_names.insert(name.to_owned()) {
-            return Err(ProviderError::Rejected);
-        }
-    }
+    let required = projected_closed_object_required(object, properties)?;
     Ok(json!({
         "type": "object",
         "properties": projected_properties,
@@ -4362,21 +4371,11 @@ fn project_codex_schema_node(schema: &Value, depth: usize) -> Result<Value, Prov
                     project_codex_schema_node(property, depth + 1)?,
                 );
             }
-            let required = object
-                .get("required")
-                .and_then(Value::as_array)
-                .ok_or(ProviderError::Rejected)?;
-            let mut required_names = BTreeSet::new();
-            for value in required {
-                let name = value.as_str().ok_or(ProviderError::Rejected)?;
-                if !properties.contains_key(name) || !required_names.insert(name.to_owned()) {
-                    return Err(ProviderError::Rejected);
-                }
-            }
+            let required = projected_closed_object_required(object, properties)?;
             let mut projected = serde_json::Map::from_iter([
                 ("type".to_owned(), Value::String("object".to_owned())),
                 ("properties".to_owned(), Value::Object(projected_properties)),
-                ("required".to_owned(), Value::Array(required.clone())),
+                ("required".to_owned(), Value::Array(required)),
                 ("additionalProperties".to_owned(), Value::Bool(false)),
             ]);
             if !description.is_empty() {
@@ -4612,10 +4611,25 @@ pub(crate) mod tests {
         AccessTokenMetadata, AuthPrincipal, AuthUser, PrincipalReference, SessionContext,
     };
     use futures::stream;
+    use graphql_orm::graphql::orm::{
+        AiMutationExecutionPolicy, GraphqlEntitySemanticMetadata, GraphqlOperationCatalog,
+        GraphqlOperationKind, GraphqlSemanticArgumentDescriptor, GraphqlSemanticCatalog,
+        GraphqlSemanticClassification, GraphqlSemanticExport, GraphqlSemanticFieldMetadata,
+        GraphqlSemanticOperationDescriptor, GraphqlSemanticRelationshipCardinality,
+        GraphqlSemanticRelationshipDescriptor, GraphqlSemanticResultDisclosure,
+        GraphqlSemanticTypeKind, GraphqlSemanticTypeRef, GraphqlSubscriptionConditionField,
+        GraphqlSubscriptionConditionOperator, GraphqlSubscriptionObservationDescriptor,
+        GraphqlSubscriptionReplayMode,
+    };
     use graphql_orm::prelude::*;
 
     use super::*;
-    use crate::{AiRunId, AiSessionId, ProviderDynamicToolResult, ProviderEvent};
+    use crate::{
+        AiGraphqlMutationCapabilityCatalog, AiGraphqlQueryCapabilityCatalog,
+        AiGraphqlQueryCapabilityLimits, AiGraphqlSubscriptionCapabilityCatalog,
+        AiGraphqlSubscriptionCapabilityLimits, AiRunId, AiSessionId, AiToolCatalog, AiToolId,
+        GraphqlExecutionTargetId, ProviderDynamicToolResult, ProviderEvent,
+    };
     use uuid::Uuid;
 
     mod canonical_tool_surface {
@@ -5467,6 +5481,827 @@ pub(crate) mod tests {
                 .is_some_and(|description| description.contains("maximum 25"))
         );
         assert!(schema.to_string().find("anyOf").is_none());
+    }
+
+    fn named_semantic_type(name: &str, nullable: bool) -> GraphqlSemanticTypeRef {
+        GraphqlSemanticTypeRef::named(name, GraphqlSemanticTypeKind::Scalar, nullable)
+    }
+
+    fn exportable_scalar_field(
+        name: &str,
+        classification: GraphqlSemanticClassification,
+    ) -> GraphqlSemanticFieldMetadata {
+        GraphqlSemanticFieldMetadata {
+            field_name: name.to_owned(),
+            description: format!("Reviewed public {name}."),
+            type_ref: named_semantic_type("String", false),
+            selectable: true,
+            filter_operators: Vec::new(),
+            sortable: false,
+            groupable: false,
+            aggregate_operators: Vec::new(),
+            aggregate_value_kind: None,
+            relationship: None,
+            classification,
+            export: GraphqlSemanticExport::Exportable,
+            has_field_policy: false,
+        }
+    }
+
+    fn generated_relational_query_surface() -> (AiToolCatalog, ModelToolDefinition, Value) {
+        const SDL: &str = r#"
+            schema { query: Query }
+            type Query { ReadParent(id: ID!): Parent! }
+            type Parent {
+              id: String!
+              name: String!
+              children(page: PageInput): ChildConnection!
+            }
+            type Child { id: String!, label: String! }
+            type ChildConnection { edges: [ChildEdge!]!, pageInfo: PageInfo! }
+            type ChildEdge { node: Child!, cursor: String! }
+            type PageInfo { totalCount: Int!, hasNextPage: Boolean! }
+            input PageInput { limit: Int, offset: Int }
+        "#;
+        let child = GraphqlEntitySemanticMetadata {
+            entity_name: "Child".to_owned(),
+            description: "A bounded child record.".to_owned(),
+            default_classification: GraphqlSemanticClassification::Internal,
+            fields: vec![
+                exportable_scalar_field("id", GraphqlSemanticClassification::Internal),
+                exportable_scalar_field("label", GraphqlSemanticClassification::Confidential),
+            ]
+            .into_boxed_slice(),
+        };
+        let parent = GraphqlEntitySemanticMetadata {
+            entity_name: "Parent".to_owned(),
+            description: "A reviewed parent record.".to_owned(),
+            default_classification: GraphqlSemanticClassification::Internal,
+            fields: vec![
+                exportable_scalar_field("id", GraphqlSemanticClassification::Internal),
+                exportable_scalar_field("name", GraphqlSemanticClassification::Confidential),
+                GraphqlSemanticFieldMetadata {
+                    field_name: "children".to_owned(),
+                    description: "Bounded related child records.".to_owned(),
+                    type_ref: GraphqlSemanticTypeRef::list(
+                        false,
+                        Some(10),
+                        GraphqlSemanticTypeRef::named(
+                            "Child",
+                            GraphqlSemanticTypeKind::Object,
+                            false,
+                        ),
+                    ),
+                    selectable: true,
+                    filter_operators: Vec::new(),
+                    sortable: false,
+                    groupable: false,
+                    aggregate_operators: Vec::new(),
+                    aggregate_value_kind: None,
+                    relationship: Some(GraphqlSemanticRelationshipDescriptor {
+                        target: "Child".to_owned(),
+                        cardinality: GraphqlSemanticRelationshipCardinality::Many,
+                        arguments: vec![GraphqlSemanticArgumentDescriptor {
+                            graphql_name: "page".to_owned(),
+                            description: "Bounded relationship page.".to_owned(),
+                            type_ref: GraphqlSemanticTypeRef::named(
+                                "PageInput",
+                                GraphqlSemanticTypeKind::Object,
+                                true,
+                            ),
+                        }],
+                    }),
+                    classification: GraphqlSemanticClassification::Confidential,
+                    export: GraphqlSemanticExport::Exportable,
+                    has_field_policy: true,
+                },
+            ]
+            .into_boxed_slice(),
+        };
+        let operation = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Query,
+            "ReadParent",
+            "Read one reviewed parent record.",
+            vec![GraphqlSemanticArgumentDescriptor {
+                graphql_name: "id".to_owned(),
+                description: "Exact public parent identity.".to_owned(),
+                type_ref: named_semantic_type("ID", false),
+            }],
+            GraphqlSemanticTypeRef::named("Parent", GraphqlSemanticTypeKind::Object, false),
+            true,
+        )
+        .expect("relational query semantics should validate");
+        let semantics = GraphqlSemanticCatalog::compose_with_custom(
+            [parent, child],
+            &GraphqlOperationCatalog::compose(std::iter::empty()),
+            [operation],
+        )
+        .expect("relational semantic catalogue should validate");
+        let compiled = AiGraphqlQueryCapabilityCatalog::compile(
+            "inventory",
+            GraphqlExecutionTargetId::parse("inventory.graphql")
+                .expect("relational target should validate"),
+            SDL,
+            &semantics,
+            AiGraphqlQueryCapabilityLimits::default(),
+        )
+        .expect("relational query capabilities should compile");
+        let mut catalog = AiToolCatalog::new();
+        catalog
+            .register_query_capability_catalog(&compiled)
+            .expect("relational query catalogue should register");
+        let capability = compiled
+            .capabilities()
+            .next()
+            .expect("relational query capability should exist");
+        let definition = catalog
+            .query_capability_model_definition(capability.id(), "read_parent")
+            .expect("relational query definition should project");
+        let plan = json!({
+            "arguments": { "id": "parent-1" },
+            "fields": { "id": true, "name": true },
+            "relationships": {
+                "children": {
+                    "arguments": {},
+                    "fields": { "id": true, "label": true },
+                    "relationships": {},
+                    "maximumItems": 2
+                }
+            }
+        });
+        (catalog, definition, plan)
+    }
+
+    fn generated_scalar_query_definition() -> ModelToolDefinition {
+        const SDL: &str = r#"
+            schema { query: Query }
+            type Query { Health: String! }
+        "#;
+        let operation = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Query,
+            "Health",
+            "Read bounded public health status.",
+            Vec::new(),
+            named_semantic_type("String", false),
+            true,
+        )
+        .expect("scalar query semantics should validate")
+        .with_result_disclosure(GraphqlSemanticResultDisclosure::new(
+            GraphqlSemanticClassification::Public,
+            GraphqlSemanticExport::Exportable,
+        ))
+        .expect("scalar result disclosure should validate");
+        let semantics = GraphqlSemanticCatalog::compose_with_custom(
+            [],
+            &GraphqlOperationCatalog::compose(std::iter::empty()),
+            [operation],
+        )
+        .expect("scalar semantic catalogue should validate");
+        let compiled = AiGraphqlQueryCapabilityCatalog::compile(
+            "inventory",
+            GraphqlExecutionTargetId::parse("inventory.graphql")
+                .expect("scalar target should validate"),
+            SDL,
+            &semantics,
+            AiGraphqlQueryCapabilityLimits::default(),
+        )
+        .expect("scalar query capabilities should compile");
+        let mut catalog = AiToolCatalog::new();
+        catalog
+            .register_query_capability_catalog(&compiled)
+            .expect("scalar query catalogue should register");
+        catalog
+            .query_capability_model_definition(
+                compiled
+                    .capabilities()
+                    .next()
+                    .expect("scalar query capability should exist")
+                    .id(),
+                "health_status",
+            )
+            .expect("scalar query definition should project")
+    }
+
+    fn generated_automatic_mutation_definition() -> ModelToolDefinition {
+        const SDL: &str = r#"
+            schema { query: Query, mutation: Mutation }
+            type Query { Health: String! }
+            type Mutation { CreateParent(input: ParentMutationInput!): Parent! }
+            type Parent { id: String!, name: String! }
+            input ParentMutationInput { name: String! }
+        "#;
+        let parent = GraphqlEntitySemanticMetadata {
+            entity_name: "Parent".to_owned(),
+            description: "A reviewed parent record.".to_owned(),
+            default_classification: GraphqlSemanticClassification::Internal,
+            fields: vec![
+                exportable_scalar_field("id", GraphqlSemanticClassification::Internal),
+                exportable_scalar_field("name", GraphqlSemanticClassification::Confidential),
+            ]
+            .into_boxed_slice(),
+        };
+        let mutation = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Mutation,
+            "CreateParent",
+            "Create one reviewed parent record.",
+            vec![GraphqlSemanticArgumentDescriptor {
+                graphql_name: "input".to_owned(),
+                description: "Reviewed parent mutation input.".to_owned(),
+                type_ref: GraphqlSemanticTypeRef::named(
+                    "ParentMutationInput",
+                    GraphqlSemanticTypeKind::Object,
+                    false,
+                ),
+            }],
+            GraphqlSemanticTypeRef::named("Parent", GraphqlSemanticTypeKind::Object, false),
+            true,
+        )
+        .expect("mutation semantics should validate")
+        .with_ai_mutation_execution(AiMutationExecutionPolicy::Automatic)
+        .expect("automatic mutation classification should validate");
+        let semantics = GraphqlSemanticCatalog::compose_with_custom(
+            [parent],
+            &GraphqlOperationCatalog::compose(std::iter::empty()),
+            [mutation],
+        )
+        .expect("mutation semantic catalogue should validate");
+        let compiled = AiGraphqlMutationCapabilityCatalog::compile(
+            "inventory",
+            GraphqlExecutionTargetId::parse("inventory.graphql")
+                .expect("mutation target should validate"),
+            SDL,
+            &semantics,
+            AiGraphqlQueryCapabilityLimits::default(),
+        )
+        .expect("automatic mutation capabilities should compile");
+        let mut catalog = AiToolCatalog::new();
+        catalog
+            .register_mutation_capability_catalog(&compiled)
+            .expect("mutation catalogue should register");
+        catalog
+            .mutation_capability_model_definition(
+                compiled
+                    .capabilities()
+                    .next()
+                    .expect("automatic mutation should exist")
+                    .id(),
+                "create_parent",
+            )
+            .expect("mutation definition should project")
+    }
+
+    fn generated_subscription_definition() -> ModelToolDefinition {
+        const SDL: &str = r#"
+            schema { query: Query, subscription: Subscription }
+            type Query { Health: Boolean! }
+            type Subscription { ParentChanged: Parent! }
+            type Parent { id: String!, name: String! }
+        "#;
+        let parent = GraphqlEntitySemanticMetadata {
+            entity_name: "Parent".to_owned(),
+            description: "A reviewed parent event.".to_owned(),
+            default_classification: GraphqlSemanticClassification::Internal,
+            fields: vec![
+                exportable_scalar_field("id", GraphqlSemanticClassification::Internal),
+                exportable_scalar_field("name", GraphqlSemanticClassification::Confidential),
+            ]
+            .into_boxed_slice(),
+        };
+        let subscription = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Subscription,
+            "ParentChanged",
+            "Observe reviewed parent changes.",
+            Vec::new(),
+            GraphqlSemanticTypeRef::named("Parent", GraphqlSemanticTypeKind::Object, false),
+            true,
+        )
+        .expect("subscription semantics should validate")
+        .with_subscription_observation(GraphqlSubscriptionObservationDescriptor {
+            replay_mode: GraphqlSubscriptionReplayMode::ReplayThenLive,
+            maximum_duration_seconds: Some(120),
+            maximum_events: Some(20),
+            condition_fields: vec![GraphqlSubscriptionConditionField {
+                field_name: "id".to_owned(),
+                operators: vec![GraphqlSubscriptionConditionOperator::Equal],
+            }],
+        })
+        .expect("replayable subscription should validate");
+        let semantics = GraphqlSemanticCatalog::compose_with_custom(
+            [parent],
+            &GraphqlOperationCatalog::compose(std::iter::empty()),
+            [subscription],
+        )
+        .expect("subscription semantic catalogue should validate");
+        let compiled = AiGraphqlSubscriptionCapabilityCatalog::compile(
+            "inventory",
+            GraphqlExecutionTargetId::parse("inventory.graphql")
+                .expect("subscription target should validate"),
+            SDL,
+            &semantics,
+            AiGraphqlSubscriptionCapabilityLimits::default(),
+        )
+        .expect("subscription capabilities should compile");
+        let mut catalog = AiToolCatalog::new();
+        catalog
+            .register_subscription_capability_catalog(&compiled)
+            .expect("subscription catalogue should register");
+        catalog
+            .subscription_capability_model_definition(
+                compiled
+                    .capabilities()
+                    .next()
+                    .expect("subscription capability should exist")
+                    .id(),
+                "parent_changed",
+            )
+            .expect("subscription definition should project")
+    }
+
+    fn closed_object_schema(required: Option<Value>) -> Value {
+        let mut schema = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "optional": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }
+            },
+            "additionalProperties": false
+        });
+        if let Some(required) = required {
+            schema
+                .as_object_mut()
+                .expect("fixture schema should be an object")
+                .insert("required".to_owned(), required);
+        }
+        schema
+    }
+
+    fn assert_projected_objects_are_closed(schema: &Value) {
+        match schema {
+            Value::Object(object) => {
+                if object.get("type").and_then(Value::as_str) == Some("object") {
+                    assert_eq!(
+                        object.get("additionalProperties"),
+                        Some(&Value::Bool(false))
+                    );
+                    let required = object
+                        .get("required")
+                        .and_then(Value::as_array)
+                        .expect("projected objects must emit a required array");
+                    let properties = object
+                        .get("properties")
+                        .and_then(Value::as_object)
+                        .expect("projected objects must emit properties");
+                    let mut names = BTreeSet::new();
+                    for value in required {
+                        let name = value.as_str().expect("required names must be strings");
+                        assert!(properties.contains_key(name));
+                        assert!(names.insert(name));
+                    }
+                }
+                for value in object.values() {
+                    assert_projected_objects_are_closed(value);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    assert_projected_objects_are_closed(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn start_bound_dynamic_thread(
+        actor: &mut AiCodexAppServerProtocolActor,
+        tools: &[ModelToolDefinition],
+    ) -> String {
+        actor
+            .start_persistent_empty_thread(
+                "model-1",
+                &AiCodexAppServerBootstrapInstructions::disabled(),
+                tools,
+            )
+            .expect("generated query definition set should start a persistent empty thread");
+        actor
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-generated-1"}}}"#)
+            .expect("thread response should bind");
+        actor
+            .accept(&thread_started_notification("thread-generated-1"))
+            .expect("thread notification should bind");
+        "thread-generated-1".to_owned()
+    }
+
+    fn start_bound_dynamic_turn(
+        actor: &mut AiCodexAppServerProtocolActor,
+        thread_id: &str,
+        input: &AiCodexAppServerTurnInput,
+        turn_id: &str,
+        request_id: u64,
+    ) {
+        actor
+            .start_turn(thread_id, input)
+            .expect("generated query turn should start");
+        let response = serde_json::to_vec(&json!({
+            "id": request_id,
+            "result": { "turn": { "id": turn_id } }
+        }))
+        .expect("turn response should encode");
+        actor.accept(&response).expect("turn response should bind");
+        actor
+            .accept(&turn_started_notification(thread_id, turn_id))
+            .expect("turn notification should bind");
+    }
+
+    #[test]
+    fn generated_query_catalog_omits_empty_required_and_codex_emits_the_empty_set() {
+        let (catalog, definition, plan) = generated_relational_query_surface();
+        assert!(
+            definition
+                .parameters
+                .pointer("/properties/relationships/required")
+                .is_none()
+        );
+        assert_eq!(
+            definition
+                .parameters
+                .pointer("/properties/relationships/additionalProperties"),
+            Some(&Value::Bool(false))
+        );
+        assert!(
+            definition
+                .parameters
+                .pointer("/properties/relationships/properties/children/properties/relationships/required")
+                .is_none()
+        );
+        assert_eq!(
+            definition.parameters.pointer(
+                "/properties/relationships/properties/children/properties/relationships/additionalProperties"
+            ),
+            Some(&Value::Bool(false))
+        );
+
+        let projected = project_codex_dynamic_tools(std::slice::from_ref(&definition))
+            .expect("canonical generated query schema should project");
+        let schema = &projected.protocol_values[0]["inputSchema"];
+        assert_eq!(
+            schema.pointer("/properties/relationships/required"),
+            Some(&json!([]))
+        );
+        assert_eq!(
+            schema.pointer("/properties/relationships/additionalProperties"),
+            Some(&Value::Bool(false))
+        );
+        assert_eq!(
+            schema.pointer(
+                "/properties/relationships/properties/children/properties/relationships/required"
+            ),
+            Some(&json!([]))
+        );
+        assert_eq!(
+            schema.pointer(
+                "/properties/relationships/properties/children/properties/relationships/additionalProperties"
+            ),
+            Some(&Value::Bool(false))
+        );
+        assert_projected_objects_are_closed(schema);
+
+        let scalar = generated_scalar_query_definition();
+        assert!(
+            scalar
+                .parameters
+                .pointer("/properties/fields/required")
+                .is_none()
+        );
+        assert!(
+            scalar
+                .parameters
+                .pointer("/properties/relationships/required")
+                .is_none()
+        );
+        let scalar_projected = project_codex_dynamic_tools(std::slice::from_ref(&scalar))
+            .expect("scalar generated query empty objects should project");
+        assert_eq!(
+            scalar_projected.protocol_values[0].pointer("/inputSchema/properties/fields/required"),
+            Some(&json!([]))
+        );
+        assert_eq!(
+            scalar_projected.protocol_values[0]
+                .pointer("/inputSchema/properties/relationships/required"),
+            Some(&json!([]))
+        );
+        assert_projected_objects_are_closed(&scalar_projected.protocol_values[0]["inputSchema"]);
+
+        let compiled = catalog
+            .compile_query_capability(
+                &AiToolId::parse(&definition.tool_id).expect("capability ID should parse"),
+                &definition.fingerprint,
+                plan,
+            )
+            .expect("nested generated relationship plan should compile");
+        assert!(compiled.descriptor().document.contains("children"));
+    }
+
+    #[test]
+    fn generated_and_mixed_definition_sets_start_persistent_empty_threads() {
+        let (_, generated, _) = generated_relational_query_surface();
+        let static_tool = dynamic_tool();
+        let mut generated_only = initialized_protocol_actor();
+        let _ = start_bound_dynamic_thread(&mut generated_only, std::slice::from_ref(&generated));
+
+        let mut mixed = initialized_protocol_actor();
+        let mixed_tools = [static_tool, generated];
+        let create = String::from_utf8(
+            mixed
+                .start_persistent_empty_thread(
+                    "model-1",
+                    &AiCodexAppServerBootstrapInstructions::disabled(),
+                    &mixed_tools,
+                )
+                .expect("mixed static and generated definitions should start"),
+        )
+        .expect("create frame should be UTF-8");
+        assert!(create.contains("\"dynamicTools\""));
+        assert!(create.contains("inventory_count"));
+        assert!(create.contains("read_parent"));
+    }
+
+    #[test]
+    fn generated_nested_plan_follows_catalog_definition_dynamic_call_and_compile_path() {
+        let (catalog, definition, plan) = generated_relational_query_surface();
+        let mut actor = initialized_protocol_actor();
+        let thread_id = start_bound_dynamic_thread(&mut actor, std::slice::from_ref(&definition));
+        let input = AiCodexAppServerTurnInput::try_from_retained_dynamic_request(
+            ModelRequest {
+                instructions: Vec::new(),
+                continuation_mode: ModelContinuationMode::ProviderRetained,
+                tools: vec![definition.clone()],
+                ..model_request()
+            },
+            &AiCodexAppServerBootstrapInstructions::disabled(),
+        )
+        .expect("generated query retained input should validate");
+        start_bound_dynamic_turn(&mut actor, &thread_id, &input, "turn-generated-1", 3);
+
+        let started = lifecycle_notification(
+            "item/started",
+            json!({
+                "item": {
+                    "arguments": plan,
+                    "id": "call-generated-1",
+                    "namespace": null,
+                    "status": "inProgress",
+                    "tool": "read_parent",
+                    "type": "dynamicToolCall"
+                },
+                "startedAtMs": 1,
+                "threadId": thread_id,
+                "turnId": "turn-generated-1"
+            }),
+        );
+        assert!(matches!(
+            actor.accept(&started),
+            Ok(AiCodexAppServerInbound::DynamicToolLifecycle {
+                completed: false,
+                ..
+            })
+        ));
+
+        let request = serde_json::to_vec(&json!({
+            "id": 0,
+            "method": "item/tool/call",
+            "params": {
+                "arguments": plan,
+                "callId": "call-generated-1",
+                "namespace": null,
+                "threadId": thread_id,
+                "tool": "read_parent",
+                "turnId": "turn-generated-1"
+            }
+        }))
+        .expect("generated query call should encode");
+        let (request_id, call) = match actor
+            .accept(&request)
+            .expect("canonical generated nested plan should be admitted")
+        {
+            AiCodexAppServerInbound::DynamicToolCall {
+                request_id, call, ..
+            } => (request_id, call),
+            other => panic!("unexpected inbound: {other:?}"),
+        };
+        assert_eq!(call.tool_id(), definition.tool_id);
+        assert_eq!(call.tool_fingerprint(), definition.fingerprint);
+        let compiled = catalog
+            .compile_query_capability(
+                &AiToolId::parse(call.tool_id()).expect("admitted capability ID should parse"),
+                call.tool_fingerprint(),
+                call.arguments().clone(),
+            )
+            .expect("admitted generated plan should compile");
+        assert!(
+            compiled
+                .descriptor()
+                .document
+                .contains("children(page: $v1) { edges { node { id label } } }")
+        );
+        let result = ProviderDynamicToolResult::new(&call, json!({"ok": true}))
+            .expect("compiled generated result should validate");
+        actor
+            .dynamic_tool_response(request_id, &result)
+            .expect("exact generated responder path should encode");
+    }
+
+    #[test]
+    fn generated_query_retained_create_and_resume_keep_the_frozen_definition_set() {
+        let (_, definition, _) = generated_relational_query_surface();
+        let input = AiCodexAppServerTurnInput::try_from_retained_dynamic_request(
+            ModelRequest {
+                instructions: Vec::new(),
+                continuation_mode: ModelContinuationMode::ProviderRetained,
+                tools: vec![definition.clone()],
+                ..model_request()
+            },
+            &AiCodexAppServerBootstrapInstructions::disabled(),
+        )
+        .expect("frozen generated input should validate");
+        let mut actor = initialized_protocol_actor();
+        let thread_id = start_bound_dynamic_thread(&mut actor, input.tools());
+        start_bound_dynamic_turn(&mut actor, &thread_id, &input, "turn-generated-1", 3);
+        actor
+            .accept(&turn_completed_notification(&thread_id, "turn-generated-1"))
+            .expect("first generated turn should complete");
+
+        let cursor = crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", &thread_id)
+            .expect("generated cursor should validate");
+        actor
+            .resume_thread(&cursor, &input)
+            .expect("unchanged frozen generated definitions should resume");
+        actor
+            .accept(br#"{"id":4,"result":{"thread":{"id":"thread-generated-1"}}}"#)
+            .expect("resume response should bind");
+        actor
+            .accept(&thread_started_notification(&thread_id))
+            .expect("resume notification should bind");
+        start_bound_dynamic_turn(&mut actor, &thread_id, &input, "turn-generated-2", 5);
+
+        let mut changed = definition;
+        changed.description = "Changed after binding.".to_owned();
+        let changed_input = AiCodexAppServerTurnInput::try_from_retained_dynamic_request(
+            ModelRequest {
+                instructions: Vec::new(),
+                continuation_mode: ModelContinuationMode::ProviderRetained,
+                tools: vec![changed],
+                ..model_request()
+            },
+            &AiCodexAppServerBootstrapInstructions::disabled(),
+        )
+        .expect("changed generated definition remains structurally valid");
+        actor
+            .accept(&turn_completed_notification(&thread_id, "turn-generated-2"))
+            .expect("second generated turn should complete");
+        assert!(matches!(
+            actor.resume_thread(&cursor, &changed_input),
+            Err(ProviderError::Rejected)
+        ));
+        actor
+            .resume_thread(&cursor, &input)
+            .expect("exact frozen generated definitions should remain resumable");
+    }
+
+    #[test]
+    fn codex_projection_rejects_malformed_required_and_unrepresentable_generated_shapes() {
+        let (catalog, definition, plan) = generated_relational_query_surface();
+        let catalog_id = AiToolId::parse(&definition.tool_id).expect("capability ID should parse");
+        assert!(matches!(
+            catalog.compile_query_capability(&catalog_id, "stale-fingerprint", plan.clone()),
+            Err(crate::AiError::Forbidden)
+        ));
+
+        let mutation = generated_automatic_mutation_definition();
+        let mutation_id = AiToolId::parse(&mutation.tool_id).expect("mutation ID should parse");
+        assert!(matches!(
+            catalog.query_capability_model_definition(&mutation_id, "create_parent"),
+            Err(crate::AiError::Forbidden)
+        ));
+        assert!(matches!(
+            catalog.compile_query_capability(&mutation_id, &mutation.fingerprint, plan),
+            Err(crate::AiError::Forbidden)
+        ));
+
+        let subscription = generated_subscription_definition();
+        assert!(
+            serde_json::to_string(&subscription.parameters)
+                .expect("subscription schema should encode")
+                .contains("oneOf")
+        );
+        assert!(matches!(
+            project_codex_dynamic_tools(std::slice::from_ref(&subscription)),
+            Err(ProviderError::Rejected)
+        ));
+
+        for required in [
+            json!("fields"),
+            json!({"fields": true}),
+            json!([1]),
+            json!(["fields", "fields"]),
+            json!(["unknown"]),
+        ] {
+            let mut malformed = definition.clone();
+            malformed.parameters = closed_object_schema(Some(required));
+            malformed
+                .parameters
+                .as_object_mut()
+                .expect("schema")
+                .insert(
+                    "properties".to_owned(),
+                    json!({
+                        "fields": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                        }
+                    }),
+                );
+            assert!(
+                matches!(
+                    project_codex_dynamic_tools(std::slice::from_ref(&malformed)),
+                    Err(ProviderError::Rejected)
+                ),
+                "malformed required must remain rejected"
+            );
+        }
+
+        let mut unknown_keyword = definition.clone();
+        unknown_keyword.parameters = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "fields": { "$ref": "#/definitions/fields" }
+            },
+            "required": ["fields"],
+            "additionalProperties": false
+        });
+        assert!(matches!(
+            project_codex_dynamic_tools(std::slice::from_ref(&unknown_keyword)),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut unbounded = definition.clone();
+        unbounded.parameters = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "fields": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": true
+                }
+            },
+            "required": [],
+            "additionalProperties": false
+        });
+        assert!(matches!(
+            project_codex_dynamic_tools(std::slice::from_ref(&unbounded)),
+            Err(ProviderError::Rejected)
+        ));
+
+        let omitted = ModelToolDefinition {
+            tool_id: "closed.optional".to_owned(),
+            provider_name: "closed_optional".to_owned(),
+            fingerprint: "b".repeat(64),
+            description: "Closed optional object.".to_owned(),
+            parameters: closed_object_schema(None),
+            strict: true,
+        };
+        let explicit_empty = ModelToolDefinition {
+            parameters: closed_object_schema(Some(json!([]))),
+            ..omitted.clone()
+        };
+        let omitted_projection = project_codex_dynamic_tools(std::slice::from_ref(&omitted))
+            .expect("omitted required is the empty set");
+        let explicit_projection =
+            project_codex_dynamic_tools(std::slice::from_ref(&explicit_empty))
+                .expect("explicit empty required remains admitted");
+        assert_eq!(
+            omitted_projection.protocol_values[0]["inputSchema"],
+            explicit_projection.protocol_values[0]["inputSchema"]
+        );
+        assert_eq!(
+            omitted_projection.protocol_values[0].pointer("/inputSchema/required"),
+            Some(&json!([]))
+        );
+        assert_eq!(
+            omitted_projection.protocol_values[0]
+                .pointer("/inputSchema/properties/optional/required"),
+            Some(&json!([]))
+        );
+        assert_ne!(
+            omitted_projection.fingerprints,
+            explicit_projection.fingerprints
+        );
     }
 
     #[test]
