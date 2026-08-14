@@ -49,6 +49,9 @@ pub enum AiError {
     /// Durable persistence is temporarily unavailable or failed safely.
     #[error("AI persistence operation failed")]
     PersistenceFailed,
+    /// A retained provider session is cleaning up or waiting to rebind.
+    #[error("AI provider session is temporarily deferred")]
+    ProviderSessionDeferred,
 }
 
 impl AiError {
@@ -69,6 +72,7 @@ impl AiError {
             Self::ProviderFailed => "AI_PROVIDER_FAILED",
             Self::RuntimeNotReady => "AI_RUNTIME_NOT_READY",
             Self::PersistenceFailed => "AI_PERSISTENCE_FAILED",
+            Self::ProviderSessionDeferred => "AI_PROVIDER_SESSION_DEFERRED",
         }
     }
 }

@@ -445,6 +445,27 @@ impl AiConsequentialToolCallOutcome {
 }
 
 impl AiPersistedApplicationToolCall {
+    pub(crate) fn safe_failure(
+        provider_call_id: impl Into<String>,
+        tool_id: impl Into<String>,
+        output: serde_json::Value,
+        lease: AiRunLease,
+    ) -> Self {
+        let provider_call_id = provider_call_id.into();
+        let tool_id = tool_id.into();
+        Self {
+            id: AiToolCallId::new(),
+            provider_call_id: provider_call_id.clone(),
+            state: AiApplicationToolCallState::ExecutionFailed,
+            model_input: Some(ModelInputBlock::ToolResult {
+                call_id: provider_call_id,
+                tool_id,
+                output,
+            }),
+            egress_manifest: None,
+            lease,
+        }
+    }
     pub(crate) fn checkpoint_value(&self) -> Option<serde_json::Value> {
         Some(serde_json::json!({
             "id": self.id.0,

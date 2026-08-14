@@ -306,6 +306,11 @@ mod tests {
             GraphqlSemanticRelationshipCardinality::One
         );
         assert!(profile.arguments.is_empty());
+        assert_eq!(
+            children.collection_bound,
+            Some(GraphqlSemanticCollectionBound::pageable("Page"))
+        );
+        assert!(profile.collection_bound.is_none());
 
         let composite = relationship(semantics, "CompositeCapabilityParent", "Children");
         assert_eq!(

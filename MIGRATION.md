@@ -13,6 +13,19 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.22.1 to 0.23.0: explicit collection-bound semantics
+
+Update `graphql-orm`, `graphql-orm-macros`, and
+`graphql-orm-operation-catalog` together to 0.23.0 / 0.3.0 at one reviewed
+full Git revision. No database, table, column, constraint, or AI
+schema-module migration is required.
+
+Regenerate semantic catalogues and automatic query capabilities. Many
+relationships now require `collection_bound`. Old catalogue version `1`
+payloads are rejected. Server-fixed object lists no longer accept a
+model-selected `maximumItems` and use the declared semantic ceiling in
+disclosure.
+
 ## 0.22.0 to 0.22.1: relationship semantic argument correction
 
 Update `graphql-orm` and `graphql-orm-macros` together to 0.22.1 at one

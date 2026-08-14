@@ -2758,11 +2758,20 @@ fn generate_entity_impl(
                     } else {
                         quote! { ::graphql_orm::graphql::orm::GraphqlSemanticRelationshipCardinality::One }
                     };
-                    let relationship_arguments = if is_multiple {
-                        GeneratedRelationshipArgumentContract::to_many(&target_type, field.span())
-                            .semantic_descriptors()
+                    let (relationship_arguments, collection_bound) = if is_multiple {
+                        let contract = GeneratedRelationshipArgumentContract::to_many(
+                            &target_type,
+                            field.span(),
+                        );
+                        let page_name = contract.page_name().to_owned();
+                        (
+                            contract.semantic_descriptors(),
+                            quote! {
+                                Some(::graphql_orm::graphql::orm::GraphqlSemanticCollectionBound::pageable(#page_name))
+                            },
+                        )
                     } else {
-                        quote! { vec![] }
+                        (quote! { vec![] }, quote! { None })
                     };
                     let has_field_policy = field_meta.read_policy.is_some();
                     semantic_field_defs.push(quote! {
@@ -2780,6 +2789,7 @@ fn generate_entity_impl(
                                 target: ::std::string::ToString::to_string(#target_type),
                                 cardinality: #cardinality,
                                 arguments: #relationship_arguments,
+                                collection_bound: #collection_bound,
                             }),
                             classification: #classification_tokens,
                             export: #export_tokens,

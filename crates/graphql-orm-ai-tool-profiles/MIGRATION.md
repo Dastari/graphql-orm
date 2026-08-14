@@ -10,6 +10,20 @@ supersedes: []
 
 # Migration Guide
 
+## 0.4.1 to 0.5.0: explicit collection-bound query plans
+
+Adopt `graphql-orm-ai-tool-profiles` 0.5.0 with `graphql-orm` 0.23.0,
+`graphql-orm-macros` 0.23.0, and `graphql-orm-operation-catalog` 0.3.0 at the
+same reviewed full Git revision. Rebuild the finished SDL, semantic
+catalogue, and automatic query capability set.
+
+No database, GraphQL SDL, table, column, constraint, data, or AI
+schema-module migration is required. Capability and plan fingerprints change
+because the query-capability version is now `2` and server-fixed lists no
+longer advertise `maximumItems`. Raise `maximum_result_records` to at least
+the product of nested server-fixed ceilings before compiling a capability
+that selects those lists together.
+
 ## 0.4.0 to 0.4.1: exact generated relationship arguments
 
 Adopt `graphql-orm-ai-tool-profiles` 0.4.1 together with `graphql-orm` and

@@ -10,6 +10,21 @@ supersedes: []
 
 # Changelog
 
+## [0.5.0] - 2026-08-14
+
+### Added
+
+- Automatic query capabilities honor `GraphqlSemanticCollectionBound`.
+  Pageable Many relationships still advertise and inject a trusted page
+  argument. Server-fixed object lists omit model `maximumItems`, compile
+  without paging arguments, and disclose the authoritative semantic ceiling.
+
+### Security
+
+- Query capability wire version is now `2`. A selectable Many relationship
+  without an executable collection bound is rejected during capability
+  construction instead of failing only after the model selects it.
+
 ## [0.4.1] - 2026-08-13
 
 ### Fixed

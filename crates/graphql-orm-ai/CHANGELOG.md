@@ -18,6 +18,26 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.79.0] - 2026-08-14
+
+### Added
+
+- Dynamic-tool execution can return a content-free
+  `AiApplicationToolFailureEnvelope` (`invalid_arguments`,
+  `authorization_denied`, `temporarily_unavailable`, `tool_unavailable`)
+  when the failure is known safe. The provider turn can complete instead of
+  becoming `RecoveryRequired`.
+- A retained provider session that is still cleaning up defers the later run
+  with `AiError::ProviderSessionDeferred` and
+  `AiReadOnlyAgentRunOutcome::Deferred` instead of terminally failing the
+  application session.
+
+### Security
+
+- Cancellation, fence loss, persistence uncertainty, and consequential
+  mutation ambiguity still become `RecoveryRequired`. Failure envelopes never
+  include arguments, results, policy, or resolver text.
+
 ## [0.78.5] - 2026-08-14
 
 ### Fixed

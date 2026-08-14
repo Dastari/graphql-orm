@@ -8,14 +8,14 @@ use sha2::{Digest, Sha256};
 use crate::{GeneratedGraphqlOperationCategory, GraphqlOperationCatalog, GraphqlOperationKind};
 
 /// Current semantic-catalogue wire version.
-pub const GRAPHQL_SEMANTIC_CATALOG_VERSION: u16 = 1;
+pub const GRAPHQL_SEMANTIC_CATALOG_VERSION: u16 = 2;
 
 /// Router descriptor extension carrying a canonical semantic catalogue.
 pub const GRAPHQL_SEMANTIC_CATALOG_EXTENSION_NAME: &str = "graphql-orm.semantic-catalog";
 
 /// Stable semantic-catalogue fingerprint algorithm.
 pub const GRAPHQL_SEMANTIC_FINGERPRINT_ALGORITHM: &str =
-    "graphql-orm-semantic-canonical-json-sha256-v1";
+    "graphql-orm-semantic-canonical-json-sha256-v2";
 
 const MAXIMUM_DESCRIPTION_BYTES: usize = 1_024;
 const MAXIMUM_ENTITIES: usize = 4_096;
@@ -294,6 +294,63 @@ pub enum GraphqlSemanticRelationshipCardinality {
     Many,
 }
 
+/// Closed contract for how a Many relationship enforces its item ceiling.
+///
+/// This is descriptive, fingerprinted catalogue metadata. It does not
+/// authorize a resolver, override row/field policy, or invent a GraphQL
+/// argument. Execution must honor the stored mode instead of inferring it
+/// from a field name.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GraphqlSemanticCollectionBound {
+    /// The maximum is enforced by one unique typed GraphQL paging argument.
+    Pageable {
+        /// Public argument that carries the trusted page size.
+        argument_name: String,
+    },
+    /// The maximum is guaranteed by the resolver and has no caller-controlled
+    /// paging argument.
+    ServerFixed {
+        /// Authoritative positive item ceiling.
+        maximum_items: u32,
+    },
+}
+
+impl GraphqlSemanticCollectionBound {
+    /// Creates a pageable bound for one named paging argument.
+    pub fn pageable(argument_name: impl Into<String>) -> Self {
+        Self::Pageable {
+            argument_name: argument_name.into(),
+        }
+    }
+
+    /// Creates a resolver-owned fixed ceiling.
+    pub const fn server_fixed(maximum_items: u32) -> Self {
+        Self::ServerFixed { maximum_items }
+    }
+
+    /// Returns the pageable argument name when this bound is pageable.
+    pub fn page_argument_name(&self) -> Option<&str> {
+        match self {
+            Self::Pageable { argument_name } => Some(argument_name.as_str()),
+            Self::ServerFixed { .. } => None,
+        }
+    }
+
+    /// Returns the authoritative fixed ceiling when the resolver owns it.
+    pub const fn server_fixed_maximum(&self) -> Option<u32> {
+        match self {
+            Self::ServerFixed { maximum_items } => Some(*maximum_items),
+            Self::Pageable { .. } => None,
+        }
+    }
+
+    /// Whether the model may choose a smaller page size through the plan.
+    pub const fn model_may_select_maximum(&self) -> bool {
+        matches!(self, Self::Pageable { .. })
+    }
+}
+
 /// One public argument in a semantic operation or relationship field.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -316,6 +373,9 @@ pub struct GraphqlSemanticRelationshipDescriptor {
     pub cardinality: GraphqlSemanticRelationshipCardinality,
     /// Typed public relationship arguments.
     pub arguments: Vec<GraphqlSemanticArgumentDescriptor>,
+    /// Required collection-bound contract when [`Self::cardinality`] is Many.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection_bound: Option<GraphqlSemanticCollectionBound>,
 }
 
 /// Canonical model- and documentation-facing public field descriptor.
@@ -1012,13 +1072,7 @@ fn validate_entity(entity: &GraphqlEntitySemanticMetadata) -> Result<(), Graphql
                 ));
             }
             validate_arguments(&relationship.arguments)?;
-            if relationship.cardinality == GraphqlSemanticRelationshipCardinality::Many
-                && !has_positive_list_bound(&field.type_ref)
-            {
-                return Err(GraphqlSemanticError::new(
-                    "semantic relationship collection is unbounded",
-                ));
-            }
+            validate_collection_bound(field, relationship)?;
         }
     }
     Ok(())
@@ -1262,6 +1316,80 @@ fn valid_fingerprint(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_collection_bound(
+    field: &GraphqlSemanticFieldMetadata,
+    relationship: &GraphqlSemanticRelationshipDescriptor,
+) -> Result<(), GraphqlSemanticError> {
+    match (
+        relationship.cardinality,
+        relationship.collection_bound.as_ref(),
+    ) {
+        (GraphqlSemanticRelationshipCardinality::One, None) => Ok(()),
+        (GraphqlSemanticRelationshipCardinality::One, Some(_)) => Err(GraphqlSemanticError::new(
+            "one-to-one relationship cannot declare a collection bound",
+        )),
+        (GraphqlSemanticRelationshipCardinality::Many, None) => Err(GraphqlSemanticError::new(
+            "semantic relationship collection bound is missing",
+        )),
+        (
+            GraphqlSemanticRelationshipCardinality::Many,
+            Some(GraphqlSemanticCollectionBound::Pageable { argument_name }),
+        ) => {
+            if !valid_graphql_name(argument_name)
+                || !relationship
+                    .arguments
+                    .iter()
+                    .any(|argument| argument.graphql_name == *argument_name)
+            {
+                return Err(GraphqlSemanticError::new(
+                    "pageable collection argument is absent",
+                ));
+            }
+            if !has_positive_list_bound(&field.type_ref) {
+                return Err(GraphqlSemanticError::new(
+                    "semantic relationship collection is unbounded",
+                ));
+            }
+            Ok(())
+        }
+        (
+            GraphqlSemanticRelationshipCardinality::Many,
+            Some(GraphqlSemanticCollectionBound::ServerFixed { maximum_items }),
+        ) => {
+            if *maximum_items == 0 {
+                return Err(GraphqlSemanticError::new("semantic list bound is invalid"));
+            }
+            if relationship
+                .arguments
+                .iter()
+                .any(|argument| is_declared_page_argument_name(&argument.graphql_name))
+            {
+                return Err(GraphqlSemanticError::new(
+                    "server-fixed collection cannot declare a paging argument",
+                ));
+            }
+            match &field.type_ref {
+                GraphqlSemanticTypeRef::List {
+                    maximum_items: Some(declared),
+                    ..
+                } if *declared == *maximum_items => Ok(()),
+                _ => Err(GraphqlSemanticError::new(
+                    "server-fixed collection bound does not match the list ceiling",
+                )),
+            }
+        }
+    }
+}
+
+fn is_declared_page_argument_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("page")
+        || name.eq_ignore_ascii_case("pagination")
+        || name.eq_ignore_ascii_case("window")
+        || name.eq_ignore_ascii_case("limit")
+        || name.eq_ignore_ascii_case("first")
+        || name.eq_ignore_ascii_case("groupLimit")
 }
 
 fn has_positive_list_bound(type_ref: &GraphqlSemanticTypeRef) -> bool {

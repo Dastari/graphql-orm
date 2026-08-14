@@ -10,8 +10,9 @@ use async_graphql_parser::{parse_schema, types::TypeSystemDefinition};
 use graphql_orm_operation_catalog::{
     AiMutationExecutionPolicy, GeneratedGraphqlOperationCategory, GraphqlAggregateOperator,
     GraphqlOperationKind, GraphqlSemanticCatalog, GraphqlSemanticClassification,
-    GraphqlSemanticExport, GraphqlSemanticFieldMetadata, GraphqlSemanticOperationDescriptor,
-    GraphqlSemanticRelationshipCardinality, GraphqlSemanticTypeRef,
+    GraphqlSemanticCollectionBound, GraphqlSemanticExport, GraphqlSemanticFieldMetadata,
+    GraphqlSemanticOperationDescriptor, GraphqlSemanticRelationshipCardinality,
+    GraphqlSemanticRelationshipDescriptor, GraphqlSemanticTypeRef,
     GraphqlSubscriptionConditionOperator, GraphqlSubscriptionReplayMode,
 };
 use serde::{Deserialize, Serialize};
@@ -26,7 +27,7 @@ use crate::{
 };
 
 /// Current automatic query-capability contract version.
-pub const AI_GRAPHQL_QUERY_CAPABILITY_VERSION: u16 = 1;
+pub const AI_GRAPHQL_QUERY_CAPABILITY_VERSION: u16 = 2;
 
 /// Current classified mutation-capability contract version.
 pub const AI_GRAPHQL_MUTATION_CAPABILITY_VERSION: u16 = 1;
@@ -2113,6 +2114,11 @@ fn validate_semantic_entities_against_schema(
                         "semantic relationship cardinality has drifted from finished SDL",
                     ));
                 }
+                validate_collection_sdl(
+                    schema,
+                    &actual.arguments,
+                    collection_execution(relationship)?,
+                )?;
                 if actual.arguments.len() != relationship.arguments.len()
                     || relationship.arguments.iter().any(|argument| {
                         actual
@@ -2571,6 +2577,9 @@ fn selection_schema(
                 )
             })
             .collect::<BTreeMap<_, _>>();
+        let collection = collection_execution(relationship)?;
+        validate_collection_sdl(schema, &actual.arguments, collection)?;
+        validate_collection_limits(collection, limits)?;
         let arguments = input_object_schema(
             schema,
             catalog,
@@ -2579,7 +2588,7 @@ fn selection_schema(
             limits,
             0,
             &mut Vec::new(),
-            relationship.cardinality == GraphqlSemanticRelationshipCardinality::Many,
+            collection.is_some_and(GraphqlSemanticCollectionBound::model_may_select_maximum),
         )?;
         let nested = selection_schema(
             schema,
@@ -2606,7 +2615,7 @@ fn selection_schema(
                 .cloned()
                 .unwrap_or_default(),
         );
-        if relationship.cardinality == GraphqlSemanticRelationshipCardinality::Many {
+        if collection.is_some_and(GraphqlSemanticCollectionBound::model_may_select_maximum) {
             let maximum = semantic_list_bound(&field.type_ref)?
                 .min(limits.maximum_list_items)
                 .min(limits.maximum_result_records);
@@ -3022,13 +3031,23 @@ impl<'a> CompileContext<'a> {
                 .capability
                 .schema
                 .object_field(entity_name, &field.field_name)?;
+            let collection = collection_execution(relationship)?;
+            if matches!(
+                collection,
+                Some(GraphqlSemanticCollectionBound::ServerFixed { .. })
+            ) && relationship_plan.maximum_items.is_some()
+            {
+                return Err(input_error(
+                    "server-fixed collection bound is not model-selected",
+                ));
+            }
             let arguments = self.compile_arguments(
                 &actual.arguments,
                 &relationship.arguments,
                 &relationship_plan.arguments,
                 relationship_plan.maximum_items,
-                relationship.cardinality == GraphqlSemanticRelationshipCardinality::Many,
-                relationship.cardinality == GraphqlSemanticRelationshipCardinality::Many,
+                collection.is_some_and(GraphqlSemanticCollectionBound::model_may_select_maximum),
+                collection.is_some_and(GraphqlSemanticCollectionBound::model_may_select_maximum),
                 &format!("{entity_name}.{}", field.field_name),
             )?;
             ancestry.push(relationship.target.clone());
@@ -3049,7 +3068,15 @@ impl<'a> CompileContext<'a> {
                 &actual.ty,
                 self.capability.limits.maximum_depth,
             )?;
-            let maximum = relationship_plan.maximum_items.unwrap_or(1);
+            let maximum = match collection {
+                Some(GraphqlSemanticCollectionBound::ServerFixed { maximum_items }) => {
+                    *maximum_items
+                }
+                Some(GraphqlSemanticCollectionBound::Pageable { .. }) => {
+                    relationship_plan.maximum_items.unwrap_or(1)
+                }
+                None => 1,
+            };
             let (wrapped, wrapped_disclosure) =
                 wrap_projection_route(&route, nested, nested_disclosure, maximum);
             let argument_clause = if arguments.is_empty() {
@@ -3277,6 +3304,80 @@ fn selectable_exportable_scalar(field: &GraphqlSemanticFieldMetadata) -> bool {
         && field.relationship.is_none()
         && field.export == GraphqlSemanticExport::Exportable
         && field.classification != GraphqlSemanticClassification::Secret
+}
+
+fn collection_execution(
+    relationship: &GraphqlSemanticRelationshipDescriptor,
+) -> Result<Option<&GraphqlSemanticCollectionBound>, AiError> {
+    match relationship.cardinality {
+        GraphqlSemanticRelationshipCardinality::One => {
+            if relationship.collection_bound.is_some() {
+                return Err(configuration_error(
+                    "one-to-one relationship cannot declare a collection bound",
+                ));
+            }
+            Ok(None)
+        }
+        GraphqlSemanticRelationshipCardinality::Many => relationship
+            .collection_bound
+            .as_ref()
+            .ok_or_else(|| configuration_error("semantic relationship collection bound is missing"))
+            .map(Some),
+    }
+}
+
+fn validate_collection_sdl(
+    schema: &FinishedSchema,
+    schema_fields: &BTreeMap<String, SchemaInput>,
+    collection: Option<&GraphqlSemanticCollectionBound>,
+) -> Result<(), AiError> {
+    let page_candidates = schema_fields
+        .iter()
+        .filter(|(name, field)| is_page_argument(name, &field.ty, schema))
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>();
+    match collection {
+        None => {
+            if !page_candidates.is_empty() {
+                return Err(configuration_error(
+                    "one-to-one relationship unexpectedly declares a page argument",
+                ));
+            }
+            Ok(())
+        }
+        Some(GraphqlSemanticCollectionBound::Pageable { argument_name }) => {
+            if page_candidates != [argument_name.as_str()] {
+                return Err(configuration_error(
+                    "pageable collection has no unique matching page argument",
+                ));
+            }
+            Ok(())
+        }
+        Some(GraphqlSemanticCollectionBound::ServerFixed { .. }) => {
+            if !page_candidates.is_empty() {
+                return Err(configuration_error(
+                    "server-fixed collection cannot expose a page argument",
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_collection_limits(
+    collection: Option<&GraphqlSemanticCollectionBound>,
+    limits: AiGraphqlQueryCapabilityLimits,
+) -> Result<(), AiError> {
+    if let Some(GraphqlSemanticCollectionBound::ServerFixed { maximum_items }) = collection
+        && (*maximum_items == 0
+            || *maximum_items > limits.maximum_list_items
+            || *maximum_items > limits.maximum_result_records)
+    {
+        return Err(configuration_error(
+            "server-fixed collection exceeds deployment limits",
+        ));
+    }
+    Ok(())
 }
 
 fn semantic_list_bound(type_ref: &GraphqlSemanticTypeRef) -> Result<u32, AiError> {
@@ -3747,6 +3848,7 @@ mod tests {
                                 true,
                             ),
                         }],
+                        collection_bound: Some(GraphqlSemanticCollectionBound::pageable("page")),
                     }),
                     classification: GraphqlSemanticClassification::Confidential,
                     export: GraphqlSemanticExport::Exportable,
@@ -4492,6 +4594,246 @@ mod tests {
             })),
             Err(crate::AiDisclosureError::IdentityMismatch)
         );
+    }
+
+    #[test]
+    fn server_fixed_object_lists_compile_without_paging_arguments() {
+        let mut base = semantic_catalog();
+        base.entities.push(GraphqlEntitySemanticMetadata {
+            entity_name: "SearchDetail".to_owned(),
+            description: "One resolver-owned search detail.".to_owned(),
+            default_classification: GraphqlSemanticClassification::Internal,
+            fields: vec![
+                scalar_field(
+                    "type",
+                    GraphqlSemanticClassification::Internal,
+                    GraphqlSemanticExport::Exportable,
+                ),
+                scalar_field(
+                    "value",
+                    GraphqlSemanticClassification::Internal,
+                    GraphqlSemanticExport::Exportable,
+                ),
+            ]
+            .into_boxed_slice(),
+        });
+        base.entities.push(GraphqlEntitySemanticMetadata {
+            entity_name: "SearchResult".to_owned(),
+            description: "One resolver-owned search hit.".to_owned(),
+            default_classification: GraphqlSemanticClassification::Internal,
+            fields: vec![
+                GraphqlSemanticFieldMetadata {
+                    field_name: "cardNo".to_owned(),
+                    description: "Public card number.".to_owned(),
+                    type_ref: named("Int", false),
+                    selectable: true,
+                    filter_operators: Vec::new(),
+                    sortable: false,
+                    groupable: false,
+                    aggregate_operators: Vec::new(),
+                    aggregate_value_kind: None,
+                    relationship: None,
+                    classification: GraphqlSemanticClassification::Internal,
+                    export: GraphqlSemanticExport::Exportable,
+                    has_field_policy: false,
+                },
+                scalar_field(
+                    "cardCode",
+                    GraphqlSemanticClassification::Internal,
+                    GraphqlSemanticExport::Exportable,
+                ),
+                GraphqlSemanticFieldMetadata {
+                    field_name: "details".to_owned(),
+                    description: "Resolver-owned details.".to_owned(),
+                    type_ref: GraphqlSemanticTypeRef::list(
+                        false,
+                        Some(4),
+                        GraphqlSemanticTypeRef::named(
+                            "SearchDetail",
+                            GraphqlSemanticTypeKind::Object,
+                            false,
+                        ),
+                    ),
+                    selectable: true,
+                    filter_operators: Vec::new(),
+                    sortable: false,
+                    groupable: false,
+                    aggregate_operators: Vec::new(),
+                    aggregate_value_kind: None,
+                    relationship: Some(GraphqlSemanticRelationshipDescriptor {
+                        target: "SearchDetail".to_owned(),
+                        cardinality: GraphqlSemanticRelationshipCardinality::Many,
+                        arguments: Vec::new(),
+                        collection_bound: Some(GraphqlSemanticCollectionBound::server_fixed(4)),
+                    }),
+                    classification: GraphqlSemanticClassification::Internal,
+                    export: GraphqlSemanticExport::Exportable,
+                    has_field_policy: false,
+                },
+            ]
+            .into_boxed_slice(),
+        });
+        base.entities.push(GraphqlEntitySemanticMetadata {
+            entity_name: "SearchPayload".to_owned(),
+            description: "Bounded resolver-owned search payload.".to_owned(),
+            default_classification: GraphqlSemanticClassification::Internal,
+            fields: vec![
+                GraphqlSemanticFieldMetadata {
+                    field_name: "elapsedMs".to_owned(),
+                    description: "Resolver elapsed time.".to_owned(),
+                    type_ref: named("Int", false),
+                    selectable: true,
+                    filter_operators: Vec::new(),
+                    sortable: false,
+                    groupable: false,
+                    aggregate_operators: Vec::new(),
+                    aggregate_value_kind: None,
+                    relationship: None,
+                    classification: GraphqlSemanticClassification::Internal,
+                    export: GraphqlSemanticExport::Exportable,
+                    has_field_policy: false,
+                },
+                GraphqlSemanticFieldMetadata {
+                    field_name: "totalCount".to_owned(),
+                    description: "Total matching count.".to_owned(),
+                    type_ref: named("Int", false),
+                    selectable: true,
+                    filter_operators: Vec::new(),
+                    sortable: false,
+                    groupable: false,
+                    aggregate_operators: Vec::new(),
+                    aggregate_value_kind: None,
+                    relationship: None,
+                    classification: GraphqlSemanticClassification::Internal,
+                    export: GraphqlSemanticExport::Exportable,
+                    has_field_policy: false,
+                },
+                GraphqlSemanticFieldMetadata {
+                    field_name: "items".to_owned(),
+                    description: "Hard-bounded search hits.".to_owned(),
+                    type_ref: GraphqlSemanticTypeRef::list(
+                        false,
+                        Some(5),
+                        GraphqlSemanticTypeRef::named(
+                            "SearchResult",
+                            GraphqlSemanticTypeKind::Object,
+                            false,
+                        ),
+                    ),
+                    selectable: true,
+                    filter_operators: Vec::new(),
+                    sortable: false,
+                    groupable: false,
+                    aggregate_operators: Vec::new(),
+                    aggregate_value_kind: None,
+                    relationship: Some(GraphqlSemanticRelationshipDescriptor {
+                        target: "SearchResult".to_owned(),
+                        cardinality: GraphqlSemanticRelationshipCardinality::Many,
+                        arguments: Vec::new(),
+                        collection_bound: Some(GraphqlSemanticCollectionBound::server_fixed(5)),
+                    }),
+                    classification: GraphqlSemanticClassification::Internal,
+                    export: GraphqlSemanticExport::Exportable,
+                    has_field_policy: false,
+                },
+            ]
+            .into_boxed_slice(),
+        });
+        let search = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Query,
+            "SearchCards",
+            "Search reviewed card records.",
+            vec![GraphqlSemanticArgumentDescriptor {
+                graphql_name: "query".to_owned(),
+                description: "Exact public search text.".to_owned(),
+                type_ref: named("String", false),
+            }],
+            GraphqlSemanticTypeRef::named("SearchPayload", GraphqlSemanticTypeKind::Object, false),
+            true,
+        )
+        .expect("search operation");
+        let semantics = GraphqlSemanticCatalog::compose_with_custom(
+            base.entities,
+            &GraphqlOperationCatalog::compose(std::iter::empty()),
+            base.operations.into_iter().chain([search]),
+        )
+        .expect("search catalogue");
+        let sdl = query_sdl().replace(
+            "ReadParent(id: ID!): Parent!",
+            "ReadParent(id: ID!): Parent!\nSearchCards(query: String!): SearchPayload!",
+        ) + r#"
+        type SearchPayload { items: [SearchResult!]! elapsedMs: Int! totalCount: Int! }
+        type SearchResult { cardNo: Int! cardCode: String! details: [SearchDetail!]! }
+        type SearchDetail { type: String! value: String! }
+        "#;
+        let catalog = AiGraphqlQueryCapabilityCatalog::compile(
+            "inventory",
+            GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
+            &sdl,
+            &semantics,
+            AiGraphqlQueryCapabilityLimits::default(),
+        )
+        .expect("search capability compiles");
+        let capability = catalog
+            .capabilities()
+            .find(|capability| capability.field_name() == "SearchCards")
+            .expect("search capability");
+        assert!(
+            capability
+                .argument_schema()
+                .pointer("/properties/relationships/properties/items/properties/maximumItems")
+                .is_none()
+        );
+        let compiled = capability
+            .compile(json!({
+                "arguments": { "query": "Toby Martin" },
+                "fields": { "elapsedMs": true, "totalCount": true },
+                "relationships": {
+                    "items": {
+                        "arguments": {},
+                        "fields": { "cardCode": true, "cardNo": true },
+                        "relationships": {
+                            "details": {
+                                "arguments": {},
+                                "fields": { "type": true, "value": true },
+                                "relationships": {}
+                            }
+                        }
+                    }
+                }
+            }))
+            .expect("fixed-list plan compiles");
+        assert!(compiled.descriptor().document.contains("items {"));
+        assert!(!compiled.descriptor().document.contains("page:"));
+        compiled
+            .disclosure_schema()
+            .evaluate(&json!({
+                "SearchCards": {
+                    "elapsedMs": 1,
+                    "totalCount": 1,
+                    "items": [{
+                        "cardNo": 1,
+                        "cardCode": "A",
+                        "details": [{"type": "phone", "value": "1"}]
+                    }]
+                }
+            }))
+            .expect("authoritative fixed ceilings disclose");
+        assert!(matches!(
+            capability.compile(json!({
+                "arguments": { "query": "Toby Martin" },
+                "fields": { "elapsedMs": true },
+                "relationships": {
+                    "items": {
+                        "arguments": {},
+                        "maximumItems": 10,
+                        "fields": { "cardNo": true },
+                        "relationships": {}
+                    }
+                }
+            })),
+            Err(AiError::InvalidInput(_))
+        ));
     }
 
     #[test]

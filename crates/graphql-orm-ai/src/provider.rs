@@ -1911,6 +1911,84 @@ impl ProviderDynamicToolResult {
     }
 }
 
+/// Current closed application-tool failure envelope version.
+pub const AI_APPLICATION_TOOL_FAILURE_VERSION: u16 = 1;
+
+/// Bounded model-visible reason a read tool did not produce a result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AiApplicationToolFailureCode {
+    /// The model-authored arguments violated the advertised schema.
+    InvalidArguments,
+    /// Current authorization denied the call without disclosing why.
+    AuthorizationDenied,
+    /// The target or runtime was temporarily unavailable.
+    TemporarilyUnavailable,
+    /// The registered tool cannot be executed; the detailed cause is operator-only.
+    ToolUnavailable,
+}
+
+impl AiApplicationToolFailureCode {
+    /// Stable machine code written into the failure envelope.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidArguments => "invalid_arguments",
+            Self::AuthorizationDenied => "authorization_denied",
+            Self::TemporarilyUnavailable => "temporarily_unavailable",
+            Self::ToolUnavailable => "tool_unavailable",
+        }
+    }
+
+    /// Whether the model may retry the same tool later in this turn.
+    pub const fn retryable(self) -> bool {
+        matches!(self, Self::TemporarilyUnavailable)
+    }
+}
+
+/// Content-free model-visible failure for one correlated dynamic-tool call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AiApplicationToolFailureEnvelope {
+    code: AiApplicationToolFailureCode,
+}
+
+impl AiApplicationToolFailureEnvelope {
+    /// Creates one closed failure envelope.
+    pub const fn new(code: AiApplicationToolFailureCode) -> Self {
+        Self { code }
+    }
+
+    /// Closed failure code.
+    pub const fn code(self) -> AiApplicationToolFailureCode {
+        self.code
+    }
+
+    /// Serializes the versioned, content-free envelope.
+    pub fn to_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "version": AI_APPLICATION_TOOL_FAILURE_VERSION,
+            "ok": false,
+            "code": self.code.as_str(),
+            "retryable": self.code.retryable(),
+        })
+    }
+}
+
+/// Classifies a library error that can safely become a model-visible tool
+/// result. Ambiguous or consequential failures remain `None`.
+pub fn classify_safe_application_tool_error(
+    error: &AiError,
+) -> Option<AiApplicationToolFailureCode> {
+    match error {
+        AiError::InvalidInput(_) => Some(AiApplicationToolFailureCode::InvalidArguments),
+        AiError::Forbidden => Some(AiApplicationToolFailureCode::AuthorizationDenied),
+        AiError::InvalidConfiguration(_) => Some(AiApplicationToolFailureCode::ToolUnavailable),
+        AiError::NotFound | AiError::ToolExecutionFailed | AiError::RuntimeNotReady => {
+            Some(AiApplicationToolFailureCode::TemporarilyUnavailable)
+        }
+        _ => None,
+    }
+}
+
 /// Typed in-flight bridge for an experimental provider-native application
 /// tool request.
 ///
@@ -2637,5 +2715,16 @@ mod safe_failure_tests {
                 .as_slice(),
             &[AiProviderFailureCategory::ProviderRejection]
         );
+
+        let denied = classify_safe_application_tool_error(&AiError::Forbidden)
+            .expect("authorization denial is a safe tool failure");
+        let envelope = AiApplicationToolFailureEnvelope::new(denied);
+        let encoded = envelope.to_json();
+        assert_eq!(encoded["ok"], false);
+        assert_eq!(encoded["code"], "authorization_denied");
+        assert_eq!(encoded["retryable"], false);
+        assert!(!format!("{encoded}").contains("policy"));
+        assert!(classify_safe_application_tool_error(&AiError::Conflict).is_none());
+        assert!(classify_safe_application_tool_error(&AiError::PersistenceFailed).is_none());
     }
 }

@@ -11,19 +11,20 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::{
-    AiAgentRuleResolution, AiApprovalRule, AiBudgetAmounts, AiBudgetReconciliation,
-    AiBudgetReconciliationOutcome, AiBudgetReservation, AiBudgetReservationId,
-    AiBudgetReservationRequest, AiBudgetService, AiEgressCapability, AiEgressDecisionAudit,
-    AiEgressManifest, AiError, AiLiveDeltaBatch, AiLiveDeltaCoalescer, AiLiveDeltaCoalescerLimits,
-    AiLiveDeltaPersistenceContext, AiLiveDeltaSink, AiPersistedApplicationToolCall,
-    AiProviderActivity, AiProviderActivityCoalescer, AiProviderActivitySink,
-    AiProviderAttachmentRequest, AiProviderAttachmentResolver, AiProviderFailureCategory,
-    AiProviderFailureDiagnosticSink, AiResolvedProviderAttachment, AiRuleProviderCapability,
-    AiRuleRunUsage, AiRunLease, AiRunState, AiRuntime, AiScope, AiSessionAction, AiToolPolicySet,
-    ModelBuiltinTool, ModelContinuation, ModelContinuationMode, ModelConversationMessage,
-    ModelConversationToolCall, ModelInputBlock, ModelRequest, ProviderDynamicToolCall,
-    ProviderDynamicToolResponder, ProviderDynamicToolResult, ProviderError, ProviderEvent,
-    ProviderKind, ProviderRequestContext, ToolMaturity,
+    AiAgentRuleResolution, AiApplicationToolFailureEnvelope, AiApprovalRule, AiBudgetAmounts,
+    AiBudgetReconciliation, AiBudgetReconciliationOutcome, AiBudgetReservation,
+    AiBudgetReservationId, AiBudgetReservationRequest, AiBudgetService, AiEgressCapability,
+    AiEgressDecisionAudit, AiEgressManifest, AiError, AiLiveDeltaBatch, AiLiveDeltaCoalescer,
+    AiLiveDeltaCoalescerLimits, AiLiveDeltaPersistenceContext, AiLiveDeltaSink,
+    AiPersistedApplicationToolCall, AiProviderActivity, AiProviderActivityCoalescer,
+    AiProviderActivitySink, AiProviderAttachmentRequest, AiProviderAttachmentResolver,
+    AiProviderFailureCategory, AiProviderFailureDiagnosticSink, AiResolvedProviderAttachment,
+    AiRuleProviderCapability, AiRuleRunUsage, AiRunLease, AiRunState, AiRuntime, AiScope,
+    AiSessionAction, AiToolPolicySet, ModelBuiltinTool, ModelContinuation, ModelContinuationMode,
+    ModelConversationMessage, ModelConversationToolCall, ModelInputBlock, ModelRequest,
+    ProviderDynamicToolCall, ProviderDynamicToolResponder, ProviderDynamicToolResult,
+    ProviderError, ProviderEvent, ProviderKind, ProviderRequestContext, ToolMaturity,
+    classify_safe_application_tool_error,
 };
 
 const MAXIMUM_PROVIDER_TRANSFERS: usize = 288;
@@ -1634,6 +1635,23 @@ impl DynamicToolResponder {
     async fn results(&self) -> Vec<AiPersistedApplicationToolCall> {
         self.results.lock().await.clone()
     }
+
+    async fn complete_safe_failure(
+        &self,
+        call: &ProviderDynamicToolCall,
+        code: crate::AiApplicationToolFailureCode,
+    ) -> Result<ProviderDynamicToolResult, ProviderError> {
+        let output = AiApplicationToolFailureEnvelope::new(code).to_json();
+        let lease = self.lease.lock().await.clone();
+        let persisted = AiPersistedApplicationToolCall::safe_failure(
+            call.call_id(),
+            call.tool_id(),
+            output.clone(),
+            lease,
+        );
+        self.results.lock().await.push(persisted);
+        ProviderDynamicToolResult::new(call, output)
+    }
 }
 
 #[async_trait]
@@ -1655,7 +1673,9 @@ impl ProviderDynamicToolResponder for DynamicToolResponder {
         let validator = jsonschema::validator_for(&definition.parameters)
             .map_err(|_| ProviderError::Rejected)?;
         if !validator.is_valid(call.arguments()) {
-            return Err(ProviderError::Rejected);
+            return self
+                .complete_safe_failure(&call, crate::AiApplicationToolFailureCode::InvalidArguments)
+                .await;
         }
         let (tool_call_index, tool_calls) = {
             let mut calls = self.calls.lock().await;
@@ -1703,11 +1723,20 @@ impl ProviderDynamicToolResponder for DynamicToolResponder {
             interactive_tool_results: Vec::new(),
             provider_session_claim: None,
         };
-        let persisted = self
+        let persisted = match self
             .execution
             .execute_dynamic_tool(&lease, &provisional, tool_call_index)
             .await
-            .map_err(|_| ProviderError::Rejected)?;
+        {
+            Ok(persisted) => persisted,
+            Err(error) => {
+                let Some(code) = classify_safe_application_tool_error(&error) else {
+                    return Err(ProviderError::Rejected);
+                };
+                drop(lease);
+                return self.complete_safe_failure(&call, code).await;
+            }
+        };
         let output = match persisted.model_input() {
             Some(ModelInputBlock::ToolResult {
                 call_id,
@@ -2694,6 +2723,13 @@ impl AiProviderCallExecutor {
                     return Err(AiError::Conflict);
                 }
                 (claim, None)
+            }
+            crate::AiProviderSessionRunDisposition::Unavailable(
+                crate::AiProviderSessionState::CleanupRequired
+                | crate::AiProviderSessionState::CleanupInProgress
+                | crate::AiProviderSessionState::CleanupBackoff,
+            ) => {
+                return Err(AiError::ProviderSessionDeferred);
             }
             crate::AiProviderSessionRunDisposition::Unavailable(_) => {
                 return Err(AiError::Conflict);

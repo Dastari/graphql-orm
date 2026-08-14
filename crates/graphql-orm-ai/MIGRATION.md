@@ -19,6 +19,27 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.79.0: safe tool failures and provider-session deferral (schema remains 0.59.0)
+
+No database, data, GraphQL SDL, backup, restore or AI schema-module migration
+is required. Existing provider-session cursors do not need to be drained.
+
+Adopt `graphql-orm-ai` 0.79.0 with `graphql-orm` 0.23.0,
+`graphql-orm-ai-tool-profiles` 0.5.0, and `graphql-orm-operation-catalog`
+0.3.0 at one reviewed full monorepo revision. Rebuild generated query
+capabilities so server-fixed object lists compile without paging arguments.
+
+Hosts that inspect `AiError` should match `ProviderSessionDeferred` for a
+later run that arrives while the previous retained cursor is cleaning up.
+That run is retry-scheduled; do not treat it as `RecoveryRequired`. After
+exact absence, the existing `RebindAllowed` path creates a fresh empty
+thread. The host planner still supplies the next turn from the durable
+transcript watermark.
+
+Safe dynamic-tool failures return
+`{ "version": 1, "ok": false, "code": "...", "retryable": ... }` to the
+provider. Do not parse raw `AiError` strings for model-visible text.
+
 ## 0.78.5: typed newly-bound Codex turn rejection (schema remains 0.59.0)
 
 No database, data, GraphQL SDL, backup, restore or AI schema-module migration

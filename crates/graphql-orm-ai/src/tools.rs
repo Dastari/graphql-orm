@@ -1277,7 +1277,7 @@ mod tests {
         .expect("test contract should validate");
         let mut value = serde_json::to_value(contract).expect("test contract should serialize");
         value["semantic_operation"] = json!({
-            "fingerprint_algorithm": "graphql-orm-semantic-canonical-json-sha256-v1",
+            "fingerprint_algorithm": "graphql-orm-semantic-canonical-json-sha256-v2",
             "catalog_fingerprint": CATALOG_FINGERPRINT,
             "operation_fingerprint": "3333333333333333333333333333333333333333333333333333333333333333",
             "kind": "query",

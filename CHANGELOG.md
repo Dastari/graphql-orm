@@ -14,6 +14,19 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.23.0 - 2026-08-14
+
+Companion macros crate: `graphql-orm-macros` **0.23.0**. Backend-neutral
+semantic owner: `graphql-orm-operation-catalog` **0.3.0**.
+
+- Added a closed `GraphqlSemanticCollectionBound` on Many relationships so a
+  pageable paging argument and a resolver-owned server-fixed list ceiling are
+  distinct fingerprinted contracts. Generated to-many relationships declare
+  `Pageable`; `GraphQLSemanticObject` object lists with `maximum_items`
+  declare `ServerFixed`.
+- Semantic catalogue wire version is now `2`. Version `1` payloads and
+  catalogues that omit a Many collection bound fail closed.
+
 ## 0.22.1 - 2026-08-13
 
 Companion macros crate: `graphql-orm-macros` **0.22.1**.

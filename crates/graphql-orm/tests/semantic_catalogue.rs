@@ -88,6 +88,42 @@ struct ReviewedMutations;
 #[derive(Default)]
 struct ReviewedSubscriptions;
 
+/// One resolver-owned search detail.
+#[derive(SimpleObject, GraphQLSemanticObject)]
+#[graphql_orm(classification = "internal")]
+struct ReviewedSearchDetail {
+    /// Public detail kind.
+    kind: String,
+    /// Public detail value.
+    value: String,
+}
+
+/// One resolver-owned search hit.
+#[derive(SimpleObject, GraphQLSemanticObject)]
+#[graphql_orm(classification = "internal")]
+struct ReviewedSearchResult {
+    /// Public record number.
+    card_no: i32,
+    /// Public record code.
+    card_code: String,
+    /// Bounded resolver-owned details.
+    #[graphql_orm(maximum_items = 12)]
+    details: Vec<ReviewedSearchDetail>,
+}
+
+/// Bounded resolver-owned search payload.
+#[derive(SimpleObject, GraphQLSemanticObject)]
+#[graphql_orm(classification = "internal")]
+struct ReviewedSearchPayload {
+    /// Hard-bounded search hits.
+    #[graphql_orm(maximum_items = 20)]
+    items: Vec<ReviewedSearchResult>,
+    /// Resolver elapsed time.
+    elapsed_ms: i32,
+    /// Total matching count.
+    total_count: i32,
+}
+
 /// Reviewed status result.
 #[derive(SimpleObject, GraphQLSemanticObject)]
 #[graphql_orm(classification = "internal")]
@@ -103,6 +139,17 @@ struct ReviewedStatus {
 #[graphql_orm_custom_operations(kind = "query", authorization = true)]
 #[graphql_orm::async_graphql::Object]
 impl ReviewedQueries {
+    /// Returns a bounded resolver-owned search payload.
+    #[graphql(name = "ReviewedSearch")]
+    async fn reviewed_search(&self, query: String) -> ReviewedSearchPayload {
+        let _ = query;
+        ReviewedSearchPayload {
+            items: Vec::new(),
+            elapsed_ms: 0,
+            total_count: 0,
+        }
+    }
+
     /// Returns a bounded service status value.
     #[graphql(name = "ReviewedStatus")]
     async fn reviewed_status(&self, limit: i32) -> ReviewedStatus {
@@ -197,6 +244,7 @@ schema_roots! {
     described_query_types: [ReviewedQueries],
     described_mutation_types: [ReviewedMutations],
     described_subscription_types: [ReviewedSubscriptions],
+    semantic_types: [ReviewedSearchPayload, ReviewedSearchResult, ReviewedSearchDetail],
 }
 
 #[test]
@@ -237,6 +285,12 @@ fn entity_and_custom_root_semantics_are_canonical_and_safe() {
     assert_eq!(
         relationship.cardinality,
         GraphqlSemanticRelationshipCardinality::Many
+    );
+    assert_eq!(
+        relationship.collection_bound,
+        Some(GraphqlSemanticCollectionBound::pageable(argument_name(
+            "page", "Page"
+        )))
     );
     assert!(matches!(
         children.type_ref,
@@ -442,6 +496,39 @@ fn entity_and_custom_root_semantics_are_canonical_and_safe() {
     let encoded = serde_json::to_string(&decoded).expect("semantic catalogue serializes");
     assert!(!encoded.contains("semantic_records"));
     assert!(!encoded.contains("implementation_marker"));
+
+    let payload_entity = catalog
+        .entities
+        .iter()
+        .find(|entity| entity.entity_name == "ReviewedSearchPayload")
+        .expect("fixed-list payload semantics");
+    let items = payload_entity
+        .fields
+        .iter()
+        .find(|field| field.field_name == field_name("items", "Items"))
+        .and_then(|field| field.relationship.as_ref())
+        .expect("items relationship");
+    assert_eq!(
+        items.collection_bound,
+        Some(GraphqlSemanticCollectionBound::server_fixed(20))
+    );
+    assert!(items.arguments.is_empty());
+    let details = catalog
+        .entities
+        .iter()
+        .find(|entity| entity.entity_name == "ReviewedSearchResult")
+        .and_then(|entity| {
+            entity
+                .fields
+                .iter()
+                .find(|field| field.field_name == field_name("details", "Details"))
+        })
+        .and_then(|field| field.relationship.as_ref())
+        .expect("details relationship");
+    assert_eq!(
+        details.collection_bound,
+        Some(GraphqlSemanticCollectionBound::server_fixed(12))
+    );
 }
 
 #[test]

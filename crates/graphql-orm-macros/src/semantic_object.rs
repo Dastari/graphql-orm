@@ -342,11 +342,25 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
             } else {
                 quote! { ::graphql_orm::graphql::orm::GraphqlSemanticRelationshipCardinality::One }
             };
+            let collection_bound = if multiple {
+                let limit = field_options.maximum_items.ok_or_else(|| {
+                    syn::Error::new_spanned(
+                        &field.ty,
+                        "public semantic-object object lists require #[graphql_orm(maximum_items = ...)]",
+                    )
+                })?;
+                quote! {
+                    Some(::graphql_orm::graphql::orm::GraphqlSemanticCollectionBound::server_fixed(#limit))
+                }
+            } else {
+                quote! { None }
+            };
             quote! {
                 Some(::graphql_orm::graphql::orm::GraphqlSemanticRelationshipDescriptor {
                     target: #target,
                     cardinality: #cardinality,
                     arguments: Vec::new(),
+                    collection_bound: #collection_bound,
                 })
             }
         } else {

@@ -344,6 +344,24 @@ pub trait AiAgentRunControl: Send + Sync {
     /// Fails closed when the fence/outcome is stale, invalid, duplicate, or
     /// cannot be persisted.
     async fn finish(&self, lease: &AiRunLease, completion: AiRunCompletion) -> Result<(), AiError>;
+
+    /// Relinquishes the current fence and schedules a bounded retry.
+    ///
+    /// The default denies so alternate run-control implementations do not
+    /// acquire retry semantics implicitly.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed when the delay/code is invalid, the retry ceiling is
+    /// exhausted, or the fence cannot be persisted.
+    async fn schedule_retry(
+        &self,
+        _lease: &AiRunLease,
+        _delay: time::Duration,
+        _error_code: &str,
+    ) -> Result<(), AiError> {
+        Err(AiError::RuntimeNotReady)
+    }
 }
 
 #[async_trait]
@@ -373,6 +391,15 @@ impl AiAgentRunControl for OrmAiRunService {
 
     async fn finish(&self, lease: &AiRunLease, completion: AiRunCompletion) -> Result<(), AiError> {
         OrmAiRunService::finish(self, lease, completion).await
+    }
+
+    async fn schedule_retry(
+        &self,
+        lease: &AiRunLease,
+        delay: time::Duration,
+        error_code: &str,
+    ) -> Result<(), AiError> {
+        OrmAiRunService::schedule_retry(self, lease, delay, error_code).await
     }
 }
 
@@ -933,6 +960,28 @@ pub enum AiReadOnlyAgentRunOutcome {
         /// Durably resolved application-tool call count.
         total_tool_calls: u32,
     },
+    /// The retained provider session is cleaning up or waiting to rebind.
+    ///
+    /// The failed run is not terminal. The application session remains
+    /// readable and a later run may continue after exact provider absence.
+    Deferred {
+        /// Closed reason the provider session cannot be used yet.
+        reason: AiProviderSessionDeferralReason,
+        /// Bounded delay before the same run may be retried.
+        retry_after: std::time::Duration,
+        /// Accepted provider-turn count.
+        provider_turns: u32,
+        /// Durably resolved application-tool call count.
+        total_tool_calls: u32,
+    },
+}
+
+/// Why a retained-provider turn was deferred instead of failing terminally.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AiProviderSessionDeferralReason {
+    /// The previous cursor is quarantined and has not yet been proven absent.
+    CleanupPending,
 }
 
 /// Security-ordered coordinator for one claimed read-only agent attempt.
@@ -1041,6 +1090,9 @@ impl AiReadOnlyAgentCoordinator {
             }
             Ok(AiReadOnlyAgentRunOutcome::RecoveryRequired { .. }) => {
                 crate::AiProviderRunCloseReason::RecoveryRequired
+            }
+            Ok(AiReadOnlyAgentRunOutcome::Deferred { .. }) => {
+                crate::AiProviderRunCloseReason::Cancelled
             }
             Ok(AiReadOnlyAgentRunOutcome::Failed { .. }) => crate::AiProviderRunCloseReason::Failed,
             Err(_) => crate::AiProviderRunCloseReason::LeaseLost,
@@ -1294,6 +1346,22 @@ impl AiReadOnlyAgentCoordinator {
             };
             let result = match provider_result {
                 Ok(result) => result,
+                Err(ProviderTurnFailure::Deferred) => {
+                    const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+                    self.run_control
+                        .schedule_retry(
+                            &lease,
+                            time::Duration::seconds(5),
+                            "provider_session_cleanup_pending",
+                        )
+                        .await?;
+                    return Ok(Deferred {
+                        reason: AiProviderSessionDeferralReason::CleanupPending,
+                        retry_after: RETRY_AFTER,
+                        provider_turns: guard.provider_turns(),
+                        total_tool_calls: guard.total_tool_calls(),
+                    });
+                }
                 Err(ProviderTurnFailure::Provider) => {
                     if self.run_control.cancellation(&lease).await?.is_some() {
                         return Ok(Cancelled {
@@ -1807,7 +1875,13 @@ impl AiReadOnlyAgentCoordinator {
             tokio::select! {
                 result = &mut provider => {
                     *lease = lease_state.lock().await.clone();
-                    return result.map_err(|_| ProviderTurnFailure::Provider);
+                    return match result {
+                        Ok(value) => Ok(value),
+                        Err(AiError::ProviderSessionDeferred) => {
+                            Err(ProviderTurnFailure::Deferred)
+                        }
+                        Err(_) => Err(ProviderTurnFailure::Provider),
+                    };
                 }
                 result = &mut cancellation => {
                     match result.map_err(ProviderTurnFailure::LeaseLost)? {
@@ -2002,6 +2076,7 @@ impl AiReadOnlyAgentCoordinator {
 
 enum ProviderTurnFailure {
     Provider,
+    Deferred,
     LeaseLost(AiError),
     Cancelled,
 }

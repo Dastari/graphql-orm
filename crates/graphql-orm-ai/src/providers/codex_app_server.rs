@@ -4643,12 +4643,12 @@ pub(crate) mod tests {
     use graphql_orm::graphql::orm::{
         AiMutationExecutionPolicy, GraphqlEntitySemanticMetadata, GraphqlOperationCatalog,
         GraphqlOperationKind, GraphqlSemanticArgumentDescriptor, GraphqlSemanticCatalog,
-        GraphqlSemanticClassification, GraphqlSemanticExport, GraphqlSemanticFieldMetadata,
-        GraphqlSemanticOperationDescriptor, GraphqlSemanticRelationshipCardinality,
-        GraphqlSemanticRelationshipDescriptor, GraphqlSemanticResultDisclosure,
-        GraphqlSemanticTypeKind, GraphqlSemanticTypeRef, GraphqlSubscriptionConditionField,
-        GraphqlSubscriptionConditionOperator, GraphqlSubscriptionObservationDescriptor,
-        GraphqlSubscriptionReplayMode,
+        GraphqlSemanticClassification, GraphqlSemanticCollectionBound, GraphqlSemanticExport,
+        GraphqlSemanticFieldMetadata, GraphqlSemanticOperationDescriptor,
+        GraphqlSemanticRelationshipCardinality, GraphqlSemanticRelationshipDescriptor,
+        GraphqlSemanticResultDisclosure, GraphqlSemanticTypeKind, GraphqlSemanticTypeRef,
+        GraphqlSubscriptionConditionField, GraphqlSubscriptionConditionOperator,
+        GraphqlSubscriptionObservationDescriptor, GraphqlSubscriptionReplayMode,
     };
     use graphql_orm::prelude::*;
 
@@ -5715,6 +5715,7 @@ pub(crate) mod tests {
                                 true,
                             ),
                         }],
+                        collection_bound: Some(GraphqlSemanticCollectionBound::pageable("page")),
                     }),
                     classification: GraphqlSemanticClassification::Confidential,
                     export: GraphqlSemanticExport::Exportable,
