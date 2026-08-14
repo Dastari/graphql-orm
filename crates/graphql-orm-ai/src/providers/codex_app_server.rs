@@ -700,11 +700,14 @@ fn retained_request_with_bootstrap(
     mut request: ModelRequest,
     bootstrap: &AiCodexAppServerBootstrapInstructions,
 ) -> Result<ModelRequest, ProviderError> {
-    if !request.instructions.is_empty() {
-        return Err(ProviderError::Rejected);
+    if request.instructions.is_empty() {
+        request.instructions = bootstrap.blocks.clone();
+        return Ok(request);
     }
-    request.instructions = bootstrap.blocks.clone();
-    Ok(request)
+    if request.instructions == bootstrap.blocks {
+        return Ok(request);
+    }
+    Err(ProviderError::Rejected)
 }
 
 /// Resource limits for the run-scoped app-server pool.
@@ -1471,6 +1474,10 @@ enum EmptyThreadActivation {
     Consumed,
 }
 
+fn bound_turn_rejected(reason: crate::AiCodexBoundTurnRejection) -> ProviderError {
+    ProviderError::NewlyBoundTurnRejected(reason)
+}
+
 fn opened_session_matches(
     binding: AiProviderRunBinding,
     registration: &AiCodexAppServerRegistration,
@@ -1484,6 +1491,7 @@ fn opened_session_matches(
         && session.claim().descriptor().provider_model() == registration.logical_model()
         && session.claim().descriptor().registration_fingerprint() == registration.identity()
         && session.claim().descriptor().protocol_version() == registration.protocol_version()
+        && binding.matches_principal_reference(&session.claim().principal_reference)
 }
 
 struct ActiveTurnGuard {
@@ -1886,56 +1894,76 @@ impl AiCodexAppServerRunPool {
         input: &AiCodexAppServerTurnInput,
     ) -> Result<Arc<RunEntry>, ProviderError> {
         let input_instruction_fingerprint = input.instruction_fingerprint()?;
-        if session.activation() != crate::AiProviderSessionActivation::NewlyBoundEmpty
-            || !opened_session_matches(binding, registration, session)
-            || input.model() != registration.logical_model()
-        {
-            return Err(ProviderError::Rejected);
+        if session.activation() != crate::AiProviderSessionActivation::NewlyBoundEmpty {
+            return Err(bound_turn_rejected(
+                crate::AiCodexBoundTurnRejection::ActivationNotNewlyBound,
+            ));
         }
-        let entry = self
-            .inner
-            .entries
-            .lock()
-            .await
-            .get(&binding)
-            .cloned()
-            .filter(|entry| {
-                entry.registration_identity == registration.identity()
-                    && !entry.poisoned.load(Ordering::Acquire)
-            })
-            .ok_or(ProviderError::Rejected)?;
+        if !opened_session_matches(binding, registration, session) {
+            return Err(bound_turn_rejected(
+                crate::AiCodexBoundTurnRejection::OpenedSessionMismatch,
+            ));
+        }
+        if input.model() != registration.logical_model() {
+            return Err(bound_turn_rejected(
+                crate::AiCodexBoundTurnRejection::ModelMismatch,
+            ));
+        }
+        let Some(entry) = self.inner.entries.lock().await.get(&binding).cloned() else {
+            return Err(bound_turn_rejected(
+                crate::AiCodexBoundTurnRejection::ProcessBindingMissing,
+            ));
+        };
+        if entry.poisoned.load(Ordering::Acquire) {
+            return Err(bound_turn_rejected(
+                crate::AiCodexBoundTurnRejection::ProcessPoisoned,
+            ));
+        }
+        if entry.registration_identity != registration.identity() {
+            return Err(bound_turn_rejected(
+                crate::AiCodexBoundTurnRejection::RegistrationIdentityMismatch,
+            ));
+        }
         if entry
             .turn_active
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            return Err(ProviderError::Rejected);
+            return Err(bound_turn_rejected(
+                crate::AiCodexBoundTurnRejection::TurnAlreadyActive,
+            ));
         }
-        let activation_matches = {
+        let activation_rejection = {
             let mut activation = entry.empty_thread.lock().await;
             match &*activation {
                 EmptyThreadActivation::Available {
                     cursor_fingerprint,
                     bootstrap_fingerprint,
                     dynamic_tools,
-                } if cursor_fingerprint == &session.cursor().fingerprint()
-                    && bootstrap_fingerprint == &input_instruction_fingerprint
-                    && dynamic_tools == input.tools() =>
-                {
-                    *activation = EmptyThreadActivation::Consumed;
-                    true
+                } => {
+                    if cursor_fingerprint != &session.cursor().fingerprint() {
+                        Some(crate::AiCodexBoundTurnRejection::CursorFingerprintMismatch)
+                    } else if bootstrap_fingerprint != &input_instruction_fingerprint {
+                        Some(crate::AiCodexBoundTurnRejection::BootstrapFingerprintMismatch)
+                    } else if dynamic_tools != input.tools() {
+                        Some(crate::AiCodexBoundTurnRejection::FrozenDefinitionMismatch)
+                    } else {
+                        *activation = EmptyThreadActivation::Consumed;
+                        None
+                    }
                 }
                 EmptyThreadActivation::Vacant
                 | EmptyThreadActivation::Creating
-                | EmptyThreadActivation::Available { .. }
-                | EmptyThreadActivation::Consumed => false,
+                | EmptyThreadActivation::Consumed => {
+                    Some(crate::AiCodexBoundTurnRejection::ActivationUnavailable)
+                }
             }
         };
-        if !activation_matches {
+        if let Some(reason) = activation_rejection {
             entry.turn_active.store(false, Ordering::Release);
             self.invalidate(binding, &entry, AiProviderRunCloseReason::ProtocolViolation)
                 .await;
-            return Err(ProviderError::Rejected);
+            return Err(bound_turn_rejected(reason));
         }
         let previous = entry.turn_count.fetch_add(1, Ordering::AcqRel);
         if previous >= self.inner.limits.maximum_turns_per_run {
@@ -4603,6 +4631,7 @@ pub(crate) mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::path::PathBuf;
     use std::process::{Child, ChildStdin, Command, Stdio};
+    use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{self, Receiver};
     use std::thread::{self, JoinHandle};
@@ -4755,6 +4784,8 @@ pub(crate) mod tests {
         bound_turns: AtomicUsize,
         retained_turns: AtomicUsize,
         deleted_threads: AtomicUsize,
+        tool_free: AtomicBool,
+        dynamic_arguments: StdMutex<Option<Value>>,
     }
 
     impl Counters {
@@ -4773,6 +4804,8 @@ pub(crate) mod tests {
                 bound_turns: AtomicUsize::new(0),
                 retained_turns: AtomicUsize::new(0),
                 deleted_threads: AtomicUsize::new(0),
+                tool_free: AtomicBool::new(false),
+                dynamic_arguments: StdMutex::new(None),
             }
         }
     }
@@ -4880,18 +4913,54 @@ pub(crate) mod tests {
             if self.counters.pending.load(Ordering::SeqCst) {
                 return Ok(Box::pin(stream::pending()));
             }
-            let definition = input.tools().first().ok_or(ProviderError::Rejected)?;
-            let call = ProviderDynamicToolCall::from_definition(
+            if self.counters.tool_free.load(Ordering::SeqCst) {
+                return Ok(Box::pin(stream::iter([
+                    Ok(ProviderEvent::ResponseStarted { response_id: None }),
+                    Ok(ProviderEvent::TextDelta {
+                        text: "ok".to_owned(),
+                    }),
+                    Ok(ProviderEvent::Usage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        cached_input_tokens: 0,
+                    }),
+                    Ok(ProviderEvent::ResponseCompleted { response_id: None }),
+                ])));
+            }
+            let definition = input
+                .tools()
+                .iter()
+                .find(|tool| tool.provider_name == "inventory_count")
+                .or_else(|| input.tools().first())
+                .ok_or(ProviderError::Rejected)?;
+            let arguments = self
+                .counters
+                .dynamic_arguments
+                .lock()
+                .expect("dynamic argument fixture should not be poisoned")
+                .clone()
+                .unwrap_or_else(|| json!({"Limit": 3}));
+            let Ok(call) = ProviderDynamicToolCall::from_definition(
                 "turn-dynamic-1",
                 "call-dynamic-1",
                 definition,
-                json!({"Limit": 3}),
-            )?;
+                arguments.clone(),
+            ) else {
+                return Ok(Box::pin(stream::iter([
+                    Ok(ProviderEvent::ResponseStarted { response_id: None }),
+                    Ok(ProviderEvent::TextDelta {
+                        text: "ok".to_owned(),
+                    }),
+                    Ok(ProviderEvent::Usage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        cached_input_tokens: 0,
+                    }),
+                    Ok(ProviderEvent::ResponseCompleted { response_id: None }),
+                ])));
+            };
             let result = responder.respond(call).await?;
-            if result.call_id() != "call-dynamic-1"
-                || result.tool_id() != definition.tool_id
-                || result.output() != &json!({"count": 3})
-            {
+            if result.call_id() != "call-dynamic-1" || result.tool_id() != definition.tool_id {
                 return Err(ProviderError::Rejected);
             }
             Ok(Box::pin(stream::iter([
@@ -4904,11 +4973,11 @@ pub(crate) mod tests {
                 }),
                 Ok(ProviderEvent::ToolArgumentsDelta {
                     call_id: "call-dynamic-1".to_owned(),
-                    delta: "{\"Limit\":3}".to_owned(),
+                    delta: arguments.to_string(),
                 }),
                 Ok(ProviderEvent::ToolCallCompleted {
                     call_id: "call-dynamic-1".to_owned(),
-                    arguments: json!({"Limit": 3}),
+                    arguments,
                 }),
                 Ok(ProviderEvent::TextDelta {
                     text: "There are three.".to_owned(),
@@ -5216,6 +5285,70 @@ pub(crate) mod tests {
         canonical_dynamic_tool_catalog().1
     }
 
+    fn mixed_read_surface() -> (
+        crate::AiToolCatalog,
+        ModelToolDefinition,
+        ModelToolDefinition,
+        Value,
+        ModelRequest,
+    ) {
+        let (mut catalog, static_definition) = canonical_dynamic_tool_catalog();
+        let (compiled, _, generated_definition, generated_plan) =
+            generated_relational_query_surface();
+        catalog
+            .register_query_capability_catalog(&compiled)
+            .expect("generated query catalogue should join the static catalogue");
+        let request = ModelRequest {
+            instructions: Vec::new(),
+            continuation_mode: ModelContinuationMode::ProviderRetained,
+            tools: vec![static_definition.clone(), generated_definition.clone()],
+            ..model_request()
+        };
+        (
+            catalog,
+            static_definition,
+            generated_definition,
+            generated_plan,
+            request,
+        )
+    }
+
+    fn mixed_registration() -> Arc<AiCodexAppServerRegistration> {
+        Arc::new(
+            (*dynamic_registration("1.0.0"))
+                .clone()
+                .with_bootstrap_instructions(bootstrap_instructions()),
+        )
+    }
+
+    struct MixedDynamicResponder {
+        generated: ModelToolDefinition,
+        plan: Value,
+    }
+
+    #[async_trait]
+    impl ProviderDynamicToolResponder for MixedDynamicResponder {
+        async fn respond(
+            &self,
+            call: ProviderDynamicToolCall,
+        ) -> Result<ProviderDynamicToolResult, ProviderError> {
+            if call.tool_id() == self.generated.tool_id
+                && call.tool_fingerprint() == self.generated.fingerprint
+                && call.arguments() == &self.plan
+            {
+                return ProviderDynamicToolResult::new(&call, json!({"ok": true}));
+            }
+            let expected = dynamic_tool();
+            if call.tool_id() == expected.tool_id
+                && call.tool_fingerprint() == expected.fingerprint
+                && call.arguments() == &json!({"Limit": 3})
+            {
+                return ProviderDynamicToolResult::new(&call, json!({"count": 3}));
+            }
+            Err(ProviderError::Rejected)
+        }
+    }
+
     struct FakeDynamicResponder;
 
     #[async_trait]
@@ -5337,6 +5470,13 @@ pub(crate) mod tests {
             AiCodexAppServerTurnInput::try_from_retained_dynamic_request(request, &bootstrap),
             Err(ProviderError::Rejected)
         ));
+        let mut exact_bootstrap = dynamic_model_request();
+        exact_bootstrap.instructions = vec![
+            "Use the exact registered application tool when it is required to answer the request."
+                .to_owned(),
+        ];
+        AiCodexAppServerTurnInput::try_from_retained_dynamic_request(exact_bootstrap, &bootstrap)
+            .expect("an exact registration bootstrap copy is not request-local");
         assert!(AiCodexAppServerBootstrapInstructions::from_static(&["bad\0text"]).is_err());
     }
 
@@ -5508,7 +5648,12 @@ pub(crate) mod tests {
         }
     }
 
-    fn generated_relational_query_surface() -> (AiToolCatalog, ModelToolDefinition, Value) {
+    fn generated_relational_query_surface() -> (
+        crate::AiGraphqlQueryCapabilityCatalog,
+        AiToolCatalog,
+        ModelToolDefinition,
+        Value,
+    ) {
         const SDL: &str = r#"
             schema { query: Query }
             type Query { ReadParent(id: ID!): Parent! }
@@ -5629,7 +5774,7 @@ pub(crate) mod tests {
                 }
             }
         });
-        (catalog, definition, plan)
+        (compiled, catalog, definition, plan)
     }
 
     fn generated_scalar_query_definition() -> ModelToolDefinition {
@@ -5918,7 +6063,7 @@ pub(crate) mod tests {
 
     #[test]
     fn generated_query_catalog_omits_empty_required_and_codex_emits_the_empty_set() {
-        let (catalog, definition, plan) = generated_relational_query_surface();
+        let (_compiled, catalog, definition, plan) = generated_relational_query_surface();
         assert!(
             definition
                 .parameters
@@ -6007,7 +6152,7 @@ pub(crate) mod tests {
 
     #[test]
     fn generated_and_mixed_definition_sets_start_persistent_empty_threads() {
-        let (_, generated, _) = generated_relational_query_surface();
+        let (_, _, generated, _) = generated_relational_query_surface();
         let static_tool = dynamic_tool();
         let mut generated_only = initialized_protocol_actor();
         let _ = start_bound_dynamic_thread(&mut generated_only, std::slice::from_ref(&generated));
@@ -6031,7 +6176,7 @@ pub(crate) mod tests {
 
     #[test]
     fn generated_nested_plan_follows_catalog_definition_dynamic_call_and_compile_path() {
-        let (catalog, definition, plan) = generated_relational_query_surface();
+        let (_compiled, catalog, definition, plan) = generated_relational_query_surface();
         let mut actor = initialized_protocol_actor();
         let thread_id = start_bound_dynamic_thread(&mut actor, std::slice::from_ref(&definition));
         let input = AiCodexAppServerTurnInput::try_from_retained_dynamic_request(
@@ -6116,7 +6261,7 @@ pub(crate) mod tests {
 
     #[test]
     fn generated_query_retained_create_and_resume_keep_the_frozen_definition_set() {
-        let (_, definition, _) = generated_relational_query_surface();
+        let (_, _, definition, _) = generated_relational_query_surface();
         let input = AiCodexAppServerTurnInput::try_from_retained_dynamic_request(
             ModelRequest {
                 instructions: Vec::new(),
@@ -6173,7 +6318,7 @@ pub(crate) mod tests {
 
     #[test]
     fn codex_projection_rejects_malformed_required_and_unrepresentable_generated_shapes() {
-        let (catalog, definition, plan) = generated_relational_query_surface();
+        let (_compiled, catalog, definition, plan) = generated_relational_query_surface();
         let catalog_id = AiToolId::parse(&definition.tool_id).expect("capability ID should parse");
         assert!(matches!(
             catalog.compile_query_capability(&catalog_id, "stale-fingerprint", plan.clone()),
@@ -6799,6 +6944,481 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn mixed_read_capabilities_start_newly_bound_dynamic_turn_without_resume() {
+        let counters = Arc::new(Counters::new());
+        let registration = mixed_registration();
+        let provider =
+            AiCodexAppServerProvider::new(registration.clone(), pool(counters.clone(), 1, 4));
+        let (_catalog, _static_definition, _generated_definition, _generated_plan, request) =
+            mixed_read_surface();
+        let context = provider_context(registration.provider_profile_id(), &request);
+        let binding = context
+            .run_binding()
+            .expect("executor context should carry the exact run binding");
+        let descriptor = crate::AiProviderSessionDescriptor::new(
+            ProviderKind::LocalHarness,
+            registration.provider_profile_id(),
+            registration.logical_model(),
+            registration.identity(),
+            registration.protocol_version(),
+            "d".repeat(64),
+        )
+        .expect("descriptor should validate");
+        let cursor = provider
+            .create_empty_session(&binding, &descriptor, &request)
+            .await
+            .expect("mixed definition set should create a persistent empty thread");
+        let opened = opened_session(binding, &registration, cursor.clone())
+            .activate_newly_bound_empty(binding, &cursor)
+            .expect("newly bound empty activation should match the created cursor");
+        let context = context
+            .with_provider_session(opened)
+            .expect("opened provider session should match the run context");
+        counters.tool_free.store(true, Ordering::SeqCst);
+        let events = provider
+            .stream_with_dynamic_tools(request, context, Arc::new(FakeDynamicResponder))
+            .await
+            .expect("newly bound mixed turn should start without resume");
+        let events = events.collect::<Vec<_>>().await;
+        assert!(events.iter().all(Result::is_ok));
+        assert_eq!(counters.created_threads.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.created_dynamic_tools.load(Ordering::SeqCst), 2);
+        assert_eq!(counters.bound_turns.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.retained_turns.load(Ordering::SeqCst), 0);
+        assert_eq!(counters.turns.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn mixed_read_plan_first_turn_accepts_exact_bootstrap_and_rebuilt_definitions() {
+        let counters = Arc::new(Counters::new());
+        let registration = mixed_registration();
+        let provider =
+            AiCodexAppServerProvider::new(registration.clone(), pool(counters.clone(), 1, 4));
+        let (catalog, static_definition, generated_definition, _, create_request) =
+            mixed_read_surface();
+        let rebuilt_static = catalog
+            .read_only_model_definition(
+                &crate::AiToolId::parse(&static_definition.tool_id)
+                    .expect("static tool ID should parse"),
+                static_definition.provider_name.clone(),
+            )
+            .expect("static catalog definition should rebuild identically");
+        let rebuilt_generated = catalog
+            .query_capability_model_definition(
+                &crate::AiToolId::parse(&generated_definition.tool_id)
+                    .expect("generated tool ID should parse"),
+                generated_definition.provider_name.clone(),
+            )
+            .expect("generated catalog definition should rebuild identically");
+        let mut first_turn = create_request.clone();
+        first_turn.instructions = vec![
+            "Use the exact registered application tool when it is required to answer the request."
+                .to_owned(),
+        ];
+        first_turn.tools = vec![rebuilt_static, rebuilt_generated];
+        let context = provider_context(registration.provider_profile_id(), &first_turn);
+        let binding = context
+            .run_binding()
+            .expect("executor context should carry the exact run binding");
+        let descriptor = crate::AiProviderSessionDescriptor::new(
+            ProviderKind::LocalHarness,
+            registration.provider_profile_id(),
+            registration.logical_model(),
+            registration.identity(),
+            registration.protocol_version(),
+            "d".repeat(64),
+        )
+        .expect("descriptor should validate");
+        crate::AiReadOnlyAgentTurnPlan::new_experimental_dynamic_tools(
+            crate::AiProviderCallPlan::new_with_read_capabilities(
+                ProviderKind::LocalHarness,
+                first_turn.clone(),
+                crate::AiBudgetReservationRequest {
+                    scope: crate::AiScope::new("project", "test"),
+                    session_id: binding.session_id(),
+                    run_id: binding.run_id(),
+                    attempt_id: binding.attempt_id(),
+                    lease_generation: binding.lease_generation(),
+                    provider_kind: ProviderKind::LocalHarness,
+                    model: first_turn.model.clone(),
+                    pricing_policy_version: "test-pricing-v1".to_owned(),
+                    estimate: crate::AiBudgetAmounts {
+                        input_tokens: 1_000,
+                        output_tokens: 1_000,
+                        tool_units: 0,
+                        image_units: 0,
+                        cost_microunits: 0,
+                        runs: 1,
+                    },
+                    idempotency_key: "mixed-bootstrap-first-turn".to_owned(),
+                    expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+                },
+                vec![crate::AiEgressManifest {
+                    provider_profile_id: registration.provider_profile_id().to_owned(),
+                    provider_kind: ProviderKind::LocalHarness.as_str().to_owned(),
+                    model: first_turn.model.clone(),
+                    destination: "local-codex".to_owned(),
+                    destination_trust: crate::AiDestinationTrust::Local,
+                    capability: crate::AiEgressCapability::ModelInference,
+                    scope: crate::AiScope::new("project", "test"),
+                    session_id: Some(binding.session_id()),
+                    run_id: Some(binding.run_id()),
+                    sources: vec![crate::AiDataSourceRef {
+                        kind: "message".to_owned(),
+                        reference: "synthetic".to_owned(),
+                        classification: crate::DataClassification::Public,
+                        trust: crate::AiSourceTrust::UserProvided,
+                    }],
+                    estimated_bytes: first_turn.conservative_egress_bytes(),
+                    estimated_tokens: 100,
+                    attachment_count: 0,
+                    purpose: "test".to_owned(),
+                    retention: "none".to_owned(),
+                    residency: None,
+                    policy_version: "test".to_owned(),
+                    consent_reference: None,
+                }],
+                "mixed-bootstrap-first-turn",
+                &catalog,
+                &{
+                    let mut static_policy =
+                        crate::AiToolPolicySet::new(crate::ToolMaturity::ReadOnly);
+                    static_policy.bind(crate::AiToolPolicyBinding {
+                        tool_id: crate::AiToolId::parse(&static_definition.tool_id)
+                            .expect("static tool ID should parse"),
+                        fingerprint: static_definition.fingerprint.clone(),
+                        enabled: true,
+                    });
+                    static_policy
+                },
+                &{
+                    let generated_capability = catalog
+                        .query_capabilities()
+                        .find(|capability| capability.id().as_str() == generated_definition.tool_id)
+                        .expect("generated capability should be registered");
+                    let mut generated_targets = crate::AiGeneratedGraphqlTargetPolicySet::new();
+                    generated_targets
+                        .bind(
+                            crate::AiGeneratedGraphqlTargetPolicyBinding::new(
+                                generated_capability.target_id().clone(),
+                                generated_capability.finished_schema_fingerprint(),
+                                generated_capability.semantic_catalog_fingerprint(),
+                            )
+                            .expect("generated target binding should validate")
+                            .allow_queries(),
+                        )
+                        .expect("generated target should bind");
+                    generated_targets
+                },
+            )
+            .expect("mixed static and generated read plan should validate"),
+            crate::AiToolResultEgressRoute::new(
+                "canonical-codex-profile",
+                "sandboxed-local-harness",
+                crate::AiDestinationTrust::Local,
+                "answer-with-registered-tool",
+                "provider-session",
+                "canonical-egress-v1",
+            )
+            .expect("mixed result route should validate"),
+            crate::AiResolvedRuleSet::new(
+                crate::AiScope::new("project", "test"),
+                crate::AiRuleConstraints {
+                    enabled: true,
+                    maximum_classification: crate::DataClassification::Restricted,
+                    maximum_tool_maturity: crate::ToolMaturity::ReadOnly,
+                    approval_requirement: crate::AiRuleApprovalRequirement::DescriptorPolicy,
+                    allowed_tool_fingerprints: None,
+                    allowed_provider_kinds: None,
+                    allowed_provider_capabilities: None,
+                    allow_provider_retention: true,
+                    allow_byok: false,
+                    budget: crate::AiRuleBudgetCeilings {
+                        maximum_steps: Some(32),
+                        maximum_duration_seconds: Some(3_600),
+                        maximum_output_tokens: Some(100_000),
+                        maximum_cost_microunits: Some(100_000_000),
+                        maximum_provider_calls: Some(16),
+                        maximum_tool_units: Some(1_000),
+                        maximum_web_search_calls: Some(4),
+                        maximum_image_units: Some(1_000),
+                    },
+                },
+                Vec::new(),
+            )
+            .expect("mixed rule set should validate"),
+            false,
+        )
+        .expect("mixed experimental dynamic-tool plan should validate")
+        .with_provider_session(
+            crate::AiProviderSessionTurnPlan::new(descriptor.clone(), "d".repeat(64))
+                .expect("provider-session plan should validate"),
+        )
+        .expect("provider-session plan should match the mixed retained call");
+
+        let cursor = provider
+            .create_empty_session(&binding, &descriptor, &create_request)
+            .await
+            .expect("mixed definition set should create a persistent empty thread");
+        let opened = opened_session(binding, &registration, cursor.clone())
+            .activate_newly_bound_empty(binding, &cursor)
+            .expect("newly bound empty activation should match the created cursor");
+        counters.tool_free.store(true, Ordering::SeqCst);
+        let events = provider
+            .stream_with_dynamic_tools(
+                first_turn,
+                context
+                    .with_provider_session(opened)
+                    .expect("opened provider session should match the run context"),
+                Arc::new(FakeDynamicResponder),
+            )
+            .await
+            .expect("exact bootstrap copy and rebuilt canonical definitions should start once");
+        let events = events.collect::<Vec<_>>().await;
+        assert!(events.iter().all(Result::is_ok));
+        assert_eq!(counters.created_threads.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.bound_turns.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.retained_turns.load(Ordering::SeqCst), 0);
+        assert_eq!(counters.turns.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn mixed_read_plan_creates_newly_bound_generated_call_and_resumes() {
+        let counters = Arc::new(Counters::new());
+        let registration = mixed_registration();
+        let provider =
+            AiCodexAppServerProvider::new(registration.clone(), pool(counters.clone(), 1, 4));
+        let (catalog, static_definition, generated_definition, generated_plan, request) =
+            mixed_read_surface();
+        let context = provider_context(registration.provider_profile_id(), &request);
+        let binding = context
+            .run_binding()
+            .expect("executor context should carry the exact run binding");
+        let mut static_policy = crate::AiToolPolicySet::new(crate::ToolMaturity::ReadOnly);
+        static_policy.bind(crate::AiToolPolicyBinding {
+            tool_id: crate::AiToolId::parse(&static_definition.tool_id)
+                .expect("static tool ID should parse"),
+            fingerprint: static_definition.fingerprint.clone(),
+            enabled: true,
+        });
+        let generated_capability = catalog
+            .query_capabilities()
+            .find(|capability| capability.id().as_str() == generated_definition.tool_id)
+            .expect("generated capability should be registered");
+        let mut generated_targets = crate::AiGeneratedGraphqlTargetPolicySet::new();
+        generated_targets
+            .bind(
+                crate::AiGeneratedGraphqlTargetPolicyBinding::new(
+                    generated_capability.target_id().clone(),
+                    generated_capability.finished_schema_fingerprint(),
+                    generated_capability.semantic_catalog_fingerprint(),
+                )
+                .expect("generated target binding should validate")
+                .allow_queries(),
+            )
+            .expect("generated target should bind");
+        let scope = crate::AiScope::new("project", "test");
+        let budget = crate::AiBudgetReservationRequest {
+            scope: scope.clone(),
+            session_id: binding.session_id(),
+            run_id: binding.run_id(),
+            attempt_id: binding.attempt_id(),
+            lease_generation: binding.lease_generation(),
+            provider_kind: ProviderKind::LocalHarness,
+            model: request.model.clone(),
+            pricing_policy_version: "test-pricing-v1".to_owned(),
+            estimate: crate::AiBudgetAmounts {
+                input_tokens: 1_000,
+                output_tokens: 1_000,
+                tool_units: 0,
+                image_units: 0,
+                cost_microunits: 0,
+                runs: 1,
+            },
+            idempotency_key: "mixed-read-plan".to_owned(),
+            expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+        };
+        let manifest = crate::AiEgressManifest {
+            provider_profile_id: registration.provider_profile_id().to_owned(),
+            provider_kind: ProviderKind::LocalHarness.as_str().to_owned(),
+            model: request.model.clone(),
+            destination: "local-codex".to_owned(),
+            destination_trust: crate::AiDestinationTrust::Local,
+            capability: crate::AiEgressCapability::ModelInference,
+            scope,
+            session_id: Some(binding.session_id()),
+            run_id: Some(binding.run_id()),
+            sources: vec![crate::AiDataSourceRef {
+                kind: "message".to_owned(),
+                reference: "synthetic".to_owned(),
+                classification: crate::DataClassification::Public,
+                trust: crate::AiSourceTrust::UserProvided,
+            }],
+            estimated_bytes: request.conservative_egress_bytes(),
+            estimated_tokens: 100,
+            attachment_count: 0,
+            purpose: "test".to_owned(),
+            retention: "none".to_owned(),
+            residency: None,
+            policy_version: "test".to_owned(),
+            consent_reference: None,
+        };
+        crate::AiProviderCallPlan::new_with_read_capabilities(
+            ProviderKind::LocalHarness,
+            request.clone(),
+            budget,
+            vec![manifest],
+            "mixed-read-plan",
+            &catalog,
+            &static_policy,
+            &generated_targets,
+        )
+        .expect("mixed static and generated read plan should validate");
+
+        let descriptor = crate::AiProviderSessionDescriptor::new(
+            ProviderKind::LocalHarness,
+            registration.provider_profile_id(),
+            registration.logical_model(),
+            registration.identity(),
+            registration.protocol_version(),
+            "d".repeat(64),
+        )
+        .expect("descriptor should validate");
+        let cursor = provider
+            .create_empty_session(&binding, &descriptor, &request)
+            .await
+            .expect("mixed definition set should create a persistent empty thread");
+        let opened = opened_session(binding, &registration, cursor.clone())
+            .activate_newly_bound_empty(binding, &cursor)
+            .expect("newly bound empty activation should match the created cursor");
+        *counters
+            .dynamic_arguments
+            .lock()
+            .expect("dynamic argument fixture should not be poisoned") =
+            Some(generated_plan.clone());
+        let context = context
+            .with_provider_session(opened)
+            .expect("opened provider session should match the run context");
+        let responder = MixedDynamicResponder {
+            generated: generated_definition.clone(),
+            plan: generated_plan,
+        };
+        let events = provider
+            .stream_with_dynamic_tools(request.clone(), context, Arc::new(responder))
+            .await
+            .expect("newly bound generated-query turn should start once");
+        let events = events.collect::<Vec<_>>().await;
+        assert!(events.iter().all(Result::is_ok));
+        assert_eq!(counters.bound_turns.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.retained_turns.load(Ordering::SeqCst), 0);
+
+        let resumed = opened_session(binding, &registration, cursor);
+        let resume_input = AiCodexAppServerTurnInput::try_from_retained_dynamic_request(
+            request,
+            registration.bootstrap_instructions(),
+        )
+        .expect("later turn should reuse the frozen mixed definitions");
+        let events = provider
+            .pool
+            .start_retained_dynamic_turn(
+                binding,
+                registration,
+                resumed,
+                resume_input,
+                Arc::new(FakeDynamicResponder),
+            )
+            .await
+            .expect("later turn should resume the same frozen thread");
+        let events = events.collect::<Vec<_>>().await;
+        assert!(events.iter().all(Result::is_ok));
+        assert_eq!(counters.bound_turns.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.retained_turns.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn newly_bound_turn_reports_content_free_activation_phase() {
+        let counters = Arc::new(Counters::new());
+        let registration = mixed_registration();
+        let pool = pool(counters.clone(), 1, 2);
+        let binding = binding();
+        let (_, _, _, _, request) = mixed_read_surface();
+        let cursor = pool
+            .create_empty_thread(binding, registration.clone(), request.tools.clone())
+            .await
+            .expect("mixed empty thread should create");
+        let opened = opened_session(binding, &registration, cursor.clone())
+            .activate_newly_bound_empty(binding, &cursor)
+            .expect("activation should validate");
+        let mut mismatched = request.clone();
+        mismatched.model = "other-model".to_owned();
+        let mismatched_input = AiCodexAppServerTurnInput::try_from_retained_dynamic_request(
+            mismatched,
+            registration.bootstrap_instructions(),
+        )
+        .expect("structurally valid model swap should convert");
+        assert!(matches!(
+            pool.start_bound_dynamic_turn(
+                binding,
+                registration.clone(),
+                opened.clone(),
+                mismatched_input,
+                Arc::new(FakeDynamicResponder),
+            )
+            .await,
+            Err(ProviderError::NewlyBoundTurnRejected(
+                crate::AiCodexBoundTurnRejection::ModelMismatch
+            ))
+        ));
+
+        let other_registration = dynamic_registration("2.0.0");
+        let swapped_session = opened_session(binding, &other_registration, cursor.clone())
+            .activate_newly_bound_empty(binding, &cursor)
+            .expect("crate marker alone is not registration proof");
+        let input = AiCodexAppServerTurnInput::try_from_retained_dynamic_request(
+            request.clone(),
+            registration.bootstrap_instructions(),
+        )
+        .expect("exact mixed input should convert");
+        assert!(matches!(
+            pool.start_bound_dynamic_turn(
+                binding,
+                registration.clone(),
+                swapped_session,
+                input,
+                Arc::new(FakeDynamicResponder),
+            )
+            .await,
+            Err(ProviderError::NewlyBoundTurnRejected(
+                crate::AiCodexBoundTurnRejection::OpenedSessionMismatch
+            ))
+        ));
+
+        let empty_bootstrap_input = AiCodexAppServerTurnInput::try_from_dynamic_request(request)
+            .expect("empty-instruction dynamic input should convert");
+        assert!(matches!(
+            pool.start_bound_dynamic_turn(
+                binding,
+                registration,
+                opened,
+                empty_bootstrap_input,
+                Arc::new(FakeDynamicResponder),
+            )
+            .await,
+            Err(ProviderError::NewlyBoundTurnRejected(
+                crate::AiCodexBoundTurnRejection::BootstrapFingerprintMismatch
+            ))
+        ));
+        assert_eq!(counters.bound_turns.load(Ordering::SeqCst), 0);
+        let encoded = format!(
+            "{}",
+            crate::AiCodexBoundTurnRejection::FrozenDefinitionMismatch
+        );
+        assert_eq!(encoded, "codex_bound_turn_frozen_definition_mismatch");
+        assert!(!encoded.contains("cursor"));
+        assert!(!encoded.contains("prompt"));
+    }
+
+    #[tokio::test]
     async fn provider_dispatches_tool_free_newly_bound_session_directly() {
         let counters = Arc::new(Counters::new());
         let registration = registration("1.0.0");
@@ -6869,7 +7489,9 @@ pub(crate) mod tests {
         assert!(matches!(
             pool.start_bound_turn(binding, registration, replay, turn())
                 .await,
-            Err(ProviderError::Rejected)
+            Err(ProviderError::NewlyBoundTurnRejected(
+                crate::AiCodexBoundTurnRejection::ActivationUnavailable
+            ))
         ));
     }
 
@@ -6916,7 +7538,9 @@ pub(crate) mod tests {
                     Arc::new(FakeDynamicResponder),
                 )
                 .await,
-            Err(ProviderError::Rejected)
+            Err(ProviderError::NewlyBoundTurnRejected(
+                crate::AiCodexBoundTurnRejection::CursorFingerprintMismatch
+            ))
         ));
         assert_eq!(counters.bound_turns.load(Ordering::SeqCst), 0);
 
@@ -6936,7 +7560,9 @@ pub(crate) mod tests {
                     Arc::new(FakeDynamicResponder),
                 )
                 .await,
-            Err(ProviderError::Rejected)
+            Err(ProviderError::NewlyBoundTurnRejected(
+                crate::AiCodexBoundTurnRejection::ProcessBindingMissing
+            ))
         ));
         assert_eq!(other_counters.launches.load(Ordering::SeqCst), 0);
     }
@@ -6999,7 +7625,9 @@ pub(crate) mod tests {
                 Arc::new(FakeDynamicResponder),
             )
             .await,
-            Err(ProviderError::Rejected)
+            Err(ProviderError::NewlyBoundTurnRejected(
+                crate::AiCodexBoundTurnRejection::FrozenDefinitionMismatch
+            ))
         ));
         assert_eq!(counters.bound_turns.load(Ordering::SeqCst), 0);
     }
@@ -7026,7 +7654,9 @@ pub(crate) mod tests {
         assert!(matches!(
             pool.start_bound_turn(binding, registration, opened, turn())
                 .await,
-            Err(ProviderError::Rejected)
+            Err(ProviderError::NewlyBoundTurnRejected(
+                crate::AiCodexBoundTurnRejection::ProcessBindingMissing
+            ))
         ));
         assert_eq!(counters.bound_turns.load(Ordering::SeqCst), 0);
         assert_eq!(counters.turns.load(Ordering::SeqCst), 0);

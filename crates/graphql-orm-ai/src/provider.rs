@@ -1588,6 +1588,9 @@ pub enum ProviderError {
     /// Provider rejected safe request metadata.
     #[error("provider rejected request")]
     Rejected,
+    /// A newly bound empty retained thread failed a closed activation check.
+    #[error("provider newly-bound turn rejected: {0}")]
+    NewlyBoundTurnRejected(AiCodexBoundTurnRejection),
     /// Stream was cancelled.
     #[error("provider stream cancelled")]
     Cancelled,
@@ -1610,7 +1613,8 @@ impl ProviderError {
             | Self::EgressDenied
             | Self::BudgetDenied
             | Self::Unsupported
-            | Self::Rejected => AiProviderFailureCategory::ProviderRejection,
+            | Self::Rejected
+            | Self::NewlyBoundTurnRejected(_) => AiProviderFailureCategory::ProviderRejection,
             Self::RateLimited => AiProviderFailureCategory::RateLimit,
             Self::Unavailable => AiProviderFailureCategory::TransportUnavailable,
             Self::Cancelled => AiProviderFailureCategory::Cancellation,
@@ -1667,6 +1671,65 @@ impl AiProviderFailureCategory {
     }
 }
 
+/// Content-free phase that rejected a newly bound empty retained-thread turn.
+///
+/// The value identifies only the closed activation check that failed. It never
+/// includes cursors, prompts, tool names, arguments, results, or provider
+/// payloads and is safe for host metrics and ordinary errors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AiCodexBoundTurnRejection {
+    /// The opened session was not marked as a newly bound empty thread.
+    ActivationNotNewlyBound,
+    /// The opened session claim did not match the exact run binding or
+    /// registration identity.
+    OpenedSessionMismatch,
+    /// The turn model did not match the frozen registration model.
+    ModelMismatch,
+    /// No process entry existed for the exact run binding.
+    ProcessBindingMissing,
+    /// The process was frozen to a different registration identity.
+    RegistrationIdentityMismatch,
+    /// The exact process had already been poisoned.
+    ProcessPoisoned,
+    /// Another turn was already active on the exact process.
+    TurnAlreadyActive,
+    /// The opened cursor fingerprint did not match the frozen empty thread.
+    CursorFingerprintMismatch,
+    /// The turn bootstrap fingerprint did not match the frozen empty thread.
+    BootstrapFingerprintMismatch,
+    /// The turn's dynamic-tool definitions did not match the frozen set.
+    FrozenDefinitionMismatch,
+    /// The empty-thread activation was vacant, still creating, or already
+    /// consumed.
+    ActivationUnavailable,
+}
+
+impl AiCodexBoundTurnRejection {
+    /// Stable bounded machine code.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ActivationNotNewlyBound => "codex_bound_turn_activation_not_newly_bound",
+            Self::OpenedSessionMismatch => "codex_bound_turn_opened_session_mismatch",
+            Self::ModelMismatch => "codex_bound_turn_model_mismatch",
+            Self::ProcessBindingMissing => "codex_bound_turn_process_binding_missing",
+            Self::RegistrationIdentityMismatch => "codex_bound_turn_registration_identity_mismatch",
+            Self::ProcessPoisoned => "codex_bound_turn_process_poisoned",
+            Self::TurnAlreadyActive => "codex_bound_turn_already_active",
+            Self::CursorFingerprintMismatch => "codex_bound_turn_cursor_fingerprint_mismatch",
+            Self::BootstrapFingerprintMismatch => "codex_bound_turn_bootstrap_fingerprint_mismatch",
+            Self::FrozenDefinitionMismatch => "codex_bound_turn_frozen_definition_mismatch",
+            Self::ActivationUnavailable => "codex_bound_turn_activation_unavailable",
+        }
+    }
+}
+
+impl fmt::Display for AiCodexBoundTurnRejection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 impl fmt::Display for AiProviderFailureCategory {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
@@ -1682,6 +1745,17 @@ impl fmt::Display for AiProviderFailureCategory {
 pub trait AiProviderFailureDiagnosticSink: Send + Sync {
     /// Records one bounded provider failure category.
     fn record(&self, category: AiProviderFailureCategory);
+
+    /// Records the closed phase that rejected a newly bound empty Codex turn.
+    ///
+    /// The default records only [`AiProviderFailureCategory::ProviderRejection`].
+    /// Hosts may override this method to distinguish activation, binding,
+    /// cursor, bootstrap, and frozen-definition failures without observing
+    /// cursors, prompts, tools, arguments, results, or provider payloads.
+    fn record_newly_bound_turn_rejection(&self, reason: AiCodexBoundTurnRejection) {
+        let _ = reason;
+        self.record(AiProviderFailureCategory::ProviderRejection);
+    }
 }
 
 /// Provider event stream.
@@ -2532,5 +2606,36 @@ mod safe_failure_tests {
         let sensitive = "secret-provider-body bearer-token cursor-value";
         let error = ProviderError::Classified(AiProviderFailureCategory::ProtocolViolation);
         assert!(!format!("{error:?} {error}").contains(sensitive));
+        let bound = ProviderError::NewlyBoundTurnRejected(
+            AiCodexBoundTurnRejection::FrozenDefinitionMismatch,
+        );
+        assert_eq!(
+            bound.safe_category(),
+            AiProviderFailureCategory::ProviderRejection
+        );
+        let bound_text = format!("{bound:?} {bound}");
+        assert!(bound_text.contains("codex_bound_turn_frozen_definition_mismatch"));
+        assert!(!bound_text.contains(sensitive));
+
+        struct DefaultBoundTurnSink(std::sync::Mutex<Vec<AiProviderFailureCategory>>);
+        impl AiProviderFailureDiagnosticSink for DefaultBoundTurnSink {
+            fn record(&self, category: AiProviderFailureCategory) {
+                self.0
+                    .lock()
+                    .expect("bound-turn diagnostic lock should remain available")
+                    .push(category);
+            }
+        }
+        let sink = DefaultBoundTurnSink(std::sync::Mutex::new(Vec::new()));
+        sink.record_newly_bound_turn_rejection(
+            AiCodexBoundTurnRejection::BootstrapFingerprintMismatch,
+        );
+        assert_eq!(
+            sink.0
+                .lock()
+                .expect("bound-turn diagnostic lock should remain available")
+                .as_slice(),
+            &[AiProviderFailureCategory::ProviderRejection]
+        );
     }
 }

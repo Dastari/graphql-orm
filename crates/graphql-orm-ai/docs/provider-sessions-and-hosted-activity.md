@@ -144,9 +144,19 @@ to an empty persistent thread. It sends no user input, request-local
 instruction, route context, secret, or resolver result until the opaque cursor
 is durably protected and claimed. The bootstrap fingerprint is part of the
 registration identity, and retained requests must leave
-`ModelRequest::instructions` empty. First activation and every resume prove
-the same bootstrap, cursor, owner/session/scope/profile/model/executable/
-protocol/policy/transcript/run fence before business input can start.
+`ModelRequest::instructions` empty or copy the exact frozen bootstrap blocks.
+Any other request-local instruction is rejected. First activation and every
+resume prove the same bootstrap, cursor, owner/session/scope/profile/model/
+executable/protocol/policy/transcript/run fence before business input can
+start.
+
+The first turn after empty-thread create consumes a crate-owned NewlyBoundEmpty
+activation and starts on that exact process. If that activation check fails,
+`ProviderError::NewlyBoundTurnRejected` names only the closed phase
+(opened-session, registration, cursor, bootstrap, frozen definitions, or
+missing process). Coordinator hosts can also receive that phase from
+`AiProviderFailureDiagnosticSink::record_newly_bound_turn_rejection`. Those
+codes are content-free and do not authorize a fresh-thread fallback.
 
 One protocol actor may perform sequential lifecycle cycles on its retained
 process. Each typed `thread/start` or `thread/resume` begins a private

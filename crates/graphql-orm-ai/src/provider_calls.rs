@@ -2425,6 +2425,16 @@ impl AiProviderCallExecutor {
         }
     }
 
+    fn record_provider_error(&self, error: &ProviderError) {
+        if let ProviderError::NewlyBoundTurnRejected(reason) = error
+            && let Some(sink) = &self.failure_diagnostic_sink
+        {
+            sink.record_newly_bound_turn_rejection(*reason);
+            return;
+        }
+        self.record_provider_failure(error.safe_category());
+    }
+
     /// Enables protected durable visible-delta persistence for this executor.
     ///
     /// Without a sink the provider result remains fully bounded and durable
@@ -3080,7 +3090,7 @@ impl AiProviderCallExecutor {
                 .await
         }
         .map_err(|error| {
-            self.record_provider_failure(error.safe_category());
+            self.record_provider_error(&error);
             AiError::ProviderFailed
         })?;
         let mut events = Vec::new();

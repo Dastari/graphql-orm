@@ -18,6 +18,35 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.78.5] - 2026-08-14
+
+### Fixed
+
+- A retained Codex first turn whose `ModelRequest::instructions` are exactly
+  the frozen registration bootstrap is now accepted as the empty request-local
+  set. On 0.78.4 that exact copy was rejected before
+  `AiCodexAppServerRunProcess::start_bound_dynamic_turn`, so a mixed
+  static/generated NewlyBoundEmpty turn never left `begin_bound_turn`.
+  Request-local replacements remain rejected, and the bootstrap fingerprint is
+  unchanged.
+- Newly bound empty-thread activation now reports a content-free
+  `AiCodexBoundTurnRejection` phase instead of a generic rejection. Coordinator
+  hosts can also distinguish the closed phase through
+  `AiProviderFailureDiagnosticSink::record_newly_bound_turn_rejection` without
+  exposing cursors, prompts, tools, or provider payloads.
+
+### Security
+
+- `begin_bound_turn` still requires NewlyBoundEmpty activation, exact run
+  binding, registration identity, cursor fingerprint, bootstrap fingerprint,
+  and frozen dynamic-tool definitions. The first turn still starts on the
+  creating process and does not fall back to a fresh thread.
+
+### Schema
+
+- AI schema module remains `0.59.0`. This release changes no persistence
+  entity, stored semantic meaning, table, column, index or constraint.
+
 ## [0.78.4] - 2026-08-14
 
 ### Fixed

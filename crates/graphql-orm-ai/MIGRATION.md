@@ -19,6 +19,29 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.78.5: typed newly-bound Codex turn rejection (schema remains 0.59.0)
+
+No database, data, GraphQL SDL, backup, restore or AI schema-module migration
+is required. Existing provider-session cursors do not need to be drained.
+
+A retained first turn may now carry the exact registration bootstrap blocks
+in `ModelRequest::instructions` or leave that field empty. Hosts that already
+copy the frozen bootstrap into the planning request do not need a definition
+rewrite, activation flag, raw constructor, or fresh-thread fallback. Any other
+instruction text is still rejected.
+
+Hosts that inspect `ProviderError` should match
+`NewlyBoundTurnRejected(AiCodexBoundTurnRejection)` for the first turn after
+`create_empty_session`. Coordinator hosts that only see `AiError::ProviderFailed`
+can override
+`AiProviderFailureDiagnosticSink::record_newly_bound_turn_rejection`. The
+phase names are stable machine codes such as
+`codex_bound_turn_frozen_definition_mismatch` and
+`codex_bound_turn_bootstrap_fingerprint_mismatch`. They never include
+cursors, prompts, tool names, arguments, or provider payloads.
+
+Pin `graphql-orm-ai` `0.78.5` at the reviewed full monorepo revision.
+
 ## 0.78.4: Codex omitted-required object projection (schema remains 0.59.0)
 
 No database, data, GraphQL SDL, backup, restore or AI schema-module migration
