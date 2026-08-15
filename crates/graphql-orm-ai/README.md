@@ -3,7 +3,7 @@ title: "graphql-orm-ai"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-14
+last_reviewed: 2026-08-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.79.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.80.0", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -133,6 +133,28 @@ Each provider feature is independently buildable with one persistence backend.
 Use `scripts/check-ai-provider-lanes.sh` from the repository root to verify one
 feature at a time; provider feature unification is not required for a valid
 adapter build.
+
+## Reasoning effort profiles
+
+`ModelReasoningEffort` is the closed provider-neutral selection:
+`Unspecified`, `None`, `Low`, `Medium`, `High`, `XHigh`, or `Max`.
+`Unspecified` omits a provider override; explicit `None` does not. Hosts define
+the reviewed exact-model set and default with
+`ModelReasoningEffortProfile::new`, install profiles on the native OpenAI
+configuration or exact Codex registration, and expose only
+`profile.supported()` to settings clients.
+
+Set the same selected value on `ModelRequest::reasoning_effort` and
+`AiBudgetReservationRequest::reasoning_effort`. The runtime rejects an
+explicit value absent from the active model profile before provider execution.
+For retained Codex sessions, create the provider-session descriptor with
+`registration.provider_session_fingerprint(selected_effort)?`; the app-server
+override affects subsequent turns, so changing effort requires exact cursor
+cleanup and rebind. Effort selection neither enables visible reasoning
+summaries nor grants tools, egress, filesystem, shell, browser, MCP, approval,
+or mutation authority. See the
+[provider-session guide](docs/provider-sessions-and-hosted-activity.md) and
+[migration guide](MIGRATION.md).
 
 ## Configuration, operations, and errors
 

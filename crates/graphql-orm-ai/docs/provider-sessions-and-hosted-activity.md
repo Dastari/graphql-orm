@@ -3,7 +3,7 @@ title: "Provider Sessions, Hosted Search, and Visible Activity"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-14
+last_reviewed: 2026-08-15
 review_by: 2027-02-11
 supersedes: []
 ---
@@ -31,11 +31,91 @@ operation whose resolver makes the final authorization decision.
 | Codex app-server v2 | disabled | run process plus optional protected thread cursor | default-off experimental dynamic tools through the coordinator |
 | Native OpenAI hosted search | absent from each request | Responses continuation only when selected | mixed retained continuation supported |
 | Visible reasoning summary | disabled | protected activity/final blocks | authority-neutral |
+| Reasoning effort | provider/registration default | exact request, budget, checkpoint, and retained-session fingerprint | authority-neutral |
 | `AiProviderSessionService` | not constructed | protected opaque cursor | authority-neutral |
 
 The Codex app-server adapter and durable provider-session service are not
 automatically coupled. A process may be warm without a retained provider
 thread, and a retained thread may exist while no process is running.
+
+## Closed reasoning-effort negotiation
+
+`ModelReasoningEffort` has seven values. `Unspecified` preserves the active
+provider or registration default by omitting the wire override. The six
+explicit values are `None`, `Low`, `Medium`, `High`, `XHigh`, and `Max`.
+Unknown serialized values fail closed, and explicit `None` is never treated as
+`Unspecified`.
+
+The crate has no universal model-to-effort catalogue. A deployment creates one
+`ModelReasoningEffortProfile` per exact reviewed model, including the supported
+explicit set and its default. Native OpenAI accepts a collection through
+`OpenAiProviderConfig::with_reasoning_effort_profiles`; a Codex registration
+accepts only the profile for its exact logical model through
+`with_reasoning_effort_profile`. `AiRuntime::provider_capabilities` and
+`ProviderCapabilities::reasoning_effort_profile` are the server-owned source
+for a settings UI. Browser input still has to deserialize into the closed enum
+and be present in `profile.supported()`.
+
+For currently reviewed GPT-5.6 registrations, the official
+[GPT-5.6 guide](https://developers.openai.com/api/docs/guides/latest-model)
+supports this deployment matrix:
+
+| Exact model | Explicit admitted values | Reviewed default |
+| --- | --- | --- |
+| `gpt-5.6-sol` | `none`, `low`, `medium`, `high`, `xhigh`, `max` | `medium` |
+| `gpt-5.6-terra` | `none`, `low`, `medium`, `high`, `xhigh`, `max` | `medium` |
+| `gpt-5.6-luna` | `none`, `low`, `medium`, `high`, `xhigh`, `max` | `medium` |
+
+This table is registration input for that reviewed deployment, not a library
+assumption. A future provider/model profile may declare a strict subset or a
+different default without widening the enum.
+
+The native adapter writes an explicit selection to `reasoning.effort` and
+omits the entire effort member for `Unspecified`. It composes independently
+with the visible `reasoning.summary` request. Effort never requests or exposes
+hidden chain-of-thought.
+
+Codex CLI 0.147.0 generated `v2/TurnStartParams.json` places the optional
+non-empty string at `turn/start.params.effort` and describes the override as
+applying to the current and subsequent turns. The strict actor narrows that
+open schema string to `ModelReasoningEffort` and authors the field name itself.
+It does not accept a JSON value or caller-supplied protocol key. The ignored
+`generated_codex_0147_schema_places_effort_only_on_turn_start` test regenerates
+and checks the schema, while the environment-gated retained live lane sends
+the exact effort on the newly bound first turn and the later resumed turn.
+
+Because the app-server value affects subsequent turns, Codex effort is frozen
+into the provider-session fingerprint:
+
+```rust
+let registration = AiCodexAppServerRegistration::new(
+    provider_profile_id,
+    logical_model,
+    executable_sha256,
+    executable_version,
+    sandbox_profile,
+    AI_CODEX_APP_SERVER_PROTOCOL_V2,
+)?
+.with_reasoning_effort_profile(profile)?;
+
+let fingerprint = registration.provider_session_fingerprint(selected_effort)?;
+```
+
+Use `fingerprint`, not `registration.identity()`, in
+`AiProviderSessionDescriptor`. Every initial or continuation
+`ModelRequest` and matching `AiBudgetReservationRequest` carries
+`selected_effort`. A changed setting cannot resume the cursor: clean up and
+confirm exact absence, issue the ordinary rebind, create a new empty thread,
+and bind the new effort fingerprint. Pre-0.80 v3 registration fingerprints
+are accepted only by the deletion adapter for draining; they are never valid
+for a turn or resume.
+
+For stateless operation the scope is one ephemeral Codex thread: the actor
+retains the selected effort through `thread/start` and its `turn/start`, then
+clears it only after the terminal turn notification. A later ephemeral thread
+may select another profile-admitted effort. The provider-call plan, budget
+proof, and continuation checkpoint still require one exact value across every
+retry or bounded replay of the same logical turn.
 
 ## Exact run-scoped app-server
 

@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-14
+last_reviewed: 2026-08-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -17,6 +17,53 @@ Historical development entries below retain their original dependency and
 checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## [0.80.0] - 2026-08-15
+
+### Added
+
+- `ModelReasoningEffort` is a provider-neutral closed selection with distinct
+  `Unspecified`, `None`, `Low`, `Medium`, `High`, `XHigh`, and `Max` values.
+  `ModelRequest` and atomic budget requests carry the exact selection through
+  initial turns, continuations, background calls, checkpoints, recovery, and
+  audit-safe provider-result metadata.
+- `ModelReasoningEffortProfile` and
+  `ProviderCapabilities::reasoning_effort_profiles` declare exact reviewed
+  model-specific supported sets and defaults. Native OpenAI maps admitted
+  values to `reasoning.effort` and omits the wire field for `Unspecified`.
+- Codex registrations accept one exact-model reasoning-effort profile and
+  expose `provider_session_fingerprint(effort)`. The strict actor authors only
+  typed `turn/start.params.effort`; generated Codex 0.147.0 schema and ignored
+  live-harness gates cover that location.
+
+### Changed
+
+- Retained Codex effort is registration/session frozen because app-server
+  defines the override for the current and subsequent turns. Registration
+  identity advances to v4, and provider-session descriptors use the exact
+  effort-bound fingerprint rather than the base registration identity.
+- Custom budget services selecting an explicit effort use
+  `new_reserved_with_reasoning_effort` and
+  `authorize_provider_call_with_reasoning_effort`. The older constructors
+  remain the `Unspecified` compatibility path.
+
+### Security
+
+- Unknown serialized effort values, missing profiles, unsupported model/effort
+  pairs, budget swaps, continuation swaps, and retained-cursor effort swaps
+  fail before provider execution. Effort changes grant no tool, egress,
+  filesystem, shell, browser, MCP, approval, mutation, remote-control, or
+  reasoning-disclosure capability. Visible reasoning summaries remain a
+  separate request and capability.
+- Legacy Codex v3 registration fingerprints are cleanup-only: the deletion
+  service can drain the old thread, but provider execution and resume never
+  admit it.
+
+### Schema
+
+- AI schema module `0.60.0` adds the non-null
+  `AiBudgetReservationRecord.reasoning_effort` column with an
+  `unspecified` default for pre-existing reservations.
 
 ## [0.79.0] - 2026-08-14
 

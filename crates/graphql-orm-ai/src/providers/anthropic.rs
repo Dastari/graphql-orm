@@ -980,6 +980,7 @@ mod tests {
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
             reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(128),
         }
@@ -1158,6 +1159,7 @@ mod tests {
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
             reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(256),
         };
@@ -1191,6 +1193,7 @@ mod tests {
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
             reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: Some(json!({
                 "type": "object",
                 "properties": {"summary": {"type": "string"}},

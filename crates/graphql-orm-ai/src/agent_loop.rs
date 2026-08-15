@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     AiEgressManifest, AiError, AiPersistedApplicationToolCall, AiProviderCallResult, AiRunId,
-    AiRunLease, AiSessionId, ModelContinuation, ModelInputBlock, ModelRequest,
+    AiRunLease, AiSessionId, ModelContinuation, ModelInputBlock, ModelReasoningEffort,
+    ModelRequest,
 };
 
 /// Deployment-owned hard bounds for one multi-turn agent loop.
@@ -60,6 +61,7 @@ pub enum AiAgentLoopTurn {
 #[derive(Clone, Debug)]
 pub struct AiAgentContinuation {
     continuation: ModelContinuation,
+    reasoning_effort: ModelReasoningEffort,
     input: Vec<ModelInputBlock>,
     transfers: Vec<AiEgressManifest>,
     replay_transfers: Vec<AiEgressManifest>,
@@ -85,6 +87,7 @@ pub(crate) struct AiStatelessConversationEvidence {
 impl AiAgentContinuation {
     pub(crate) fn from_subscription_result(
         continuation: ModelContinuation,
+        reasoning_effort: ModelReasoningEffort,
         call_id: String,
         tool_id: String,
         output: serde_json::Value,
@@ -93,6 +96,7 @@ impl AiAgentContinuation {
     ) -> Result<Self, AiError> {
         let candidate = Self {
             continuation,
+            reasoning_effort,
             input: vec![ModelInputBlock::ToolResult {
                 call_id,
                 tool_id,
@@ -106,6 +110,7 @@ impl AiAgentContinuation {
 
     pub(crate) fn from_persisted_results(
         continuation: ModelContinuation,
+        reasoning_effort: ModelReasoningEffort,
         completed_tools: &[AiPersistedApplicationToolCall],
         replay_transfers: Vec<AiEgressManifest>,
     ) -> Result<Self, AiError> {
@@ -134,6 +139,7 @@ impl AiAgentContinuation {
         }
         let candidate = Self {
             continuation,
+            reasoning_effort,
             input,
             transfers,
             replay_transfers,
@@ -143,8 +149,9 @@ impl AiAgentContinuation {
 
     pub(crate) fn checkpoint_value(&self) -> serde_json::Value {
         serde_json::json!({
-            "formatVersion": 2,
+            "formatVersion": 3,
             "continuation": self.continuation,
+            "reasoningEffort": self.reasoning_effort,
             "input": self.input,
             "transfers": self.transfers,
             "replayTransfers": self.replay_transfers,
@@ -157,6 +164,8 @@ impl AiAgentContinuation {
         struct Snapshot {
             format_version: u32,
             continuation: ModelContinuation,
+            #[serde(default)]
+            reasoning_effort: ModelReasoningEffort,
             input: Vec<ModelInputBlock>,
             transfers: Vec<AiEgressManifest>,
             #[serde(default)]
@@ -165,7 +174,7 @@ impl AiAgentContinuation {
 
         let snapshot: Snapshot =
             serde_json::from_value(value).map_err(|_| AiError::PersistenceFailed)?;
-        if !matches!(snapshot.format_version, 1 | 2)
+        if !matches!(snapshot.format_version, 1..=3)
             || snapshot.input.is_empty()
             || snapshot.input.len() > 256
             || snapshot.input.len() != snapshot.transfers.len()
@@ -202,7 +211,7 @@ impl AiAgentContinuation {
                         matches!(message, crate::ModelConversationMessage::Tool { .. })
                     })
                     .count();
-                if snapshot.format_version != 2
+                if !matches!(snapshot.format_version, 2 | 3)
                     || historical_results != snapshot.replay_transfers.len()
                     || snapshot.replay_transfers.iter().any(|transfer| {
                         transfer.capability != crate::AiEgressCapability::ToolResult
@@ -218,6 +227,7 @@ impl AiAgentContinuation {
         }
         let continuation = Self {
             continuation: snapshot.continuation,
+            reasoning_effort: snapshot.reasoning_effort,
             input: snapshot.input,
             transfers: snapshot.transfers,
             replay_transfers: snapshot.replay_transfers,
@@ -417,6 +427,7 @@ impl AiAgentContinuation {
             }
         };
         if request.continuation_mode != expected_mode
+            || request.reasoning_effort != self.reasoning_effort
             || (expected_mode == crate::ModelContinuationMode::StatelessReplay
                 && !request.instructions.is_empty())
         {
@@ -451,6 +462,7 @@ pub struct AiAgentLoopGuard {
     outputs: BTreeMap<String, ModelInputBlock>,
     output_transfers: BTreeMap<String, AiEgressManifest>,
     pending_continuation: Option<ModelContinuation>,
+    pending_reasoning_effort: Option<ModelReasoningEffort>,
     replay_transfers: Vec<AiEgressManifest>,
     terminal: bool,
 }
@@ -472,6 +484,7 @@ impl AiAgentLoopGuard {
             outputs: BTreeMap::new(),
             output_transfers: BTreeMap::new(),
             pending_continuation: None,
+            pending_reasoning_effort: None,
             replay_transfers: Vec::new(),
             terminal: false,
         }
@@ -506,6 +519,7 @@ impl AiAgentLoopGuard {
             outputs: BTreeMap::new(),
             output_transfers: BTreeMap::new(),
             pending_continuation: None,
+            pending_reasoning_effort: None,
             replay_transfers: Vec::new(),
             terminal: false,
         })
@@ -518,6 +532,7 @@ impl AiAgentLoopGuard {
             && self.outputs.is_empty()
             && self.output_transfers.is_empty()
             && self.pending_continuation.is_none()
+            && self.pending_reasoning_effort.is_none()
             && self.has_provider_turn_capacity()
     }
 
@@ -629,6 +644,7 @@ impl AiAgentLoopGuard {
             }
         };
         self.pending_continuation = Some(continuation);
+        self.pending_reasoning_effort = Some(result.reasoning_effort());
         Ok(AiAgentLoopTurn::ToolCalls {
             provider_turn_index,
             call_count: result.tool_calls().len(),
@@ -683,6 +699,7 @@ impl AiAgentLoopGuard {
             || self.outputs.len() != self.pending_order.len()
             || self.output_transfers.len() != self.pending_order.len()
             || self.pending_continuation.is_none()
+            || self.pending_reasoning_effort.is_none()
         {
             return Err(AiError::Conflict);
         }
@@ -699,8 +716,13 @@ impl AiAgentLoopGuard {
         self.pending_order.clear();
         self.pending_tools.clear();
         let continuation = self.pending_continuation.take().ok_or(AiError::Conflict)?;
+        let reasoning_effort = self
+            .pending_reasoning_effort
+            .take()
+            .ok_or(AiError::Conflict)?;
         let next = AiAgentContinuation {
             continuation,
+            reasoning_effort,
             input,
             transfers,
             replay_transfers: std::mem::take(&mut self.replay_transfers),
@@ -733,5 +755,107 @@ fn valid_stateless_user_block(block: &ModelInputBlock) -> bool {
             serde_json::to_vec(value).is_ok_and(|encoded| encoded.len() <= 16 * 1024 * 1024)
         }
         ModelInputBlock::Attachment { .. } | ModelInputBlock::ToolResult { .. } => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn transfer() -> AiEgressManifest {
+        AiEgressManifest {
+            provider_profile_id: "profile-1".to_owned(),
+            provider_kind: "openai".to_owned(),
+            model: "reviewed-model".to_owned(),
+            destination: "openai".to_owned(),
+            destination_trust: crate::AiDestinationTrust::ManagedProvider,
+            capability: crate::AiEgressCapability::ToolResult,
+            scope: crate::AiScope::new("project", "test"),
+            session_id: None,
+            run_id: None,
+            sources: Vec::new(),
+            estimated_bytes: 1,
+            estimated_tokens: 1,
+            attachment_count: 0,
+            purpose: "continue_tool_result".to_owned(),
+            retention: "none".to_owned(),
+            residency: None,
+            policy_version: "egress-v1".to_owned(),
+            consent_reference: None,
+        }
+    }
+
+    fn empty_request(effort: ModelReasoningEffort) -> ModelRequest {
+        ModelRequest {
+            model: "reviewed-model".to_owned(),
+            instructions: Vec::new(),
+            input: Vec::new(),
+            continuation: None,
+            continuation_mode: crate::ModelContinuationMode::ProviderRetained,
+            tools: Vec::new(),
+            builtin_tools: Vec::new(),
+            maximum_builtin_tool_calls: None,
+            reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: effort,
+            output_schema: None,
+            maximum_output_tokens: Some(128),
+        }
+    }
+
+    #[test]
+    fn continuation_checkpoint_and_application_fence_exact_effort() {
+        let continuation = AiAgentContinuation::from_subscription_result(
+            ModelContinuation::ProviderResponse {
+                response_id: "response-1".to_owned(),
+            },
+            ModelReasoningEffort::XHigh,
+            "call-1".to_owned(),
+            "records.read".to_owned(),
+            serde_json::json!({"record": 1}),
+            transfer(),
+            Vec::new(),
+        )
+        .expect("effort-bound continuation should validate");
+        assert_eq!(
+            continuation.checkpoint_value()["reasoningEffort"],
+            serde_json::json!("xhigh")
+        );
+
+        let mut exact = empty_request(ModelReasoningEffort::XHigh);
+        continuation
+            .clone()
+            .apply_with_transfers(&mut exact)
+            .expect("exact effort should continue");
+        assert_eq!(exact.reasoning_effort, ModelReasoningEffort::XHigh);
+        assert_eq!(
+            exact.reasoning_summary,
+            crate::ModelReasoningSummaryRequest::Disabled
+        );
+
+        let mut swapped = empty_request(ModelReasoningEffort::High);
+        assert!(matches!(
+            continuation.clone().apply_with_transfers(&mut swapped),
+            Err(AiError::Conflict)
+        ));
+        assert!(swapped.input.is_empty() && swapped.continuation.is_none());
+
+        let mut unknown = continuation.checkpoint_value();
+        unknown["reasoningEffort"] = serde_json::json!("minimal");
+        assert!(matches!(
+            AiAgentContinuation::from_checkpoint_value(unknown),
+            Err(AiError::PersistenceFailed)
+        ));
+
+        let mut legacy = continuation.checkpoint_value();
+        legacy["formatVersion"] = serde_json::json!(2);
+        legacy
+            .as_object_mut()
+            .expect("checkpoint should be an object")
+            .remove("reasoningEffort");
+        let legacy = AiAgentContinuation::from_checkpoint_value(legacy)
+            .expect("legacy checkpoints should preserve the old unspecified behavior");
+        legacy
+            .apply_with_transfers(&mut empty_request(ModelReasoningEffort::Unspecified))
+            .expect("legacy continuation should remain unspecified");
     }
 }

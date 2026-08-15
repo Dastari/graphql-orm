@@ -18,6 +18,7 @@ fn request(model: &str) -> ModelRequest {
         builtin_tools: vec![],
         maximum_builtin_tool_calls: None,
         reasoning_summary: graphql_orm_ai::ModelReasoningSummaryRequest::Disabled,
+        reasoning_effort: graphql_orm_ai::ModelReasoningEffort::Unspecified,
         output_schema: None,
         maximum_output_tokens: Some(64),
     }
@@ -347,6 +348,7 @@ async fn stateless_replay_requires_one_unique_proof_for_every_tool_result() {
         builtin_tools: Vec::new(),
         maximum_builtin_tool_calls: None,
         reasoning_summary: graphql_orm_ai::ModelReasoningSummaryRequest::Disabled,
+        reasoning_effort: graphql_orm_ai::ModelReasoningEffort::Unspecified,
         output_schema: None,
         maximum_output_tokens: Some(64),
     };
@@ -439,6 +441,7 @@ async fn attachment_egress_is_bound_to_exact_id_checksum_and_bytes() {
         builtin_tools: vec![],
         maximum_builtin_tool_calls: None,
         reasoning_summary: graphql_orm_ai::ModelReasoningSummaryRequest::Disabled,
+        reasoning_effort: graphql_orm_ai::ModelReasoningEffort::Unspecified,
         output_schema: None,
         maximum_output_tokens: Some(64),
     };

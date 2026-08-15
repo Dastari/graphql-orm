@@ -5550,6 +5550,7 @@ mod tests {
                 lease_generation: 1,
                 provider_kind: "mock".to_owned(),
                 provider_model: "retention-test".to_owned(),
+                reasoning_effort: "unspecified".to_owned(),
                 pricing_policy_version: "retention-pricing-v1".to_owned(),
                 reserved_input_tokens: 1,
                 reserved_output_tokens: 1,

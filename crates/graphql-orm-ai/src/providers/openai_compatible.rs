@@ -216,6 +216,7 @@ impl OpenAiCompatibleProvider {
             project: None,
             timeout: config.timeout,
             store_responses: config.capabilities.provider_retained_continuation,
+            reasoning_effort_profiles: Vec::new(),
         };
         let binding = CompatibleRouteBinding {
             profile_id: config.profile_id.clone(),
@@ -371,6 +372,7 @@ mod tests {
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
             reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(32),
         }

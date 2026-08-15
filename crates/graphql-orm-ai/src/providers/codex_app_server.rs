@@ -26,9 +26,10 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use crate::{
     AiProvider, AiProviderFailureCategory, AiProviderRunBinding, AiProviderRunCloseOutcome,
     AiProviderRunCloseReason, AiProviderRunInterruptOutcome, ModelContinuationMode,
-    ModelInputBlock, ModelReasoningSummaryRequest, ModelRequest, ModelToolDefinition,
-    ProviderCapabilities, ProviderDynamicToolCall, ProviderDynamicToolResponder, ProviderError,
-    ProviderEventStream, ProviderKind, ProviderRequestContext,
+    ModelInputBlock, ModelReasoningEffort, ModelReasoningEffortProfile,
+    ModelReasoningSummaryRequest, ModelRequest, ModelToolDefinition, ProviderCapabilities,
+    ProviderDynamicToolCall, ProviderDynamicToolResponder, ProviderError, ProviderEventStream,
+    ProviderKind, ProviderRequestContext,
 };
 
 const MAXIMUM_PROCESSES: usize = 4_096;
@@ -330,6 +331,7 @@ pub struct AiCodexAppServerRegistration {
     protocol_version: String,
     launch_profile: AiCodexAppServerLaunchProfile,
     bootstrap_instructions: AiCodexAppServerBootstrapInstructions,
+    reasoning_effort_profile: Option<ModelReasoningEffortProfile>,
     identity: String,
 }
 
@@ -376,6 +378,7 @@ impl AiCodexAppServerRegistration {
             protocol_version,
             launch_profile,
             bootstrap_instructions,
+            reasoning_effort_profile: None,
             identity: String::new(),
         };
         registration.refresh_identity();
@@ -409,6 +412,32 @@ impl AiCodexAppServerRegistration {
         self.bootstrap_instructions = bootstrap_instructions;
         self.refresh_identity();
         self
+    }
+
+    /// Installs the exact reviewed effort set and default for this
+    /// registration's logical model.
+    ///
+    /// The profile changes both the immutable registration identity and every
+    /// effort-bound provider-session fingerprint. It grants no new Codex tool,
+    /// filesystem, shell, browser, network, approval, or dynamic-tool
+    /// capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidConfiguration`] unless the profile is
+    /// for this registration's exact logical model.
+    pub fn with_reasoning_effort_profile(
+        mut self,
+        profile: ModelReasoningEffortProfile,
+    ) -> Result<Self, ProviderError> {
+        if profile.model() != self.logical_model {
+            return Err(ProviderError::InvalidConfiguration(
+                "Codex reasoning-effort profile model mismatch".to_owned(),
+            ));
+        }
+        self.reasoning_effort_profile = Some(profile);
+        self.refresh_identity();
+        Ok(self)
     }
 
     fn refresh_identity(&mut self) {
@@ -466,6 +495,63 @@ impl AiCodexAppServerRegistration {
     pub fn identity(&self) -> &str {
         &self.identity
     }
+
+    /// Exact reviewed reasoning-effort profile, when explicit selections are
+    /// enabled for this registration.
+    pub fn reasoning_effort_profile(&self) -> Option<&ModelReasoningEffortProfile> {
+        self.reasoning_effort_profile.as_ref()
+    }
+
+    /// Returns the immutable provider-session fingerprint for one exact effort
+    /// selection.
+    ///
+    /// Codex app-server documents `turn/start.effort` as applying to the
+    /// current and subsequent turns. Consequently this adapter treats effort
+    /// as registration-frozen for retained sessions. A setting change must
+    /// clean up/rebind the cursor using the new fingerprint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Unsupported`] unless the registration admits
+    /// the selected effort for its exact logical model.
+    pub fn provider_session_fingerprint(
+        &self,
+        effort: ModelReasoningEffort,
+    ) -> Result<String, ProviderError> {
+        self.reasoning_effort_capabilities()
+            .validate_reasoning_effort(&self.logical_model, effort)?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"graphql-orm-ai/codex-provider-session/v1\0");
+        hasher.update(self.identity.as_bytes());
+        hasher.update(effort.as_str().as_bytes());
+        Ok(hex::encode(hasher.finalize()))
+    }
+
+    fn admits_provider_session_fingerprint(&self, fingerprint: &str) -> bool {
+        std::iter::once(ModelReasoningEffort::Unspecified)
+            .chain(
+                self.reasoning_effort_profile
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|profile| profile.supported().iter().copied()),
+            )
+            .any(|effort| {
+                self.provider_session_fingerprint(effort)
+                    .is_ok_and(|expected| expected == fingerprint)
+            })
+    }
+
+    fn admits_cleanup_fingerprint(&self, fingerprint: &str) -> bool {
+        self.admits_provider_session_fingerprint(fingerprint)
+            || legacy_registration_identity_v3(self) == fingerprint
+    }
+
+    fn reasoning_effort_capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            reasoning_effort_profiles: self.reasoning_effort_profile.iter().cloned().collect(),
+            ..ProviderCapabilities::default()
+        }
+    }
 }
 
 /// Bounded text-only input for one fresh app-server turn.
@@ -480,6 +566,7 @@ pub struct AiCodexAppServerTurnInput {
     retained_bootstrap_fingerprint: Option<String>,
     input: Vec<String>,
     tools: Vec<ModelToolDefinition>,
+    reasoning_effort: ModelReasoningEffort,
     maximum_output_tokens: u64,
 }
 
@@ -497,6 +584,7 @@ impl std::fmt::Debug for AiCodexAppServerTurnInput {
             .field("input", &"<protected>")
             .field("input_count", &self.input.len())
             .field("tool_count", &self.tools.len())
+            .field("reasoning_effort", &self.reasoning_effort)
             .field("maximum_output_tokens", &self.maximum_output_tokens)
             .finish()
     }
@@ -514,6 +602,7 @@ impl AiCodexAppServerTurnInput {
         model: impl Into<String>,
         instructions: Vec<String>,
         input: Vec<String>,
+        reasoning_effort: ModelReasoningEffort,
         maximum_output_tokens: u64,
     ) -> Result<Self, ProviderError> {
         let turn = Self {
@@ -522,6 +611,7 @@ impl AiCodexAppServerTurnInput {
             retained_bootstrap_fingerprint: None,
             input,
             tools: Vec::new(),
+            reasoning_effort,
             maximum_output_tokens,
         };
         turn.validate()?;
@@ -582,6 +672,11 @@ impl AiCodexAppServerTurnInput {
         &self.tools
     }
 
+    /// Exact validated reasoning-effort selection for this turn.
+    pub const fn reasoning_effort(&self) -> ModelReasoningEffort {
+        self.reasoning_effort
+    }
+
     /// Requested output-token ceiling.
     pub const fn maximum_output_tokens(&self) -> u64 {
         self.maximum_output_tokens
@@ -632,6 +727,7 @@ impl AiCodexAppServerTurnInput {
             request.model,
             request.instructions,
             input,
+            request.reasoning_effort,
             request
                 .maximum_output_tokens
                 .ok_or(ProviderError::InvalidRequest)?,
@@ -667,6 +763,7 @@ impl AiCodexAppServerTurnInput {
             request.model,
             request.instructions,
             input,
+            request.reasoning_effort,
             request
                 .maximum_output_tokens
                 .ok_or(ProviderError::InvalidRequest)?,
@@ -904,7 +1001,9 @@ impl crate::AiProviderSessionDeletionService for AiCodexAppServerProviderSession
         if descriptor.provider_kind() != &ProviderKind::LocalHarness
             || descriptor.provider_profile_id() != self.registration.provider_profile_id()
             || descriptor.provider_model() != self.registration.logical_model()
-            || descriptor.registration_fingerprint() != self.registration.identity()
+            || !self
+                .registration
+                .admits_cleanup_fingerprint(descriptor.registration_fingerprint())
             || descriptor.protocol_version() != self.registration.protocol_version()
             || request.cursor().kind() != "codex.app_server.thread.v2"
         {
@@ -936,6 +1035,12 @@ impl AiProvider for AiCodexAppServerProvider {
             custom_tools: dynamic_tools_available,
             provider_retained_continuation: true,
             local: true,
+            reasoning_effort_profiles: self
+                .registration
+                .reasoning_effort_profile()
+                .cloned()
+                .into_iter()
+                .collect(),
             ..ProviderCapabilities::default()
         }
     }
@@ -945,6 +1050,8 @@ impl AiProvider for AiCodexAppServerProvider {
         request: ModelRequest,
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
+        self.capabilities()
+            .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
         context.validate_request(&ProviderKind::LocalHarness, &request)?;
         context.validate_provider_profile(
             &ProviderKind::LocalHarness,
@@ -953,6 +1060,11 @@ impl AiProvider for AiCodexAppServerProvider {
         )?;
         let binding = context.run_binding().ok_or(ProviderError::Rejected)?;
         let retained = context.provider_session().cloned();
+        if retained.as_ref().is_some_and(|session| {
+            !retained_session_matches_effort(&self.registration, session, request.reasoning_effort)
+        }) {
+            return Err(ProviderError::Rejected);
+        }
         let input = if retained.is_some() {
             AiCodexAppServerTurnInput::try_from_retained_model_request(
                 request,
@@ -994,6 +1106,8 @@ impl AiProvider for AiCodexAppServerProvider {
         {
             return Err(ProviderError::Unsupported);
         }
+        self.capabilities()
+            .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
         context.validate_request(&ProviderKind::LocalHarness, &request)?;
         context.validate_provider_profile(
             &ProviderKind::LocalHarness,
@@ -1002,6 +1116,11 @@ impl AiProvider for AiCodexAppServerProvider {
         )?;
         let binding = context.run_binding().ok_or(ProviderError::Rejected)?;
         let retained = context.provider_session().cloned();
+        if retained.as_ref().is_some_and(|session| {
+            !retained_session_matches_effort(&self.registration, session, request.reasoning_effort)
+        }) {
+            return Err(ProviderError::Rejected);
+        }
         let input = if retained.is_some() {
             AiCodexAppServerTurnInput::try_from_retained_dynamic_request(
                 request,
@@ -1064,10 +1183,15 @@ impl AiProvider for AiCodexAppServerProvider {
         descriptor: &crate::AiProviderSessionDescriptor,
         request: &ModelRequest,
     ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
+        self.capabilities()
+            .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
+        let session_fingerprint = self
+            .registration
+            .provider_session_fingerprint(request.reasoning_effort)?;
         if descriptor.provider_kind() != &ProviderKind::LocalHarness
             || descriptor.provider_profile_id() != self.registration.provider_profile_id()
             || descriptor.provider_model() != self.registration.logical_model()
-            || descriptor.registration_fingerprint() != self.registration.identity()
+            || descriptor.registration_fingerprint() != session_fingerprint
             || descriptor.protocol_version() != self.registration.protocol_version()
         {
             return Err(ProviderError::Rejected);
@@ -1091,7 +1215,12 @@ impl AiProvider for AiCodexAppServerProvider {
             )?
         };
         self.pool
-            .create_empty_thread(*binding, self.registration.clone(), input.tools().to_vec())
+            .create_empty_thread(
+                *binding,
+                self.registration.clone(),
+                input.reasoning_effort(),
+                input.tools().to_vec(),
+            )
             .await
     }
 
@@ -1105,7 +1234,9 @@ impl AiProvider for AiCodexAppServerProvider {
         if descriptor.provider_kind() != &ProviderKind::LocalHarness
             || descriptor.provider_profile_id() != self.registration.provider_profile_id()
             || descriptor.provider_model() != self.registration.logical_model()
-            || descriptor.registration_fingerprint() != self.registration.identity()
+            || !self
+                .registration
+                .admits_provider_session_fingerprint(descriptor.registration_fingerprint())
             || descriptor.protocol_version() != self.registration.protocol_version()
         {
             return Err(ProviderError::Rejected);
@@ -1133,6 +1264,7 @@ pub trait AiCodexAppServerRunProcess: Send + Sync {
     async fn create_empty_thread(
         &self,
         _model: &str,
+        _reasoning_effort: ModelReasoningEffort,
         _bootstrap: &AiCodexAppServerBootstrapInstructions,
         _dynamic_tools: Vec<ModelToolDefinition>,
     ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
@@ -1310,11 +1442,12 @@ impl AiCodexAppServerLaunchedProcess {
     async fn create_empty_thread(
         &self,
         model: &str,
+        reasoning_effort: ModelReasoningEffort,
         bootstrap: &AiCodexAppServerBootstrapInstructions,
         dynamic_tools: Vec<ModelToolDefinition>,
     ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
         self.process
-            .create_empty_thread(model, bootstrap, dynamic_tools)
+            .create_empty_thread(model, reasoning_effort, bootstrap, dynamic_tools)
             .await
     }
 
@@ -1469,6 +1602,7 @@ enum EmptyThreadActivation {
     Available {
         cursor_fingerprint: String,
         bootstrap_fingerprint: String,
+        reasoning_effort: ModelReasoningEffort,
         dynamic_tools: Vec<ModelToolDefinition>,
     },
     Consumed,
@@ -1489,9 +1623,23 @@ fn opened_session_matches(
         && session.claim().run_lease_generation() == binding.lease_generation()
         && session.claim().descriptor().provider_profile_id() == registration.provider_profile_id()
         && session.claim().descriptor().provider_model() == registration.logical_model()
-        && session.claim().descriptor().registration_fingerprint() == registration.identity()
+        && registration.admits_provider_session_fingerprint(
+            session.claim().descriptor().registration_fingerprint(),
+        )
         && session.claim().descriptor().protocol_version() == registration.protocol_version()
         && binding.matches_principal_reference(&session.claim().principal_reference)
+}
+
+fn retained_session_matches_effort(
+    registration: &AiCodexAppServerRegistration,
+    session: &crate::AiOpenedProviderSession,
+    effort: ModelReasoningEffort,
+) -> bool {
+    registration
+        .provider_session_fingerprint(effort)
+        .is_ok_and(|fingerprint| {
+            session.claim().descriptor().registration_fingerprint() == fingerprint
+        })
 }
 
 struct ActiveTurnGuard {
@@ -1536,6 +1684,7 @@ impl AiCodexAppServerRunPool {
         &self,
         binding: AiProviderRunBinding,
         registration: Arc<AiCodexAppServerRegistration>,
+        reasoning_effort: ModelReasoningEffort,
         dynamic_tools: Vec<ModelToolDefinition>,
     ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
         if !self.supports_launch_profile(registration.launch_profile())
@@ -1543,6 +1692,9 @@ impl AiCodexAppServerRunPool {
         {
             return Err(ProviderError::Unsupported);
         }
+        registration
+            .reasoning_effort_capabilities()
+            .validate_reasoning_effort(registration.logical_model(), reasoning_effort)?;
         for tool in &dynamic_tools {
             tool.validate()?;
         }
@@ -1569,6 +1721,7 @@ impl AiCodexAppServerRunPool {
             self.inner.limits.startup_timeout,
             entry.process.create_empty_thread(
                 registration.logical_model(),
+                reasoning_effort,
                 registration.bootstrap_instructions(),
                 dynamic_tools.clone(),
             ),
@@ -1583,6 +1736,7 @@ impl AiCodexAppServerRunPool {
                         .bootstrap_instructions()
                         .fingerprint()
                         .to_owned(),
+                    reasoning_effort,
                     dynamic_tools,
                 };
                 Ok(cursor)
@@ -1721,6 +1875,9 @@ impl AiCodexAppServerRunPool {
         input: AiCodexAppServerTurnInput,
     ) -> Result<ProviderEventStream, ProviderError> {
         input.validate()?;
+        registration
+            .reasoning_effort_capabilities()
+            .validate_reasoning_effort(registration.logical_model(), input.reasoning_effort())?;
         if input.model() != registration.logical_model() {
             return Err(ProviderError::Rejected);
         }
@@ -1813,6 +1970,9 @@ impl AiCodexAppServerRunPool {
         input: AiCodexAppServerTurnInput,
     ) -> Result<ProviderEventStream, ProviderError> {
         input.validate()?;
+        registration
+            .reasoning_effort_capabilities()
+            .validate_reasoning_effort(registration.logical_model(), input.reasoning_effort())?;
         if !input.tools().is_empty() {
             return Err(ProviderError::Rejected);
         }
@@ -1854,6 +2014,9 @@ impl AiCodexAppServerRunPool {
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
         input.validate()?;
+        registration
+            .reasoning_effort_capabilities()
+            .validate_reasoning_effort(registration.logical_model(), input.reasoning_effort())?;
         if input.tools().is_empty() || !registration.experimental_dynamic_tools() {
             return Err(ProviderError::Unsupported);
         }
@@ -1904,6 +2067,11 @@ impl AiCodexAppServerRunPool {
                 crate::AiCodexBoundTurnRejection::OpenedSessionMismatch,
             ));
         }
+        if !retained_session_matches_effort(registration, session, input.reasoning_effort()) {
+            return Err(bound_turn_rejected(
+                crate::AiCodexBoundTurnRejection::ReasoningEffortMismatch,
+            ));
+        }
         if input.model() != registration.logical_model() {
             return Err(bound_turn_rejected(
                 crate::AiCodexBoundTurnRejection::ModelMismatch,
@@ -1939,12 +2107,15 @@ impl AiCodexAppServerRunPool {
                 EmptyThreadActivation::Available {
                     cursor_fingerprint,
                     bootstrap_fingerprint,
+                    reasoning_effort,
                     dynamic_tools,
                 } => {
                     if cursor_fingerprint != &session.cursor().fingerprint() {
                         Some(crate::AiCodexBoundTurnRejection::CursorFingerprintMismatch)
                     } else if bootstrap_fingerprint != &input_instruction_fingerprint {
                         Some(crate::AiCodexBoundTurnRejection::BootstrapFingerprintMismatch)
+                    } else if *reasoning_effort != input.reasoning_effort() {
+                        Some(crate::AiCodexBoundTurnRejection::ReasoningEffortMismatch)
                     } else if dynamic_tools != input.tools() {
                         Some(crate::AiCodexBoundTurnRejection::FrozenDefinitionMismatch)
                     } else {
@@ -2037,9 +2208,13 @@ impl AiCodexAppServerRunPool {
         input: AiCodexAppServerTurnInput,
     ) -> Result<ProviderEventStream, ProviderError> {
         input.validate()?;
+        registration
+            .reasoning_effort_capabilities()
+            .validate_reasoning_effort(registration.logical_model(), input.reasoning_effort())?;
         if input.model() != registration.logical_model()
             || session.activation() != crate::AiProviderSessionActivation::ExistingRetained
             || !opened_session_matches(binding, &registration, &session)
+            || !retained_session_matches_effort(&registration, &session, input.reasoning_effort())
         {
             return Err(ProviderError::Rejected);
         }
@@ -2138,6 +2313,9 @@ impl AiCodexAppServerRunPool {
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
         input.validate()?;
+        registration
+            .reasoning_effort_capabilities()
+            .validate_reasoning_effort(registration.logical_model(), input.reasoning_effort())?;
         if input.model() != registration.logical_model()
             || input.tools().is_empty()
             || !registration.experimental_dynamic_tools()
@@ -2234,11 +2412,15 @@ impl AiCodexAppServerRunPool {
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
         input.validate()?;
+        registration
+            .reasoning_effort_capabilities()
+            .validate_reasoning_effort(registration.logical_model(), input.reasoning_effort())?;
         if input.model() != registration.logical_model()
             || input.tools().is_empty()
             || !registration.experimental_dynamic_tools()
             || session.activation() != crate::AiProviderSessionActivation::ExistingRetained
             || !opened_session_matches(binding, &registration, &session)
+            || !retained_session_matches_effort(&registration, &session, input.reasoning_effort())
         {
             return Err(ProviderError::Rejected);
         }
@@ -2671,6 +2853,7 @@ pub struct AiCodexAppServerProtocolActor {
     pending_turn_thread_id: Option<String>,
     active_turn_id: Option<String>,
     retained_model: Option<String>,
+    retained_reasoning_effort: Option<ModelReasoningEffort>,
     retained_bootstrap_fingerprint: Option<String>,
     dynamic_tools: BTreeMap<String, ModelToolDefinition>,
     dynamic_tool_projection_fingerprints: BTreeMap<String, String>,
@@ -2713,6 +2896,7 @@ impl AiCodexAppServerProtocolActor {
             pending_turn_thread_id: None,
             active_turn_id: None,
             retained_model: None,
+            retained_reasoning_effort: None,
             retained_bootstrap_fingerprint: None,
             dynamic_tools: BTreeMap::new(),
             dynamic_tool_projection_fingerprints: BTreeMap::new(),
@@ -2874,6 +3058,7 @@ impl AiCodexAppServerProtocolActor {
         input.validate()?;
         self.validate_thread_lifecycle_boundary()?;
         if self.retained_model.is_some()
+            || self.retained_reasoning_effort.is_some()
             || !self.dynamic_tools.is_empty()
             || !self.pending_dynamic_requests.is_empty()
             || !self.started_dynamic_calls.is_empty()
@@ -2898,6 +3083,7 @@ impl AiCodexAppServerProtocolActor {
             }),
         )?;
         self.begin_new_thread_lifecycle();
+        self.retained_reasoning_effort = Some(input.reasoning_effort());
         Ok(frame)
     }
 
@@ -2911,6 +3097,7 @@ impl AiCodexAppServerProtocolActor {
     pub fn start_persistent_empty_thread(
         &mut self,
         model: &str,
+        reasoning_effort: ModelReasoningEffort,
         bootstrap: &AiCodexAppServerBootstrapInstructions,
         dynamic_tools: &[ModelToolDefinition],
     ) -> Result<Vec<u8>, ProviderError> {
@@ -2919,6 +3106,7 @@ impl AiCodexAppServerProtocolActor {
             || self.thread_lifecycle_phase != ThreadLifecyclePhase::Ready
             || self.active_thread_id.is_some()
             || self.retained_model.is_some()
+            || self.retained_reasoning_effort.is_some()
             || self.retained_bootstrap_fingerprint.is_some()
             || !self.dynamic_tools.is_empty()
             || !self.pending_dynamic_requests.is_empty()
@@ -2947,6 +3135,7 @@ impl AiCodexAppServerProtocolActor {
         let frame = self.request(ClientMethod::ThreadStart, "thread/start", params)?;
         self.begin_new_thread_lifecycle();
         self.retained_model = Some(model.to_owned());
+        self.retained_reasoning_effort = Some(reasoning_effort);
         self.retained_bootstrap_fingerprint = Some(bootstrap.fingerprint().to_owned());
         self.dynamic_tools = projected_tools.definitions;
         self.dynamic_tool_projection_fingerprints = projected_tools.fingerprints;
@@ -2985,6 +3174,9 @@ impl AiCodexAppServerProtocolActor {
                 .as_deref()
                 .is_some_and(|model| model != input.model())
             || self
+                .retained_reasoning_effort
+                .is_some_and(|effort| effort != input.reasoning_effort())
+            || self
                 .retained_bootstrap_fingerprint
                 .as_deref()
                 .is_some_and(|fingerprint| fingerprint != input_instruction_fingerprint.as_str())
@@ -3022,6 +3214,7 @@ impl AiCodexAppServerProtocolActor {
         let frame = self.request(ClientMethod::ThreadResume, "thread/resume", params)?;
         self.begin_resume_lifecycle(cursor.expose_to_provider_adapter());
         self.retained_model = Some(input.model().to_owned());
+        self.retained_reasoning_effort = Some(input.reasoning_effort());
         self.retained_bootstrap_fingerprint = Some(input_instruction_fingerprint);
         self.dynamic_tools = projected_tools.definitions;
         self.dynamic_tool_projection_fingerprints = projected_tools.fingerprints;
@@ -3070,6 +3263,7 @@ impl AiCodexAppServerProtocolActor {
         input.validate()?;
         self.validate_thread_lifecycle_boundary()?;
         if self.retained_model.is_some()
+            || self.retained_reasoning_effort.is_some()
             || input.tools().is_empty()
             || !self.dynamic_tools.is_empty()
             || !self.pending_dynamic_requests.is_empty()
@@ -3099,6 +3293,7 @@ impl AiCodexAppServerProtocolActor {
             }),
         )?;
         self.begin_new_thread_lifecycle();
+        self.retained_reasoning_effort = Some(input.reasoning_effort());
         self.dynamic_tools = projected_tools.definitions;
         self.dynamic_tool_projection_fingerprints = projected_tools.fingerprints;
         Ok(frame)
@@ -3182,6 +3377,9 @@ impl AiCodexAppServerProtocolActor {
                 .as_deref()
                 .is_some_and(|model| model != input.model())
             || self
+                .retained_reasoning_effort
+                .is_some_and(|effort| effort != input.reasoning_effort())
+            || self
                 .retained_bootstrap_fingerprint
                 .as_deref()
                 .is_some_and(|fingerprint| fingerprint != input_instruction_fingerprint)
@@ -3201,6 +3399,12 @@ impl AiCodexAppServerProtocolActor {
             "input": input.input().iter().map(|text| json!({"type": "text", "text": text})).collect::<Vec<_>>(),
             "summary": "none",
         });
+        if let Some(effort) = input.reasoning_effort().wire_value() {
+            params
+                .as_object_mut()
+                .ok_or(ProviderError::Rejected)?
+                .insert("effort".to_owned(), Value::String(effort.to_owned()));
+        }
         if !input.tools().is_empty() {
             params
                 .as_object_mut()
@@ -3427,6 +3631,7 @@ impl AiCodexAppServerProtocolActor {
                 return Err(ProviderError::Rejected);
             }
             if self.retained_model.is_none() {
+                self.retained_reasoning_effort = None;
                 self.dynamic_tools.clear();
                 self.dynamic_tool_projection_fingerprints.clear();
             }
@@ -3713,6 +3918,7 @@ impl AiCodexAppServerProtocolActor {
                 }
                 self.active_thread_id = None;
                 self.retained_model = None;
+                self.retained_reasoning_effort = None;
                 self.retained_bootstrap_fingerprint = None;
                 self.dynamic_tools.clear();
                 self.dynamic_tool_projection_fingerprints.clear();
@@ -4606,6 +4812,40 @@ fn valid_reference(value: &str) -> bool {
 
 fn registration_identity(registration: &AiCodexAppServerRegistration) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"graphql-orm-ai/codex-app-server-registration/v4\0");
+    for value in [
+        registration.provider_profile_id.as_str(),
+        registration.logical_model.as_str(),
+        registration.executable_sha256.as_str(),
+        registration.executable_version.as_str(),
+        registration.sandbox_profile.as_str(),
+        registration.protocol_version.as_str(),
+    ] {
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value.as_bytes());
+    }
+    let profile = registration.launch_profile.identity_label();
+    hasher.update((profile.len() as u64).to_be_bytes());
+    hasher.update(profile.as_bytes());
+    hasher.update((registration.bootstrap_instructions.fingerprint().len() as u64).to_be_bytes());
+    hasher.update(registration.bootstrap_instructions.fingerprint().as_bytes());
+    if let Some(profile) = &registration.reasoning_effort_profile {
+        hasher.update(b"profile\0");
+        hasher.update((profile.model().len() as u64).to_be_bytes());
+        hasher.update(profile.model().as_bytes());
+        hasher.update(profile.default().as_str().as_bytes());
+        for effort in profile.supported() {
+            hasher.update(effort.as_str().as_bytes());
+            hasher.update(b"\0");
+        }
+    } else {
+        hasher.update(b"no-profile\0");
+    }
+    hex::encode(hasher.finalize())
+}
+
+fn legacy_registration_identity_v3(registration: &AiCodexAppServerRegistration) -> String {
+    let mut hasher = Sha256::new();
     hasher.update(b"graphql-orm-ai/codex-app-server-registration/v3\0");
     for value in [
         registration.provider_profile_id.as_str(),
@@ -4786,6 +5026,7 @@ pub(crate) mod tests {
         deleted_threads: AtomicUsize,
         tool_free: AtomicBool,
         dynamic_arguments: StdMutex<Option<Value>>,
+        reasoning_efforts: StdMutex<Vec<ModelReasoningEffort>>,
     }
 
     impl Counters {
@@ -4806,6 +5047,7 @@ pub(crate) mod tests {
                 deleted_threads: AtomicUsize::new(0),
                 tool_free: AtomicBool::new(false),
                 dynamic_arguments: StdMutex::new(None),
+                reasoning_efforts: StdMutex::new(Vec::new()),
             }
         }
     }
@@ -4865,10 +5107,16 @@ pub(crate) mod tests {
         async fn create_empty_thread(
             &self,
             _model: &str,
+            reasoning_effort: ModelReasoningEffort,
             _bootstrap: &AiCodexAppServerBootstrapInstructions,
             dynamic_tools: Vec<ModelToolDefinition>,
         ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
             self.counters.created_threads.fetch_add(1, Ordering::SeqCst);
+            self.counters
+                .reasoning_efforts
+                .lock()
+                .expect("reasoning-effort fixture should not be poisoned")
+                .push(reasoning_effort);
             self.counters
                 .created_dynamic_tools
                 .fetch_add(dynamic_tools.len(), Ordering::SeqCst);
@@ -4881,9 +5129,14 @@ pub(crate) mod tests {
 
         async fn start_fresh_turn(
             &self,
-            _input: AiCodexAppServerTurnInput,
+            input: AiCodexAppServerTurnInput,
         ) -> Result<ProviderEventStream, ProviderError> {
             self.counters.turns.fetch_add(1, Ordering::SeqCst);
+            self.counters
+                .reasoning_efforts
+                .lock()
+                .expect("reasoning-effort fixture should not be poisoned")
+                .push(input.reasoning_effort());
             if self.counters.pending.load(Ordering::SeqCst) {
                 return Ok(Box::pin(stream::pending()));
             }
@@ -4910,6 +5163,11 @@ pub(crate) mod tests {
             responder: Arc<dyn ProviderDynamicToolResponder>,
         ) -> Result<ProviderEventStream, ProviderError> {
             self.counters.turns.fetch_add(1, Ordering::SeqCst);
+            self.counters
+                .reasoning_efforts
+                .lock()
+                .expect("reasoning-effort fixture should not be poisoned")
+                .push(input.reasoning_effort());
             if self.counters.pending.load(Ordering::SeqCst) {
                 return Ok(Box::pin(stream::pending()));
             }
@@ -5091,11 +5349,27 @@ pub(crate) mod tests {
         registration: &AiCodexAppServerRegistration,
         cursor: crate::AiProviderSessionCursor,
     ) -> crate::AiOpenedProviderSession {
+        opened_session_with_effort(
+            binding,
+            registration,
+            cursor,
+            ModelReasoningEffort::Unspecified,
+        )
+    }
+
+    fn opened_session_with_effort(
+        binding: AiProviderRunBinding,
+        registration: &AiCodexAppServerRegistration,
+        cursor: crate::AiProviderSessionCursor,
+        reasoning_effort: ModelReasoningEffort,
+    ) -> crate::AiOpenedProviderSession {
         let descriptor = crate::AiProviderSessionDescriptor::new(
             ProviderKind::LocalHarness,
             registration.provider_profile_id(),
             registration.logical_model(),
-            registration.identity(),
+            registration
+                .provider_session_fingerprint(reasoning_effort)
+                .expect("selected effort should be admitted"),
             registration.protocol_version(),
             "d".repeat(64),
         )
@@ -5148,6 +5422,38 @@ pub(crate) mod tests {
             )
             .expect("test registration should validate")
             .with_launch_profile(profile),
+        )
+    }
+
+    fn reasoning_effort_profile() -> ModelReasoningEffortProfile {
+        ModelReasoningEffortProfile::new(
+            "model-1",
+            [
+                ModelReasoningEffort::None,
+                ModelReasoningEffort::Low,
+                ModelReasoningEffort::Medium,
+                ModelReasoningEffort::High,
+                ModelReasoningEffort::XHigh,
+                ModelReasoningEffort::Max,
+            ],
+            ModelReasoningEffort::Medium,
+        )
+        .expect("reviewed Codex reasoning-effort profile should validate")
+    }
+
+    fn reasoning_registration(
+        version: &str,
+        dynamic_tools: bool,
+    ) -> Arc<AiCodexAppServerRegistration> {
+        let registration = if dynamic_tools {
+            (*dynamic_registration(version)).clone()
+        } else {
+            (*registration(version)).clone()
+        };
+        Arc::new(
+            registration
+                .with_reasoning_effort_profile(reasoning_effort_profile())
+                .expect("exact-model reasoning-effort profile should bind"),
         )
     }
 
@@ -5413,6 +5719,252 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn reasoning_effort_profile_and_session_fingerprints_are_registration_frozen() {
+        let baseline = registration("1.0.0");
+        let reviewed = reasoning_registration("1.0.0", false);
+        assert_ne!(baseline.identity(), reviewed.identity());
+        let profile = reviewed
+            .reasoning_effort_profile()
+            .expect("reasoning-effort profile should be registered");
+        assert_eq!(profile.model(), "model-1");
+        assert_eq!(profile.default(), ModelReasoningEffort::Medium);
+        assert_eq!(profile.supported().len(), 6);
+
+        let efforts = [
+            ModelReasoningEffort::Unspecified,
+            ModelReasoningEffort::None,
+            ModelReasoningEffort::Low,
+            ModelReasoningEffort::Medium,
+            ModelReasoningEffort::High,
+            ModelReasoningEffort::XHigh,
+            ModelReasoningEffort::Max,
+        ];
+        let fingerprints = efforts
+            .into_iter()
+            .map(|effort| {
+                reviewed
+                    .provider_session_fingerprint(effort)
+                    .expect("every reviewed effort should fingerprint")
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(fingerprints.len(), efforts.len());
+        let legacy = legacy_registration_identity_v3(&reviewed);
+        assert!(!reviewed.admits_provider_session_fingerprint(&legacy));
+        assert!(reviewed.admits_cleanup_fingerprint(&legacy));
+
+        let subset = ModelReasoningEffortProfile::new(
+            "model-1",
+            [ModelReasoningEffort::Low, ModelReasoningEffort::Medium],
+            ModelReasoningEffort::Medium,
+        )
+        .expect("Codex subset should validate");
+        let subset_registration = (*registration("1.0.0"))
+            .clone()
+            .with_reasoning_effort_profile(subset)
+            .expect("exact-model subset should bind");
+        assert!(
+            subset_registration
+                .provider_session_fingerprint(ModelReasoningEffort::Low)
+                .is_ok()
+        );
+        assert!(matches!(
+            subset_registration.provider_session_fingerprint(ModelReasoningEffort::High),
+            Err(ProviderError::Unsupported)
+        ));
+        let wrong_model = ModelReasoningEffortProfile::new(
+            "other-model",
+            [ModelReasoningEffort::Medium],
+            ModelReasoningEffort::Medium,
+        )
+        .expect("standalone profile should validate");
+        assert!(matches!(
+            (*registration("1.0.0"))
+                .clone()
+                .with_reasoning_effort_profile(wrong_model),
+            Err(ProviderError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn protocol_authors_only_the_closed_turn_start_effort_field() {
+        let efforts = [
+            ModelReasoningEffort::Unspecified,
+            ModelReasoningEffort::None,
+            ModelReasoningEffort::Low,
+            ModelReasoningEffort::Medium,
+            ModelReasoningEffort::High,
+            ModelReasoningEffort::XHigh,
+            ModelReasoningEffort::Max,
+        ];
+        for effort in efforts {
+            let bootstrap = AiCodexAppServerBootstrapInstructions::disabled();
+            let mut actor = initialized_protocol_actor();
+            let create: Value = serde_json::from_slice(
+                &actor
+                    .start_persistent_empty_thread("model-1", effort, &bootstrap, &[])
+                    .expect("empty thread should encode"),
+            )
+            .expect("thread frame should be JSON");
+            assert!(create.pointer("/params/effort").is_none());
+            actor
+                .accept(br#"{"id":2,"result":{"thread":{"id":"thread-effort"}}}"#)
+                .expect("thread response should bind");
+            actor
+                .accept(&thread_started_notification("thread-effort"))
+                .expect("thread notification should bind");
+            let mut input = turn();
+            input.instructions.clear();
+            input.reasoning_effort = effort;
+            let start: Value = serde_json::from_slice(
+                &actor
+                    .start_turn("thread-effort", &input)
+                    .expect("admitted effort should encode"),
+            )
+            .expect("turn frame should be JSON");
+            assert_eq!(
+                start.pointer("/params/effort").and_then(Value::as_str),
+                effort.wire_value()
+            );
+            assert!(start.pointer("/params/reasoningEffort").is_none());
+            assert_eq!(start.pointer("/params/summary"), Some(&json!("none")));
+        }
+    }
+
+    #[test]
+    fn successive_stateless_threads_scope_effort_to_each_exact_thread() {
+        let mut actor = initialized_protocol_actor();
+        let mut first = turn();
+        first.reasoning_effort = ModelReasoningEffort::High;
+        actor
+            .start_fresh_thread(&first)
+            .expect("first stateless thread should start");
+        actor
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-stateless-1"}}}"#)
+            .expect("first thread response should bind");
+        actor
+            .accept(&thread_started_notification("thread-stateless-1"))
+            .expect("first thread notification should bind");
+        let first_turn: Value = serde_json::from_slice(
+            &actor
+                .start_turn("thread-stateless-1", &first)
+                .expect("first stateless turn should start"),
+        )
+        .expect("first turn frame should be JSON");
+        assert_eq!(first_turn.pointer("/params/effort"), Some(&json!("high")));
+        actor
+            .accept(br#"{"id":3,"result":{"turn":{"id":"turn-stateless-1"}}}"#)
+            .expect("first turn response should bind");
+        actor
+            .accept(&turn_started_notification(
+                "thread-stateless-1",
+                "turn-stateless-1",
+            ))
+            .expect("first turn notification should bind");
+        actor
+            .accept(&turn_completed_notification(
+                "thread-stateless-1",
+                "turn-stateless-1",
+            ))
+            .expect("first stateless turn should complete");
+
+        let mut second = turn();
+        second.reasoning_effort = ModelReasoningEffort::Max;
+        actor
+            .start_fresh_thread(&second)
+            .expect("a new stateless thread may select a new admitted effort");
+        actor
+            .accept(br#"{"id":4,"result":{"thread":{"id":"thread-stateless-2"}}}"#)
+            .expect("second thread response should bind");
+        actor
+            .accept(&thread_started_notification("thread-stateless-2"))
+            .expect("second thread notification should bind");
+        let second_turn: Value = serde_json::from_slice(
+            &actor
+                .start_turn("thread-stateless-2", &second)
+                .expect("second stateless turn should start"),
+        )
+        .expect("second turn frame should be JSON");
+        assert_eq!(second_turn.pointer("/params/effort"), Some(&json!("max")));
+    }
+
+    #[test]
+    fn retained_dynamic_create_resume_and_continuation_preserve_exact_effort() {
+        let bootstrap = AiCodexAppServerBootstrapInstructions::disabled();
+        let mut request = dynamic_model_request();
+        request.reasoning_effort = ModelReasoningEffort::Medium;
+        let input =
+            AiCodexAppServerTurnInput::try_from_retained_dynamic_request(request, &bootstrap)
+                .expect("retained dynamic input should validate");
+        let mut actor = initialized_protocol_actor();
+        actor
+            .start_persistent_empty_thread(
+                "model-1",
+                ModelReasoningEffort::Medium,
+                &bootstrap,
+                input.tools(),
+            )
+            .expect("dynamic empty thread should encode");
+        actor
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-effort"}}}"#)
+            .expect("thread response should bind");
+        actor
+            .accept(&thread_started_notification("thread-effort"))
+            .expect("thread notification should bind");
+        let first: Value = serde_json::from_slice(
+            &actor
+                .start_turn("thread-effort", &input)
+                .expect("newly bound first turn should preserve effort"),
+        )
+        .expect("turn frame should be JSON");
+        assert_eq!(first.pointer("/params/effort"), Some(&json!("medium")));
+        actor
+            .accept(br#"{"id":3,"result":{"turn":{"id":"turn-effort-1"}}}"#)
+            .expect("turn response should bind");
+        actor
+            .accept(&turn_started_notification("thread-effort", "turn-effort-1"))
+            .expect("turn notification should bind");
+        actor
+            .accept(&turn_completed_notification(
+                "thread-effort",
+                "turn-effort-1",
+            ))
+            .expect("first turn should complete");
+
+        let cursor =
+            crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", "thread-effort")
+                .expect("retained cursor should validate");
+        let mut substituted = input.clone();
+        substituted.reasoning_effort = ModelReasoningEffort::High;
+        assert!(matches!(
+            actor.resume_thread(&cursor, &substituted),
+            Err(ProviderError::Rejected)
+        ));
+        actor
+            .resume_thread(&cursor, &input)
+            .expect("exact effort should resume");
+        actor
+            .accept(br#"{"id":4,"result":{"thread":{"id":"thread-effort"}}}"#)
+            .expect("resume response should bind");
+        actor
+            .accept(&thread_started_notification("thread-effort"))
+            .expect("resume notification should bind");
+        let continuation: Value = serde_json::from_slice(
+            &actor
+                .start_turn("thread-effort", &input)
+                .expect("dynamic continuation should preserve effort"),
+        )
+        .expect("continuation frame should be JSON");
+        assert_eq!(
+            continuation.pointer("/params/effort"),
+            Some(&json!("medium"))
+        );
+        assert_eq!(
+            continuation.pointer("/params/environments"),
+            Some(&json!([]))
+        );
+    }
+
+    #[test]
     fn retained_bootstrap_is_static_registration_bound_and_active_on_first_turn() {
         let bootstrap = bootstrap_instructions();
         let without_bootstrap = dynamic_registration("1.0.0");
@@ -5436,7 +5988,12 @@ pub(crate) mod tests {
 
         let mut actor = initialized_protocol_actor();
         let frame = actor
-            .start_persistent_empty_thread("model-1", &bootstrap, &[dynamic_tool()])
+            .start_persistent_empty_thread(
+                "model-1",
+                ModelReasoningEffort::Unspecified,
+                &bootstrap,
+                &[dynamic_tool()],
+            )
             .expect("static bootstrap thread should encode");
         let value: Value = serde_json::from_slice(&frame).expect("frame should be JSON");
         assert_eq!(
@@ -6028,6 +6585,7 @@ pub(crate) mod tests {
         actor
             .start_persistent_empty_thread(
                 "model-1",
+                ModelReasoningEffort::Unspecified,
                 &AiCodexAppServerBootstrapInstructions::disabled(),
                 tools,
             )
@@ -6164,6 +6722,7 @@ pub(crate) mod tests {
             mixed
                 .start_persistent_empty_thread(
                     "model-1",
+                    ModelReasoningEffort::Unspecified,
                     &AiCodexAppServerBootstrapInstructions::disabled(),
                     &mixed_tools,
                 )
@@ -6522,9 +7081,16 @@ pub(crate) mod tests {
             "model-1",
             vec!["trusted".to_owned()],
             vec!["hello".to_owned()],
+            ModelReasoningEffort::Unspecified,
             128,
         )
         .expect("test turn should validate")
+    }
+
+    fn turn_with_effort(effort: ModelReasoningEffort) -> AiCodexAppServerTurnInput {
+        let mut input = turn();
+        input.reasoning_effort = effort;
+        input
     }
 
     fn model_request() -> ModelRequest {
@@ -6540,6 +7106,7 @@ pub(crate) mod tests {
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
             reasoning_summary: ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(128),
         }
@@ -6764,13 +7331,14 @@ pub(crate) mod tests {
         let proof = crate::AiEgressDecision::allow(&manifest, "test", "test-user")
             .authorize(&manifest)
             .expect("manifest should authorize");
-        let budget = crate::AiBudgetReservation::new_reserved(
+        let budget = crate::AiBudgetReservation::new_reserved_with_reasoning_effort(
             crate::AiBudgetReservationId::new(),
             run_id,
             attempt_id,
             1,
             ProviderKind::LocalHarness,
             &request.model,
+            request.reasoning_effort,
             "test-pricing-v1",
             crate::AiBudgetAmounts {
                 input_tokens: 1_000,
@@ -6781,12 +7349,13 @@ pub(crate) mod tests {
             time::OffsetDateTime::now_utc() + time::Duration::hours(1),
         )
         .expect("budget should validate")
-        .authorize_provider_call(
+        .authorize_provider_call_with_reasoning_effort(
             run_id,
             attempt_id,
             1,
             &ProviderKind::LocalHarness,
             &request.model,
+            request.reasoning_effort,
             request.maximum_output_tokens.unwrap_or_default(),
             0,
             time::OffsetDateTime::now_utc(),
@@ -6848,7 +7417,12 @@ pub(crate) mod tests {
         let pool = pool(counters.clone(), 1, 2);
         let binding = binding();
         let cursor = pool
-            .create_empty_thread(binding, dynamic_registration("1.0.0"), vec![dynamic_tool()])
+            .create_empty_thread(
+                binding,
+                dynamic_registration("1.0.0"),
+                ModelReasoningEffort::Unspecified,
+                vec![dynamic_tool()],
+            )
             .await
             .expect("empty retained thread should create");
         assert_eq!(cursor.kind(), "codex.app_server.thread.v2");
@@ -6860,8 +7434,13 @@ pub(crate) mod tests {
         assert_eq!(counters.deleted_threads.load(Ordering::SeqCst), 1);
 
         assert!(matches!(
-            pool.create_empty_thread(binding, registration("1.0.0"), vec![dynamic_tool()])
-                .await,
+            pool.create_empty_thread(
+                binding,
+                registration("1.0.0"),
+                ModelReasoningEffort::Unspecified,
+                vec![dynamic_tool()],
+            )
+            .await,
             Err(ProviderError::Unsupported)
         ));
     }
@@ -6873,7 +7452,12 @@ pub(crate) mod tests {
         let binding = binding();
         let registration = dynamic_registration("1.0.0");
         let cursor = pool
-            .create_empty_thread(binding, registration.clone(), vec![dynamic_tool()])
+            .create_empty_thread(
+                binding,
+                registration.clone(),
+                ModelReasoningEffort::Unspecified,
+                vec![dynamic_tool()],
+            )
             .await
             .expect("retained dynamic thread should create");
         let opened = opened_session(binding, &registration, cursor.clone())
@@ -6917,7 +7501,9 @@ pub(crate) mod tests {
             ProviderKind::LocalHarness,
             registration.provider_profile_id(),
             registration.logical_model(),
-            registration.identity(),
+            registration
+                .provider_session_fingerprint(ModelReasoningEffort::Unspecified)
+                .expect("unspecified effort should be admitted"),
             registration.protocol_version(),
             "d".repeat(64),
         )
@@ -6960,7 +7546,9 @@ pub(crate) mod tests {
             ProviderKind::LocalHarness,
             registration.provider_profile_id(),
             registration.logical_model(),
-            registration.identity(),
+            registration
+                .provider_session_fingerprint(ModelReasoningEffort::Unspecified)
+                .expect("unspecified effort should be admitted"),
             registration.protocol_version(),
             "d".repeat(64),
         )
@@ -7025,7 +7613,9 @@ pub(crate) mod tests {
             ProviderKind::LocalHarness,
             registration.provider_profile_id(),
             registration.logical_model(),
-            registration.identity(),
+            registration
+                .provider_session_fingerprint(ModelReasoningEffort::Unspecified)
+                .expect("unspecified effort should be admitted"),
             registration.protocol_version(),
             "d".repeat(64),
         )
@@ -7042,6 +7632,7 @@ pub(crate) mod tests {
                     lease_generation: binding.lease_generation(),
                     provider_kind: ProviderKind::LocalHarness,
                     model: first_turn.model.clone(),
+                    reasoning_effort: first_turn.reasoning_effort,
                     pricing_policy_version: "test-pricing-v1".to_owned(),
                     estimate: crate::AiBudgetAmounts {
                         input_tokens: 1_000,
@@ -7227,6 +7818,7 @@ pub(crate) mod tests {
             lease_generation: binding.lease_generation(),
             provider_kind: ProviderKind::LocalHarness,
             model: request.model.clone(),
+            reasoning_effort: request.reasoning_effort,
             pricing_policy_version: "test-pricing-v1".to_owned(),
             estimate: crate::AiBudgetAmounts {
                 input_tokens: 1_000,
@@ -7280,7 +7872,9 @@ pub(crate) mod tests {
             ProviderKind::LocalHarness,
             registration.provider_profile_id(),
             registration.logical_model(),
-            registration.identity(),
+            registration
+                .provider_session_fingerprint(ModelReasoningEffort::Unspecified)
+                .expect("unspecified effort should be admitted"),
             registration.protocol_version(),
             "d".repeat(64),
         )
@@ -7344,7 +7938,12 @@ pub(crate) mod tests {
         let binding = binding();
         let (_, _, _, _, request) = mixed_read_surface();
         let cursor = pool
-            .create_empty_thread(binding, registration.clone(), request.tools.clone())
+            .create_empty_thread(
+                binding,
+                registration.clone(),
+                request.reasoning_effort,
+                request.tools.clone(),
+            )
             .await
             .expect("mixed empty thread should create");
         let opened = opened_session(binding, &registration, cursor.clone())
@@ -7436,7 +8035,9 @@ pub(crate) mod tests {
             ProviderKind::LocalHarness,
             registration.provider_profile_id(),
             registration.logical_model(),
-            registration.identity(),
+            registration
+                .provider_session_fingerprint(ModelReasoningEffort::Unspecified)
+                .expect("unspecified effort should be admitted"),
             registration.protocol_version(),
             "d".repeat(64),
         )
@@ -7470,7 +8071,12 @@ pub(crate) mod tests {
         let binding = binding();
         let registration = registration("1.0.0");
         let cursor = pool
-            .create_empty_thread(binding, registration.clone(), Vec::new())
+            .create_empty_thread(
+                binding,
+                registration.clone(),
+                ModelReasoningEffort::Unspecified,
+                Vec::new(),
+            )
             .await
             .expect("empty retained thread should create");
         let opened = opened_session(binding, &registration, cursor.clone())
@@ -7503,7 +8109,12 @@ pub(crate) mod tests {
         let binding = binding();
         let registration = dynamic_registration("1.0.0");
         let created = primary_pool
-            .create_empty_thread(binding, registration.clone(), vec![dynamic_tool()])
+            .create_empty_thread(
+                binding,
+                registration.clone(),
+                ModelReasoningEffort::Unspecified,
+                vec![dynamic_tool()],
+            )
             .await
             .expect("empty retained thread should create");
         let other_binding = AiProviderRunBinding::new_for_principal_reference(
@@ -7573,14 +8184,21 @@ pub(crate) mod tests {
         let counters = Arc::new(Counters::new());
         let pool = pool(counters.clone(), 1, 2);
         let later_binding = binding_for_owner(1);
-        let registration = dynamic_registration("1.0.0");
+        let registration = reasoning_registration("1.0.0", true);
         let cursor = crate::AiProviderSessionCursor::new(
             "codex.app_server.thread.v2",
             "thread-retained-test",
         )
         .expect("committed cursor should validate");
-        let opened = opened_session(later_binding, &registration, cursor);
-        let input = AiCodexAppServerTurnInput::try_from_dynamic_request(dynamic_model_request())
+        let opened = opened_session_with_effort(
+            later_binding,
+            &registration,
+            cursor,
+            ModelReasoningEffort::Max,
+        );
+        let mut request = dynamic_model_request();
+        request.reasoning_effort = ModelReasoningEffort::Max;
+        let input = AiCodexAppServerTurnInput::try_from_dynamic_request(request)
             .expect("dynamic input should validate");
         let events = pool
             .start_retained_dynamic_turn(
@@ -7598,6 +8216,14 @@ pub(crate) mod tests {
         assert_eq!(counters.launches.load(Ordering::SeqCst), 1);
         assert_eq!(counters.bound_turns.load(Ordering::SeqCst), 0);
         assert_eq!(counters.retained_turns.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            counters
+                .reasoning_efforts
+                .lock()
+                .expect("reasoning-effort fixture should not be poisoned")
+                .as_slice(),
+            &[ModelReasoningEffort::Max]
+        );
     }
 
     #[tokio::test]
@@ -7607,7 +8233,12 @@ pub(crate) mod tests {
         let binding = binding();
         let registration = dynamic_registration("1.0.0");
         let cursor = pool
-            .create_empty_thread(binding, registration.clone(), vec![dynamic_tool()])
+            .create_empty_thread(
+                binding,
+                registration.clone(),
+                ModelReasoningEffort::Unspecified,
+                vec![dynamic_tool()],
+            )
             .await
             .expect("empty dynamic thread should create");
         let opened = opened_session(binding, &registration, cursor.clone())
@@ -7638,14 +8269,24 @@ pub(crate) mod tests {
         let counters = Arc::new(Counters::new());
         let pool = pool(counters.clone(), 1, 2);
         let binding = binding();
-        let registration = registration("1.0.0");
+        let registration = reasoning_registration("1.0.0", false);
         let cursor = pool
-            .create_empty_thread(binding, registration.clone(), Vec::new())
+            .create_empty_thread(
+                binding,
+                registration.clone(),
+                ModelReasoningEffort::High,
+                Vec::new(),
+            )
             .await
             .expect("empty thread should create");
-        let opened = opened_session(binding, &registration, cursor.clone())
-            .activate_newly_bound_empty(binding, &cursor)
-            .expect("activation should validate");
+        let opened = opened_session_with_effort(
+            binding,
+            &registration,
+            cursor.clone(),
+            ModelReasoningEffort::High,
+        )
+        .activate_newly_bound_empty(binding, &cursor)
+        .expect("activation should validate");
         assert_eq!(
             pool.close_run(&binding, AiProviderRunCloseReason::Cancelled)
                 .await
@@ -7653,14 +8294,27 @@ pub(crate) mod tests {
             AiProviderRunCloseOutcome::Closed
         );
         assert!(matches!(
-            pool.start_bound_turn(binding, registration, opened, turn())
-                .await,
+            pool.start_bound_turn(
+                binding,
+                registration,
+                opened,
+                turn_with_effort(ModelReasoningEffort::High),
+            )
+            .await,
             Err(ProviderError::NewlyBoundTurnRejected(
                 crate::AiCodexBoundTurnRejection::ProcessBindingMissing
             ))
         ));
         assert_eq!(counters.bound_turns.load(Ordering::SeqCst), 0);
         assert_eq!(counters.turns.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            counters
+                .reasoning_efforts
+                .lock()
+                .expect("reasoning-effort fixture should not be poisoned")
+                .as_slice(),
+            &[ModelReasoningEffort::High]
+        );
     }
 
     #[test]
@@ -7715,6 +8369,118 @@ pub(crate) mod tests {
             Err(ProviderError::EgressDenied)
         ));
         assert_eq!(counters.launches.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn provider_rejects_retained_effort_swap_before_execution() {
+        let counters = Arc::new(Counters::new());
+        let registration = reasoning_registration("1.0.0", false);
+        let provider =
+            AiCodexAppServerProvider::new(registration.clone(), pool(counters.clone(), 1, 4));
+        let mut request = model_request();
+        request.continuation_mode = ModelContinuationMode::ProviderRetained;
+        request.instructions.clear();
+        request.reasoning_effort = ModelReasoningEffort::High;
+        let base_context = provider_context(registration.provider_profile_id(), &request);
+        let binding = base_context
+            .run_binding()
+            .expect("provider context should carry its exact binding");
+        let descriptor = |effort| {
+            crate::AiProviderSessionDescriptor::new(
+                ProviderKind::LocalHarness,
+                registration.provider_profile_id(),
+                registration.logical_model(),
+                registration
+                    .provider_session_fingerprint(effort)
+                    .expect("reviewed effort should fingerprint"),
+                registration.protocol_version(),
+                "d".repeat(64),
+            )
+            .expect("provider-session descriptor should validate")
+        };
+
+        assert!(matches!(
+            provider
+                .create_empty_session(&binding, &descriptor(ModelReasoningEffort::Low), &request,)
+                .await,
+            Err(ProviderError::Rejected)
+        ));
+        assert_eq!(counters.launches.load(Ordering::SeqCst), 0);
+
+        let cursor = provider
+            .create_empty_session(&binding, &descriptor(ModelReasoningEffort::High), &request)
+            .await
+            .expect("exact effort should create an empty retained thread");
+        let wrong = opened_session_with_effort(
+            binding,
+            &registration,
+            cursor.clone(),
+            ModelReasoningEffort::Low,
+        )
+        .activate_newly_bound_empty(binding, &cursor)
+        .expect("synthetic wrong-effort claim should activate structurally");
+        assert!(matches!(
+            provider
+                .stream(
+                    request.clone(),
+                    base_context
+                        .clone()
+                        .with_provider_session(wrong)
+                        .expect("session should match the context binding"),
+                )
+                .await,
+            Err(ProviderError::Rejected)
+        ));
+        assert_eq!(counters.turns.load(Ordering::SeqCst), 0);
+
+        let exact = opened_session_with_effort(
+            binding,
+            &registration,
+            cursor.clone(),
+            ModelReasoningEffort::High,
+        )
+        .activate_newly_bound_empty(binding, &cursor)
+        .expect("exact effort claim should activate");
+        let first = provider
+            .stream(
+                request.clone(),
+                base_context
+                    .clone()
+                    .with_provider_session(exact)
+                    .expect("session should match the context binding"),
+            )
+            .await
+            .expect("exact newly-bound effort should start")
+            .collect::<Vec<_>>()
+            .await;
+        assert!(first.iter().all(Result::is_ok));
+
+        let resumed =
+            opened_session_with_effort(binding, &registration, cursor, ModelReasoningEffort::High);
+        let continuation = provider
+            .stream(
+                request,
+                base_context
+                    .with_provider_session(resumed)
+                    .expect("resumed session should match the context binding"),
+            )
+            .await
+            .expect("exact retained effort should resume")
+            .collect::<Vec<_>>()
+            .await;
+        assert!(continuation.iter().all(Result::is_ok));
+        assert_eq!(
+            counters
+                .reasoning_efforts
+                .lock()
+                .expect("reasoning-effort fixture should not be poisoned")
+                .as_slice(),
+            &[
+                ModelReasoningEffort::High,
+                ModelReasoningEffort::High,
+                ModelReasoningEffort::High,
+            ]
+        );
     }
 
     #[tokio::test]
@@ -7873,8 +8639,13 @@ pub(crate) mod tests {
         counters.stream_error.store(true, Ordering::SeqCst);
         let pool = pool(counters.clone(), 2, 4);
         let binding = binding();
+        let registration = reasoning_registration("1.0.0", false);
         let events = pool
-            .start_fresh_turn(binding, registration("1.0.0"), turn())
+            .start_fresh_turn(
+                binding,
+                registration.clone(),
+                turn_with_effort(ModelReasoningEffort::XHigh),
+            )
             .await
             .expect("turn should start")
             .collect::<Vec<_>>()
@@ -7883,12 +8654,24 @@ pub(crate) mod tests {
         assert_eq!(counters.shutdowns.load(Ordering::SeqCst), 1);
 
         counters.stream_error.store(false, Ordering::SeqCst);
-        pool.start_fresh_turn(binding, registration("1.0.0"), turn())
-            .await
-            .expect("retry should use a replacement process")
-            .collect::<Vec<_>>()
-            .await;
+        pool.start_fresh_turn(
+            binding,
+            registration,
+            turn_with_effort(ModelReasoningEffort::XHigh),
+        )
+        .await
+        .expect("retry should use a replacement process")
+        .collect::<Vec<_>>()
+        .await;
         assert_eq!(counters.launches.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            counters
+                .reasoning_efforts
+                .lock()
+                .expect("reasoning-effort fixture should not be poisoned")
+                .as_slice(),
+            &[ModelReasoningEffort::XHigh, ModelReasoningEffort::XHigh]
+        );
     }
 
     #[tokio::test]
@@ -8601,6 +9384,7 @@ pub(crate) mod tests {
         new_thread
             .start_persistent_empty_thread(
                 "model-1",
+                ModelReasoningEffort::Unspecified,
                 &AiCodexAppServerBootstrapInstructions::disabled(),
                 &[],
             )
@@ -8643,7 +9427,12 @@ pub(crate) mod tests {
     fn protocol_admits_runtime_warning_after_strict_retained_resume() {
         let mut actor = initialized_protocol_actor();
         actor
-            .start_persistent_empty_thread("model-1", &trusted_bootstrap(), &[])
+            .start_persistent_empty_thread(
+                "model-1",
+                ModelReasoningEffort::Unspecified,
+                &trusted_bootstrap(),
+                &[],
+            )
             .expect("persistent empty thread should encode");
         actor
             .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
@@ -8740,7 +9529,12 @@ pub(crate) mod tests {
     fn retained_actor_repeats_response_first_create_resume_and_turn_lifecycle() {
         let mut actor = initialized_protocol_actor();
         actor
-            .start_persistent_empty_thread("model-1", &trusted_bootstrap(), &[])
+            .start_persistent_empty_thread(
+                "model-1",
+                ModelReasoningEffort::Unspecified,
+                &trusted_bootstrap(),
+                &[],
+            )
             .expect("persistent create should encode");
         actor
             .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
@@ -8770,7 +9564,12 @@ pub(crate) mod tests {
     fn retained_actor_repeats_notification_first_create_and_resume_lifecycle() {
         let mut actor = initialized_protocol_actor();
         actor
-            .start_persistent_empty_thread("model-1", &trusted_bootstrap(), &[])
+            .start_persistent_empty_thread(
+                "model-1",
+                ModelReasoningEffort::Unspecified,
+                &trusted_bootstrap(),
+                &[],
+            )
             .expect("persistent create should encode");
         actor
             .accept(&thread_started_notification("thread-retained-1"))
@@ -8808,6 +9607,7 @@ pub(crate) mod tests {
         actor
             .start_persistent_empty_thread(
                 "model-1",
+                ModelReasoningEffort::Unspecified,
                 &AiCodexAppServerBootstrapInstructions::disabled(),
                 input.tools(),
             )
@@ -9522,6 +10322,7 @@ pub(crate) mod tests {
             empty_guard
                 .start_persistent_empty_thread(
                     "codex-test-model",
+                    ModelReasoningEffort::Unspecified,
                     &AiCodexAppServerBootstrapInstructions::disabled(),
                     &[],
                 )
@@ -9574,6 +10375,7 @@ pub(crate) mod tests {
             dynamic_create
                 .start_persistent_empty_thread(
                     "model-1",
+                    ModelReasoningEffort::Unspecified,
                     &AiCodexAppServerBootstrapInstructions::disabled(),
                     input.tools(),
                 )
@@ -9662,6 +10464,66 @@ pub(crate) mod tests {
         ));
     }
 
+    #[test]
+    #[ignore = "requires the reviewed Codex CLI 0.147.0 binary"]
+    fn generated_codex_0147_schema_places_effort_only_on_turn_start() {
+        let executable = std::env::var("GRAPHQL_ORM_AI_CODEX_0147_BIN")
+            .expect("set GRAPHQL_ORM_AI_CODEX_0147_BIN to the reviewed absolute binary path");
+        assert!(PathBuf::from(&executable).is_absolute());
+        let version = Command::new(&executable)
+            .arg("--version")
+            .env_clear()
+            .output()
+            .expect("reviewed Codex version should execute");
+        assert!(version.status.success());
+        assert_eq!(
+            String::from_utf8(version.stdout)
+                .expect("version should be UTF-8")
+                .trim(),
+            "codex-cli 0.147.0"
+        );
+        let output =
+            std::env::temp_dir().join(format!("graphql-orm-ai-codex-schema-{}", Uuid::new_v4()));
+        std::fs::create_dir(&output).expect("unique schema output directory should create");
+        let status = Command::new(&executable)
+            .args(["app-server", "generate-json-schema", "--out"])
+            .arg(&output)
+            .env_clear()
+            .status()
+            .expect("reviewed Codex schema generator should execute");
+        assert!(status.success());
+        let schema: Value = serde_json::from_slice(
+            &std::fs::read(output.join("v2/TurnStartParams.json"))
+                .expect("generated TurnStartParams schema should exist"),
+        )
+        .expect("generated TurnStartParams schema should be JSON");
+        assert_eq!(
+            schema.pointer("/definitions/ReasoningEffort/type"),
+            Some(&json!("string"))
+        );
+        assert_eq!(
+            schema.pointer("/definitions/ReasoningEffort/minLength"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            schema.pointer("/properties/effort/anyOf/0/$ref"),
+            Some(&json!("#/definitions/ReasoningEffort"))
+        );
+        assert!(
+            schema
+                .pointer("/properties/effort/description")
+                .and_then(Value::as_str)
+                .is_some_and(|description| description.contains("this turn and subsequent turns"))
+        );
+        assert!(
+            !schema["required"]
+                .as_array()
+                .expect("required set should be an array")
+                .contains(&json!("effort"))
+        );
+        std::fs::remove_dir_all(&output).expect("temporary schema directory should remove");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "requires a reviewed Codex CLI 0.147.0 binary and disposable configured home"]
     async fn live_codex_0147_bound_first_turn_then_later_resume_uses_strict_actor() {
@@ -9719,6 +10581,7 @@ pub(crate) mod tests {
             &actor
                 .start_persistent_empty_thread(
                     "gpt-5.4",
+                    ModelReasoningEffort::High,
                     &bootstrap_instructions(),
                     &[dynamic_tool()],
                 )
@@ -9775,6 +10638,7 @@ pub(crate) mod tests {
         let mut live_request = dynamic_model_request();
         live_request.model = "gpt-5.4".to_owned();
         live_request.instructions.clear();
+        live_request.reasoning_effort = ModelReasoningEffort::High;
         live_request.input = vec![ModelInputBlock::Text {
             text: "Call inventory_count exactly once with Limit set to 3, then report the count."
                 .to_owned(),
@@ -9786,11 +10650,16 @@ pub(crate) mod tests {
         )
         .expect("live retained dynamic input should validate");
 
-        process.send(
-            &actor
-                .start_turn(cursor.expose_to_provider_adapter(), &input)
-                .expect("newly bound thread should start its first turn without resume"),
+        let first_turn = actor
+            .start_turn(cursor.expose_to_provider_adapter(), &input)
+            .expect("newly bound thread should start its first turn without resume");
+        let first_turn_json: Value =
+            serde_json::from_slice(&first_turn).expect("first turn should be JSON");
+        assert_eq!(
+            first_turn_json.pointer("/params/effort"),
+            Some(&json!("high"))
         );
+        process.send(&first_turn);
         let mut turn_response_observed = false;
         let mut turn_started_observed = false;
         let mut turn_completed_observed = false;
@@ -9984,11 +10853,16 @@ pub(crate) mod tests {
         }
         assert!(resume_response_observed && resume_notification_observed);
 
-        process.send(
-            &actor
-                .start_turn(cursor.expose_to_provider_adapter(), &input)
-                .expect("resumed thread should start a second turn"),
+        let second_turn = actor
+            .start_turn(cursor.expose_to_provider_adapter(), &input)
+            .expect("resumed thread should start a second turn");
+        let second_turn_json: Value =
+            serde_json::from_slice(&second_turn).expect("second turn should be JSON");
+        assert_eq!(
+            second_turn_json.pointer("/params/effort"),
+            Some(&json!("high"))
         );
+        process.send(&second_turn);
         let mut second_completed = false;
         let mut second_dynamic_tool_calls = 0;
         for _ in 0..64 {

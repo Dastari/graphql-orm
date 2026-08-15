@@ -482,6 +482,8 @@ pub(crate) struct AiBudgetReservationRecord {
     pub lease_generation: i64,
     pub provider_kind: String,
     pub provider_model: String,
+    #[graphql_orm(default = "'unspecified'")]
+    pub reasoning_effort: String,
     pub pricing_policy_version: String,
     pub reserved_input_tokens: i64,
     pub reserved_output_tokens: i64,
@@ -2362,7 +2364,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.59.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.60.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

@@ -193,6 +193,7 @@ fn stateless_tool_request(model: &str) -> ModelRequest {
         builtin_tools: Vec::new(),
         maximum_builtin_tool_calls: None,
         reasoning_summary: graphql_orm_ai::ModelReasoningSummaryRequest::Disabled,
+        reasoning_effort: graphql_orm_ai::ModelReasoningEffort::Unspecified,
         output_schema: None,
         maximum_output_tokens: Some(64),
     }
@@ -226,6 +227,7 @@ fn request(model: &str) -> ModelRequest {
         builtin_tools: vec![],
         maximum_builtin_tool_calls: None,
         reasoning_summary: graphql_orm_ai::ModelReasoningSummaryRequest::Disabled,
+        reasoning_effort: graphql_orm_ai::ModelReasoningEffort::Unspecified,
         output_schema: None,
         maximum_output_tokens: Some(64),
     }

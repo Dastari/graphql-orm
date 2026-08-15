@@ -857,6 +857,9 @@ impl AiRuntime {
                 "provider registry kind mismatch".to_owned(),
             ));
         }
+        provider
+            .capabilities()
+            .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
         provider.stream(request, context).await
     }
 
@@ -894,6 +897,9 @@ impl AiRuntime {
             ));
         }
         provider
+            .capabilities()
+            .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
+        provider
             .stream_with_dynamic_tools(request, context, responder)
             .await
     }
@@ -918,6 +924,9 @@ impl AiRuntime {
                 "provider registry kind mismatch".to_owned(),
             ));
         }
+        provider
+            .capabilities()
+            .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
         provider
             .create_empty_session(binding, descriptor, request)
             .await
@@ -1107,7 +1116,9 @@ impl AiRuntime {
                 "provider registry kind mismatch".to_owned(),
             ));
         }
-        if !provider.capabilities().background {
+        let capabilities = provider.capabilities();
+        capabilities.validate_reasoning_effort(&request.model, request.reasoning_effort)?;
+        if !capabilities.background {
             return Err(ProviderError::Unsupported);
         }
         provider.submit_background(request, context, binding).await
@@ -1448,6 +1459,9 @@ impl AiRuntimeBuilder {
     /// Registers a provider adapter.
     pub fn provider(mut self, provider: Arc<dyn AiProvider>) -> Result<Self, AiError> {
         let kind = provider.provider_kind();
+        provider.capabilities().validate().map_err(|_| {
+            AiError::InvalidConfiguration("invalid provider capabilities".to_owned())
+        })?;
         if self.providers.insert(kind.clone(), provider).is_some() {
             return Err(AiError::AlreadyExists(format!("provider {kind:?}")));
         }

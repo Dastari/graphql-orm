@@ -106,6 +106,8 @@ struct ProviderResultSnapshot {
     lease_generation: i64,
     provider_kind: ProviderKind,
     provider_model: String,
+    #[serde(default)]
+    reasoning_effort: crate::ModelReasoningEffort,
     provider_response_id: Option<String>,
     budget_reservation_id: Uuid,
     previous_response_id: Option<String>,
@@ -590,13 +592,14 @@ impl OrmAiCoordinatorCheckpointService {
         }
         let provider = payload.provider_result;
         let provider_tool = provider.tool_calls.first().ok_or(AiError::Conflict)?;
-        if provider.format_version != 1
+        if !(1..=2).contains(&provider.format_version)
             || provider.session_id != lease.session_id().0
             || provider.run_id != lease.run_id().0
             || provider.attempt_id != lease.attempt_id()
             || provider.lease_generation != lease.lease_generation()
             || provider.provider_kind.as_str() != reservation.provider_kind
             || provider.provider_model != reservation.provider_model
+            || provider.reasoning_effort.as_str() != reservation.reasoning_effort
             || provider.provider_response_id.as_deref() != Some(provider_response_id)
             || provider.budget_reservation_id != budget_reservation_id
             || provider.tool_calls.len() != 1
@@ -784,6 +787,7 @@ impl OrmAiCoordinatorCheckpointService {
         }
         let continuation = crate::AiAgentContinuation::from_persisted_results(
             adopted.pending_continuation.clone(),
+            adopted.provider_result.reasoning_effort,
             std::slice::from_ref(completed),
             Vec::new(),
         )?;
@@ -1163,13 +1167,14 @@ impl OrmAiCoordinatorCheckpointService {
         }
         let provider = &payload.provider_result;
         let provider_tool = provider.tool_calls.first().ok_or(AiError::Conflict)?;
-        if provider.format_version != 1
+        if !(1..=2).contains(&provider.format_version)
             || provider.session_id != lease.session_id().0
             || provider.run_id != lease.run_id().0
             || provider.attempt_id != checkpoint.attempt_id
             || provider.lease_generation != checkpoint.lease_generation
             || provider.provider_kind.as_str() != reservation.provider_kind
             || provider.provider_model != reservation.provider_model
+            || provider.reasoning_effort.as_str() != reservation.reasoning_effort
             || provider.provider_response_id.as_deref() != Some(provider_response_id)
             || provider.budget_reservation_id != budget_reservation_id
             || provider.tool_calls.len() != 1
@@ -1856,13 +1861,14 @@ impl OrmAiCoordinatorCheckpointService {
             return Err(AiError::Conflict);
         }
         let provider = &payload.provider_result;
-        if provider.format_version != 1
+        if !(1..=2).contains(&provider.format_version)
             || provider.session_id != lease.session_id().0
             || provider.run_id != lease.run_id().0
             || provider.attempt_id != checkpoint.attempt_id
             || provider.lease_generation != checkpoint.lease_generation
             || provider.provider_kind.as_str() != reservation.provider_kind
             || provider.provider_model != reservation.provider_model
+            || provider.reasoning_effort.as_str() != reservation.reasoning_effort
             || provider.provider_response_id.as_deref() != provider_response_id
             || provider.budget_reservation_id != budget_reservation_id
             || provider.tool_calls.is_empty()

@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-14
+last_reviewed: 2026-08-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -18,6 +18,106 @@ Migration entries preserve the dependency and schema facts for the checkpoint
 they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## 0.80.0: model reasoning effort (schema 0.59.0 to 0.60.0)
+
+Adopt `graphql-orm-ai` 0.80.0 at one reviewed full monorepo revision and apply
+`AiSchemaModule` 0.60.0. The module adds a non-null
+`AiBudgetReservationRecord.reasoning_effort` column with database default
+`unspecified`. Existing reservations, protected provider-result format 1, and
+protected continuation formats 1/2 therefore retain the pre-0.80
+provider-default behavior. New protected provider results use format 2 and new
+continuations use format 3 so their selected effort participates in protected
+checkpoint fingerprints. No prompt, reasoning, token, cursor, tool, or result
+content is migrated.
+
+This pre-1.0 minor is source-breaking for public struct literals. Add
+`reasoning_effort: ModelReasoningEffort::Unspecified` to existing
+`ModelRequest` and `AiBudgetReservationRequest` literals. Prefer
+`OpenAiProviderConfig::new`; direct config literals must add
+`reasoning_effort_profiles`. Direct `ProviderCapabilities` literals must add
+the same field or use `..Default::default()`. Implementations of
+`AiCodexAppServerRunProcess::create_empty_thread` must accept and preserve the
+new typed effort argument. Calls to
+`AiCodexAppServerProtocolActor::start_persistent_empty_thread` must pass the
+validated selected effort.
+
+Build exact reviewed profiles rather than assuming a universal model matrix:
+
+```rust
+use graphql_orm_ai::{
+    ModelReasoningEffort as Effort, ModelReasoningEffortProfile,
+};
+
+let profile = ModelReasoningEffortProfile::new(
+    "gpt-5.6-sol",
+    [Effort::None, Effort::Low, Effort::Medium, Effort::High,
+     Effort::XHigh, Effort::Max],
+    Effort::Medium,
+)?;
+```
+
+Install native profiles with
+`OpenAiProviderConfig::with_reasoning_effort_profiles(vec![...])`. Install one
+exact logical-model profile in each Codex registration with
+`AiCodexAppServerRegistration::with_reasoning_effort_profile(profile)`. Read
+the admitted UI set and default from
+`AiRuntime::provider_capabilities(kind)` and
+`ProviderCapabilities::reasoning_effort_profile(model)`; do not accept a
+browser-authored string outside `profile.supported()`. `Unspecified` is not an
+explicit supported option: it means omit the provider override and use the
+registration/provider default. Explicit `None` remains a different value.
+
+For every initial and continuation plan, set the same selected value on
+`ModelRequest::reasoning_effort` and
+`AiBudgetReservationRequest::reasoning_effort`. Custom budget services must
+use `AiBudgetReservation::new_reserved_with_reasoning_effort` when restoring
+an explicit selection, then
+`authorize_provider_call_with_reasoning_effort`. The compatibility methods
+authorize only `Unspecified`. The crate binds effort into request hashes,
+budget proof, provider-result checkpoints, continuation checkpoints and
+provider-session fencing; a planner must not rewrite it during retry or
+recovery.
+
+Codex app-server generated schema places the optional override at
+`turn/start.params.effort` and describes it as applying to the current and
+subsequent turns. Retained sessions are therefore effort-frozen. Construct the
+descriptor with the effort-bound value:
+
+```rust
+let registration_fingerprint =
+    registration.provider_session_fingerprint(selected_effort)?;
+let descriptor = AiProviderSessionDescriptor::new(
+    ProviderKind::LocalHarness,
+    registration.provider_profile_id(),
+    registration.logical_model(),
+    registration_fingerprint,
+    registration.protocol_version(),
+    transcript_fingerprint,
+)?;
+```
+
+Do not use `registration.identity()` as the descriptor fingerprint. Changing
+the effort or reviewed profile must enter the existing cleanup/absence/rebind
+flow and create a new empty thread; it must never resume the old cursor.
+Registration identity is now v4, so every pre-0.80 Codex retained cursor is
+incompatible with execution even when the new selection is `Unspecified`.
+Before a rolling upgrade, stop creating Codex sessions and drain them with the
+old deployment, or let 0.80's deletion service consume the legacy v3
+fingerprint as cleanup-only evidence. Wait for exact absence, then issue the
+ordinary rebind and create a descriptor with
+`provider_session_fingerprint(selected_effort)`. Do not mix old and new
+workers on one resumable cursor.
+
+A reviewed host GPT-5.6 profile may register `gpt-5.6-sol`,
+`gpt-5.6-terra`, and `gpt-5.6-luna` with the explicit set `none`, `low`,
+`medium`, `high`, `xhigh`, `max` and default `medium`, as documented by the
+[OpenAI GPT-5.6 guide](https://developers.openai.com/api/docs/guides/latest-model).
+That is deployment registration data, not a hard-coded library catalogue.
+The Codex generated schema itself accepts a non-empty string; the crate's
+closed enum and exact profile provide the narrower provider-specific
+projection. Keep visible summary selection independently disabled or
+capability-checked.
 
 ## 0.79.0: safe tool failures and provider-session deferral (schema remains 0.59.0)
 

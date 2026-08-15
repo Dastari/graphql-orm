@@ -112,6 +112,7 @@ fn core_config(config: &XAiProviderConfig) -> OpenAiProviderConfig {
         project: None,
         timeout: config.timeout,
         store_responses: config.store_responses,
+        reasoning_effort_profiles: Vec::new(),
     }
 }
 
@@ -204,6 +205,7 @@ mod tests {
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
             reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(128),
         }

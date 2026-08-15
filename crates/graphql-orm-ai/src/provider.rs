@@ -98,6 +98,205 @@ pub struct ProviderCapabilities {
     pub maximum_context_tokens: Option<u64>,
     /// Maximum output tokens when known.
     pub maximum_output_tokens: Option<u64>,
+    /// Exact model-specific reasoning-effort profiles reviewed for this
+    /// provider registration.
+    ///
+    /// An empty collection preserves provider defaults but admits no explicit
+    /// effort. Profiles are negotiation metadata only and grant no execution,
+    /// egress, tool, or reasoning-disclosure authority.
+    #[serde(default)]
+    pub reasoning_effort_profiles: Vec<ModelReasoningEffortProfile>,
+}
+
+impl ProviderCapabilities {
+    /// Returns the exact reviewed reasoning-effort profile for `model`.
+    ///
+    /// `None` means the registration admits only
+    /// [`ModelReasoningEffort::Unspecified`] for that model. Duplicate profile
+    /// declarations are invalid registration configuration and are therefore
+    /// also reported as `None`; capability validation rejects them before
+    /// runtime construction.
+    pub fn reasoning_effort_profile(&self, model: &str) -> Option<&ModelReasoningEffortProfile> {
+        let mut matching = self
+            .reasoning_effort_profiles
+            .iter()
+            .filter(|profile| profile.model() == model);
+        let profile = matching.next()?;
+        matching.next().is_none().then_some(profile)
+    }
+
+    /// Validates one request-selected effort against the exact model profile.
+    ///
+    /// `Unspecified` always preserves the provider/registration default.
+    /// Every explicit effort requires one unique exact-model profile that
+    /// admits it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Unsupported`] for an unregistered or
+    /// unsupported explicit value and [`ProviderError::InvalidConfiguration`]
+    /// for malformed or duplicate capability profiles.
+    pub fn validate_reasoning_effort(
+        &self,
+        model: &str,
+        effort: ModelReasoningEffort,
+    ) -> Result<(), ProviderError> {
+        self.validate()?;
+        if effort == ModelReasoningEffort::Unspecified {
+            return Ok(());
+        }
+        if self
+            .reasoning_effort_profile(model)
+            .is_some_and(|profile| profile.supports(effort))
+        {
+            Ok(())
+        } else {
+            Err(ProviderError::Unsupported)
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ProviderError> {
+        let mut models = BTreeSet::new();
+        if self.reasoning_effort_profiles.len() > 256
+            || self
+                .reasoning_effort_profiles
+                .iter()
+                .any(|profile| profile.validate().is_err() || !models.insert(profile.model()))
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "invalid provider reasoning-effort profiles".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Closed provider-neutral reasoning-effort selection.
+///
+/// This controls provider reasoning work only. It never requests, exposes, or
+/// authorizes hidden chain-of-thought, and it does not enable visible
+/// reasoning summaries or any tool/capability.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelReasoningEffort {
+    /// Use the provider or reviewed registration default and omit a wire
+    /// override.
+    #[default]
+    Unspecified,
+    /// Explicitly request no reasoning effort. This is distinct from
+    /// [`Self::Unspecified`].
+    None,
+    /// Low reasoning effort.
+    Low,
+    /// Medium reasoning effort.
+    Medium,
+    /// High reasoning effort.
+    High,
+    /// Extra-high reasoning effort.
+    #[serde(rename = "xhigh")]
+    XHigh,
+    /// Maximum reasoning effort.
+    Max,
+}
+
+impl ModelReasoningEffort {
+    /// Stable serialized value.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::None => "none",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    /// Exact provider wire value, or `None` when the provider default must be
+    /// preserved by omitting the field.
+    pub const fn wire_value(self) -> Option<&'static str> {
+        match self {
+            Self::Unspecified => None,
+            explicit => Some(explicit.as_str()),
+        }
+    }
+}
+
+/// Reviewed supported reasoning-effort set and default for one exact model.
+///
+/// The profile is provider-registration metadata, not a universal model
+/// catalogue. Hosts must build it from their reviewed provider/model contract
+/// and replace the registration when that contract changes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelReasoningEffortProfile {
+    model: String,
+    supported: BTreeSet<ModelReasoningEffort>,
+    default: ModelReasoningEffort,
+}
+
+impl ModelReasoningEffortProfile {
+    /// Creates one exact model profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidConfiguration`] unless the model is a
+    /// bounded provider identifier, the supported set is non-empty and
+    /// excludes [`ModelReasoningEffort::Unspecified`], and `default` is one of
+    /// the supported explicit values.
+    pub fn new(
+        model: impl Into<String>,
+        supported: impl IntoIterator<Item = ModelReasoningEffort>,
+        default: ModelReasoningEffort,
+    ) -> Result<Self, ProviderError> {
+        let profile = Self {
+            model: model.into(),
+            supported: supported.into_iter().collect(),
+            default,
+        };
+        profile.validate()?;
+        Ok(profile)
+    }
+
+    fn validate(&self) -> Result<(), ProviderError> {
+        if self.model.trim().is_empty()
+            || self.model.len() > 200
+            || self.model.chars().any(char::is_control)
+            || self.supported.is_empty()
+            || self.supported.len() > 6
+            || self.supported.contains(&ModelReasoningEffort::Unspecified)
+            || self.default == ModelReasoningEffort::Unspecified
+            || !self.supported.contains(&self.default)
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "invalid model reasoning-effort profile".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Exact provider model identifier.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Reviewed supported explicit efforts in stable order.
+    pub fn supported(&self) -> &BTreeSet<ModelReasoningEffort> {
+        &self.supported
+    }
+
+    /// Reviewed default used when a request selects
+    /// [`ModelReasoningEffort::Unspecified`].
+    pub const fn default(&self) -> ModelReasoningEffort {
+        self.default
+    }
+
+    /// Whether this exact profile admits an explicit effort.
+    pub fn supports(&self, effort: ModelReasoningEffort) -> bool {
+        effort != ModelReasoningEffort::Unspecified && self.supported.contains(&effort)
+    }
 }
 
 /// Host-selected visible reasoning-summary request.
@@ -343,6 +542,10 @@ pub struct ModelRequest {
     /// Host-selected visible reasoning-summary behavior.
     #[serde(default)]
     pub reasoning_summary: ModelReasoningSummaryRequest,
+    /// Host-selected reasoning effort. `Unspecified` preserves the active
+    /// provider/model profile default and is distinct from explicit `None`.
+    #[serde(default)]
+    pub reasoning_effort: ModelReasoningEffort,
     /// Optional structured-output schema.
     pub output_schema: Option<serde_json::Value>,
     /// Maximum requested output tokens.
@@ -537,7 +740,8 @@ impl ModelRequest {
             .checked_add(64_u64.saturating_mul(self.input.len() as u64))?
             .checked_add(64_u64.saturating_mul(self.tools.len() as u64))?
             .checked_add(64_u64.saturating_mul(self.builtin_tools.len() as u64))?
-            .checked_add(serialized_bytes(&self.reasoning_summary)?)?;
+            .checked_add(serialized_bytes(&self.reasoning_summary)?)?
+            .checked_add(serialized_bytes(&self.reasoning_effort)?)?;
         for instruction in &self.instructions {
             total = total.checked_add(serialized_bytes(instruction)?)?;
         }
@@ -1229,14 +1433,10 @@ impl ProviderRequestContext {
         request: &ModelRequest,
     ) -> Result<(), ProviderError> {
         request.validate()?;
-        let requested_maximum_output_tokens = request.maximum_output_tokens.unwrap_or(0);
-        let requested_maximum_tool_units = request.maximum_builtin_tool_calls();
         if !self.budget.matches(
             self.run_id,
             provider_kind,
-            &request.model,
-            requested_maximum_output_tokens,
-            requested_maximum_tool_units,
+            request,
             OffsetDateTime::now_utc(),
         ) {
             return Err(ProviderError::BudgetDenied);
@@ -1698,6 +1898,8 @@ pub enum AiCodexBoundTurnRejection {
     CursorFingerprintMismatch,
     /// The turn bootstrap fingerprint did not match the frozen empty thread.
     BootstrapFingerprintMismatch,
+    /// The turn reasoning effort did not match the frozen empty thread.
+    ReasoningEffortMismatch,
     /// The turn's dynamic-tool definitions did not match the frozen set.
     FrozenDefinitionMismatch,
     /// The empty-thread activation was vacant, still creating, or already
@@ -1718,6 +1920,7 @@ impl AiCodexBoundTurnRejection {
             Self::TurnAlreadyActive => "codex_bound_turn_already_active",
             Self::CursorFingerprintMismatch => "codex_bound_turn_cursor_fingerprint_mismatch",
             Self::BootstrapFingerprintMismatch => "codex_bound_turn_bootstrap_fingerprint_mismatch",
+            Self::ReasoningEffortMismatch => "codex_bound_turn_reasoning_effort_mismatch",
             Self::FrozenDefinitionMismatch => "codex_bound_turn_frozen_definition_mismatch",
             Self::ActivationUnavailable => "codex_bound_turn_activation_unavailable",
         }
@@ -2655,6 +2858,113 @@ pub trait AiProvider: Send + Sync {
 #[cfg(test)]
 mod safe_failure_tests {
     use super::*;
+
+    #[test]
+    fn reasoning_effort_is_closed_and_unknown_values_fail_closed() {
+        let values = [
+            (ModelReasoningEffort::Unspecified, "unspecified"),
+            (ModelReasoningEffort::None, "none"),
+            (ModelReasoningEffort::Low, "low"),
+            (ModelReasoningEffort::Medium, "medium"),
+            (ModelReasoningEffort::High, "high"),
+            (ModelReasoningEffort::XHigh, "xhigh"),
+            (ModelReasoningEffort::Max, "max"),
+        ];
+        for (effort, encoded) in values {
+            assert_eq!(effort.as_str(), encoded);
+            assert_eq!(
+                serde_json::to_string(&effort).expect("effort should serialize"),
+                format!("\"{encoded}\"")
+            );
+            assert_eq!(
+                serde_json::from_str::<ModelReasoningEffort>(&format!("\"{encoded}\""))
+                    .expect("closed effort should deserialize"),
+                effort
+            );
+        }
+        assert!(serde_json::from_str::<ModelReasoningEffort>("\"minimal\"").is_err());
+        assert!(serde_json::from_str::<ModelReasoningEffort>("\"MAX\"").is_err());
+        assert_eq!(ModelReasoningEffort::Unspecified.wire_value(), None);
+        assert_eq!(ModelReasoningEffort::None.wire_value(), Some("none"));
+    }
+
+    #[test]
+    fn reasoning_effort_profiles_are_exact_model_specific_and_validated() {
+        let profile = ModelReasoningEffortProfile::new(
+            "reviewed-model",
+            [ModelReasoningEffort::Low, ModelReasoningEffort::High],
+            ModelReasoningEffort::Low,
+        )
+        .expect("reviewed subset should validate");
+        let capabilities = ProviderCapabilities {
+            reasoning_effort_profiles: vec![profile.clone()],
+            ..ProviderCapabilities::default()
+        };
+        assert_eq!(profile.default(), ModelReasoningEffort::Low);
+        assert_eq!(
+            profile.supported().iter().copied().collect::<Vec<_>>(),
+            vec![ModelReasoningEffort::Low, ModelReasoningEffort::High]
+        );
+        for effort in [
+            ModelReasoningEffort::Unspecified,
+            ModelReasoningEffort::Low,
+            ModelReasoningEffort::High,
+        ] {
+            capabilities
+                .validate_reasoning_effort("reviewed-model", effort)
+                .expect("admitted exact-model effort should validate");
+        }
+        for (model, effort) in [
+            ("reviewed-model", ModelReasoningEffort::None),
+            ("other-model", ModelReasoningEffort::Low),
+        ] {
+            assert!(matches!(
+                capabilities.validate_reasoning_effort(model, effort),
+                Err(ProviderError::Unsupported)
+            ));
+        }
+        assert!(
+            ModelReasoningEffortProfile::new(
+                "reviewed-model",
+                [ModelReasoningEffort::Low],
+                ModelReasoningEffort::High,
+            )
+            .is_err()
+        );
+        assert!(
+            ModelReasoningEffortProfile::new(
+                "reviewed-model",
+                [ModelReasoningEffort::Unspecified],
+                ModelReasoningEffort::Unspecified,
+            )
+            .is_err()
+        );
+
+        let malformed: ModelReasoningEffortProfile = serde_json::from_value(serde_json::json!({
+            "model": "reviewed-model",
+            "supported": ["low"],
+            "default": "high"
+        }))
+        .expect("serde shape is intentionally validated at capability admission");
+        let malformed_capabilities = ProviderCapabilities {
+            reasoning_effort_profiles: vec![malformed],
+            ..ProviderCapabilities::default()
+        };
+        assert!(matches!(
+            malformed_capabilities
+                .validate_reasoning_effort("reviewed-model", ModelReasoningEffort::Low),
+            Err(ProviderError::InvalidConfiguration(_))
+        ));
+        let duplicate_capabilities = ProviderCapabilities {
+            reasoning_effort_profiles: vec![profile.clone(), profile],
+            ..ProviderCapabilities::default()
+        };
+        assert!(matches!(
+            duplicate_capabilities
+                .validate_reasoning_effort("reviewed-model", ModelReasoningEffort::Low),
+            Err(ProviderError::InvalidConfiguration(_))
+        ));
+    }
 
     #[test]
     fn provider_failure_categories_are_closed_and_content_free() {

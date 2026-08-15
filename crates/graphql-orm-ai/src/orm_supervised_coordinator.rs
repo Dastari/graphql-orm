@@ -2381,6 +2381,7 @@ mod tests {
                 ModelContinuation::ProviderResponse {
                     response_id: "automatic-response".to_owned(),
                 },
+                crate::ModelReasoningEffort::Unspecified,
                 &[completed],
                 Vec::new(),
             )?;
@@ -2676,6 +2677,7 @@ mod tests {
             ModelContinuation::ProviderResponse {
                 response_id: "test-previous-response".to_owned(),
             },
+            crate::ModelReasoningEffort::Unspecified,
             &[completed],
             Vec::new(),
         )
@@ -2723,6 +2725,7 @@ mod tests {
             ModelContinuation::ProviderResponse {
                 response_id: "test-previous-response".to_owned(),
             },
+            crate::ModelReasoningEffort::Unspecified,
             &[completed],
             Vec::new(),
         )

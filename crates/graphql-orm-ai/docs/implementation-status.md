@@ -3,15 +3,15 @@ title: "Implementation Status"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-14
+last_reviewed: 2026-08-15
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.79.0` with AI schema module
-`0.59.0`. It uses workspace `graphql-orm` `0.23.0`, backend-neutral
+`graphql-orm-ai` is at crate version `0.80.0` with AI schema module
+`0.60.0`. It uses workspace `graphql-orm` `0.23.0`, backend-neutral
 `graphql-orm-ai-tool-profiles` `0.5.0`, and external `agql-auth`
 `0.15.0` at `e841ffd382082ad7419be259fe957f949b956ff7`.
 
@@ -29,7 +29,8 @@ verification evidence belongs in the focused guides.
   budgets, egress, current-principal rehydration, fencing, session lifecycle,
   and the implemented OpenAI background-reconciliation path.
 - Native OpenAI supports host-selected bounded visible reasoning summaries and
-  explicit public/allowed/blocked hosted web search. Provider-retained calls
+  exact-model closed reasoning-effort profiles, plus explicit
+  public/allowed/blocked hosted web search. Provider-retained calls
   may offer search beside exact registered application tools; stateless mixed
   built-in/application-tool replay remains closed. Completed web searches have
   distinct cumulative rule ceilings, pricing/usage settlement, protected
@@ -48,7 +49,10 @@ verification evidence belongs in the focused guides.
   cumulative-usage replay are admitted only through typed content-free
   controls that cannot become model output or current-run usage. Retained
   developer instructions are compile-time static, registration-fingerprinted,
-  and distinct from request input. Provider definitions are projected from the
+  and distinct from request input. Reasoning effort is a separately typed,
+  model-profile-validated turn field frozen into each retained-session
+  fingerprint; it grants no reasoning disclosure or execution authority.
+  Provider definitions are projected from the
   exact registered manifest, with canonical JSON Schema validation retained at
   every dynamic-call boundary.
 - The provider-neutral durable session service protects opaque retained-thread

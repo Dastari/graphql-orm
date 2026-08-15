@@ -21,7 +21,7 @@ use crate::{
     AiBudgetAmounts, AiBudgetReconciliation, AiBudgetReconciliationOutcome,
     AiBudgetReconciliationResult, AiBudgetReservation, AiBudgetReservationId,
     AiBudgetReservationRequest, AiBudgetReservationState, AiBudgetService, AiError, AiRunId,
-    AiScope, ProviderKind,
+    AiScope, ModelReasoningEffort, ProviderKind,
 };
 
 /// Deployment-owned hard limits for the durable budget service.
@@ -358,6 +358,7 @@ impl OrmAiBudgetService {
                             lease_generation: request.lease_generation,
                             provider_kind: request.provider_kind.as_str().to_owned(),
                             provider_model: request.model,
+                            reasoning_effort: request.reasoning_effort.as_str().to_owned(),
                             pricing_policy_version: request.pricing_policy_version,
                             reserved_input_tokens: amount_to_i64(request.estimate.input_tokens)?,
                             reserved_output_tokens: amount_to_i64(request.estimate.output_tokens)?,
@@ -1114,6 +1115,7 @@ fn reservation_matches_request(
         && record.lease_generation == request.lease_generation
         && record.provider_kind == request.provider_kind.as_str()
         && record.provider_model == request.model
+        && record.reasoning_effort == request.reasoning_effort.as_str()
         && record.pricing_policy_version == request.pricing_policy_version
         && reservation_amounts(record).is_ok_and(|amounts| amounts == request.estimate)
         && record.expires_at == canonical_expiry.unix_timestamp()
@@ -1225,6 +1227,7 @@ fn record_to_reservation(
         record.lease_generation,
         parse_provider_kind(&record.provider_kind)?,
         record.provider_model.clone(),
+        parse_reasoning_effort(&record.reasoning_effort)?,
         record.pricing_policy_version.clone(),
         reservation_amounts(record)?,
         reservation_actual(record)?,
@@ -1232,6 +1235,19 @@ fn record_to_reservation(
         OffsetDateTime::from_unix_timestamp(record.expires_at)
             .map_err(|_| AiError::PersistenceFailed)?,
     )
+}
+
+fn parse_reasoning_effort(value: &str) -> Result<ModelReasoningEffort, AiError> {
+    match value {
+        "unspecified" => Ok(ModelReasoningEffort::Unspecified),
+        "none" => Ok(ModelReasoningEffort::None),
+        "low" => Ok(ModelReasoningEffort::Low),
+        "medium" => Ok(ModelReasoningEffort::Medium),
+        "high" => Ok(ModelReasoningEffort::High),
+        "xhigh" => Ok(ModelReasoningEffort::XHigh),
+        "max" => Ok(ModelReasoningEffort::Max),
+        _ => Err(AiError::PersistenceFailed),
+    }
 }
 
 fn record_to_reconciliation_result(
@@ -1716,6 +1732,7 @@ mod tests {
             lease_generation: 1,
             provider_kind: ProviderKind::OpenAi,
             model: "test-model".to_owned(),
+            reasoning_effort: ModelReasoningEffort::Unspecified,
             pricing_policy_version: "pricing-test-v1".to_owned(),
             estimate: AiBudgetAmounts {
                 input_tokens,

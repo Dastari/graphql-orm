@@ -3457,6 +3457,7 @@ mod service {
                     lease_generation: 1,
                     provider_kind: "openai".to_owned(),
                     provider_model: "coordinator-test-model".to_owned(),
+                    reasoning_effort: "unspecified".to_owned(),
                     pricing_policy_version: "parked-test-v1".to_owned(),
                     reserved_input_tokens: 1,
                     reserved_output_tokens: 1,

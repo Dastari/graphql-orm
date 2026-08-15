@@ -350,6 +350,8 @@ struct ProtectedProviderResult {
     lease_generation: i64,
     provider_kind: crate::ProviderKind,
     provider_model: String,
+    #[serde(default)]
+    reasoning_effort: crate::ModelReasoningEffort,
     events: Vec<crate::ProviderEvent>,
     usage: crate::AiBudgetAmounts,
     cached_input_tokens: u64,
@@ -2307,6 +2309,7 @@ impl OrmAiSubscriptionWaitService {
         decision.authorize(&outcome.egress_manifest)?;
         let continuation = crate::AiAgentContinuation::from_subscription_result(
             outcome.pending_continuation,
+            provider.reasoning_effort,
             outcome.provider_call_id,
             outcome.tool_id,
             outcome.output,
@@ -2622,7 +2625,7 @@ impl OrmAiSubscriptionWaitService {
             || payload.plan_fingerprint != waiter.plan_fingerprint
             || payload.provider_turns == 0
             || payload.total_tool_calls == 0
-            || provider.format_version != 1
+            || !(1..=2).contains(&provider.format_version)
             || provider.session_id != waiter.session_id
             || provider.run_id != waiter.run_id
             || provider.attempt_id != waiter.source_attempt_id
@@ -4459,6 +4462,7 @@ mod tests {
                     lease_generation: lease.lease_generation(),
                     provider_kind: result.provider_kind().as_str().to_owned(),
                     provider_model: result.provider_model().to_owned(),
+                    reasoning_effort: result.reasoning_effort().as_str().to_owned(),
                     pricing_policy_version: "subscription-pricing-v1".to_owned(),
                     reserved_input_tokens: 1,
                     reserved_output_tokens: 1,

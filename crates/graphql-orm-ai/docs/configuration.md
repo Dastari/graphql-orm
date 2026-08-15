@@ -3,7 +3,7 @@ title: "AI configuration and limits catalogue"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-08-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -41,12 +41,21 @@ URL or incoming bearer credential. `AiCodexAppServerRunLimits` is in
 [`codex_app_server.rs`](../src/providers/codex_app_server.rs); it is experimental
 and must remain behind `provider-codex-app-server`.
 
+Reasoning effort is not a free-form provider option. Configure exact-model
+`ModelReasoningEffortProfile` values on
+`OpenAiProviderConfig::with_reasoning_effort_profiles` or
+`AiCodexAppServerRegistration::with_reasoning_effort_profile`. An empty
+profile set admits only `ModelReasoningEffort::Unspecified`; it does not infer
+support from a model name. `ProviderCapabilities::reasoning_effort_profile`
+returns the safe supported set and reviewed default for settings negotiation.
+
 | Type | Fields and defaults/bounds |
 | --- | --- |
 | [`AiProviderCallLimits`](../src/provider_calls.rs) | `new(events, event_bytes, total_bytes)`: events 1–65,536; byte limits positive, total at least individual, each at most 64 MiB. Tool and built-in call ceilings start at 8 and are separately validated. |
 | [`AiProviderAttachmentResolutionLimits`](../src/provider_calls.rs) | Default 8 attachments, 25 MiB each, 50 MiB total. Constructor permits 1–32 attachments and at most 100 MiB per/total. |
 | [`AiLocalHarnessLimits`](../src/local_harness.rs) | Default request/frame 2 MiB, output 16 MiB, stderr 16 KiB, 16,384 frames, startup 10 s, turn 120 s, shutdown 5 s, memory 4 GiB, CPU 120 s. The launcher, not this type, proves sandbox enforcement. |
 | [`AiCodexAppServerRunLimits`](../src/providers/codex_app_server.rs) | Experimental defaults: 32 processes, 4 per owner, 16 turns/run, startup 30 s, turn 5 min, interrupt/shutdown 5 s. It does not authorize dynamic tools or a local process. |
+| [`ModelReasoningEffortProfile`](../src/provider.rs) | One exact model, a non-empty subset of the six explicit closed efforts, and one supported explicit default. `Unspecified` is the request compatibility/default sentinel and is never a supported-set member. |
 
 ## Service limits by responsibility
 

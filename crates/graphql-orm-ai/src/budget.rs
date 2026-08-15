@@ -7,7 +7,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    AiBudgetReservationId, AiError, AiRunId, AiScope, AiSessionId, ProviderError, ProviderKind,
+    AiBudgetReservationId, AiError, AiRunId, AiScope, AiSessionId, ModelReasoningEffort,
+    ModelRequest, ProviderError, ProviderKind,
 };
 
 /// Token, cost, and unit capacity reserved or consumed by one provider call.
@@ -75,6 +76,9 @@ pub struct AiBudgetReservationRequest {
     pub provider_kind: ProviderKind,
     /// Exact provider model.
     pub model: String,
+    /// Exact reasoning effort selected for the bound provider request.
+    #[serde(default)]
+    pub reasoning_effort: ModelReasoningEffort,
     /// Immutable pricing-policy version used for the estimate.
     pub pricing_policy_version: String,
     /// Capacity to reserve before external execution.
@@ -94,6 +98,7 @@ pub struct AiBudgetReservation {
     lease_generation: i64,
     provider_kind: ProviderKind,
     model: String,
+    reasoning_effort: ModelReasoningEffort,
     pricing_policy_version: String,
     reserved: AiBudgetAmounts,
     actual: Option<AiBudgetAmounts>,
@@ -127,6 +132,43 @@ impl AiBudgetReservation {
         reserved: AiBudgetAmounts,
         expires_at: OffsetDateTime,
     ) -> Result<Self, AiError> {
+        Self::new_reserved_with_reasoning_effort(
+            id,
+            run_id,
+            attempt_id,
+            lease_generation,
+            provider_kind,
+            model,
+            ModelReasoningEffort::Unspecified,
+            pricing_policy_version,
+            reserved,
+            expires_at,
+        )
+    }
+
+    /// Creates a reserved result bound to one exact reasoning effort.
+    ///
+    /// This is the effort-aware counterpart to [`Self::new_reserved`].
+    /// Custom durable budget services must use it when reconstructing an
+    /// explicitly selected effort.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] under the same conditions as
+    /// [`Self::new_reserved`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_reserved_with_reasoning_effort(
+        id: AiBudgetReservationId,
+        run_id: AiRunId,
+        attempt_id: Uuid,
+        lease_generation: i64,
+        provider_kind: ProviderKind,
+        model: impl Into<String>,
+        reasoning_effort: ModelReasoningEffort,
+        pricing_policy_version: impl Into<String>,
+        reserved: AiBudgetAmounts,
+        expires_at: OffsetDateTime,
+    ) -> Result<Self, AiError> {
         let model = model.into();
         let pricing_policy_version = pricing_policy_version.into();
         if attempt_id.is_nil()
@@ -146,6 +188,7 @@ impl AiBudgetReservation {
             lease_generation,
             provider_kind,
             model,
+            reasoning_effort,
             pricing_policy_version,
             reserved,
             actual: None,
@@ -163,19 +206,21 @@ impl AiBudgetReservation {
         lease_generation: i64,
         provider_kind: ProviderKind,
         model: impl Into<String>,
+        reasoning_effort: ModelReasoningEffort,
         pricing_policy_version: impl Into<String>,
         reserved: AiBudgetAmounts,
         actual: Option<AiBudgetAmounts>,
         state: AiBudgetReservationState,
         expires_at: OffsetDateTime,
     ) -> Result<Self, AiError> {
-        let mut reservation = Self::new_reserved(
+        let mut reservation = Self::new_reserved_with_reasoning_effort(
             id,
             run_id,
             attempt_id,
             lease_generation,
             provider_kind,
             model,
+            reasoning_effort,
             pricing_policy_version,
             reserved,
             expires_at,
@@ -235,6 +280,40 @@ impl AiBudgetReservation {
         requested_maximum_tool_units: u64,
         now: OffsetDateTime,
     ) -> Result<AuthorizedBudgetReservation, ProviderError> {
+        self.authorize_provider_call_with_reasoning_effort(
+            run_id,
+            attempt_id,
+            lease_generation,
+            provider_kind,
+            model,
+            ModelReasoningEffort::Unspecified,
+            requested_maximum_output_tokens,
+            requested_maximum_tool_units,
+            now,
+        )
+    }
+
+    /// Authorizes one exact provider request including its selected reasoning
+    /// effort.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::BudgetDenied`] under the same conditions as
+    /// [`Self::authorize_provider_call`] and when the effort differs from the
+    /// durable reservation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorize_provider_call_with_reasoning_effort(
+        &self,
+        run_id: AiRunId,
+        attempt_id: Uuid,
+        lease_generation: i64,
+        provider_kind: &ProviderKind,
+        model: &str,
+        reasoning_effort: ModelReasoningEffort,
+        requested_maximum_output_tokens: u64,
+        requested_maximum_tool_units: u64,
+        now: OffsetDateTime,
+    ) -> Result<AuthorizedBudgetReservation, ProviderError> {
         if self.state != AiBudgetReservationState::Reserved
             || now >= self.expires_at
             || self.run_id != run_id
@@ -242,6 +321,7 @@ impl AiBudgetReservation {
             || self.lease_generation != lease_generation
             || &self.provider_kind != provider_kind
             || self.model != model
+            || self.reasoning_effort != reasoning_effort
             || requested_maximum_output_tokens > self.reserved.output_tokens
             || requested_maximum_tool_units > self.reserved.tool_units
         {
@@ -252,6 +332,7 @@ impl AiBudgetReservation {
             run_id: self.run_id,
             provider_kind: self.provider_kind.clone(),
             model: self.model.clone(),
+            reasoning_effort: self.reasoning_effort,
             maximum_output_tokens: self.reserved.output_tokens,
             maximum_tool_units: self.reserved.tool_units,
             expires_at: self.expires_at,
@@ -266,6 +347,7 @@ pub struct AuthorizedBudgetReservation {
     run_id: AiRunId,
     provider_kind: ProviderKind,
     model: String,
+    reasoning_effort: ModelReasoningEffort,
     maximum_output_tokens: u64,
     maximum_tool_units: u64,
     expires_at: OffsetDateTime,
@@ -281,16 +363,15 @@ impl AuthorizedBudgetReservation {
         &self,
         run_id: AiRunId,
         provider_kind: &ProviderKind,
-        model: &str,
-        requested_maximum_output_tokens: u64,
-        requested_maximum_tool_units: u64,
+        request: &ModelRequest,
         now: OffsetDateTime,
     ) -> bool {
         self.run_id == run_id
             && &self.provider_kind == provider_kind
-            && self.model == model
-            && requested_maximum_output_tokens <= self.maximum_output_tokens
-            && requested_maximum_tool_units <= self.maximum_tool_units
+            && self.model == request.model
+            && self.reasoning_effort == request.reasoning_effort
+            && request.maximum_output_tokens.unwrap_or(0) <= self.maximum_output_tokens
+            && request.maximum_builtin_tool_calls() <= self.maximum_tool_units
             && now < self.expires_at
     }
 }
@@ -371,4 +452,80 @@ pub trait AiBudgetService: Send + Sync {
         principal: &ResolvedPrincipal,
         reconciliation: AiBudgetReconciliation,
     ) -> Result<AiBudgetReconciliationResult, AiError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn budget_authorization_is_fenced_to_exact_reasoning_effort() {
+        let run_id = AiRunId::new();
+        let attempt_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+        let reservation = AiBudgetReservation::new_reserved_with_reasoning_effort(
+            AiBudgetReservationId::new(),
+            run_id,
+            attempt_id,
+            7,
+            ProviderKind::OpenAi,
+            "reviewed-model",
+            ModelReasoningEffort::High,
+            "pricing-v1",
+            AiBudgetAmounts {
+                output_tokens: 128,
+                runs: 1,
+                ..AiBudgetAmounts::default()
+            },
+            now + time::Duration::minutes(1),
+        )
+        .expect("effort-bound reservation should validate");
+        reservation
+            .authorize_provider_call_with_reasoning_effort(
+                run_id,
+                attempt_id,
+                7,
+                &ProviderKind::OpenAi,
+                "reviewed-model",
+                ModelReasoningEffort::High,
+                128,
+                0,
+                now,
+            )
+            .expect("exact effort should authorize");
+        for effort in [
+            ModelReasoningEffort::Unspecified,
+            ModelReasoningEffort::None,
+            ModelReasoningEffort::Medium,
+            ModelReasoningEffort::Max,
+        ] {
+            assert!(matches!(
+                reservation.authorize_provider_call_with_reasoning_effort(
+                    run_id,
+                    attempt_id,
+                    7,
+                    &ProviderKind::OpenAi,
+                    "reviewed-model",
+                    effort,
+                    128,
+                    0,
+                    now,
+                ),
+                Err(ProviderError::BudgetDenied)
+            ));
+        }
+        assert!(matches!(
+            reservation.authorize_provider_call(
+                run_id,
+                attempt_id,
+                7,
+                &ProviderKind::OpenAi,
+                "reviewed-model",
+                128,
+                0,
+                now,
+            ),
+            Err(ProviderError::BudgetDenied)
+        ));
+    }
 }

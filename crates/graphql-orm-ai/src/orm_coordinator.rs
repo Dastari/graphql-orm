@@ -3121,6 +3121,7 @@ mod tests {
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
             reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(128),
         };
@@ -3132,6 +3133,7 @@ mod tests {
             lease_generation: lease.lease_generation(),
             provider_kind: crate::ProviderKind::LocalHarness,
             model: request.model.clone(),
+            reasoning_effort: request.reasoning_effort,
             pricing_policy_version: "canonical-codex-v1".to_owned(),
             estimate: crate::AiBudgetAmounts {
                 output_tokens: 128,
@@ -3201,6 +3203,7 @@ mod tests {
             ModelContinuation::ProviderResponse {
                 response_id: "adopted-response".to_owned(),
             },
+            crate::ModelReasoningEffort::Unspecified,
             &[persisted],
             Vec::new(),
         )

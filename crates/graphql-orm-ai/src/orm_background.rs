@@ -916,12 +916,13 @@ impl OrmAiOpenAiBackgroundSubmissionService {
             .budget_service
             .reserve(&principal, plan.budget_request().clone())
             .await?;
-        let authorized_budget = match reservation.authorize_provider_call(
+        let authorized_budget = match reservation.authorize_provider_call_with_reasoning_effort(
             lease.run_id(),
             lease.attempt_id(),
             lease.lease_generation(),
             plan.provider_kind_ref(),
             &plan.request_ref().model,
+            plan.request_ref().reasoning_effort,
             plan.request_ref().maximum_output_tokens.unwrap_or(0),
             plan.request_ref().maximum_builtin_tool_calls(),
             self.clock.now(),

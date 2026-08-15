@@ -257,6 +257,7 @@ impl AiProviderCallPlan {
             || transfers.len() > MAXIMUM_PROVIDER_TRANSFERS
             || budget.provider_kind != provider_kind
             || budget.model != request.model
+            || budget.reasoning_effort != request.reasoning_effort
         {
             return Err(AiError::InvalidInput(
                 "invalid provider call plan".to_owned(),
@@ -1162,6 +1163,7 @@ impl AiProviderCallPlan {
                 builtin_tools: Vec::new(),
                 maximum_builtin_tool_calls: None,
                 reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+                reasoning_effort: crate::ModelReasoningEffort::Unspecified,
                 output_schema: None,
                 maximum_output_tokens: Some(64),
             },
@@ -1173,6 +1175,7 @@ impl AiProviderCallPlan {
                 lease_generation: lease.lease_generation(),
                 provider_kind: ProviderKind::OpenAi,
                 model,
+                reasoning_effort: crate::ModelReasoningEffort::Unspecified,
                 pricing_policy_version: "test-pricing-v1".to_owned(),
                 estimate: AiBudgetAmounts {
                     output_tokens: 64,
@@ -1207,6 +1210,7 @@ impl AiProviderCallPlan {
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
             reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(64),
         };
@@ -1218,6 +1222,7 @@ impl AiProviderCallPlan {
             lease_generation: lease.lease_generation(),
             provider_kind: ProviderKind::OpenAi,
             model: model.clone(),
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             pricing_policy_version: "test-pricing-v1".to_owned(),
             estimate: AiBudgetAmounts {
                 output_tokens: 64,
@@ -1755,13 +1760,14 @@ impl ProviderDynamicToolResponder for DynamicToolResponder {
 impl AiProviderCallResult {
     pub(crate) fn checkpoint_value(&self) -> serde_json::Value {
         serde_json::json!({
-            "formatVersion": 1,
+            "formatVersion": 2,
             "sessionId": self.session_id.0,
             "runId": self.run_id.0,
             "attemptId": self.attempt_id,
             "leaseGeneration": self.lease_generation,
             "providerKind": self.provider_kind,
             "providerModel": self.provider_model,
+            "reasoningEffort": self.request_snapshot.reasoning_effort,
             "events": self.events,
             "usage": self.usage,
             "cachedInputTokens": self.cached_input_tokens,
@@ -1807,6 +1813,11 @@ impl AiProviderCallResult {
     /// Exact provider model used by the turn.
     pub fn provider_model(&self) -> &str {
         &self.provider_model
+    }
+
+    /// Exact reasoning effort used for this provider turn.
+    pub const fn reasoning_effort(&self) -> crate::ModelReasoningEffort {
+        self.request_snapshot.reasoning_effort
     }
 
     /// Normalized provider events in arrival order.
@@ -2184,6 +2195,7 @@ impl AiProviderCallResult {
                 builtin_tools: Vec::new(),
                 maximum_builtin_tool_calls: None,
                 reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+                reasoning_effort: crate::ModelReasoningEffort::Unspecified,
                 output_schema: None,
                 maximum_output_tokens: Some(64),
             },
@@ -2293,6 +2305,7 @@ impl AiProviderCallResult {
                 builtin_tools: Vec::new(),
                 maximum_builtin_tool_calls: None,
                 reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+                reasoning_effort: crate::ModelReasoningEffort::Unspecified,
                 output_schema: None,
                 maximum_output_tokens: Some(256),
             },
@@ -2878,12 +2891,13 @@ impl AiProviderCallExecutor {
             .reserve(&principal, plan.budget.clone())
             .await?;
         let authorized_budget = reservation
-            .authorize_provider_call(
+            .authorize_provider_call_with_reasoning_effort(
                 lease.run_id(),
                 lease.attempt_id(),
                 lease.lease_generation(),
                 &plan.provider_kind,
                 &plan.request.model,
+                plan.request.reasoning_effort,
                 plan.request.maximum_output_tokens.unwrap_or(0),
                 plan.request.maximum_builtin_tool_calls(),
                 self.clock.now(),
@@ -5311,6 +5325,7 @@ mod tests {
             builtin_tools: vec![],
             maximum_builtin_tool_calls: None,
             reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(100),
         };
@@ -5322,6 +5337,7 @@ mod tests {
             lease_generation: fixture.lease.lease_generation(),
             provider_kind: ProviderKind::OpenAiCompatible,
             model: request.model.clone(),
+            reasoning_effort: request.reasoning_effort,
             pricing_policy_version: "test-pricing-v1".to_owned(),
             estimate: AiBudgetAmounts {
                 input_tokens: 100,
@@ -5384,6 +5400,7 @@ mod tests {
             builtin_tools: vec![],
             maximum_builtin_tool_calls: None,
             reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(100),
         };
@@ -5395,6 +5412,7 @@ mod tests {
             lease_generation: fixture.lease.lease_generation(),
             provider_kind: ProviderKind::OpenAi,
             model: request.model.clone(),
+            reasoning_effort: request.reasoning_effort,
             pricing_policy_version: "test-pricing-v1".to_owned(),
             estimate: AiBudgetAmounts {
                 input_tokens: 100,
@@ -9846,6 +9864,7 @@ mod tests {
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
             reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(100),
         };
@@ -10172,6 +10191,7 @@ mod tests {
                 builtin_tools: Vec::new(),
                 maximum_builtin_tool_calls: None,
                 reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+                reasoning_effort: crate::ModelReasoningEffort::Unspecified,
                 output_schema: None,
                 maximum_output_tokens: Some(100),
             },
@@ -10394,6 +10414,7 @@ mod tests {
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
             reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(100),
         };
@@ -11372,6 +11393,7 @@ mod tests {
             builtin_tools: vec![],
             maximum_builtin_tool_calls: None,
             reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(100),
         };
@@ -11386,6 +11408,7 @@ mod tests {
             lease_generation: 1,
             provider_kind: ProviderKind::OpenAiCompatible,
             model: request.model.clone(),
+            reasoning_effort: request.reasoning_effort,
             pricing_policy_version: "test".to_owned(),
             estimate: AiBudgetAmounts {
                 runs: 1,

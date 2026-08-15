@@ -778,6 +778,7 @@ mod tests {
                 lease_generation: lease.lease_generation(),
                 provider_kind: "openai".to_owned(),
                 provider_model: "ui-intent-test-model".to_owned(),
+                reasoning_effort: "unspecified".to_owned(),
                 pricing_policy_version: "ui-intent-test-pricing-v1".to_owned(),
                 reserved_input_tokens: 1,
                 reserved_output_tokens: 1,

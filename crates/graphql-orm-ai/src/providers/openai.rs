@@ -20,9 +20,9 @@ use crate::{
 };
 use crate::{
     AiProvider, AiProviderAttachmentRequest, AiSecretStore, ModelBuiltinTool, ModelContinuation,
-    ModelInputBlock, ModelReasoningSummaryRequest, ModelRequest, ModelWebSearchDomainPolicy,
-    ProviderCapabilities, ProviderCitation, ProviderError, ProviderEvent, ProviderEventStream,
-    ProviderKind, ProviderRequestContext, SecretRef,
+    ModelInputBlock, ModelReasoningEffortProfile, ModelReasoningSummaryRequest, ModelRequest,
+    ModelWebSearchDomainPolicy, ProviderCapabilities, ProviderCitation, ProviderError,
+    ProviderEvent, ProviderEventStream, ProviderKind, ProviderRequestContext, SecretRef,
 };
 
 #[cfg(feature = "provider-openai")]
@@ -71,6 +71,11 @@ pub struct OpenAiProviderConfig {
     /// Whether OpenAI may retain the response object. Defaults to false so the
     /// local session remains canonical.
     pub store_responses: bool,
+    /// Exact reviewed model-specific reasoning-effort profiles.
+    ///
+    /// Empty preserves existing provider-default behavior and rejects every
+    /// explicit effort selection.
+    pub reasoning_effort_profiles: Vec<ModelReasoningEffortProfile>,
 }
 
 impl OpenAiProviderConfig {
@@ -83,7 +88,29 @@ impl OpenAiProviderConfig {
             project: None,
             timeout: Duration::from_secs(120),
             store_responses: false,
+            reasoning_effort_profiles: Vec::new(),
         }
+    }
+
+    /// Installs exact reviewed model-specific reasoning-effort profiles.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidConfiguration`] for duplicate exact
+    /// model declarations. Individual profiles are already validated by
+    /// [`ModelReasoningEffortProfile::new`].
+    #[cfg(feature = "provider-openai")]
+    pub fn with_reasoning_effort_profiles(
+        mut self,
+        profiles: Vec<ModelReasoningEffortProfile>,
+    ) -> Result<Self, ProviderError> {
+        ProviderCapabilities {
+            reasoning_effort_profiles: profiles.clone(),
+            ..ProviderCapabilities::default()
+        }
+        .validate()?;
+        self.reasoning_effort_profiles = profiles;
+        Ok(self)
     }
 }
 
@@ -393,6 +420,11 @@ impl OpenAiProvider {
                 parallel_tool_calls: flavor == ResponsesFlavor::XAi,
                 structured_output: true,
                 provider_retained_continuation: config.store_responses,
+                reasoning_effort_profiles: if flavor == ResponsesFlavor::OpenAi {
+                    config.reasoning_effort_profiles.clone()
+                } else {
+                    Vec::new()
+                },
                 ..ProviderCapabilities::default()
             };
             if flavor == ResponsesFlavor::OpenAi {
@@ -414,6 +446,7 @@ impl OpenAiProvider {
                 "Responses capabilities do not match transport configuration".to_owned(),
             ));
         }
+        capabilities.validate()?;
         Ok(Self {
             config,
             secrets,
@@ -535,6 +568,8 @@ impl OpenAiProvider {
         request: &ModelRequest,
         context: &ProviderRequestContext,
     ) -> Result<Value, ProviderError> {
+        self.capabilities
+            .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
         if request.continuation_mode != crate::ModelContinuationMode::ProviderRetained {
             return Err(ProviderError::Unsupported);
         }
@@ -671,11 +706,18 @@ impl OpenAiProvider {
         if let Some(maximum_builtin_tool_calls) = request.maximum_builtin_tool_calls {
             body["max_tool_calls"] = Value::from(maximum_builtin_tool_calls);
         }
+        let mut reasoning = serde_json::Map::new();
+        if let Some(effort) = request.reasoning_effort.wire_value() {
+            reasoning.insert("effort".to_owned(), Value::String(effort.to_owned()));
+        }
         if matches!(
             request.reasoning_summary,
             ModelReasoningSummaryRequest::Auto { .. }
         ) {
-            body["reasoning"] = json!({"summary": "auto"});
+            reasoning.insert("summary".to_owned(), Value::String("auto".to_owned()));
+        }
+        if !reasoning.is_empty() {
+            body["reasoning"] = Value::Object(reasoning);
         }
         if let Some(schema) = &request.output_schema {
             body["text"] = json!({
@@ -2450,6 +2492,7 @@ mod tests {
             builtin_tools: vec![],
             maximum_builtin_tool_calls: None,
             reasoning_summary: ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(32),
         };
@@ -2508,6 +2551,7 @@ mod tests {
             builtin_tools: vec![],
             maximum_builtin_tool_calls: None,
             reasoning_summary: ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(32),
         };
@@ -2818,6 +2862,90 @@ mod tests {
     }
 
     #[test]
+    fn native_reasoning_effort_maps_exactly_and_unspecified_is_omitted() {
+        let reference = SecretRef::parse("openai/reasoning-effort-test")
+            .expect("test secret reference should parse");
+        let profile = ModelReasoningEffortProfile::new(
+            "test-model",
+            [
+                crate::ModelReasoningEffort::None,
+                crate::ModelReasoningEffort::Low,
+                crate::ModelReasoningEffort::Medium,
+                crate::ModelReasoningEffort::High,
+                crate::ModelReasoningEffort::XHigh,
+                crate::ModelReasoningEffort::Max,
+            ],
+            crate::ModelReasoningEffort::Medium,
+        )
+        .expect("reviewed OpenAI profile should validate");
+        let config = OpenAiProviderConfig::new(reference.clone())
+            .with_reasoning_effort_profiles(vec![profile])
+            .expect("unique OpenAI profiles should validate");
+        let provider = OpenAiProvider::new(
+            config,
+            Arc::new(TestSecrets(reference, "not-a-real-key".to_owned())),
+        )
+        .expect("reasoning-effort provider should build");
+        let mut request = ModelRequest {
+            model: "test-model".to_owned(),
+            instructions: Vec::new(),
+            input: vec![ModelInputBlock::Text {
+                text: "synthetic input".to_owned(),
+            }],
+            continuation: None,
+            continuation_mode: crate::ModelContinuationMode::ProviderRetained,
+            tools: Vec::new(),
+            builtin_tools: Vec::new(),
+            maximum_builtin_tool_calls: None,
+            reasoning_summary: ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
+            output_schema: None,
+            maximum_output_tokens: Some(64),
+        };
+        let provider_context = context("test-model", request.conservative_egress_bytes());
+        let body = provider
+            .request_body(&request, &provider_context)
+            .expect("unspecified effort should preserve provider defaults");
+        assert!(body.get("reasoning").is_none());
+
+        for effort in [
+            crate::ModelReasoningEffort::None,
+            crate::ModelReasoningEffort::Low,
+            crate::ModelReasoningEffort::Medium,
+            crate::ModelReasoningEffort::High,
+            crate::ModelReasoningEffort::XHigh,
+            crate::ModelReasoningEffort::Max,
+        ] {
+            request.reasoning_effort = effort;
+            let body = provider
+                .request_body(&request, &provider_context)
+                .expect("reviewed explicit effort should map");
+            assert_eq!(
+                body.pointer("/reasoning/effort").and_then(Value::as_str),
+                effort.wire_value()
+            );
+            assert!(body.pointer("/reasoning/summary").is_none());
+        }
+
+        request.reasoning_effort = crate::ModelReasoningEffort::High;
+        request.reasoning_summary =
+            ModelReasoningSummaryRequest::auto(4_096).expect("summary bound should validate");
+        let body = provider
+            .request_body(&request, &provider_context)
+            .expect("effort and visible summary are independent wire fields");
+        assert_eq!(
+            body["reasoning"],
+            json!({"effort": "high", "summary": "auto"})
+        );
+
+        request.model = "unreviewed-model".to_owned();
+        assert!(matches!(
+            provider.request_body(&request, &provider_context),
+            Err(ProviderError::Unsupported)
+        ));
+    }
+
+    #[test]
     fn stateful_tool_continuation_requires_explicit_response_storage() {
         let reference = SecretRef::parse("openai/continuation-test")
             .expect("test secret reference should parse");
@@ -2839,6 +2967,7 @@ mod tests {
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
             reasoning_summary: ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(64),
         };
@@ -2892,6 +3021,7 @@ mod tests {
             }],
             maximum_builtin_tool_calls: Some(3),
             reasoning_summary: ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(32),
         };
@@ -2975,6 +3105,7 @@ mod tests {
             }],
             maximum_builtin_tool_calls: Some(1),
             reasoning_summary: ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(32),
         };
@@ -3034,6 +3165,7 @@ mod tests {
             maximum_builtin_tool_calls: Some(4),
             reasoning_summary: ModelReasoningSummaryRequest::auto(4_096)
                 .expect("summary bound should validate"),
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(128),
         };
@@ -3388,6 +3520,7 @@ mod tests {
             builtin_tools: vec![],
             maximum_builtin_tool_calls: None,
             reasoning_summary: ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(32),
         };
@@ -3459,6 +3592,7 @@ mod tests {
             builtin_tools: vec![],
             maximum_builtin_tool_calls: None,
             reasoning_summary: ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(32),
         };
@@ -3502,6 +3636,7 @@ mod tests {
             builtin_tools: vec![],
             maximum_builtin_tool_calls: None,
             reasoning_summary: ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(32),
         };
@@ -3562,6 +3697,7 @@ mod tests {
             builtin_tools: vec![],
             maximum_builtin_tool_calls: None,
             reasoning_summary: ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
             output_schema: None,
             maximum_output_tokens: Some(64),
         };
