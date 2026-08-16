@@ -1031,6 +1031,16 @@ impl AiProvider for AiCodexAppServerProvider {
                 .pool
                 .supports_launch_profile(self.registration.launch_profile());
         ProviderCapabilities {
+            capability_delivery_modes: if dynamic_tools_available {
+                [
+                    crate::AiCapabilityDeliveryMode::ProviderDeferred,
+                    crate::AiCapabilityDeliveryMode::FixedBroker,
+                ]
+                .into_iter()
+                .collect()
+            } else {
+                Default::default()
+            },
             streaming: true,
             custom_tools: dynamic_tools_available,
             provider_retained_continuation: true,
@@ -4459,6 +4469,59 @@ fn project_codex_schema_node(schema: &Value, depth: usize) -> Result<Value, Prov
         return Err(ProviderError::Rejected);
     }
     let object = schema.as_object().ok_or(ProviderError::Rejected)?;
+    if let Some(one_of) = object.get("oneOf") {
+        if object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "oneOf" | "description"))
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let alternatives = one_of.as_array().ok_or(ProviderError::Rejected)?;
+        if alternatives.is_empty() || alternatives.len() > 512 {
+            return Err(ProviderError::Rejected);
+        }
+        let mut values = Vec::with_capacity(alternatives.len());
+        let mut unique = BTreeSet::new();
+        for alternative in alternatives {
+            let alternative = alternative.as_object().ok_or(ProviderError::Rejected)?;
+            if alternative
+                .keys()
+                .any(|key| !matches!(key.as_str(), "const" | "description"))
+            {
+                return Err(ProviderError::Rejected);
+            }
+            if let Some(description) = alternative.get("description") {
+                validate_codex_schema_description(
+                    description.as_str().ok_or(ProviderError::Rejected)?,
+                )?;
+            }
+            let value = alternative
+                .get("const")
+                .and_then(Value::as_str)
+                .ok_or(ProviderError::Rejected)?;
+            if value.is_empty() || value.len() > 512 || !unique.insert(value) {
+                return Err(ProviderError::Rejected);
+            }
+            values.push(Value::String(value.to_owned()));
+        }
+        let description = object
+            .get("description")
+            .map(|value| value.as_str().ok_or(ProviderError::Rejected))
+            .transpose()?
+            .unwrap_or_default();
+        validate_codex_schema_description(description)?;
+        let mut projected = serde_json::Map::from_iter([
+            ("type".to_owned(), Value::String("string".to_owned())),
+            ("enum".to_owned(), Value::Array(values)),
+        ]);
+        if !description.is_empty() {
+            projected.insert(
+                "description".to_owned(),
+                Value::String(description.to_owned()),
+            );
+        }
+        return Ok(Value::Object(projected));
+    }
     if let Some(any_of) = object.get("anyOf") {
         if object
             .keys()
@@ -6155,6 +6218,7 @@ pub(crate) mod tests {
                 "additionalProperties": false
             }),
             strict: true,
+            defer_loading: false,
         };
         let projected = project_codex_dynamic_tools(&[tool])
             .expect("finite nested capability schema should project");
@@ -6322,15 +6386,9 @@ pub(crate) mod tests {
             .expect("relational query definition should project");
         let plan = json!({
             "arguments": { "id": "parent-1" },
-            "fields": { "id": true, "name": true },
-            "relationships": {
-                "children": {
-                    "arguments": {},
-                    "fields": { "id": true, "label": true },
-                    "relationships": {},
-                    "maximumItems": 2
-                }
-            }
+            "selections": ["id", "name", "children.id", "children.label"],
+            "relationshipArguments": { "children": {} },
+            "relationshipMaximumItems": { "children": 2 }
         });
         (compiled, catalog, definition, plan)
     }
@@ -6621,55 +6679,46 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn generated_query_catalog_omits_empty_required_and_codex_emits_the_empty_set() {
+    fn compact_generated_query_projects_closed_maps_and_exact_selection_paths() {
         let (_compiled, catalog, definition, plan) = generated_relational_query_surface();
-        assert!(
+        assert_eq!(
             definition
                 .parameters
-                .pointer("/properties/relationships/required")
-                .is_none()
+                .pointer("/properties/relationshipArguments/additionalProperties"),
+            Some(&Value::Bool(false))
         );
         assert_eq!(
             definition
                 .parameters
-                .pointer("/properties/relationships/additionalProperties"),
+                .pointer("/properties/relationshipMaximumItems/additionalProperties"),
             Some(&Value::Bool(false))
         );
         assert!(
             definition
                 .parameters
-                .pointer("/properties/relationships/properties/children/properties/relationships/required")
-                .is_none()
-        );
-        assert_eq!(
-            definition.parameters.pointer(
-                "/properties/relationships/properties/children/properties/relationships/additionalProperties"
-            ),
-            Some(&Value::Bool(false))
+                .pointer("/properties/selections/items/oneOf")
+                .and_then(Value::as_array)
+                .is_some_and(|alternatives| alternatives
+                    .iter()
+                    .any(|alternative| alternative.get("const") == Some(&json!("children.id"))))
         );
 
         let projected = project_codex_dynamic_tools(std::slice::from_ref(&definition))
             .expect("canonical generated query schema should project");
         let schema = &projected.protocol_values[0]["inputSchema"];
         assert_eq!(
-            schema.pointer("/properties/relationships/required"),
+            schema.pointer("/properties/relationshipArguments/required"),
             Some(&json!([]))
         );
         assert_eq!(
-            schema.pointer("/properties/relationships/additionalProperties"),
+            schema.pointer("/properties/relationshipArguments/additionalProperties"),
             Some(&Value::Bool(false))
         );
-        assert_eq!(
-            schema.pointer(
-                "/properties/relationships/properties/children/properties/relationships/required"
-            ),
-            Some(&json!([]))
-        );
-        assert_eq!(
-            schema.pointer(
-                "/properties/relationships/properties/children/properties/relationships/additionalProperties"
-            ),
-            Some(&Value::Bool(false))
+        assert!(
+            schema
+                .pointer("/properties/selections/items/enum")
+                .and_then(Value::as_array)
+                .is_some_and(|values| values.contains(&json!("children.id")))
         );
         assert_projected_objects_are_closed(schema);
 
@@ -6677,25 +6726,21 @@ pub(crate) mod tests {
         assert!(
             scalar
                 .parameters
-                .pointer("/properties/fields/required")
+                .pointer("/properties/selections")
                 .is_none()
         );
         assert!(
             scalar
                 .parameters
-                .pointer("/properties/relationships/required")
+                .pointer("/properties/relationshipArguments")
                 .is_none()
         );
         let scalar_projected = project_codex_dynamic_tools(std::slice::from_ref(&scalar))
             .expect("scalar generated query empty objects should project");
-        assert_eq!(
-            scalar_projected.protocol_values[0].pointer("/inputSchema/properties/fields/required"),
-            Some(&json!([]))
-        );
-        assert_eq!(
+        assert!(
             scalar_projected.protocol_values[0]
-                .pointer("/inputSchema/properties/relationships/required"),
-            Some(&json!([]))
+                .pointer("/inputSchema/properties/selections")
+                .is_none()
         );
         assert_projected_objects_are_closed(&scalar_projected.protocol_values[0]["inputSchema"]);
 
@@ -6980,6 +7025,7 @@ pub(crate) mod tests {
             description: "Closed optional object.".to_owned(),
             parameters: closed_object_schema(None),
             strict: true,
+            defer_loading: false,
         };
         let explicit_empty = ModelToolDefinition {
             parameters: closed_object_schema(Some(json!([]))),

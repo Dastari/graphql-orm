@@ -325,6 +325,30 @@ async fn owner_isolation_atomic_send_idempotency_and_windowed_reads() {
         messages.edges[0].node.preview,
         "Find records containing the example term"
     );
+    let bootstrap = service
+        .conversation_bootstrap(&owner, AiSessionId(session.id), 20, 20, 100)
+        .await
+        .expect("owner bootstrap should be authoritative");
+    assert_eq!(bootstrap.messages.len(), 1);
+    assert_eq!(bootstrap.messages[0].id, first.message_id);
+    assert_eq!(bootstrap.watermark, bootstrap.session.stream_head);
+    assert_eq!(bootstrap.active_runs.len(), 1);
+    assert_eq!(bootstrap.active_runs[0].id, first.run_id);
+    assert_eq!(bootstrap.active_runs[0].state, "queued");
+    assert!(bootstrap.terminal_runs.is_empty());
+    assert!(!bootstrap.reset_required);
+    let after_bootstrap = service
+        .session_event_page(&owner, AiSessionId(session.id), bootstrap.watermark, 100)
+        .await
+        .expect("replay should begin strictly after the bootstrap watermark");
+    assert!(after_bootstrap.events.is_empty());
+    assert_eq!(after_bootstrap.watermark, bootstrap.watermark);
+    assert!(matches!(
+        service
+            .conversation_bootstrap(&stranger, AiSessionId(session.id), 20, 20, 100)
+            .await,
+        Err(AiError::NotFound)
+    ));
 
     let blocks = service
         .message_blocks(&owner, first.message_id, None, 20)

@@ -183,6 +183,92 @@ pub struct AiSessionEventPage {
     pub reset_required: bool,
 }
 
+/// Safe authoritative run state included in conversation bootstrap.
+#[derive(Clone, Debug, SimpleObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct AiConversationRunSummary {
+    /// Run identifier.
+    pub id: Uuid,
+    /// User message that initiated the run.
+    pub input_message_id: Uuid,
+    /// Closed durable run state.
+    pub state: String,
+    /// Current attempt when active or last attempted.
+    pub attempt_id: Option<Uuid>,
+    /// Current/terminal fence generation.
+    pub lease_generation: i64,
+    /// Bounded public terminal code, never an error body.
+    pub outcome_code: Option<String>,
+    /// Creation timestamp.
+    pub created_at: i64,
+}
+
+/// Safe current tool-call state included in conversation bootstrap.
+#[derive(Clone, Debug, SimpleObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct AiConversationToolCallSummary {
+    /// Tool-call identifier.
+    pub id: Uuid,
+    /// Owning run.
+    pub run_id: Uuid,
+    /// Stable public capability identifier.
+    pub tool_id: String,
+    /// Durable call state.
+    pub state: String,
+    /// Bounded safe outcome/authorization code.
+    pub outcome_code: Option<String>,
+    /// Provider turn index.
+    pub provider_turn_index: i64,
+    /// Tool order in that turn.
+    pub tool_call_index: i64,
+    /// Creation timestamp.
+    pub created_at: i64,
+    /// Completion timestamp.
+    pub completed_at: Option<i64>,
+}
+
+/// Safe provider activity necessary to render an active/recent turn.
+#[derive(Clone, Debug, SimpleObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct AiConversationProviderActivitySummary {
+    /// Owning run.
+    pub run_id: Uuid,
+    /// Provider family.
+    pub provider_kind: String,
+    /// Exact provider model.
+    pub provider_model: String,
+    /// Latest durable activity state.
+    pub state: String,
+    /// Latest safe activity timestamp.
+    pub updated_at: i64,
+}
+
+/// One bounded owner-authorized authoritative conversation bootstrap.
+#[derive(Clone, Debug, SimpleObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct AiConversationBootstrap {
+    /// Current session shell and scope.
+    pub session: AiSessionView,
+    /// Newest bounded message window in display order.
+    pub messages: Vec<AiMessageView>,
+    /// Opaque cursor usable as `before` for the next older message page.
+    pub backward_cursor: Option<String>,
+    /// Whether older messages remain.
+    pub has_older_messages: bool,
+    /// Durable event watermark captured with this state.
+    pub watermark: i64,
+    /// All active runs admitted by the bootstrap bound.
+    pub active_runs: Vec<AiConversationRunSummary>,
+    /// Recently terminal run outcomes, newest last.
+    pub terminal_runs: Vec<AiConversationRunSummary>,
+    /// Tool calls for the active/recent runs only.
+    pub tool_calls: Vec<AiConversationToolCallSummary>,
+    /// Safe provider activity for the active/recent runs only.
+    pub provider_activity: Vec<AiConversationProviderActivitySummary>,
+    /// Retention or a bootstrap bound prevents exact reconstruction.
+    pub reset_required: bool,
+}
+
 /// Session creation input.
 #[derive(Clone, Debug, InputObject)]
 #[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
@@ -256,6 +342,21 @@ pub struct SendAiMessagePayload {
 /// queries and never return data owned by another principal.
 #[async_trait]
 pub trait AiSessionService: Send + Sync {
+    /// Returns one bounded authoritative conversation bootstrap suitable for
+    /// replay from its watermark followed by live subscription.
+    async fn conversation_bootstrap(
+        &self,
+        _principal: &AuthPrincipal,
+        _session_id: AiSessionId,
+        _message_limit: i64,
+        _terminal_run_limit: i64,
+        _tool_call_limit: i64,
+    ) -> Result<AiConversationBootstrap, AiError> {
+        Err(AiError::InvalidConfiguration(
+            "AI conversation bootstrap is not implemented by this service".to_owned(),
+        ))
+    }
+
     /// Lists visible session shells.
     async fn sessions(
         &self,
@@ -354,6 +455,30 @@ pub struct AiQueryRoot;
 )]
 #[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
 impl AiQueryRoot {
+    /// Returns one owner-authorized bounded authoritative bootstrap. Clients
+    /// begin durable replay strictly after the returned watermark, drain to
+    /// the captured head, and then attach live subscription.
+    async fn ai_conversation_bootstrap(
+        &self,
+        context: &Context<'_>,
+        session_id: Uuid,
+        message_limit: Option<i64>,
+        terminal_run_limit: Option<i64>,
+        tool_call_limit: Option<i64>,
+    ) -> async_graphql::Result<AiConversationBootstrap> {
+        let principal = agql_auth::principal_from_ctx(context)?;
+        service(context)?
+            .conversation_bootstrap(
+                &principal,
+                AiSessionId(session_id),
+                message_limit.unwrap_or(50),
+                terminal_run_limit.unwrap_or(20),
+                tool_call_limit.unwrap_or(100),
+            )
+            .await
+            .map_err(extend)
+    }
+
     /// Returns a lazily opened, current-policy, descriptor-bounded tool result
     /// preview when the exact tool explicitly permits browser presentation.
     async fn ai_tool_call_result_preview(

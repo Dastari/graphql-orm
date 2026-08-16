@@ -298,6 +298,7 @@ async fn stateless_replay_requires_one_unique_proof_for_every_tool_result() {
             "additionalProperties": false
         }),
         strict: true,
+        defer_loading: false,
     };
     let stateless_request = ModelRequest {
         model: model.to_owned(),

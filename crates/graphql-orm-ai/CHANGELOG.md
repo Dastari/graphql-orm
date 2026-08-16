@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-15
+last_reviewed: 2026-08-16
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -17,6 +17,57 @@ Historical development entries below retain their original dependency and
 checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## [0.81.0] - 2026-08-16
+
+### Added
+
+- Provider-neutral capability delivery selects `EagerExact`,
+  `ClientDeferred`, `ProviderDeferred`, or `FixedBroker` from declared adapter
+  support and exact count/byte bounds. Search/load bindings rehydrate the
+  current principal, reapply host policy and fence session/run/attempt/lease,
+  target/schema/catalogue/capability and provider-session fingerprints.
+- Native OpenAI can opt exact reviewed models into deferred `tool_search`.
+  Strict function schemas are projected reversibly from the unchanged
+  canonical schema and arguments are normalized and validated against both
+  contracts.
+- Provider calls expose a typed local-preparation/dispatch lifecycle and a
+  content-free final egress requirement sized after opaque continuation and
+  provider projection. Definitely unstarted failures release reservations;
+  possible transmission remains uncertain.
+- `AiConversationBootstrap` and `aiConversationBootstrap` provide one bounded
+  owner-authorized newest-message window, durable watermark, active/recent run
+  outcomes, tool calls, provider activity and reset-required state.
+
+### Changed
+
+- Ordinary, dynamic, stateless and retained read loops share the durable
+  application-tool outcome and safe-failure classifier. Correctable read
+  failures are protected, fenced and persisted once for continuation instead
+  of unconditionally transitioning the run to recovery required.
+- Generated provider definitions use compact v3 query plans. Public
+  `ModelToolDefinition` literals add `defer_loading`; use `false` outside a
+  coordinator-selected native deferred surface.
+- Retained sessions exposing capabilities must construct
+  `AiProviderSessionDescriptor::new_with_capability_binding`; its existing
+  persisted registration fingerprint then invalidates every execution-relevant
+  delivery change.
+
+### Schema
+
+- AI schema module remains `0.60.0`. No table, column, index, constraint,
+  backfill, protected payload, token, prompt, result or authority migration is
+  required.
+
+### Security
+
+- Discovery, loading, registration and provider-native search grant no
+  execution authority. Current principal, host policy and ordinary resolver
+  authorization are reapplied before execution; mutations/subscriptions remain
+  separately classified and default closed.
+- Model/browser outcomes contain only bounded safe codes and public state;
+  resolver/provider bodies, prompts, results, credentials and authorization
+  internals are excluded.
 
 ## [0.80.0] - 2026-08-15
 

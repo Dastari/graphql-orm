@@ -3,12 +3,49 @@ title: "graphql-orm-ai-tool-profiles migration guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-16
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.5.0 to 0.6.0: compact discovery and query-plan wire v3
+
+Adopt `graphql-orm-ai-tool-profiles` 0.6.0 and `graphql-orm-ai` 0.81.0 from one
+reviewed full monorepo revision. Rebuild the finished public SDL,
+`GraphqlSemanticCatalog`, generated capability catalogues and canonical
+`AiCapabilityIndex`. Refresh exact capability/catalogue/index allowlists and
+provider registrations: `AI_GRAPHQL_QUERY_CAPABILITY_VERSION` is now `3`, so
+generated capability and provider-session fingerprints intentionally change.
+
+Provider-facing callers now submit the compact shape:
+
+```json
+{
+  "arguments": {"id": "job-123"},
+  "selections": ["id", "status", "labour.id", "stock.quantity"],
+  "relationshipArguments": {"labour": {}, "stock": {}},
+  "relationshipMaximumItems": {"labour": 25, "stock": 25}
+}
+```
+
+Use `compact_argument_schema()` and `compile_compact`; do not send the legacy
+recursive `fields`/`relationships` schema to a model. The compiler temporarily
+accepts an already-persisted closed v2 plan as migration input, but v3
+definitions never advertise it. Every plan still receives final authoritative
+depth, list, total-record and result-byte validation. Correctable compact-plan
+flows may use `compile_compact_correctable` and its bounded failure code.
+
+Compile `AiCapabilityIndex` from the exact target/schema/semantic/catalogue
+set only after schema composition. Index limits are independent. Public
+descriptions now participate in semantic, capability, entry and index
+fingerprints, so a documentation-only semantic description change requires
+the same rebuild and retained-session rebind as another executable catalogue
+change.
+
+No database, data, GraphQL SDL, table, column, index, constraint, backfill,
+protected-content, credential or AI schema-module migration is required.
 
 ## 0.4.1 to 0.5.0: explicit collection-bound query plans
 

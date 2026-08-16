@@ -10,6 +10,8 @@ use graphql_orm_ai::*;
 use serde_json::json;
 use uuid::Uuid;
 
+type BootstrapRequest = (String, Uuid, i64, i64, i64);
+
 fn principal(subject: &str) -> AuthPrincipal {
     AuthPrincipal::User(AuthUser {
         user_id: subject.to_owned(),
@@ -36,6 +38,7 @@ struct RecordingSessionService {
     message_page: Mutex<Option<ValidatedKeysetConnection>>,
     principal_subject: Mutex<Option<String>>,
     rename_input: Mutex<Option<RenameAiSessionInput>>,
+    bootstrap_request: Mutex<Option<BootstrapRequest>>,
 }
 
 #[derive(Default)]
@@ -130,6 +133,48 @@ impl AiInboxService for RecordingInboxService {
 
 #[async_trait]
 impl AiSessionService for RecordingSessionService {
+    async fn conversation_bootstrap(
+        &self,
+        principal: &AuthPrincipal,
+        session_id: AiSessionId,
+        message_limit: i64,
+        terminal_run_limit: i64,
+        tool_call_limit: i64,
+    ) -> Result<AiConversationBootstrap, AiError> {
+        *self
+            .bootstrap_request
+            .lock()
+            .expect("test mutex should not be poisoned") = Some((
+            principal.subject().to_owned(),
+            session_id.0,
+            message_limit,
+            terminal_run_limit,
+            tool_call_limit,
+        ));
+        Ok(AiConversationBootstrap {
+            session: AiSessionView {
+                id: session_id.0,
+                scope_kind: "collection".to_owned(),
+                scope_id: "54".to_owned(),
+                title: "Current conversation".to_owned(),
+                title_revision: 2,
+                state: "active".to_owned(),
+                stream_head: 42,
+                last_activity_at: 100,
+                archived_at: None,
+            },
+            messages: Vec::new(),
+            backward_cursor: Some("older-cursor".to_owned()),
+            has_older_messages: true,
+            watermark: 42,
+            active_runs: Vec::new(),
+            terminal_runs: Vec::new(),
+            tool_calls: Vec::new(),
+            provider_activity: Vec::new(),
+            reset_required: false,
+        })
+    }
+
     async fn sessions(
         &self,
         principal: &AuthPrincipal,
@@ -282,6 +327,48 @@ impl AiSessionService for RecordingSessionService {
             run_id: Uuid::new_v4(),
         })
     }
+}
+
+#[tokio::test]
+async fn conversation_bootstrap_returns_one_watermarked_authoritative_snapshot() {
+    let service = Arc::new(RecordingSessionService::default());
+    let schema = schema(service.clone());
+    let session_id = Uuid::new_v4();
+    let response = schema
+        .execute(
+            Request::new(format!(
+                "{{ aiConversationBootstrap(sessionId: \"{session_id}\") {{ session {{ id streamHead }} messages {{ id }} backwardCursor hasOlderMessages watermark activeRuns {{ id }} terminalRuns {{ id outcomeCode }} toolCalls {{ id outcomeCode }} providerActivity {{ runId state }} resetRequired }} }}"
+            ))
+            .data(principal("bootstrap-owner")),
+        )
+        .await;
+
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(
+        response.data.into_json().expect("response JSON"),
+        json!({
+            "aiConversationBootstrap": {
+                "session": {"id": session_id, "streamHead": 42},
+                "messages": [],
+                "backwardCursor": "older-cursor",
+                "hasOlderMessages": true,
+                "watermark": 42,
+                "activeRuns": [],
+                "terminalRuns": [],
+                "toolCalls": [],
+                "providerActivity": [],
+                "resetRequired": false
+            }
+        })
+    );
+    assert_eq!(
+        service
+            .bootstrap_request
+            .lock()
+            .expect("test mutex should not be poisoned")
+            .as_ref(),
+        Some(&("bootstrap-owner".to_owned(), session_id, 50, 20, 100))
+    );
 }
 
 fn schema(

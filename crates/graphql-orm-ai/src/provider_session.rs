@@ -162,6 +162,37 @@ impl AiProviderSessionDescriptor {
         Ok(descriptor)
     }
 
+    /// Creates a retained-session descriptor whose persisted registration
+    /// identity is the complete capability-delivery binding.
+    ///
+    /// This is the required constructor for sessions that expose application
+    /// capabilities. Because the ordinary provider-session row already fences
+    /// the registration fingerprint, changing the delivery mode, compact
+    /// index, bootstrap tools, projection version, model, reasoning effort, or
+    /// underlying registration identity forces an ordinary drain/rebind and
+    /// requires no parallel persistence authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-configuration error when the descriptor or binding
+    /// values are malformed.
+    pub fn new_with_capability_binding(
+        provider_kind: ProviderKind,
+        provider_profile_id: impl Into<String>,
+        protocol_version: impl Into<String>,
+        policy_fingerprint: impl Into<String>,
+        capability_binding: &crate::AiProviderCapabilitySessionBinding,
+    ) -> Result<Self, AiError> {
+        Self::new(
+            provider_kind,
+            provider_profile_id,
+            capability_binding.model(),
+            capability_binding.fingerprint(),
+            protocol_version,
+            policy_fingerprint,
+        )
+    }
+
     /// Exact provider family.
     pub fn provider_kind(&self) -> &ProviderKind {
         &self.provider_kind

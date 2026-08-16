@@ -8,6 +8,7 @@
 #![warn(missing_docs)]
 
 mod canonical_json;
+mod capability_index;
 mod data;
 mod disclosure;
 mod error;
@@ -16,6 +17,7 @@ mod profiles;
 mod query_plans;
 mod tools;
 
+pub use capability_index::*;
 pub use data::*;
 pub use disclosure::*;
 pub use error::*;

@@ -27,7 +27,7 @@ use crate::{
 };
 
 /// Current automatic query-capability contract version.
-pub const AI_GRAPHQL_QUERY_CAPABILITY_VERSION: u16 = 2;
+pub const AI_GRAPHQL_QUERY_CAPABILITY_VERSION: u16 = 3;
 
 /// Current classified mutation-capability contract version.
 pub const AI_GRAPHQL_MUTATION_CAPABILITY_VERSION: u16 = 1;
@@ -137,7 +137,7 @@ impl Default for AiGraphqlQueryCapabilityLimits {
             maximum_result_records: 100,
             maximum_result_bytes: 256 * 1024,
             maximum_capabilities: 1_024,
-            maximum_schema_bytes: 4 * 1024 * 1024,
+            maximum_schema_bytes: 16 * 1024 * 1024,
         }
     }
 }
@@ -181,6 +181,67 @@ pub struct AiGraphqlQueryPlan {
     pub maximum_items: Option<u32>,
 }
 
+/// Compact provider-facing query plan compiled back into the canonical closed
+/// tree before ordinary validation and execution.
+///
+/// Selection paths contain public GraphQL names only. Every path must end in
+/// one selectable scalar field; intermediate segments must be declared
+/// relationships. Relationship argument and limit maps may address only
+/// relationships already traversed by a selected path.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AiCompactGraphqlQueryPlan {
+    /// Exact typed root arguments, excluding a server-owned page bound.
+    #[serde(default)]
+    pub arguments: Map<String, Value>,
+    /// Explicit public scalar selection paths such as `id` or `labour.name`.
+    #[serde(default)]
+    pub selections: Vec<String>,
+    /// Typed arguments keyed by an exact selected relationship path.
+    #[serde(default)]
+    pub relationship_arguments: BTreeMap<String, Map<String, Value>>,
+    /// Positive collection bounds keyed by an exact selected relationship path.
+    #[serde(default)]
+    pub relationship_maximum_items: BTreeMap<String, u32>,
+    /// Positive root result ceiling when the root returns a collection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum_items: Option<u32>,
+}
+
+/// Closed model-safe reason a compact query plan could not compile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiGraphqlQueryPlanFailureCode {
+    /// Arguments or public paths are malformed or unknown.
+    InvalidArguments,
+    /// Selection complexity exceeds the configured field bound.
+    SelectionTooLarge,
+    /// Relationship depth exceeds the configured bound.
+    RelationshipDepthExceeded,
+    /// Aggregate root/relationship cardinality exceeds the total record bound.
+    ResultBudgetExceeded,
+    /// The capability no longer matches the active schema/catalogue/target.
+    CapabilityStale,
+}
+
+/// Bounded correction envelope returned by the staged compact compiler.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiGraphqlQueryPlanCorrection {
+    /// Current correction-envelope version.
+    pub version: u16,
+    /// Stable safe failure code.
+    pub code: AiGraphqlQueryPlanFailureCode,
+    /// Maximum selected scalar paths.
+    pub maximum_selected_fields: u16,
+    /// Maximum relationship depth.
+    pub maximum_relationship_depth: u8,
+    /// Total result-record ceiling across the complete selection.
+    pub maximum_result_records: u32,
+    /// Result-byte ceiling.
+    pub maximum_result_bytes: u64,
+}
+
 /// One deterministic provider-facing query capability segment.
 #[derive(Clone, Debug)]
 pub struct AiGraphqlQueryCapability {
@@ -188,6 +249,7 @@ pub struct AiGraphqlQueryCapability {
     operation: GraphqlSemanticOperationDescriptor,
     description: String,
     argument_schema: Value,
+    compact_argument_schema: Value,
     fingerprint: String,
     schema_fingerprint: String,
     target_id: GraphqlExecutionTargetId,
@@ -211,6 +273,16 @@ impl AiGraphqlQueryCapability {
     /// Returns the finite JSON Schema 2020-12 query-plan contract.
     pub fn argument_schema(&self) -> &Value {
         &self.argument_schema
+    }
+
+    /// Returns the compact non-recursive provider-facing plan schema.
+    ///
+    /// The compact schema is a reversible projection of the unchanged closed
+    /// execution plan. It contains only public schema names and finite typed
+    /// arguments; it never accepts GraphQL text, aliases, fragments, targets,
+    /// introspection, SQL, URLs, or callbacks.
+    pub fn compact_argument_schema(&self) -> &Value {
+        &self.compact_argument_schema
     }
 
     /// Returns the complete capability fingerprint.
@@ -265,6 +337,113 @@ impl AiGraphqlQueryCapability {
         let typed_plan: AiGraphqlQueryPlan = serde_json::from_value(plan.clone())
             .map_err(|_| input_error("query plan has an invalid shape"))?;
         self.compile_typed_plan(typed_plan, &plan, GraphqlOperationKind::Query)
+    }
+
+    /// Compiles one compact provider plan through the same authoritative
+    /// schema-derived compiler as [`Self::compile`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe input error for an unknown, hidden, stale, cyclic,
+    /// over-depth, over-cardinality, or over-budget public selection.
+    pub fn compile_compact(&self, plan: Value) -> Result<AiCompiledGraphqlQuery, AiError> {
+        let validator = jsonschema::validator_for(&self.compact_argument_schema)
+            .map_err(|_| configuration_error("compact query capability schema is invalid"))?;
+        if !validator.is_valid(&plan) {
+            // Keep the pre-v3 closed plan readable for host-owned persisted
+            // work and a bounded migration window. It is never advertised by
+            // the v3 model definition and remains subject to the same final
+            // schema-derived compiler and budgets.
+            if plan.get("fields").is_some() && plan.get("selections").is_none() {
+                return self.compile(plan);
+            }
+            return Err(input_error(
+                "compact query plan does not match the capability schema",
+            ));
+        }
+        let compact: AiCompactGraphqlQueryPlan = serde_json::from_value(plan.clone())
+            .map_err(|_| input_error("compact query plan has an invalid shape"))?;
+        let expanded = self.expand_compact_plan(compact)?;
+        self.compile_typed_plan(expanded, &plan, GraphqlOperationKind::Query)
+    }
+
+    /// Staged compact compilation that converts every correctable local
+    /// validation failure into a bounded model-safe envelope. The authoritative
+    /// compiler remains the final validator.
+    pub fn compile_compact_correctable(
+        &self,
+        plan: Value,
+    ) -> Result<AiCompiledGraphqlQuery, AiGraphqlQueryPlanCorrection> {
+        self.compile_compact(plan)
+            .map_err(|error| self.correction_for(&error))
+    }
+
+    fn correction_for(&self, error: &AiError) -> AiGraphqlQueryPlanCorrection {
+        let code = match error {
+            AiError::InvalidInput(message) if message.contains("relationship depth") => {
+                AiGraphqlQueryPlanFailureCode::RelationshipDepthExceeded
+            }
+            AiError::InvalidInput(message)
+                if message.contains("result record")
+                    || message.contains("result-record")
+                    || message.contains("record budget") =>
+            {
+                AiGraphqlQueryPlanFailureCode::ResultBudgetExceeded
+            }
+            AiError::InvalidInput(message)
+                if message.contains("selection is too large")
+                    || message.contains("selection exceeds")
+                    || message.contains("complexity limits") =>
+            {
+                AiGraphqlQueryPlanFailureCode::SelectionTooLarge
+            }
+            AiError::InvalidConfiguration(_) => AiGraphqlQueryPlanFailureCode::CapabilityStale,
+            _ => AiGraphqlQueryPlanFailureCode::InvalidArguments,
+        };
+        AiGraphqlQueryPlanCorrection {
+            version: 1,
+            code,
+            maximum_selected_fields: self.limits.maximum_selected_fields,
+            maximum_relationship_depth: self.limits.maximum_depth,
+            maximum_result_records: self.limits.maximum_result_records,
+            maximum_result_bytes: self.limits.maximum_result_bytes,
+        }
+    }
+
+    fn expand_compact_plan(
+        &self,
+        compact: AiCompactGraphqlQueryPlan,
+    ) -> Result<AiGraphqlQueryPlan, AiError> {
+        if compact.selections.len() > self.limits.maximum_selected_fields as usize {
+            return Err(input_error("compact query selection is too large"));
+        }
+        let mut plan = AiGraphqlQueryPlan {
+            arguments: compact.arguments,
+            maximum_items: compact.maximum_items,
+            ..AiGraphqlQueryPlan::default()
+        };
+        let mut selected_relationships = BTreeSet::new();
+        for selection in &compact.selections {
+            expand_compact_selection(
+                &mut plan,
+                selection,
+                &compact.relationship_arguments,
+                &compact.relationship_maximum_items,
+                &mut selected_relationships,
+                self.limits.maximum_depth,
+            )?;
+        }
+        if compact
+            .relationship_arguments
+            .keys()
+            .chain(compact.relationship_maximum_items.keys())
+            .any(|path| !selected_relationships.contains(path))
+        {
+            return Err(input_error(
+                "compact query relationship options do not match a selected path",
+            ));
+        }
+        Ok(plan)
     }
 
     fn compile_typed_plan(
@@ -938,6 +1117,11 @@ impl AiGraphqlMutationCapability {
         self.base.argument_schema()
     }
 
+    /// Returns the compact non-recursive provider-facing mutation schema.
+    pub fn compact_argument_schema(&self) -> &Value {
+        self.base.compact_argument_schema()
+    }
+
     /// Returns the complete capability fingerprint.
     pub fn fingerprint(&self) -> &str {
         self.base.fingerprint()
@@ -997,6 +1181,36 @@ impl AiGraphqlMutationCapability {
                 "compiled mutation capability has invalid operation kind",
             ));
         }
+        Ok(AiCompiledGraphqlMutation {
+            execution_policy: self.execution_policy,
+            compiled,
+        })
+    }
+
+    /// Compiles one compact provider mutation plan through the authoritative
+    /// schema-derived compiler and preserves the reviewed mutation policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for stale, malformed, hidden, excessive, or
+    /// unbounded plan content.
+    pub fn compile_compact(&self, plan: Value) -> Result<AiCompiledGraphqlMutation, AiError> {
+        let validator = jsonschema::validator_for(self.compact_argument_schema())
+            .map_err(|_| configuration_error("compact mutation capability schema is invalid"))?;
+        if !validator.is_valid(&plan) {
+            if plan.get("fields").is_some() && plan.get("selections").is_none() {
+                return self.compile(plan);
+            }
+            return Err(input_error(
+                "compact mutation plan does not match the capability schema",
+            ));
+        }
+        let compact: AiCompactGraphqlQueryPlan = serde_json::from_value(plan.clone())
+            .map_err(|_| input_error("compact mutation plan has an invalid shape"))?;
+        let expanded = self.base.expand_compact_plan(compact)?;
+        let compiled =
+            self.base
+                .compile_typed_plan(expanded, &plan, GraphqlOperationKind::Mutation)?;
         Ok(AiCompiledGraphqlMutation {
             execution_policy: self.execution_policy,
             compiled,
@@ -1230,6 +1444,30 @@ pub struct AiGraphqlSubscriptionPlan {
     pub maximum_events: u32,
 }
 
+/// Compact provider-facing bounded subscription plan.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AiCompactGraphqlSubscriptionPlan {
+    /// Exact typed root arguments.
+    #[serde(default)]
+    pub arguments: Map<String, Value>,
+    /// Explicit public scalar selection paths.
+    pub selections: Vec<String>,
+    /// Typed arguments keyed by selected relationship path.
+    #[serde(default)]
+    pub relationship_arguments: BTreeMap<String, Map<String, Value>>,
+    /// Positive collection bounds keyed by selected relationship path.
+    #[serde(default)]
+    pub relationship_maximum_items: BTreeMap<String, u32>,
+    /// Optional closed completion predicate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<AiGraphqlSubscriptionCondition>,
+    /// Positive bounded observation timeout.
+    pub timeout_seconds: u32,
+    /// Positive bounded number of events examined.
+    pub maximum_events: u32,
+}
+
 /// One replayable subscription root compiled from finished schema semantics.
 #[derive(Clone, Debug)]
 pub struct AiGraphqlSubscriptionCapability {
@@ -1254,6 +1492,11 @@ impl AiGraphqlSubscriptionCapability {
         self.base.argument_schema()
     }
 
+    /// Returns the compact non-recursive provider-facing subscription schema.
+    pub fn compact_argument_schema(&self) -> &Value {
+        self.base.compact_argument_schema()
+    }
+
     /// Returns the complete capability fingerprint.
     pub fn fingerprint(&self) -> &str {
         self.base.fingerprint()
@@ -1262,6 +1505,11 @@ impl AiGraphqlSubscriptionCapability {
     /// Returns the exact public Subscription root field.
     pub fn field_name(&self) -> &str {
         self.base.field_name()
+    }
+
+    /// Returns the exact semantic operation fingerprint.
+    pub fn semantic_operation_fingerprint(&self) -> &str {
+        self.base.semantic_operation_fingerprint()
     }
 
     /// Compiles one bounded plan into an immutable subscription contract.
@@ -1297,6 +1545,64 @@ impl AiGraphqlSubscriptionCapability {
         let compiled =
             self.base
                 .compile_typed_plan(query_plan, &plan, GraphqlOperationKind::Subscription)?;
+        Ok(AiCompiledGraphqlSubscription {
+            capability_fingerprint: compiled.capability_fingerprint,
+            plan_fingerprint: compiled.plan_fingerprint,
+            descriptor: compiled.descriptor,
+            disclosure_schema: compiled.disclosure_schema,
+            variables: compiled.variables,
+            condition: typed.condition,
+            timeout_seconds: typed.timeout_seconds,
+            maximum_events: typed.maximum_events,
+        })
+    }
+
+    /// Compiles one compact bounded subscription through the authoritative
+    /// schema-derived compiler.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for an invalid condition, bound, public path, or
+    /// stale/hidden/excessive selection.
+    pub fn compile_compact(&self, plan: Value) -> Result<AiCompiledGraphqlSubscription, AiError> {
+        let validator = jsonschema::validator_for(self.compact_argument_schema())
+            .map_err(|_| configuration_error("compact subscription schema is invalid"))?;
+        if !validator.is_valid(&plan) {
+            if plan.get("fields").is_some() && plan.get("selections").is_none() {
+                return self.compile(plan);
+            }
+            return Err(input_error(
+                "compact subscription plan does not match the capability schema",
+            ));
+        }
+        let typed: AiCompactGraphqlSubscriptionPlan = serde_json::from_value(plan.clone())
+            .map_err(|_| input_error("compact subscription plan has an invalid shape"))?;
+        if typed.timeout_seconds == 0
+            || typed.timeout_seconds > self.maximum_duration_seconds
+            || typed.maximum_events == 0
+            || typed.maximum_events > self.maximum_events
+        {
+            return Err(input_error("subscription observation bounds are invalid"));
+        }
+        let expanded = self.base.expand_compact_plan(AiCompactGraphqlQueryPlan {
+            arguments: typed.arguments,
+            selections: typed.selections,
+            relationship_arguments: typed.relationship_arguments,
+            relationship_maximum_items: typed.relationship_maximum_items,
+            maximum_items: None,
+        })?;
+        let legacy = AiGraphqlSubscriptionPlan {
+            arguments: expanded.arguments.clone(),
+            fields: expanded.fields.clone(),
+            relationships: expanded.relationships.clone(),
+            condition: typed.condition.clone(),
+            timeout_seconds: typed.timeout_seconds,
+            maximum_events: typed.maximum_events,
+        };
+        validate_subscription_condition(&self.base, &legacy)?;
+        let compiled =
+            self.base
+                .compile_typed_plan(expanded, &plan, GraphqlOperationKind::Subscription)?;
         Ok(AiCompiledGraphqlSubscription {
             capability_fingerprint: compiled.capability_fingerprint,
             plan_fingerprint: compiled.plan_fingerprint,
@@ -1426,13 +1732,23 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
                 maximum_duration_seconds,
                 maximum_events,
             )?;
-            if serde_json::to_vec(&base.argument_schema)
+            base.compact_argument_schema = compact_subscription_plan_schema(
+                &schema,
+                semantic_catalog,
+                operation,
+                &base.output,
+                limits.query,
+                maximum_duration_seconds,
+                maximum_events,
+            )?;
+            if serde_json::to_vec(&base.compact_argument_schema)
                 .map(|encoded| encoded.len() > MAXIMUM_PROVIDER_SCHEMA_BYTES)
                 .unwrap_or(true)
                 || jsonschema::validator_for(&base.argument_schema).is_err()
+                || jsonschema::validator_for(&base.compact_argument_schema).is_err()
             {
                 return Err(configuration_error(
-                    "subscription capability schema exceeds the provider contract",
+                    "compact subscription schema exceeds the provider contract",
                 ));
             }
             base.fingerprint = sha256_json(&json!({
@@ -2002,12 +2318,14 @@ fn compile_capability(
     validate_operation_against_schema(operation, root_field, expected_kind)?;
     let output = resolve_query_output(schema, semantic_catalog, operation, &root_field.ty, limits)?;
     let argument_schema = build_plan_schema(schema, semantic_catalog, operation, &output, limits)?;
-    if serde_json::to_vec(&argument_schema)
+    let compact_argument_schema =
+        build_compact_plan_schema(schema, semantic_catalog, operation, &output, limits)?;
+    if serde_json::to_vec(&compact_argument_schema)
         .map(|encoded| encoded.len() > MAXIMUM_PROVIDER_SCHEMA_BYTES)
         .unwrap_or(true)
     {
         return Err(configuration_error(
-            "query capability schema exceeds the provider contract",
+            "compact query capability schema exceeds the provider contract",
         ));
     }
     jsonschema::validator_for(&argument_schema)
@@ -2035,6 +2353,7 @@ fn compile_capability(
         "semantic_catalog": semantic_catalog.fingerprint,
         "operation": operation.fingerprint,
         "argument_schema": argument_schema,
+        "compact_argument_schema": compact_argument_schema,
         "limits": limits,
     }));
     Ok(AiGraphqlQueryCapability {
@@ -2042,6 +2361,7 @@ fn compile_capability(
         operation: operation.clone(),
         description: operation.description.clone(),
         argument_schema,
+        compact_argument_schema,
         fingerprint,
         schema_fingerprint: schema_fingerprint.to_owned(),
         target_id,
@@ -2386,6 +2706,259 @@ fn build_plan_schema(
     }))
 }
 
+#[derive(Clone)]
+struct CompactRelationshipSchema {
+    path: String,
+    arguments: Value,
+    maximum_items: Option<u32>,
+}
+
+fn build_compact_plan_schema(
+    schema: &FinishedSchema,
+    catalog: &GraphqlSemanticCatalog,
+    operation: &GraphqlSemanticOperationDescriptor,
+    output: &QueryOutput,
+    limits: AiGraphqlQueryCapabilityLimits,
+) -> Result<Value, AiError> {
+    let root = schema.operation_root_field(operation.kind, &operation.field_name)?;
+    let inject_root_bound = root_bound_argument(schema, root, output)?;
+    let argument_descriptions = operation
+        .arguments
+        .iter()
+        .map(|argument| {
+            (
+                argument.graphql_name.as_str(),
+                argument.description.as_str(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let arguments = input_object_schema(
+        schema,
+        catalog,
+        &root.arguments,
+        &argument_descriptions,
+        limits,
+        0,
+        &mut Vec::new(),
+        inject_root_bound,
+    )?;
+    let mut selection_alternatives = Vec::new();
+    let mut relationship_schemas = Vec::new();
+    if let QueryOutput::Entity { entity, .. } = output {
+        collect_compact_selection_paths(
+            schema,
+            catalog,
+            entity,
+            limits,
+            0,
+            &mut vec![entity.clone()],
+            "",
+            &mut selection_alternatives,
+            &mut relationship_schemas,
+        )?;
+        if selection_alternatives.is_empty() {
+            return Err(configuration_error(
+                "query entity has no compact exportable selections",
+            ));
+        }
+    }
+    let mut relationship_arguments = Map::new();
+    let mut relationship_limits = Map::new();
+    for relationship in relationship_schemas {
+        relationship_arguments.insert(relationship.path.clone(), relationship.arguments);
+        if let Some(maximum) = relationship.maximum_items {
+            relationship_limits.insert(
+                relationship.path,
+                bounded_integer_schema(
+                    1,
+                    i64::from(
+                        maximum
+                            .min(limits.maximum_list_items)
+                            .min(limits.maximum_result_records),
+                    ),
+                ),
+            );
+        }
+    }
+    let mut properties = Map::from_iter([("arguments".to_owned(), arguments)]);
+    let mut required = vec![Value::String("arguments".to_owned())];
+    if matches!(output, QueryOutput::Entity { .. }) {
+        properties.insert(
+            "selections".to_owned(),
+            json!({
+                "type": "array",
+                "description": "Explicit public scalar selection paths. No select-all behavior.",
+                "items": { "oneOf": selection_alternatives },
+                "minItems": 1,
+                "maxItems": i64::from(limits.maximum_selected_fields),
+                "uniqueItems": true,
+            }),
+        );
+        properties.insert(
+            "relationshipArguments".to_owned(),
+            json!({
+                "type": "object",
+                "description": "Typed arguments for selected relationship paths only.",
+                "properties": relationship_arguments,
+                "required": [],
+                "additionalProperties": false,
+            }),
+        );
+        properties.insert(
+            "relationshipMaximumItems".to_owned(),
+            json!({
+                "type": "object",
+                "description": "Positive collection bounds for selected pageable relationship paths.",
+                "properties": relationship_limits,
+                "required": [],
+                "additionalProperties": false,
+            }),
+        );
+        required.extend([
+            Value::String("selections".to_owned()),
+            Value::String("relationshipArguments".to_owned()),
+            Value::String("relationshipMaximumItems".to_owned()),
+        ]);
+    }
+    match output {
+        QueryOutput::Entity { .. } if output.requires_root_bound() => {
+            properties.insert(
+                "maximumItems".to_owned(),
+                bounded_integer_schema(1, i64::from(limits.maximum_result_records)),
+            );
+            required.push(Value::String("maximumItems".to_owned()));
+        }
+        QueryOutput::Aggregate { .. } => {
+            properties.insert(
+                "maximumItems".to_owned(),
+                bounded_integer_schema(1, i64::from(limits.maximum_result_records)),
+            );
+            required.push(Value::String("maximumItems".to_owned()));
+        }
+        QueryOutput::Scalar {
+            maximum_items: Some(maximum),
+            ..
+        } => {
+            properties.insert(
+                "maximumItems".to_owned(),
+                bounded_integer_schema(1, i64::from(*maximum)),
+            );
+            required.push(Value::String("maximumItems".to_owned()));
+        }
+        QueryOutput::Entity { .. } | QueryOutput::Scalar { .. } => {}
+    }
+    Ok(json!({
+        "$schema": JSON_SCHEMA_2020_12,
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_compact_selection_paths(
+    schema: &FinishedSchema,
+    catalog: &GraphqlSemanticCatalog,
+    entity_name: &str,
+    limits: AiGraphqlQueryCapabilityLimits,
+    depth: u8,
+    ancestry: &mut Vec<String>,
+    prefix: &str,
+    selections: &mut Vec<Value>,
+    relationships: &mut Vec<CompactRelationshipSchema>,
+) -> Result<(), AiError> {
+    let entity = semantic_entity(catalog, entity_name)?;
+    for field in entity
+        .fields
+        .iter()
+        .filter(|field| selectable_exportable_scalar(field))
+    {
+        schema.object_field(entity_name, &field.field_name)?;
+        let path = join_selection_path(prefix, &field.field_name);
+        selections.push(json!({
+            "const": path,
+            "description": field.description,
+        }));
+    }
+    if depth + 1 >= limits.maximum_depth {
+        return Ok(());
+    }
+    for field in entity.fields.iter().filter(|field| {
+        field.selectable
+            && field.export == GraphqlSemanticExport::Exportable
+            && field.classification != GraphqlSemanticClassification::Secret
+            && field.relationship.is_some()
+    }) {
+        let relationship = field
+            .relationship
+            .as_ref()
+            .ok_or_else(|| configuration_error("relationship semantics are missing"))?;
+        if ancestry.contains(&relationship.target) {
+            continue;
+        }
+        let actual = schema.object_field(entity_name, &field.field_name)?;
+        let collection = collection_execution(relationship)?;
+        validate_collection_sdl(schema, &actual.arguments, collection)?;
+        validate_collection_limits(collection, limits)?;
+        let descriptions = relationship
+            .arguments
+            .iter()
+            .map(|argument| {
+                (
+                    argument.graphql_name.as_str(),
+                    argument.description.as_str(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut argument_schema = input_object_schema(
+            schema,
+            catalog,
+            &actual.arguments,
+            &descriptions,
+            limits,
+            0,
+            &mut Vec::new(),
+            collection.is_some_and(GraphqlSemanticCollectionBound::model_may_select_maximum),
+        )?;
+        insert_description(&mut argument_schema, Some(&field.description))?;
+        let path = join_selection_path(prefix, &field.field_name);
+        let maximum_items = match collection {
+            Some(GraphqlSemanticCollectionBound::Pageable { .. }) => {
+                Some(semantic_list_bound(&field.type_ref)?)
+            }
+            Some(GraphqlSemanticCollectionBound::ServerFixed { .. }) | None => None,
+        };
+        relationships.push(CompactRelationshipSchema {
+            path: path.clone(),
+            arguments: argument_schema,
+            maximum_items,
+        });
+        ancestry.push(relationship.target.clone());
+        collect_compact_selection_paths(
+            schema,
+            catalog,
+            &relationship.target,
+            limits,
+            depth + 1,
+            ancestry,
+            &path,
+            selections,
+            relationships,
+        )?;
+        ancestry.pop();
+    }
+    Ok(())
+}
+
+fn join_selection_path(prefix: &str, field: &str) -> String {
+    if prefix.is_empty() {
+        field.to_owned()
+    } else {
+        format!("{prefix}.{field}")
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn subscription_plan_schema(
     schema: &FinishedSchema,
@@ -2468,6 +3041,89 @@ fn subscription_plan_schema(
         .get_mut("required")
         .and_then(Value::as_array_mut)
         .ok_or_else(|| configuration_error("subscription plan requirements are missing"))?;
+    required.retain(|value| value.as_str() != Some("maximumItems"));
+    required.push(Value::String("timeoutSeconds".to_owned()));
+    required.push(Value::String("maximumEvents".to_owned()));
+    Ok(plan)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compact_subscription_plan_schema(
+    schema: &FinishedSchema,
+    catalog: &GraphqlSemanticCatalog,
+    operation: &GraphqlSemanticOperationDescriptor,
+    output: &QueryOutput,
+    limits: AiGraphqlQueryCapabilityLimits,
+    maximum_duration_seconds: u32,
+    maximum_events: u32,
+) -> Result<Value, AiError> {
+    let mut plan = build_compact_plan_schema(schema, catalog, operation, output, limits)?;
+    let object = plan
+        .as_object_mut()
+        .ok_or_else(|| configuration_error("compact subscription schema is not an object"))?;
+    let properties = object
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| configuration_error("compact subscription properties are missing"))?;
+    properties.remove("maximumItems");
+    properties.insert(
+        "timeoutSeconds".to_owned(),
+        bounded_integer_schema(1, i64::from(maximum_duration_seconds)),
+    );
+    properties.insert(
+        "maximumEvents".to_owned(),
+        bounded_integer_schema(1, i64::from(maximum_events)),
+    );
+    let observation = operation
+        .subscription_observation
+        .as_ref()
+        .ok_or_else(|| configuration_error("subscription observation semantics are missing"))?;
+    if !observation.condition_fields.is_empty() {
+        let QueryOutput::Entity { entity, .. } = output else {
+            return Err(configuration_error(
+                "conditional subscription result is not an entity",
+            ));
+        };
+        let entity = semantic_entity(catalog, entity)?;
+        let mut alternatives = Vec::new();
+        for condition in &observation.condition_fields {
+            let semantic_field = entity
+                .fields
+                .iter()
+                .find(|field| field.field_name == condition.field_name)
+                .ok_or_else(|| configuration_error("condition field semantics are missing"))?;
+            if !selectable_exportable_scalar(semantic_field) {
+                return Err(configuration_error(
+                    "condition field is not an exportable scalar",
+                ));
+            }
+            let actual = schema.object_field(&entity.entity_name, &condition.field_name)?;
+            let value_schema = input_type_schema(
+                schema,
+                catalog,
+                &actual.ty,
+                None,
+                limits,
+                0,
+                &mut Vec::new(),
+            )?;
+            alternatives.push(json!({
+                "type": "object",
+                "properties": {
+                    "field": { "const": condition.field_name },
+                    "operator": { "enum": condition.operators },
+                    "value": value_schema,
+                },
+                "required": ["field", "operator", "value"],
+                "additionalProperties": false,
+            }));
+        }
+        properties.insert("condition".to_owned(), json!({ "oneOf": alternatives }));
+    }
+    let required = object
+        .get_mut("required")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| configuration_error("compact subscription requirements are missing"))?;
     required.retain(|value| value.as_str() != Some("maximumItems"));
     required.push(Value::String("timeoutSeconds".to_owned()));
     required.push(Value::String("maximumEvents".to_owned()));
@@ -3144,6 +3800,99 @@ impl<'a> CompileContext<'a> {
 struct EntityPlanRef<'a> {
     fields: &'a BTreeMap<String, bool>,
     relationships: &'a BTreeMap<String, AiGraphqlRelationshipQueryPlan>,
+}
+
+fn expand_compact_selection(
+    plan: &mut AiGraphqlQueryPlan,
+    selection: &str,
+    relationship_arguments: &BTreeMap<String, Map<String, Value>>,
+    relationship_maximum_items: &BTreeMap<String, u32>,
+    selected_relationships: &mut BTreeSet<String>,
+    maximum_depth: u8,
+) -> Result<(), AiError> {
+    let segments = selection.split('.').collect::<Vec<_>>();
+    if segments.is_empty()
+        || segments.len() > usize::from(maximum_depth)
+        || segments.iter().any(|segment| !valid_graphql_name(segment))
+    {
+        return Err(input_error("compact query selection path is invalid"));
+    }
+    if segments.len() == 1 {
+        plan.fields.insert(segments[0].to_owned(), true);
+        return Ok(());
+    }
+    let mut relationships = &mut plan.relationships;
+    let mut prefix = String::new();
+    for segment in &segments[..segments.len() - 1] {
+        prefix = join_selection_path(&prefix, segment);
+        selected_relationships.insert(prefix.clone());
+        let relationship = relationships
+            .entry((*segment).to_owned())
+            .or_insert_with(|| AiGraphqlRelationshipQueryPlan {
+                arguments: relationship_arguments
+                    .get(&prefix)
+                    .cloned()
+                    .unwrap_or_default(),
+                maximum_items: relationship_maximum_items.get(&prefix).copied(),
+                ..AiGraphqlRelationshipQueryPlan::default()
+            });
+        if relationship.arguments
+            != relationship_arguments
+                .get(&prefix)
+                .cloned()
+                .unwrap_or_default()
+            || relationship.maximum_items != relationship_maximum_items.get(&prefix).copied()
+        {
+            return Err(input_error(
+                "compact query relationship options are ambiguous",
+            ));
+        }
+        relationships = &mut relationship.relationships;
+    }
+    let leaf = segments
+        .last()
+        .ok_or_else(|| input_error("compact query selection path is empty"))?;
+    let mut relationship = &mut plan.relationships;
+    for segment in &segments[..segments.len() - 1] {
+        relationship = &mut relationship
+            .get_mut(*segment)
+            .ok_or_else(|| input_error("compact query relationship path is invalid"))?
+            .relationships;
+    }
+    let parent = if segments.len() == 2 {
+        plan.relationships
+            .get_mut(segments[0])
+            .ok_or_else(|| input_error("compact query relationship path is invalid"))?
+    } else {
+        compact_parent_relationship(&mut plan.relationships, &segments[..segments.len() - 1])?
+    };
+    parent.fields.insert((*leaf).to_owned(), true);
+    Ok(())
+}
+
+fn compact_parent_relationship<'a>(
+    relationships: &'a mut BTreeMap<String, AiGraphqlRelationshipQueryPlan>,
+    path: &[&str],
+) -> Result<&'a mut AiGraphqlRelationshipQueryPlan, AiError> {
+    let (first, rest) = path
+        .split_first()
+        .ok_or_else(|| input_error("compact query relationship path is empty"))?;
+    let relationship = relationships
+        .get_mut(*first)
+        .ok_or_else(|| input_error("compact query relationship path is invalid"))?;
+    if rest.is_empty() {
+        Ok(relationship)
+    } else {
+        compact_parent_relationship(&mut relationship.relationships, rest)
+    }
+}
+
+fn valid_graphql_name(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes.next().is_some_and(|first| {
+        (first.is_ascii_alphabetic() || first == b'_')
+            && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    }) && !value.starts_with("__")
 }
 
 fn unique_entity_route(
@@ -4163,6 +4912,69 @@ mod tests {
     }
 
     #[test]
+    fn compact_paths_compile_the_same_nested_query_without_recursive_schema() {
+        let catalog = catalog();
+        let capability = catalog.capabilities().next().expect("query capability");
+        let compact_schema =
+            serde_json::to_string(capability.compact_argument_schema()).expect("compact schema");
+        assert!(compact_schema.len() < 64 * 1024);
+        assert!(compact_schema.contains("children.label"));
+        assert!(compact_schema.contains("Bounded related child records."));
+        assert!(!compact_schema.contains("credential"));
+        let compiled = capability
+            .compile_compact(json!({
+                "arguments": {"id": "parent-1"},
+                "selections": ["id", "name", "children.id", "children.label"],
+                "relationshipArguments": {"children": {}},
+                "relationshipMaximumItems": {"children": 2}
+            }))
+            .expect("compact query compiles");
+        assert!(
+            compiled
+                .descriptor()
+                .document
+                .contains("children(page: $v1) { edges { node { id label } } }")
+        );
+        assert_eq!(compiled.variables()["v1"]["limit"], json!(2));
+    }
+
+    #[test]
+    fn compact_cross_field_budget_failure_returns_a_correction_envelope() {
+        let sdl = query_sdl();
+        let catalogue = AiGraphqlQueryCapabilityCatalog::compile(
+            "inventory",
+            GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
+            &sdl,
+            &semantic_catalog(),
+            AiGraphqlQueryCapabilityLimits {
+                maximum_result_records: 2,
+                ..AiGraphqlQueryCapabilityLimits::default()
+            },
+        )
+        .expect("capability");
+        let capability = catalogue.capabilities().next().expect("query capability");
+        let plan = json!({
+            "arguments": {"id": "parent-1"},
+            "selections": ["id", "children.id"],
+            "relationshipArguments": {"children": {}},
+            "relationshipMaximumItems": {"children": 2}
+        });
+        assert!(
+            jsonschema::validator_for(capability.compact_argument_schema())
+                .expect("schema")
+                .is_valid(&plan)
+        );
+        let correction = capability
+            .compile_compact_correctable(plan)
+            .expect_err("aggregate record budget must remain authoritative");
+        assert_eq!(
+            correction.code,
+            AiGraphqlQueryPlanFailureCode::ResultBudgetExceeded
+        );
+        assert_eq!(correction.maximum_result_records, 2);
+    }
+
+    #[test]
     fn hidden_unknown_unbounded_and_tampered_plans_fail_closed() {
         let catalog = catalog();
         let capability = catalog.capabilities().next().expect("query capability");
@@ -5013,5 +5825,86 @@ mod tests {
         let capabilities = catalog.capabilities().collect::<Vec<_>>();
         assert_eq!(capabilities.len(), 1);
         assert_eq!(capabilities[0].field_name(), "ParentChanged");
+    }
+
+    #[test]
+    fn orm_field_description_flows_into_index_and_changes_fingerprints() {
+        let first_semantics = semantic_catalog();
+        let mut described_entities = first_semantics.entities.clone();
+        described_entities
+            .iter_mut()
+            .find(|entity| entity.entity_name == "Parent")
+            .and_then(|entity| {
+                entity
+                    .fields
+                    .iter_mut()
+                    .find(|field| field.field_name == "name")
+            })
+            .expect("public name field")
+            .description = "Customer-facing account display name.".to_owned();
+        let second_semantics = GraphqlSemanticCatalog::compose_with_custom(
+            described_entities,
+            &GraphqlOperationCatalog::compose(std::iter::empty()),
+            first_semantics.operations.clone(),
+        )
+        .expect("described semantics should recompose");
+        let sdl = query_sdl();
+        let target = GraphqlExecutionTargetId::parse("inventory.graphql").expect("target");
+        let first_catalogue = AiGraphqlQueryCapabilityCatalog::compile(
+            "inventory",
+            target.clone(),
+            &sdl,
+            &first_semantics,
+            AiGraphqlQueryCapabilityLimits::default(),
+        )
+        .expect("first catalogue");
+        let second_catalogue = AiGraphqlQueryCapabilityCatalog::compile(
+            "inventory",
+            target.clone(),
+            &sdl,
+            &second_semantics,
+            AiGraphqlQueryCapabilityLimits::default(),
+        )
+        .expect("second catalogue");
+        let first_index = crate::AiCapabilityIndex::compile(
+            target.clone(),
+            first_catalogue.finished_schema_fingerprint(),
+            &first_semantics,
+            Some(&first_catalogue),
+            None,
+            None,
+            Vec::new(),
+            "target-policy-v1",
+            crate::AiCapabilityIndexLimits::default(),
+        )
+        .expect("first index");
+        let second_index = crate::AiCapabilityIndex::compile(
+            target,
+            second_catalogue.finished_schema_fingerprint(),
+            &second_semantics,
+            Some(&second_catalogue),
+            None,
+            None,
+            Vec::new(),
+            "target-policy-v1",
+            crate::AiCapabilityIndexLimits::default(),
+        )
+        .expect("second index");
+        assert_ne!(first_semantics.fingerprint, second_semantics.fingerprint);
+        assert_ne!(
+            first_catalogue.fingerprint(),
+            second_catalogue.fingerprint()
+        );
+        assert_ne!(first_index.fingerprint(), second_index.fingerprint());
+        let result = second_index
+            .search(&crate::AiCapabilitySearchQuery {
+                text: "customer-facing display name".to_owned(),
+                namespace: Some("inventory".to_owned()),
+                kind: Some(crate::AiCapabilityKind::GeneratedQuery),
+                entity_or_operation: None,
+                maximum_results: 3,
+            })
+            .expect("new field description should be searchable");
+        assert!(!result.candidates.is_empty());
     }
 }

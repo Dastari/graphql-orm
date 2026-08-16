@@ -3,7 +3,7 @@ title: GraphQL ORM AI production-readiness plan
 kind: plan
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-14
+last_reviewed: 2026-08-16
 review_by: 2026-09-01
 supersedes:
   - crates/graphql-orm-ai/docs/completion-plan.md
@@ -31,7 +31,7 @@ retention, or restore proofs remain closed.
 
 ## Dependencies
 
-- `graphql-orm` 0.22.0 schema-module, transaction, fencing, operation-metadata,
+- `graphql-orm` 0.23.0 schema-module, transaction, fencing, operation-metadata,
   and restore contracts.
 - `graphql-orm-backup` 0.7 snapshot, repository, verification, and restore
   orchestration.
@@ -59,7 +59,7 @@ retention, or restore proofs remain closed.
 
 ## Current checkpoint
 
-Package 0.79.0 and AI schema module 0.59.0 provide the protected runtime,
+Package 0.81.0 and AI schema module 0.60.0 provide the protected runtime,
 provider adapters, exact completed-batch adoption, retention foundations,
 restore planning, and readiness observation contracts. Database-derived
 collection covers bounded conservative run classification, approval and
@@ -74,6 +74,15 @@ Retained approval suspension now commits its protected parked checkpoint,
 nonterminal source-attempt outcome and lease release atomically; crash-gap
 confirmation is repairable only from that graph, and approved waits receive a
 fresh fence before consumption and provider reclaim.
+
+Schema-derived AI reads now also retain a complete compact fingerprinted index,
+bounded deterministic discovery, coordinator-selected delivery modes, finite
+public-path query plans, reversible OpenAI strict projections, final-request
+continuation sizing, typed dispatch uncertainty and one durable safe-failure
+broker. The owner-authorized conversation bootstrap supplies the current
+messages/watermark/run/tool/provider state needed for replay-to-live recovery.
+Provider-session delivery changes use the existing exact cleanup/absence/rebind
+lifecycle; they do not add a persistence migration.
 
 Verified manifest plus restored-target object-byte integrity remains a fatal
 incomplete audit. The next implementation slice binds that byte stream to the

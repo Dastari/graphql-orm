@@ -189,6 +189,7 @@ fn stateless_tool_request(model: &str) -> ModelRequest {
                 "additionalProperties": false
             }),
             strict: true,
+            defer_loading: false,
         }],
         builtin_tools: Vec::new(),
         maximum_builtin_tool_calls: None,

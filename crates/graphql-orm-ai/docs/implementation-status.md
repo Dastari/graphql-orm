@@ -3,16 +3,16 @@ title: "Implementation Status"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-15
+last_reviewed: 2026-08-16
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.80.0` with AI schema module
+`graphql-orm-ai` is at crate version `0.81.0` with AI schema module
 `0.60.0`. It uses workspace `graphql-orm` `0.23.0`, backend-neutral
-`graphql-orm-ai-tool-profiles` `0.5.0`, and external `agql-auth`
+`graphql-orm-ai-tool-profiles` `0.6.0`, and external `agql-auth`
 `0.15.0` at `e841ffd382082ad7419be259fe957f949b956ff7`.
 
 The active work order, dependencies, and exit gates are maintained in the
@@ -76,6 +76,19 @@ verification evidence belongs in the focused guides.
   current host policy, and ordinary resolver authorization. Read-only and the
   bounded sequential supervised path are implemented; mixed, parallel, and
   stateless consequential execution remains closed.
+- Finished schema and semantic metadata now produce one complete deterministic
+  compact capability index. Providers receive an exact small eager set,
+  client/native deferred definitions, or a frozen three-tool broker according
+  to declared capability and exact byte/count limits. Discovery and loaded
+  bindings recheck current principal/policy and grant no resolver authority.
+- Generated provider schemas use finite public selection paths rather than
+  recursively expanded relationship maps. The exact compiler still enforces
+  typed arguments, depth/cardinality, complete result-record and result-byte
+  budgets and returns durable correctable safe failures.
+- Provider inference authorization is sized after opaque continuation and
+  strict-schema projection. Definitely local adapter rejections release budget;
+  possible transmission remains uncertain. Native OpenAI strict projection is
+  reversible and native tool search is exact-model opt-in.
 - Read-only provider plans may expose exact static descriptors and generated
   query capabilities together. Catalogue kind is server-derived, each kind
   retains its own exact policy, and retained/stateless continuations consume
@@ -102,6 +115,9 @@ verification evidence belongs in the focused guides.
   the library owns current-principal disclosure checks, lease fencing,
   protected events, and the conditional commit that preserves manual and
   pre-upgrade titles.
+- `aiConversationBootstrap` supplies one owner/current-policy bounded snapshot
+  of latest messages, watermark, active/recent runs, tool calls, provider
+  activity and retention reset state for replay-then-live browser recovery.
 - Provider-persistent file upload, indexing, and file search remain closed.
   This does not include provider-hosted public web search. Inline
   attachment input and exact deletion of known provider artifacts are separate

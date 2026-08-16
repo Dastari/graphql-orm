@@ -50,6 +50,8 @@ pub struct MockProvider {
     background_retrieval_failure: Option<MockBackgroundRetrievalFailure>,
     #[cfg(test)]
     stream_failure: Option<crate::AiProviderFailureCategory>,
+    #[cfg(test)]
+    prepare_failure: Option<crate::AiProviderFailureCategory>,
     #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
     provider_session_cursor: Option<crate::AiProviderSessionCursor>,
     #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
@@ -87,6 +89,8 @@ impl MockProvider {
             background_retrieval_failure: None,
             #[cfg(test)]
             stream_failure: None,
+            #[cfg(test)]
+            prepare_failure: None,
             #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
             provider_session_cursor: None,
             #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
@@ -134,6 +138,15 @@ impl MockProvider {
         category: crate::AiProviderFailureCategory,
     ) -> Self {
         self.stream_failure = Some(category);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_prepare_failure(
+        mut self,
+        category: crate::AiProviderFailureCategory,
+    ) -> Self {
+        self.prepare_failure = Some(category);
         self
     }
 
@@ -220,6 +233,19 @@ impl AiProvider for MockProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         self.capabilities.clone()
+    }
+
+    async fn prepare_dispatch(
+        &self,
+        request: &ModelRequest,
+        context: &ProviderRequestContext,
+    ) -> Result<(), ProviderError> {
+        context.validate_request(&self.kind, request)?;
+        #[cfg(test)]
+        if let Some(category) = self.prepare_failure {
+            return Err(ProviderError::Classified(category));
+        }
+        Ok(())
     }
 
     async fn stream(

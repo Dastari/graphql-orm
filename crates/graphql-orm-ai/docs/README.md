@@ -3,7 +3,7 @@ title: "graphql-orm-ai documentation"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-08-16
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -24,6 +24,7 @@ tool-free, and network-free; production integration comes later.
 ## How-to
 
 - [Run a durable provider turn](worker-provider-turn.md).
+- [Discover and deliver schema-derived capabilities](capability-discovery-and-execution.md).
 - [Run a durable bounded subscription wait](durable-subscription-waits.md).
 - [Add a read-only application-tool loop](read-only-tool-loop.md) or [supervised mutations](supervised-tool-loop.md).
 - [Set budgets and report usage](usage-and-budgets.md).
@@ -34,6 +35,7 @@ tool-free, and network-free; production integration comes later.
 ## Reference
 
 - [Attachments](attachments.md), [provider files](provider-files.md), [live streaming](live-streaming.md), [context compaction](context-compaction.md), [skills and UI intents](skills-and-ui-intents.md), and [remote GraphQL execution](remote-graphql-execution.md).
+- [Capability index, compact planning, durable broker and conversation bootstrap](capability-discovery-and-execution.md).
 - [Migration guide](../MIGRATION.md) and [changelog](../CHANGELOG.md).
 
 ## Concepts and operations

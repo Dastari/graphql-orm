@@ -231,6 +231,13 @@ impl AiProvider for AnthropicProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
+            capability_delivery_modes: [
+                crate::AiCapabilityDeliveryMode::EagerExact,
+                crate::AiCapabilityDeliveryMode::ClientDeferred,
+                crate::AiCapabilityDeliveryMode::FixedBroker,
+            ]
+            .into_iter()
+            .collect(),
             streaming: true,
             custom_tools: true,
             parallel_tool_calls: true,
@@ -964,6 +971,7 @@ mod tests {
                 "additionalProperties": false
             }),
             strict: true,
+            defer_loading: false,
         }
     }
 

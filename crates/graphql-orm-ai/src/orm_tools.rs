@@ -351,7 +351,29 @@ pub struct AiPersistedApplicationToolCall {
     state: AiApplicationToolCallState,
     model_input: Option<ModelInputBlock>,
     egress_manifest: Option<AiEgressManifest>,
+    failure_code: Option<crate::AiApplicationToolFailureCode>,
     lease: AiRunLease,
+}
+
+/// Canonical durable model-visible outcome shared by every provider loop.
+#[derive(Clone, Debug)]
+pub enum AiDurableApplicationToolOutcome {
+    /// Protected successful model input and its exact egress metadata.
+    Success {
+        /// Separately authorized continuation block.
+        model_input: ModelInputBlock,
+        /// Exact authorized egress manifest.
+        egress_manifest: Box<AiEgressManifest>,
+    },
+    /// Persisted bounded safe failure.
+    Failure {
+        /// Closed failure code.
+        code: crate::AiApplicationToolFailureCode,
+        /// Whether a corrected or later retry is safe.
+        retryable: bool,
+        /// Separately authorized continuation block when egress allowed it.
+        model_input: Option<ModelInputBlock>,
+    },
 }
 
 /// Server-owned canonical preview builder for one exact consequential
@@ -445,27 +467,6 @@ impl AiConsequentialToolCallOutcome {
 }
 
 impl AiPersistedApplicationToolCall {
-    pub(crate) fn safe_failure(
-        provider_call_id: impl Into<String>,
-        tool_id: impl Into<String>,
-        output: serde_json::Value,
-        lease: AiRunLease,
-    ) -> Self {
-        let provider_call_id = provider_call_id.into();
-        let tool_id = tool_id.into();
-        Self {
-            id: AiToolCallId::new(),
-            provider_call_id: provider_call_id.clone(),
-            state: AiApplicationToolCallState::ExecutionFailed,
-            model_input: Some(ModelInputBlock::ToolResult {
-                call_id: provider_call_id,
-                tool_id,
-                output,
-            }),
-            egress_manifest: None,
-            lease,
-        }
-    }
     pub(crate) fn checkpoint_value(&self) -> Option<serde_json::Value> {
         Some(serde_json::json!({
             "id": self.id.0,
@@ -494,6 +495,29 @@ impl AiPersistedApplicationToolCall {
     /// Separately egress-authorized provider continuation block, when allowed.
     pub fn model_input(&self) -> Option<&ModelInputBlock> {
         self.model_input.as_ref()
+    }
+
+    /// Returns the one canonical durable outcome consumed by all provider
+    /// continuation modes.
+    pub fn durable_outcome(&self) -> Option<AiDurableApplicationToolOutcome> {
+        match self.state {
+            AiApplicationToolCallState::Completed => {
+                Some(AiDurableApplicationToolOutcome::Success {
+                    model_input: self.model_input.clone()?,
+                    egress_manifest: Box::new(self.egress_manifest.clone()?),
+                })
+            }
+            AiApplicationToolCallState::ExecutionFailed => {
+                let code = self.failure_code?;
+                Some(AiDurableApplicationToolOutcome::Failure {
+                    code,
+                    retryable: code.retryable(),
+                    model_input: self.model_input.clone(),
+                })
+            }
+            AiApplicationToolCallState::EgressDenied
+            | AiApplicationToolCallState::EgressAuditFailed => None,
+        }
     }
 
     pub(crate) fn egress_manifest(&self) -> Option<&AiEgressManifest> {
@@ -528,6 +552,7 @@ impl AiPersistedApplicationToolCall {
                 output,
             }),
             egress_manifest,
+            failure_code: None,
             lease,
         }
     }
@@ -630,6 +655,8 @@ impl OrmAiApplicationToolCallService {
         context: AiApplicationToolCallContext,
         route: AiToolResultEgressRoute,
     ) -> Result<AiPersistedApplicationToolCall, AiError> {
+        let fallback_context = context.clone();
+        let fallback_route = route.clone();
         match self
             .execute_unapproved(
                 lease,
@@ -638,11 +665,321 @@ impl OrmAiApplicationToolCallService {
                 route,
                 UnapprovedToolMode::ReadOnly,
             )
-            .await?
+            .await
         {
-            AiConsequentialToolCallOutcome::Persisted(call) => Ok(*call),
-            AiConsequentialToolCallOutcome::RecoveryRequired { .. } => Err(AiError::Conflict),
+            Ok(AiConsequentialToolCallOutcome::Persisted(call)) => Ok(*call),
+            Ok(AiConsequentialToolCallOutcome::RecoveryRequired { .. }) => Err(AiError::Conflict),
+            Err(error) => {
+                let Some(code) = crate::classify_safe_application_tool_error(&error) else {
+                    return Err(error);
+                };
+                self.persist_safe_read_failure(
+                    lease,
+                    provider_result,
+                    fallback_context,
+                    fallback_route,
+                    code,
+                )
+                .await
+            }
         }
+    }
+
+    /// Persists one deterministic read rejection through the same fenced row,
+    /// protected event, egress, and continuation path used by successful tool
+    /// calls. This is also used when current policy rejects before resolver
+    /// dispatch; no synthetic in-memory failure is authoritative.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale fences/bindings, unavailable protection,
+    /// denied egress auditing, or irreconcilable persistence state.
+    pub async fn persist_safe_read_failure(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        context: AiApplicationToolCallContext,
+        route: AiToolResultEgressRoute,
+        mut code: crate::AiApplicationToolFailureCode,
+    ) -> Result<AiPersistedApplicationToolCall, AiError> {
+        self.validate_outer_binding(lease, provider_result, &context, &route)?;
+        let provider_call = provider_result
+            .tool_calls()
+            .get(context.tool_call_index)
+            .ok_or(AiError::Conflict)?;
+        let encoded_arguments = serde_json::to_vec(provider_call.arguments())
+            .map_err(|_| AiError::InvalidInput("invalid tool arguments".to_owned()))?;
+        if encoded_arguments.len() > self.limits.maximum_argument_bytes {
+            code = crate::AiApplicationToolFailureCode::InvalidArguments;
+        }
+        let session =
+            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        validate_session_binding(&session, lease, &context.scope)?;
+        let principal = self
+            .runtime
+            .resolve_current_principal(lease.principal_reference())
+            .await?;
+        let scope_allowed = self
+            .runtime
+            .access_policy()
+            .can_access_scope(
+                principal.principal(),
+                &context.scope,
+                AiSessionAction::Write,
+            )
+            .await
+            .is_allowed();
+        let session_allowed = self
+            .runtime
+            .access_policy()
+            .can_access_session(
+                principal.principal(),
+                lease.session_id(),
+                AiSessionAction::Write,
+            )
+            .await
+            .is_allowed();
+        if !scope_allowed || !session_allowed {
+            code = crate::AiApplicationToolFailureCode::AuthorizationDenied;
+        }
+        let policy = self
+            .runtime
+            .content_protection_policy_resolver()
+            .resolve(principal.principal(), &context.scope)
+            .await?;
+        if !policy.ready || policy.scope != context.scope {
+            return Err(AiError::RuntimeNotReady);
+        }
+        let id = AiToolCallId::new();
+        let provider_call_key = provider_call_key(lease, provider_call.call_id());
+        let argument_hash = canonical_json_hash(provider_call.arguments())?;
+        let protected_arguments = self
+            .protect(
+                &policy,
+                protection_context(
+                    "graphql_orm_ai_tool_calls",
+                    id.0,
+                    "protected_arguments",
+                    &context.scope,
+                ),
+                provider_call.arguments().clone(),
+            )
+            .await?;
+        let started_event_id = Uuid::new_v4();
+        let started_inbox_event_id = Uuid::new_v4();
+        let started_payload = json!({
+            "toolCallId": id.0,
+            "runId": lease.run_id().0,
+            "toolId": provider_call.tool_id().as_str(),
+        });
+        let protected_started_event = self
+            .protect(
+                &policy,
+                protection_context(
+                    "graphql_orm_ai_session_events",
+                    started_event_id,
+                    "protected_payload",
+                    &context.scope,
+                ),
+                started_payload.clone(),
+            )
+            .await?;
+        let protected_started_inbox_event = self
+            .protect(
+                &policy,
+                protection_context(
+                    "graphql_orm_ai_inbox_events",
+                    started_inbox_event_id,
+                    "protected_payload",
+                    &context.scope,
+                ),
+                started_payload,
+            )
+            .await?;
+        let active_lease = self
+            .run_service
+            .begin_tool_call(
+                lease,
+                PreparedToolCallStart {
+                    id: id.0,
+                    provider_call_key: provider_call_key.clone(),
+                    provider_call_id: provider_call.call_id().to_owned(),
+                    provider_kind: provider_result.provider_kind().as_str().to_owned(),
+                    provider_model: provider_result.provider_model().to_owned(),
+                    provider_response_id: provider_result.provider_response_id().map(str::to_owned),
+                    budget_reservation_id: provider_result.budget_reservation_id().0,
+                    provider_turn_index: i64::from(context.provider_turn_index),
+                    tool_call_index: i64::try_from(context.tool_call_index)
+                        .map_err(|_| AiError::InvalidInput("invalid tool index".to_owned()))?,
+                    tool_id: provider_call.tool_id().as_str().to_owned(),
+                    tool_fingerprint: provider_call.tool_fingerprint().to_owned(),
+                    protected_arguments,
+                    argument_hash,
+                    risk: "read_only".to_owned(),
+                    idempotency_key: Some(format!("ai-tool:{provider_call_key}")),
+                    correlation_id: context.correlation_id.clone(),
+                    causation_id: context.causation_id.clone(),
+                    delegation_reference: context.delegation_reference.clone(),
+                    started_event: Some(PreparedToolLifecycleEvent {
+                        event_id: started_event_id,
+                        inbox_event_id: started_inbox_event_id,
+                        protected_event: protected_started_event,
+                        protected_inbox_event: protected_started_inbox_event,
+                    }),
+                    expected_owner_principal_kind: session.owner_principal_kind.clone(),
+                    expected_owner_subject: session.owner_subject.clone(),
+                    expected_scope_kind: context.scope.kind.clone(),
+                    expected_scope_id: context.scope.id.clone(),
+                    expected_tenant_id: context.scope.tenant_id.clone(),
+                },
+            )
+            .await?;
+        let output = crate::AiApplicationToolFailureEnvelope::new(code).to_json();
+        let output_bytes = serde_json::to_vec(&output).map_err(|_| AiError::PersistenceFailed)?;
+        let outbound_bytes = output_bytes
+            .len()
+            .checked_add(provider_call.call_id().len())
+            .and_then(|bytes| bytes.checked_add(provider_call.tool_id().as_str().len()))
+            .ok_or_else(|| AiError::InvalidInput("tool failure is too large".to_owned()))?;
+        let manifest = AiEgressManifest {
+            provider_profile_id: route.provider_profile_id,
+            provider_kind: provider_result.provider_kind().as_str().to_owned(),
+            model: provider_result.provider_model().to_owned(),
+            destination: route.destination,
+            destination_trust: route.destination_trust,
+            capability: AiEgressCapability::ToolResult,
+            scope: context.scope.clone(),
+            session_id: Some(active_lease.session_id()),
+            run_id: Some(active_lease.run_id()),
+            sources: vec![AiDataSourceRef {
+                kind: "application_tool_result".to_owned(),
+                reference: id.0.to_string(),
+                classification: DataClassification::Public,
+                trust: AiSourceTrust::TrustedRuntime,
+            }],
+            estimated_bytes: u64::try_from(outbound_bytes)
+                .map_err(|_| AiError::InvalidInput("tool failure is too large".to_owned()))?,
+            estimated_tokens: u64::try_from(output_bytes.len()).unwrap_or(u64::MAX),
+            attachment_count: 0,
+            purpose: route.purpose,
+            retention: route.retention,
+            residency: route.residency,
+            policy_version: route.policy_version,
+            consent_reference: route.consent_reference,
+        };
+        let decision = self
+            .runtime
+            .authorize_egress(active_lease.principal_reference(), &manifest)
+            .await?;
+        self.egress_audit.record(&manifest, &decision).await?;
+        let (state, model_input, decision_id, manifest_hash) =
+            if decision.authorize(&manifest).is_ok() {
+                (
+                    AiApplicationToolCallState::ExecutionFailed,
+                    Some(ModelInputBlock::ToolResult {
+                        call_id: provider_call.call_id().to_owned(),
+                        tool_id: provider_call.tool_id().as_str().to_owned(),
+                        output: output.clone(),
+                    }),
+                    Some(decision.id.0),
+                    Some(decision.manifest_hash.clone()),
+                )
+            } else {
+                (
+                    AiApplicationToolCallState::EgressDenied,
+                    None,
+                    Some(decision.id.0),
+                    Some(decision.manifest_hash.clone()),
+                )
+            };
+        let protected_result = self
+            .protect(
+                &policy,
+                protection_context(
+                    "graphql_orm_ai_tool_calls",
+                    id.0,
+                    "protected_result",
+                    &context.scope,
+                ),
+                output,
+            )
+            .await?;
+        let event_id = Uuid::new_v4();
+        let inbox_event_id = Uuid::new_v4();
+        let terminal_payload = json!({
+            "toolCallId": id.0,
+            "runId": active_lease.run_id().0,
+            "toolId": provider_call.tool_id().as_str(),
+            "state": state.as_str(),
+            "code": code.as_str(),
+        });
+        let protected_event = self
+            .protect(
+                &policy,
+                protection_context(
+                    "graphql_orm_ai_session_events",
+                    event_id,
+                    "protected_payload",
+                    &context.scope,
+                ),
+                terminal_payload.clone(),
+            )
+            .await?;
+        let protected_inbox_event = self
+            .protect(
+                &policy,
+                protection_context(
+                    "graphql_orm_ai_inbox_events",
+                    inbox_event_id,
+                    "protected_payload",
+                    &context.scope,
+                ),
+                terminal_payload,
+            )
+            .await?;
+        let renewed = self
+            .run_service
+            .finish_tool_call(
+                &active_lease,
+                PreparedToolCallFinish {
+                    id: id.0,
+                    state: state.as_str().to_owned(),
+                    protected_result,
+                    authorization_code: code.as_str().to_owned(),
+                    authorization_policy_version: None,
+                    authorization_state_digest: None,
+                    disclosure_schema_fingerprint: safe_failure_disclosure_fingerprint(),
+                    result_classification: "public".to_owned(),
+                    result_egress_decision_id: decision_id,
+                    result_egress_manifest_hash: manifest_hash,
+                    application_audit_ref: None,
+                    event_id,
+                    inbox_event_id,
+                    protected_event,
+                    protected_inbox_event,
+                    correlation_id: context.correlation_id,
+                    expected_provider_call_key: provider_call_key,
+                    expected_tool_fingerprint: provider_call.tool_fingerprint().to_owned(),
+                    expected_owner_principal_kind: session.owner_principal_kind,
+                    expected_owner_subject: session.owner_subject,
+                    expected_scope_kind: context.scope.kind,
+                    expected_scope_id: context.scope.id,
+                    expected_tenant_id: context.scope.tenant_id,
+                },
+            )
+            .await?;
+        Ok(AiPersistedApplicationToolCall {
+            id,
+            provider_call_id: provider_call.call_id().to_owned(),
+            state,
+            model_input,
+            egress_manifest: decision_id.map(|_| manifest),
+            failure_code: Some(code),
+            lease: renewed,
+        })
     }
 
     /// Executes one exact generated mutation classified `Automatic`.
@@ -973,6 +1310,7 @@ impl OrmAiApplicationToolCallService {
             policy_version,
             authorization_state_digest,
             application_audit_ref,
+            failure_code,
         ) = match execution {
             Ok(result) => (
                 AiApplicationToolCallState::Completed,
@@ -983,6 +1321,7 @@ impl OrmAiApplicationToolCallService {
                 Some(result.policy_version().to_owned()),
                 Some(result.authorization_state_digest().to_owned()),
                 result.response().application_audit_ref.clone(),
+                None,
             ),
             Err(_) if matches!(mode, UnapprovedToolMode::AutomaticMutation) => {
                 return self
@@ -993,16 +1332,21 @@ impl OrmAiApplicationToolCallService {
                     )
                     .await;
             }
-            Err(_) => (
-                AiApplicationToolCallState::ExecutionFailed,
-                json!({"data": null, "errorCodes": ["AI_TOOL_EXECUTION_FAILED"]}),
-                DataClassification::Public,
-                AiSourceTrust::TrustedRuntime,
-                "execution_failed".to_owned(),
-                None,
-                None,
-                None,
-            ),
+            Err(error) => {
+                let code = crate::classify_safe_application_tool_error(&error)
+                    .unwrap_or(crate::AiApplicationToolFailureCode::ToolUnavailable);
+                (
+                    AiApplicationToolCallState::ExecutionFailed,
+                    crate::AiApplicationToolFailureEnvelope::new(code).to_json(),
+                    DataClassification::Public,
+                    AiSourceTrust::TrustedRuntime,
+                    code.as_str().to_owned(),
+                    None,
+                    None,
+                    None,
+                    Some(code),
+                )
+            }
         };
         #[cfg(test)]
         if let Err(error) =
@@ -1196,6 +1540,7 @@ impl OrmAiApplicationToolCallService {
                     state: final_state,
                     model_input,
                     egress_manifest: decision_id.map(|_| manifest),
+                    failure_code,
                     lease: renewed,
                 },
             )))
@@ -2313,6 +2658,7 @@ impl OrmAiConsequentialToolCallService {
                 state,
                 model_input,
                 egress_manifest: decision_id.map(|_| manifest),
+                failure_code: None,
                 lease: renewed,
             },
         )))
@@ -2536,6 +2882,12 @@ fn valid_audit_reference(value: &str) -> bool {
     !value.trim().is_empty()
         && value.len() <= 1_024
         && value.bytes().all(|byte| !byte.is_ascii_control())
+}
+
+fn safe_failure_disclosure_fingerprint() -> String {
+    hex::encode(Sha256::digest(
+        b"graphql-orm-ai/application-tool-safe-failure/v1",
+    ))
 }
 
 const fn classification_value(value: DataClassification) -> &'static str {

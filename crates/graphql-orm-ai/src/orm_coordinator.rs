@@ -521,6 +521,21 @@ pub trait AiAgentReadOnlyToolExecutor: Send + Sync {
         context: AiApplicationToolCallContext,
         route: AiToolResultEgressRoute,
     ) -> Result<AiPersistedApplicationToolCall, AiError>;
+
+    /// Persists one deterministic safe rejection through the ordinary durable
+    /// tool broker.
+    async fn persist_safe_failure(
+        &self,
+        _lease: &AiRunLease,
+        _provider_result: &AiProviderCallResult,
+        _context: AiApplicationToolCallContext,
+        _route: AiToolResultEgressRoute,
+        _code: crate::AiApplicationToolFailureCode,
+    ) -> Result<AiPersistedApplicationToolCall, AiError> {
+        Err(AiError::InvalidConfiguration(
+            "durable safe tool failures are not implemented by this executor".to_owned(),
+        ))
+    }
 }
 
 #[async_trait]
@@ -533,6 +548,18 @@ impl AiAgentReadOnlyToolExecutor for OrmAiApplicationToolCallService {
         route: AiToolResultEgressRoute,
     ) -> Result<AiPersistedApplicationToolCall, AiError> {
         self.execute_read_only(lease, provider_result, context, route)
+            .await
+    }
+
+    async fn persist_safe_failure(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        context: AiApplicationToolCallContext,
+        route: AiToolResultEgressRoute,
+        code: crate::AiApplicationToolFailureCode,
+    ) -> Result<AiPersistedApplicationToolCall, AiError> {
+        self.persist_safe_read_failure(lease, provider_result, context, route, code)
             .await
     }
 }
@@ -645,6 +672,25 @@ impl AiProviderDynamicToolExecution for ReadOnlyDynamicToolExecution {
             return Err(AiError::Conflict);
         }
         Ok(persisted)
+    }
+
+    async fn persist_dynamic_failure(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        tool_call_index: usize,
+        code: crate::AiApplicationToolFailureCode,
+    ) -> Result<AiPersistedApplicationToolCall, AiError> {
+        let context = AiApplicationToolCallContext::new(
+            self.provider_turn_index,
+            tool_call_index,
+            self.scope.clone(),
+            self.correlation_id.clone(),
+            provider_result.budget_reservation_id().0.to_string(),
+        )?;
+        self.tool_executor
+            .persist_safe_failure(lease, provider_result, context, self.route.clone(), code)
+            .await
     }
 }
 
@@ -1610,28 +1656,58 @@ impl AiReadOnlyAgentCoordinator {
                             correlation_id.clone(),
                             result.budget_reservation_id().0.to_string(),
                         )?;
+                        let failure_context = context.clone();
                         let persisted = match self
                             .tool_executor
                             .execute_tool(&lease, &result, context, route.clone())
                             .await
                         {
                             Ok(persisted) => persisted,
-                            Err(_) => {
+                            Err(error) => {
                                 if self.run_control.cancellation(&lease).await?.is_some() {
                                     return Ok(Cancelled {
                                         provider_turns: guard.provider_turns(),
                                         total_tool_calls: guard.total_tool_calls(),
                                     });
                                 }
-                                return self
-                                    .finish_recovery(
-                                        &lease,
-                                        &guard,
-                                        AiAgentRecoveryPhase::ApplicationTool,
-                                        "application_tool_uncertain",
-                                        result.provider_response_id(),
-                                    )
-                                    .await;
+                                if let Some(code) =
+                                    crate::classify_safe_application_tool_error(&error)
+                                {
+                                    match self
+                                        .tool_executor
+                                        .persist_safe_failure(
+                                            &lease,
+                                            &result,
+                                            failure_context,
+                                            route.clone(),
+                                            code,
+                                        )
+                                        .await
+                                    {
+                                        Ok(persisted) => persisted,
+                                        Err(_) => {
+                                            return self
+                                                .finish_recovery(
+                                                    &lease,
+                                                    &guard,
+                                                    AiAgentRecoveryPhase::ApplicationTool,
+                                                    "application_tool_persistence_uncertain",
+                                                    result.provider_response_id(),
+                                                )
+                                                .await;
+                                        }
+                                    }
+                                } else {
+                                    return self
+                                        .finish_recovery(
+                                            &lease,
+                                            &guard,
+                                            AiAgentRecoveryPhase::ApplicationTool,
+                                            "application_tool_uncertain",
+                                            result.provider_response_id(),
+                                        )
+                                        .await;
+                                }
                             }
                         };
                         let renewed = persisted.lease().clone();

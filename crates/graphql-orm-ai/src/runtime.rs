@@ -842,25 +842,49 @@ impl AiRuntime {
         request: ModelRequest,
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
-        if !self.start_gate.is_ready() {
-            return Err(ProviderError::InvalidConfiguration(
-                "AI runtime is not ready".to_owned(),
-            ));
+        match self
+            .dispatch_provider(provider_kind, request, context)
+            .await
+        {
+            crate::AiProviderDispatchOutcome::Dispatched(stream) => Ok(stream),
+            crate::AiProviderDispatchOutcome::RejectedBeforeDispatch(error)
+            | crate::AiProviderDispatchOutcome::FailedAfterPossibleDispatch(error) => Err(error),
         }
-        context.validate_request(provider_kind, &request)?;
-        let provider = self
-            .providers
-            .get(provider_kind)
-            .ok_or(ProviderError::Unsupported)?;
-        if provider.provider_kind() != *provider_kind {
-            return Err(ProviderError::InvalidConfiguration(
-                "provider registry kind mismatch".to_owned(),
-            ));
+    }
+
+    /// Dispatches a provider request while preserving whether failure occurred
+    /// before or after the transport uncertainty boundary.
+    pub async fn dispatch_provider(
+        &self,
+        provider_kind: &ProviderKind,
+        request: ModelRequest,
+        context: ProviderRequestContext,
+    ) -> crate::AiProviderDispatchOutcome {
+        let local = || {
+            if !self.start_gate.is_ready() {
+                return Err(ProviderError::InvalidConfiguration(
+                    "AI runtime is not ready".to_owned(),
+                ));
+            }
+            context.validate_request(provider_kind, &request)?;
+            let provider = self
+                .providers
+                .get(provider_kind)
+                .ok_or(ProviderError::Unsupported)?;
+            if provider.provider_kind() != *provider_kind {
+                return Err(ProviderError::InvalidConfiguration(
+                    "provider registry kind mismatch".to_owned(),
+                ));
+            }
+            provider
+                .capabilities()
+                .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
+            Ok(provider)
+        };
+        match local() {
+            Ok(provider) => provider.dispatch(request, context).await,
+            Err(error) => crate::AiProviderDispatchOutcome::RejectedBeforeDispatch(error),
         }
-        provider
-            .capabilities()
-            .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
-        provider.stream(request, context).await
     }
 
     /// Calls a registered provider with a coordinator-owned in-flight dynamic
@@ -881,27 +905,53 @@ impl AiRuntime {
         context: ProviderRequestContext,
         responder: Arc<dyn crate::ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
-        if !self.start_gate.is_ready() {
-            return Err(ProviderError::InvalidConfiguration(
-                "AI runtime is not ready".to_owned(),
-            ));
-        }
-        context.validate_request(provider_kind, &request)?;
-        let provider = self
-            .providers
-            .get(provider_kind)
-            .ok_or(ProviderError::Unsupported)?;
-        if provider.provider_kind() != *provider_kind {
-            return Err(ProviderError::InvalidConfiguration(
-                "provider registry kind mismatch".to_owned(),
-            ));
-        }
-        provider
-            .capabilities()
-            .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
-        provider
-            .stream_with_dynamic_tools(request, context, responder)
+        match self
+            .dispatch_provider_with_dynamic_tools(provider_kind, request, context, responder)
             .await
+        {
+            crate::AiProviderDispatchOutcome::Dispatched(stream) => Ok(stream),
+            crate::AiProviderDispatchOutcome::RejectedBeforeDispatch(error)
+            | crate::AiProviderDispatchOutcome::FailedAfterPossibleDispatch(error) => Err(error),
+        }
+    }
+
+    /// Dynamic-tool counterpart of [`Self::dispatch_provider`].
+    pub async fn dispatch_provider_with_dynamic_tools(
+        &self,
+        provider_kind: &ProviderKind,
+        request: ModelRequest,
+        context: ProviderRequestContext,
+        responder: Arc<dyn crate::ProviderDynamicToolResponder>,
+    ) -> crate::AiProviderDispatchOutcome {
+        let local = || {
+            if !self.start_gate.is_ready() {
+                return Err(ProviderError::InvalidConfiguration(
+                    "AI runtime is not ready".to_owned(),
+                ));
+            }
+            context.validate_request(provider_kind, &request)?;
+            let provider = self
+                .providers
+                .get(provider_kind)
+                .ok_or(ProviderError::Unsupported)?;
+            if provider.provider_kind() != *provider_kind {
+                return Err(ProviderError::InvalidConfiguration(
+                    "provider registry kind mismatch".to_owned(),
+                ));
+            }
+            provider
+                .capabilities()
+                .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
+            Ok(provider)
+        };
+        match local() {
+            Ok(provider) => {
+                provider
+                    .dispatch_with_dynamic_tools(request, context, responder)
+                    .await
+            }
+            Err(error) => crate::AiProviderDispatchOutcome::RejectedBeforeDispatch(error),
+        }
     }
 
     #[cfg(any(feature = "sqlite", feature = "postgres"))]

@@ -265,6 +265,13 @@ impl AiProvider for OllamaProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
+            capability_delivery_modes: [
+                crate::AiCapabilityDeliveryMode::EagerExact,
+                crate::AiCapabilityDeliveryMode::ClientDeferred,
+                crate::AiCapabilityDeliveryMode::FixedBroker,
+            ]
+            .into_iter()
+            .collect(),
             streaming: true,
             image_input: true,
             custom_tools: true,
@@ -796,6 +803,7 @@ mod tests {
                 "additionalProperties": false
             }),
             strict: true,
+            defer_loading: false,
         }
     }
 

@@ -43,6 +43,16 @@ impl OpenAiCompatibleCapabilities {
 
     fn provider_capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
+            capability_delivery_modes: if self.custom_tools {
+                [
+                    crate::AiCapabilityDeliveryMode::EagerExact,
+                    crate::AiCapabilityDeliveryMode::FixedBroker,
+                ]
+                .into_iter()
+                .collect()
+            } else {
+                Default::default()
+            },
             streaming: true,
             custom_tools: self.custom_tools,
             parallel_tool_calls: self.parallel_tool_calls,
@@ -216,6 +226,7 @@ impl OpenAiCompatibleProvider {
             project: None,
             timeout: config.timeout,
             store_responses: config.capabilities.provider_retained_continuation,
+            native_tool_search_models: std::collections::BTreeSet::new(),
             reasoning_effort_profiles: Vec::new(),
         };
         let binding = CompatibleRouteBinding {

@@ -3,12 +3,42 @@ title: "graphql-orm-ai-tool-profiles changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-16
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # Changelog
+
+## [0.6.0] - 2026-08-16
+
+### Added
+
+- `AiCapabilityIndex` deterministically combines the finished-schema,
+  semantic catalogue, generated query/mutation/subscription catalogues,
+  reviewed static descriptors and target-policy fingerprint into independently
+  count-, entry-byte-, and total-byte-bounded public discovery metadata.
+- Generated capabilities expose a non-recursive compact plan schema using
+  explicit public scalar paths, typed root/relationship arguments, per-list
+  bounds, total-record bounds and result-byte bounds. The staged compiler can
+  return closed correction codes for correctable invalid selections.
+
+### Changed
+
+- Generated capability wire version is `3`. Provider-facing definitions use
+  the compact plan; v2 closed plans remain accepted only as a migration input
+  to the authoritative compiler and are no longer advertised.
+- Public ORM entity, field, relationship, argument and operation descriptions
+  flow from `GraphqlSemanticCatalog` into the index and its fingerprints.
+
+### Security
+
+- Index entries exclude executable schemas/documents/SDL, private storage
+  coordinates, URLs, authorization expressions, credentials and secret or
+  `NeverExport` fields. Discovery remains descriptive and grants no authority.
+- Compact compilation rejects unknown/hidden/secret/stale public names,
+  cross-target drift, relationship depth, collection cardinality, aggregate
+  record budget and result-byte overflow.
 
 ## [0.5.0] - 2026-08-14
 

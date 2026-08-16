@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use agql_auth::AuthPrincipal;
@@ -10,7 +11,8 @@ use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{IntFilter, StringFilter, UuidFilter};
 use graphql_orm::graphql::orm::{
-    ConditionalUpdateOutcome, DefaultWriteBackend, TransactionError, TransactionMode,
+    ConditionalUpdateOutcome, DefaultWriteBackend, OrderDirection, TransactionError,
+    TransactionMode,
 };
 use graphql_orm::graphql::pagination::{
     KeysetConnectionInput, KeysetWindowDirection, ValidatedKeysetConnection,
@@ -24,11 +26,13 @@ use crate::orm_inbox::{PreparedAiInboxEvent, append_inbox_event};
 use crate::persistence::*;
 use crate::{
     AiAccessPolicy, AiContentProtectionPolicy, AiContentProtectionPolicyResolver,
-    AiContentProtector, AiError, AiMessageBlockView, AiMessageConnection, AiMessageEdge,
-    AiMessageView, AiScope, AiSessionAction, AiSessionConnection, AiSessionEdge,
-    AiSessionEventPage, AiSessionEventView, AiSessionId, AiSessionService, AiSessionTitleActor,
-    AiSessionView, AiSessionWakeup, ContentProtectionContext, CreateAiSessionInput,
-    ProtectedContentEnvelope, RenameAiSessionInput, SendAiMessageInput, SendAiMessagePayload,
+    AiContentProtector, AiConversationBootstrap, AiConversationProviderActivitySummary,
+    AiConversationRunSummary, AiConversationToolCallSummary, AiError, AiMessageBlockView,
+    AiMessageConnection, AiMessageEdge, AiMessageView, AiScope, AiSessionAction,
+    AiSessionConnection, AiSessionEdge, AiSessionEventPage, AiSessionEventView, AiSessionId,
+    AiSessionService, AiSessionTitleActor, AiSessionView, AiSessionWakeup,
+    ContentProtectionContext, CreateAiSessionInput, ProtectedContentEnvelope, RenameAiSessionInput,
+    SendAiMessageInput, SendAiMessagePayload,
 };
 
 /// Service-side limits that are enforced even when callers bypass GraphQL.
@@ -196,6 +200,194 @@ impl OrmAiSessionService {
 
 #[async_trait]
 impl AiSessionService for OrmAiSessionService {
+    async fn conversation_bootstrap(
+        &self,
+        principal: &AuthPrincipal,
+        session_id: AiSessionId,
+        message_limit: i64,
+        terminal_run_limit: i64,
+        tool_call_limit: i64,
+    ) -> Result<AiConversationBootstrap, AiError> {
+        if !(1..=200).contains(&message_limit)
+            || !(1..=100).contains(&terminal_run_limit)
+            || !(1..=500).contains(&tool_call_limit)
+        {
+            return Err(AiError::InvalidInput(
+                "invalid conversation bootstrap limits".to_owned(),
+            ));
+        }
+        for _ in 0..3 {
+            let first = self
+                .visible_session(principal, session_id, AiSessionAction::Read)
+                .await?
+                .ok_or(AiError::NotFound)?;
+            let page = KeysetConnectionInput {
+                last: Some(message_limit),
+                ..KeysetConnectionInput::default()
+            }
+            .validate(message_limit, 200)
+            .map_err(|_| AiError::InvalidInput("invalid message bootstrap window".to_owned()))?;
+            let messages = self.messages(principal, session_id, page).await?;
+            let active_states = vec![
+                "queued".to_owned(),
+                "leased".to_owned(),
+                "running".to_owned(),
+                "waiting_approval".to_owned(),
+                "waiting_tool".to_owned(),
+                "waiting_reauth".to_owned(),
+                "waiting_provider".to_owned(),
+                "waiting_subscription".to_owned(),
+                "retry_scheduled".to_owned(),
+            ];
+            let active_runs = self
+                .database
+                .transaction(TransactionMode::Default, move |tx| {
+                    Box::pin(async move {
+                        tx.query::<AiRunRecord>()
+                            .filter(AiRunRecordWhereInput {
+                                session_id: Some(UuidFilter {
+                                    eq: Some(session_id.0),
+                                    ..Default::default()
+                                }),
+                                state: Some(StringFilter {
+                                    in_list: Some(active_states),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .order_by(AiRunRecordOrderByInput {
+                                created_at: Some(OrderDirection::Asc),
+                            })
+                            .limit(101)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)
+                    })
+                })
+                .await
+                .map_err(map_transaction)?;
+            if active_runs.len() > 100 {
+                return Err(AiError::InvalidInput(
+                    "conversation has too many active runs".to_owned(),
+                ));
+            }
+            let mut terminal_runs = self
+                .database
+                .transaction(TransactionMode::Default, move |tx| {
+                    Box::pin(async move {
+                        tx.query::<AiRunRecord>()
+                            .filter(AiRunRecordWhereInput {
+                                session_id: Some(UuidFilter {
+                                    eq: Some(session_id.0),
+                                    ..Default::default()
+                                }),
+                                state: Some(StringFilter {
+                                    in_list: Some(vec![
+                                        "completed".to_owned(),
+                                        "failed".to_owned(),
+                                        "cancelled".to_owned(),
+                                        "recovery_required".to_owned(),
+                                    ]),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .order_by(AiRunRecordOrderByInput {
+                                created_at: Some(OrderDirection::Desc),
+                            })
+                            .limit(terminal_run_limit)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)
+                    })
+                })
+                .await
+                .map_err(map_transaction)?;
+            terminal_runs.reverse();
+            let selected_run_ids = active_runs
+                .iter()
+                .chain(terminal_runs.iter())
+                .map(|run| run.id)
+                .collect::<BTreeSet<_>>();
+            let mut tool_rows = if selected_run_ids.is_empty() {
+                Vec::new()
+            } else {
+                let selected_run_ids = selected_run_ids.into_iter().collect::<Vec<_>>();
+                let query_limit = tool_call_limit.checked_add(1).ok_or(AiError::InvalidInput(
+                    "invalid conversation bootstrap limits".to_owned(),
+                ))?;
+                self.database
+                    .transaction(TransactionMode::Default, move |tx| {
+                        Box::pin(async move {
+                            tx.query::<AiToolCallRecord>()
+                                .filter(AiToolCallRecordWhereInput {
+                                    run_id: Some(UuidFilter {
+                                        in_list: Some(selected_run_ids),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                })
+                                .default_order()
+                                .limit(query_limit)
+                                .fetch_all()
+                                .await
+                                .map_err(OrmPublicError::from)
+                        })
+                    })
+                    .await
+                    .map_err(map_transaction)?
+            };
+            let tool_calls_truncated = tool_rows.len() > tool_call_limit as usize;
+            tool_rows.truncate(tool_call_limit as usize);
+            let second = self
+                .visible_session(principal, session_id, AiSessionAction::Read)
+                .await?
+                .ok_or(AiError::NotFound)?;
+            if first.row_version != second.row_version
+                || first.stream_head != second.stream_head
+                || first.message_head != second.message_head
+            {
+                continue;
+            }
+            let has_older_messages = messages.page_info.has_previous_page;
+            let backward_cursor = messages.page_info.start_cursor.clone();
+            let reset_required =
+                first.message_head > 0 && messages.edges.is_empty() || tool_calls_truncated;
+            let message_views = messages.edges.into_iter().map(|edge| edge.node).collect();
+            let active_views = active_runs.iter().map(run_summary).collect::<Vec<_>>();
+            let terminal_views = terminal_runs.iter().map(run_summary).collect::<Vec<_>>();
+            let tool_calls = tool_rows.iter().map(tool_call_summary).collect::<Vec<_>>();
+            let mut provider_activity = BTreeMap::new();
+            for row in &tool_rows {
+                if let (Some(kind), Some(model)) = (&row.provider_kind, &row.provider_model) {
+                    provider_activity.insert(
+                        (row.run_id, kind.clone(), model.clone()),
+                        AiConversationProviderActivitySummary {
+                            run_id: row.run_id,
+                            provider_kind: kind.clone(),
+                            provider_model: model.clone(),
+                            state: row.state.clone(),
+                            updated_at: row.completed_at.unwrap_or(row.created_at),
+                        },
+                    );
+                }
+            }
+            return Ok(AiConversationBootstrap {
+                session: session_view(&first),
+                messages: message_views,
+                backward_cursor,
+                has_older_messages,
+                watermark: first.stream_head,
+                active_runs: active_views,
+                terminal_runs: terminal_views,
+                tool_calls,
+                provider_activity: provider_activity.into_values().collect(),
+                reset_required,
+            });
+        }
+        Err(AiError::Conflict)
+    }
+
     async fn sessions(
         &self,
         principal: &AuthPrincipal,
@@ -1422,6 +1614,32 @@ fn message_view(record: &AiMessageRecord, preview: String, content_purged: bool)
         block_count: record.block_count,
         completion_state: record.completion_state.clone(),
         created_at: record.created_at,
+    }
+}
+
+fn run_summary(record: &AiRunRecord) -> AiConversationRunSummary {
+    AiConversationRunSummary {
+        id: record.id,
+        input_message_id: record.input_message_id,
+        state: record.state.clone(),
+        attempt_id: record.attempt_id,
+        lease_generation: record.lease_generation,
+        outcome_code: record.error_code.clone(),
+        created_at: record.created_at,
+    }
+}
+
+fn tool_call_summary(record: &AiToolCallRecord) -> AiConversationToolCallSummary {
+    AiConversationToolCallSummary {
+        id: record.id,
+        run_id: record.run_id,
+        tool_id: record.tool_id.clone(),
+        state: record.state.clone(),
+        outcome_code: record.authorization_code.clone(),
+        provider_turn_index: record.provider_turn_index,
+        tool_call_index: record.tool_call_index,
+        created_at: record.created_at,
+        completed_at: record.completed_at,
     }
 }
 

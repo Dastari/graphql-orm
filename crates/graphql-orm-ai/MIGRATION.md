@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-15
+last_reviewed: 2026-08-16
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -18,6 +18,69 @@ Migration entries preserve the dependency and schema facts for the checkpoint
 they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## 0.80.0 to 0.81.0: capability discovery and durable provider loops
+
+Adopt `graphql-orm-ai` 0.81.0 and
+`graphql-orm-ai-tool-profiles` 0.6.0 at one reviewed full monorepo revision.
+The AI schema module remains `0.60.0`: there is no database/data/table/column/
+index/constraint/backfill or protected-payload migration. Do not rerun or
+invent a schema module. The new `aiConversationBootstrap` field is an additive
+GraphQL API change; regenerate typed clients and PascalCase clients if used.
+
+This pre-1.0 minor is source-breaking for public struct literals. Add
+`defer_loading: false` to direct `ModelToolDefinition` literals. Direct
+`OpenAiProviderConfig` literals add `native_tool_search_models`; prefer
+`OpenAiProviderConfig::new`. Direct `ProviderCapabilities` literals add
+`capability_delivery_modes` or use `..Default::default()`. Provider trait
+implementations may retain the default dispatch bridge, but production
+adapters should implement `prepare_dispatch` for every validation step they
+can prove occurs before transmission.
+
+Rebuild all generated capabilities and use compact v3 plan definitions as
+described in the tool-profile migration guide. Use
+`select_capability_delivery_mode` and `prepare_capability_delivery_surface`;
+prompt text must not select a mode. Opt native OpenAI tool search in only for
+exact reviewed compatible model IDs:
+
+```rust
+let config = OpenAiProviderConfig::new(secret_ref)
+    .with_native_tool_search_models(["gpt-5.4".to_owned()])?;
+```
+
+OpenAI strict projection is crate-owned. Keep the canonical JSON Schema
+unchanged and pass it in `ModelToolDefinition`; the adapter projects optional
+values to a reversible required/nullable form and normalizes returned
+arguments before the canonical validator and ordinary tool broker.
+
+Retained provider definitions are compatibility-sensitive. Build
+`AiProviderCapabilitySessionBinding` from the selected mode, canonical index,
+static bootstrap tools, projection version, exact model/effort and underlying
+registration identity, then use
+`AiProviderSessionDescriptor::new_with_capability_binding`. Existing 0.80
+sessions lack that complete registration fingerprint and are cleanup-only:
+stop assigning new turns, invoke the persisted provider-kind/registration
+deletion adapter through the ordinary cleanup worker until exact absence is
+recorded, then bind a new session. Never rewrite a stored cursor or fingerprint.
+
+Before declaring workers ready after deployment or restart:
+
+1. Apply/verify `AiSchemaModule` 0.60.0.
+2. Run `OrmAiRunService::recover_expired_leases` to convergence and reconcile
+   approval/subscription cancellation and terminal events.
+3. Drain `AiProviderSessionService::claim_cleanup` work, selecting the deletion
+   adapter from each persisted descriptor, and record exact absence or bounded
+   retry backoff.
+4. Compile/verify the current schema, semantic catalogue, compact index,
+   target policy and provider registrations.
+5. Start ordinary bounded recovery and cleanup loops before accepting run
+   claims. Migration completion alone is not readiness.
+
+Provider inference manifests must come from the final
+`AiProviderCallPlan::egress_requirement`, after the opaque continuation and
+exact loaded definitions are installed. A pre-dispatch rejection is retryable
+and releases unused budget. A failure after possible transmission remains
+uncertain and follows the retained-session recovery policy.
 
 ## 0.80.0: model reasoning effort (schema 0.59.0 to 0.60.0)
 

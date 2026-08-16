@@ -21,8 +21,9 @@ use crate::{
 use crate::{
     AiProvider, AiProviderAttachmentRequest, AiSecretStore, ModelBuiltinTool, ModelContinuation,
     ModelInputBlock, ModelReasoningEffortProfile, ModelReasoningSummaryRequest, ModelRequest,
-    ModelWebSearchDomainPolicy, ProviderCapabilities, ProviderCitation, ProviderError,
-    ProviderEvent, ProviderEventStream, ProviderKind, ProviderRequestContext, SecretRef,
+    ModelWebSearchDomainPolicy, OpenAiStrictToolProjection, ProviderCapabilities, ProviderCitation,
+    ProviderError, ProviderEvent, ProviderEventStream, ProviderKind, ProviderRequestContext,
+    SecretRef,
 };
 
 #[cfg(feature = "provider-openai")]
@@ -71,6 +72,9 @@ pub struct OpenAiProviderConfig {
     /// Whether OpenAI may retain the response object. Defaults to false so the
     /// local session remains canonical.
     pub store_responses: bool,
+    /// Exact reviewed models permitted to use native `tool_search` deferred
+    /// loading. Empty disables native tool search.
+    pub native_tool_search_models: BTreeSet<String>,
     /// Exact reviewed model-specific reasoning-effort profiles.
     ///
     /// Empty preserves existing provider-default behavior and rejects every
@@ -88,6 +92,7 @@ impl OpenAiProviderConfig {
             project: None,
             timeout: Duration::from_secs(120),
             store_responses: false,
+            native_tool_search_models: BTreeSet::new(),
             reasoning_effort_profiles: Vec::new(),
         }
     }
@@ -110,6 +115,33 @@ impl OpenAiProviderConfig {
         }
         .validate()?;
         self.reasoning_effort_profiles = profiles;
+        Ok(self)
+    }
+
+    /// Enables native deferred tool search only for exact reviewed model IDs.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty, oversized, duplicate, or control-bearing model set.
+    #[cfg(feature = "provider-openai")]
+    pub fn with_native_tool_search_models(
+        mut self,
+        models: impl IntoIterator<Item = String>,
+    ) -> Result<Self, ProviderError> {
+        let models = models.into_iter().collect::<Vec<_>>();
+        let unique = models.iter().cloned().collect::<BTreeSet<_>>();
+        if models.is_empty()
+            || models.len() != unique.len()
+            || models.len() > 64
+            || models.iter().any(|model| {
+                model.trim().is_empty() || model.len() > 200 || model.chars().any(char::is_control)
+            })
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "OpenAI native tool-search models are invalid".to_owned(),
+            ));
+        }
+        self.native_tool_search_models = unique;
         Ok(self)
     }
 }
@@ -399,6 +431,16 @@ impl OpenAiProvider {
                 "OpenAI timeout must be between one millisecond and ten minutes".to_owned(),
             ));
         }
+        if config.native_tool_search_models.len() > 64
+            || config.native_tool_search_models.iter().any(|model| {
+                model.trim().is_empty() || model.len() > 200 || model.chars().any(char::is_control)
+            })
+            || (flavor != ResponsesFlavor::OpenAi && !config.native_tool_search_models.is_empty())
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "OpenAI native tool-search models are invalid".to_owned(),
+            ));
+        }
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(config.timeout)
@@ -415,6 +457,25 @@ impl OpenAiProvider {
         };
         let capabilities = compatible_capabilities.unwrap_or_else(|| {
             let mut capabilities = ProviderCapabilities {
+                capability_delivery_modes: match flavor {
+                    ResponsesFlavor::OpenAi => [
+                        crate::AiCapabilityDeliveryMode::EagerExact,
+                        crate::AiCapabilityDeliveryMode::ClientDeferred,
+                        crate::AiCapabilityDeliveryMode::FixedBroker,
+                    ]
+                    .into_iter()
+                    .chain(
+                        (!config.native_tool_search_models.is_empty())
+                            .then_some(crate::AiCapabilityDeliveryMode::ProviderDeferred),
+                    )
+                    .collect(),
+                    ResponsesFlavor::XAi | ResponsesFlavor::Compatible => [
+                        crate::AiCapabilityDeliveryMode::EagerExact,
+                        crate::AiCapabilityDeliveryMode::FixedBroker,
+                    ]
+                    .into_iter()
+                    .collect(),
+                },
                 streaming: true,
                 custom_tools: true,
                 parallel_tool_calls: flavor == ResponsesFlavor::XAi,
@@ -661,18 +722,44 @@ impl OpenAiProvider {
             }
         }
 
-        let mut tools = Vec::with_capacity(request.tools.len() + request.builtin_tools.len());
+        if request.tools.iter().any(|tool| tool.defer_loading)
+            && (self.flavor != ResponsesFlavor::OpenAi
+                || !self
+                    .config
+                    .native_tool_search_models
+                    .contains(&request.model))
+        {
+            return Err(ProviderError::Unsupported);
+        }
+        let mut tools = Vec::with_capacity(request.tools.len() + request.builtin_tools.len() + 1);
         for tool in &request.tools {
+            let parameters = if self.flavor == ResponsesFlavor::OpenAi && tool.strict {
+                OpenAiStrictToolProjection::compile(&tool.parameters)?
+                    .provider_schema()
+                    .clone()
+            } else {
+                tool.parameters.clone()
+            };
             let mut definition = json!({
                 "type": "function",
                 "name": tool.provider_name,
                 "description": tool.description,
-                "parameters": tool.parameters
+                "parameters": parameters
             });
             if self.flavor != ResponsesFlavor::XAi {
                 definition["strict"] = Value::Bool(tool.strict);
             }
+            if self.flavor == ResponsesFlavor::OpenAi && tool.defer_loading {
+                definition["defer_loading"] = Value::Bool(true);
+            } else if tool.defer_loading {
+                return Err(ProviderError::Unsupported);
+            }
             tools.push(definition);
+        }
+        if self.flavor == ResponsesFlavor::OpenAi
+            && request.tools.iter().any(|tool| tool.defer_loading)
+        {
+            tools.push(json!({"type": "tool_search"}));
         }
         for builtin in &request.builtin_tools {
             tools.push(openai_builtin(builtin)?);
@@ -741,6 +828,38 @@ impl AiProvider for OpenAiProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         self.capabilities.clone()
+    }
+
+    async fn prepare_dispatch(
+        &self,
+        request: &ModelRequest,
+        context: &ProviderRequestContext,
+    ) -> Result<(), ProviderError> {
+        context.validate_request(&self.provider_kind, request)?;
+        #[cfg(feature = "provider-openai-compatible")]
+        if let Some(binding) = &self.compatible_binding
+            && !context.permits_profile_destination_retention(
+                &self.provider_kind,
+                request,
+                &binding.profile_id,
+                &binding.destination,
+                &binding.retention,
+            )
+        {
+            return Err(ProviderError::EgressDenied);
+        }
+        if self.flavor != ResponsesFlavor::Compatible
+            && self.config.store_responses
+            && !context.permits_retained_response(&self.provider_kind, request)
+        {
+            return Err(ProviderError::EgressDenied);
+        }
+        self.request_body(request, context)?;
+        self.secrets
+            .resolve(&self.config.credential)
+            .await
+            .map_err(|_| ProviderError::CredentialUnavailable)?;
+        Ok(())
     }
 
     #[cfg(feature = "provider-openai")]
@@ -967,11 +1086,22 @@ impl AiProvider for OpenAiProvider {
         }
 
         let mut bytes = response.bytes_stream();
-        let tool_ids = request
+        let tool_bindings = request
             .tools
             .iter()
-            .map(|tool| (tool.provider_name.clone(), tool.tool_id.clone()))
-            .collect::<BTreeMap<_, _>>();
+            .map(|tool| {
+                let projection = (self.flavor == ResponsesFlavor::OpenAi && tool.strict)
+                    .then(|| OpenAiStrictToolProjection::compile(&tool.parameters))
+                    .transpose()?;
+                Ok((
+                    tool.provider_name.clone(),
+                    OpenAiToolBinding {
+                        tool_id: tool.tool_id.clone(),
+                        projection,
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, ProviderError>>()?;
         let allowed_builtin_kinds = request
             .builtin_tools
             .iter()
@@ -984,7 +1114,7 @@ impl AiProvider for OpenAiProvider {
             let mut normalizer = OpenAiEventNormalizer::new(
                 request.model,
                 request.maximum_output_tokens,
-                tool_ids,
+                tool_bindings,
                 allowed_builtin_kinds,
                 maximum_reasoning_summary_bytes,
             );
@@ -1537,12 +1667,19 @@ fn decode_sse_frame(frame: &[u8]) -> Result<Option<String>, ProviderError> {
 struct FunctionCallState {
     call_id: String,
     arguments: String,
+    projection: Option<OpenAiStrictToolProjection>,
+}
+
+#[derive(Clone, Debug)]
+struct OpenAiToolBinding {
+    tool_id: String,
+    projection: Option<OpenAiStrictToolProjection>,
 }
 
 struct OpenAiEventNormalizer {
     expected_model: String,
     maximum_output_tokens: Option<u64>,
-    tool_ids: BTreeMap<String, String>,
+    tool_bindings: BTreeMap<String, OpenAiToolBinding>,
     allowed_builtin_kinds: BTreeSet<String>,
     maximum_reasoning_summary_bytes: Option<u64>,
     function_calls: BTreeMap<String, FunctionCallState>,
@@ -1562,14 +1699,14 @@ impl OpenAiEventNormalizer {
     fn new(
         expected_model: String,
         maximum_output_tokens: Option<u64>,
-        tool_ids: BTreeMap<String, String>,
+        tool_bindings: BTreeMap<String, OpenAiToolBinding>,
         allowed_builtin_kinds: BTreeSet<String>,
         maximum_reasoning_summary_bytes: Option<u64>,
     ) -> Self {
         Self {
             expected_model,
             maximum_output_tokens,
-            tool_ids,
+            tool_bindings,
             allowed_builtin_kinds,
             maximum_reasoning_summary_bytes,
             function_calls: BTreeMap::new(),
@@ -1769,8 +1906,8 @@ impl OpenAiEventNormalizer {
         }
         if item_type == "function_call" {
             let provider_name = required_string(item, "name")?;
-            let tool_id = self
-                .tool_ids
+            let binding = self
+                .tool_bindings
                 .get(&provider_name)
                 .ok_or(ProviderError::Rejected)?
                 .clone();
@@ -1793,9 +1930,13 @@ impl OpenAiEventNormalizer {
                             .ok_or(ProviderError::Rejected)?
                             .to_owned(),
                     },
+                    projection: binding.projection,
                 },
             );
-            return Ok(vec![ProviderEvent::ToolCallStarted { call_id, tool_id }]);
+            return Ok(vec![ProviderEvent::ToolCallStarted {
+                call_id,
+                tool_id: binding.tool_id,
+            }]);
         }
         if item_type == "message" {
             if item.get("role").and_then(Value::as_str) != Some("assistant") {
@@ -1865,6 +2006,12 @@ impl OpenAiEventNormalizer {
         if !arguments.is_object() {
             return Err(ProviderError::Rejected);
         }
+        let arguments = state
+            .projection
+            .as_ref()
+            .map_or(Ok(arguments.clone()), |projection| {
+                projection.normalize_arguments(&arguments)
+            })?;
         if !self.completed_calls.insert(state.call_id.clone()) {
             return Ok(Vec::new());
         }
@@ -3127,7 +3274,9 @@ mod tests {
     fn provider_retained_request_can_mix_web_and_exact_application_tools() {
         let reference = SecretRef::parse("openai/mixed-tools-test")
             .expect("test secret reference should parse");
-        let mut config = OpenAiProviderConfig::new(reference.clone());
+        let mut config = OpenAiProviderConfig::new(reference.clone())
+            .with_native_tool_search_models(["test-model".to_owned()])
+            .expect("test model should enable native tool search");
         config.store_responses = true;
         let provider = OpenAiProvider::new(
             config,
@@ -3158,6 +3307,7 @@ mod tests {
                     "additionalProperties": false
                 }),
                 strict: true,
+                defer_loading: false,
             }],
             builtin_tools: vec![ModelBuiltinTool::WebSearch {
                 domains: ModelWebSearchDomainPolicy::PublicWeb,
@@ -3183,12 +3333,22 @@ mod tests {
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][1]["type"], "web_search");
 
-        let mut stateless = request;
-        stateless.continuation_mode = crate::ModelContinuationMode::StatelessReplay;
-        stateless.continuation = None;
-        stateless.input = vec![ModelInputBlock::Text {
+        let mut deferred = request;
+        deferred.continuation = None;
+        deferred.input = vec![ModelInputBlock::Text {
             text: "synthetic".to_owned(),
         }];
+        deferred.tools[0].defer_loading = true;
+        let deferred_body = provider
+            .request_body(
+                &deferred,
+                &context("test-model", deferred.conservative_egress_bytes()),
+            )
+            .expect("native deferred definitions should map");
+        assert_eq!(deferred_body["tools"][0]["defer_loading"], true);
+        assert_eq!(deferred_body["tools"][1]["type"], "tool_search");
+        let mut stateless = deferred;
+        stateless.continuation_mode = crate::ModelContinuationMode::StatelessReplay;
         assert!(matches!(
             stateless.validate(),
             Err(ProviderError::InvalidRequest)

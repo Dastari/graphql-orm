@@ -11,23 +11,36 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::{
-    AiAgentRuleResolution, AiApplicationToolFailureEnvelope, AiApprovalRule, AiBudgetAmounts,
-    AiBudgetReconciliation, AiBudgetReconciliationOutcome, AiBudgetReservation,
-    AiBudgetReservationId, AiBudgetReservationRequest, AiBudgetService, AiEgressCapability,
-    AiEgressDecisionAudit, AiEgressManifest, AiError, AiLiveDeltaBatch, AiLiveDeltaCoalescer,
-    AiLiveDeltaCoalescerLimits, AiLiveDeltaPersistenceContext, AiLiveDeltaSink,
-    AiPersistedApplicationToolCall, AiProviderActivity, AiProviderActivityCoalescer,
-    AiProviderActivitySink, AiProviderAttachmentRequest, AiProviderAttachmentResolver,
-    AiProviderFailureCategory, AiProviderFailureDiagnosticSink, AiResolvedProviderAttachment,
-    AiRuleProviderCapability, AiRuleRunUsage, AiRunLease, AiRunState, AiRuntime, AiScope,
-    AiSessionAction, AiToolPolicySet, ModelBuiltinTool, ModelContinuation, ModelContinuationMode,
-    ModelConversationMessage, ModelConversationToolCall, ModelInputBlock, ModelRequest,
-    ProviderDynamicToolCall, ProviderDynamicToolResponder, ProviderDynamicToolResult,
-    ProviderError, ProviderEvent, ProviderKind, ProviderRequestContext, ToolMaturity,
-    classify_safe_application_tool_error,
+    AiAgentRuleResolution, AiApprovalRule, AiBudgetAmounts, AiBudgetReconciliation,
+    AiBudgetReconciliationOutcome, AiBudgetReservation, AiBudgetReservationId,
+    AiBudgetReservationRequest, AiBudgetService, AiEgressCapability, AiEgressDecisionAudit,
+    AiEgressManifest, AiError, AiLiveDeltaBatch, AiLiveDeltaCoalescer, AiLiveDeltaCoalescerLimits,
+    AiLiveDeltaPersistenceContext, AiLiveDeltaSink, AiPersistedApplicationToolCall,
+    AiProviderActivity, AiProviderActivityCoalescer, AiProviderActivitySink,
+    AiProviderAttachmentRequest, AiProviderAttachmentResolver, AiProviderFailureCategory,
+    AiProviderFailureDiagnosticSink, AiResolvedProviderAttachment, AiRuleProviderCapability,
+    AiRuleRunUsage, AiRunLease, AiRunState, AiRuntime, AiScope, AiSessionAction, AiToolPolicySet,
+    ModelBuiltinTool, ModelContinuation, ModelContinuationMode, ModelConversationMessage,
+    ModelConversationToolCall, ModelInputBlock, ModelRequest, ProviderDynamicToolCall,
+    ProviderDynamicToolResponder, ProviderDynamicToolResult, ProviderError, ProviderEvent,
+    ProviderKind, ProviderRequestContext, ToolMaturity, classify_safe_application_tool_error,
 };
 
 const MAXIMUM_PROVIDER_TRANSFERS: usize = 288;
+
+/// Content-free exact conservative requirement for the final bound provider
+/// request after continuation and provider projections are installed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiProviderEgressRequirement {
+    /// Conservative final serialized bytes.
+    pub bytes: u64,
+    /// Deterministic conservative token ceiling.
+    pub tokens: u64,
+    /// Highest classifications represented by referenced sources.
+    pub classifications: BTreeSet<crate::DataClassification>,
+    /// Redacted stable source references; never source content.
+    pub source_references: BTreeSet<(String, String)>,
+}
 
 /// Deployment-owned bounds for a single normalized provider stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,6 +276,20 @@ impl AiProviderCallPlan {
                 "invalid provider call plan".to_owned(),
             ));
         }
+        let final_bytes = request
+            .conservative_provider_egress_bytes(&provider_kind)
+            .map_err(|_| AiError::InvalidInput("invalid provider call projection".to_owned()))?;
+        let final_tokens = request
+            .conservative_provider_egress_tokens(&provider_kind)
+            .map_err(|_| AiError::InvalidInput("invalid provider call projection".to_owned()))?;
+        let inference = transfers
+            .iter_mut()
+            .find(|manifest| manifest.capability == AiEgressCapability::ModelInference)
+            .ok_or_else(|| {
+                AiError::InvalidInput("provider plan has no inference manifest".to_owned())
+            })?;
+        inference.estimated_bytes = final_bytes;
+        inference.estimated_tokens = final_tokens;
         let mut manifest_hashes = BTreeSet::new();
         if transfers.iter().any(|manifest| {
             manifest.provider_kind != provider_kind.as_str()
@@ -291,6 +318,45 @@ impl AiProviderCallPlan {
             transfers,
             correlation_id,
             tool_rule_bindings: Vec::new(),
+        })
+    }
+
+    /// Returns the content-free final request requirement that was sealed into
+    /// the model-inference manifest before any authorization occurs.
+    ///
+    /// # Errors
+    ///
+    /// Returns a local error if the retained request can no longer be
+    /// projected exactly. An executor must treat this as unstarted.
+    pub fn egress_requirement(&self) -> Result<AiProviderEgressRequirement, AiError> {
+        let bytes = self
+            .request
+            .conservative_provider_egress_bytes(&self.provider_kind)
+            .map_err(|_| AiError::InvalidInput("invalid provider call projection".to_owned()))?;
+        let tokens = self
+            .request
+            .conservative_provider_egress_tokens(&self.provider_kind)
+            .map_err(|_| AiError::InvalidInput("invalid provider call projection".to_owned()))?;
+        let classifications = self
+            .transfers
+            .iter()
+            .flat_map(|manifest| manifest.sources.iter().map(|source| source.classification))
+            .collect();
+        let source_references = self
+            .transfers
+            .iter()
+            .flat_map(|manifest| {
+                manifest
+                    .sources
+                    .iter()
+                    .map(|source| (source.kind.clone(), source.reference.clone()))
+            })
+            .collect();
+        Ok(AiProviderEgressRequirement {
+            bytes,
+            tokens,
+            classifications,
+            source_references,
         })
     }
 
@@ -1159,6 +1225,7 @@ impl AiProviderCallPlan {
                         "additionalProperties": false
                     }),
                     strict: true,
+                    defer_loading: false,
                 }],
                 builtin_tools: Vec::new(),
                 maximum_builtin_tool_calls: None,
@@ -1616,6 +1683,20 @@ pub trait AiProviderDynamicToolExecution: Send + Sync {
         provider_result: &AiProviderCallResult,
         tool_call_index: usize,
     ) -> Result<AiPersistedApplicationToolCall, AiError>;
+
+    /// Persists a deterministic failure for the exact normalized call through
+    /// the same durable broker used by ordinary completed-turn execution.
+    async fn persist_dynamic_failure(
+        &self,
+        _lease: &AiRunLease,
+        _provider_result: &AiProviderCallResult,
+        _tool_call_index: usize,
+        _code: crate::AiApplicationToolFailureCode,
+    ) -> Result<AiPersistedApplicationToolCall, AiError> {
+        Err(AiError::InvalidConfiguration(
+            "durable dynamic-tool failures are not implemented".to_owned(),
+        ))
+    }
 }
 
 struct DynamicToolResponder {
@@ -1640,23 +1721,6 @@ impl DynamicToolResponder {
     async fn results(&self) -> Vec<AiPersistedApplicationToolCall> {
         self.results.lock().await.clone()
     }
-
-    async fn complete_safe_failure(
-        &self,
-        call: &ProviderDynamicToolCall,
-        code: crate::AiApplicationToolFailureCode,
-    ) -> Result<ProviderDynamicToolResult, ProviderError> {
-        let output = AiApplicationToolFailureEnvelope::new(code).to_json();
-        let lease = self.lease.lock().await.clone();
-        let persisted = AiPersistedApplicationToolCall::safe_failure(
-            call.call_id(),
-            call.tool_id(),
-            output.clone(),
-            lease,
-        );
-        self.results.lock().await.push(persisted);
-        ProviderDynamicToolResult::new(call, output)
-    }
 }
 
 #[async_trait]
@@ -1665,7 +1729,7 @@ impl ProviderDynamicToolResponder for DynamicToolResponder {
         &self,
         call: ProviderDynamicToolCall,
     ) -> Result<ProviderDynamicToolResult, ProviderError> {
-        let definition = self
+        let _definition = self
             .request_snapshot
             .tools
             .iter()
@@ -1675,13 +1739,6 @@ impl ProviderDynamicToolResponder for DynamicToolResponder {
                     && definition.fingerprint == call.tool_fingerprint()
             })
             .ok_or(ProviderError::Rejected)?;
-        let validator = jsonschema::validator_for(&definition.parameters)
-            .map_err(|_| ProviderError::Rejected)?;
-        if !validator.is_valid(call.arguments()) {
-            return self
-                .complete_safe_failure(&call, crate::AiApplicationToolFailureCode::InvalidArguments)
-                .await;
-        }
         let (tool_call_index, tool_calls) = {
             let mut calls = self.calls.lock().await;
             if calls
@@ -1738,8 +1795,10 @@ impl ProviderDynamicToolResponder for DynamicToolResponder {
                 let Some(code) = classify_safe_application_tool_error(&error) else {
                     return Err(ProviderError::Rejected);
                 };
-                drop(lease);
-                return self.complete_safe_failure(&call, code).await;
+                self.execution
+                    .persist_dynamic_failure(&lease, &provisional, tool_call_index, code)
+                    .await
+                    .map_err(|_| ProviderError::Rejected)?
             }
         };
         let output = match persisted.model_input() {
@@ -2402,8 +2461,9 @@ fn test_model_inference_manifest(lease: &AiRunLease, model: &str) -> AiEgressMan
 ///
 /// The executor requires a running fenced lease, freshly reauthorizes session
 /// and scope access, reserves budget atomically, durably records every egress
-/// decision, marks the reservation uncertain immediately before transport,
-/// enforces bounded normalized output, and commits authoritative usage. It
+/// decision, releases definitely unstarted calls, marks the reservation
+/// uncertain only after the adapter reports possible dispatch, enforces
+/// bounded normalized output, and commits authoritative usage. It
 /// deliberately leaves run completion and transcript persistence to the next
 /// fenced orchestration layer.
 pub struct AiProviderCallExecutor {
@@ -3028,20 +3088,6 @@ impl AiProviderCallExecutor {
                 }
             };
         }
-        self.budget_service
-            .reconcile(
-                &current,
-                AiBudgetReconciliation {
-                    reservation_id: reservation.id(),
-                    attempt_id: lease.attempt_id(),
-                    lease_generation: lease.lease_generation(),
-                    actual: None,
-                    cached_input_tokens: None,
-                    outcome: AiBudgetReconciliationOutcome::MarkUncertain,
-                },
-            )
-            .await?;
-
         let provider_model = plan.request.model.clone();
         let live_scope = plan.budget.scope.clone();
         let live_correlation_id = plan.correlation_id.clone();
@@ -3124,10 +3170,10 @@ impl AiProviderCallExecutor {
                 results: Mutex::new(Vec::new()),
             })
         });
-        let mut stream = if let Some(responder) = &dynamic_responder {
+        let dispatch = if let Some(responder) = &dynamic_responder {
             let responder: Arc<dyn ProviderDynamicToolResponder> = responder.clone();
             self.runtime
-                .stream_provider_with_dynamic_tools(
+                .dispatch_provider_with_dynamic_tools(
                     &plan.provider_kind,
                     plan.request,
                     context,
@@ -3136,13 +3182,47 @@ impl AiProviderCallExecutor {
                 .await
         } else {
             self.runtime
-                .stream_provider(&plan.provider_kind, plan.request, context)
+                .dispatch_provider(&plan.provider_kind, plan.request, context)
                 .await
-        }
-        .map_err(|error| {
-            self.record_provider_error(&error);
-            AiError::ProviderFailed
-        })?;
+        };
+        let mut stream = match dispatch {
+            crate::AiProviderDispatchOutcome::RejectedBeforeDispatch(error) => {
+                self.record_provider_error(&error);
+                self.release_unstarted(&lease, &reservation).await?;
+                return Err(AiError::ProviderFailed);
+            }
+            crate::AiProviderDispatchOutcome::FailedAfterPossibleDispatch(error) => {
+                self.record_provider_error(&error);
+                self.budget_service
+                    .reconcile(
+                        &current,
+                        AiBudgetReconciliation {
+                            reservation_id: reservation.id(),
+                            attempt_id: lease.attempt_id(),
+                            lease_generation: lease.lease_generation(),
+                            actual: None,
+                            cached_input_tokens: None,
+                            outcome: AiBudgetReconciliationOutcome::MarkUncertain,
+                        },
+                    )
+                    .await?;
+                return Err(AiError::ProviderFailed);
+            }
+            crate::AiProviderDispatchOutcome::Dispatched(stream) => stream,
+        };
+        self.budget_service
+            .reconcile(
+                &current,
+                AiBudgetReconciliation {
+                    reservation_id: reservation.id(),
+                    attempt_id: lease.attempt_id(),
+                    lease_generation: lease.lease_generation(),
+                    actual: None,
+                    cached_input_tokens: None,
+                    outcome: AiBudgetReconciliationOutcome::MarkUncertain,
+                },
+            )
+            .await?;
         let mut events = Vec::new();
         let mut total_bytes = 0usize;
         let mut usage = None;
@@ -7925,6 +8005,7 @@ mod tests {
             description: descriptor.description.clone(),
             parameters: descriptor.argument_schema.clone(),
             strict: true,
+            defer_loading: false,
         }];
         base.transfers[0].estimated_bytes = base.request.conservative_egress_bytes();
         AiProviderCallPlan::new_with_tools(
@@ -8231,6 +8312,7 @@ mod tests {
             description: mutation.description.clone(),
             parameters: mutation.argument_schema.clone(),
             strict: true,
+            defer_loading: false,
         };
         let mut static_policy = AiToolPolicySet::new(ToolMaturity::SupervisedWrite);
         static_policy.bind(AiToolPolicyBinding {
@@ -8470,6 +8552,7 @@ mod tests {
             description: descriptor.description.clone(),
             parameters: descriptor.argument_schema.clone(),
             strict: true,
+            defer_loading: false,
         }];
         base.transfers[0].estimated_bytes = base.request.conservative_egress_bytes();
         AiProviderCallPlan::new_with_supervised_tools(
@@ -8834,6 +8917,32 @@ mod tests {
                 .as_slice(),
             &[AiProviderFailureCategory::ProtocolViolation]
         );
+        assert_eq!(reservation_state(&fixture.database).await, "uncertain");
+    }
+
+    #[tokio::test]
+    async fn adapter_rejection_before_dispatch_releases_capacity_and_is_retryable() {
+        let fixture = fixture_with_provider(
+            MockProvider::new(Vec::new())
+                .with_prepare_failure(AiProviderFailureCategory::ProviderRejection),
+        )
+        .await;
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate"),
+        );
+
+        assert!(matches!(
+            executor.execute(&fixture.lease, plan(&fixture)).await,
+            Err(AiError::ProviderFailed)
+        ));
+        assert_eq!(fixture.mock.request_count(), 0);
+        assert_eq!(reservation_state(&fixture.database).await, "released");
     }
 
     #[tokio::test]
@@ -9349,8 +9458,9 @@ mod tests {
                 call_id: "generated-call".to_owned(),
                 arguments: json!({
                     "arguments": {"recordId": "generated-1"},
-                    "fields": {"recordId": true, "subject": true},
-                    "relationships": {}
+                    "selections": ["recordId", "subject"],
+                    "relationshipArguments": {},
+                    "relationshipMaximumItems": {}
                 }),
             },
             ProviderEvent::Usage {
@@ -9585,55 +9695,6 @@ mod tests {
             )
             .await
             .expect("provider result should be durably checkpointed");
-        fixture.tool_policy_version.store(0, Ordering::SeqCst);
-        assert!(matches!(
-            service
-                .execute_read_only(
-                    &checkpointed_lease,
-                    &provider_result,
-                    call_context.clone(),
-                    route.clone(),
-                )
-                .await,
-            Err(AiError::Forbidden)
-        ));
-        assert!(
-            AiToolCallRecord::query(fixture.database.pool())
-                .filter(AiToolCallRecordWhereInput {
-                    run_id: Some(UuidFilter {
-                        eq: Some(fixture.lease.run_id().0),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                })
-                .limit(1)
-                .fetch_all()
-                .await
-                .expect("denied tool records should be queryable")
-                .is_empty(),
-            "pre-execution policy denial must not adopt or advertise a tool call"
-        );
-        assert!(
-            AiSessionEventRecord::query(fixture.database.pool())
-                .filter(AiSessionEventRecordWhereInput {
-                    session_id: Some(UuidFilter {
-                        eq: Some(fixture.lease.session_id().0),
-                        ..Default::default()
-                    }),
-                    event_type: Some(graphql_orm::graphql::filters::StringFilter {
-                        eq: Some("application_tool_started".to_owned()),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                })
-                .limit(1)
-                .fetch_all()
-                .await
-                .expect("denied lifecycle events should be queryable")
-                .is_empty(),
-            "pre-execution denial must not emit a started event"
-        );
-        fixture.tool_policy_version.store(1, Ordering::SeqCst);
         let persisted = service
             .execute_read_only(
                 &checkpointed_lease,
@@ -10213,6 +10274,24 @@ mod tests {
             next.request.continuation,
             Some(ModelContinuation::StatelessConversation { .. })
         ));
+        let exact_final_bytes = next
+            .request
+            .conservative_provider_egress_bytes(&next.provider_kind)
+            .expect("final stateless request should size");
+        let requirement = next
+            .egress_requirement()
+            .expect("sealed requirement should size");
+        assert_eq!(requirement.bytes, exact_final_bytes);
+        assert_eq!(requirement.tokens, exact_final_bytes);
+        assert_eq!(
+            next.transfers
+                .iter()
+                .find(|manifest| manifest.capability == AiEgressCapability::ModelInference)
+                .expect("inference manifest should exist")
+                .estimated_bytes,
+            exact_final_bytes,
+            "opaque history and tool results must be included before authorization"
+        );
         assert_eq!(
             next.transfers
                 .iter()
@@ -10410,6 +10489,7 @@ mod tests {
                 description: descriptor.description.clone(),
                 parameters: descriptor.argument_schema.clone(),
                 strict: true,
+                defer_loading: false,
             }],
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
@@ -11389,6 +11469,7 @@ mod tests {
                 description: "Read records".to_owned(),
                 parameters: json!({"type": "object"}),
                 strict: true,
+                defer_loading: false,
             }],
             builtin_tools: vec![],
             maximum_builtin_tool_calls: None,

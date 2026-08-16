@@ -3,7 +3,7 @@ title: "graphql-orm-ai"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-15
+last_reviewed: 2026-08-16
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.80.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.81.0", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -71,6 +71,13 @@ the compiled test-backed recipe and the missing reusable bootstrap API.
   one read-only provider plan may expose these capabilities beside exact
   legacy/static read descriptors without duplicating either policy contract.
   Secret/`NeverExport` fields never enter provider schemas.
+- A deterministic compact capability index, bounded lexical discovery,
+  coordinator-selected eager/client-deferred/provider-deferred/fixed-broker
+  delivery, and short-lived current-authority loaded bindings. See
+  [capability discovery and execution](docs/capability-discovery-and-execution.md).
+- One bounded owner-authorized conversation bootstrap combines the newest
+  messages, durable watermark, active/recent runs, tool calls, provider
+  activity and retention reset state for race-free replay/live handoff.
 - Provider-neutral adapters plus deterministic network-free mocks.
 - Optional provider profiles, attachments, skills, UI intents, rules, and
   usage/pricing controls, each behind independent proof and policy boundaries.

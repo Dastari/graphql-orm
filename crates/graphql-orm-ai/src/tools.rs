@@ -667,8 +667,9 @@ impl AiToolCatalog {
             provider_name: provider_name.into(),
             fingerprint: capability.fingerprint().to_owned(),
             description: capability.description().to_owned(),
-            parameters: capability.argument_schema().clone(),
+            parameters: capability.compact_argument_schema().clone(),
             strict: true,
+            defer_loading: false,
         };
         definition.validate().map_err(|_| {
             AiError::InvalidConfiguration("automatic query provider alias is invalid".to_owned())
@@ -694,7 +695,7 @@ impl AiToolCatalog {
         if capability.fingerprint() != expected_capability_fingerprint {
             return Err(AiError::Forbidden);
         }
-        capability.compile(plan)
+        capability.compile_compact(plan)
     }
 
     /// Projects one registered classified mutation capability for a provider.
@@ -721,8 +722,9 @@ impl AiToolCatalog {
             provider_name: provider_name.into(),
             fingerprint: capability.fingerprint().to_owned(),
             description: capability.description().to_owned(),
-            parameters: capability.argument_schema().clone(),
+            parameters: capability.compact_argument_schema().clone(),
             strict: true,
+            defer_loading: false,
         };
         definition.validate().map_err(|_| {
             AiError::InvalidConfiguration(
@@ -755,7 +757,7 @@ impl AiToolCatalog {
         if capability.fingerprint() != expected_capability_fingerprint {
             return Err(AiError::Forbidden);
         }
-        capability.compile(plan)
+        capability.compile_compact(plan)
     }
 
     /// Projects one registered subscription capability for a provider.
@@ -780,8 +782,9 @@ impl AiToolCatalog {
             provider_name: provider_name.into(),
             fingerprint: capability.fingerprint().to_owned(),
             description: capability.description().to_owned(),
-            parameters: capability.argument_schema().clone(),
+            parameters: capability.compact_argument_schema().clone(),
             strict: true,
+            defer_loading: false,
         };
         definition.validate().map_err(|_| {
             AiError::InvalidConfiguration(
@@ -812,7 +815,7 @@ impl AiToolCatalog {
         if capability.fingerprint() != expected_capability_fingerprint {
             return Err(AiError::Forbidden);
         }
-        capability.compile(plan)
+        capability.compile_compact(plan)
     }
 
     /// Builds one provider-facing definition from the exact registered
@@ -852,6 +855,7 @@ impl AiToolCatalog {
             description: descriptor.description.clone(),
             parameters: descriptor.argument_schema.clone(),
             strict: true,
+            defer_loading: false,
         };
         definition.validate().map_err(|_| {
             AiError::InvalidConfiguration("provider-facing tool alias is invalid".to_owned())
@@ -927,7 +931,7 @@ impl AiToolCatalog {
         if !targets.allows_query_capability(capability)
             || definition.fingerprint != capability.fingerprint()
             || definition.description != capability.description()
-            || definition.parameters != *capability.argument_schema()
+            || definition.parameters != *capability.compact_argument_schema()
             || !definition.strict
         {
             return Err(AiError::Forbidden);
@@ -973,7 +977,7 @@ impl AiToolCatalog {
         if !targets.allows_mutation_capability(capability)
             || definition.fingerprint != capability.fingerprint()
             || definition.description != capability.description()
-            || definition.parameters != *capability.argument_schema()
+            || definition.parameters != *capability.compact_argument_schema()
             || !definition.strict
         {
             return Err(AiError::Forbidden);

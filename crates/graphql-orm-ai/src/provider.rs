@@ -18,7 +18,7 @@ const MAXIMUM_PROVIDER_REQUEST_METADATA_BYTES: u64 = 64 * 1024 * 1024;
 const MAXIMUM_STATELESS_TOOL_RESULTS: usize = 256;
 
 use crate::{
-    AiBudgetReservationId, AiEgressCapability, AiEgressManifest, AiError,
+    AiBudgetReservationId, AiCapabilityDeliveryMode, AiEgressCapability, AiEgressManifest, AiError,
     AiProviderAttachmentRequest, AiResolvedProviderAttachment, AiRunId, AiSessionId,
     AuthorizedBudgetReservation, AuthorizedEgress,
 };
@@ -62,6 +62,11 @@ impl ProviderKind {
 /// Capability declaration used for safe route selection.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderCapabilities {
+    /// Reviewed capability-definition delivery modes. An empty set admits no
+    /// application capability surface even when low-level custom functions
+    /// are supported.
+    #[serde(default)]
+    pub capability_delivery_modes: BTreeSet<AiCapabilityDeliveryMode>,
     /// Streaming text output.
     pub streaming: bool,
     /// Image input.
@@ -109,6 +114,12 @@ pub struct ProviderCapabilities {
 }
 
 impl ProviderCapabilities {
+    /// Whether this exact registration declares a reviewed capability
+    /// delivery mode. The declaration is negotiation metadata, not authority.
+    pub fn supports_capability_delivery(&self, mode: AiCapabilityDeliveryMode) -> bool {
+        self.capability_delivery_modes.contains(&mode)
+    }
+
     /// Returns the exact reviewed reasoning-effort profile for `model`.
     ///
     /// `None` means the registration admits only
@@ -157,7 +168,8 @@ impl ProviderCapabilities {
 
     pub(crate) fn validate(&self) -> Result<(), ProviderError> {
         let mut models = BTreeSet::new();
-        if self.reasoning_effort_profiles.len() > 256
+        if (!self.custom_tools && !self.capability_delivery_modes.is_empty())
+            || self.reasoning_effort_profiles.len() > 256
             || self
                 .reasoning_effort_profiles
                 .iter()
@@ -733,6 +745,52 @@ impl ModelRequest {
         serialized_bytes.saturating_add(encoded_attachment_bytes)
     }
 
+    /// Returns the final provider-specific conservative request bytes after
+    /// applying every crate-owned schema projection.
+    ///
+    /// This is the value an inference manifest must authorize. In particular,
+    /// native OpenAI strict schemas are sized after optional-value envelopes
+    /// are installed, so a continuation cannot add unmanifested content at
+    /// the adapter boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns a local provider error when a required projection is invalid or
+    /// non-reversible.
+    pub fn conservative_provider_egress_bytes(
+        &self,
+        provider_kind: &ProviderKind,
+    ) -> Result<u64, ProviderError> {
+        if provider_kind != &ProviderKind::OpenAi {
+            return Ok(self.conservative_egress_bytes());
+        }
+        let mut projected = self.clone();
+        for tool in &mut projected.tools {
+            if tool.strict {
+                tool.parameters = crate::OpenAiStrictToolProjection::compile(&tool.parameters)?
+                    .provider_schema()
+                    .clone();
+            }
+        }
+        Ok(projected.conservative_egress_bytes())
+    }
+
+    /// Deterministic conservative token ceiling for the exact final request.
+    ///
+    /// One token per serialized byte is deliberately conservative for byte
+    /// tokenizers while remaining content-free and provider independent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error under the same conditions as
+    /// [`Self::conservative_provider_egress_bytes`].
+    pub fn conservative_provider_egress_tokens(
+        &self,
+        provider_kind: &ProviderKind,
+    ) -> Result<u64, ProviderError> {
+        self.conservative_provider_egress_bytes(provider_kind)
+    }
+
     fn serialized_metadata_bytes(&self) -> Option<u64> {
         let mut total = 4_096_u64
             .checked_add(serialized_bytes(&self.model)?)?
@@ -960,6 +1018,11 @@ pub struct ModelToolDefinition {
     pub parameters: serde_json::Value,
     /// Request provider-side strict schema enforcement when supported.
     pub strict: bool,
+    /// Allow a reviewed provider-native tool-search implementation to keep
+    /// this exact definition out of the initial model context until selected.
+    /// This changes delivery only and grants no discovery or execution authority.
+    #[serde(default)]
+    pub defer_loading: bool,
 }
 
 impl ModelToolDefinition {
@@ -1446,7 +1509,7 @@ impl ProviderRequestContext {
             .iter()
             .filter(|block| matches!(block, ModelInputBlock::Attachment { .. }))
             .count() as u32;
-        let estimated_bytes = request.conservative_egress_bytes();
+        let estimated_bytes = request.conservative_provider_egress_bytes(provider_kind)?;
 
         self.require_capability(
             provider_kind,
@@ -1965,6 +2028,50 @@ pub trait AiProviderFailureDiagnosticSink: Send + Sync {
 pub type ProviderEventStream =
     Pin<Box<dyn Stream<Item = Result<ProviderEvent, ProviderError>> + Send + 'static>>;
 
+/// Content-free provider-call lifecycle phase.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiProviderDispatchPhase {
+    /// Complete request was prepared and validated locally.
+    PreparedLocally,
+    /// Adapter rejected before any transport dispatch.
+    RejectedBeforeDispatch,
+    /// Bytes may have crossed the provider transport boundary.
+    Dispatched,
+    /// Provider acknowledged the request.
+    AcceptedByProvider,
+    /// Provider response is streaming.
+    Streaming,
+    /// Provider response completed and usage can settle.
+    Completed,
+    /// Failure occurred after the request may have reached the provider.
+    FailedAfterPossibleExecution,
+}
+
+/// Typed boundary outcome returned by an adapter instead of conflating local
+/// rejection with possible provider execution.
+pub enum AiProviderDispatchOutcome {
+    /// Request definitely did not cross the dispatch boundary.
+    RejectedBeforeDispatch(ProviderError),
+    /// Request crossed the dispatch boundary and yielded a response stream.
+    Dispatched(ProviderEventStream),
+    /// Dispatch may have occurred but no stream could be returned.
+    FailedAfterPossibleDispatch(ProviderError),
+}
+
+impl AiProviderDispatchOutcome {
+    /// Current content-free lifecycle phase.
+    pub const fn phase(&self) -> AiProviderDispatchPhase {
+        match self {
+            Self::RejectedBeforeDispatch(_) => AiProviderDispatchPhase::RejectedBeforeDispatch,
+            Self::Dispatched(_) => AiProviderDispatchPhase::Dispatched,
+            Self::FailedAfterPossibleDispatch(_) => {
+                AiProviderDispatchPhase::FailedAfterPossibleExecution
+            }
+        }
+    }
+}
+
 /// One exact provider-originated application-tool request awaiting a
 /// coordinator-owned response.
 ///
@@ -2123,12 +2230,24 @@ pub const AI_APPLICATION_TOOL_FAILURE_VERSION: u16 = 1;
 pub enum AiApplicationToolFailureCode {
     /// The model-authored arguments violated the advertised schema.
     InvalidArguments,
+    /// The requested public selection exceeds the bounded projection surface.
+    SelectionTooLarge,
+    /// A selected relationship path exceeds the configured depth.
+    RelationshipDepthExceeded,
+    /// The complete selected result exceeds the aggregate record budget.
+    ResultBudgetExceeded,
+    /// The loaded schema/catalogue/target/capability binding is stale.
+    CapabilityStale,
     /// Current authorization denied the call without disclosing why.
     AuthorizationDenied,
     /// The target or runtime was temporarily unavailable.
     TemporarilyUnavailable,
     /// The registered tool cannot be executed; the detailed cause is operator-only.
     ToolUnavailable,
+    /// A resolver reported a bounded validation failure safe for correction.
+    ResolverValidationFailed,
+    /// No result exists and current disclosure policy permits that distinction.
+    NotFound,
 }
 
 impl AiApplicationToolFailureCode {
@@ -2136,15 +2255,30 @@ impl AiApplicationToolFailureCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::InvalidArguments => "invalid_arguments",
+            Self::SelectionTooLarge => "selection_too_large",
+            Self::RelationshipDepthExceeded => "relationship_depth_exceeded",
+            Self::ResultBudgetExceeded => "result_budget_exceeded",
+            Self::CapabilityStale => "capability_stale",
             Self::AuthorizationDenied => "authorization_denied",
             Self::TemporarilyUnavailable => "temporarily_unavailable",
             Self::ToolUnavailable => "tool_unavailable",
+            Self::ResolverValidationFailed => "resolver_validation_failed",
+            Self::NotFound => "not_found",
         }
     }
 
     /// Whether the model may retry the same tool later in this turn.
     pub const fn retryable(self) -> bool {
-        matches!(self, Self::TemporarilyUnavailable)
+        matches!(
+            self,
+            Self::TemporarilyUnavailable
+                | Self::InvalidArguments
+                | Self::SelectionTooLarge
+                | Self::RelationshipDepthExceeded
+                | Self::ResultBudgetExceeded
+                | Self::CapabilityStale
+                | Self::ResolverValidationFailed
+        )
     }
 }
 
@@ -2182,12 +2316,34 @@ pub fn classify_safe_application_tool_error(
     error: &AiError,
 ) -> Option<AiApplicationToolFailureCode> {
     match error {
+        AiError::InvalidInput(message) if message.contains("relationship depth") => {
+            Some(AiApplicationToolFailureCode::RelationshipDepthExceeded)
+        }
+        AiError::InvalidInput(message)
+            if message.contains("result-record")
+                || message.contains("result record")
+                || message.contains("record budget") =>
+        {
+            Some(AiApplicationToolFailureCode::ResultBudgetExceeded)
+        }
+        AiError::InvalidInput(message)
+            if message.contains("selection is too large")
+                || message.contains("selection exceeds")
+                || message.contains("complexity limits") =>
+        {
+            Some(AiApplicationToolFailureCode::SelectionTooLarge)
+        }
+        AiError::InvalidInput(message) if message.contains("stale") => {
+            Some(AiApplicationToolFailureCode::CapabilityStale)
+        }
         AiError::InvalidInput(_) => Some(AiApplicationToolFailureCode::InvalidArguments),
         AiError::Forbidden => Some(AiApplicationToolFailureCode::AuthorizationDenied),
         AiError::InvalidConfiguration(_) => Some(AiApplicationToolFailureCode::ToolUnavailable),
-        AiError::NotFound | AiError::ToolExecutionFailed | AiError::RuntimeNotReady => {
-            Some(AiApplicationToolFailureCode::TemporarilyUnavailable)
+        AiError::NotFound => Some(AiApplicationToolFailureCode::NotFound),
+        AiError::ToolExecutionFailed => {
+            Some(AiApplicationToolFailureCode::ResolverValidationFailed)
         }
+        AiError::RuntimeNotReady => Some(AiApplicationToolFailureCode::TemporarilyUnavailable),
         _ => None,
     }
 }
@@ -2743,6 +2899,38 @@ pub trait AiProvider: Send + Sync {
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError>;
 
+    /// Performs adapter-owned validation and local preparation before the
+    /// transport boundary. The default is empty for compatibility; reviewed
+    /// external adapters override it for their complete local validation.
+    async fn prepare_dispatch(
+        &self,
+        _request: &ModelRequest,
+        _context: &ProviderRequestContext,
+    ) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    /// Dispatches one locally validated request with an explicit uncertainty
+    /// boundary.
+    ///
+    /// The compatibility default is conservative: legacy adapter errors may
+    /// have followed dispatch. Reviewed adapters should override this method
+    /// to report deterministic local validation as
+    /// [`AiProviderDispatchOutcome::RejectedBeforeDispatch`].
+    async fn dispatch(
+        &self,
+        request: ModelRequest,
+        context: ProviderRequestContext,
+    ) -> AiProviderDispatchOutcome {
+        if let Err(error) = self.prepare_dispatch(&request, &context).await {
+            return AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
+        }
+        match self.stream(request, context).await {
+            Ok(stream) => AiProviderDispatchOutcome::Dispatched(stream),
+            Err(error) => AiProviderDispatchOutcome::FailedAfterPossibleDispatch(error),
+        }
+    }
+
     /// Starts a streaming request with a coordinator-owned in-flight
     /// application-tool responder.
     ///
@@ -2761,6 +2949,26 @@ pub trait AiProvider: Send + Sync {
             return Err(ProviderError::Unsupported);
         }
         self.stream(request, context).await
+    }
+
+    /// Dispatches a request with the coordinator-owned dynamic-tool responder
+    /// and an explicit uncertainty boundary.
+    async fn dispatch_with_dynamic_tools(
+        &self,
+        request: ModelRequest,
+        context: ProviderRequestContext,
+        responder: Arc<dyn ProviderDynamicToolResponder>,
+    ) -> AiProviderDispatchOutcome {
+        if let Err(error) = self.prepare_dispatch(&request, &context).await {
+            return AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
+        }
+        match self
+            .stream_with_dynamic_tools(request, context, responder)
+            .await
+        {
+            Ok(stream) => AiProviderDispatchOutcome::Dispatched(stream),
+            Err(error) => AiProviderDispatchOutcome::FailedAfterPossibleDispatch(error),
+        }
     }
 
     /// Interrupts one exact run-scoped provider resource.

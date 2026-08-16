@@ -112,6 +112,7 @@ fn core_config(config: &XAiProviderConfig) -> OpenAiProviderConfig {
         project: None,
         timeout: config.timeout,
         store_responses: config.store_responses,
+        native_tool_search_models: std::collections::BTreeSet::new(),
         reasoning_effort_profiles: Vec::new(),
     }
 }
@@ -201,6 +202,7 @@ mod tests {
                     "additionalProperties": false
                 }),
                 strict: true,
+                defer_loading: false,
             }],
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,

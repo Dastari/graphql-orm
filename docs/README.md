@@ -3,7 +3,7 @@ title: GraphQL ORM documentation index
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-08-16
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -63,6 +63,7 @@ Each package owns its local contract documentation:
 - [`graphql-orm-storage`](../crates/graphql-orm-storage/docs/README.md)
 - [`graphql-orm-backup`](../crates/graphql-orm-backup/docs/README.md)
 - [`graphql-orm-ai`](../crates/graphql-orm-ai/docs/README.md)
+- [AI capability discovery and execution](../crates/graphql-orm-ai/docs/capability-discovery-and-execution.md)
 - [`graphql-orm-ai-tool-profiles`](../crates/graphql-orm-ai-tool-profiles/README.md)
 - [`graphql-orm-router-protocol`](../crates/graphql-orm-router-protocol/README.md)
 - [`graphql-orm-router`](../crates/graphql-orm-router/README.md)

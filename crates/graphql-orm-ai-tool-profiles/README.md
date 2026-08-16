@@ -3,7 +3,7 @@ title: "graphql-orm-ai-tool-profiles"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-16
 review_by: 2027-02-11
 supersedes: []
 ---
@@ -24,7 +24,7 @@ are separate runtime decisions and must remain default-deny.
 
 ```toml
 [dependencies]
-graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.5.0" }
+graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.0" }
 serde_json = "1"
 ```
 
@@ -86,17 +86,11 @@ let capabilities = AiGraphqlQueryCapabilityCatalog::compile(
 )?;
 
 let capability = capabilities.capabilities().next().ok_or("no Query roots")?;
-let compiled = capability.compile(serde_json::json!({
+let compiled = capability.compile_compact(serde_json::json!({
     "arguments": { "id": "item-1" },
-    "fields": { "id": true, "displayName": true },
-    "relationships": {
-        "children": {
-            "arguments": {},
-            "fields": { "id": true },
-            "relationships": {},
-            "maximumItems": 10
-        }
-    }
+    "selections": ["id", "displayName", "children.id"],
+    "relationshipArguments": {"children": {}},
+    "relationshipMaximumItems": {"children": 10}
 }))?;
 # let _ = compiled;
 # Ok(()) }
@@ -110,12 +104,29 @@ variables schema, disclosure shape, limits, and plan fingerprint. Registration
 is discovery only; a fresh target/current-principal policy and the ordinary
 resolver remain authoritative at execution.
 
-Generated entity `WhereInput` objects contain recursive `And`/`Or`/`Not`
-connectives, which are intentionally absent from the finite provider schema;
-all non-recursive typed filter fields remain available. Handwritten recursive
-inputs still fail readiness rather than being approximated. Relationship
-arguments, including the single nullable to-many `OrderByInput`, must continue
-to match the finished SDL exactly.
+The compact selection schema is a finite list of public paths, so adding deep
+relationships does not recursively duplicate the entire nested field map.
+Generated entity `WhereInput` objects still omit recursive `And`/`Or`/`Not`
+connectives; all non-recursive typed filter fields remain available.
+Handwritten recursive inputs fail readiness rather than being approximated.
+Relationship arguments, including the single nullable to-many `OrderByInput`,
+continue to match the finished SDL exactly.
+
+## Canonical capability index
+
+After compiling the generated catalogues, combine them with reviewed static
+descriptors through `AiCapabilityIndex::compile`. The result is a complete,
+deterministic and independently bounded discovery index containing only public
+semantic summaries and exact fingerprints. It intentionally contains no JSON
+Schema, GraphQL document/SDL, database name, resolver URL, policy expression,
+credential, authority or secret/hidden field.
+
+`AiCapabilityIndex::search` provides bounded deterministic lexical discovery
+with exact namespace/kind/entity filters and stable ID tie-breaking. Search
+returns exact candidate/index/schema/semantic/target-policy fingerprints but
+grants no authority. The runtime package owns current-principal rehydration,
+policy reapplication, short-lived loaded bindings and ordinary resolver
+execution.
 
 Opt-in aggregate roots use the same catalogue and a fixed result projection.
 Their filters, grouping, metrics, operators, and group limits remain typed and
