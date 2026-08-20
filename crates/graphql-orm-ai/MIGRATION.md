@@ -19,6 +19,71 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.81.0 to 0.82.0: session reliability and failure disposition
+
+Adopt `graphql-orm-ai` 0.82.0 at one reviewed full monorepo revision.
+
+### Schema module
+
+The AI schema module advances **0.60.0 to 0.61.0** and adds one entity,
+`graphql_orm_ai_run_failure_dispositions`, with a unique index on
+`source_run_id` and a session/decision index. Apply and verify the module
+before serving traffic. There is no backfill, no column change to an existing
+table, and no protected-payload migration. Existing rows and events remain
+readable.
+
+### Source-breaking changes
+
+`AiAgentProviderTurnExecutor::interrupt_run` now returns
+`AiRunInterruptSettlement` instead of `()`. Existing implementations that
+interrupt without proving settlement should return
+`AiRunInterruptSettlement::RequestedUnsettled`, and one that finds no live
+resource should return `NotActive`. Do not return `Settled` unless the adapter
+can prove the interrupted turn left the provider's retained thread consistent
+with the durable transcript; `retains_thread()` is the only thing that keeps a
+binding, and it fails closed.
+
+`AiSessionEventEnvelope` gained a nullable `closed` field. Build envelopes with
+`AiSessionEventEnvelope::delivered` or `AiSessionEventEnvelope::ended` instead
+of struct literals.
+
+### Behavioural changes with no API change
+
+`conversation_bootstrap` no longer returns `Conflict` while an assistant is
+streaming. Its `watermark` is now documented as a **resume floor** rather than
+an equality point. Subscribe with `after_sequence = watermark`; no event at or
+below it is missing, and the message window never leads it, but run and
+tool-call rows may already reflect an event after it. Apply replayed events by
+identifier so re-applying one the snapshot already reflects is idempotent. A
+client that assumed every replayed event was unseen must be updated.
+
+Session-event streams now tolerate a briefly unavailable authorization
+dependency within a bounded per-session jittered grace window, and emit a typed
+close envelope before ending. Authoritative denials are unchanged: the stream
+still fails immediately, and the existing `AiError` still follows the close
+envelope, so a client reading only errors keeps working.
+
+A run whose provider-session cleanup stays pending past its retry allowance now
+closes as `Failed` with `provider_session_cleanup_unavailable` instead of
+expiring into `RecoveryRequired`. That code is retryable, because nothing
+executed.
+
+### New GraphQL surface
+
+`retryAiRun` and `acknowledgeAiRunFailure` are additive; regenerate typed and
+PascalCase clients. Install `Arc<dyn AiRunDispositionService>` in schema data
+or both mutations return a configuration error. `OrmAiRunDispositionService`
+is the generated-ORM implementation.
+
+Four event types are additive on the existing session stream:
+`run_retry_queued`, `run_failure_acknowledged`, `provider_session_reset`, and
+`provider_session_rebound`. Clients that reject unknown event types must be
+updated to ignore them.
+
+The `run_failed` and `run_recovery_required` payloads advance from the tagged
+`...-v1` shape to `...-v2` and carry a `failure` record. Readers accept both
+shapes; a v1 payload written before this release stays readable.
+
 ## 0.80.0 to 0.81.0: capability discovery and durable provider loops
 
 Adopt `graphql-orm-ai` 0.81.0 and
