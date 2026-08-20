@@ -77,6 +77,8 @@ mod orm_rules;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_run_cancellation;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_run_disposition;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_runs;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_session_retention;
@@ -121,6 +123,7 @@ mod remote_execution;
 mod restore;
 mod rules;
 mod run_cancellation;
+mod run_disposition;
 mod run_state;
 mod runtime;
 mod secrets;
@@ -193,6 +196,8 @@ pub use orm_rules::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_run_cancellation::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_run_disposition::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_runs::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_session_retention::*;
@@ -240,6 +245,7 @@ pub use remote_execution::*;
 pub use restore::*;
 pub use rules::*;
 pub use run_cancellation::*;
+pub use run_disposition::*;
 pub use run_state::*;
 pub use runtime::*;
 pub use secrets::*;

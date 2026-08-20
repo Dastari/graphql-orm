@@ -11,8 +11,9 @@ use graphql_orm::graphql::pagination::{
 use uuid::Uuid;
 
 use crate::{
-    AiError, AiInboxEventPage, AiInboxService, AiRunCancellationService, AiRunCancellationView,
-    AiScope, AiSessionId, AiUsageConnection, AiUsageFilterInput, CancelAiRunInput,
+    AcknowledgeAiRunFailureInput, AiError, AiInboxEventPage, AiInboxService,
+    AiRunCancellationService, AiRunCancellationView, AiRunDispositionService, AiRunDispositionView,
+    AiScope, AiSessionId, AiUsageConnection, AiUsageFilterInput, CancelAiRunInput, RetryAiRunInput,
 };
 
 /// Scope input for session creation/configuration.
@@ -650,6 +651,36 @@ impl AiMutationRoot {
             .map_err(extend)
     }
 
+    /// Authors a new run for the same durable user message as one failed run.
+    ///
+    /// This is not a resume: the failed run stays terminal and every audit row
+    /// it produced is preserved. The request is refused when the server cannot
+    /// prove re-execution is safe.
+    async fn retry_ai_run(
+        &self,
+        context: &Context<'_>,
+        input: RetryAiRunInput,
+    ) -> async_graphql::Result<AiRunDispositionView> {
+        let principal = agql_auth::principal_from_ctx(context)?;
+        disposition_service(context)?
+            .retry_run(&principal, input)
+            .await
+            .map_err(extend)
+    }
+
+    /// Durably dismisses one failed run's failure without deleting history.
+    async fn acknowledge_ai_run_failure(
+        &self,
+        context: &Context<'_>,
+        input: AcknowledgeAiRunFailureInput,
+    ) -> async_graphql::Result<AiRunDispositionView> {
+        let principal = agql_auth::principal_from_ctx(context)?;
+        disposition_service(context)?
+            .acknowledge_run_failure(&principal, input)
+            .await
+            .map_err(extend)
+    }
+
     /// Creates a private owner-only session.
     async fn create_ai_session(
         &self,
@@ -761,6 +792,18 @@ fn cancellation_service(
         .cloned()
         .ok_or_else(|| {
             AiError::InvalidConfiguration("AI run cancellation service is not installed".to_owned())
+                .extend()
+        })
+}
+
+fn disposition_service(
+    context: &Context<'_>,
+) -> async_graphql::Result<Arc<dyn AiRunDispositionService>> {
+    context
+        .data_opt::<Arc<dyn AiRunDispositionService>>()
+        .cloned()
+        .ok_or_else(|| {
+            AiError::InvalidConfiguration("AI run disposition service is not installed".to_owned())
                 .extend()
         })
 }
