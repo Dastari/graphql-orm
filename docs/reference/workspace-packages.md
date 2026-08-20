@@ -19,7 +19,7 @@ changes.
 | Package | Version | Path | Default features | Direct internal dependencies |
 | --- | --- | --- | --- | --- |
 | `graphql-orm` | `0.23.0` | `crates/graphql-orm` | `sqlite` | `graphql-orm-macros`, `graphql-orm-operation-catalog`, `graphql-orm-router-protocol` (dev-only) |
-| `graphql-orm-ai` | `0.81.0` | `crates/graphql-orm-ai` | `sqlite` | `graphql-orm`, `graphql-orm-ai-tool-profiles`, `graphql-orm-storage` |
+| `graphql-orm-ai` | `0.82.0` | `crates/graphql-orm-ai` | `sqlite` | `graphql-orm`, `graphql-orm-ai-tool-profiles`, `graphql-orm-storage` |
 | `graphql-orm-ai-tool-profiles` | `0.6.0` | `crates/graphql-orm-ai-tool-profiles` | none | `graphql-orm-operation-catalog`, `graphql-orm-router-protocol` (dev-only) |
 | `graphql-orm-backup` | `0.7.1` | `crates/graphql-orm-backup` | `local` | `graphql-orm` (optional), `graphql-orm-storage` |
 | `graphql-orm-macros` | `0.23.0` | `crates/graphql-orm-macros` | `sqlite` | none |

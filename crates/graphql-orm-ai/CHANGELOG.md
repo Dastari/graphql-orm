@@ -18,6 +18,69 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.82.0] - 2026-08-20
+
+Persistent schema module: **0.61.0**.
+
+### Added
+
+- `retryAiRun` and `acknowledgeAiRunFailure` dispose of a failed or
+  recovery-required run. Retry authors a *new* run over the same durable user
+  message under current policy and is idempotent under a client request id;
+  acknowledge durably dismisses the failure. Neither mutates or deletes the
+  source run, so its state, immutable attempt outcomes, and session and inbox
+  events survive. At most one disposition wins per run.
+- `run_failed` and `run_recovery_required` events carry a bounded failure
+  record with a stable code, a retryable flag, and the admission reason.
+  Retry admission is computed from committed rows only: `RecoveryRequired` is
+  never retryable, an absent or unrecognized failure code is never retryable,
+  and a run that already produced a durable assistant message is refused.
+- `provider_session_reset` and `provider_session_rebound` events disclose that
+  a retained provider thread stopped being usable, carrying only the
+  server-owned reason class. Previously the durable transcript read as
+  continuous while the model had silently lost all prior context.
+- `AiSessionEventEnvelope.closed` carries a typed
+  [`AiSessionStreamClose`] on the final envelope of any server-ended session
+  stream, so a client can distinguish "stream over, resubscribe" from network
+  silence.
+- `AiRunInterruptSettlement` reports what an interrupt proved about the turn it
+  stopped. It fails closed: only proven settlement retains a thread, and no
+  adapter currently reports it.
+- `OrmAiSessionService::session_stream_head` performs one bounded authorized
+  head-sequence read, used as a durable fallback delivery path.
+
+### Changed
+
+- **Conversation bootstrap no longer fails while an assistant is streaming.**
+  The snapshot retry predicate compared `row_version` and `stream_head`, which
+  every coalesced live delta advances at roughly the coalescer rate, so the
+  bounded snapshot returned `Conflict` for exactly the sessions a user is most
+  likely to open. The predicate now covers only fields the bootstrap returns.
+  The watermark is a resume floor: nothing at or below it is missing, run and
+  tool-call rows may already reflect a later event, and the message window
+  never leads it.
+- Session-event subscriptions survive a brief authorization-service restart
+  within a bounded, per-session jittered grace window instead of failing on the
+  first `resolve` error. An authoritative denial, or any class this crate does
+  not recognize, still denies immediately.
+- Session-event subscriptions run a periodic bounded durable head check, so
+  single-replica delivery no longer depends solely on the process-local wakeup
+  channel and a missed hint is no longer unrecoverable.
+- A message accepted while provider-session cleanup is pending now converges
+  without an operator. Exhausting the bounded retry allowance closes the run as
+  a clean visible failure instead of leaving it to expire into
+  `RecoveryRequired`, which was misclassified because nothing had executed.
+- `AiRunCompletion::outcome_code` is now readable.
+
+### Breaking
+
+- `AiAgentProviderTurnExecutor::interrupt_run` returns
+  `AiRunInterruptSettlement` instead of `()`.
+- `AiSessionEventEnvelope` gained a `closed` field. Construct it through
+  `AiSessionEventEnvelope::delivered` or `AiSessionEventEnvelope::ended`.
+- The persistent schema module advances to 0.61.0 for the new run-failure
+  disposition entity.
+
 ## [0.81.0] - 2026-08-16
 
 ### Added

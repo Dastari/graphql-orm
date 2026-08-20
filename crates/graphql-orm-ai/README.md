@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.81.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.82.0", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -117,6 +117,31 @@ subscription observation. `OrmAiSubscriptionWaitService` binds that plan to an
 authenticated registered replay source and the existing run queue; it
 rehydrates current authority at open, event and adoption boundaries. See
 [durable bounded subscription waits](docs/durable-subscription-waits.md).
+
+## Session reliability
+
+One bounded `aiConversationBootstrap` snapshot plus durable event replay is the
+supported way to open a conversation. Its watermark is a **resume floor**:
+nothing at or below it is missing from the snapshot, the message window never
+leads it, and run and tool-call rows may already reflect a later event, so
+replayed events are applied by identifier.
+
+Session-event streams end with a typed close envelope rather than silence,
+tolerate a briefly unavailable authorization dependency inside a bounded
+jittered grace window while denying authoritative revocation immediately, and
+run a periodic bounded durable head check so single-replica delivery does not
+depend solely on the process-local wakeup channel.
+
+Terminal `run_failed` and `run_recovery_required` events carry a bounded,
+content-free failure record with a stable code and a retryable flag computed
+from committed rows. `retryAiRun` authors a new run over the same durable user
+message under current policy where re-execution is provably safe;
+`acknowledgeAiRunFailure` dismisses a failure without deleting audit history.
+Invalidating a retained provider thread emits `provider_session_reset` or
+`provider_session_rebound` so a host can tell the user the model's context was
+reset even though the durable transcript reads as continuous.
+
+See the [session reliability adoption contract](docs/session-reliability-adoption.md).
 
 ## Features and capability boundary
 
