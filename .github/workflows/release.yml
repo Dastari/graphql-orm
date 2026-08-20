@@ -65,6 +65,27 @@ jobs:
             echo "router_distribution_approval is required for a router binary" >&2
             exit 1
           fi
+      - name: Reclaim runner disk
+        run: |
+          set -euo pipefail
+          # Every release lane runs in this one job and shares one target
+          # directory: all packages, every backend and provider permutation,
+          # rustdoc output, and a second toolchain. CI splits the same lanes
+          # across jobs, so only the release job exhausts the runner image.
+          # Drop preinstalled toolchains this workspace never builds against
+          # rather than dropping or reordering any verification lane.
+          df -h /
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/share/powershell \
+            /usr/local/share/boost \
+            /opt/hostedtoolcache/CodeQL \
+            "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}/Python" \
+            "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}/node" || true
+          sudo docker image prune --all --force || true
+          df -h /
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
