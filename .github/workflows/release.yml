@@ -35,6 +35,17 @@ concurrency:
   group: workspace-release
   cancel-in-progress: false
 
+# Every release lane shares one target directory in one job, across all
+# packages and every backend and provider permutation. Debug info and
+# incremental artifacts dominate that directory and contribute nothing to a
+# test, Clippy, rustdoc, or check lane, so they are disabled rather than
+# dropping or weakening any lane. Failure backtraces lose line detail; the
+# split CI workflow keeps full debug info for diagnosis.
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   validate:
     name: Validate exact release source
