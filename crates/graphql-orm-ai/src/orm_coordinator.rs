@@ -446,8 +446,15 @@ pub trait AiAgentProviderTurnExecutor: Send + Sync {
 
     /// Interrupts an active run-scoped provider resource after durable
     /// cancellation or lease loss has already been observed.
-    async fn interrupt_run(&self, _lease: &AiRunLease) -> Result<(), AiError> {
-        Ok(())
+    ///
+    /// The returned settlement reports what the interruption proved. A default
+    /// executor proves nothing, so it reports no live resource rather than
+    /// implying the retained thread may be kept.
+    async fn interrupt_run(
+        &self,
+        _lease: &AiRunLease,
+    ) -> Result<crate::AiRunInterruptSettlement, AiError> {
+        Ok(crate::AiRunInterruptSettlement::NotActive)
     }
 
     /// Closes all provider resources belonging to one exact run fence.
@@ -492,7 +499,10 @@ impl AiAgentProviderTurnExecutor for AiProviderCallExecutor {
             .await
     }
 
-    async fn interrupt_run(&self, lease: &AiRunLease) -> Result<(), AiError> {
+    async fn interrupt_run(
+        &self,
+        lease: &AiRunLease,
+    ) -> Result<crate::AiRunInterruptSettlement, AiError> {
         AiProviderCallExecutor::interrupt_run(self, lease).await
     }
 

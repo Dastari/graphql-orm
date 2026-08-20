@@ -163,6 +163,45 @@ pub enum AiProviderRunInterruptOutcome {
     Requested,
 }
 
+/// What an interrupt request proved about the provider turn it stopped.
+///
+/// This is deliberately separate from [`AiProviderRunInterruptOutcome`], which
+/// reports only whether a live resource accepted the request. Settlement is a
+/// stronger claim: that the provider's retained thread, after interruption, is
+/// consistent with the durable transcript.
+///
+/// No adapter currently reports [`Self::Settled`]. The Codex app-server
+/// `turn/interrupt` response is an empty object, `TurnStatus` has a
+/// first-class `interrupted` value, and resumed threads page prior turns back
+/// through `thread/turns/list`, so an acknowledgement does not distinguish a
+/// discarded partial turn from a retained one. Treating acknowledgement as
+/// settlement would let the model carry content the durable transcript never
+/// recorded. The variant exists so an adapter that can prove settlement may
+/// report it without another breaking change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AiRunInterruptSettlement {
+    /// No live provider resource existed for the exact fence.
+    NotActive,
+    /// Interruption was requested and acknowledged, but the retained thread's
+    /// post-interrupt content is not proven to match the durable transcript.
+    RequestedUnsettled,
+    /// The provider proved the interrupted turn left its retained thread
+    /// consistent with the durable transcript, with no unresolved dynamic tool
+    /// call and no uncertain persisted output.
+    Settled,
+}
+
+impl AiRunInterruptSettlement {
+    /// Returns whether the retained thread may be kept bound.
+    ///
+    /// Anything other than proven settlement is false, so an unrecognized or
+    /// merely acknowledged interruption fails closed into invalidation.
+    pub const fn retains_thread(self) -> bool {
+        matches!(self, Self::Settled)
+    }
+}
+
 /// Result of closing one exact provider-run resource.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AiProviderRunCloseOutcome {
