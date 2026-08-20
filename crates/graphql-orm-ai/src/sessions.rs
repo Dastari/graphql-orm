@@ -255,7 +255,11 @@ pub struct AiConversationBootstrap {
     pub backward_cursor: Option<String>,
     /// Whether older messages remain.
     pub has_older_messages: bool,
-    /// Durable event watermark captured with this state.
+    /// Durable event resume floor captured before this state was assembled.
+    ///
+    /// Subscribe with `after_sequence = watermark`. Run and tool-call rows may
+    /// already reflect events after it; replaying those is idempotent because
+    /// both are identified state. Messages never lead it.
     pub watermark: i64,
     /// All active runs admitted by the bootstrap bound.
     pub active_runs: Vec<AiConversationRunSummary>,
@@ -344,6 +348,13 @@ pub struct SendAiMessagePayload {
 pub trait AiSessionService: Send + Sync {
     /// Returns one bounded authoritative conversation bootstrap suitable for
     /// replay from its watermark followed by live subscription.
+    ///
+    /// The returned `watermark` is a resume floor, not an equality point. Every
+    /// durable effect at or before it is reflected in the snapshot, so a client
+    /// that subscribes with `after_sequence = watermark` cannot miss an event.
+    /// Run and tool-call rows may already reflect a later effect; those rows are
+    /// identified state, so re-applying the replayed event that produced them is
+    /// idempotent. The message window never leads the watermark.
     async fn conversation_bootstrap(
         &self,
         _principal: &AuthPrincipal,

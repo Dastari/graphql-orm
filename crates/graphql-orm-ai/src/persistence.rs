@@ -888,6 +888,7 @@ pub(crate) struct AiMessageRecord {
     /// Hash binding the idempotency reference to text and attachment IDs.
     pub content_hash: Option<String>,
     /// Producing run.
+    #[filterable(type = "uuid")]
     pub run_id: Option<graphql_orm::uuid::Uuid>,
     /// Provider kind/model metadata.
     pub provider_kind: Option<String>,

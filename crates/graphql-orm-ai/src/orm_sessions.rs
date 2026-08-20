@@ -157,6 +157,30 @@ impl OrmAiSessionService {
         Ok(Some(record))
     }
 
+    /// Returns the session's current durable stream head for an authorized
+    /// owner, or `None` when the session is not visible.
+    ///
+    /// This is the bounded head-sequence read used as the durable fallback for
+    /// live delivery. It exists so a subscriber does not depend solely on the
+    /// process-local wakeup channel: a dropped or missed in-process hint is
+    /// otherwise unrecoverable. It reads one row and opens no protected
+    /// content.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe library error for a policy denial or persistence
+    /// failure.
+    pub async fn session_stream_head(
+        &self,
+        principal: &AuthPrincipal,
+        session_id: AiSessionId,
+    ) -> Result<Option<i64>, AiError> {
+        Ok(self
+            .visible_session(principal, session_id, AiSessionAction::Read)
+            .await?
+            .map(|record| record.stream_head))
+    }
+
     async fn protection_policy(
         &self,
         principal: &AuthPrincipal,
@@ -343,10 +367,7 @@ impl AiSessionService for OrmAiSessionService {
                 .visible_session(principal, session_id, AiSessionAction::Read)
                 .await?
                 .ok_or(AiError::NotFound)?;
-            if first.row_version != second.row_version
-                || first.stream_head != second.stream_head
-                || first.message_head != second.message_head
-            {
+            if !bootstrap_snapshot_is_stable(&first, &second) {
                 continue;
             }
             let has_older_messages = messages.page_info.has_previous_page;
@@ -1571,6 +1592,34 @@ fn validate_scope(scope: &AiScope) -> Result<(), AiError> {
     Ok(())
 }
 
+/// Returns whether two reads of the same session admit one bootstrap snapshot.
+///
+/// The predicate deliberately ignores `stream_head`, `last_activity_at`, and
+/// `row_version`. A coalesced live delta advances all three at roughly the
+/// streaming coalescer rate while an assistant is answering, but it appends
+/// only a session event: it cannot change the session shell, the message
+/// window, a run row, or a tool-call row that the bootstrap returns. Including
+/// that churn in the predicate made the bounded snapshot fail structurally for
+/// exactly the sessions a user is most likely to open.
+///
+/// Every remaining field either appears in the returned session view or bounds
+/// the returned message window, so an unstable value means the assembled
+/// snapshot could not have existed at one instant.
+fn bootstrap_snapshot_is_stable(first: &AiSessionRecord, second: &AiSessionRecord) -> bool {
+    first.id == second.id
+        && first.message_head == second.message_head
+        && first.state == second.state
+        && first.archived_at == second.archived_at
+        && first.deleted_at == second.deleted_at
+        && first.title == second.title
+        && first.title_revision == second.title_revision
+        && first.owner_principal_kind == second.owner_principal_kind
+        && first.owner_subject == second.owner_subject
+        && first.tenant_id == second.tenant_id
+        && first.scope_kind == second.scope_kind
+        && first.scope_id == second.scope_id
+}
+
 pub(crate) fn session_view(record: &AiSessionRecord) -> AiSessionView {
     AiSessionView {
         id: record.id,
@@ -1725,5 +1774,143 @@ pub(crate) fn map_orm(error: OrmPublicError) -> AiError {
         OrmErrorCode::ServiceUnavailable
         | OrmErrorCode::InternalError
         | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_snapshot_tests {
+    use super::{AiSessionRecord, bootstrap_snapshot_is_stable};
+
+    fn record() -> AiSessionRecord {
+        AiSessionRecord {
+            id: uuid::Uuid::from_u128(1),
+            owner_principal_kind: "user".to_owned(),
+            owner_subject: "bootstrap-owner".to_owned(),
+            tenant_id: Some("tenant".to_owned()),
+            scope_kind: "workspace".to_owned(),
+            scope_id: "scope".to_owned(),
+            title: "Research".to_owned(),
+            title_revision: 4,
+            title_source: "user".to_owned(),
+            state: "active".to_owned(),
+            stream_head: 12,
+            message_head: 3,
+            last_activity_at: 1_700_000_000,
+            archived_at: None,
+            deleted_at: None,
+            row_version: 9,
+        }
+    }
+
+    #[test]
+    fn live_delta_churn_admits_the_snapshot() {
+        let first = record();
+        // Exactly what a coalesced live delta advances: the stream head, the
+        // activity timestamp, and the CAS version. Nothing the bootstrap
+        // returns depends on any of them.
+        let second = AiSessionRecord {
+            stream_head: first.stream_head + 41,
+            last_activity_at: first.last_activity_at + 7,
+            row_version: first.row_version + 41,
+            ..record()
+        };
+        assert!(bootstrap_snapshot_is_stable(&first, &second));
+    }
+
+    #[test]
+    fn every_returned_field_forces_a_retry() {
+        let first = record();
+        let mutations: Vec<(&str, AiSessionRecord)> = vec![
+            (
+                "id",
+                AiSessionRecord {
+                    id: uuid::Uuid::from_u128(2),
+                    ..record()
+                },
+            ),
+            (
+                "message_head",
+                AiSessionRecord {
+                    message_head: 4,
+                    ..record()
+                },
+            ),
+            (
+                "state",
+                AiSessionRecord {
+                    state: "archived".to_owned(),
+                    ..record()
+                },
+            ),
+            (
+                "archived_at",
+                AiSessionRecord {
+                    archived_at: Some(1_700_000_100),
+                    ..record()
+                },
+            ),
+            (
+                "deleted_at",
+                AiSessionRecord {
+                    deleted_at: Some(1_700_000_100),
+                    ..record()
+                },
+            ),
+            (
+                "title",
+                AiSessionRecord {
+                    title: "Renamed".to_owned(),
+                    ..record()
+                },
+            ),
+            (
+                "title_revision",
+                AiSessionRecord {
+                    title_revision: 5,
+                    ..record()
+                },
+            ),
+            (
+                "owner_principal_kind",
+                AiSessionRecord {
+                    owner_principal_kind: "api_token:service".to_owned(),
+                    ..record()
+                },
+            ),
+            (
+                "owner_subject",
+                AiSessionRecord {
+                    owner_subject: "someone-else".to_owned(),
+                    ..record()
+                },
+            ),
+            (
+                "tenant_id",
+                AiSessionRecord {
+                    tenant_id: Some("other-tenant".to_owned()),
+                    ..record()
+                },
+            ),
+            (
+                "scope_kind",
+                AiSessionRecord {
+                    scope_kind: "project".to_owned(),
+                    ..record()
+                },
+            ),
+            (
+                "scope_id",
+                AiSessionRecord {
+                    scope_id: "other-scope".to_owned(),
+                    ..record()
+                },
+            ),
+        ];
+        for (field, second) in mutations {
+            assert!(
+                !bootstrap_snapshot_is_stable(&first, &second),
+                "an unstable {field} must reject the assembled snapshot"
+            );
+        }
     }
 }

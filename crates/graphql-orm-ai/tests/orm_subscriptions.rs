@@ -1,7 +1,7 @@
 #![cfg(feature = "sqlite")]
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use agql_auth::{
@@ -92,6 +92,20 @@ fn principal() -> AuthPrincipal {
             ..AccessTokenMetadata::default()
         },
     })
+}
+
+async fn apply_schema(database: &Database<SqliteBackend>, name: &str) {
+    let module = AiSchemaModule;
+    let plan = database
+        .schema()
+        .plan_migration_to_entities(name, "AI subscription service test", module.entities())
+        .await
+        .expect("schema plans");
+    database
+        .schema()
+        .apply_migration(&plan, ApplyOptions::default())
+        .await
+        .expect("schema applies");
 }
 
 async fn services(
@@ -256,10 +270,23 @@ async fn replay_is_paged_to_a_watermark_and_revocation_closes_stream() {
     assert_eq!(second.event.expect("event").sequence, 2);
 
     active.store(false, Ordering::SeqCst);
-    let revoked = tokio::time::timeout(Duration::from_secs(1), stream.next())
+    // An authoritative denial closes immediately: the typed envelope names the
+    // reason, and the error still follows so existing clients keep working.
+    let close = tokio::time::timeout(Duration::from_secs(1), stream.next())
         .await
         .expect("reauthorization runs")
-        .expect("terminal error item");
+        .expect("terminal close item")
+        .expect("close envelope is not an error");
+    assert_eq!(
+        close.closed,
+        Some(AiSessionStreamClose::AuthorizationRevoked)
+    );
+    assert!(close.event.is_none());
+    assert!(!close.reset_required);
+    let revoked = stream
+        .next()
+        .await
+        .expect("terminal error item after the close envelope");
     assert!(matches!(revoked, Err(AiError::ReauthorizationFailed)));
     assert!(stream.next().await.is_none());
 }
@@ -307,4 +334,200 @@ async fn maximum_sized_replay_pages_are_drained_before_live_delivery() {
     let live = live.event.expect("live durable event");
     assert_eq!(live.sequence, 102);
     assert_eq!(live.event_type, "session_title_changed");
+}
+
+/// Resolver that can be made temporarily unavailable, distinguishing a
+/// dependency restart from an authoritative denial.
+struct BlipResolver {
+    principal: AuthPrincipal,
+    unavailable: Arc<AtomicBool>,
+    denied: Arc<AtomicBool>,
+    attempts: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl CurrentPrincipalResolver for BlipResolver {
+    async fn resolve(
+        &self,
+        reference: &PrincipalReference,
+    ) -> agql_auth::AuthResult<ResolvedPrincipal> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        if self.denied.load(Ordering::SeqCst) {
+            return Err(agql_auth::AuthError::Forbidden);
+        }
+        if self.unavailable.load(Ordering::SeqCst) {
+            return Err(agql_auth::AuthError::AuthServiceUnavailable);
+        }
+        ResolvedPrincipal::new(
+            reference.clone(),
+            self.principal.clone(),
+            OffsetDateTime::now_utc(),
+        )
+    }
+}
+
+/// Work item 2: a brief authorization-service restart must not drop the
+/// stream, but an authoritative denial must still close it immediately.
+#[tokio::test]
+async fn reauthorization_blip_is_survived_and_denial_still_fails_fast() {
+    let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+        .await
+        .expect("in-memory SQLite opens");
+    apply_schema(&database, "ai-subscription-blip-v1").await;
+    let sessions = Arc::new(OrmAiSessionService::new(
+        database,
+        Arc::new(AllowAll),
+        Arc::new(ProtectionPolicy),
+        Arc::new(DatabaseManagedContentProtector),
+    ));
+    let principal = principal();
+    let unavailable = Arc::new(AtomicBool::new(false));
+    let denied = Arc::new(AtomicBool::new(false));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let subscriptions = OrmAiSubscriptionService::new(
+        sessions.clone(),
+        Arc::new(BlipResolver {
+            principal: principal.clone(),
+            unavailable: unavailable.clone(),
+            denied: denied.clone(),
+            attempts: attempts.clone(),
+        }),
+    )
+    .with_reauthorization_interval(Duration::from_millis(20))
+    .with_reauthorization_grace(Duration::from_secs(30))
+    .with_replay_check_interval(Duration::from_millis(10))
+    .with_replay_page_size(50);
+
+    let session = create_session(&sessions, &principal).await;
+    send(&sessions, &principal, session.id, "first").await;
+    let mut stream = subscriptions
+        .session_events(principal.clone(), AiSessionId(session.id), 0)
+        .await
+        .expect("subscription opens");
+    let first = stream
+        .next()
+        .await
+        .expect("first item")
+        .expect("first event");
+    assert_eq!(first.event.expect("event").sequence, 1);
+
+    // The dependency goes away for long enough to cover several ticks. Drive
+    // the stream while waiting so its select loop keeps running, and require
+    // that reauthorization was actually retried rather than abandoned.
+    unavailable.store(true, Ordering::SeqCst);
+    let before = attempts.load(Ordering::SeqCst);
+    let outage = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if attempts.load(Ordering::SeqCst) >= before + 3 {
+                return Ok::<(), AiError>(());
+            }
+            tokio::select! {
+                item = stream.next() => {
+                    let item = item.expect("stream must stay open during the outage")?;
+                    assert!(
+                        item.closed.is_none(),
+                        "an unavailable dependency must not close the stream inside the grace window"
+                    );
+                }
+                () = tokio::time::sleep(Duration::from_millis(5)) => {}
+            }
+        }
+    })
+    .await
+    .expect("reauthorization must be retried during the outage");
+    outage.expect("the stream must not error inside the grace window");
+
+    // Still inside the grace window, durable delivery continues.
+    send(&sessions, &principal, session.id, "during outage").await;
+    let during = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("delivery continues during the outage")
+        .expect("item")
+        .expect("event delivered while reauthorization is unavailable");
+    assert!(during.closed.is_none());
+    assert!(during.event.is_some());
+
+    // Recovery, then an authoritative denial closes immediately.
+    unavailable.store(false, Ordering::SeqCst);
+    denied.store(true, Ordering::SeqCst);
+    let close = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let item = stream.next().await.expect("stream item")?;
+            if item.closed.is_some() {
+                return Ok::<_, AiError>(item);
+            }
+        }
+    })
+    .await
+    .expect("denial closes the stream")
+    .expect("close envelope is not an error");
+    assert_eq!(
+        close.closed,
+        Some(AiSessionStreamClose::AuthorizationRevoked)
+    );
+}
+
+/// Work item 2: single-replica delivery must not depend solely on the
+/// in-process wakeup channel.
+///
+/// Two `Database` handles over one SQLite file have independent in-process
+/// wakeup channels, so a commit through the writer handle never produces a
+/// wakeup on the subscriber handle. That is exactly the shape of a dropped or
+/// missed hint, and the bounded durable head check is the only path that can
+/// deliver it.
+#[tokio::test]
+async fn durable_replay_fallback_delivers_without_an_in_process_wakeup() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("subscription-fallback.sqlite");
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+
+    let subscriber_database = Database::<SqliteBackend>::connect_sqlite(&url)
+        .await
+        .expect("subscriber handle opens");
+    apply_schema(&subscriber_database, "ai-subscription-fallback-v1").await;
+    let writer_database = Database::<SqliteBackend>::connect_sqlite(&url)
+        .await
+        .expect("writer handle opens");
+
+    let subscriber_sessions = Arc::new(OrmAiSessionService::new(
+        subscriber_database,
+        Arc::new(AllowAll),
+        Arc::new(ProtectionPolicy),
+        Arc::new(DatabaseManagedContentProtector),
+    ));
+    let writer_sessions = OrmAiSessionService::new(
+        writer_database,
+        Arc::new(AllowAll),
+        Arc::new(ProtectionPolicy),
+        Arc::new(DatabaseManagedContentProtector),
+    );
+
+    let principal = principal();
+    let subscriptions = OrmAiSubscriptionService::new(
+        subscriber_sessions.clone(),
+        Arc::new(ToggleResolver {
+            principal: principal.clone(),
+            active: Arc::new(AtomicBool::new(true)),
+        }),
+    )
+    .with_reauthorization_interval(Duration::from_secs(600))
+    .with_replay_check_interval(Duration::from_millis(20))
+    .with_replay_page_size(50);
+
+    let session = create_session(&subscriber_sessions, &principal).await;
+    let mut stream = subscriptions
+        .session_events(principal.clone(), AiSessionId(session.id), 0)
+        .await
+        .expect("subscription opens");
+
+    // Committed through the other handle: no wakeup reaches this subscriber.
+    send(&writer_sessions, &principal, session.id, "no wakeup").await;
+
+    let delivered = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("the durable fallback must deliver without an in-process wakeup")
+        .expect("item")
+        .expect("event");
+    assert!(delivered.closed.is_none());
+    assert_eq!(delivered.event.expect("event").sequence, 1);
 }

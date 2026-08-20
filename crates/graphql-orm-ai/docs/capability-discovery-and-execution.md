@@ -211,8 +211,31 @@ returns the session shell, newest messages plus backward cursor, durable
 watermark, active runs, recent terminal codes, related tool calls, safe
 provider activity and reset-required state. It never returns prompts, tool
 results, provider payloads, credentials or authorization details. The ORM
-implementation uses a bounded optimistic snapshot and retries if the session
-watermark changes during assembly.
+implementation uses a bounded optimistic snapshot and retries only when a
+field it actually returns changed during assembly.
+
+### The watermark is a resume floor
+
+The returned watermark is captured before the snapshot is assembled and is a
+lower bound, not an equality point:
+
+- every durable effect at or before the watermark is reflected in the
+  snapshot, so subscribing with `after_sequence = watermark` cannot miss an
+  event;
+- the message window never leads the watermark, because a new message changes
+  the message head and forces the snapshot to be reassembled;
+- run and tool-call rows may already reflect an effect after the watermark.
+  Both are identified state keyed by row ID, so re-applying the replayed event
+  that produced them is idempotent. A client must apply replayed events by ID
+  rather than assuming every replayed event is unseen.
+
+Deliberately excluded from the retry predicate are the session stream head,
+last-activity timestamp and CAS row version. A coalesced live delta advances
+all three at roughly the streaming coalescer rate while an assistant is
+answering, but appends only a session event and cannot change anything the
+bootstrap returns. Including that churn made the bounded snapshot fail with
+`Conflict` for exactly the sessions a user is most likely to open, which a
+client cannot distinguish from a disconnection.
 
 A client renders the snapshot, begins durable event replay strictly after the
 returned watermark, drains to the captured/current head, then attaches live
