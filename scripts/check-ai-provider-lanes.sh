@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -gt 2 ]]; then
+usage() {
   echo "usage: scripts/check-ai-provider-lanes.sh [test|check|clippy|doc] [provider-feature]" >&2
+  echo "       scripts/check-ai-provider-lanes.sh --list" >&2
+}
+
+if [[ $# -gt 2 ]]; then
+  usage
   exit 2
 fi
 
@@ -17,6 +22,25 @@ providers=(
   local-harness
   provider-codex-app-server
 )
+
+# `--list` prints the provider lanes as a JSON array so a caller that fans the
+# lanes across separate runners, each with its own `target/`, derives the set
+# from this script instead of restating it.
+if [[ "${mode}" == "--list" ]]; then
+  if [[ $# -gt 1 ]]; then
+    usage
+    exit 2
+  fi
+  printf '['
+  for index in "${!providers[@]}"; do
+    if [[ "${index}" -gt 0 ]]; then
+      printf ','
+    fi
+    printf '"%s"' "${providers[${index}]}"
+  done
+  printf ']\n'
+  exit 0
+fi
 
 case "${mode}" in
   test|check|clippy|doc) ;;
