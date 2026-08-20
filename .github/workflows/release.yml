@@ -35,22 +35,28 @@ concurrency:
   group: workspace-release
   cancel-in-progress: false
 
-# Every release lane shares one target directory in one job, across all
-# packages and every backend and provider permutation. Debug info and
-# incremental artifacts dominate that directory and contribute nothing to a
-# test, Clippy, rustdoc, or check lane, so they are disabled rather than
-# dropping or weakening any lane. Failure backtraces lose line detail; the
-# split CI workflow keeps full debug info for diagnosis.
+# Release validation is decomposed into independent jobs that mirror the CI
+# workflow, and the AI provider lanes fan out one runner per provider feature,
+# so no single `target/` ever holds every package, backend, and provider
+# permutation. Debug info and incremental artifacts still dominate whatever a
+# lane leaves behind and contribute nothing to a test, Clippy, rustdoc, or
+# check lane, so they stay disabled rather than dropping or weakening any lane.
+# Failure backtraces lose line detail; the CI workflow keeps `line-tables-only`
+# for diagnosis.
 env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
   CARGO_INCREMENTAL: "0"
 
 jobs:
-  validate:
-    name: Validate exact release source
+  guard:
+    name: Prove the selected source is current main
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 10
+    # The protected `release` environment stays on the single entry job. Every
+    # validation lane and the publication job depend on it, so one human
+    # approval still gates the whole run before any release lane compiles
+    # anything, exactly as the single `validate` job required.
     environment: release
     steps:
       - uses: actions/checkout@v5
@@ -76,30 +82,20 @@ jobs:
             echo "router_distribution_approval is required for a router binary" >&2
             exit 1
           fi
-      - name: Reclaim runner disk
-        run: |
-          set -euo pipefail
-          # Every release lane runs in this one job and shares one target
-          # directory: all packages, every backend and provider permutation,
-          # rustdoc output, and a second toolchain. CI splits the same lanes
-          # across jobs, so only the release job exhausts the runner image.
-          # Drop preinstalled toolchains this workspace never builds against
-          # rather than dropping or reordering any verification lane.
-          df -h /
-          sudo rm -rf \
-            /usr/local/lib/android \
-            /usr/share/dotnet \
-            /opt/ghc \
-            /usr/local/share/powershell \
-            /usr/local/share/boost \
-            /opt/hostedtoolcache/CodeQL \
-            "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}/Python" \
-            "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}/node" || true
-          sudo docker image prune --all --force || true
-          df -h /
+
+  workspace-integrity:
+    name: Workspace integrity and release metadata
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy,rustfmt
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Validate documentation and release metadata
         run: |
@@ -109,6 +105,20 @@ jobs:
           scripts/check-release-manifest.sh
           scripts/check-workspace-dependencies.sh
           cargo fmt --all -- --check
+
+  neutral-packages:
+    name: Neutral package lanes
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.target_ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
       - name: Verify neutral packages
         run: |
           cargo test -p graphql-orm-operation-catalog -p graphql-orm-ai-tool-profiles --locked
@@ -118,6 +128,20 @@ jobs:
           cargo clippy -p graphql-orm-backup --all-targets --features orm-sqlite --locked -- -D warnings
           RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc -p graphql-orm-operation-catalog -p graphql-orm-ai-tool-profiles -p graphql-orm-storage --no-deps --locked
           RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm-backup --features orm-sqlite --no-deps --locked
+
+  orm:
+    name: ORM backend lanes
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.target_ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
       - name: Verify ORM backend lanes
         run: |
           cargo test -p graphql-orm --locked
@@ -125,22 +149,126 @@ jobs:
           cargo check -p graphql-orm --no-default-features --features mssql --locked
           cargo clippy -p graphql-orm --all-targets --locked -- -D warnings
           RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --no-deps --locked
-      - name: Verify AI provider and backend lanes
+
+  ai-provider-matrix:
+    name: Enumerate AI provider lanes
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      providers: ${{ steps.providers.outputs.providers }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.target_ref }}
+      - id: providers
+        name: Read the provider lane list from the lane runner
+        # The provider list stays owned by scripts/check-ai-provider-lanes.sh.
+        # Reading it here means a provider added to the script cannot be
+        # silently dropped from the release matrix.
         run: |
-          scripts/check-ai-provider-lanes.sh test
-          cargo test -p graphql-orm-ai --features graphql-case-pascal --test graphql_naming --locked
+          set -euo pipefail
+          providers=$(scripts/check-ai-provider-lanes.sh --list)
+          echo "${providers}"
+          printf 'providers=%s\n' "${providers}" >> "${GITHUB_OUTPUT}"
+
+  ai-provider-lanes:
+    name: AI provider lane (${{ matrix.provider }})
+    needs:
+      - guard
+      - ai-provider-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      # Release runs are rare and gate an immutable publication, so report
+      # every failing provider lane instead of cancelling the siblings.
+      fail-fast: false
+      matrix:
+        provider: ${{ fromJSON(needs.ai-provider-matrix.outputs.providers) }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.target_ref }}
+      - name: Reclaim runner disk
+        # graphql-orm-ai relinks every test binary for the test, Clippy, and
+        # rustdoc lane of this provider. One provider per runner is what fixes
+        # the exhaustion; reclaiming the unused preinstalled toolchains keeps
+        # headroom for the crate that originally filled the disk.
+        uses: ./.github/actions/reclaim-runner-disk
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.provider }}
+      - name: Verify the provider lane
+        env:
+          PROVIDER: ${{ matrix.provider }}
+        run: |
+          scripts/check-ai-provider-lanes.sh test "${PROVIDER}"
+          scripts/check-ai-provider-lanes.sh clippy "${PROVIDER}"
+          scripts/check-ai-provider-lanes.sh doc "${PROVIDER}"
+
+  ai-graphql-naming:
+    name: AI GraphQL naming lane
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.target_ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p graphql-orm-ai --features graphql-case-pascal --test graphql_naming --locked
+
+  ai-postgres-parity:
+    name: AI PostgreSQL parity lane
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.target_ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run ORM parity against a test-owned disposable PostgreSQL container
+        run: cargo test -p graphql-orm-ai --no-default-features --features postgres,provider-openai --test postgres_parity --locked -- --test-threads=1
+
+  alternate-features:
+    name: Alternate feature lanes
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.target_ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify alternate AI, storage, and backup lanes
+        run: |
           cargo check -p graphql-orm-ai --no-default-features --features postgres --locked
           cargo check -p graphql-orm-ai --no-default-features --features mssql --locked
           cargo check -p graphql-orm-ai -p graphql-orm --no-default-features --features graphql-orm-ai/sqlite,graphql-orm/mssql --locked
-          cargo test -p graphql-orm-ai --no-default-features --features postgres,provider-openai --test postgres_parity --locked -- --test-threads=1
-          scripts/check-ai-provider-lanes.sh clippy
-          scripts/check-ai-provider-lanes.sh doc
-          RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc -p graphql-orm-operation-catalog -p graphql-orm-ai-tool-profiles --no-deps --locked
-      - name: Verify alternate storage and backup lanes
-        run: |
           cargo check -p graphql-orm-backup --no-default-features --features local,orm-postgres --locked
           cargo check -p graphql-orm-storage --no-default-features --features s3,azure --locked
           cargo check -p graphql-orm-storage --no-default-features --features smb --locked
+
+  router:
+    name: Router lanes
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.target_ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
       - name: Verify router lanes
         run: |
           cargo test -p graphql-orm-router-protocol --locked
@@ -150,11 +278,93 @@ jobs:
           cargo clippy -p graphql-orm-router --all-targets --features auth-agql --locked -- -D warnings
           RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc -p graphql-orm-router-protocol --no-deps --locked
           RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm-router --no-deps --features auth-agql --locked
+
+  router-msrv:
+    name: Router minimum supported Rust version
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.target_ref }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.90.0
+      - uses: Swatinem/rust-cache@v2
       - name: Verify router minimum supported Rust version
         run: |
-          rustup toolchain install 1.90.0 --profile minimal
-          cargo +1.90.0 test -p graphql-orm-router-protocol --locked
-          cargo +1.90.0 test -p graphql-orm-router --locked
+          cargo test -p graphql-orm-router-protocol --locked
+          cargo test -p graphql-orm-router --locked
+
+  validate:
+    name: Release validation complete
+    needs:
+      - guard
+      - workspace-integrity
+      - neutral-packages
+      - orm
+      - ai-provider-matrix
+      - ai-provider-lanes
+      - ai-graphql-naming
+      - ai-postgres-parity
+      - alternate-features
+      - router
+      - router-msrv
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require every release validation lane to have succeeded
+        # A failed or cancelled dependency already skips this job. The explicit
+        # assertion also fails the release when a lane is skipped, so a future
+        # condition on a validation job cannot quietly narrow what an immutable
+        # release was verified against.
+        env:
+          LANE_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          unsuccessful=$(
+            jq -r 'to_entries[] | select(.value.result != "success") | "\(.key): \(.value.result)"' \
+              <<<"${LANE_RESULTS}"
+          )
+          if [[ -n "${unsuccessful}" ]]; then
+            echo "release: validation lanes did not succeed:" >&2
+            echo "${unsuccessful}" >&2
+            exit 1
+          fi
+          jq -r 'to_entries[] | "release: \(.key) succeeded"' <<<"${LANE_RESULTS}"
+
+  release:
+    name: Publish immutable workspace release
+    needs:
+      - guard
+      - validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
+      - name: Restore release tag visibility
+        env:
+          TARGET_REF: ${{ inputs.target_ref }}
+        run: |
+          set -euo pipefail
+          # The release identity proof - current main, unused workspace tag,
+          # router approval - runs once in the guard job before any validation
+          # lane, exactly as it did before validation was split. This job only
+          # re-establishes the tag data that the manifest generator and the tag
+          # step read, and confirms this runner checked out the validated
+          # commit.
+          git fetch origin main --tags --force
+          test "$(git rev-parse HEAD)" = "${TARGET_REF}"
+      - name: Reclaim runner disk
+        # Only the optional router artifact compiles anything in this job.
+        if: inputs.include_router_artifact
+        uses: ./.github/actions/reclaim-runner-disk
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Generate deterministic release bundle
         env:
           RELEASE_ID: ${{ inputs.release_id }}

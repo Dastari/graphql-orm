@@ -125,12 +125,15 @@ Run **Workspace release** manually and supply:
 - `include_router_artifact`: normally false for source-only releases; and
 - `router_distribution_approval`: required when a router binary is attached.
 
-The protected `release` environment is the human authorization boundary. The
+The protected `release` environment is the human authorization boundary and
+gates the workflow's entry job, so no release lane runs before approval. The
 workflow then:
 
 1. proves the requested commit is current `main` and the workspace tag is new;
 2. reruns documentation, dependency, package, backend, provider, Clippy, and
-   Rustdoc release lanes with the lockfile fixed;
+   Rustdoc release lanes with the lockfile fixed, as parallel jobs that each
+   own their `target/`, one per AI provider lane, all of which must succeed
+   before anything is tagged or published;
 3. generates the canonical JSON manifest and Markdown release notes;
 4. optionally builds the approved Linux router executable and its CycloneDX
    inventory;

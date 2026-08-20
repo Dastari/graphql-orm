@@ -71,8 +71,10 @@ scripts/check-ai-provider-lanes.sh doc
 The runner covers `provider-openai`, `provider-anthropic`, `provider-xai`,
 `provider-ollama`, `provider-openai-compatible`, `local-harness`, and
 `provider-codex-app-server`, each with only SQLite and that provider enabled.
-Pass one provider feature as the second argument for a focused run. These local
-commands are release evidence; a hosted workflow result is not a substitute.
+Pass one provider feature as the second argument for a focused run, and
+`--list` to print the lane set as JSON. The release workflow uses both to give
+every provider lane its own runner and its own `target/`. These local commands
+are release evidence; a hosted workflow result is not a substitute.
 
 Router changes also require warnings-denied package lanes and the dependency
 boundary check:
