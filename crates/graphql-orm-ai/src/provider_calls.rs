@@ -2589,13 +2589,24 @@ impl AiProviderCallExecutor {
         self
     }
 
-    pub(crate) async fn interrupt_run(&self, lease: &AiRunLease) -> Result<(), AiError> {
+    pub(crate) async fn interrupt_run(
+        &self,
+        lease: &AiRunLease,
+    ) -> Result<crate::AiRunInterruptSettlement, AiError> {
         let binding = crate::AiProviderRunBinding::from_lease(lease)?;
-        self.runtime
+        let requested = self
+            .runtime
             .interrupt_all_provider_runs(&binding)
             .await
-            .map(|_| ())
-            .map_err(|_| AiError::ProviderFailed)
+            .map_err(|_| AiError::ProviderFailed)?;
+        // Acknowledgement is not settlement: no adapter can currently prove the
+        // interrupted turn left its retained thread consistent with the durable
+        // transcript, so this never reports `Settled`.
+        Ok(if requested == 0 {
+            crate::AiRunInterruptSettlement::NotActive
+        } else {
+            crate::AiRunInterruptSettlement::RequestedUnsettled
+        })
     }
 
     pub(crate) async fn close_run(
