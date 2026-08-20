@@ -117,7 +117,13 @@ async fn fixture_on(database: Database<SqliteBackend>, migrate: bool) -> Fixture
             .expect("AI schema migration should apply");
     }
     let owner = principal("disposition-owner");
-    let clock = Arc::new(FixedClock::new(OffsetDateTime::now_utc()));
+    // The session service stamps `next_attempt_at` from the real clock while
+    // `claim_next` compares against this fixed one, so a fixture pinned to
+    // "now" only claims when both land in the same second. Lead the real clock
+    // so the queued run is eligible regardless of where the boundary falls.
+    let clock = Arc::new(FixedClock::new(
+        OffsetDateTime::now_utc() + Duration::seconds(2),
+    ));
     let active = Arc::new(AtomicBool::new(true));
     let access_policy: Arc<dyn AiAccessPolicy> = Arc::new(AllowAll);
     let protection_policy: Arc<dyn AiContentProtectionPolicyResolver> = Arc::new(ProtectionPolicy);
