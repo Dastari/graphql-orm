@@ -399,7 +399,8 @@ pub fn classify_run_retry(
 const fn is_retryable_failure_code(code: &str) -> bool {
     matches!(
         code.as_bytes(),
-        b"agent_rule_budget_exceeded"
+        b"provider_session_cleanup_unavailable"
+            | b"agent_rule_budget_exceeded"
             | b"agent_rule_changed_after_provider"
             | b"agent_turn_limit_reached"
             | b"provider_unavailable"
