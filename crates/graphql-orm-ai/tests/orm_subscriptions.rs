@@ -393,9 +393,12 @@ async fn reauthorization_blip_is_survived_and_denial_still_fails_fast() {
             attempts: attempts.clone(),
         }),
     )
-    .with_reauthorization_interval(Duration::from_millis(20))
+    // Fast enough to observe several reauthorization attempts quickly, but not
+    // so fast that the durable head check starves a concurrent writer of the
+    // single in-memory SQLite write lock when the whole suite runs in parallel.
+    .with_reauthorization_interval(Duration::from_millis(50))
     .with_reauthorization_grace(Duration::from_secs(30))
-    .with_replay_check_interval(Duration::from_millis(10))
+    .with_replay_check_interval(Duration::from_millis(500))
     .with_replay_page_size(50);
 
     let session = create_session(&sessions, &principal).await;
@@ -429,7 +432,7 @@ async fn reauthorization_blip_is_survived_and_denial_still_fails_fast() {
                         "an unavailable dependency must not close the stream inside the grace window"
                     );
                 }
-                () = tokio::time::sleep(Duration::from_millis(5)) => {}
+                () = tokio::time::sleep(Duration::from_millis(20)) => {}
             }
         }
     })
