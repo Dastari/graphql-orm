@@ -2051,7 +2051,7 @@ impl OrmAiSubscriptionWaitService {
                             UpdateAiRunRecordInput {
                                 state: Some(final_state.as_str().to_owned()),
                                 next_attempt_at: Some(None),
-                                error_code: Some(Some(reason_code)),
+                                error_code: Some(Some(reason_code.clone())),
                                 ..Default::default()
                             },
                         )
@@ -2061,7 +2061,7 @@ impl OrmAiSubscriptionWaitService {
                     ) {
                         return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                     }
-                    append_terminal_run_event(tx, &run, final_state, now).await
+                    append_terminal_run_event(tx, &run, final_state, Some(&reason_code), now).await
                 })
             })
             .await

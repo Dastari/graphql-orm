@@ -421,3 +421,111 @@ async fn cancellation_wakes_the_fenced_worker_and_wrong_pairs_fail_closed() {
     assert!(observed.expect("wait should succeed").is_some());
     assert_eq!(view.expect("request should succeed").state, "cancelled");
 }
+
+/// Work item 1: a bootstrap opened *while* durable session events are being
+/// appended must return a snapshot rather than `Conflict`.
+///
+/// Cancellation is used as the event source because it appends two session
+/// events per run and touches no field the bootstrap returns, which is exactly
+/// the shape of coalesced live-delta churn during streaming. The writer runs
+/// concurrently with the readers so the append lands between the bootstrap's
+/// two session reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bootstrap_survives_concurrent_session_event_churn() {
+    let fixture = Arc::new(fixture().await);
+    let (session, _first_run) = active_run(&fixture).await;
+
+    // Enqueue every run up front so no message lands during the bootstraps: a
+    // new message legitimately invalidates the snapshot, and this test is
+    // about event churn alone.
+    let mut runs = Vec::new();
+    for _ in 0..64 {
+        let sent = fixture
+            .sessions
+            .send_message(
+                &fixture.owner,
+                SendAiMessageInput {
+                    session_id: session.id,
+                    text: "Keep counting".to_owned(),
+                    attachment_ids: vec![],
+                    client_message_id: Uuid::new_v4(),
+                },
+            )
+            .await
+            .expect("message should enqueue a run");
+        runs.push(sent.run_id);
+    }
+    let expected_messages = runs.len() + 1;
+
+    let before = fixture
+        .sessions
+        .conversation_bootstrap(&fixture.owner, AiSessionId(session.id), 200, 20, 500)
+        .await
+        .expect("quiescent bootstrap should succeed");
+
+    let writer_fixture = fixture.clone();
+    let writer_session = session.id;
+    let writer = tokio::spawn(async move {
+        for run_id in runs {
+            writer_fixture
+                .cancellation
+                .request_cancellation(
+                    &writer_fixture.owner,
+                    CancelAiRunInput {
+                        session_id: writer_session,
+                        run_id,
+                        client_request_id: Uuid::new_v4(),
+                    },
+                )
+                .await
+                .expect("owner should cancel the queued run");
+            tokio::task::yield_now().await;
+        }
+    });
+
+    let mut bootstraps = 0_u32;
+    while !writer.is_finished() {
+        let bootstrap = fixture
+            .sessions
+            .conversation_bootstrap(&fixture.owner, AiSessionId(session.id), 200, 20, 500)
+            .await
+            .expect("bootstrap must not fail while session events are appended");
+        assert_eq!(bootstrap.messages.len(), expected_messages);
+        assert!(!bootstrap.reset_required);
+
+        // The watermark is a resume floor: replay strictly after it must never
+        // skip an event, and the snapshot must already cover everything at or
+        // below it.
+        let page = fixture
+            .sessions
+            .session_event_page(
+                &fixture.owner,
+                AiSessionId(session.id),
+                bootstrap.watermark,
+                500,
+            )
+            .await
+            .expect("replay should start from the returned watermark");
+        assert!(!page.reset_required);
+        assert!(page.watermark >= bootstrap.watermark);
+        for event in &page.events {
+            assert!(event.sequence > bootstrap.watermark);
+        }
+        bootstraps += 1;
+    }
+    writer.await.expect("writer task should not panic");
+
+    let after = fixture
+        .sessions
+        .conversation_bootstrap(&fixture.owner, AiSessionId(session.id), 200, 20, 500)
+        .await
+        .expect("final bootstrap should succeed");
+    assert!(
+        after.watermark > before.watermark,
+        "the churn source must actually advance the durable stream head"
+    );
+    assert!(
+        bootstraps > 0,
+        "the reader must have raced the writer at least once"
+    );
+}

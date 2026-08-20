@@ -21,9 +21,9 @@ use crate::orm_inbox::{PreparedAiInboxEvent, append_inbox_event};
 use crate::orm_provider_session::AiProviderSessionBindingRecord;
 use crate::persistence::*;
 use crate::{
-    AiApprovalId, AiBudgetAmounts, AiError, AiRunCancellation, AiRunCancellationHub, AiRunId,
-    AiRunState, AiRunTerminalEvent, AiScope, AiSessionId, AiSessionWakeup, AiToolCallId,
-    ProtectedContentEnvelope,
+    AiApprovalId, AiBudgetAmounts, AiError, AiRunCancellation, AiRunCancellationHub, AiRunFailure,
+    AiRunId, AiRunRetryEvidence, AiRunState, AiRunTerminalEvent, AiScope, AiSessionId,
+    AiSessionWakeup, AiToolCallId, ProtectedContentEnvelope, classify_run_retry,
 };
 
 const MAXIMUM_WORKER_ID_BYTES: usize = 256;
@@ -914,6 +914,7 @@ impl OrmAiRunService {
                     if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
                         return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                     }
+                    let terminal_outcome_code = completion.outcome_code.clone();
                     append_attempt_outcome(
                         tx,
                         &lease,
@@ -923,7 +924,14 @@ impl OrmAiRunService {
                         now,
                     )
                     .await?;
-                    append_terminal_run_event(tx, &current, completion.final_state, now).await
+                    append_terminal_run_event(
+                        tx,
+                        &current,
+                        completion.final_state,
+                        Some(terminal_outcome_code.as_str()),
+                        now,
+                    )
+                    .await
                 })
             })
             .await
@@ -1453,7 +1461,14 @@ impl OrmAiRunService {
                         )
                         .await?;
                         if AiRunTerminalEvent::from_run_state(next_state).is_some() {
-                            append_terminal_run_event(tx, &current, next_state, now).await?;
+                            append_terminal_run_event(
+                                tx,
+                                &current,
+                                next_state,
+                                Some(outcome_code),
+                                now,
+                            )
+                            .await?;
                         }
                     }
                     Ok(report)
@@ -4015,6 +4030,7 @@ impl OrmAiRunService {
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    let terminal_outcome_code = reconciliation.outcome_code.clone();
                     let current = tx
                         .find_by_id::<AiRunRecord>(&reconciliation.expected_run.id)
                         .await
@@ -4469,7 +4485,7 @@ impl OrmAiRunService {
                         resource_kind: "ai_run".to_owned(),
                         resource_reference: current.id.to_string(),
                         outcome: audit_outcome.to_owned(),
-                        reason_code: reconciliation.outcome_code.clone(),
+                        reason_code: terminal_outcome_code.clone(),
                         correlation_id: approval_id.unwrap_or(current.id).to_string(),
                         causation_id: tool_call_id.map(|id| id.to_string()),
                         policy_version: reconciliation.policy_version,
@@ -4481,13 +4497,20 @@ impl OrmAiRunService {
                             tx,
                             lease,
                             final_state,
-                            reconciliation.outcome_code,
+                            terminal_outcome_code.clone(),
                             provider_response_id,
                             now,
                         )
                         .await?;
                     }
-                    append_terminal_run_event(tx, &current, final_state, now).await?;
+                    append_terminal_run_event(
+                        tx,
+                        &current,
+                        final_state,
+                        Some(terminal_outcome_code.as_str()),
+                        now,
+                    )
+                    .await?;
                     tx.queue_event(AiSessionWakeup {
                         session_id: session.id,
                         sequence: event_sequence,
@@ -4708,6 +4731,7 @@ fn reservation_usage_matches(
 }
 
 const TERMINAL_EVENT_METADATA_FORMAT: &str = "graphql-orm-ai-run-terminal-event-v1";
+const TERMINAL_EVENT_METADATA_FORMAT_V2: &str = "graphql-orm-ai-run-terminal-event-v2";
 
 /// Opens the deliberately content-free metadata envelope used by canonical
 /// run terminal events without consulting a scope content key.
@@ -4727,11 +4751,15 @@ pub(crate) fn open_terminal_event_metadata(
     else {
         return Ok(None);
     };
-    if value.get("format").and_then(serde_json::Value::as_str)
-        != Some(TERMINAL_EVENT_METADATA_FORMAT)
-    {
-        return Ok(None);
-    }
+    // Rows written before the failure record used the v1 shape and must stay
+    // readable. Anything that is neither tagged shape falls through to the
+    // configured content protector; anything that claims a tagged shape but
+    // does not match it exactly fails closed.
+    let expected_len = match value.get("format").and_then(serde_json::Value::as_str) {
+        Some(TERMINAL_EVENT_METADATA_FORMAT) => 2,
+        Some(TERMINAL_EVENT_METADATA_FORMAT_V2) => 3,
+        _ => return Ok(None),
+    };
     let terminal =
         AiRunTerminalEvent::from_event_type(event_type).ok_or(AiError::PersistenceFailed)?;
     if protected_payload
@@ -4741,22 +4769,62 @@ pub(crate) fn open_terminal_event_metadata(
         || protected_payload
             .as_object()
             .is_none_or(|object| object.len() != 2)
-        || value.len() != 2
+        || value.len() != expected_len
         || value.get("state").and_then(serde_json::Value::as_str)
             != Some(terminal.run_state().as_str())
     {
         return Err(AiError::PersistenceFailed);
     }
+    if expected_len == 3 && !valid_terminal_failure_record(value.get("failure")) {
+        return Err(AiError::PersistenceFailed);
+    }
     Ok(Some(serde_json::Value::Object(value.clone())))
+}
+
+/// Validates the bounded failure record without opening any protected content.
+///
+/// `null` is the successful-terminal case. Every other shape must be the exact
+/// versioned record this crate writes.
+fn valid_terminal_failure_record(failure: Option<&serde_json::Value>) -> bool {
+    let Some(failure) = failure else {
+        return false;
+    };
+    if failure.is_null() {
+        return true;
+    }
+    let Some(record) = failure.as_object() else {
+        return false;
+    };
+    record.len() == 5
+        && record.get("version").and_then(serde_json::Value::as_u64)
+            == Some(u64::from(crate::AI_RUN_FAILURE_VERSION))
+        && record.get("ok") == Some(&serde_json::Value::Bool(false))
+        && record
+            .get("retryable")
+            .is_some_and(serde_json::Value::is_boolean)
+        && record
+            .get("admission")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|admission| {
+                matches!(
+                    admission,
+                    "allowed" | "refused_uncertain" | "refused_already_answered"
+                )
+            })
+        && record
+            .get("code")
+            .is_some_and(|code| code.is_null() || code.as_str().is_some_and(valid_safe_code))
 }
 
 fn terminal_event_metadata(
     terminal: AiRunTerminalEvent,
+    failure: Option<&AiRunFailure>,
 ) -> Result<serde_json::Value, OrmPublicError> {
     serde_json::to_value(ProtectedContentEnvelope::DatabaseManaged {
         value: serde_json::json!({
-            "format": TERMINAL_EVENT_METADATA_FORMAT,
+            "format": TERMINAL_EVENT_METADATA_FORMAT_V2,
             "state": terminal.run_state().as_str(),
+            "failure": failure.map(AiRunFailure::to_json),
         }),
     })
     .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))
@@ -4768,6 +4836,7 @@ pub(crate) async fn append_terminal_run_event(
     tx: &mut MutationContext<'_, DefaultWriteBackend>,
     run: &AiRunRecord,
     final_state: AiRunState,
+    outcome_code: Option<&str>,
     now: OffsetDateTime,
 ) -> Result<(), OrmPublicError> {
     let terminal = AiRunTerminalEvent::from_run_state(final_state)
@@ -4835,8 +4904,32 @@ pub(crate) async fn append_terminal_run_event(
     };
     let event_id = Uuid::new_v4();
     let inbox_event_id = Uuid::new_v4();
-    let protected_event = terminal_event_metadata(terminal)?;
-    let protected_inbox_event = terminal_event_metadata(terminal)?;
+    // Retry admission is decided from committed rows only. The caller supplies
+    // the outcome code from the completion it is committing, because `run` is
+    // the pre-transition record and its `error_code` is still the previous
+    // attempt's value.
+    let failure = match terminal {
+        AiRunTerminalEvent::Completed => None,
+        AiRunTerminalEvent::Failed
+        | AiRunTerminalEvent::Cancelled
+        | AiRunTerminalEvent::RecoveryRequired => {
+            let evidence = AiRunRetryEvidence {
+                terminal,
+                produced_assistant_output: run_produced_assistant_output(
+                    tx,
+                    run.session_id,
+                    run.id,
+                )
+                .await?,
+            };
+            Some(AiRunFailure::new(
+                classify_run_retry(evidence, outcome_code),
+                outcome_code.map(str::to_owned),
+            ))
+        }
+    };
+    let protected_event = terminal_event_metadata(terminal, failure.as_ref())?;
+    let protected_inbox_event = terminal_event_metadata(terminal, failure.as_ref())?;
     tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
         id: event_id,
         session_id: session.id,
@@ -5662,8 +5755,9 @@ mod tests {
                 .expect("terminal metadata should validate")
                 .expect("terminal event should use metadata-only envelope"),
             serde_json::json!({
-                "format": TERMINAL_EVENT_METADATA_FORMAT,
+                "format": TERMINAL_EVENT_METADATA_FORMAT_V2,
                 "state": "completed",
+                "failure": serde_json::Value::Null,
             })
         );
         let inbox = inbox_events(&fixture).await;
@@ -5844,4 +5938,40 @@ mod tests {
         assert_eq!(retry.retry_count(), 1);
         assert_eq!(retry.lease_generation(), 2);
     }
+}
+
+/// Returns whether one run already produced a durable assistant message.
+///
+/// This is the only evidence allowed to decide "already answered". It reads
+/// committed rows in the caller's transaction and never consults worker state,
+/// elapsed time, or a provider report.
+pub(crate) async fn run_produced_assistant_output(
+    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    session_id: Uuid,
+    run_id: Uuid,
+) -> Result<bool, OrmPublicError> {
+    let rows = tx
+        .query::<AiMessageRecord>()
+        .filter(AiMessageRecordWhereInput {
+            // Scoped by session first so the read stays inside one
+            // conversation's indexed keyset rather than scanning globally.
+            session_id: Some(UuidFilter {
+                eq: Some(session_id),
+                ..Default::default()
+            }),
+            run_id: Some(UuidFilter {
+                eq: Some(run_id),
+                ..Default::default()
+            }),
+            message_role: Some(StringFilter {
+                eq: Some("assistant".to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .limit(1)
+        .fetch_all()
+        .await
+        .map_err(OrmPublicError::from)?;
+    Ok(!rows.is_empty())
 }

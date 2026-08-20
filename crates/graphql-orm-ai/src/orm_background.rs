@@ -1539,8 +1539,14 @@ impl OrmAiOpenAiBackgroundSubmissionService {
                         now,
                     )
                     .await?;
-                    append_terminal_run_event(tx, &current, AiRunState::RecoveryRequired, now)
-                        .await?;
+                    append_terminal_run_event(
+                        tx,
+                        &current,
+                        AiRunState::RecoveryRequired,
+                        Some(safe_error_code),
+                        now,
+                    )
+                    .await?;
                     tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
                         actor_principal_kind: "system".to_owned(),
                         actor_subject: "provider-background".to_owned(),
@@ -3308,7 +3314,7 @@ async fn commit_background_terminal_graph(
     })
     .await
     .map_err(OrmPublicError::from)?;
-    append_terminal_run_event(tx, &run, run_state, now).await?;
+    append_terminal_run_event(tx, &run, run_state, Some(outcome_code), now).await?;
     tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
         actor_principal_kind: "system".to_owned(),
         actor_subject: submission
@@ -4711,7 +4717,14 @@ async fn close_background_recovery(
     })
     .await
     .map_err(OrmPublicError::from)?;
-    append_terminal_run_event(tx, &run, AiRunState::RecoveryRequired, now).await?;
+    append_terminal_run_event(
+        tx,
+        &run,
+        AiRunState::RecoveryRequired,
+        Some(safe_error_code),
+        now,
+    )
+    .await?;
     close_matched_receipt_recovery(tx, submission, safe_error_code, now).await?;
     tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
         actor_principal_kind: "system".to_owned(),

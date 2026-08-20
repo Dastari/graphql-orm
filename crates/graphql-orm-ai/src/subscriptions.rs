@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use agql_auth::AuthPrincipal;
-use async_graphql::{Context, ErrorExtensions, SimpleObject, Subscription};
+use async_graphql::{Context, Enum, ErrorExtensions, SimpleObject, Subscription};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use uuid::Uuid;
@@ -21,16 +21,75 @@ pub struct AiSessionWakeup {
     pub sequence: i64,
 }
 
-/// Subscription item supporting explicit retention-gap reset signaling.
+/// Closed reason for a session-event stream that ended without the client
+/// unsubscribing.
+///
+/// A stream that simply stops producing items is indistinguishable from
+/// network silence, so every server-side end carries exactly one of these on a
+/// final envelope. None of these values disclose provider, prompt, tool, or
+/// authorization detail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+pub enum AiSessionStreamClose {
+    /// Retention removed history the client still needs. Discard derived state
+    /// and reload from `aiConversationBootstrap`.
+    ResetRequired,
+    /// The host's in-process wakeup channel closed, normally because the
+    /// process is shutting down. Durable history is intact; resubscribe from
+    /// the last delivered watermark.
+    WakeupChannelClosed,
+    /// Reauthorization returned an authoritative denial, or the session is no
+    /// longer visible to the principal. Do not resubscribe with the same
+    /// credentials.
+    AuthorizationRevoked,
+    /// Reauthorization could not be completed within the bounded grace window
+    /// because the authorization dependency was unavailable. Durable history is
+    /// intact; resubscribe after backing off.
+    ReauthorizationUnavailable,
+}
+
+/// Subscription item supporting explicit retention-gap reset signaling and
+/// typed terminal close signaling.
 #[derive(Clone, Debug, SimpleObject)]
 #[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
 pub struct AiSessionEventEnvelope {
-    /// Durable event, absent only for a reset signal.
+    /// Durable event, absent only for a reset or close signal.
     pub event: Option<AiSessionEventView>,
     /// Replay watermark associated with this delivery.
     pub watermark: i64,
     /// Whether retention removed required history and the client must reload.
     pub reset_required: bool,
+    /// Set only on the final envelope of a server-ended stream, and `None` on
+    /// every ordinary delivery. An end with no preceding close envelope and no
+    /// error is a client unsubscribe or a transport failure.
+    pub closed: Option<AiSessionStreamClose>,
+}
+
+impl AiSessionEventEnvelope {
+    /// Creates an ordinary delivery for one durable event.
+    #[must_use]
+    pub const fn delivered(event: AiSessionEventView, watermark: i64) -> Self {
+        Self {
+            event: Some(event),
+            watermark,
+            reset_required: false,
+            closed: None,
+        }
+    }
+
+    /// Creates the final envelope for a server-ended stream.
+    ///
+    /// `reset_required` stays coupled to [`AiSessionStreamClose::ResetRequired`]
+    /// so existing clients that only read the boolean keep working.
+    #[must_use]
+    pub const fn ended(reason: AiSessionStreamClose, watermark: i64) -> Self {
+        Self {
+            event: None,
+            watermark,
+            reset_required: matches!(reason, AiSessionStreamClose::ResetRequired),
+            closed: Some(reason),
+        }
+    }
 }
 
 /// Type-erased bounded event stream.

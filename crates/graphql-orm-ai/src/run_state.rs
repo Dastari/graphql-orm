@@ -300,3 +300,148 @@ pub enum AiRunTransitionError {
     #[error(transparent)]
     Lease(#[from] LeaseError),
 }
+
+/// Wire version of the bounded run-failure record carried by terminal run
+/// events.
+pub const AI_RUN_FAILURE_VERSION: u16 = 1;
+
+/// Whether a client may author a new run for the same durable user message.
+///
+/// This is not a state-machine transition. `RecoveryRequired`, `Failed`, and
+/// `Cancelled` are all terminal and never resume; retry means *authoring a new
+/// run* over the same already-persisted user message under current policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiRunRetryAdmission {
+    /// A new run may be authored for the same durable user message.
+    Allowed,
+    /// Re-execution is refused because the original stop left an effect that
+    /// could not be proven safe. This is the fail-closed default.
+    RefusedUncertain,
+    /// Re-execution is refused because the run already produced a durable
+    /// assistant answer for that user message.
+    RefusedAlreadyAnswered,
+}
+
+impl AiRunRetryAdmission {
+    /// Stable public value.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Allowed => "allowed",
+            Self::RefusedUncertain => "refused_uncertain",
+            Self::RefusedAlreadyAnswered => "refused_already_answered",
+        }
+    }
+
+    /// Returns whether a retry request will be admitted.
+    pub const fn is_allowed(self) -> bool {
+        matches!(self, Self::Allowed)
+    }
+}
+
+/// Durable evidence a retry decision is allowed to consider.
+///
+/// Every field must come from committed rows. Nothing here may be inferred
+/// from elapsed time, in-memory worker state, or provider reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AiRunRetryEvidence {
+    /// Terminal state the run actually reached.
+    pub terminal: AiRunTerminalEvent,
+    /// Whether a durable assistant message exists for this run.
+    pub produced_assistant_output: bool,
+}
+
+/// Classifies whether a terminal run may be retried as a new run.
+///
+/// The rules are deliberately conservative:
+///
+/// - `RecoveryRequired` is never retryable. It exists precisely because an
+///   external effect could not be proven safe, and re-execution is what the
+///   safe-failure guardrail forbids.
+/// - `Completed` is never retryable; the message already has its answer.
+/// - `Cancelled` is retryable only when the run produced no durable assistant
+///   output. Cancellation observed *after* a provider turn was persisted
+///   leaves a fully answered message, and authoring a second run over it would
+///   produce a second answer.
+/// - `Failed` is retryable only for an explicitly proven-clean code. An absent
+///   or unrecognized code is refused, because an unclassified failure is
+///   exactly the case where safety cannot be proven.
+pub fn classify_run_retry(
+    evidence: AiRunRetryEvidence,
+    outcome_code: Option<&str>,
+) -> AiRunRetryAdmission {
+    match evidence.terminal {
+        AiRunTerminalEvent::RecoveryRequired => AiRunRetryAdmission::RefusedUncertain,
+        AiRunTerminalEvent::Completed => AiRunRetryAdmission::RefusedAlreadyAnswered,
+        AiRunTerminalEvent::Cancelled => {
+            if evidence.produced_assistant_output {
+                AiRunRetryAdmission::RefusedAlreadyAnswered
+            } else {
+                AiRunRetryAdmission::Allowed
+            }
+        }
+        AiRunTerminalEvent::Failed => {
+            if evidence.produced_assistant_output {
+                return AiRunRetryAdmission::RefusedAlreadyAnswered;
+            }
+            match outcome_code {
+                Some(code) if is_retryable_failure_code(code) => AiRunRetryAdmission::Allowed,
+                _ => AiRunRetryAdmission::RefusedUncertain,
+            }
+        }
+    }
+}
+
+/// Closed allowlist of failure codes that leave no unproven external effect.
+///
+/// Membership is opt-in. A code absent from this list is refused, so adding a
+/// new failure classification cannot silently make it retryable.
+const fn is_retryable_failure_code(code: &str) -> bool {
+    matches!(
+        code.as_bytes(),
+        b"agent_rule_budget_exceeded"
+            | b"agent_rule_changed_after_provider"
+            | b"agent_turn_limit_reached"
+            | b"provider_unavailable"
+            | b"provider_rate_limited"
+            | b"provider_request_rejected"
+            | b"runtime_not_ready"
+    )
+}
+
+/// Bounded, content-free failure record a client may render.
+///
+/// It mirrors the model-visible safe failure envelope shape and carries only
+/// server-owned classification: never a prompt, provider payload, tool
+/// argument, stack, or authorization detail.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiRunFailure {
+    /// Stable redacted outcome code, absent when the writer supplied none.
+    pub code: Option<String>,
+    /// Whether a new run may be authored for the same durable user message.
+    pub retryable: bool,
+    /// Why retry is or is not admitted.
+    pub admission: AiRunRetryAdmission,
+}
+
+impl AiRunFailure {
+    /// Builds the record for one classified terminal outcome.
+    pub fn new(admission: AiRunRetryAdmission, code: Option<String>) -> Self {
+        Self {
+            code,
+            retryable: admission.is_allowed(),
+            admission,
+        }
+    }
+
+    /// Serializes the versioned, content-free record.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "version": AI_RUN_FAILURE_VERSION,
+            "ok": false,
+            "code": self.code,
+            "retryable": self.retryable,
+            "admission": self.admission.as_str(),
+        })
+    }
+}
