@@ -1404,19 +1404,48 @@ impl AiReadOnlyAgentCoordinator {
                 Ok(result) => result,
                 Err(ProviderTurnFailure::Deferred) => {
                     const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
-                    self.run_control
+                    // The durable retry is what makes a message accepted during
+                    // provider-session cleanup converge without an operator: the
+                    // run becomes retry-scheduled and is reclaimed after the
+                    // deadline, across a host restart. The `Deferred` outcome is
+                    // a report, not the mechanism.
+                    match self
+                        .run_control
                         .schedule_retry(
                             &lease,
                             time::Duration::seconds(5),
                             "provider_session_cleanup_pending",
                         )
-                        .await?;
-                    return Ok(Deferred {
-                        reason: AiProviderSessionDeferralReason::CleanupPending,
-                        retry_after: RETRY_AFTER,
-                        provider_turns: guard.provider_turns(),
-                        total_tool_calls: guard.total_tool_calls(),
-                    });
+                        .await
+                    {
+                        Ok(()) => {
+                            return Ok(Deferred {
+                                reason: AiProviderSessionDeferralReason::CleanupPending,
+                                retry_after: RETRY_AFTER,
+                                provider_turns: guard.provider_turns(),
+                                total_tool_calls: guard.total_tool_calls(),
+                            });
+                        }
+                        Err(AiError::Conflict) => {
+                            // The retry ceiling ran out while cleanup stayed
+                            // pending. Nothing was executed on this attempt: no
+                            // provider call, no tool, no persisted output. Close
+                            // the run as a clean visible failure rather than
+                            // letting the lease expire into `RecoveryRequired`,
+                            // which would be both misclassified and stuck until
+                            // an operator looked at it. A stale fence makes the
+                            // terminal write fail too, so ordinary expired-lease
+                            // reconciliation still owns that case.
+                            return self
+                                .finish_failed(
+                                    &lease,
+                                    &guard,
+                                    "provider_session_cleanup_unavailable",
+                                )
+                                .await;
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
                 Err(ProviderTurnFailure::Provider) => {
                     if self.run_control.cancellation(&lease).await?.is_some() {
@@ -2186,19 +2215,39 @@ mod tests {
 
     struct TestRunControl {
         finishes: Mutex<Vec<AiRunState>>,
+        finish_codes: Mutex<Vec<String>>,
         heartbeat_count: AtomicUsize,
         fail_heartbeat: AtomicBool,
         cancelled: AtomicBool,
+        scheduled_retries: Mutex<Vec<String>>,
+        retry_ceiling_reached: AtomicBool,
     }
 
     impl TestRunControl {
         fn new() -> Self {
             Self {
                 finishes: Mutex::new(Vec::new()),
+                finish_codes: Mutex::new(Vec::new()),
                 heartbeat_count: AtomicUsize::new(0),
                 fail_heartbeat: AtomicBool::new(false),
                 cancelled: AtomicBool::new(false),
+                scheduled_retries: Mutex::new(Vec::new()),
+                retry_ceiling_reached: AtomicBool::new(false),
             }
+        }
+
+        fn scheduled_retry_codes(&self) -> Vec<String> {
+            self.scheduled_retries
+                .lock()
+                .expect("test retry lock should not be poisoned")
+                .clone()
+        }
+
+        fn final_codes(&self) -> Vec<String> {
+            self.finish_codes
+                .lock()
+                .expect("test finish code lock should not be poisoned")
+                .clone()
         }
 
         fn final_states(&self) -> Vec<AiRunState> {
@@ -2252,10 +2301,32 @@ mod tests {
             _lease: &AiRunLease,
             completion: AiRunCompletion,
         ) -> Result<(), AiError> {
+            self.finish_codes
+                .lock()
+                .expect("test finish code lock should not be poisoned")
+                .push(completion.outcome_code().to_owned());
             self.finishes
                 .lock()
                 .expect("test finish lock should not be poisoned")
                 .push(completion.final_state());
+            Ok(())
+        }
+
+        async fn schedule_retry(
+            &self,
+            _lease: &AiRunLease,
+            _delay: time::Duration,
+            error_code: &str,
+        ) -> Result<(), AiError> {
+            if self.retry_ceiling_reached.load(Ordering::SeqCst) {
+                // Exactly what the durable service returns once the run has
+                // exhausted its bounded retry allowance.
+                return Err(AiError::Conflict);
+            }
+            self.scheduled_retries
+                .lock()
+                .expect("test retry lock should not be poisoned")
+                .push(error_code.to_owned());
             Ok(())
         }
     }
@@ -2389,6 +2460,30 @@ mod tests {
                 .take()
                 .ok_or(AiError::Conflict)
                 .map(|result| result.test_with_provider_session_claim(self.claim.clone()))
+        }
+    }
+
+    struct DeferringRetainedProviderExecutor;
+
+    #[async_trait]
+    impl AiAgentProviderTurnExecutor for DeferringRetainedProviderExecutor {
+        async fn execute_turn(
+            &self,
+            _lease: &AiRunLease,
+            _plan: AiProviderCallPlan,
+        ) -> Result<AiProviderCallResult, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn execute_retained_turn(
+            &self,
+            _lease: Arc<tokio::sync::Mutex<AiRunLease>>,
+            _plan: AiProviderCallPlan,
+            _session_plan: crate::AiProviderSessionTurnPlan,
+            _session_service: Arc<dyn crate::AiProviderSessionService>,
+            _execution: Option<Arc<dyn AiProviderDynamicToolExecution>>,
+        ) -> Result<AiProviderCallResult, AiError> {
+            Err(AiError::ProviderSessionDeferred)
         }
     }
 
@@ -3501,6 +3596,128 @@ mod tests {
                 usize::from(fail_commit)
             );
         }
+    }
+
+    /// Work item 4.3: a message accepted while provider-session cleanup is
+    /// pending must converge without an operator.
+    ///
+    /// While the run still has retry allowance it becomes durably
+    /// retry-scheduled, which is what survives a host restart: `claim_next`
+    /// reclaims queued and retry-scheduled runs, so the `Deferred` outcome is a
+    /// report rather than the delivery mechanism.
+    #[tokio::test]
+    async fn cleanup_pending_defers_through_a_durable_retry() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        let descriptor = retained_descriptor();
+        let planner = Arc::new(TestRetainedChatPlanner {
+            scope: test_scope(),
+            provider_session: crate::AiProviderSessionTurnPlan::new(descriptor, "c".repeat(64))
+                .expect("retained turn plan should validate"),
+        });
+        let session_service = Arc::new(TestProviderSessionService {
+            run: run.clone(),
+            commits: AtomicUsize::new(0),
+            cleanups: AtomicUsize::new(0),
+            fail_commit: false,
+        });
+        let forbidden = Arc::new(ChatForbiddenBoundaries::default());
+        let coordinator = AiReadOnlyAgentCoordinator::new(
+            run.clone(),
+            Arc::new(DeferringRetainedProviderExecutor),
+            forbidden.clone(),
+            Arc::new(TestOutputWriter),
+            forbidden.clone(),
+            Arc::new(TestCheckpointWriter),
+            Arc::new(TestRuleResolver),
+            planner,
+            limits(50),
+        )
+        .with_provider_session_service(session_service);
+
+        let outcome = coordinator
+            .execute_claimed(&lease)
+            .await
+            .expect("a pending cleanup should defer rather than fail");
+        assert!(matches!(
+            outcome,
+            Deferred {
+                reason: AiProviderSessionDeferralReason::CleanupPending,
+                ..
+            }
+        ));
+        assert_eq!(
+            run.scheduled_retry_codes(),
+            vec!["provider_session_cleanup_pending".to_owned()],
+            "the durable retry, not the reported outcome, is what converges"
+        );
+        assert!(
+            run.final_states().is_empty(),
+            "a deferral must not close the run"
+        );
+    }
+
+    /// Work item 4.3: once the bounded retry allowance is exhausted while
+    /// cleanup is still pending, the run must close as a visible failure rather
+    /// than being left to expire into `RecoveryRequired`, which is both
+    /// misclassified and stuck until an operator looks at it.
+    #[tokio::test]
+    async fn exhausted_cleanup_retries_converge_to_a_clean_visible_failure() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        run.retry_ceiling_reached.store(true, Ordering::SeqCst);
+        let descriptor = retained_descriptor();
+        let planner = Arc::new(TestRetainedChatPlanner {
+            scope: test_scope(),
+            provider_session: crate::AiProviderSessionTurnPlan::new(descriptor, "c".repeat(64))
+                .expect("retained turn plan should validate"),
+        });
+        let session_service = Arc::new(TestProviderSessionService {
+            run: run.clone(),
+            commits: AtomicUsize::new(0),
+            cleanups: AtomicUsize::new(0),
+            fail_commit: false,
+        });
+        let forbidden = Arc::new(ChatForbiddenBoundaries::default());
+        let coordinator = AiReadOnlyAgentCoordinator::new(
+            run.clone(),
+            Arc::new(DeferringRetainedProviderExecutor),
+            forbidden.clone(),
+            Arc::new(TestOutputWriter),
+            forbidden.clone(),
+            Arc::new(TestCheckpointWriter),
+            Arc::new(TestRuleResolver),
+            planner,
+            limits(50),
+        )
+        .with_provider_session_service(session_service);
+
+        let outcome = coordinator
+            .execute_claimed(&lease)
+            .await
+            .expect("an exhausted retry allowance should still close the run");
+        assert!(matches!(outcome, Failed { .. }));
+        assert_eq!(run.final_states(), vec![AiRunState::Failed]);
+        assert_eq!(
+            run.final_codes(),
+            vec!["provider_session_cleanup_unavailable".to_owned()]
+        );
+        assert!(
+            run.scheduled_retry_codes().is_empty(),
+            "no retry may be recorded once the allowance is exhausted"
+        );
+        // Nothing executed on this attempt, so the failure is provably clean
+        // and the owner may author a new run for the same message.
+        assert_eq!(
+            crate::classify_run_retry(
+                crate::AiRunRetryEvidence {
+                    terminal: crate::AiRunTerminalEvent::Failed,
+                    produced_assistant_output: false,
+                },
+                Some("provider_session_cleanup_unavailable"),
+            ),
+            crate::AiRunRetryAdmission::Allowed
+        );
     }
 
     #[tokio::test]

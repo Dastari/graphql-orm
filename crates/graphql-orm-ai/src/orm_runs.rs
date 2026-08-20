@@ -268,6 +268,14 @@ impl AiRunCompletion {
     pub const fn final_state(&self) -> AiRunState {
         self.final_state
     }
+
+    /// Stable redacted outcome code recorded on the immutable attempt outcome.
+    ///
+    /// This is server-owned classification, never provider diagnostics, a
+    /// prompt, a tool argument, or response content.
+    pub fn outcome_code(&self) -> &str {
+        &self.outcome_code
+    }
 }
 
 /// Bounded result of expired-lease reconciliation.
