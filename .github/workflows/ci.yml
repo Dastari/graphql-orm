@@ -7,6 +7,16 @@ on:
       - main
   workflow_dispatch:
 
+# The companions job relinks every graphql-orm-ai test binary once per provider
+# feature combination. With full debug info that exhausted the runner disk and
+# the linker died with SIGBUS mid-link. `line-tables-only` keeps file and line
+# numbers in failure backtraces, which is what CI diagnosis actually needs,
+# at a fraction of the size.
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   workspace-integrity:
     runs-on: ubuntu-latest
