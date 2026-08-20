@@ -702,7 +702,7 @@ impl AiSessionService for OrmAiSessionService {
         let has_more = rows.last().is_some_and(|row| row.sequence < watermark);
         let mut events = Vec::with_capacity(rows.len());
         for row in rows {
-            let payload = match crate::orm_runs::open_terminal_event_metadata(
+            let payload = match crate::orm_runs::open_metadata_only_event(
                 &row.event_type,
                 &row.protected_payload,
             )? {

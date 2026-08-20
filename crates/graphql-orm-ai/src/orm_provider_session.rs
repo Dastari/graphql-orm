@@ -148,9 +148,10 @@ mod service {
     };
     use crate::persistence::{
         AiApprovalRecord, AiAuditEventRecord, AiMessageRecord, AiRunCheckpointRecord,
-        AiRunCheckpointRecordWhereInput, AiRunRecord, AiSessionRecord,
-        AiSubscriptionWaitAdoptionRecord, AiSubscriptionWaitAdoptionRecordWhereInput,
-        AiSubscriptionWaiterRecord, AiToolCallRecord, CreateAiAuditEventRecordInput,
+        AiRunCheckpointRecordWhereInput, AiRunRecord, AiSessionEventRecord, AiSessionRecord,
+        AiSessionRecordWhereInput, AiSubscriptionWaitAdoptionRecord,
+        AiSubscriptionWaitAdoptionRecordWhereInput, AiSubscriptionWaiterRecord, AiToolCallRecord,
+        CreateAiAuditEventRecordInput, CreateAiSessionEventRecordInput, UpdateAiSessionRecordInput,
     };
     use crate::{
         AiAccessPolicy, AiContentProtectionPolicy, AiContentProtectionPolicyResolver,
@@ -1006,6 +1007,20 @@ mod service {
                             now,
                         )
                         .await?;
+                        // A rebind replaces the provider's thread even though
+                        // the durable transcript is continuous. Disclose it so
+                        // the host can tell the user the model's context was
+                        // reset rather than silently continuing.
+                        append_provider_session_disclosure(
+                            tx,
+                            crate::orm_runs::PROVIDER_SESSION_REBOUND_EVENT,
+                            updated.session_id,
+                            updated.id,
+                            "provider_session_absence_rebound",
+                            Some(lease.run_id().0),
+                            now,
+                        )
+                        .await?;
                         Ok(updated)
                     })
                 })
@@ -1574,6 +1589,16 @@ mod service {
                             parked.source_run_id.0,
                             now,
                         )
+                        .await?;
+                        append_provider_session_disclosure(
+                            tx,
+                            crate::orm_runs::PROVIDER_SESSION_RESET_EVENT,
+                            binding.session_id,
+                            binding.id,
+                            &reason_code,
+                            Some(parked.source_run_id.0),
+                            now,
+                        )
                         .await
                     })
                 })
@@ -1623,6 +1648,16 @@ mod service {
                             binding.id,
                             &reason_code,
                             request.claim.run_id.0,
+                            now,
+                        )
+                        .await?;
+                        append_provider_session_disclosure(
+                            tx,
+                            crate::orm_runs::PROVIDER_SESSION_RESET_EVENT,
+                            binding.session_id,
+                            binding.id,
+                            &reason_code,
+                            Some(request.claim.run_id.0),
                             now,
                         )
                         .await
@@ -1897,6 +1932,16 @@ mod service {
                             binding.id,
                             &reason_code,
                             claim.run_id.0,
+                            now,
+                        )
+                        .await?;
+                        append_provider_session_disclosure(
+                            tx,
+                            crate::orm_runs::PROVIDER_SESSION_RESET_EVENT,
+                            binding.session_id,
+                            binding.id,
+                            &reason_code,
+                            Some(claim.run_id.0),
                             now,
                         )
                         .await
@@ -3168,6 +3213,77 @@ mod service {
         .await
         .map_err(OrmPublicError::from)?;
         let _ = now;
+        Ok(())
+    }
+
+    /// Discloses that a retained provider thread stopped being usable, so the
+    /// model's context was reset even though the durable transcript stays
+    /// continuous.
+    ///
+    /// The event carries only the server-owned reason class: never a cursor,
+    /// prompt, provider payload, tool argument, or authorization detail. It is
+    /// appended to the ordinary sequenced session stream so it replays,
+    /// retains, and authorizes exactly like every other session event.
+    async fn append_provider_session_disclosure(
+        tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+        event_type: &str,
+        session_id: Uuid,
+        binding_id: Uuid,
+        reason_code: &str,
+        run_id: Option<Uuid>,
+        now: OffsetDateTime,
+    ) -> Result<(), OrmPublicError> {
+        let session = tx
+            .find_by_id::<AiSessionRecord>(&session_id)
+            .await
+            .map_err(OrmPublicError::from)?
+            .ok_or_else(OrmPublicError::not_found)?;
+        // A deleting or removed session has no client to disclose to, and its
+        // stream is being torn down; skip rather than fail the lifecycle write.
+        if !matches!(session.state.as_str(), "active" | "archived")
+            || session.deleted_at.is_some()
+            || session.stream_head < 0
+        {
+            return Ok(());
+        }
+        let sequence = session
+            .stream_head
+            .checked_add(1)
+            .filter(|sequence| *sequence <= i64::from(i32::MAX))
+            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+        if !matches!(
+            tx.compare_and_swap::<AiSessionRecord>(
+                &session.id,
+                session.row_version,
+                AiSessionRecordWhereInput::default(),
+                UpdateAiSessionRecordInput {
+                    stream_head: Some(sequence),
+                    last_activity_at: Some(now.unix_timestamp()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(OrmPublicError::from)?,
+            ConditionalUpdateOutcome::Updated(_)
+        ) {
+            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+        }
+        tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            sequence,
+            event_type: event_type.to_owned(),
+            run_id,
+            causation_id: Some(binding_id.to_string()),
+            correlation_id: binding_id.to_string(),
+            protected_payload: crate::orm_runs::provider_session_event_metadata(reason_code)?,
+        })
+        .await
+        .map_err(OrmPublicError::from)?;
+        tx.queue_event(crate::AiSessionWakeup {
+            session_id: session.id,
+            sequence,
+        });
         Ok(())
     }
 

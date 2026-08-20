@@ -758,3 +758,94 @@ async fn exact_absence_authorizes_one_fenced_rebind_with_a_fresh_cursor() {
         "deleted-thread"
     );
 }
+
+/// Work item 4.2: every retained-thread invalidation must be disclosed on the
+/// ordinary sequenced session stream, so a host can tell the user the model's
+/// context was reset even though the durable transcript reads as continuous.
+#[tokio::test]
+async fn provider_session_invalidation_is_disclosed_on_the_session_stream() {
+    let fixture = provider_session_fixture().await;
+    let run = active_run(&fixture, &fixture.owner, "workspace-disclosure").await;
+    let descriptor = AiProviderSessionDescriptor::new(
+        ProviderKind::LocalHarness,
+        "reviewed-local-profile",
+        "reviewed-model",
+        "a".repeat(64),
+        "codex-app-server/v2",
+        "b".repeat(64),
+    )
+    .expect("provider descriptor should validate");
+    let claim = fixture
+        .provider_sessions
+        .bind_for_run(
+            &run,
+            AiProviderSessionBindRequest::new(
+                descriptor,
+                AiProviderSessionCursor::new("codex.thread", "retained-thread")
+                    .expect("cursor should validate"),
+                "c".repeat(64),
+                None,
+            )
+            .expect("bind request should validate"),
+        )
+        .await
+        .expect("provider session should bind");
+
+    let before = fixture
+        .sessions
+        .session_event_page(&fixture.owner, run.session_id(), 0, 500)
+        .await
+        .expect("events should replay");
+    assert!(
+        !before
+            .events
+            .iter()
+            .any(|event| event.event_type == "provider_session_reset"),
+        "binding alone must not disclose a reset"
+    );
+
+    // Pressing Stop after a completed turn is ordinary user behaviour, and it
+    // currently costs the retained thread. That must be visible.
+    fixture
+        .provider_sessions
+        .require_cleanup(&claim, "provider_session_cancelled_after_turn")
+        .await
+        .expect("invalidation should record cleanup");
+
+    let after = fixture
+        .sessions
+        .session_event_page(&fixture.owner, run.session_id(), 0, 500)
+        .await
+        .expect("events should replay");
+    let disclosure = after
+        .events
+        .iter()
+        .find(|event| event.event_type == "provider_session_reset")
+        .expect("invalidation must be disclosed");
+    assert_eq!(
+        disclosure.payload.0["reason"],
+        serde_json::json!("provider_session_cancelled_after_turn")
+    );
+    assert_eq!(
+        disclosure.payload.0.as_object().map(serde_json::Map::len),
+        Some(2),
+        "the disclosure carries only its tagged format and reason class"
+    );
+    assert!(disclosure.sequence > 0);
+    assert_eq!(after.watermark, disclosure.sequence);
+
+    // It participates in ordinary replay: a client resuming from the previous
+    // watermark receives exactly this event.
+    let resumed = fixture
+        .sessions
+        .session_event_page(&fixture.owner, run.session_id(), before.watermark, 500)
+        .await
+        .expect("replay from the earlier watermark should succeed");
+    assert!(!resumed.reset_required);
+    assert!(
+        resumed
+            .events
+            .iter()
+            .any(|event| event.event_type == "provider_session_reset")
+    );
+}
