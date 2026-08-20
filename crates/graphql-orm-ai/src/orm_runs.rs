@@ -4737,6 +4737,88 @@ fn reservation_usage_matches(
 
 const TERMINAL_EVENT_METADATA_FORMAT: &str = "graphql-orm-ai-run-terminal-event-v1";
 const TERMINAL_EVENT_METADATA_FORMAT_V2: &str = "graphql-orm-ai-run-terminal-event-v2";
+pub(crate) const PROVIDER_SESSION_EVENT_METADATA_FORMAT: &str =
+    "graphql-orm-ai-provider-session-event-v1";
+
+/// Stable event type disclosing that a retained provider thread stopped being
+/// usable, so the model's context was reset even though the durable transcript
+/// is continuous.
+pub(crate) const PROVIDER_SESSION_RESET_EVENT: &str = "provider_session_reset";
+/// Stable event type disclosing that a new provider session binding replaced a
+/// prior one for the same session.
+pub(crate) const PROVIDER_SESSION_REBOUND_EVENT: &str = "provider_session_rebound";
+
+/// Opens any content-free tagged event metadata without consulting a scope
+/// content key.
+///
+/// Returns `Ok(None)` for an event whose payload is ordinary protected content,
+/// which the caller must open through the configured protector.
+pub(crate) fn open_metadata_only_event(
+    event_type: &str,
+    protected_payload: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, AiError> {
+    if matches!(
+        event_type,
+        PROVIDER_SESSION_RESET_EVENT | PROVIDER_SESSION_REBOUND_EVENT
+    ) {
+        return open_provider_session_event_metadata(protected_payload);
+    }
+    open_terminal_event_metadata(event_type, protected_payload)
+}
+
+/// Opens the content-free provider-session lifecycle envelope.
+///
+/// The reason class is a server-owned safe code describing *why* a retained
+/// thread was dropped. It never carries provider, prompt, tool, cursor, or
+/// authorization content, so it needs no scope content key.
+fn open_provider_session_event_metadata(
+    protected_payload: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, AiError> {
+    let Some(value) = protected_payload
+        .as_object()
+        .and_then(|envelope| envelope.get("value"))
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(None);
+    };
+    if value.get("format").and_then(serde_json::Value::as_str)
+        != Some(PROVIDER_SESSION_EVENT_METADATA_FORMAT)
+    {
+        return Ok(None);
+    }
+    if protected_payload
+        .get("protection")
+        .and_then(serde_json::Value::as_str)
+        != Some("database_managed")
+        || protected_payload
+            .as_object()
+            .is_none_or(|object| object.len() != 2)
+        || value.len() != 2
+        || !value
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(valid_safe_code)
+    {
+        return Err(AiError::PersistenceFailed);
+    }
+    Ok(Some(serde_json::Value::Object(value.clone())))
+}
+
+/// Builds the content-free provider-session lifecycle envelope.
+pub(crate) fn provider_session_event_metadata(
+    reason_code: &str,
+) -> Result<serde_json::Value, OrmPublicError> {
+    if !valid_safe_code(reason_code) {
+        return Err(OrmPublicError::new(OrmErrorCode::InvalidInput));
+    }
+    serde_json::to_value(ProtectedContentEnvelope::DatabaseManaged {
+        value: serde_json::json!({
+            "format": PROVIDER_SESSION_EVENT_METADATA_FORMAT,
+            "reason": reason_code,
+        }),
+    })
+    .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))
+}
 
 /// Opens the deliberately content-free metadata envelope used by canonical
 /// run terminal events without consulting a scope content key.
