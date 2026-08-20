@@ -1169,6 +1169,65 @@ pub(crate) struct AiRunCancellationRequestRecord {
     pub requested_at: i64,
 }
 
+/// Owner-authored terminal disposition of one failed or recovery-required run.
+///
+/// A failed run is either superseded by a newly authored run or explicitly
+/// dismissed. Both are recorded here rather than by mutating or deleting the
+/// original run: the source run row, its immutable attempt outcomes, and its
+/// durable session/inbox events all remain intact for audit.
+#[backend_selected_graphql_entity(
+    table = "graphql_orm_ai_run_failure_dispositions",
+    plural = "GraphqlOrmAiRunFailureDispositions",
+    default_sort = "decided_at ASC, id ASC",
+    unique_index = "source_run_id",
+    index(
+        name = "idx_graphql_orm_ai_run_failure_dispositions_session",
+        columns = ["session_id", "decided_at", "id"],
+        directions = ["asc", "asc", "asc"]
+    )
+)]
+#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
+#[cfg_attr(
+    any(feature = "sqlite", feature = "postgres"),
+    derive(GraphQLEntity, GraphQLOperations)
+)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub(crate) struct AiRunFailureDispositionRecord {
+    /// Client-generated idempotency key.
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    pub id: graphql_orm::uuid::Uuid,
+    /// Exact owning session.
+    #[filterable(type = "uuid")]
+    pub session_id: graphql_orm::uuid::Uuid,
+    /// Failed or recovery-required run being disposed of. At most one
+    /// disposition may win per run.
+    #[unique]
+    #[filterable(type = "uuid")]
+    pub source_run_id: graphql_orm::uuid::Uuid,
+    /// Durable user message the source run consumed. A retry authors a new run
+    /// over this same message rather than duplicating it.
+    #[filterable(type = "uuid")]
+    pub input_message_id: graphql_orm::uuid::Uuid,
+    /// Closed disposition: `retried` or `acknowledged`.
+    #[filterable(type = "string")]
+    pub disposition: String,
+    /// Newly authored run, present only for `retried`.
+    #[filterable(type = "uuid")]
+    pub retry_run_id: Option<graphql_orm::uuid::Uuid>,
+    /// Terminal state the source run had reached when it was disposed of.
+    pub source_state: String,
+    /// Bounded safe outcome code observed on the source run.
+    pub source_outcome_code: Option<String>,
+    /// Safe owner principal kind.
+    pub principal_kind: String,
+    /// Safe owner subject.
+    pub principal_subject: String,
+    /// Server timestamp at which the disposition won.
+    #[sortable]
+    pub decided_at: i64,
+}
+
 /// Private, protected one-shot replay-then-live subscription waiter.
 ///
 /// The row contains only safe drift/fencing metadata in ordinary columns.
@@ -2365,7 +2424,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.60.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.61.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 
@@ -2432,6 +2491,7 @@ impl OrmSchemaModule for AiSchemaModule {
                 AiAttachmentArtifactRecord::metadata(),
                 AiRunRecord::metadata(),
                 AiRunCancellationRequestRecord::metadata(),
+                AiRunFailureDispositionRecord::metadata(),
                 AiSubscriptionWaiterRecord::metadata(),
                 AiSubscriptionWaitAdoptionRecord::metadata(),
                 AiRunAttemptRecord::metadata(),

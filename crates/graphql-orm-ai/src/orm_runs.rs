@@ -914,7 +914,12 @@ impl OrmAiRunService {
                     if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
                         return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                     }
-                    let terminal_outcome_code = completion.outcome_code.clone();
+                    // The event must classify from the value that lands on the
+                    // run row, because that is what the retry mutation will
+                    // later re-evaluate. Classifying from `outcome_code` would
+                    // let a completion with an outcome code but no error code
+                    // advertise a retry the mutation then refuses.
+                    let terminal_error_code = completion.error_code.clone();
                     append_attempt_outcome(
                         tx,
                         &lease,
@@ -928,7 +933,7 @@ impl OrmAiRunService {
                         tx,
                         &current,
                         completion.final_state,
-                        Some(terminal_outcome_code.as_str()),
+                        terminal_error_code.as_deref(),
                         now,
                     )
                     .await
