@@ -158,11 +158,12 @@ jobs:
           manifest-path: crates/graphql-orm/Cargo.toml
           baseline-root: ../graphql-orm-baseline/crates/graphql-orm
           feature-group: default-features
-      - uses: obi1kenobi/cargo-semver-checks-action@v2
-        with:
-          manifest-path: crates/graphql-orm-macros/Cargo.toml
-          baseline-root: ../graphql-orm-baseline/crates/graphql-orm-macros
-          feature-group: default-features
+      # graphql-orm-macros is deliberately absent. It is a proc-macro crate, so
+      # it exposes no library API surface for cargo-semver-checks to analyze;
+      # newer versions of the tool now fail the job outright rather than
+      # silently checking nothing. scripts/check-semver.sh has excluded it for
+      # the same reason. Macro compatibility is covered by the aligned
+      # package-version gate and the full compile/trybuild fixture matrix.
       - if: steps.companion-baseline.outputs.exists == 'true'
         uses: obi1kenobi/cargo-semver-checks-action@v2
         with:
