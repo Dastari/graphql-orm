@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.82.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.84.0", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -172,6 +172,22 @@ Each provider feature is independently buildable with one persistence backend.
 Use `scripts/check-ai-provider-lanes.sh` from the repository root to verify one
 feature at a time; provider feature unification is not required for a valid
 adapter build.
+
+## Budget capacity and stranded reservations
+
+Reserved capacity counts against a budget ceiling exactly like committed
+usage, so a reservation that never reconciles consumes the ceiling for the rest
+of its policy period. `aiBudgetScopeCapacity` reports per-policy reserved and
+committed amounts, ceilings, and a bounded list of unresolved reservations
+under `ReadBudgetPolicies`. `reclaimAiBudgetReservation` resolves one expired
+reservation whose owning run is terminal, under `ManageBudgetReclamation`,
+recent MFA, an exact CAS version, and the
+`with_budget_reservation_reclamation` deployment opt-in. It commits the held
+estimate as authoritative usage rather than releasing it, because an
+unreconciled reservation carries no proof that the provider was not reached.
+A denial at reservation is pre-transport and certain: the run fails with
+`provider_budget_denied` and stays retryable. See the
+[usage and budgets guide](docs/usage-and-budgets.md).
 
 ## Reasoning effort profiles
 

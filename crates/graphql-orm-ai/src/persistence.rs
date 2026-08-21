@@ -454,7 +454,12 @@ pub(crate) struct AiBudgetCounterRecord {
     table = "graphql_orm_ai_budget_reservations",
     plural = "GraphqlOrmAiBudgetReservations",
     default_sort = "created_at DESC",
-    unique_composite = "principal_kind, principal_subject, idempotency_key"
+    unique_composite = "principal_kind, principal_subject, idempotency_key",
+    index(
+        name = "idx_graphql_orm_ai_budget_reservations_scope_state",
+        columns = ["scope_kind", "scope_id", "tenant_id", "state", "expires_at"],
+        directions = ["asc", "asc", "asc", "asc", "asc"]
+    )
 )]
 #[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
 #[cfg_attr(
@@ -468,8 +473,11 @@ pub(crate) struct AiBudgetReservationRecord {
     pub id: graphql_orm::uuid::Uuid,
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
     pub budget_counter_ids: serde_json::Value,
+    #[filterable(type = "string")]
     pub scope_kind: String,
+    #[filterable(type = "string")]
     pub scope_id: String,
+    #[filterable(type = "string")]
     pub tenant_id: Option<String>,
     #[filterable(type = "string")]
     pub principal_kind: String,
@@ -502,6 +510,7 @@ pub(crate) struct AiBudgetReservationRecord {
     pub idempotency_key: String,
     #[filterable(type = "string")]
     pub state: String,
+    #[filterable(type = "number")]
     pub expires_at: i64,
     #[sortable]
     pub created_at: i64,
@@ -2424,7 +2433,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.62.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.63.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

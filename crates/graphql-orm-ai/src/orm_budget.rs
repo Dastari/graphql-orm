@@ -684,10 +684,10 @@ impl AiBudgetService for OrmAiBudgetService {
 }
 
 #[derive(Clone, Debug)]
-struct BudgetPeriod {
-    key: String,
-    started_at: i64,
-    ends_at: i64,
+pub(crate) struct BudgetPeriod {
+    pub(crate) key: String,
+    pub(crate) started_at: i64,
+    pub(crate) ends_at: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -733,12 +733,30 @@ pub(crate) async fn commit_uncertain_background_budget(
     .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
     let counter_ids = reservation_counter_ids(record)
         .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    let reservation_scope = AiScope {
+        kind: record.scope_kind.clone(),
+        id: record.scope_id.clone(),
+        tenant_id: record.tenant_id.clone(),
+    };
     for counter_id in counter_ids {
         let counter = tx
             .find_by_id::<AiBudgetCounterRecord>(&counter_id)
             .await
             .map_err(OrmPublicError::from)?
             .ok_or_else(OrmPublicError::not_found)?;
+        let policy = tx
+            .find_by_id::<AiBudgetPolicyRecord>(&counter.budget_policy_id)
+            .await
+            .map_err(OrmPublicError::from)?
+            .ok_or_else(OrmPublicError::not_found)?;
+        if !policy_applies(
+            &policy,
+            &reservation_scope,
+            &record.principal_kind,
+            &record.principal_subject,
+        ) {
+            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+        }
         let reserved_counter = counter_reserved(&counter)
             .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
         let committed_counter = counter_committed(&counter)
@@ -816,6 +834,147 @@ pub(crate) async fn commit_uncertain_background_budget(
         }
     };
     Ok(updated)
+}
+
+/// Conservatively commits a stranded reservation's own reserved amounts as
+/// authoritative usage inside the caller's wider state-machine transaction.
+///
+/// This is the transactional half of the privileged reclamation surface. The
+/// caller owns authorization, recent MFA, the exact scope binding, the expiry
+/// and terminal-run evidence, and the audit append; this function owns the
+/// counter arithmetic, usage insertion, and reservation CAS so reclamation
+/// cannot diverge from ordinary provider reconciliation.
+///
+/// It never invents an absence proof. A `Reserved` or `Uncertain` reservation
+/// may have crossed the transport boundary, so the only safe resolution is to
+/// charge the estimate that was already held. That can over-count, never
+/// under-count, and it moves nothing between policies: the reserved column
+/// falls by exactly the amount the committed column rises.
+pub(crate) async fn commit_stranded_reservation(
+    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+    record: &AiBudgetReservationRecord,
+    now: OffsetDateTime,
+) -> Result<AiBudgetReservationRecord, OrmPublicError> {
+    let state = parse_reservation_state(&record.state)
+        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    if !matches!(
+        state,
+        AiBudgetReservationState::Reserved | AiBudgetReservationState::Uncertain
+    ) {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
+    let reserved = reservation_amounts(record)
+        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    let actual = validate_reconciliation_actual(
+        reserved,
+        Some(reserved),
+        Some(0),
+        AiBudgetReconciliationOutcome::Commit,
+    )
+    .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?
+    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    let counter_ids = reservation_counter_ids(record)
+        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    let reservation_scope = AiScope {
+        kind: record.scope_kind.clone(),
+        id: record.scope_id.clone(),
+        tenant_id: record.tenant_id.clone(),
+    };
+    for counter_id in counter_ids {
+        let counter = tx
+            .find_by_id::<AiBudgetCounterRecord>(&counter_id)
+            .await
+            .map_err(OrmPublicError::from)?
+            .ok_or_else(OrmPublicError::not_found)?;
+        let policy = tx
+            .find_by_id::<AiBudgetPolicyRecord>(&counter.budget_policy_id)
+            .await
+            .map_err(OrmPublicError::from)?
+            .ok_or_else(OrmPublicError::not_found)?;
+        if !policy_applies(
+            &policy,
+            &reservation_scope,
+            &record.principal_kind,
+            &record.principal_subject,
+        ) {
+            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+        }
+        let reserved_counter = counter_reserved(&counter)
+            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+        let committed_counter = counter_committed(&counter)
+            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+        let next_reserved = checked_sub(reserved_counter, reserved)
+            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+        let next_committed = checked_add(committed_counter, actual)
+            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+        let update = counter_amount_update(next_reserved, next_committed)?;
+        if !matches!(
+            tx.compare_and_swap::<AiBudgetCounterRecord>(
+                &counter.id,
+                counter.row_version,
+                AiBudgetCounterRecordWhereInput::default(),
+                update,
+            )
+            .await
+            .map_err(OrmPublicError::from)?,
+            ConditionalUpdateOutcome::Updated(_)
+        ) {
+            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+        }
+    }
+    tx.insert::<AiUsageEntryRecord>(CreateAiUsageEntryRecordInput {
+        id: Uuid::new_v4(),
+        budget_reservation_id: record.id,
+        scope_kind: record.scope_kind.clone(),
+        scope_id: record.scope_id.clone(),
+        tenant_id: record.tenant_id.clone(),
+        principal_kind: record.principal_kind.clone(),
+        principal_subject: record.principal_subject.clone(),
+        session_id: Some(record.session_id),
+        run_id: Some(record.run_id),
+        provider_kind: record.provider_kind.clone(),
+        provider_model: record.provider_model.clone(),
+        input_tokens: amount_to_i64(actual.input_tokens)?,
+        cached_input_tokens: 0,
+        output_tokens: amount_to_i64(actual.output_tokens)?,
+        tool_units: amount_to_i64(actual.tool_units)?,
+        image_units: amount_to_i64(actual.image_units)?,
+        cost_microunits: Some(amount_to_i64(actual.cost_microunits)?),
+    })
+    .await
+    .map_err(OrmPublicError::from)?;
+    match tx
+        .compare_and_swap::<AiBudgetReservationRecord>(
+            &record.id,
+            record.row_version,
+            AiBudgetReservationRecordWhereInput {
+                state: Some(StringFilter {
+                    eq: Some(record.state.clone()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            UpdateAiBudgetReservationRecordInput {
+                actual_input_tokens: Some(Some(amount_to_i64(actual.input_tokens)?)),
+                actual_cached_input_tokens: Some(Some(0)),
+                actual_output_tokens: Some(Some(amount_to_i64(actual.output_tokens)?)),
+                actual_tool_units: Some(Some(amount_to_i64(actual.tool_units)?)),
+                actual_image_units: Some(Some(amount_to_i64(actual.image_units)?)),
+                actual_cost_microunits: Some(Some(amount_to_i64(actual.cost_microunits)?)),
+                actual_runs: Some(Some(amount_to_i64(actual.runs)?)),
+                state: Some("committed".to_owned()),
+                reconciled_at: Some(Some(now.unix_timestamp())),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(OrmPublicError::from)?
+    {
+        ConditionalUpdateOutcome::Updated(updated) => Ok(updated),
+        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
+            Err(OrmPublicError::new(OrmErrorCode::Conflict))
+        }
+    }
 }
 
 #[cfg(feature = "provider-openai")]
@@ -1035,7 +1194,7 @@ fn validate_policy_capacity(
     Ok(())
 }
 
-fn budget_period(interval: &str, now: OffsetDateTime) -> Result<BudgetPeriod, AiError> {
+pub(crate) fn budget_period(interval: &str, now: OffsetDateTime) -> Result<BudgetPeriod, AiError> {
     let timestamp = now.unix_timestamp();
     match interval {
         "minute" => fixed_period("minute", timestamp, 60),

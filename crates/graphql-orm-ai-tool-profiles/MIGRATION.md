@@ -10,6 +10,23 @@ supersedes: []
 
 # Migration Guide
 
+## 0.6.0 to 0.7.0: proof-bearing pre-transport budget denial
+
+Adopt `graphql-orm-ai-tool-profiles` 0.7.0 with `graphql-orm-ai` 0.84.0 from
+one reviewed full monorepo revision.
+
+`AiError` gains `PreTransportBudgetDenied`. Only the provider-execution
+boundary may return it, and only after proving provider dispatch was never
+attempted and any created reservation was durably released. A budget or rule
+limit reached during a provider/tool loop remains `BudgetDenied`; it must not
+be reclassified as a certain local refusal. Both variants intentionally expose
+the same stable public error code, `AI_BUDGET_DENIED`.
+
+The enum was already non-exhaustive. Update any deliberately exhaustive
+internal matches. There is no schema, database, data, GraphQL SDL, manifest,
+capability, fingerprint, protected-content, credential, or AI schema-module
+migration from this package change.
+
 ## 0.5.0 to 0.6.0: compact discovery and query-plan wire v3
 
 Adopt `graphql-orm-ai-tool-profiles` 0.6.0 and `graphql-orm-ai` 0.81.0 from one

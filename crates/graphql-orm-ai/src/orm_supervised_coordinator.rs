@@ -1087,6 +1087,18 @@ impl AiSupervisedAgentCoordinator {
                     )
                     .await;
             }
+            Err(SupervisedProviderTurnFailure::BudgetDenied) => {
+                if let Some((service, claim)) = &reclaimed {
+                    let _ = service
+                        .require_cleanup(claim, "provider_session_reclaimed_handoff_failed")
+                        .await;
+                }
+                // A pre-transport reservation denial is certain and local: it
+                // consumed no provider turn and left no reservation held.
+                return self
+                    .finish_failed(&lease, &guard, "provider_budget_denied")
+                    .await;
+            }
             Err(SupervisedProviderTurnFailure::LeaseLost(error)) => return Err(error),
         };
         if self.run_control.cancellation(&lease).await?.is_some() {
@@ -1588,7 +1600,7 @@ impl AiSupervisedAgentCoordinator {
             tokio::pin!(heartbeat);
             tokio::select! {
                 result = &mut provider => {
-                    return result.map_err(|_| SupervisedProviderTurnFailure::Provider);
+                    return result.map_err(|error| classify_supervised_turn_failure(&error));
                 }
                 () = &mut heartbeat => {
                     *lease = self
@@ -1624,7 +1636,7 @@ impl AiSupervisedAgentCoordinator {
             tokio::select! {
                 result = &mut provider => {
                     *lease = lease_state.lock().await.clone();
-                    return result.map_err(|_| SupervisedProviderTurnFailure::Provider);
+                    return result.map_err(|error| classify_supervised_turn_failure(&error));
                 }
                 () = &mut heartbeat => {
                     let current = lease_state.lock().await.clone();
@@ -1700,7 +1712,20 @@ impl AiSupervisedAgentCoordinator {
 
 enum SupervisedProviderTurnFailure {
     Provider,
+    BudgetDenied,
     LeaseLost(AiError),
+}
+
+/// Separates a certain pre-transport budget refusal from an uncertain turn.
+///
+/// See the read-only coordinator for the full argument: the atomic budget
+/// reservation happens before the transport boundary, so a denial proves no
+/// bytes crossed it and no reservation was left held.
+const fn classify_supervised_turn_failure(error: &AiError) -> SupervisedProviderTurnFailure {
+    match error {
+        AiError::PreTransportBudgetDenied => SupervisedProviderTurnFailure::BudgetDenied,
+        _ => SupervisedProviderTurnFailure::Provider,
+    }
 }
 
 #[cfg(test)]
@@ -2938,6 +2963,69 @@ mod tests {
         assert_eq!(checkpoints.automatic_checkpoints.load(Ordering::SeqCst), 1);
         assert_eq!(planner.continuation_count.load(Ordering::SeqCst), 1);
         assert_eq!(run.final_states(), vec![AiRunState::Completed]);
+    }
+
+    #[tokio::test]
+    async fn pre_transport_budget_denial_is_a_certain_supervised_failure() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        let provider = Arc::new(TestProviderExecutor {
+            responses: Mutex::new(VecDeque::from([Err(AiError::PreTransportBudgetDenied)])),
+            require_checkpoint_cleared: false,
+            calls: AtomicUsize::new(0),
+        });
+        let coordinator = AiSupervisedAgentCoordinator::new(
+            run.clone(),
+            provider.clone(),
+            Arc::new(TestOutputWriter),
+            Arc::new(TestCheckpointWriter {
+                provider_checkpoints: AtomicUsize::new(0),
+            }),
+            Arc::new(TestCheckpointControl {
+                adopted: Mutex::new(None),
+                consumed: AtomicBool::new(false),
+            }),
+            Arc::new(TestApprovalStager {
+                calls: AtomicUsize::new(0),
+                saw_checkpoint: AtomicBool::new(false),
+            }),
+            unused_automatic(),
+            unused_resume(),
+            Arc::new(TestRuleResolver),
+            Arc::new(TestPlanner {
+                scope: test_scope(),
+                route: test_route(),
+                continuation_count: AtomicUsize::new(0),
+            }),
+            Arc::new(FixedClock::new(time::OffsetDateTime::now_utc())),
+            limits(),
+        );
+
+        let outcome = coordinator
+            .execute_claimed(&lease)
+            .await
+            .expect("a supervised budget denial is a clean terminal failure");
+
+        assert_eq!(
+            outcome,
+            AiSupervisedAgentRunOutcome::Failed {
+                provider_turns: 0,
+                total_tool_calls: 0,
+            }
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.remaining_responses(), 0);
+        assert_eq!(run.final_states(), vec![AiRunState::Failed]);
+        assert_eq!(
+            crate::classify_run_retry(
+                crate::AiRunRetryEvidence {
+                    terminal: crate::AiRunTerminalEvent::Failed,
+                    produced_assistant_output: false,
+                },
+                Some("provider_budget_denied"),
+            ),
+            crate::AiRunRetryAdmission::Allowed
+        );
     }
 
     #[tokio::test]

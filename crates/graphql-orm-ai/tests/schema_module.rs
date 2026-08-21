@@ -8,7 +8,7 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
 
     assert_eq!(catalog.modules().len(), 1);
     assert_eq!(catalog.modules()[0].version, AI_SCHEMA_MODULE_VERSION);
-    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.62.0");
+    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.63.0");
     assert_eq!(catalog.entities().len(), 47);
     assert!(
         catalog
@@ -106,6 +106,11 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
                 "principal_subject".to_owned(),
                 "idempotency_key".to_owned(),
             ]
+    }));
+    assert!(reservation.indexes.iter().any(|index| {
+        index.name == "idx_graphql_orm_ai_budget_reservations_scope_state"
+            && index.columns == ["scope_kind", "scope_id", "tenant_id", "state", "expires_at"]
+            && !index.is_unique
     }));
     assert!(
         reservation

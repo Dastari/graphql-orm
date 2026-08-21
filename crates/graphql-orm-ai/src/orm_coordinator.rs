@@ -408,6 +408,13 @@ impl AiAgentRunControl for OrmAiRunService {
 pub trait AiAgentProviderTurnExecutor: Send + Sync {
     /// Executes one exactly planned turn for the current attempt/generation.
     ///
+    /// Returning [`AiError::PreTransportBudgetDenied`] is a proof-bearing
+    /// contract: the
+    /// denial must have occurred before provider transport, and no budget
+    /// reservation may remain held. Once transport might have occurred, an
+    /// executor must return [`AiError::ProviderFailed`] instead so the
+    /// coordinator preserves uncertainty.
+    ///
     /// # Errors
     ///
     /// Returns a safe library error for any authorization, budget, egress,
@@ -1506,6 +1513,19 @@ impl AiReadOnlyAgentCoordinator {
                         )
                         .await;
                 }
+                Err(ProviderTurnFailure::BudgetDenied) => {
+                    // The atomic reservation is taken before the transport
+                    // boundary, so a denial is a certain, local, pre-transport
+                    // refusal: no provider turn was consumed and the
+                    // reservation transaction held nothing. Closing the run
+                    // for recovery here would report a proven refusal as
+                    // unprovable provider uncertainty and permanently refuse
+                    // retry admission for a run that is safe to author again
+                    // once capacity exists.
+                    return self
+                        .finish_failed(&lease, &guard, "provider_budget_denied")
+                        .await;
+                }
                 Err(ProviderTurnFailure::LeaseLost(error)) => return Err(error),
                 Err(ProviderTurnFailure::Cancelled(settlement)) => {
                     self.settle_interrupted_provider_session(&lease, &guard, settlement)
@@ -1932,7 +1952,9 @@ impl AiReadOnlyAgentCoordinator {
                 .wait_for_cancellation(&cancellation_lease, heartbeat_delay);
             tokio::pin!(cancellation);
             tokio::select! {
-                result = &mut provider => return result.map_err(|_| ProviderTurnFailure::Provider),
+                result = &mut provider => {
+                    return result.map_err(|error| classify_provider_turn_failure(&error));
+                }
                 result = &mut cancellation => {
                     match result.map_err(ProviderTurnFailure::LeaseLost)? {
                         Some(_) => {
@@ -1979,7 +2001,7 @@ impl AiReadOnlyAgentCoordinator {
             tokio::select! {
                 result = &mut provider => {
                     *lease = lease_state.lock().await.clone();
-                    return result.map_err(|_| ProviderTurnFailure::Provider);
+                    return result.map_err(|error| classify_provider_turn_failure(&error));
                 }
                 result = &mut cancellation => {
                     match result.map_err(ProviderTurnFailure::LeaseLost)? {
@@ -2049,7 +2071,7 @@ impl AiReadOnlyAgentCoordinator {
                         Err(AiError::ProviderSessionDeferred) => {
                             Err(ProviderTurnFailure::Deferred)
                         }
-                        Err(_) => Err(ProviderTurnFailure::Provider),
+                        Err(error) => Err(classify_provider_turn_failure(&error)),
                     };
                 }
                 result = &mut cancellation => {
@@ -2251,11 +2273,26 @@ impl AiReadOnlyAgentCoordinator {
 
 enum ProviderTurnFailure {
     Provider,
+    BudgetDenied,
     Deferred,
     LeaseLost(AiError),
     /// Owner cancellation won the fence; the value reports what the resulting
     /// interrupt proved about the provider's retained thread.
     Cancelled(crate::AiRunInterruptSettlement),
+}
+
+/// Separates a certain pre-transport refusal from an uncertain provider turn.
+///
+/// The budget reservation is taken before the transport boundary and inside
+/// the same call that later dispatches. A denial therefore proves that no
+/// bytes crossed the provider boundary, that no provider turn was consumed,
+/// and that the atomic reservation transaction left nothing held. Every other
+/// executor error keeps the fail-closed uncertain classification.
+const fn classify_provider_turn_failure(error: &AiError) -> ProviderTurnFailure {
+    match error {
+        AiError::PreTransportBudgetDenied => ProviderTurnFailure::BudgetDenied,
+        _ => ProviderTurnFailure::Provider,
+    }
 }
 
 #[cfg(all(test, feature = "sqlite"))]
@@ -3555,6 +3592,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pre_transport_budget_denial_fails_cleanly_instead_of_requiring_recovery() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        let provider = Arc::new(TestProviderExecutor {
+            responses: Mutex::new(VecDeque::from([Err(AiError::PreTransportBudgetDenied)])),
+            delay: None,
+        });
+        let planner = Arc::new(TestChatPlanner {
+            scope: test_scope(),
+            continuation_count: AtomicUsize::new(0),
+        });
+        let forbidden = Arc::new(ChatForbiddenBoundaries::default());
+        let coordinator = AiReadOnlyAgentCoordinator::new(
+            run.clone(),
+            provider.clone(),
+            forbidden.clone(),
+            Arc::new(TestOutputWriter),
+            forbidden.clone(),
+            Arc::new(TestCheckpointWriter),
+            Arc::new(TestRuleResolver),
+            planner,
+            limits(50),
+        );
+
+        let outcome = coordinator
+            .execute_claimed(&lease)
+            .await
+            .expect("a budget denial is a clean terminal failure");
+
+        assert!(matches!(
+            outcome,
+            Failed {
+                provider_turns: 0,
+                total_tool_calls: 0,
+            }
+        ));
+        assert_eq!(run.final_states(), vec![AiRunState::Failed]);
+        assert_eq!(run.final_codes(), vec!["provider_budget_denied".to_owned()]);
+        assert!(run.scheduled_retry_codes().is_empty());
+        assert_eq!(provider.remaining_responses(), 0);
+        assert_eq!(forbidden.tool_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(forbidden.provider_checkpoints.load(Ordering::SeqCst), 0);
+        // A certain pre-transport refusal is safe to author again once
+        // capacity exists, so the terminal-event failure record admits retry.
+        assert_eq!(
+            crate::classify_run_retry(
+                crate::AiRunRetryEvidence {
+                    terminal: crate::AiRunTerminalEvent::Failed,
+                    produced_assistant_output: false,
+                },
+                Some("provider_budget_denied"),
+            ),
+            crate::AiRunRetryAdmission::Allowed
+        );
+    }
+
+    #[tokio::test]
+    async fn generic_budget_denial_cannot_claim_pre_transport_certainty() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        let provider = Arc::new(TestProviderExecutor {
+            responses: Mutex::new(VecDeque::from([Err(AiError::BudgetDenied)])),
+            delay: None,
+        });
+        let planner = Arc::new(TestChatPlanner {
+            scope: test_scope(),
+            continuation_count: AtomicUsize::new(0),
+        });
+        let forbidden = Arc::new(ChatForbiddenBoundaries::default());
+        let coordinator = AiReadOnlyAgentCoordinator::new(
+            run.clone(),
+            provider,
+            forbidden.clone(),
+            Arc::new(TestOutputWriter),
+            forbidden.clone(),
+            Arc::new(TestCheckpointWriter),
+            Arc::new(TestRuleResolver),
+            planner,
+            limits(50),
+        );
+
+        let outcome = coordinator
+            .execute_claimed(&lease)
+            .await
+            .expect("a generic denial must preserve possible transport uncertainty");
+
+        assert!(matches!(
+            outcome,
+            RecoveryRequired {
+                phase: AiAgentRecoveryPhase::ProviderTurn,
+                provider_turns: 0,
+                total_tool_calls: 0,
+            }
+        ));
+        assert_eq!(run.final_states(), vec![AiRunState::RecoveryRequired]);
+        assert_eq!(
+            run.final_codes(),
+            vec!["provider_turn_uncertain".to_owned()]
+        );
+    }
+
+    #[tokio::test]
     async fn chat_turn_persists_final_output_without_tool_boundaries() {
         let lease = AiRunLease::test_running(principal_reference());
         let run = Arc::new(TestRunControl::new());
@@ -4195,6 +4334,71 @@ mod tests {
             0
         );
         assert_eq!(run.final_states(), vec![AiRunState::Completed]);
+    }
+
+    #[tokio::test]
+    async fn post_transport_dynamic_tool_limit_remains_provider_uncertainty() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        let provider = Arc::new(TestProviderExecutor {
+            responses: Mutex::new(VecDeque::from([Ok(AiProviderCallResult::test_result(
+                &lease,
+                None,
+                "response-dynamic-tool-limit",
+                vec![
+                    ("dynamic-call-1", "test.read", json!({})),
+                    ("dynamic-call-2", "test.read", json!({})),
+                ],
+            ))])),
+            delay: None,
+        });
+        let planner = Arc::new(TestDynamicPlanner {
+            scope: test_scope(),
+            route: test_route(),
+            continuation_count: AtomicUsize::new(0),
+        });
+        let coordinator_limits = AiReadOnlyAgentCoordinatorLimits::new(
+            AiAgentLoopLimits::new(4, 1).expect("test loop limits should validate"),
+            Duration::milliseconds(50),
+        )
+        .expect("test coordinator limits should validate");
+        let coordinator = AiReadOnlyAgentCoordinator::new(
+            run.clone(),
+            provider,
+            Arc::new(TestToolExecutor {
+                expose_result: true,
+            }),
+            Arc::new(TestOutputWriter),
+            Arc::new(ChatForbiddenBoundaries::default()),
+            Arc::new(TestCheckpointWriter),
+            Arc::new(TestRuleResolver),
+            planner,
+            coordinator_limits,
+        );
+
+        let outcome = coordinator
+            .execute_claimed(&lease)
+            .await
+            .expect("a limit reached after dispatch must retain uncertainty");
+
+        assert!(matches!(
+            outcome,
+            RecoveryRequired {
+                phase: AiAgentRecoveryPhase::ProviderTurn,
+                provider_turns: 0,
+                total_tool_calls: 0,
+            }
+        ));
+        assert_eq!(run.final_states(), vec![AiRunState::RecoveryRequired]);
+        assert_eq!(
+            run.final_codes(),
+            vec!["provider_turn_uncertain".to_owned()]
+        );
+        assert!(
+            !run.final_codes()
+                .iter()
+                .any(|code| code == "provider_budget_denied")
+        );
     }
 
     #[tokio::test]
