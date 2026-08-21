@@ -65,6 +65,7 @@ pub struct AiReadOnlyAgentTurnPlan {
     rules: AiResolvedRuleSet,
     uses_byok: bool,
     provider_session: Option<crate::AiProviderSessionTurnPlan>,
+    capability_delivery: Option<crate::AiCapabilityDeliveryTurn>,
 }
 
 enum AiReadOnlyAgentTurnMode {
@@ -104,6 +105,7 @@ impl AiReadOnlyAgentTurnPlan {
             rules,
             uses_byok,
             provider_session: None,
+            capability_delivery: None,
         })
     }
 
@@ -136,6 +138,7 @@ impl AiReadOnlyAgentTurnPlan {
             rules,
             uses_byok,
             provider_session: None,
+            capability_delivery: None,
         })
     }
 
@@ -173,6 +176,7 @@ impl AiReadOnlyAgentTurnPlan {
             rules,
             uses_byok,
             provider_session: None,
+            capability_delivery: None,
         })
     }
 
@@ -197,12 +201,47 @@ impl AiReadOnlyAgentTurnPlan {
                 AiReadOnlyAgentTurnMode::ChatOnly
                     | AiReadOnlyAgentTurnMode::ExperimentalDynamicTools(_)
             )
+            || self.capability_delivery.as_ref().is_some_and(|delivery| {
+                session.descriptor().registration_fingerprint()
+                    != delivery.session_binding().fingerprint()
+            })
         {
             return Err(AiError::InvalidInput(
                 "provider-session plan does not match the exact provider call".to_owned(),
             ));
         }
         self.provider_session = Some(session);
+        Ok(self)
+    }
+
+    /// Binds this turn to one crate-owned capability delivery surface.
+    ///
+    /// The coordinator refuses the turn unless the offered definitions are
+    /// exactly the definitions the crate minted for the current delivery mode
+    /// and compact index, so a host installs the surface and never authors it.
+    /// Broker calls in the resulting turn are dispatched through the ordinary
+    /// durable application-tool broker.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidInput`] unless the plan offers exactly the
+    /// crate-owned surface and carries an application-tool result route.
+    pub fn with_capability_delivery(
+        mut self,
+        delivery: crate::AiCapabilityDeliveryTurn,
+    ) -> Result<Self, AiError> {
+        if !delivery.matches_offered_tools(self.provider_call.offered_tools())
+            || matches!(&self.mode, AiReadOnlyAgentTurnMode::ChatOnly)
+            || self.provider_session.as_ref().is_some_and(|session| {
+                session.descriptor().registration_fingerprint()
+                    != delivery.session_binding().fingerprint()
+            })
+        {
+            return Err(AiError::InvalidInput(
+                "capability delivery surface does not match the exact provider call".to_owned(),
+            ));
+        }
+        self.capability_delivery = Some(delivery);
         Ok(self)
     }
 
@@ -216,6 +255,7 @@ impl AiReadOnlyAgentTurnPlan {
         AiResolvedRuleSet,
         bool,
         Option<crate::AiProviderSessionTurnPlan>,
+        Option<crate::AiCapabilityDeliveryTurn>,
     ) {
         let scope = self.provider_call.scope().clone();
         let correlation_id = self.provider_call.correlation_id().to_owned();
@@ -227,6 +267,7 @@ impl AiReadOnlyAgentTurnPlan {
             self.rules,
             self.uses_byok,
             self.provider_session,
+            self.capability_delivery,
         )
     }
 
@@ -272,6 +313,32 @@ pub trait AiReadOnlyAgentTurnPlanner: Send + Sync {
         provider_turns: u32,
         continuation: AiAgentContinuation,
     ) -> Result<AiReadOnlyAgentTurnPlan, AiError>;
+
+    /// Builds the next provider turn with the crate-owned capability delivery
+    /// state that survived the preceding turn.
+    ///
+    /// Implementations adopting deferred capability delivery should override
+    /// this method, call [`crate::AiCapabilityDeliveryTurn::current_surface`]
+    /// after any client-deferred installation, and attach a clone of the same
+    /// delivery turn to the returned plan. The default preserves existing
+    /// planners that do not use capability delivery.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe library error when current configuration, context,
+    /// budget estimates, egress manifests, or the updated exact capability
+    /// surface cannot produce a continuation plan.
+    async fn continuation_plan_with_capability_delivery(
+        &self,
+        lease: &AiRunLease,
+        provider_turns: u32,
+        continuation: AiAgentContinuation,
+        capability_delivery: Option<&crate::AiCapabilityDeliveryTurn>,
+    ) -> Result<AiReadOnlyAgentTurnPlan, AiError> {
+        let _ = capability_delivery;
+        self.continuation_plan(lease, provider_turns, continuation)
+            .await
+    }
 }
 
 /// Fresh current-principal hierarchical-rule resolution for one run boundary.
@@ -553,6 +620,50 @@ pub trait AiAgentReadOnlyToolExecutor: Send + Sync {
             "durable safe tool failures are not implemented by this executor".to_owned(),
         ))
     }
+
+    /// Executes one frozen capability-broker call through the ordinary durable
+    /// tool broker.
+    ///
+    /// Discovery and describe return bounded authority-neutral metadata; only
+    /// execute reaches a resolver, through the exact loaded binding. The
+    /// default remains unavailable so an existing executor does not gain the
+    /// broker implicitly.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe library error for a stale binding/fence, a non-broker or
+    /// unoffered tool, authorization, disclosure, protection, execution,
+    /// egress, or persistence failure.
+    async fn execute_capability_broker(
+        &self,
+        _lease: &AiRunLease,
+        _provider_result: &AiProviderCallResult,
+        _context: AiApplicationToolCallContext,
+        _route: AiToolResultEgressRoute,
+        _delivery: &crate::AiCapabilityDeliveryTurn,
+    ) -> Result<AiPersistedApplicationToolCall, AiError> {
+        Err(AiError::InvalidConfiguration(
+            "capability broker dispatch is not implemented by this executor".to_owned(),
+        ))
+    }
+
+    /// Projects the exact registered definitions for the capabilities a
+    /// client-deferred broker run has already loaded.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe library error when a loaded capability is no longer a
+    /// registered generated read capability.
+    async fn loaded_capability_definitions(
+        &self,
+        _lease: &AiRunLease,
+        _provider_kind: &crate::ProviderKind,
+        _delivery: &crate::AiCapabilityDeliveryTurn,
+    ) -> Result<Vec<crate::ModelToolDefinition>, AiError> {
+        Err(AiError::InvalidConfiguration(
+            "deferred capability projection is not implemented by this executor".to_owned(),
+        ))
+    }
 }
 
 #[async_trait]
@@ -579,6 +690,33 @@ impl AiAgentReadOnlyToolExecutor for OrmAiApplicationToolCallService {
         self.persist_safe_read_failure(lease, provider_result, context, route, code)
             .await
     }
+
+    async fn execute_capability_broker(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        context: AiApplicationToolCallContext,
+        route: AiToolResultEgressRoute,
+        delivery: &crate::AiCapabilityDeliveryTurn,
+    ) -> Result<AiPersistedApplicationToolCall, AiError> {
+        self.execute_capability_broker_call(lease, provider_result, context, route, delivery)
+            .await
+    }
+
+    async fn loaded_capability_definitions(
+        &self,
+        lease: &AiRunLease,
+        provider_kind: &crate::ProviderKind,
+        delivery: &crate::AiCapabilityDeliveryTurn,
+    ) -> Result<Vec<crate::ModelToolDefinition>, AiError> {
+        OrmAiApplicationToolCallService::loaded_capability_definitions(
+            self,
+            lease,
+            provider_kind,
+            delivery,
+        )
+        .await
+    }
 }
 
 struct DynamicToolExecutionState {
@@ -596,6 +734,7 @@ struct ReadOnlyDynamicToolExecution {
     rule_fingerprint: String,
     provider_turn_index: u32,
     maximum_calls: u32,
+    capability_delivery: Option<crate::AiCapabilityDeliveryTurn>,
     state: Mutex<DynamicToolExecutionState>,
 }
 
@@ -612,6 +751,7 @@ impl ReadOnlyDynamicToolExecution {
         provider_turn_index: u32,
         maximum_calls: u32,
         rule_usage: AiRuleRunUsage,
+        capability_delivery: Option<crate::AiCapabilityDeliveryTurn>,
     ) -> Self {
         Self {
             run_control,
@@ -623,6 +763,7 @@ impl ReadOnlyDynamicToolExecution {
             rule_fingerprint,
             provider_turn_index,
             maximum_calls,
+            capability_delivery,
             state: Mutex::new(DynamicToolExecutionState {
                 rule_usage,
                 accepted_calls: 0,
@@ -676,10 +817,28 @@ impl AiProviderDynamicToolExecution for ReadOnlyDynamicToolExecution {
             self.correlation_id.clone(),
             provider_result.budget_reservation_id().0.to_string(),
         )?;
-        let persisted = self
-            .tool_executor
-            .execute_tool(lease, provider_result, context, self.route.clone())
-            .await?;
+        let persisted = match (
+            crate::AiCapabilityBrokerOperation::from_tool_id(call.tool_id()),
+            self.capability_delivery.as_ref(),
+        ) {
+            (None, _) => {
+                self.tool_executor
+                    .execute_tool(lease, provider_result, context, self.route.clone())
+                    .await?
+            }
+            (Some(_), Some(delivery)) => {
+                self.tool_executor
+                    .execute_capability_broker(
+                        lease,
+                        provider_result,
+                        context,
+                        self.route.clone(),
+                        delivery,
+                    )
+                    .await?
+            }
+            (Some(_), None) => return Err(AiError::Forbidden),
+        };
         if self
             .run_control
             .cancellation(persisted.lease())
@@ -1350,6 +1509,8 @@ impl AiReadOnlyAgentCoordinator {
             };
             (guard, plan, AiRuleRunUsage::default())
         };
+        let mut capability_delivery: Option<crate::AiCapabilityDeliveryTurn> = None;
+        let mut capability_delivery_initialized = false;
 
         loop {
             if self.run_control.cancellation(&lease).await?.is_some() {
@@ -1371,7 +1532,35 @@ impl AiReadOnlyAgentCoordinator {
                 planned_rules,
                 uses_byok,
                 provider_session_plan,
+                turn_capability_delivery,
             ) = turn_plan.into_parts();
+            match (
+                capability_delivery_initialized,
+                &capability_delivery,
+                &turn_capability_delivery,
+            ) {
+                (false, _, None) => {
+                    capability_delivery_initialized = true;
+                }
+                (false, _, Some(delivery))
+                    if delivery.matches_offered_tools(provider_plan.offered_tools()) =>
+                {
+                    capability_delivery = turn_capability_delivery.clone();
+                    capability_delivery_initialized = true;
+                }
+                (true, None, None) => {}
+                (true, Some(existing), Some(delivery))
+                    if delivery.matches_offered_tools(provider_plan.offered_tools())
+                        && existing.shares_run_state(delivery) =>
+                {
+                    capability_delivery = turn_capability_delivery.clone();
+                }
+                _ => {
+                    return self
+                        .finish_failed(&lease, &guard, "capability_delivery_surface_invalid")
+                        .await;
+                }
+            }
             let resolution = match self.rule_resolver.resolve_rules(&lease, &scope).await {
                 Ok(resolution)
                     if resolution.rules().fingerprint() == planned_rules.fingerprint() =>
@@ -1414,6 +1603,7 @@ impl AiReadOnlyAgentCoordinator {
                         guard.provider_turns(),
                         guard.remaining_tool_capacity(),
                         rule_usage,
+                        capability_delivery.clone(),
                     )))
                 }
                 AiReadOnlyAgentTurnMode::ChatOnly
@@ -1760,11 +1950,29 @@ impl AiReadOnlyAgentCoordinator {
                             result.budget_reservation_id().0.to_string(),
                         )?;
                         let failure_context = context.clone();
-                        let persisted = match self
-                            .tool_executor
-                            .execute_tool(&lease, &result, context, route.clone())
-                            .await
-                        {
+                        let broker_operation = crate::AiCapabilityBrokerOperation::from_tool_id(
+                            result.tool_calls()[tool_call_index].tool_id(),
+                        );
+                        let dispatch = match (broker_operation, capability_delivery.as_ref()) {
+                            (None, _) => {
+                                self.tool_executor
+                                    .execute_tool(&lease, &result, context, route.clone())
+                                    .await
+                            }
+                            (Some(_), Some(delivery)) => {
+                                self.tool_executor
+                                    .execute_capability_broker(
+                                        &lease,
+                                        &result,
+                                        context,
+                                        route.clone(),
+                                        delivery,
+                                    )
+                                    .await
+                            }
+                            (Some(_), None) => Err(AiError::Forbidden),
+                        };
+                        let persisted = match dispatch {
                             Ok(persisted) => persisted,
                             Err(error) => {
                                 if self.run_control.cancellation(&lease).await?.is_some() {
@@ -1877,9 +2085,30 @@ impl AiReadOnlyAgentCoordinator {
                                 .await;
                         }
                     };
+                    if let Some(delivery) = capability_delivery.as_ref()
+                        && delivery.requires_deferred_installation()
+                    {
+                        let installed = self
+                            .tool_executor
+                            .loaded_capability_definitions(&lease, result.provider_kind(), delivery)
+                            .await
+                            .and_then(|definitions| {
+                                delivery.install_deferred_definitions(definitions)
+                            });
+                        if installed.is_err() {
+                            return self
+                                .finish_failed(&lease, &guard, "capability_delivery_install_failed")
+                                .await;
+                        }
+                    }
                     turn_plan = match self
                         .planner
-                        .continuation_plan(&lease, guard.provider_turns(), continuation)
+                        .continuation_plan_with_capability_delivery(
+                            &lease,
+                            guard.provider_turns(),
+                            continuation,
+                            capability_delivery.as_ref(),
+                        )
                         .await
                     {
                         Ok(plan) if plan.is_continuation() => plan,
@@ -3554,7 +3783,7 @@ mod tests {
             false,
         )
         .expect("an exact initial tool-free plan should validate");
-        let (_, _, _, mode, _, _, _) = plan.into_parts();
+        let (_, _, _, mode, _, _, _, _) = plan.into_parts();
         assert!(matches!(mode, AiReadOnlyAgentTurnMode::ChatOnly));
 
         assert!(matches!(

@@ -982,6 +982,565 @@ impl OrmAiApplicationToolCallService {
         })
     }
 
+    /// Executes one frozen capability-broker call as an ordinary durable
+    /// application tool call.
+    ///
+    /// `graphql.capabilities.discover` and `graphql.capabilities.describe`
+    /// return bounded authority-neutral metadata and never reach a resolver;
+    /// only `graphql.capabilities.execute` does, through the exact loaded
+    /// binding and [`AiRuntime::execute_query_capability`]. The call follows
+    /// the same order as every other read: validate, rehydrate, current
+    /// policy, fenced row, exact capability, resolver authorization,
+    /// disclosure/protection, durable outcome, one model result.
+    ///
+    /// The offered definition must be exactly the crate-minted broker
+    /// definition for the current compact index, so a host cannot widen,
+    /// rename, or re-fingerprint the broker surface, and a model cannot call a
+    /// broker tool that was not offered for the current index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale result/lease/context binding, a
+    /// non-broker or unoffered tool, oversized arguments, unavailable
+    /// protection, a stale fence, or persistence failure. The ordinary and
+    /// dynamic coordinator loops classify pre-start unknown, stale, expired,
+    /// unauthorized, and over-budget selections and persist one bounded safe
+    /// failure through their shared failure boundary; this method never starts
+    /// a second row for the same call.
+    pub async fn execute_capability_broker_call(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        context: AiApplicationToolCallContext,
+        route: AiToolResultEgressRoute,
+        delivery: &crate::AiCapabilityDeliveryTurn,
+    ) -> Result<AiPersistedApplicationToolCall, AiError> {
+        self.dispatch_capability_broker(lease, provider_result, context, route, delivery)
+            .await
+    }
+
+    /// Projects the exact provider definitions for the capabilities currently
+    /// loaded by one client-deferred broker run.
+    ///
+    /// The definitions are minted from the registered capability catalogue,
+    /// never from model output, and are the only definitions the internal
+    /// deferred-definition installer accepts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::Forbidden`] when a loaded capability is no longer a
+    /// registered generated read capability, and a safe error when its
+    /// provider projection is invalid.
+    pub async fn loaded_capability_definitions(
+        &self,
+        lease: &AiRunLease,
+        provider_kind: &crate::ProviderKind,
+        delivery: &crate::AiCapabilityDeliveryTurn,
+    ) -> Result<Vec<crate::ModelToolDefinition>, AiError> {
+        let run = crate::AiCapabilityRunBinding::from_lease(
+            lease,
+            provider_kind.clone(),
+            delivery.session_binding(),
+        );
+        let mut definitions = Vec::new();
+        for binding in delivery.session().loaded_bindings() {
+            delivery
+                .broker()
+                .authorize_execution(lease.principal_reference(), &run, &binding)
+                .await?;
+            let definition = self
+                .runtime
+                .tool_catalog()
+                .query_capability_model_definition(
+                    binding.capability_id(),
+                    crate::capability_provider_alias(binding.capability_id()),
+                )?;
+            if definition.fingerprint != binding.capability_fingerprint() {
+                return Err(AiError::Forbidden);
+            }
+            definitions.push(definition);
+        }
+        Ok(definitions)
+    }
+
+    async fn dispatch_capability_broker(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        context: AiApplicationToolCallContext,
+        route: AiToolResultEgressRoute,
+        delivery: &crate::AiCapabilityDeliveryTurn,
+    ) -> Result<AiPersistedApplicationToolCall, AiError> {
+        self.validate_outer_binding(lease, provider_result, &context, &route)?;
+        let provider_call = provider_result
+            .tool_calls()
+            .get(context.tool_call_index)
+            .ok_or_else(|| AiError::InvalidInput("tool call index is out of bounds".to_owned()))?;
+        let operation = crate::AiCapabilityBrokerOperation::from_tool_id(provider_call.tool_id())
+            .ok_or(AiError::Forbidden)?;
+        let expected = crate::capability_broker_definitions(delivery.index_fingerprint())?
+            .into_iter()
+            .find(|definition| definition.tool_id == operation.tool_id())
+            .ok_or(AiError::Forbidden)?;
+        let offered = provider_result
+            .request_snapshot()
+            .tools
+            .iter()
+            .filter(|definition| definition.tool_id == operation.tool_id())
+            .collect::<Vec<_>>();
+        if offered.len() != 1
+            || *offered[0] != expected
+            || provider_call.tool_fingerprint() != expected.fingerprint
+        {
+            return Err(AiError::Forbidden);
+        }
+        let argument_bytes = serde_json::to_vec(provider_call.arguments())
+            .map_err(|_| AiError::InvalidInput("invalid tool arguments".to_owned()))?;
+        if argument_bytes.len() > self.limits.maximum_argument_bytes {
+            return Err(AiError::InvalidInput(
+                "tool arguments exceed deployment limit".to_owned(),
+            ));
+        }
+
+        let session =
+            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        validate_session_binding(&session, lease, &context.scope)?;
+        let principal = self.current_access(lease, &context.scope).await?;
+        let policy = self
+            .runtime
+            .content_protection_policy_resolver()
+            .resolve(principal.principal(), &context.scope)
+            .await?;
+        if !policy.ready || policy.scope != context.scope {
+            return Err(AiError::RuntimeNotReady);
+        }
+
+        let id = AiToolCallId::new();
+        let provider_call_key = provider_call_key(lease, provider_call.call_id());
+        let argument_hash = canonical_json_hash(provider_call.arguments())?;
+        let protected_arguments = self
+            .protect(
+                &policy,
+                protection_context(
+                    "graphql_orm_ai_tool_calls",
+                    id.0,
+                    "protected_arguments",
+                    &context.scope,
+                ),
+                provider_call.arguments().clone(),
+            )
+            .await?;
+        let started_event_id = Uuid::new_v4();
+        let started_inbox_event_id = Uuid::new_v4();
+        let started_payload = json!({
+            "toolCallId": id.0,
+            "runId": lease.run_id().0,
+            "toolId": provider_call.tool_id().as_str(),
+        });
+        let protected_started_event = self
+            .protect(
+                &policy,
+                protection_context(
+                    "graphql_orm_ai_session_events",
+                    started_event_id,
+                    "protected_payload",
+                    &context.scope,
+                ),
+                started_payload.clone(),
+            )
+            .await?;
+        let protected_started_inbox_event = self
+            .protect(
+                &policy,
+                protection_context(
+                    "graphql_orm_ai_inbox_events",
+                    started_inbox_event_id,
+                    "protected_payload",
+                    &context.scope,
+                ),
+                started_payload,
+            )
+            .await?;
+        let active_lease = self
+            .run_service
+            .begin_tool_call(
+                lease,
+                PreparedToolCallStart {
+                    id: id.0,
+                    provider_call_key: provider_call_key.clone(),
+                    provider_call_id: provider_call.call_id().to_owned(),
+                    provider_kind: provider_result.provider_kind().as_str().to_owned(),
+                    provider_model: provider_result.provider_model().to_owned(),
+                    provider_response_id: provider_result.provider_response_id().map(str::to_owned),
+                    budget_reservation_id: provider_result.budget_reservation_id().0,
+                    provider_turn_index: i64::from(context.provider_turn_index),
+                    tool_call_index: i64::try_from(context.tool_call_index)
+                        .map_err(|_| AiError::InvalidInput("invalid tool index".to_owned()))?,
+                    tool_id: provider_call.tool_id().as_str().to_owned(),
+                    tool_fingerprint: provider_call.tool_fingerprint().to_owned(),
+                    protected_arguments,
+                    argument_hash,
+                    risk: "read_only".to_owned(),
+                    idempotency_key: Some(format!("ai-tool:{provider_call_key}")),
+                    correlation_id: context.correlation_id.clone(),
+                    causation_id: context.causation_id.clone(),
+                    delegation_reference: context.delegation_reference.clone(),
+                    started_event: Some(PreparedToolLifecycleEvent {
+                        event_id: started_event_id,
+                        inbox_event_id: started_inbox_event_id,
+                        protected_event: protected_started_event,
+                        protected_inbox_event: protected_started_inbox_event,
+                    }),
+                    expected_owner_principal_kind: session.owner_principal_kind.clone(),
+                    expected_owner_subject: session.owner_subject.clone(),
+                    expected_scope_kind: context.scope.kind.clone(),
+                    expected_scope_id: context.scope.id.clone(),
+                    expected_tenant_id: context.scope.tenant_id.clone(),
+                },
+            )
+            .await?;
+        let lease = &active_lease;
+        let outcome = self
+            .run_capability_broker(lease, &context, id, provider_result, delivery, operation)
+            .await;
+        let (
+            mut state,
+            mut model_output,
+            mut classification,
+            mut source_trust,
+            mut authorization_code,
+            mut policy_version,
+            mut authorization_state_digest,
+            mut application_audit_ref,
+            mut failure_code,
+            mut disclosure_fingerprint,
+        ) = match outcome {
+            Ok(success) => (
+                AiApplicationToolCallState::Completed,
+                success.output,
+                success.classification,
+                success.source_trust,
+                "allowed".to_owned(),
+                success.policy_version,
+                success.authorization_state_digest,
+                success.application_audit_ref,
+                None,
+                success.disclosure_fingerprint,
+            ),
+            Err(error) => {
+                let code = crate::classify_safe_application_tool_error(&error)
+                    .unwrap_or(crate::AiApplicationToolFailureCode::ToolUnavailable);
+                (
+                    AiApplicationToolCallState::ExecutionFailed,
+                    crate::AiApplicationToolFailureEnvelope::new(code).to_json(),
+                    DataClassification::Public,
+                    AiSourceTrust::TrustedRuntime,
+                    code.as_str().to_owned(),
+                    None,
+                    None,
+                    None,
+                    Some(code),
+                    safe_failure_disclosure_fingerprint(),
+                )
+            }
+        };
+        let mut output_bytes =
+            serde_json::to_vec(&model_output).map_err(|_| AiError::ToolExecutionFailed)?;
+        if output_bytes.len() > self.limits.maximum_model_output_bytes {
+            let code = crate::AiApplicationToolFailureCode::ResultBudgetExceeded;
+            state = AiApplicationToolCallState::ExecutionFailed;
+            model_output = crate::AiApplicationToolFailureEnvelope::new(code).to_json();
+            classification = DataClassification::Public;
+            source_trust = AiSourceTrust::TrustedRuntime;
+            authorization_code = code.as_str().to_owned();
+            policy_version = None;
+            authorization_state_digest = None;
+            application_audit_ref = None;
+            failure_code = Some(code);
+            disclosure_fingerprint = safe_failure_disclosure_fingerprint();
+            output_bytes =
+                serde_json::to_vec(&model_output).map_err(|_| AiError::ToolExecutionFailed)?;
+        }
+        let outbound_bytes = output_bytes
+            .len()
+            .checked_add(provider_call.call_id().len())
+            .and_then(|bytes| bytes.checked_add(provider_call.tool_id().as_str().len()))
+            .ok_or_else(|| AiError::InvalidInput("tool result is too large".to_owned()))?;
+        self.current_access(lease, &context.scope).await?;
+        let manifest = AiEgressManifest {
+            provider_profile_id: route.provider_profile_id,
+            provider_kind: provider_result.provider_kind().as_str().to_owned(),
+            model: provider_result.provider_model().to_owned(),
+            destination: route.destination,
+            destination_trust: route.destination_trust,
+            capability: AiEgressCapability::ToolResult,
+            scope: context.scope.clone(),
+            session_id: Some(lease.session_id()),
+            run_id: Some(lease.run_id()),
+            sources: vec![AiDataSourceRef {
+                kind: "application_tool_result".to_owned(),
+                reference: id.0.to_string(),
+                classification,
+                trust: source_trust,
+            }],
+            estimated_bytes: u64::try_from(outbound_bytes)
+                .map_err(|_| AiError::InvalidInput("tool result is too large".to_owned()))?,
+            estimated_tokens: 0,
+            attachment_count: 0,
+            purpose: route.purpose,
+            retention: route.retention,
+            residency: route.residency,
+            policy_version: route.policy_version,
+            consent_reference: route.consent_reference,
+        };
+        let decision = self
+            .runtime
+            .authorize_egress(lease.principal_reference(), &manifest)
+            .await?;
+        let audit_result = self.egress_audit.record(&manifest, &decision).await;
+        let (final_state, model_input, decision_id, manifest_hash, final_authorization_code) =
+            if audit_result.is_err() {
+                (
+                    AiApplicationToolCallState::EgressAuditFailed,
+                    None,
+                    None,
+                    None,
+                    "egress_audit_failed".to_owned(),
+                )
+            } else if decision.authorize(&manifest).is_err() {
+                (
+                    AiApplicationToolCallState::EgressDenied,
+                    None,
+                    Some(decision.id.0),
+                    Some(decision.manifest_hash.clone()),
+                    "egress_denied".to_owned(),
+                )
+            } else {
+                (
+                    state,
+                    Some(ModelInputBlock::ToolResult {
+                        call_id: provider_call.call_id().to_owned(),
+                        tool_id: provider_call.tool_id().as_str().to_owned(),
+                        output: model_output.clone(),
+                    }),
+                    Some(decision.id.0),
+                    Some(decision.manifest_hash.clone()),
+                    authorization_code,
+                )
+            };
+        let protected_result = self
+            .protect(
+                &policy,
+                protection_context(
+                    "graphql_orm_ai_tool_calls",
+                    id.0,
+                    "protected_result",
+                    &context.scope,
+                ),
+                model_output,
+            )
+            .await?;
+        let event_id = Uuid::new_v4();
+        let inbox_event_id = Uuid::new_v4();
+        let terminal_payload = json!({
+            "toolCallId": id.0,
+            "runId": lease.run_id().0,
+            "toolId": provider_call.tool_id().as_str(),
+            "state": final_state.as_str(),
+        });
+        let protected_event = self
+            .protect(
+                &policy,
+                protection_context(
+                    "graphql_orm_ai_session_events",
+                    event_id,
+                    "protected_payload",
+                    &context.scope,
+                ),
+                terminal_payload.clone(),
+            )
+            .await?;
+        let protected_inbox_event = self
+            .protect(
+                &policy,
+                protection_context(
+                    "graphql_orm_ai_inbox_events",
+                    inbox_event_id,
+                    "protected_payload",
+                    &context.scope,
+                ),
+                terminal_payload,
+            )
+            .await?;
+        let renewed = self
+            .run_service
+            .finish_tool_call(
+                lease,
+                PreparedToolCallFinish {
+                    id: id.0,
+                    state: final_state.as_str().to_owned(),
+                    protected_result,
+                    authorization_code: final_authorization_code,
+                    authorization_policy_version: policy_version,
+                    authorization_state_digest,
+                    disclosure_schema_fingerprint: disclosure_fingerprint,
+                    result_classification: classification_value(classification).to_owned(),
+                    result_egress_decision_id: decision_id,
+                    result_egress_manifest_hash: manifest_hash,
+                    application_audit_ref,
+                    event_id,
+                    inbox_event_id,
+                    protected_event,
+                    protected_inbox_event,
+                    correlation_id: context.correlation_id,
+                    expected_provider_call_key: provider_call_key,
+                    expected_tool_fingerprint: provider_call.tool_fingerprint().to_owned(),
+                    expected_owner_principal_kind: session.owner_principal_kind,
+                    expected_owner_subject: session.owner_subject,
+                    expected_scope_kind: context.scope.kind,
+                    expected_scope_id: context.scope.id,
+                    expected_tenant_id: context.scope.tenant_id,
+                },
+            )
+            .await?;
+        Ok(AiPersistedApplicationToolCall {
+            id,
+            provider_call_id: provider_call.call_id().to_owned(),
+            state: final_state,
+            model_input,
+            egress_manifest: decision_id.map(|_| manifest),
+            failure_code,
+            lease: renewed,
+        })
+    }
+
+    async fn run_capability_broker(
+        &self,
+        lease: &AiRunLease,
+        context: &AiApplicationToolCallContext,
+        tool_call_id: AiToolCallId,
+        provider_result: &AiProviderCallResult,
+        delivery: &crate::AiCapabilityDeliveryTurn,
+        operation: crate::AiCapabilityBrokerOperation,
+    ) -> Result<BrokerCallOutput, AiError> {
+        let provider_call = provider_result
+            .tool_calls()
+            .get(context.tool_call_index)
+            .ok_or(AiError::Conflict)?;
+        let arguments = provider_call.arguments();
+        let run = crate::AiCapabilityRunBinding::from_lease(
+            lease,
+            provider_result.provider_kind().clone(),
+            delivery.session_binding(),
+        );
+        let broker = delivery.broker();
+        let session = delivery.session();
+        match operation {
+            crate::AiCapabilityBrokerOperation::Discover => {
+                let output = if delivery.mode() == crate::AiCapabilityDeliveryMode::ClientDeferred {
+                    broker
+                        .dispatch_client_deferred_discover(
+                            lease.principal_reference(),
+                            &run,
+                            session,
+                            arguments,
+                        )
+                        .await?
+                } else {
+                    broker
+                        .dispatch_discover(lease.principal_reference(), &run, session, arguments)
+                        .await?
+                };
+                BrokerCallOutput::metadata(output, broker_disclosure_fingerprint(operation))
+            }
+            crate::AiCapabilityBrokerOperation::Describe => {
+                let description = broker
+                    .dispatch_describe(lease.principal_reference(), &run, session, arguments)
+                    .await?;
+                let definition = self
+                    .runtime
+                    .tool_catalog()
+                    .query_capability_model_definition(
+                        description.capability_id(),
+                        crate::capability_provider_alias(description.capability_id()),
+                    )?;
+                if definition.fingerprint != description.capability_fingerprint() {
+                    return Err(AiError::Forbidden);
+                }
+                let description = description.with_plan_schema(
+                    definition.parameters,
+                    session.limits().maximum_describe_bytes,
+                )?;
+                BrokerCallOutput::metadata(
+                    description.into_model_result(),
+                    broker_disclosure_fingerprint(operation),
+                )
+            }
+            crate::AiCapabilityBrokerOperation::Execute => {
+                let execution = broker
+                    .authorize_broker_execution(
+                        lease.principal_reference(),
+                        &run,
+                        session,
+                        arguments,
+                    )
+                    .await?;
+                let compiled = self.runtime.tool_catalog().compile_query_capability(
+                    execution.capability_id(),
+                    execution.capability_fingerprint(),
+                    execution.plan().clone(),
+                )?;
+                let (_, disclosure, _) = compiled.into_parts();
+                let disclosure_fingerprint = disclosure.fingerprint.clone();
+                let invocation = GraphqlInvocationContext {
+                    run_id: lease.run_id(),
+                    tool_call_id,
+                    scope: context.scope.clone(),
+                    correlation_id: context.correlation_id.clone(),
+                    causation_id: context.causation_id.clone(),
+                    delegation_reference: context.delegation_reference.clone(),
+                    idempotency_key: Some(format!(
+                        "ai-tool:{}",
+                        provider_call_key(lease, provider_call.call_id())
+                    )),
+                };
+                let capability_id = execution.capability_id().clone();
+                let capability_fingerprint = execution.capability_fingerprint().to_owned();
+                let plan = execution.into_plan();
+                let result = tokio::time::timeout(
+                    self.limits.maximum_execution_time.unsigned_abs(),
+                    async {
+                        self.runtime
+                            .execute_query_capability(
+                                lease.principal_reference(),
+                                &capability_id,
+                                &capability_fingerprint,
+                                plan,
+                                invocation,
+                            )
+                            .await
+                    },
+                )
+                .await
+                .unwrap_or(Err(AiError::ToolExecutionFailed))?;
+                Ok(BrokerCallOutput {
+                    output: result.model_output(),
+                    classification: result.disclosure().maximum_classification,
+                    source_trust: AiSourceTrust::ResolverResult,
+                    disclosure_fingerprint,
+                    policy_version: Some(result.policy_version().to_owned()),
+                    authorization_state_digest: Some(
+                        result.authorization_state_digest().to_owned(),
+                    ),
+                    application_audit_ref: result.response().application_audit_ref.clone(),
+                })
+            }
+        }
+    }
+
     /// Executes one exact generated mutation classified `Automatic`.
     ///
     /// The service compiles and freshly preauthorizes the closed plan, then
@@ -2882,6 +3441,52 @@ fn valid_audit_reference(value: &str) -> bool {
     !value.trim().is_empty()
         && value.len() <= 1_024
         && value.bytes().all(|byte| !byte.is_ascii_control())
+}
+
+struct BrokerCallOutput {
+    output: serde_json::Value,
+    classification: DataClassification,
+    source_trust: AiSourceTrust,
+    disclosure_fingerprint: String,
+    policy_version: Option<String>,
+    authorization_state_digest: Option<String>,
+    application_audit_ref: Option<String>,
+}
+
+impl BrokerCallOutput {
+    fn metadata(
+        output: serde_json::Value,
+        disclosure_fingerprint: String,
+    ) -> Result<Self, AiError> {
+        let authorization_state_digest = canonical_json_hash(&json!({
+            "contract": "graphql-orm-ai/capability-broker-metadata-authorization/v1",
+            "disclosureFingerprint": &disclosure_fingerprint,
+            "output": &output,
+        }))?;
+        Ok(Self {
+            output,
+            classification: DataClassification::Public,
+            source_trust: AiSourceTrust::TrustedRuntime,
+            disclosure_fingerprint,
+            policy_version: Some("capability-broker-metadata-v1".to_owned()),
+            authorization_state_digest: Some(authorization_state_digest),
+            application_audit_ref: None,
+        })
+    }
+}
+
+fn broker_disclosure_fingerprint(operation: crate::AiCapabilityBrokerOperation) -> String {
+    hex::encode(Sha256::digest(match operation {
+        crate::AiCapabilityBrokerOperation::Discover => {
+            b"graphql-orm-ai/capability-broker-discover/v1".as_slice()
+        }
+        crate::AiCapabilityBrokerOperation::Describe => {
+            b"graphql-orm-ai/capability-broker-describe/v1".as_slice()
+        }
+        crate::AiCapabilityBrokerOperation::Execute => {
+            b"graphql-orm-ai/capability-broker-execute/v1".as_slice()
+        }
+    }))
 }
 
 fn safe_failure_disclosure_fingerprint() -> String {

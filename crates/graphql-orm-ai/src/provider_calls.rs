@@ -586,6 +586,144 @@ impl AiProviderCallPlan {
         )
     }
 
+    /// Creates an initial provider call exposing exactly one crate-owned
+    /// capability delivery surface.
+    ///
+    /// The surface is minted by
+    /// [`crate::prepare_capability_delivery_surface`] and its fields are
+    /// private, so a host cannot author, widen, rename, or re-fingerprint the
+    /// offered definitions. Frozen broker definitions are crate-owned and need
+    /// no catalogue entry; every other definition must still be one uniquely
+    /// registered, currently admitted read capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for ordinary initial-plan binding failures, an
+    /// offered set that differs from the crate-owned surface, or any unknown,
+    /// colliding, disabled, stale, mutation, or subscription definition.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_capability_surface(
+        provider_kind: ProviderKind,
+        request: ModelRequest,
+        budget: AiBudgetReservationRequest,
+        transfers: Vec<AiEgressManifest>,
+        correlation_id: impl Into<String>,
+        surface: &crate::AiCapabilityDeliverySurface,
+        catalog: &crate::AiToolCatalog,
+        static_policy: &AiToolPolicySet,
+        generated_targets: &crate::AiGeneratedGraphqlTargetPolicySet,
+    ) -> Result<Self, AiError> {
+        if request.tools.is_empty()
+            || request.continuation.is_some()
+            || request
+                .input
+                .iter()
+                .any(|block| matches!(block, crate::ModelInputBlock::ToolResult { .. }))
+        {
+            return Err(AiError::InvalidInput(
+                "initial capability-surface provider plan is invalid".to_owned(),
+            ));
+        }
+        Self::new_with_bound_capability_surface(
+            provider_kind,
+            request,
+            budget,
+            transfers,
+            correlation_id,
+            surface,
+            catalog,
+            static_policy,
+            generated_targets,
+        )
+    }
+
+    /// Creates a subsequent turn that retains one exact crate-owned capability
+    /// delivery surface and installs one opaque bounded-loop continuation.
+    ///
+    /// A client-deferred run supplies the surface returned by the internal
+    /// deferred-definition installer; every other mode supplies its unchanged
+    /// initial surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for malformed continuation bindings, an offered
+    /// set that differs from the crate-owned surface, or any unknown,
+    /// colliding, disabled, stale, mutation, or subscription definition.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_continuation_with_capability_surface(
+        provider_kind: ProviderKind,
+        mut request: ModelRequest,
+        budget: AiBudgetReservationRequest,
+        mut transfers: Vec<AiEgressManifest>,
+        correlation_id: impl Into<String>,
+        continuation: crate::AiAgentContinuation,
+        surface: &crate::AiCapabilityDeliverySurface,
+        catalog: &crate::AiToolCatalog,
+        static_policy: &AiToolPolicySet,
+        generated_targets: &crate::AiGeneratedGraphqlTargetPolicySet,
+    ) -> Result<Self, AiError> {
+        let tool_transfers = continuation.apply_with_transfers(&mut request)?;
+        transfers.extend(tool_transfers);
+        Self::new_with_bound_capability_surface(
+            provider_kind,
+            request,
+            budget,
+            transfers,
+            correlation_id,
+            surface,
+            catalog,
+            static_policy,
+            generated_targets,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_bound_capability_surface(
+        provider_kind: ProviderKind,
+        request: ModelRequest,
+        budget: AiBudgetReservationRequest,
+        transfers: Vec<AiEgressManifest>,
+        correlation_id: impl Into<String>,
+        surface: &crate::AiCapabilityDeliverySurface,
+        catalog: &crate::AiToolCatalog,
+        static_policy: &AiToolPolicySet,
+        generated_targets: &crate::AiGeneratedGraphqlTargetPolicySet,
+    ) -> Result<Self, AiError> {
+        if request.tools.is_empty() || request.tools.as_slice() != surface.tools() {
+            return Err(AiError::Forbidden);
+        }
+        for definition in &request.tools {
+            let id = crate::AiToolId::parse(definition.tool_id.clone())?;
+            if crate::AiCapabilityBrokerOperation::from_tool_id(&id).is_some() {
+                continue;
+            }
+            catalog.validate_read_capability_model_definition(
+                definition,
+                static_policy,
+                generated_targets,
+            )?;
+        }
+        let bindings = request
+            .tools
+            .iter()
+            .map(|definition| AiPlanToolRuleBinding {
+                fingerprint: definition.fingerprint.clone(),
+                maturity: ToolMaturity::ReadOnly,
+                approval: AiApprovalRule::None,
+            })
+            .collect();
+        let mut plan = Self::new_internal(
+            provider_kind,
+            request,
+            budget,
+            transfers,
+            correlation_id.into(),
+            true,
+        )?;
+        plan.tool_rule_bindings = bindings;
+        Ok(plan)
+    }
+
     fn new_with_bound_tools(
         provider_kind: ProviderKind,
         request: ModelRequest,
@@ -965,6 +1103,10 @@ impl AiProviderCallPlan {
     /// tool definition.
     pub fn has_application_tools(&self) -> bool {
         !self.request.tools.is_empty()
+    }
+
+    pub(crate) fn offered_tools(&self) -> &[crate::ModelToolDefinition] {
+        &self.request.tools
     }
 
     pub(crate) fn is_tool_free_initial(&self) -> bool {
@@ -3808,7 +3950,10 @@ fn valid_provider_call_id(value: &str) -> bool {
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{
+        RwLock,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
 
     use super::*;
     #[cfg(feature = "provider-openai")]
@@ -3905,6 +4050,42 @@ mod tests {
     }
 
     struct Resolver(AuthPrincipal);
+
+    struct BrokerCurrentIndex(Arc<AiCapabilityIndex>);
+
+    impl AiCurrentCapabilityIndex for BrokerCurrentIndex {
+        fn current_index(
+            &self,
+            _run: &AiCapabilityRunBinding,
+        ) -> Result<Arc<AiCapabilityIndex>, AiError> {
+            Ok(Arc::clone(&self.0))
+        }
+    }
+
+    struct BrokerAuthority {
+        allowed: AtomicBool,
+        policy_fingerprint: RwLock<String>,
+    }
+
+    #[async_trait]
+    impl AiCapabilityAuthorityPolicy for BrokerAuthority {
+        async fn authorize(
+            &self,
+            _principal: &ResolvedPrincipal,
+            _owning_index: &AiCapabilityIndex,
+            _entry: &AiCapabilityIndexEntry,
+            _run: &AiCapabilityRunBinding,
+        ) -> Result<AiCapabilityAuthorityDecision, AiError> {
+            Ok(AiCapabilityAuthorityDecision {
+                allowed: self.allowed.load(Ordering::SeqCst),
+                policy_fingerprint: self
+                    .policy_fingerprint
+                    .read()
+                    .map_err(|_| AiError::PersistenceFailed)?
+                    .clone(),
+            })
+        }
+    }
 
     struct CountingResolver {
         principal: AuthPrincipal,
@@ -9688,6 +9869,445 @@ mod tests {
         assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
         assert_eq!(fixture.mock.request_count(), 1);
         assert_eq!(reservation_state(&fixture.database).await, "committed");
+    }
+
+    fn broker_provider_result(
+        lease: &AiRunLease,
+        previous_response_id: Option<String>,
+        response_id: &str,
+        call_id: &str,
+        definition: &ModelToolDefinition,
+        arguments: serde_json::Value,
+    ) -> AiProviderCallResult {
+        let mut result = AiProviderCallResult::test_result(
+            lease,
+            previous_response_id,
+            response_id,
+            vec![(call_id, definition.tool_id.as_str(), arguments)],
+        );
+        result.request_snapshot.tools = vec![definition.clone()];
+        result.tool_calls[0].provider_name = definition.provider_name.clone();
+        result.tool_calls[0].tool_fingerprint = definition.fingerprint.clone();
+        result
+    }
+
+    async fn commit_broker_provider_budget(
+        fixture: &Fixture,
+        result: AiProviderCallResult,
+    ) -> AiProviderCallResult {
+        let now = OffsetDateTime::now_utc();
+        let reservation = AiBudgetReservationRecord::insert(
+            &fixture.database,
+            CreateAiBudgetReservationRecordInput {
+                budget_counter_ids: json!([]),
+                scope_kind: fixture.scope.kind.clone(),
+                scope_id: fixture.scope.id.clone(),
+                tenant_id: fixture.scope.tenant_id.clone(),
+                principal_kind: "user".to_owned(),
+                principal_subject: fixture.principal.subject().to_owned(),
+                session_id: fixture.lease.session_id().0,
+                run_id: fixture.lease.run_id().0,
+                attempt_id: fixture.lease.attempt_id(),
+                lease_generation: fixture.lease.lease_generation(),
+                provider_kind: ProviderKind::OpenAi.as_str().to_owned(),
+                provider_model: "coordinator-test-model".to_owned(),
+                reasoning_effort: ModelReasoningEffort::Unspecified.as_str().to_owned(),
+                pricing_policy_version: "broker-test-pricing-v1".to_owned(),
+                reserved_input_tokens: 1,
+                reserved_output_tokens: 1,
+                reserved_tool_units: 0,
+                reserved_image_units: 0,
+                reserved_cost_microunits: 1,
+                reserved_runs: 1,
+                actual_input_tokens: Some(1),
+                actual_cached_input_tokens: Some(0),
+                actual_output_tokens: Some(1),
+                actual_tool_units: Some(0),
+                actual_image_units: Some(0),
+                actual_cost_microunits: Some(1),
+                actual_runs: Some(1),
+                idempotency_key: format!(
+                    "broker-test-provider-turn-{}",
+                    result
+                        .provider_response_id()
+                        .expect("broker result should have a response ID")
+                ),
+                state: "committed".to_owned(),
+                expires_at: (now + Duration::hours(1)).unix_timestamp(),
+                reconciled_at: Some(now.unix_timestamp()),
+            },
+        )
+        .await
+        .expect("broker test provider budget should commit");
+        result.test_with_budget_reservation(AiBudgetReservationId(reservation.id))
+    }
+
+    struct BrokerTurnTestHarness<'a> {
+        fixture: &'a Fixture,
+        checkpoint_service: &'a OrmAiCoordinatorCheckpointService,
+        tool_service: &'a OrmAiApplicationToolCallService,
+        route: &'a AiToolResultEgressRoute,
+        delivery: &'a AiCapabilityDeliveryTurn,
+    }
+
+    impl BrokerTurnTestHarness<'_> {
+        async fn persist_and_execute(
+            &self,
+            guard: &mut AiAgentLoopGuard,
+            lease: &AiRunLease,
+            provider_result: &AiProviderCallResult,
+            provider_results: &[&AiProviderCallResult],
+        ) -> (AiPersistedApplicationToolCall, AiRunLease) {
+            let AiAgentLoopTurn::ToolCalls {
+                provider_turn_index,
+                call_count,
+            } = guard
+                .observe_provider_turn(provider_result)
+                .expect("broker provider turn should bind to the loop")
+            else {
+                panic!("broker provider turn must request one tool")
+            };
+            assert_eq!(call_count, 1);
+            let total_tool_calls = usize::try_from(guard.total_tool_calls())
+                .expect("bounded tool-call count should fit usize");
+            let tool_calls_before_turn = total_tool_calls
+                .checked_sub(call_count)
+                .expect("observed broker calls should include the current turn");
+            let (rules, usage) = test_rule_checkpoint(
+                &self.fixture.scope,
+                provider_results,
+                tool_calls_before_turn,
+            );
+            let checkpointed_lease = self
+                .checkpoint_service
+                .persist_provider_turn(
+                    lease,
+                    provider_result,
+                    &self.fixture.scope,
+                    "capability-broker-test",
+                    self.route,
+                    &rules,
+                    usage,
+                    guard.provider_turns(),
+                    guard.total_tool_calls(),
+                )
+                .await
+                .expect("broker provider result should checkpoint");
+            let context = AiApplicationToolCallContext::new(
+                provider_turn_index,
+                0,
+                self.fixture.scope.clone(),
+                "capability-broker-test",
+                provider_result
+                    .provider_response_id()
+                    .expect("broker response should have an ID"),
+            )
+            .expect("broker context should validate");
+            let persisted = self
+                .tool_service
+                .execute_capability_broker_call(
+                    &checkpointed_lease,
+                    provider_result,
+                    context,
+                    self.route.clone(),
+                    self.delivery,
+                )
+                .await
+                .expect("broker call should have one durable outcome");
+            guard
+                .observe_tool_result(&persisted)
+                .expect("durable broker result should bind to the provider call");
+            let continuation = guard
+                .continuation()
+                .expect("one durable broker result should permit continuation");
+            let total_tool_calls = usize::try_from(guard.total_tool_calls())
+                .expect("bounded tool-call count should fit usize");
+            let (_, usage) =
+                test_rule_checkpoint(&self.fixture.scope, provider_results, total_tool_calls);
+            let batch_lease = self
+                .checkpoint_service
+                .persist_tool_batch(
+                    persisted.lease(),
+                    provider_result,
+                    std::slice::from_ref(&persisted),
+                    &continuation,
+                    &self.fixture.scope,
+                    "capability-broker-test",
+                    self.route,
+                    &rules,
+                    usage,
+                    guard.provider_turns(),
+                    guard.total_tool_calls(),
+                )
+                .await
+                .expect("broker tool batch should checkpoint");
+            let adopted = self
+                .checkpoint_service
+                .adopt_tool_batch(&batch_lease)
+                .await
+                .expect("broker tool batch should reauthorize")
+                .expect("broker tool batch should remain adoptable");
+            let ready_lease = self
+                .checkpoint_service
+                .consume_before_provider(&batch_lease, adopted.checkpoint_id())
+                .await
+                .expect("broker checkpoint should consume exactly once");
+            (persisted, ready_lease)
+        }
+    }
+
+    fn broker_output(call: &AiPersistedApplicationToolCall) -> &serde_json::Value {
+        match call
+            .model_input()
+            .expect("broker result should be model-visible")
+        {
+            ModelInputBlock::ToolResult { output, .. } => output,
+            _ => panic!("broker result must be a tool result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fixed_broker_round_trip_is_durable_and_executes_through_the_ordinary_resolver() {
+        let fixture = fixture(Vec::new()).await;
+        let (semantics, query_catalog) = generated_query_catalog();
+        let capability_index = Arc::new(
+            AiCapabilityIndex::compile(
+                GraphqlExecutionTargetId::parse("generated-read-application")
+                    .expect("generated target should validate"),
+                query_catalog.finished_schema_fingerprint(),
+                &semantics,
+                Some(&query_catalog),
+                None,
+                None,
+                [],
+                "target-policy-v1",
+                AiCapabilityIndexLimits::default(),
+            )
+            .expect("generated capability index should compile"),
+        );
+        let generated_id = fixture
+            .generated_query_id
+            .as_ref()
+            .expect("fixture should register the generated query");
+        let generated_definition = fixture
+            .runtime
+            .tool_catalog()
+            .query_capability_model_definition(
+                generated_id,
+                capability_provider_alias(generated_id),
+            )
+            .expect("registered generated query should project");
+        let broker = Arc::new(
+            AiCapabilityDiscoveryBroker::new(
+                Arc::new(Resolver(fixture.principal.clone())),
+                Arc::new(BrokerCurrentIndex(Arc::clone(&capability_index))),
+                Arc::new(BrokerAuthority {
+                    allowed: AtomicBool::new(true),
+                    policy_fingerprint: RwLock::new("current-policy-v1".to_owned()),
+                }),
+                Arc::new(SystemClock),
+                Duration::seconds(30),
+            )
+            .expect("capability broker should validate"),
+        );
+        let capability_index_set = AiCapabilityIndexSet::compile([Arc::clone(&capability_index)])
+            .expect("capability index set should compile");
+        let binding = AiProviderCapabilitySessionBinding::new(
+            AiCapabilityDeliveryMode::FixedBroker,
+            capability_index_set.fingerprint(),
+            BTreeSet::new(),
+            "test-provider-projection-v1",
+            "coordinator-test-model",
+            ModelReasoningEffort::Unspecified,
+            "f".repeat(64),
+        )
+        .expect("provider capability binding should validate");
+        let capabilities = ProviderCapabilities {
+            custom_tools: true,
+            capability_delivery_modes: BTreeSet::from([AiCapabilityDeliveryMode::FixedBroker]),
+            ..ProviderCapabilities::default()
+        };
+        let delivery = AiCapabilityDeliveryTurn::select(
+            &capabilities,
+            capability_index_set.fingerprint(),
+            vec![generated_definition],
+            true,
+            binding,
+            broker,
+            AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default())
+                .expect("broker session should validate"),
+        )
+        .expect("fixed broker delivery should select");
+        let definitions = delivery.current_tools();
+        let discover_definition = definitions
+            .iter()
+            .find(|definition| definition.tool_id == AI_CAPABILITY_DISCOVER_TOOL_ID)
+            .expect("fixed broker should offer discovery");
+        let describe_definition = definitions
+            .iter()
+            .find(|definition| definition.tool_id == AI_CAPABILITY_DESCRIBE_TOOL_ID)
+            .expect("fixed broker should offer describe");
+        let execute_definition = definitions
+            .iter()
+            .find(|definition| definition.tool_id == AI_CAPABILITY_EXECUTE_TOOL_ID)
+            .expect("fixed broker should offer execute");
+        let route = AiToolResultEgressRoute::new(
+            "mock-profile",
+            "local-mock",
+            AiDestinationTrust::Local,
+            "continue_capability_broker_result",
+            "none",
+            "egress-v1",
+        )
+        .expect("broker result route should validate");
+        let checkpoint_service = OrmAiCoordinatorCheckpointService::new(
+            fixture.run_service.clone(),
+            Arc::new(Resolver(fixture.principal.clone())),
+            Arc::new(AllowAccess),
+            Arc::new(ProtectionPolicy),
+            Arc::new(DatabaseManagedContentProtector),
+            Arc::new(TestRuleResolver::default()),
+            Arc::new(SystemClock),
+            AiCoordinatorCheckpointLimits::new(256 * 1_024, Duration::seconds(30))
+                .expect("checkpoint limits should validate"),
+        );
+        let tool_service = OrmAiApplicationToolCallService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            fixture.audit.clone(),
+            Arc::new(SystemClock),
+            AiApplicationToolCallLimits::new(
+                16_384,
+                256 * 1_024,
+                8,
+                8,
+                Duration::seconds(30),
+                Duration::seconds(10),
+            )
+            .expect("tool limits should validate"),
+        );
+        let mut guard = AiAgentLoopGuard::new(
+            &fixture.lease,
+            AiAgentLoopLimits::new(8, 8).expect("broker loop limits should validate"),
+        );
+        let broker_turns = BrokerTurnTestHarness {
+            fixture: &fixture,
+            checkpoint_service: &checkpoint_service,
+            tool_service: &tool_service,
+            route: &route,
+            delivery: &delivery,
+        };
+
+        let discover = commit_broker_provider_budget(
+            &fixture,
+            broker_provider_result(
+                &fixture.lease,
+                None,
+                "broker-response-1",
+                "broker-discover-call",
+                discover_definition,
+                json!({
+                    "text": "reviewed generated record",
+                    "namespace": "generated-read",
+                    "kind": "generated_query",
+                    "entityOrClass": null,
+                    "maximumResults": 1
+                }),
+            ),
+        )
+        .await;
+        let (discover_call, lease) = broker_turns
+            .persist_and_execute(&mut guard, &fixture.lease, &discover, &[&discover])
+            .await;
+        let candidate = &broker_output(&discover_call)["candidates"][0];
+        assert_eq!(candidate["capabilityId"], generated_id.as_str());
+
+        let describe = commit_broker_provider_budget(
+            &fixture,
+            broker_provider_result(
+                &lease,
+                Some("broker-response-1".to_owned()),
+                "broker-response-2",
+                "broker-describe-call",
+                describe_definition,
+                json!({
+                    "capabilityId": candidate["capabilityId"],
+                    "candidateFingerprint": candidate["candidateFingerprint"]
+                }),
+            ),
+        )
+        .await;
+        let (describe_call, lease) = broker_turns
+            .persist_and_execute(&mut guard, &lease, &describe, &[&discover, &describe])
+            .await;
+        let loaded_reference = broker_output(&describe_call)["loadedReference"]
+            .as_str()
+            .expect("description should carry an opaque loaded reference")
+            .to_owned();
+
+        let execute = commit_broker_provider_budget(
+            &fixture,
+            broker_provider_result(
+                &lease,
+                Some("broker-response-2".to_owned()),
+                "broker-response-3",
+                "broker-execute-call",
+                execute_definition,
+                json!({
+                    "loadedReference": loaded_reference,
+                    "arguments": [{"name": "recordId", "value": "record-42"}],
+                    "selections": ["recordId", "subject"],
+                    "relationshipArguments": [],
+                    "relationshipMaximumItems": [],
+                    "maximumItems": null
+                }),
+            ),
+        )
+        .await;
+        let (execute_call, _lease) = broker_turns
+            .persist_and_execute(
+                &mut guard,
+                &lease,
+                &execute,
+                &[&discover, &describe, &execute],
+            )
+            .await;
+        let execute_output = broker_output(&execute_call);
+        assert_eq!(
+            execute_output["data"]["GeneratedRecord"]["recordId"], "record-42",
+            "unexpected broker execute output: {execute_output}"
+        );
+        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 1);
+        let amplification = delivery.amplification();
+        assert_eq!(amplification.discover_calls, 1);
+        assert_eq!(amplification.describe_calls, 1);
+        assert_eq!(amplification.execute_calls, 1);
+        assert_eq!(amplification.total_calls(), 3);
+
+        let rows = AiToolCallRecord::query(fixture.database.pool())
+            .filter(AiToolCallRecordWhereInput {
+                run_id: Some(UuidFilter {
+                    eq: Some(fixture.lease.run_id().0),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .limit(10)
+            .fetch_all()
+            .await
+            .expect("broker tool rows should load");
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|row| row.state == "completed"));
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.tool_id.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                AI_CAPABILITY_DISCOVER_TOOL_ID,
+                AI_CAPABILITY_DESCRIBE_TOOL_ID,
+                AI_CAPABILITY_EXECUTE_TOOL_ID,
+            ])
+        );
     }
 
     #[tokio::test]

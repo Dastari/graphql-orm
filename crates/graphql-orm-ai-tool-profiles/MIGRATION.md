@@ -3,12 +3,33 @@ title: "graphql-orm-ai-tool-profiles migration guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-16
+last_reviewed: 2026-08-21
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.7.0 to 0.8.0: canonical federated capability-index sets
+
+Adopt `graphql-orm-ai-tool-profiles` 0.8.0 and `graphql-orm-ai` 0.85.0 from one
+reviewed full monorepo revision. Continue compiling one exact
+`AiCapabilityIndex` beside each owning target after its finished SDL and
+semantic catalogue are complete. Combine the active indexes with
+`AiCapabilityIndexSet::compile` and use its fingerprint for delivery surfaces
+and retained provider-session bindings.
+
+Remove consumer-authored combined-index fingerprints and single-target broker
+selection. Capability IDs must be globally unique across the active set; a
+collision is now a deployment error. Discovery ranks the complete set, while
+loading and execution revalidate the exact member index's target, schema,
+semantic catalogue and policy fingerprints. Existing single-index sources can
+continue through the compatibility adapter. Validate deployment-specific
+`AiCapabilityIndexSetLimits` for target count, aggregate entry count, canonical
+entry bytes and global search results when the defaults are not appropriate.
+
+No database, data, GraphQL SDL, table, column, index, constraint, backfill,
+protected-content, credential or AI schema-module migration is required.
 
 ## 0.6.0 to 0.7.0: proof-bearing pre-transport budget denial
 

@@ -5,7 +5,10 @@
 //! is descriptive only; callers must reauthorize and load the exact current
 //! capability before execution.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use graphql_orm_operation_catalog::{
     GeneratedGraphqlOperationCategory, GraphqlAggregateOperator, GraphqlOperationKind,
@@ -26,6 +29,9 @@ use crate::{
 
 /// Current compact capability-index contract version.
 pub const AI_CAPABILITY_INDEX_VERSION: u16 = 1;
+
+/// Current deterministic multi-target capability-index-set contract version.
+pub const AI_CAPABILITY_INDEX_SET_VERSION: u16 = 1;
 
 const MAXIMUM_SEARCH_TEXT_BYTES: usize = 1_024;
 const MAXIMUM_PUBLIC_TEXT_BYTES: usize = 1_024;
@@ -64,6 +70,46 @@ impl AiCapabilityIndexLimits {
             || !(1..=128).contains(&self.maximum_search_results)
         {
             return Err(configuration_error("capability-index limits are invalid"));
+        }
+        Ok(())
+    }
+}
+
+/// Independent ceilings for one canonical federated index set.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiCapabilityIndexSetLimits {
+    /// Maximum independently owned logical targets.
+    pub maximum_indexes: u16,
+    /// Maximum entries across every member index.
+    pub maximum_entries: u32,
+    /// Maximum canonical JSON bytes across every member entry.
+    pub maximum_total_bytes: u64,
+    /// Maximum results returned by one global search.
+    pub maximum_search_results: u16,
+}
+
+impl Default for AiCapabilityIndexSetLimits {
+    fn default() -> Self {
+        Self {
+            maximum_indexes: 256,
+            maximum_entries: 16_384,
+            maximum_total_bytes: 64 * 1_024 * 1_024,
+            maximum_search_results: 32,
+        }
+    }
+}
+
+impl AiCapabilityIndexSetLimits {
+    fn validate(self) -> Result<(), AiError> {
+        if !(1..=1_024).contains(&self.maximum_indexes)
+            || !(1..=1_048_576).contains(&self.maximum_entries)
+            || !(1_024..=4 * 1_024 * 1_024 * 1_024).contains(&self.maximum_total_bytes)
+            || !(1..=128).contains(&self.maximum_search_results)
+        {
+            return Err(configuration_error(
+                "capability index set limits are invalid",
+            ));
         }
         Ok(())
     }
@@ -451,27 +497,15 @@ impl AiCapabilityIndex {
     ) -> Result<AiCapabilitySearchResult, AiError> {
         query.validate(self.limits.maximum_search_results)?;
         let terms = search_terms(&query.text);
-        let mut ranked =
-            self.entries
-                .values()
-                .filter(|entry| {
-                    query
-                        .namespace
-                        .as_ref()
-                        .is_none_or(|namespace| &entry.namespace == namespace)
-                        && query.kind.is_none_or(|kind| entry.kind == kind)
-                        && query.entity_or_operation.as_ref().is_none_or(|name| {
-                            semantic_key(&entry.operation_name) == semantic_key(name)
-                                || entry.entity_name.as_ref().is_some_and(|entity| {
-                                    semantic_key(entity) == semantic_key(name)
-                                })
-                        })
-                })
-                .filter_map(|entry| {
-                    let score = search_score(entry, &terms);
-                    (score > 0).then_some((score, entry))
-                })
-                .collect::<Vec<_>>();
+        let mut ranked = self
+            .entries
+            .values()
+            .filter(|entry| entry_matches_query(entry, query))
+            .filter_map(|entry| {
+                let score = search_score(entry, &terms);
+                (score > 0).then_some((score, entry))
+            })
+            .collect::<Vec<_>>();
         ranked.sort_by(|left, right| {
             right
                 .0
@@ -481,24 +515,220 @@ impl AiCapabilityIndex {
         let candidates = ranked
             .into_iter()
             .take(usize::from(query.maximum_results))
-            .map(|(_, entry)| AiCapabilitySearchCandidate {
-                id: entry.id.clone(),
-                kind: entry.kind,
-                name: entry.name.clone(),
-                description: entry.description.clone(),
-                namespace: entry.namespace.clone(),
-                entity_name: entry.entity_name.clone(),
-                operation_name: entry.operation_name.clone(),
-                operation_shape: entry.operation_shape,
-                capability_fingerprint: entry.capability_fingerprint.clone(),
-                entry_fingerprint: entry.fingerprint.clone(),
-            })
+            .map(|(_, entry)| search_candidate(entry))
             .collect();
         Ok(AiCapabilitySearchResult {
             index_fingerprint: self.fingerprint.clone(),
             schema_fingerprint: self.schema_fingerprint.clone(),
             semantic_catalogue_fingerprint: self.semantic_catalogue_fingerprint.clone(),
             target_policy_fingerprint: self.target_policy_fingerprint.clone(),
+            candidates,
+        })
+    }
+}
+
+/// Deterministic collection of independently compiled capability indexes.
+///
+/// An index set preserves the exact logical target, schema, semantic
+/// catalogue, and policy fingerprint of every owning index. It is not a
+/// synthetic GraphQL schema and grants no authority. Capability identifiers
+/// must be globally unique so discovery can resolve each candidate to exactly
+/// one owning target before current policy and resolver authorization run.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AiCapabilityIndexSet {
+    indexes: BTreeMap<GraphqlExecutionTargetId, Arc<AiCapabilityIndex>>,
+    capability_owners: BTreeMap<AiToolId, GraphqlExecutionTargetId>,
+    fingerprint: String,
+    maximum_search_results: u16,
+    limits: AiCapabilityIndexSetLimits,
+}
+
+impl AiCapabilityIndexSet {
+    /// Compiles a canonical index set from independently reviewed indexes.
+    ///
+    /// Input order does not affect the aggregate fingerprint. The aggregate
+    /// binds every target to its exact index fingerprint without inventing a
+    /// combined schema or catalogue. Duplicate targets and capability IDs are
+    /// rejected even when their contents happen to match.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an empty or oversized set, a duplicate target, a
+    /// duplicate capability identifier, or an invalid member fingerprint.
+    pub fn compile<I, T>(indexes: I) -> Result<Self, AiError>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<Arc<AiCapabilityIndex>>,
+    {
+        Self::compile_with_limits(indexes, AiCapabilityIndexSetLimits::default())
+    }
+
+    /// Compiles a canonical index set with explicit aggregate ceilings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid limits or when the member set exceeds any
+    /// configured target, entry, or search-result ceiling.
+    pub fn compile_with_limits<I, T>(
+        indexes: I,
+        limits: AiCapabilityIndexSetLimits,
+    ) -> Result<Self, AiError>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<Arc<AiCapabilityIndex>>,
+    {
+        limits.validate()?;
+        let mut canonical = BTreeMap::new();
+        let mut capability_owners = BTreeMap::new();
+        let mut total_bytes = 0_u64;
+        let mut maximum_search_results = limits.maximum_search_results;
+        for index in indexes {
+            let index = index.into();
+            if !valid_sha256_fingerprint(&index.fingerprint) {
+                return Err(configuration_error(
+                    "capability index set contains an invalid fingerprint",
+                ));
+            }
+            let target_id = index.target_id.clone();
+            if canonical.contains_key(&target_id) {
+                return Err(configuration_error(
+                    "capability index set contains a duplicate target",
+                ));
+            }
+            for id in index.entries.keys() {
+                if capability_owners
+                    .insert(id.clone(), target_id.clone())
+                    .is_some()
+                {
+                    return Err(configuration_error(
+                        "capability index set contains a duplicate capability",
+                    ));
+                }
+            }
+            for entry in index.entries.values() {
+                let entry_bytes =
+                    u64::try_from(canonical_json_bytes(entry).len()).map_err(|_| {
+                        configuration_error("capability index set byte size overflowed")
+                    })?;
+                total_bytes = total_bytes.checked_add(entry_bytes).ok_or_else(|| {
+                    configuration_error("capability index set byte size overflowed")
+                })?;
+            }
+            maximum_search_results =
+                maximum_search_results.min(index.limits.maximum_search_results);
+            canonical.insert(target_id, index);
+            if canonical.len() > usize::from(limits.maximum_indexes) {
+                return Err(configuration_error(
+                    "capability index set contains too many targets",
+                ));
+            }
+            if capability_owners.len() > limits.maximum_entries as usize {
+                return Err(configuration_error(
+                    "capability index set contains too many entries",
+                ));
+            }
+            if total_bytes > limits.maximum_total_bytes {
+                return Err(configuration_error(
+                    "capability index set contains too many bytes",
+                ));
+            }
+        }
+        if canonical.is_empty() {
+            return Err(configuration_error("capability index set is empty"));
+        }
+        let members = canonical
+            .iter()
+            .map(|(target_id, index)| {
+                json!({
+                    "target_id": target_id,
+                    "index_fingerprint": index.fingerprint,
+                })
+            })
+            .collect::<Vec<_>>();
+        let fingerprint = sha256_json(&json!({
+            "version": AI_CAPABILITY_INDEX_SET_VERSION,
+            "members": members,
+        }));
+        Ok(Self {
+            indexes: canonical,
+            capability_owners,
+            fingerprint,
+            maximum_search_results,
+            limits,
+        })
+    }
+
+    /// Canonical aggregate fingerprint for every exact member index.
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    /// Aggregate ceilings validated for this set.
+    pub const fn limits(&self) -> AiCapabilityIndexSetLimits {
+        self.limits
+    }
+
+    /// Member indexes in stable logical-target order.
+    pub fn indexes(&self) -> impl ExactSizeIterator<Item = &Arc<AiCapabilityIndex>> {
+        self.indexes.values()
+    }
+
+    /// Resolves one exact member index by logical target.
+    pub fn index(&self, target_id: &GraphqlExecutionTargetId) -> Option<&Arc<AiCapabilityIndex>> {
+        self.indexes.get(target_id)
+    }
+
+    /// Resolves the sole owning index for a globally unique capability ID.
+    pub fn owning_index(&self, id: &AiToolId) -> Option<&Arc<AiCapabilityIndex>> {
+        self.capability_owners
+            .get(id)
+            .and_then(|target_id| self.indexes.get(target_id))
+    }
+
+    /// Resolves one exact entry and its owning index. This grants no authority.
+    pub fn entry(
+        &self,
+        id: &AiToolId,
+    ) -> Option<(&Arc<AiCapabilityIndex>, &AiCapabilityIndexEntry)> {
+        let index = self.owning_index(id)?;
+        Some((index, index.entry(id)?))
+    }
+
+    /// Searches every member index as one deterministic bounded namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid query or result ceiling. Search emits
+    /// model-safe metadata only and grants no authority.
+    pub fn search(
+        &self,
+        query: &AiCapabilitySearchQuery,
+    ) -> Result<AiCapabilityIndexSetSearchResult, AiError> {
+        query.validate(self.maximum_search_results)?;
+        let terms = search_terms(&query.text);
+        let mut ranked = self
+            .indexes
+            .values()
+            .flat_map(|index| index.entries.values())
+            .filter(|entry| entry_matches_query(entry, query))
+            .filter_map(|entry| {
+                let score = search_score(entry, &terms);
+                (score > 0).then_some((score, entry))
+            })
+            .collect::<Vec<_>>();
+        ranked.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| left.1.id.cmp(&right.1.id))
+        });
+        let candidates = ranked
+            .into_iter()
+            .take(usize::from(query.maximum_results))
+            .map(|(_, entry)| search_candidate(entry))
+            .collect();
+        Ok(AiCapabilityIndexSetSearchResult {
+            index_set_fingerprint: self.fingerprint.clone(),
             candidates,
         })
     }
@@ -585,6 +815,51 @@ pub struct AiCapabilitySearchResult {
     pub target_policy_fingerprint: String,
     /// Ranked candidates with stable ID tie-breaking.
     pub candidates: Vec<AiCapabilitySearchCandidate>,
+}
+
+/// Bounded deterministic discovery response across a canonical index set.
+///
+/// Member schema, semantic-catalogue, target-policy, and index fingerprints
+/// remain on their owning indexes and are revalidated when a candidate is
+/// loaded. This response binds the complete active set without fabricating a
+/// synthetic cross-subgraph schema identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiCapabilityIndexSetSearchResult {
+    /// Exact aggregate index-set fingerprint searched.
+    pub index_set_fingerprint: String,
+    /// Ranked globally unique candidates with stable ID tie-breaking.
+    pub candidates: Vec<AiCapabilitySearchCandidate>,
+}
+
+fn entry_matches_query(entry: &AiCapabilityIndexEntry, query: &AiCapabilitySearchQuery) -> bool {
+    query
+        .namespace
+        .as_ref()
+        .is_none_or(|namespace| &entry.namespace == namespace)
+        && query.kind.is_none_or(|kind| entry.kind == kind)
+        && query.entity_or_operation.as_ref().is_none_or(|name| {
+            semantic_key(&entry.operation_name) == semantic_key(name)
+                || entry
+                    .entity_name
+                    .as_ref()
+                    .is_some_and(|entity| semantic_key(entity) == semantic_key(name))
+        })
+}
+
+fn search_candidate(entry: &AiCapabilityIndexEntry) -> AiCapabilitySearchCandidate {
+    AiCapabilitySearchCandidate {
+        id: entry.id.clone(),
+        kind: entry.kind,
+        name: entry.name.clone(),
+        description: entry.description.clone(),
+        namespace: entry.namespace.clone(),
+        entity_name: entry.entity_name.clone(),
+        operation_name: entry.operation_name.clone(),
+        operation_shape: entry.operation_shape,
+        capability_fingerprint: entry.capability_fingerprint.clone(),
+        entry_fingerprint: entry.fingerprint.clone(),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1116,6 +1391,10 @@ fn sha256_json(value: &serde_json::Value) -> String {
     hex::encode(Sha256::digest(canonical_json_bytes(value)))
 }
 
+fn valid_sha256_fingerprint(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn input_error(message: &str) -> AiError {
     AiError::InvalidInput(message.to_owned())
 }
@@ -1284,5 +1563,109 @@ mod tests {
             .expect("search");
         assert_eq!(result.candidates[0].id.as_str(), "app.alpha");
         assert_eq!(result.candidates[1].id.as_str(), "app.beta");
+    }
+
+    #[test]
+    fn index_set_searches_multiple_targets_deterministically() {
+        let semantic = semantic_catalogue();
+        let compile = |target: &str, descriptor: AiToolDescriptor| {
+            Arc::new(
+                AiCapabilityIndex::compile(
+                    GraphqlExecutionTargetId::parse(target).expect("target"),
+                    format!("schema-{target}"),
+                    &semantic,
+                    None,
+                    None,
+                    None,
+                    [descriptor],
+                    format!("policy-{target}"),
+                    AiCapabilityIndexLimits::default(),
+                )
+                .expect("index"),
+            )
+        };
+        let jim = compile(
+            "jim",
+            descriptor("jim.jobs", "List recent jobs and Actions.", 0),
+        );
+        let fame = compile(
+            "fame",
+            descriptor("fame.endpoints", "List connected managed endpoints.", 0),
+        );
+        let first = AiCapabilityIndexSet::compile([jim.clone(), fame.clone()]).expect("set");
+        let second = AiCapabilityIndexSet::compile([fame.clone(), jim.clone()]).expect("set");
+        assert_eq!(first.fingerprint(), second.fingerprint());
+        assert_eq!(first.indexes().len(), 2);
+        assert_eq!(
+            first
+                .owning_index(&AiToolId::parse("jim.jobs").unwrap())
+                .unwrap()
+                .target_id()
+                .as_str(),
+            "jim"
+        );
+        let jobs = first
+            .search(&AiCapabilitySearchQuery {
+                text: "recent jobs".to_owned(),
+                namespace: None,
+                kind: None,
+                entity_or_operation: None,
+                maximum_results: 2,
+            })
+            .expect("search");
+        assert_eq!(jobs.index_set_fingerprint, first.fingerprint());
+        assert_eq!(jobs.candidates[0].id.as_str(), "jim.jobs");
+        let endpoints = first
+            .search(&AiCapabilitySearchQuery {
+                text: "connected endpoints".to_owned(),
+                namespace: None,
+                kind: None,
+                entity_or_operation: None,
+                maximum_results: 2,
+            })
+            .expect("search");
+        assert_eq!(endpoints.candidates[0].id.as_str(), "fame.endpoints");
+        assert!(
+            AiCapabilityIndexSet::compile_with_limits(
+                [jim.clone(), fame.clone()],
+                AiCapabilityIndexSetLimits {
+                    maximum_entries: 1,
+                    ..AiCapabilityIndexSetLimits::default()
+                },
+            )
+            .is_err()
+        );
+        assert!(
+            AiCapabilityIndexSet::compile_with_limits(
+                [jim, fame],
+                AiCapabilityIndexSetLimits {
+                    maximum_total_bytes: 1_024,
+                    ..AiCapabilityIndexSetLimits::default()
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn index_set_rejects_cross_target_capability_collisions() {
+        let semantic = semantic_catalogue();
+        let compile = |target: &str| {
+            Arc::new(
+                AiCapabilityIndex::compile(
+                    GraphqlExecutionTargetId::parse(target).expect("target"),
+                    format!("schema-{target}"),
+                    &semantic,
+                    None,
+                    None,
+                    None,
+                    [descriptor("shared.lookup", "Look up records.", 0)],
+                    format!("policy-{target}"),
+                    AiCapabilityIndexLimits::default(),
+                )
+                .expect("index"),
+            )
+        };
+        assert!(AiCapabilityIndexSet::compile([compile("first"), compile("second")]).is_err());
     }
 }

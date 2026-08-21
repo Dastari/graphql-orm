@@ -3,12 +3,30 @@ title: "graphql-orm-ai-tool-profiles changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-16
+last_reviewed: 2026-08-21
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # Changelog
+
+## [0.8.0] - 2026-08-21
+
+### Added
+
+- `AiCapabilityIndexSet` canonically combines independently compiled logical
+  target indexes for federated discovery. Its deterministic aggregate
+  fingerprint binds each target to its exact index, global search preserves
+  stable ranking, and every capability resolves to one owning index.
+  `AiCapabilityIndexSetLimits` independently bounds targets, aggregate entries
+  and entry bytes, and global search results.
+
+### Security
+
+- Empty sets, duplicate targets, cross-target capability-ID collisions and
+  invalid member fingerprints fail closed. The set invents no aggregate SDL,
+  semantic catalogue or policy identity; execution must revalidate the exact
+  owning index and ordinary resolver authority.
 
 ## [0.7.0] - 2026-08-21
 
