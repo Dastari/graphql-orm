@@ -37,8 +37,8 @@ This crate is a reusable backup and restore companion for applications that use 
   Keep downstream applications on one reviewed monorepo revision so ORM,
   backup, and storage share the same canonical source/type universe.
 - `graphql-orm` owns its optional `agql-auth` integration and pins
-  `agql-auth` 0.15.0 at
-  `e841ffd382082ad7419be259fe957f949b956ff7`. This crate must not enable or
+  `agql-auth` 0.16.0 at
+  `e6439aa034babb6827e9253977f760667ea6b7eb`. This crate must not enable or
   depend directly on application authorization.
 - Applying and dry-run restore compare the manifest backend/schema hash with
   the target before target checks or writes. Preserve that fail-closed

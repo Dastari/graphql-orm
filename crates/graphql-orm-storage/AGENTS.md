@@ -36,8 +36,8 @@ This crate is a reusable storage companion for applications that use `graphql-or
   through workspace path dependencies and one root `Cargo.lock`. Keep
   downstream companion packages on one reviewed monorepo revision.
 - `graphql-orm` owns the optional `agql-auth` integration, pinned at
-  `agql-auth` 0.15.0 revision
-  `e841ffd382082ad7419be259fe957f949b956ff7`; this crate does not depend on
+  `agql-auth` 0.16.0 revision
+  `e6439aa034babb6827e9253977f760667ea6b7eb`; this crate does not depend on
   application authorization.
 - The storage provider boundary is now the streaming `BlobStore` trait.
 - `ObjectStorage` extends `BlobStore`; custom providers must implement `BlobStore` first.
