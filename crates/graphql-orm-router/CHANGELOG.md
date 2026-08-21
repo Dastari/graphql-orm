@@ -10,6 +10,20 @@ supersedes: []
 
 # Changelog
 
+## 0.2.0 - 2026-08-22
+
+- Added strict `scopeMatcher` file configuration. Omission and `kind: exact`
+  preserve exact-string behavior; `kind: hierarchical` exposes the generic
+  separator, wildcard, universal-wildcard, super-scope, and exact-only options
+  from the optional resource-server matcher.
+- Updated the optional `agql-auth` adapter to 0.16.0 for consumer-supplied
+  exact-only fixed scopes and resource-qualified scope patterns.
+- Applied the configured matcher uniformly to fixed and rendered operation
+  requirements. Subgraph resolver authorization remains authoritative.
+
+No descriptor, GraphQL schema, token wire, or stored-data migration is
+required. Hierarchical file configuration requires the `auth-agql` feature.
+
 ## 0.1.4 - 2026-08-13
 
 - Updated the optional resource-server-only `agql-auth` adapter to 0.15.0 at

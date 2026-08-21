@@ -58,6 +58,7 @@ an unbounded value.
 | `graphqlPath` | `/graphql`; absolute, non-root, without query or fragment. |
 | `anonymousDevelopment` | `false`; mutually exclusive with authentication and unsuitable for production. |
 | `authentication` | Required unless anonymous development is explicitly enabled. |
+| `scopeMatcher` | Omitted means exact-string matching. `kind: "hierarchical"` requires the `auth-agql` feature. |
 | `subgraphs` | At least one static source is required. |
 | `forwardedHeaders` | Empty. Sensitive, hop-by-hop, cookie, and authorization names are rejected. |
 | `schemaFetchTimeoutMs` | 10000. |
@@ -87,6 +88,25 @@ array. JWKS uses HTTPS. Plain HTTP is accepted only for loopback when
 
 The router validates RS256 public keys only. Configuration has no private-key,
 token-signing, session, refresh-token, or RSA-decryption field.
+
+Scope matching is a separate resource-server policy. Omission or
+`{"kind":"exact"}` preserves exact-string compatibility. With the
+`auth-agql` feature, `kind: "hierarchical"` accepts these optional fields:
+
+| Field | Default or rule |
+| --- | --- |
+| `separator` | `.`; one visible character. |
+| `wildcard` | `*`; one non-empty segment without whitespace. |
+| `wildcardMatchesMultiSegment` | `true`; a trailing wildcard matches the remaining hierarchy. |
+| `allowUniversalWildcard` | `false`; a bare wildcard has no implicit authority. |
+| `superScopes` | Empty; each listed grant satisfies ordinary requirements. |
+| `exactOnlyScopes` | Empty; each listed requirement accepts only an equal grant. |
+| `exactOnlyScopePatterns` | Empty; matching resource-qualified requirements accept only equal grants. |
+
+Exact-only requirements are evaluated before super-scope and wildcard rules.
+Lists are normalized and deduplicated at startup. The router applies this one
+matcher to fixed and rendered operation requirements; resolver guards remain
+authoritative.
 
 For programmatic setup, `JwksAuthenticationConfig::new` requires a JWKS URL,
 issuer, and non-empty audiences. It defaults to a 15-minute key cache,
