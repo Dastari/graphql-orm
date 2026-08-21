@@ -30,9 +30,14 @@ Hosts that readiness-test an installed Codex app-server may construct a
 bootstrap-fingerprint-bound retained turn with
 `AiCodexAppServerTurnInput::retained_dynamic_tool_readiness_probe`. Supply the
 same complete dynamic-tool definitions and reasoning effort used to create the
-empty retained thread. The constructor only validates input; it does not grant
-process, provider, application-tool, egress or result authority. Keep the
-probe inside the reviewed host sandbox and return no application data.
+empty retained thread, plus the exact tool ID that the model must select. The
+constructor only validates input; it does not grant process, provider,
+application-tool, egress or result authority. After the actor admits that
+exact call, use `dynamic_tool_readiness_response` to return the sole fixed
+`{"ready":true}` result, finish the turn and delete the thread. The actor
+rejects this response on an ordinary turn or another tool, and the result
+cannot contain application data. Keep the probe inside the reviewed host
+sandbox.
 
 ## 0.85.0 to 0.86.0: metered stateless native-item refusal
 

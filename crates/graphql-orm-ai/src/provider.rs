@@ -2203,6 +2203,14 @@ impl std::fmt::Debug for ProviderDynamicToolResult {
 }
 
 impl ProviderDynamicToolResult {
+    pub(crate) fn readiness_probe(call_id: String, tool_id: String) -> Self {
+        Self {
+            call_id,
+            tool_id,
+            output: serde_json::json!({"ready": true}),
+        }
+    }
+
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn new(
         call: &ProviderDynamicToolCall,

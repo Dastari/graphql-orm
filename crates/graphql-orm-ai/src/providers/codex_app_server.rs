@@ -568,6 +568,7 @@ pub struct AiCodexAppServerTurnInput {
     tools: Vec<ModelToolDefinition>,
     reasoning_effort: ModelReasoningEffort,
     maximum_output_tokens: u64,
+    readiness_probe_tool_id: Option<String>,
 }
 
 impl std::fmt::Debug for AiCodexAppServerTurnInput {
@@ -586,6 +587,7 @@ impl std::fmt::Debug for AiCodexAppServerTurnInput {
             .field("tool_count", &self.tools.len())
             .field("reasoning_effort", &self.reasoning_effort)
             .field("maximum_output_tokens", &self.maximum_output_tokens)
+            .field("readiness_probe", &self.readiness_probe_tool_id.is_some())
             .finish()
     }
 }
@@ -613,6 +615,7 @@ impl AiCodexAppServerTurnInput {
             tools: Vec::new(),
             reasoning_effort,
             maximum_output_tokens,
+            readiness_probe_tool_id: None,
         };
         turn.validate()?;
         Ok(turn)
@@ -638,10 +641,15 @@ impl AiCodexAppServerTurnInput {
         bootstrap: &AiCodexAppServerBootstrapInstructions,
         prompt: impl Into<String>,
         tools: Vec<ModelToolDefinition>,
+        readiness_tool_id: impl Into<String>,
         reasoning_effort: ModelReasoningEffort,
         maximum_output_tokens: u64,
     ) -> Result<Self, ProviderError> {
         if tools.is_empty() {
+            return Err(ProviderError::InvalidRequest);
+        }
+        let readiness_tool_id = readiness_tool_id.into();
+        if !tools.iter().any(|tool| tool.tool_id == readiness_tool_id) {
             return Err(ProviderError::InvalidRequest);
         }
         let mut turn = Self::new(
@@ -653,6 +661,7 @@ impl AiCodexAppServerTurnInput {
         )?;
         turn.retained_bootstrap_fingerprint = Some(bootstrap.fingerprint().to_owned());
         turn.tools = tools;
+        turn.readiness_probe_tool_id = Some(readiness_tool_id);
         turn.validate()?;
         Ok(turn)
     }
@@ -687,6 +696,16 @@ impl AiCodexAppServerTurnInput {
             if !crate::valid_sha256(fingerprint) || bootstrap.fingerprint() != fingerprint {
                 return Err(ProviderError::InvalidRequest);
             }
+        }
+        if self
+            .readiness_probe_tool_id
+            .as_ref()
+            .is_some_and(|tool_id| {
+                self.retained_bootstrap_fingerprint.is_none()
+                    || !self.tools.iter().any(|tool| tool.tool_id == *tool_id)
+            })
+        {
+            return Err(ProviderError::InvalidRequest);
         }
         Ok(())
     }
@@ -3017,6 +3036,7 @@ pub struct AiCodexAppServerProtocolActor {
     pending_dynamic_requests: BTreeMap<u64, (String, String)>,
     started_dynamic_calls: BTreeMap<String, String>,
     responded_dynamic_calls: BTreeMap<String, String>,
+    readiness_probe_tool_id: Option<String>,
     started_items: BTreeMap<String, String>,
     completed_items: BTreeSet<String>,
     initialization_complete: bool,
@@ -3060,6 +3080,7 @@ impl AiCodexAppServerProtocolActor {
             pending_dynamic_requests: BTreeMap::new(),
             started_dynamic_calls: BTreeMap::new(),
             responded_dynamic_calls: BTreeMap::new(),
+            readiness_probe_tool_id: None,
             started_items: BTreeMap::new(),
             completed_items: BTreeSet::new(),
             initialization_complete: false,
@@ -3503,6 +3524,39 @@ impl AiCodexAppServerProtocolActor {
         Ok(frame)
     }
 
+    /// Acknowledges the exact dynamic-tool call selected by a marked
+    /// host-owned readiness probe with one fixed content-free result.
+    ///
+    /// This method cannot acknowledge an ordinary turn, a different tool, or
+    /// an already answered call. Its output is always `{"ready":true}` and
+    /// therefore cannot carry application data or substitute for the
+    /// coordinator-owned application-tool result path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Rejected`] unless the active turn was created
+    /// by [`AiCodexAppServerTurnInput::retained_dynamic_tool_readiness_probe`]
+    /// and `request_id` names its exact expected pending tool call.
+    pub fn dynamic_tool_readiness_response(
+        &mut self,
+        request_id: u64,
+    ) -> Result<Vec<u8>, ProviderError> {
+        let expected_tool_id = self
+            .readiness_probe_tool_id
+            .as_deref()
+            .ok_or(ProviderError::Rejected)?;
+        let (call_id, tool_id) = self
+            .pending_dynamic_requests
+            .get(&request_id)
+            .filter(|(_, tool_id)| tool_id == expected_tool_id)
+            .cloned()
+            .ok_or(ProviderError::Rejected)?;
+        let result = crate::ProviderDynamicToolResult::readiness_probe(call_id, tool_id);
+        let frame = self.dynamic_tool_response(request_id, &result)?;
+        self.readiness_probe_tool_id = None;
+        Ok(frame)
+    }
+
     /// Encodes text-only user input for one exact lifecycle-complete thread.
     ///
     /// Trusted instructions are deliberately not copied into the user input
@@ -3548,6 +3602,7 @@ impl AiCodexAppServerProtocolActor {
             || self.turn_started_observed
             || !self.started_items.is_empty()
             || !self.completed_items.is_empty()
+            || self.readiness_probe_tool_id.is_some()
         {
             return Err(ProviderError::InvalidRequest);
         }
@@ -3571,6 +3626,7 @@ impl AiCodexAppServerProtocolActor {
         let frame = self.request(ClientMethod::TurnStart, "turn/start", params)?;
         self.thread_lifecycle_operation = None;
         self.pending_turn_thread_id = Some(thread_id.to_owned());
+        self.readiness_probe_tool_id = input.readiness_probe_tool_id.clone();
         self.runtime_warning_count = 0;
         self.runtime_warning_bytes = 0;
         Ok(frame)
@@ -3784,6 +3840,7 @@ impl AiCodexAppServerProtocolActor {
             if !self.pending_dynamic_requests.is_empty()
                 || !self.started_dynamic_calls.is_empty()
                 || !self.responded_dynamic_calls.is_empty()
+                || self.readiness_probe_tool_id.is_some()
             {
                 return Err(ProviderError::Rejected);
             }
@@ -6183,6 +6240,7 @@ pub(crate) mod tests {
             &bootstrap,
             "Call the named readiness tool exactly once.",
             vec![tool.clone()],
+            tool.tool_id.clone(),
             ModelReasoningEffort::Medium,
             128,
         )
@@ -6208,11 +6266,112 @@ pub(crate) mod tests {
                 &bootstrap,
                 "Call the named readiness tool exactly once.",
                 Vec::new(),
+                "missing.tool",
                 ModelReasoningEffort::Medium,
                 128,
             ),
             Err(ProviderError::InvalidRequest)
         ));
+    }
+
+    #[test]
+    fn retained_dynamic_readiness_response_is_fixed_exact_and_settleable() {
+        let bootstrap = AiCodexAppServerBootstrapInstructions::disabled();
+        let tool = dynamic_tool();
+        let input = AiCodexAppServerTurnInput::retained_dynamic_tool_readiness_probe(
+            "model-1",
+            &bootstrap,
+            "Call inventory_count once with Limit 3.",
+            vec![tool.clone()],
+            tool.tool_id.clone(),
+            ModelReasoningEffort::Unspecified,
+            128,
+        )
+        .expect("readiness input should validate");
+        let mut actor = initialized_protocol_actor();
+        let thread_id = start_bound_dynamic_thread(&mut actor, std::slice::from_ref(&tool));
+        start_bound_dynamic_turn(&mut actor, &thread_id, &input, "turn-readiness-1", 3);
+
+        let started = lifecycle_notification(
+            "item/started",
+            json!({
+                "item": {
+                    "arguments": {"Limit": 3},
+                    "id": "call-readiness-1",
+                    "namespace": null,
+                    "status": "inProgress",
+                    "tool": "inventory_count",
+                    "type": "dynamicToolCall"
+                },
+                "startedAtMs": 1,
+                "threadId": thread_id,
+                "turnId": "turn-readiness-1"
+            }),
+        );
+        actor
+            .accept(&started)
+            .expect("readiness lifecycle should start");
+        let request = serde_json::to_vec(&json!({
+            "id": 0,
+            "method": "item/tool/call",
+            "params": {
+                "arguments": {"Limit": 3},
+                "callId": "call-readiness-1",
+                "namespace": null,
+                "threadId": thread_id,
+                "tool": "inventory_count",
+                "turnId": "turn-readiness-1"
+            }
+        }))
+        .expect("readiness call should encode");
+        assert!(matches!(
+            actor.accept(&request),
+            Ok(AiCodexAppServerInbound::DynamicToolCall { request_id: 0, .. })
+        ));
+
+        let response = String::from_utf8(
+            actor
+                .dynamic_tool_readiness_response(0)
+                .expect("exact readiness call should receive the fixed response"),
+        )
+        .expect("readiness response should be UTF-8");
+        assert!(response.contains("\\\"ready\\\":true"));
+        assert!(!response.contains("count"));
+        assert!(matches!(
+            actor.dynamic_tool_readiness_response(0),
+            Err(ProviderError::Rejected)
+        ));
+
+        let completed = lifecycle_notification(
+            "item/completed",
+            json!({
+                "item": {
+                    "arguments": {"Limit": 3},
+                    "contentItems": [{"type": "inputText", "text": "{\"ready\":true}"}],
+                    "durationMs": 2,
+                    "id": "call-readiness-1",
+                    "namespace": null,
+                    "status": "completed",
+                    "success": true,
+                    "tool": "inventory_count",
+                    "type": "dynamicToolCall"
+                },
+                "completedAtMs": 3,
+                "threadId": thread_id,
+                "turnId": "turn-readiness-1"
+            }),
+        );
+        actor
+            .accept(&completed)
+            .expect("fixed readiness result should settle");
+        actor
+            .accept(&turn_completed_notification(&thread_id, "turn-readiness-1"))
+            .expect("readiness turn should complete");
+        let cursor = crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", thread_id)
+            .expect("readiness cursor should validate");
+        actor
+            .delete_thread(&cursor)
+            .expect("settled readiness thread should be deletable");
     }
 
     #[test]
