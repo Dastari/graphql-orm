@@ -19,7 +19,75 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
-## Unreleased: budget reclamation and pre-transport denial (crate 0.83.0 to 0.84.0; schema 0.62.0 to 0.63.0)
+## 0.84.0 to 0.85.0: executable federated bounded capability delivery
+
+Adopt `graphql-orm-ai` 0.85.0 and `graphql-orm-ai-tool-profiles` 0.8.0 at one
+reviewed full monorepo revision. The AI schema module remains **0.63.0**. There
+is no database, data, table, column, index, constraint, backfill, GraphQL SDL,
+protected-payload, backup or restore migration.
+
+The delivery types introduced in 0.81 now have an ordinary durable execution
+path. Build one complete current index per owning logical target, combine them
+with `AiCapabilityIndexSet::compile`, and supply the set through
+`AiCurrentCapabilityIndexSet`. Use the aggregate set fingerprint for the
+delivery surface and retained session binding. Do not synthesize a combined
+schema/catalogue fingerprint; global capability-ID collisions fail readiness.
+Existing single-index implementations retain a compatibility adapter.
+`AiCapabilityAuthorityPolicy::authorize` now also receives the exact owning
+`AiCapabilityIndex`; use its logical target and fingerprints when applying
+current target policy. Do not infer an owner from capability naming.
+
+Build the exact currently eligible read definitions, then construct one
+`AiCapabilityDeliveryTurn::select`. Build the provider request from
+`delivery.current_surface()` using
+`AiProviderCallPlan::new_with_capability_surface`, and attach a clone of the
+same delivery value with `AiReadOnlyAgentTurnPlan::with_capability_delivery`.
+Do not construct or edit broker definitions.
+
+Client-deferred installation is required after every accepted discovery,
+including a discovery that returns no currently permitted candidates. The
+crate then clears previously installed generated definitions and retains only
+the exact static bootstrap and discovery definitions.
+
+Override
+`AiReadOnlyAgentTurnPlanner::continuation_plan_with_capability_delivery` when
+using capability delivery. The optional value is the crate-owned run state
+that survived the preceding turn. After client-deferred discovery it already
+contains the exact loaded definitions. Use its `current_surface()` with
+`AiProviderCallPlan::new_continuation_with_capability_surface`, then attach a
+clone of that same delivery turn. Recreating state under the same public
+fingerprint, retaining an earlier surface, or returning a plan without the
+delivery turn fails closed.
+
+Hosts that constrain tools through hierarchical agent rules must admit the
+exact broker-definition fingerprints present in the selected surface as
+approval-free read tools. This grants no application authority: discover and
+describe return bounded metadata, and execute still performs fresh principal,
+policy, target/schema/catalogue/capability, resolver, disclosure, egress,
+budget and fence checks.
+
+Size loop limits for delivery amplification. A novel fixed-broker capability
+uses discover, describe and execute (three application-tool calls); a
+completed-turn adapter also needs a provider continuation for each result,
+while an in-turn dynamic adapter can keep the same provider turn open. A
+still-loaded capability reuses execute only. Client-deferred use adds discovery
+and one continuation before the exact tool call. All calls count against the
+existing tool-call, provider-turn, duration, budget and rule ceilings;
+increasing them is a host policy decision, never an automatic library bypass.
+
+Size `AiCapabilityDeliveryLimits::maximum_describe_bytes` together with the
+ordinary application-tool result and provider-input ceilings. It bounds the
+complete on-demand planning contract (512 KiB by default); a larger exact
+schema is omitted with `planSchemaAvailable: false`, never truncated.
+
+Changing delivery mode, index set, static bootstrap tools, projection, model,
+reasoning effort or registration identity changes the provider capability
+session binding. Retained sessions with a different binding remain
+cleanup-only and must reach exact absence before rebind. Process restart loses
+only the bounded non-authoritative broker cache: a later describe/execute
+returns a safe stale-selection result and the model must rediscover.
+
+## 0.83.0 to 0.84.0: budget reclamation and pre-transport denial (schema 0.62.0 to 0.63.0)
 
 ### Schema module
 

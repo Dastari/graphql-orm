@@ -18,7 +18,66 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
-## [Unreleased]
+## [0.85.0] - 2026-08-21
+
+Persistent schema module: **0.63.0** (unchanged from 0.84.0).
+
+### Added
+
+- The coordinator now dispatches the closed
+  `graphql.capabilities.discover`, `graphql.capabilities.describe`, and
+  `graphql.capabilities.execute` surfaces through
+  `OrmAiApplicationToolCallService`, so fixed-broker and client-deferred
+  delivery use the same durable started/completed rows, protected output,
+  egress evidence, checkpoints, cancellation and safe-failure envelopes as
+  ordinary read tools.
+- `AiCapabilityDeliveryTurn` owns the selected delivery mode, exact mutable
+  client-deferred surface and bounded per-run broker state. Its current surface
+  can be supplied to initial and continuation provider plans without a host
+  recreating definitions.
+- `AiReadOnlyAgentTurnPlanner::continuation_plan_with_capability_delivery`
+  receives the surviving crate-owned delivery state after a broker result is
+  committed. Existing planners retain a fail-closed default bridge.
+- `AiCapabilityIndexSet` and `AiCurrentCapabilityIndexSet` make one broker
+  span independently owned federated targets without a synthetic combined
+  schema or a consumer-authored aggregate fingerprint.
+
+### Changed
+
+- Client-deferred discovery loads only the exact bounded generated-query
+  candidates returned under fresh current authority, then installs only those
+  definitions on the next continuation. An empty current-authority result
+  clears earlier deferred definitions instead of retaining a stale provider
+  surface. Fixed-broker execution accepts closed dot-path input construction,
+  explicit selection paths, relationship arguments/cardinality and total
+  result bounds; the canonical compact-plan compiler remains final authority.
+- A loaded capability remains valid across monotonic lease renewals in the
+  same session/run/attempt/provider binding. Cross-run, stale-generation,
+  principal, provider-session, catalogue, schema, policy and capability
+  substitution still fail closed.
+- Cross-target capability IDs must be globally unique. Search binds the
+  canonical aggregate set while load and execution bind and revalidate the
+  selected capability's exact owning index.
+- Fixed-broker describe returns an exact compact plan schema only when the
+  complete planning contract fits the crate-owned describe bound (512 KiB by
+  default); it reports an unavailable schema instead of truncating one.
+- Broker result overflow is persisted as one deterministic safe failure on
+  the already-started durable tool row rather than escaping into a duplicate
+  execution attempt.
+
+### Security
+
+- Discovery and describe remain authority-neutral metadata operations.
+  Execute rehydrates the current principal, reapplies current target/tool
+  policy, authorizes the exact short-lived loaded binding, and invokes only a
+  generated read through ordinary GraphQL resolver and disclosure checks.
+  Static tools, mutations, subscriptions, arbitrary GraphQL, URLs, SQL and
+  callbacks cannot enter the fixed broker.
+
+There is no schema, data, protected-payload, GraphQL SDL, backup or restore
+migration in this release.
+
+## [0.84.0] - 2026-08-21
 
 Persistent schema module: **0.63.0**.
 

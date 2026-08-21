@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.84.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.85.0", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -71,7 +71,8 @@ the compiled test-backed recipe and the missing reusable bootstrap API.
   one read-only provider plan may expose these capabilities beside exact
   legacy/static read descriptors without duplicating either policy contract.
   Secret/`NeverExport` fields never enter provider schemas.
-- A deterministic compact capability index, bounded lexical discovery,
+- Deterministic per-target compact capability indexes, one canonical
+  collision-free multi-target index set, bounded lexical discovery,
   coordinator-selected eager/client-deferred/provider-deferred/fixed-broker
   delivery, and short-lived current-authority loaded bindings. See
   [capability discovery and execution](docs/capability-discovery-and-execution.md).

@@ -3,7 +3,7 @@ title: "Capability discovery and execution"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-16
+last_reviewed: 2026-08-21
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -37,10 +37,21 @@ coordinate, resolver URL, auth mechanism, policy expression, token, delegated
 authority, hidden field, secret classification or protected value. It is a
 complete catalogue, not a prompt payload and not an authorization cache.
 
+A federated host compiles one index per owning logical target, then combines
+them with `AiCapabilityIndexSet::compile`. The set sorts targets
+deterministically, rejects every cross-target capability-ID collision, and
+fingerprints the exact target-to-index membership. It does not invent a
+combined SDL, semantic catalogue, or policy fingerprint. Search ranks entries
+globally, while load and execute recover the sole owning index and revalidate
+that target's schema, semantic catalogue, target policy, capability, and
+current resolver authority. A host-authored combined fingerprint is neither
+needed nor accepted.
+
 ```rust,no_run
-# use graphql_orm_ai::{AiCapabilityIndex, AiCapabilityIndexLimits};
-# fn build(target: graphql_orm_ai::GraphqlExecutionTargetId, schema_fingerprint: String, semantics: &graphql_orm_ai::GraphqlSemanticCatalog, queries: &graphql_orm_ai::AiGraphqlQueryCapabilityCatalog, static_tools: Vec<graphql_orm_ai::AiToolDescriptor>) -> Result<AiCapabilityIndex, graphql_orm_ai::AiError> {
-AiCapabilityIndex::compile(
+# use std::sync::Arc;
+# use graphql_orm_ai::{AiCapabilityIndex, AiCapabilityIndexLimits, AiCapabilityIndexSet};
+# fn build(target: graphql_orm_ai::GraphqlExecutionTargetId, schema_fingerprint: String, semantics: &graphql_orm_ai::GraphqlSemanticCatalog, queries: &graphql_orm_ai::AiGraphqlQueryCapabilityCatalog, static_tools: Vec<graphql_orm_ai::AiToolDescriptor>) -> Result<AiCapabilityIndexSet, graphql_orm_ai::AiError> {
+let index = AiCapabilityIndex::compile(
     target,
     schema_fingerprint,
     semantics,
@@ -50,7 +61,8 @@ AiCapabilityIndex::compile(
     static_tools,
     "exact-target-policy-v7",
     AiCapabilityIndexLimits::default(),
-)
+)?;
+AiCapabilityIndexSet::compile([Arc::new(index)])
 # }
 ```
 
@@ -59,17 +71,20 @@ AiCapabilityIndex::compile(
 The built-in search uses bounded normalized lexical terms, optional exact
 namespace/kind/entity-or-operation filters, deterministic scores and stable ID
 tie-breaking. It needs no embeddings or external database. A host may later
-implement the closed current-index and authority traits with a reviewed search
-service, but returned IDs and fingerprints must still bind to the canonical
-index.
+implement the closed current-index-set and authority traits with a reviewed
+search service, but returned IDs and fingerprints must still bind to the
+canonical set and the candidate's exact owning index.
 
 `AiCapabilityDiscoveryBroker` rehydrates the current principal and reapplies
 host scope, target, kind, classification, provider and session policy while
 filtering search results, again while loading, and again immediately before
-execution. Its `AiLoadedCapabilityBinding` is crate-created, private-field,
+execution. `AiCapabilityAuthorityPolicy` receives the exact owning index on
+each check; hosts apply target policy from that proof rather than parsing an
+ID. Its `AiLoadedCapabilityBinding` is crate-created, private-field,
 short-lived and fenced to owner reference, session, run, attempt, lease,
-provider session, target policy, schema, semantic catalogue, index, entry,
-kind and capability. Revocation or drift between any two stages fails closed.
+provider session, aggregate index set, owning target policy, schema, semantic
+catalogue, index, entry, kind and capability. Revocation or drift between any
+two stages fails closed.
 The final call must still pass through the ordinary durable application-tool
 broker and authenticated GraphQL resolver.
 
@@ -82,9 +97,9 @@ negotiation metadata, never authority.
 | Mode | Initial surface | Use |
 | --- | --- | --- |
 | `EagerExact` | All already-filtered exact definitions | Small sets within exact count and byte limits |
-| `ClientDeferred` | Discovery only; freshly loaded exact definitions on the next continuation | Stateless/local or client-executed search |
+| `ClientDeferred` | Exact static bootstrap plus discovery; freshly loaded generated-query definitions on the next continuation | Stateless/local or client-executed search |
 | `ProviderDeferred` | Already-filtered definitions marked for reviewed native deferred loading | Native provider tool search |
-| `FixedBroker` | Frozen discover/describe/execute definitions | Retained sessions whose definitions cannot change |
+| `FixedBroker` | Exact static bootstrap plus frozen discover/describe/execute definitions | Retained sessions whose generated definitions cannot change |
 
 `prepare_client_deferred_continuation` accepts only definitions matching the
 crate-owned loaded bindings and the configured selection count. Fixed broker
@@ -93,9 +108,94 @@ selected capability's authoritative compiler validates every name and type.
 No broker accepts arbitrary GraphQL, target, alias, fragment, introspection,
 SQL, URL or callback.
 
-`AiProviderCapabilitySessionBinding` fingerprints delivery mode, index, static
-bootstrap definitions, projection algorithm, model, reasoning effort and the
-underlying registration identity. Pass it to
+### Coordinator construction and dispatch
+
+One `AiCapabilityDeliveryTurn` is the run-owned bridge between mode selection,
+the exact provider surface and durable broker execution:
+
+```rust,ignore
+let delivery = AiCapabilityDeliveryTurn::select(
+    provider_capabilities,
+    index_set.fingerprint(),
+    currently_eligible_read_definitions,
+    retained_definitions_frozen,
+    provider_capability_session_binding,
+    capability_broker,
+    AiCapabilityBrokerSession::new(delivery_limits)?,
+)?;
+
+let surface = delivery.current_surface();
+request.tools = surface.tools().to_vec();
+let provider_plan = AiProviderCallPlan::new_with_capability_surface(
+    provider_kind,
+    request,
+    budget,
+    transfers,
+    correlation_id,
+    &surface,
+    runtime.tool_catalog(),
+    static_policy,
+    generated_target_policy,
+)?;
+let turn = AiReadOnlyAgentTurnPlan::new(
+    provider_plan,
+    result_egress_route,
+    rules,
+    uses_byok,
+)?
+.with_capability_delivery(delivery.clone())?;
+```
+
+The host composes `OrmAiApplicationToolCallService` as the coordinator's
+ordinary tool executor. The coordinator recognizes only the three frozen IDs
+from the exact offered surface and dispatches them through that service; a
+host executor retains a fail-closed default and does not gain broker execution
+implicitly.
+
+For a continuation, override
+`AiReadOnlyAgentTurnPlanner::continuation_plan_with_capability_delivery`. Use
+the supplied delivery turn's current surface with
+`AiProviderCallPlan::new_continuation_with_capability_surface`, and attach a
+clone of that same turn. Client-deferred discovery installs freshly loaded
+generated-query definitions only after its durable tool result and checkpoint
+commit. An empty current-authority discovery clears earlier generated
+definitions rather than retaining a stale provider surface. Recreating blank
+broker state under an equal public fingerprint, retaining a pre-discovery
+surface, or substituting definitions fails closed.
+
+Hierarchical rule policy must admit the exact broker fingerprints present in
+the crate-owned surface as approval-free read tools. That is a loop constraint,
+not application authority: the execute operation still rehydrates the current
+principal and passes the selected generated query through the ordinary policy,
+delegation, resolver and disclosure boundary.
+
+Fixed-broker `describe` returns the exact compact planning schema only on
+demand. The complete description, including that schema, is bounded by
+`AiCapabilityDeliveryLimits::maximum_describe_bytes` (512 KiB by default and
+4 MiB at the compiled ceiling). An oversized schema is not truncated or
+partially exposed: the response sets `planSchemaAvailable` to `false`, and the
+provider must choose another reviewed capability or return a bounded answer.
+
+### Turn amplification
+
+Delivery work consumes normal bounded-loop capacity:
+
+| Path | Extra broker calls before/including application execution |
+| --- | ---: |
+| Eager exact | 0 |
+| Provider deferred | Provider-native discovery only; exact application call still counts normally |
+| Client deferred, newly selected capability | 1 discover, then the exact application call |
+| Fixed broker, novel capability | discover + describe + execute = 3 |
+| Fixed broker, still-loaded capability | execute = 1 |
+
+Every completed broker result is ordinary provider input, so stateless loops
+also consume the corresponding continuation turns. Size provider-turn,
+tool-call, duration, budget and hierarchical-rule ceilings for this bounded
+amplification. The library never raises a host ceiling automatically.
+
+`AiProviderCapabilitySessionBinding` fingerprints delivery mode, the complete
+canonical index set, static bootstrap definitions, projection algorithm,
+model, reasoning effort and the underlying registration identity. Pass it to
 `AiProviderSessionDescriptor::new_with_capability_binding`; the existing
 durable registration fence then makes any change cleanup-and-rebind only.
 
@@ -259,8 +359,9 @@ an automatic consequence of migrations:
    deletion adapter from the persisted provider kind and registration
    metadata, open only the exact protected cursor, then record exact absence or
    bounded retry.
-5. Compile the finished schema, semantics, index, target policy and provider
-   registrations; only then start ordinary workers and subscriptions.
+5. Compile every target's finished schema, semantics, index and target policy;
+   compile their canonical index set and provider registrations; only then
+   start ordinary workers and subscriptions.
 
 Changing provider profile, delivery mode, model/effort, projection or catalogue
 requires the same cleanup/absence/rebind lifecycle. A live provider session is

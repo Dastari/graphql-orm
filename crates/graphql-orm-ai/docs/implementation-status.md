@@ -10,9 +10,9 @@ supersedes: []
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.84.0` with AI schema module
+`graphql-orm-ai` is at crate version `0.85.0` with AI schema module
 `0.63.0`. It uses workspace `graphql-orm` `0.23.0`, backend-neutral
-`graphql-orm-ai-tool-profiles` `0.7.0`, and external `agql-auth`
+`graphql-orm-ai-tool-profiles` `0.8.0`, and external `agql-auth`
 `0.15.0` at `e841ffd382082ad7419be259fe957f949b956ff7`.
 
 The active work order, dependencies, and exit gates are maintained in the
@@ -76,8 +76,10 @@ verification evidence belongs in the focused guides.
   current host policy, and ordinary resolver authorization. Read-only and the
   bounded sequential supervised path are implemented; mixed, parallel, and
   stateless consequential execution remains closed.
-- Finished schema and semantic metadata now produce one complete deterministic
-  compact capability index. Providers receive an exact small eager set,
+- Finished schemas and semantic metadata now produce canonical deterministic
+  compact capability indexes. A fingerprinted index set combines multiple
+  owning subgraphs without erasing their target/schema identities or allowing
+  cross-index substitution. Providers receive an exact small eager set,
   client/native deferred definitions, or a frozen three-tool broker according
   to declared capability and exact byte/count limits. Discovery and loaded
   bindings recheck current principal/policy and grant no resolver authority.
