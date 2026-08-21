@@ -98,6 +98,14 @@ impl AiError {
     }
 }
 
+impl ErrorExtensions for AiError {
+    fn extend(&self) -> async_graphql::Error {
+        async_graphql::Error::new(self.to_string()).extend_with(|_, extensions| {
+            extensions.set("code", self.public_code());
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,13 +116,5 @@ mod tests {
             AiError::StatelessNativeItemRejected.public_code(),
             "AI_PROVIDER_FAILED"
         );
-    }
-}
-
-impl ErrorExtensions for AiError {
-    fn extend(&self) -> async_graphql::Error {
-        async_graphql::Error::new(self.to_string()).extend_with(|_, extensions| {
-            extensions.set("code", self.public_code());
-        })
     }
 }
