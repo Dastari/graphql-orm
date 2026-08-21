@@ -3,14 +3,14 @@ title: "Session reliability adoption contract"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-20
+last_reviewed: 2026-08-21
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Session reliability adoption contract
 
-This is the exact contract for the 0.82.0 session-reliability work: which
+This is the exact contract for the 0.82.0–0.83.0 session-reliability work: which
 public APIs are new or changed, what a client must do differently, and which
 behaviours changed with no API change at all. It complements
 [MIGRATION.md](../MIGRATION.md), which records the schema and source-breaking
@@ -176,22 +176,35 @@ a changed rule fingerprint, an incomplete dynamic turn, and an exceeded budget
 are all ordinary user behaviour rather than faults.
 
 **Interruption reports what it proved.** `AiRunInterruptSettlement` replaces
-`()` from `interrupt_run`. `retains_thread()` is true only for `Settled`, which
-no adapter currently reports, so it fails closed to invalidation.
+`()` from `interrupt_run`. `retains_thread()` is true only for `Settled`, and
+settlement requires three independent legs:
 
-Acknowledgement is not settlement. The Codex app-server `turn/interrupt`
-response is an empty object, `TurnStatus` has a first-class `interrupted`
-value, and a resumed thread pages prior turns back through
-`thread/turns/list` — so an acknowledgement cannot distinguish a discarded
-partial turn from a retained one. Treating it as settlement would let the model
-carry content the durable transcript never recorded, which is the same
-divergence the disclosure events above exist to expose. The variant exists so
-an adapter that can prove settlement may report it without a further breaking
-change.
+1. the exact provider interrupt was acknowledged;
+2. the adapter proves no unresolved dynamic tool call and version-observed
+   discard of the partial provider output; and
+3. the durable provider-session store transactionally proves that the cancelled
+   run persisted no assistant message, tool call, or checkpoint.
 
-Interrupting an in-flight turn already invalidates the retained binding through
-the executor's own ambiguous-turn cleanup. That path is now *disclosed* rather
-than silent, so a mid-generation stop is visible to the user.
+Acknowledgement alone is not settlement. The Codex app-server adapter reports
+its provider-side proof only for the reviewed `codex-cli 0.148.0` / `gpt-5.4`
+deployment. Direct measurement showed that an interrupted assistant stream has
+`status=interrupted`, no assistant item in `thread/turns/list`, no partial text
+in the rollout file, and no partial text in the resumed model context. The
+empty `turn/interrupt` response does not promise that behaviour, so repeat the
+probe before upgrading Codex or the admitted model.
+
+The adapter fences interruption against dynamic-call dispatch. A call still in
+flight, or one first dispatched after interruption begins, keeps the result
+unsettled. A call completed before interruption is no longer unresolved, but
+the independent durable leg still refuses retention once tool traffic or a
+checkpoint was persisted.
+
+When all three proofs hold, the ORM store advances the binding watermark and
+transcript fingerprint across the interrupted user message and releases the
+claim. Codex retains that user message with no assistant reply, which matches
+the durable transcript. Any missing proof, ORM conflict, or alternate store's
+default-deny implementation invalidates the binding through the same disclosed
+cleanup path, so a mid-generation context reset remains visible to the user.
 
 ## Messages accepted during cleanup
 
@@ -217,6 +230,9 @@ reconciliation keeps owning that case.
 | `AiSessionEventEnvelope` | Added `closed`; construct via `delivered`/`ended` |
 | `AiSessionStreamClose` | New enum |
 | `AiRunInterruptSettlement` | New enum; `interrupt_run` returns it instead of `()` |
+| `AiProviderRunInterruptOutcome::RequestedSettled` | Provider-side settled-interrupt proof |
+| `AiRuntime::interrupt_all_provider_runs_with_settlement` | Aggregate provider proof; existing count API unchanged |
+| `AiProviderSessionService::settle_interrupted_turn`, `require_cleanup_for_run` | Default-deny durable retain/invalidate boundary |
 | `AiRunFailure`, `AiRunRetryAdmission`, `AiRunRetryEvidence`, `classify_run_retry` | New |
 | `AiRunDisposition`, `AiRunDispositionView`, `AiRunRetryRefusal` | New |
 | `RetryAiRunInput`, `AcknowledgeAiRunFailureInput` | New GraphQL inputs |

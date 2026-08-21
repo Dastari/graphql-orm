@@ -1163,6 +1163,32 @@ impl AiProviderSessionCommit {
     }
 }
 
+/// Derives the transcript fingerprint of a thread that retained one exact
+/// interrupted user prompt and no reply.
+///
+/// The value chains the binding's previous fingerprint, so it is an opaque
+/// crate-owned continuation of the same commit chain rather than anything a
+/// host can recompute from message content alone. Hosts echo the stored
+/// fingerprint from the binding view into the next turn plan exactly as they
+/// do after an ordinary commit.
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub(crate) fn interrupted_turn_transcript_fingerprint(
+    previous_transcript_fingerprint: &str,
+    session_id: AiSessionId,
+    run_id: AiRunId,
+    input_message_id: Uuid,
+    through_message_sequence: i64,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"graphql-orm-ai/provider-session-interrupted-turn/v1\0");
+    digest.update(previous_transcript_fingerprint.as_bytes());
+    digest.update(session_id.0.as_bytes());
+    digest.update(run_id.0.as_bytes());
+    digest.update(input_message_id.as_bytes());
+    digest.update(through_message_sequence.to_be_bytes());
+    hex::encode(digest.finalize())
+}
+
 /// Fenced cleanup claim containing no opened provider cursor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AiProviderSessionCleanupClaim {
@@ -1488,6 +1514,47 @@ pub trait AiProviderSessionService: Send + Sync {
         commit: AiProviderSessionCommit,
     ) -> Result<AiProviderSessionBindingView, AiError>;
 
+    /// Retains one exact binding across an interrupt the provider settled.
+    ///
+    /// This is the only path that releases a claim without an assistant
+    /// message. It is admissible because a settled interrupt leaves the
+    /// retained thread holding exactly the interrupted user prompt and no
+    /// reply, which is what the durable transcript also records for a
+    /// cancelled run. The implementation must therefore re-prove, from
+    /// committed rows and inside the same transaction, that:
+    ///
+    /// - the caller's `settlement` reports [`AiRunInterruptSettlement::Settled`];
+    /// - the binding is claimed by exactly this run, attempt, lease
+    ///   generation, and claim owner, and the claim has not expired;
+    /// - the run persisted no assistant message and no run checkpoint, so no
+    ///   output of the interrupted turn is persisted or uncertainly persisted;
+    ///   and
+    /// - the durable input message is the exact next message after the
+    ///   binding's watermark.
+    ///
+    /// It then advances the watermark to that input message, derives a new
+    /// transcript fingerprint, and returns the binding to a resumable state
+    /// with no claim. Anything short of the full proof must fail, and the
+    /// caller must fall back to [`Self::require_cleanup_for_run`].
+    ///
+    /// The default denies, so an alternate store never acquires interrupt
+    /// retention implicitly.
+    ///
+    /// [`AiRunInterruptSettlement::Settled`]: crate::AiRunInterruptSettlement::Settled
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when settlement, the run fence, current
+    /// principal/session access, claim ownership, durable output absence, or
+    /// the transcript watermark cannot be validated exactly.
+    async fn settle_interrupted_turn(
+        &self,
+        _lease: &AiRunLease,
+        _settlement: crate::AiRunInterruptSettlement,
+    ) -> Result<AiProviderSessionBindingView, AiError> {
+        Err(AiError::RuntimeNotReady)
+    }
+
     /// Irreversibly removes a claim from reuse after cancellation, transport
     /// ambiguity, cursor rejection, policy drift, or another safe reason.
     async fn require_cleanup(
@@ -1495,6 +1562,30 @@ pub trait AiProviderSessionService: Send + Sync {
         claim: &AiProviderSessionClaim,
         reason_code: &str,
     ) -> Result<(), AiError>;
+
+    /// Invalidates the binding claimed by one exact run fence.
+    ///
+    /// This is [`Self::require_cleanup`] for a caller that observed durable
+    /// cancellation or an unsettled interrupt and therefore never received the
+    /// claim value — the claim is identified by the run fence itself. It must
+    /// apply the same state transition and the same retained-thread
+    /// invalidation disclosure event, so a user whose model context was reset
+    /// still learns about it.
+    ///
+    /// The default denies rather than silently leaving a claimed binding to
+    /// expire.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no binding is claimed by the exact run fence, the
+    /// reason code is unsafe, or the transition cannot be committed.
+    async fn require_cleanup_for_run(
+        &self,
+        _lease: &AiRunLease,
+        _reason_code: &str,
+    ) -> Result<(), AiError> {
+        Err(AiError::RuntimeNotReady)
+    }
 
     /// Claims one expired, invalidated, or deletion-required binding.
     async fn claim_cleanup(

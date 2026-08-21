@@ -113,6 +113,7 @@ fn principal(subject: &str) -> AuthPrincipal {
 struct ProviderSessionFixture {
     sessions: OrmAiSessionService,
     runs: OrmAiRunService,
+    cancellation: Arc<OrmAiRunCancellationService>,
     provider_sessions: OrmAiProviderSessionService,
     owner: AuthPrincipal,
     other: AuthPrincipal,
@@ -166,12 +167,25 @@ async fn provider_session_fixture() -> ProviderSessionFixture {
         protection_resolver.clone(),
         content_protector.clone(),
     );
+    let cancellation_hub =
+        Arc::new(AiRunCancellationHub::new(32).expect("cancellation hub should validate"));
     let runs = OrmAiRunService::new(
         database.clone(),
         clock.clone(),
         AiRunServiceLimits::new(Duration::minutes(1), Duration::minutes(1), 16, 3, 3)
             .expect("run limits should validate"),
-    );
+    )
+    .with_cancellation_hub(cancellation_hub.clone());
+    let cancellation = Arc::new(OrmAiRunCancellationService::new(
+        database.clone(),
+        access_policy.clone(),
+        protection_resolver.clone(),
+        content_protector.clone(),
+        principal_resolver.clone(),
+        clock.clone(),
+        AiRunCancellationLimits::default(),
+        cancellation_hub,
+    ));
     let provider_sessions = OrmAiProviderSessionService::new(
         database,
         access_policy,
@@ -186,6 +200,7 @@ async fn provider_session_fixture() -> ProviderSessionFixture {
     ProviderSessionFixture {
         sessions,
         runs,
+        cancellation,
         provider_sessions,
         owner,
         other,
@@ -521,6 +536,85 @@ async fn provider_session_cursor_is_owner_run_fenced_revocable_and_exactly_clean
             .await,
         Err(AiError::NotFound | AiError::Conflict)
     ));
+}
+
+#[tokio::test]
+async fn settled_interrupt_advances_the_durable_watermark_and_reuses_the_thread() {
+    let fixture = provider_session_fixture().await;
+    let owner = fixture.owner.clone();
+    let interrupted = active_run(&fixture, &owner, "settled-interrupt-workspace").await;
+    let descriptor = AiProviderSessionDescriptor::new(
+        ProviderKind::LocalHarness,
+        "reviewed-local-profile",
+        "reviewed-model",
+        "a".repeat(64),
+        "codex-app-server/v2",
+        "b".repeat(64),
+    )
+    .expect("provider descriptor should validate");
+    let initial_fingerprint = "c".repeat(64);
+    let claim = fixture
+        .provider_sessions
+        .bind_for_run(
+            &interrupted,
+            AiProviderSessionBindRequest::new(
+                descriptor.clone(),
+                AiProviderSessionCursor::new("codex.thread", "settled-interrupt-thread")
+                    .expect("cursor should validate"),
+                initial_fingerprint.clone(),
+                Some(fixture.clock.now() + Duration::hours(1)),
+            )
+            .expect("bind request should validate"),
+        )
+        .await
+        .expect("empty provider thread should bind to the interrupted run");
+    assert_eq!(claim.through_message_sequence(), 0);
+
+    fixture
+        .cancellation
+        .request_cancellation(
+            &owner,
+            CancelAiRunInput {
+                session_id: interrupted.session_id().0,
+                run_id: interrupted.run_id().0,
+                client_request_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("owner cancellation should become durable");
+
+    assert!(matches!(
+        fixture
+            .provider_sessions
+            .settle_interrupted_turn(&interrupted, AiRunInterruptSettlement::RequestedUnsettled,)
+            .await,
+        Err(AiError::Conflict)
+    ));
+    let settled = fixture
+        .provider_sessions
+        .settle_interrupted_turn(&interrupted, AiRunInterruptSettlement::Settled)
+        .await
+        .expect("exact cancelled run with no output should settle");
+    assert_eq!(settled.state(), AiProviderSessionState::Active);
+    assert_eq!(settled.through_message_sequence(), 1);
+    assert_ne!(settled.transcript_fingerprint(), initial_fingerprint);
+
+    let next = next_active_run(&fixture, &owner, interrupted.session_id()).await;
+    let resumed = fixture
+        .provider_sessions
+        .claim_for_run(&next, &descriptor, settled.transcript_fingerprint())
+        .await
+        .expect("the next run should claim the same settled provider thread");
+    assert_eq!(resumed.through_message_sequence(), 1);
+    let opened = fixture
+        .provider_sessions
+        .open_for_run(&next, &resumed)
+        .await
+        .expect("the retained cursor should reopen under the next exact fence");
+    assert_eq!(
+        opened.cursor().expose_to_provider_adapter(),
+        "settled-interrupt-thread"
+    );
 }
 
 #[tokio::test]

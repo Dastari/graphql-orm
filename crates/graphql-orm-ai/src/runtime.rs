@@ -1073,7 +1073,41 @@ impl AiRuntime {
         &self,
         binding: &crate::AiProviderRunBinding,
     ) -> Result<u64, ProviderError> {
+        self.interrupt_provider_runs(binding)
+            .await
+            .map(|(requested, _)| requested)
+    }
+
+    /// Requests interruption and reports the aggregate settlement proof.
+    ///
+    /// This is the proof-carrying counterpart to
+    /// [`Self::interrupt_all_provider_runs`]. It visits the same complete
+    /// adapter set, but returns what those adapters proved rather than the
+    /// count that accepted the request. Aggregation is fail-closed: one adapter
+    /// that merely acknowledged keeps the whole result
+    /// [`crate::AiRunInterruptSettlement::RequestedUnsettled`], and settlement
+    /// still needs the caller's durable evidence through
+    /// [`crate::AiRunInterruptSettlement::with_durable_turn_evidence`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the first non-sensitive provider error after attempting every
+    /// registered adapter.
+    pub async fn interrupt_all_provider_runs_with_settlement(
+        &self,
+        binding: &crate::AiProviderRunBinding,
+    ) -> Result<crate::AiRunInterruptSettlement, ProviderError> {
+        self.interrupt_provider_runs(binding)
+            .await
+            .map(|(_, settlement)| settlement)
+    }
+
+    async fn interrupt_provider_runs(
+        &self,
+        binding: &crate::AiProviderRunBinding,
+    ) -> Result<(u64, crate::AiRunInterruptSettlement), ProviderError> {
         let mut requested = 0_u64;
+        let mut settlement = crate::AiRunInterruptSettlement::NotActive;
         let mut first_error = None;
         for (kind, provider) in &self.providers {
             if provider.provider_kind() != *kind {
@@ -1085,16 +1119,22 @@ impl AiRuntime {
                 continue;
             }
             match provider.interrupt_run(binding).await {
-                Ok(crate::AiProviderRunInterruptOutcome::Requested) => {
-                    requested = requested.saturating_add(1);
+                Ok(outcome) => {
+                    if matches!(
+                        outcome,
+                        crate::AiProviderRunInterruptOutcome::Requested
+                            | crate::AiProviderRunInterruptOutcome::RequestedSettled
+                    ) {
+                        requested = requested.saturating_add(1);
+                    }
+                    settlement = settlement.fold_provider_outcome(outcome);
                 }
-                Ok(crate::AiProviderRunInterruptOutcome::NotActive) => {}
                 Err(error) => {
                     first_error.get_or_insert(error);
                 }
             }
         }
-        first_error.map_or(Ok(requested), Err)
+        first_error.map_or(Ok((requested, settlement)), Err)
     }
 
     /// Closes every registered adapter resource for one exact run binding.

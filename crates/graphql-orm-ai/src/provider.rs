@@ -2976,6 +2976,19 @@ pub trait AiProvider: Send + Sync {
     /// The default is inert for ordinary request-scoped adapters. This signal
     /// contains no cancellation authority; the caller must first observe the
     /// authoritative durable cancellation or lease-loss fence.
+    ///
+    /// An adapter reports
+    /// [`AiProviderRunInterruptOutcome::RequestedSettled`] only when it can
+    /// prove, for the exact interrupted turn, that the provider acknowledged
+    /// the interrupt, that no dynamic tool call is unresolved, and that the
+    /// interrupted partial turn is discarded from the provider payload, the
+    /// provider's durable thread artifact, and the model's later context. An
+    /// adapter that cannot prove all three keeps
+    /// [`AiProviderRunInterruptOutcome::Requested`], which fails closed to
+    /// invalidating the retained thread.
+    ///
+    /// [`AiProviderRunInterruptOutcome::RequestedSettled`]: crate::AiProviderRunInterruptOutcome::RequestedSettled
+    /// [`AiProviderRunInterruptOutcome::Requested`]: crate::AiProviderRunInterruptOutcome::Requested
     async fn interrupt_run(
         &self,
         _binding: &crate::AiProviderRunBinding,

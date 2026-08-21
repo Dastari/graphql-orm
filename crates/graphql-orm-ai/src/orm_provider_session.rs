@@ -147,11 +147,12 @@ mod service {
         content_context, map_orm, map_protection, map_transaction, principal_identity, record_scope,
     };
     use crate::persistence::{
-        AiApprovalRecord, AiAuditEventRecord, AiMessageRecord, AiRunCheckpointRecord,
-        AiRunCheckpointRecordWhereInput, AiRunRecord, AiSessionEventRecord, AiSessionRecord,
-        AiSessionRecordWhereInput, AiSubscriptionWaitAdoptionRecord,
+        AiApprovalRecord, AiAuditEventRecord, AiMessageRecord, AiMessageRecordWhereInput,
+        AiRunCheckpointRecord, AiRunCheckpointRecordWhereInput, AiRunRecord, AiSessionEventRecord,
+        AiSessionRecord, AiSessionRecordWhereInput, AiSubscriptionWaitAdoptionRecord,
         AiSubscriptionWaitAdoptionRecordWhereInput, AiSubscriptionWaiterRecord, AiToolCallRecord,
-        CreateAiAuditEventRecordInput, CreateAiSessionEventRecordInput, UpdateAiSessionRecordInput,
+        AiToolCallRecordWhereInput, CreateAiAuditEventRecordInput, CreateAiSessionEventRecordInput,
+        UpdateAiSessionRecordInput,
     };
     use crate::{
         AiAccessPolicy, AiContentProtectionPolicy, AiContentProtectionPolicyResolver,
@@ -1896,6 +1897,127 @@ mod service {
             binding_view(&record)
         }
 
+        async fn settle_interrupted_turn(
+            &self,
+            lease: &AiRunLease,
+            settlement: crate::AiRunInterruptSettlement,
+        ) -> Result<AiProviderSessionBindingView, AiError> {
+            // The caller's settlement is necessary, never sufficient: every
+            // condition below is re-proven from committed rows inside the
+            // transaction that keeps the binding.
+            if !settlement.retains_thread() {
+                return Err(AiError::Conflict);
+            }
+            let (current, observed_session, scope) = self.load_owned_active_context(lease).await?;
+            self.protection_policy(current.principal(), &scope).await?;
+            let now = canonical_second(self.clock.now());
+            let idle_expires_at = now
+                .checked_add(self.limits.idle_ttl())
+                .ok_or(AiError::PersistenceFailed)?;
+            let lease = lease.clone();
+            let record = self
+                .database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let _run = load_and_validate_interrupted_run(tx, &lease).await?;
+                        let session = tx
+                            .find_by_id::<AiSessionRecord>(&lease.session_id().0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if session != observed_session {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let input = tx
+                            .find_by_id::<AiMessageRecord>(&lease.input_message_id())
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        if input.session_id != session.id
+                            || input.message_role != "user"
+                            || input.completion_state != "complete"
+                            || input.sequence <= 0
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        if !run_persisted_no_output(tx, lease.run_id()).await? {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let binding = load_single_session_binding(tx, session.id).await?;
+                        validate_binding_record(&binding)?;
+                        if binding.owner_principal_kind != session.owner_principal_kind
+                            || binding.owner_subject != session.owner_subject
+                            || record_scope_from_binding(&binding) != scope
+                            || binding.state != AiProviderSessionState::Claimed.as_str()
+                            || binding.claimed_run_id != Some(lease.run_id().0)
+                            || binding.claimed_attempt_id != Some(lease.attempt_id())
+                            || binding.claimed_run_lease_generation
+                                != Some(lease.lease_generation())
+                            || binding.claim_owner.as_deref() != Some(lease.worker_id())
+                            || binding
+                                .claim_expires_at
+                                .is_none_or(|expiry| expiry <= now.unix_timestamp())
+                            || binding.through_message_sequence.checked_add(1)
+                                != Some(input.sequence)
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let transcript_fingerprint =
+                            crate::provider_session::interrupted_turn_transcript_fingerprint(
+                                &binding.transcript_fingerprint,
+                                AiSessionId(binding.session_id),
+                                lease.run_id(),
+                                input.id,
+                                input.sequence,
+                            );
+                        let bounded_idle_expiry = idle_expires_at
+                            .unix_timestamp()
+                            .min(binding.absolute_expires_at)
+                            .min(binding.provider_expires_at.unwrap_or(i64::MAX));
+                        if bounded_idle_expiry <= now.unix_timestamp() {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let outcome = tx
+                            .compare_and_swap::<AiProviderSessionBindingRecord>(
+                                &binding.id,
+                                binding.row_version,
+                                AiProviderSessionBindingRecordWhereInput::default(),
+                                UpdateAiProviderSessionBindingRecordInput {
+                                    through_message_sequence: Some(input.sequence),
+                                    transcript_fingerprint: Some(transcript_fingerprint),
+                                    last_run_id: Some(Some(lease.run_id().0)),
+                                    state: Some(AiProviderSessionState::Active.as_str().to_owned()),
+                                    claimed_run_id: Some(None),
+                                    claimed_attempt_id: Some(None),
+                                    claimed_run_lease_generation: Some(None),
+                                    claim_owner: Some(None),
+                                    claim_expires_at: Some(None),
+                                    idle_expires_at: Some(bounded_idle_expiry),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        let ConditionalUpdateOutcome::Updated(updated) = outcome else {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        };
+                        append_audit(
+                            tx,
+                            "ai.provider_session.interrupt_settled",
+                            binding.id,
+                            "provider_session_interrupt_settled",
+                            lease.run_id().0,
+                            now,
+                        )
+                        .await?;
+                        Ok(updated)
+                    })
+                })
+                .await
+                .map_err(map_transaction)?;
+            binding_view(&record)
+        }
+
         async fn require_cleanup(
             &self,
             claim: &AiProviderSessionClaim,
@@ -1942,6 +2064,66 @@ mod service {
                             binding.id,
                             &reason_code,
                             Some(claim.run_id.0),
+                            now,
+                        )
+                        .await
+                    })
+                })
+                .await
+                .map_err(map_transaction)
+        }
+
+        async fn require_cleanup_for_run(
+            &self,
+            lease: &AiRunLease,
+            reason_code: &str,
+        ) -> Result<(), AiError> {
+            validate_reason_code(reason_code)?;
+            let now = canonical_second(self.clock.now());
+            let lease = lease.clone();
+            let reason_code = reason_code.to_owned();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let binding = load_single_session_binding(tx, lease.session_id().0).await?;
+                        validate_binding_record(&binding)?;
+                        if binding.state != AiProviderSessionState::Claimed.as_str()
+                            || binding.claimed_run_id != Some(lease.run_id().0)
+                            || binding.claimed_attempt_id != Some(lease.attempt_id())
+                            || binding.claimed_run_lease_generation
+                                != Some(lease.lease_generation())
+                            || binding.claim_owner.as_deref() != Some(lease.worker_id())
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let outcome = tx
+                            .compare_and_swap::<AiProviderSessionBindingRecord>(
+                                &binding.id,
+                                binding.row_version,
+                                AiProviderSessionBindingRecordWhereInput::default(),
+                                cleanup_required_update(reason_code.clone(), lease.run_id().0),
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        append_audit(
+                            tx,
+                            "ai.provider_session.cleanup_required",
+                            binding.id,
+                            &reason_code,
+                            lease.run_id().0,
+                            now,
+                        )
+                        .await?;
+                        append_provider_session_disclosure(
+                            tx,
+                            crate::orm_runs::PROVIDER_SESSION_RESET_EVENT,
+                            binding.session_id,
+                            binding.id,
+                            &reason_code,
+                            Some(lease.run_id().0),
                             now,
                         )
                         .await
@@ -2399,6 +2581,113 @@ mod service {
             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
         }
         Ok(run)
+    }
+
+    /// Loads the run behind an interrupted turn and proves it recorded nothing
+    /// for that turn.
+    ///
+    /// Owner cancellation is what makes an interrupt observable, so the run row
+    /// is already `Cancelled` with its lease released while the caller's lease
+    /// snapshot still reads `Running`. The absent checkpoint is the durable
+    /// proof that no provider turn, adopted wait, or assistant output of this
+    /// run was persisted.
+    async fn load_and_validate_interrupted_run(
+        tx: &mut MutationContext<'_, DefaultWriteBackend>,
+        lease: &AiRunLease,
+    ) -> Result<AiRunRecord, OrmPublicError> {
+        let run = tx
+            .find_by_id::<AiRunRecord>(&lease.run_id().0)
+            .await
+            .map_err(OrmPublicError::from)?
+            .ok_or_else(OrmPublicError::not_found)?;
+        let stored_reference: PrincipalReference =
+            serde_json::from_value(run.principal_reference.clone())
+                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+        if lease.state() != AiRunState::Running
+            || run.session_id != lease.session_id().0
+            || run.input_message_id != lease.input_message_id()
+            || stored_reference != *lease.principal_reference()
+            || run.attempt_id != Some(lease.attempt_id())
+            || run.lease_generation != lease.lease_generation()
+            || run.retry_count != i64::from(lease.retry_count())
+            || run.state != AiRunState::Cancelled.as_str()
+            || run.latest_checkpoint_id.is_some()
+            || lease.latest_checkpoint_id().is_some()
+        {
+            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+        }
+        Ok(run)
+    }
+
+    /// Returns whether one run committed no assistant message and no tool call.
+    ///
+    /// Both are read inside the settling transaction, so a concurrent writer
+    /// cannot slip persisted output past the check.
+    async fn run_persisted_no_output(
+        tx: &mut MutationContext<'_, DefaultWriteBackend>,
+        run_id: AiRunId,
+    ) -> Result<bool, OrmPublicError> {
+        let messages = tx
+            .query::<AiMessageRecord>()
+            .filter(AiMessageRecordWhereInput {
+                run_id: Some(UuidFilter {
+                    eq: Some(run_id.0),
+                    ..Default::default()
+                }),
+                message_role: Some(StringFilter {
+                    eq: Some("assistant".to_owned()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .limit(1)
+            .fetch_all()
+            .await
+            .map_err(OrmPublicError::from)?;
+        if !messages.is_empty() {
+            return Ok(false);
+        }
+        let tool_calls = tx
+            .query::<AiToolCallRecord>()
+            .filter(AiToolCallRecordWhereInput {
+                run_id: Some(UuidFilter {
+                    eq: Some(run_id.0),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .limit(1)
+            .fetch_all()
+            .await
+            .map_err(OrmPublicError::from)?;
+        Ok(tool_calls.is_empty())
+    }
+
+    /// Loads the single provider-session binding of one session.
+    async fn load_single_session_binding(
+        tx: &mut MutationContext<'_, DefaultWriteBackend>,
+        session_id: Uuid,
+    ) -> Result<AiProviderSessionBindingRecord, OrmPublicError> {
+        let records = tx
+            .query::<AiProviderSessionBindingRecord>()
+            .filter(AiProviderSessionBindingRecordWhereInput {
+                session_id: Some(UuidFilter {
+                    eq: Some(session_id),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .limit(2)
+            .fetch_all()
+            .await
+            .map_err(OrmPublicError::from)?;
+        if records.len() > 1 {
+            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+        }
+        records
+            .into_iter()
+            .next()
+            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))
     }
 
     fn validate_active_claim(

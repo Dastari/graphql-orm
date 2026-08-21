@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-16
+last_reviewed: 2026-08-21
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -18,6 +18,44 @@ Migration entries preserve the dependency and schema facts for the checkpoint
 they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## 0.82.0 to 0.83.0: settled retained Codex interruption
+
+Adopt `graphql-orm-ai` 0.83.0 at one reviewed full monorepo revision.
+
+### Schema module
+
+The AI schema module advances **0.61.0 to 0.62.0** as a persistent-semantic
+version. There is no DDL, table, column, index, constraint, protected-payload,
+row-rewrite, or backfill change. Apply and verify the module while AI workers
+are stopped, then restart all workers on the same revision. The semantic bump
+records that an existing provider-session binding can now advance its durable
+watermark and transcript fingerprint after a settled interrupt.
+
+### Provider adoption
+
+`AiProviderRunInterruptOutcome` gains the non-exhaustive
+`RequestedSettled` variant. Ordinary adapters should continue returning
+`Requested`; only an adapter with exact acknowledged-interrupt, unresolved-tool
+absence, and provider-thread discard proof may report the new variant.
+
+`AiRuntime::interrupt_all_provider_runs` keeps its existing count result. The
+new `interrupt_all_provider_runs_with_settlement` returns the aggregate proof
+for coordinator implementations. A caller must still apply durable evidence;
+provider acknowledgement alone never permits retaining a thread.
+
+The Codex app-server proof is version-observed for `codex-cli 0.148.0` with
+`gpt-5.4`, not guaranteed by the empty `turn/interrupt` response. Re-run the
+documented interrupt probe before changing the Codex version or admitted model.
+The adapter fails closed when a dynamic call remains in flight or starts after
+interruption begins. The ORM implementation then transactionally rechecks the
+cancelled run, exact claim, message watermark, and absence of an assistant
+message, tool call, or checkpoint before retaining the binding. A failure uses
+the existing disclosed cleanup-required path.
+
+The interrupted user message remains in Codex and in the durable transcript,
+with no assistant reply. That unanswered prompt is expected and is incorporated
+into the provider-session transcript fingerprint before a later run resumes.
 
 ## 0.81.0 to 0.82.0: session reliability and failure disposition
 

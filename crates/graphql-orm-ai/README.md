@@ -141,6 +141,13 @@ Invalidating a retained provider thread emits `provider_session_reset` or
 `provider_session_rebound` so a host can tell the user the model's context was
 reset even though the durable transcript reads as continuous.
 
+The reviewed Codex app-server adapter can retain a thread after Stop only when
+the exact interrupt was acknowledged, no dynamic tool call remains unresolved,
+and the ORM transaction proves that the cancelled turn persisted no assistant
+message, tool call, or checkpoint. This discard guarantee is version-observed
+for `codex-cli 0.148.0` with `gpt-5.4`; reverify it before upgrading Codex. Any
+missing proof continues through the disclosed cleanup-and-rebind path.
+
 See the [session reliability adoption contract](docs/session-reliability-adoption.md).
 
 ## Features and capability boundary
