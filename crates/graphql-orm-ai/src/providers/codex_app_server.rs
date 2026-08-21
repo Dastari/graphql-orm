@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use agql_auth::Clock;
@@ -1603,7 +1603,76 @@ struct RunEntry {
     turn_count: AtomicU32,
     turn_active: AtomicBool,
     poisoned: AtomicBool,
+    /// Dynamic tool calls currently executing through the coordinator-owned
+    /// responder for this exact run process.
+    dynamic_tool_calls_in_flight: AtomicU64,
+    /// Closes the race between beginning interruption and checking the
+    /// in-flight counter after the provider acknowledgement.
+    interrupt_started: AtomicBool,
+    /// Remembers a tool call dispatched after interruption began. Once set it
+    /// is never cleared: that ordering is outside the measured settlement
+    /// evidence even if the responder finishes before the acknowledgement.
+    dynamic_tool_call_after_interrupt: AtomicBool,
     empty_thread: Mutex<EmptyThreadActivation>,
+}
+
+/// Counts coordinator-owned dynamic tool calls for one exact run process.
+///
+/// The wrapper adds no authority: it forwards the exact call to the
+/// coordinator responder and returns its exact result. It exists only so the
+/// adapter can prove, at interrupt time, that the interrupted turn has no
+/// unresolved dynamic tool call and did not dispatch one after interruption
+/// began.
+struct DynamicToolCallCounter {
+    entry: Arc<RunEntry>,
+    inner: Arc<dyn ProviderDynamicToolResponder>,
+}
+
+/// Decrements the in-flight counter even when the responder future is dropped
+/// by interruption or task cancellation.
+struct DynamicToolCallInFlightGuard {
+    entry: Arc<RunEntry>,
+}
+
+impl Drop for DynamicToolCallInFlightGuard {
+    fn drop(&mut self) {
+        self.entry
+            .dynamic_tool_calls_in_flight
+            .fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl DynamicToolCallCounter {
+    fn wrap(
+        entry: &Arc<RunEntry>,
+        inner: Arc<dyn ProviderDynamicToolResponder>,
+    ) -> Arc<dyn ProviderDynamicToolResponder> {
+        Arc::new(Self {
+            entry: entry.clone(),
+            inner,
+        })
+    }
+}
+
+#[async_trait]
+impl ProviderDynamicToolResponder for DynamicToolCallCounter {
+    async fn respond(
+        &self,
+        call: ProviderDynamicToolCall,
+    ) -> Result<crate::ProviderDynamicToolResult, ProviderError> {
+        self.entry
+            .dynamic_tool_calls_in_flight
+            .fetch_add(1, Ordering::SeqCst);
+        let _in_flight = DynamicToolCallInFlightGuard {
+            entry: self.entry.clone(),
+        };
+        if self.entry.interrupt_started.load(Ordering::SeqCst) {
+            self.entry
+                .dynamic_tool_call_after_interrupt
+                .store(true, Ordering::SeqCst);
+        }
+        self.inner.respond(call).await
+    }
 }
 
 enum EmptyThreadActivation {
@@ -2033,6 +2102,7 @@ impl AiCodexAppServerRunPool {
         let entry = self
             .begin_bound_turn(binding, &registration, &session, &input)
             .await?;
+        let responder = DynamicToolCallCounter::wrap(&entry, responder);
         let turn_deadline = tokio::time::Instant::now() + self.inner.limits.turn_timeout;
         let stream = match tokio::time::timeout_at(
             turn_deadline,
@@ -2346,6 +2416,7 @@ impl AiCodexAppServerRunPool {
             entry.turn_active.store(false, Ordering::Release);
             return Err(ProviderError::RateLimited);
         }
+        let responder = DynamicToolCallCounter::wrap(&entry, responder);
         let turn_deadline = tokio::time::Instant::now() + self.inner.limits.turn_timeout;
         let stream = match tokio::time::timeout_at(
             turn_deadline,
@@ -2448,6 +2519,7 @@ impl AiCodexAppServerRunPool {
             entry.turn_active.store(false, Ordering::Release);
             return Err(ProviderError::RateLimited);
         }
+        let responder = DynamicToolCallCounter::wrap(&entry, responder);
         let turn_deadline = tokio::time::Instant::now() + self.inner.limits.turn_timeout;
         let stream = match tokio::time::timeout_at(
             turn_deadline,
@@ -2573,6 +2645,9 @@ impl AiCodexAppServerRunPool {
             turn_count: AtomicU32::new(0),
             turn_active: AtomicBool::new(false),
             poisoned: AtomicBool::new(false),
+            dynamic_tool_calls_in_flight: AtomicU64::new(0),
+            interrupt_started: AtomicBool::new(false),
+            dynamic_tool_call_after_interrupt: AtomicBool::new(false),
             empty_thread: Mutex::new(EmptyThreadActivation::Vacant),
         });
         if identity_is_new {
@@ -2617,6 +2692,31 @@ impl AiCodexAppServerRunPool {
     /// This method contains no cancellation authority. Callers must first
     /// observe authoritative durable cancellation or lease loss.
     ///
+    /// # Settlement provenance
+    ///
+    /// A confirmed interrupt of a turn with no unresolved dynamic tool call
+    /// reports [`AiProviderRunInterruptOutcome::RequestedSettled`]. That is
+    /// **version-observed behaviour, not a protocol promise**:
+    /// `TurnInterruptResponse` is an empty object and nothing in the app-server
+    /// contract guarantees discard. It rests on a measurement against
+    /// `codex-cli 0.148.0` with `gpt-5.4`, interrupting mid-assistant-stream,
+    /// which found that the interrupted partial turn is absent from
+    /// `turn/completed` (`status=interrupted`, `items=0`), from
+    /// `thread/turns/list` (the interrupted turn holds only its `userMessage`),
+    /// from the on-disk rollout JSONL a later resume reloads, and from the
+    /// model's context when the resumed thread is asked to quote its last line.
+    /// The interrupted user message *is* retained, so a settled interrupt
+    /// leaves a prompt with no reply — consistent with a durable transcript
+    /// that recorded the same prompt and no answer.
+    ///
+    /// **Re-verify this on a Codex upgrade.** Behaviour with a dynamic tool
+    /// call in flight was never measured, so an unresolved call or one first
+    /// dispatched after interruption begins keeps the fail-closed
+    /// [`AiProviderRunInterruptOutcome::Requested`]. A call that completed
+    /// before interruption is not unresolved; the coordinator's separate
+    /// durable-output guard still decides whether that turn may retain its
+    /// binding.
+    ///
     /// # Errors
     ///
     /// Returns a non-sensitive provider error when bounded interruption cannot
@@ -2632,12 +2732,20 @@ impl AiCodexAppServerRunPool {
         if !entry.turn_active.load(Ordering::Acquire) {
             return Ok(AiProviderRunInterruptOutcome::NotActive);
         }
+        entry.interrupt_started.store(true, Ordering::SeqCst);
         tokio::time::timeout(
             self.inner.limits.interrupt_timeout,
             entry.process.interrupt(),
         )
         .await
         .map_err(|_| provider_timeout_error())??;
+        if entry.dynamic_tool_calls_in_flight.load(Ordering::SeqCst) == 0
+            && !entry
+                .dynamic_tool_call_after_interrupt
+                .load(Ordering::SeqCst)
+        {
+            return Ok(AiProviderRunInterruptOutcome::RequestedSettled);
+        }
         Ok(AiProviderRunInterruptOutcome::Requested)
     }
 
@@ -8582,6 +8690,94 @@ pub(crate) mod tests {
         assert_eq!(counters.turns.load(Ordering::SeqCst), 1);
     }
 
+    /// A dynamic tool call that has not been answered is outside the measured
+    /// interrupt evidence, so the adapter refuses to report settlement.
+    struct BlockingDynamicResponder {
+        entered: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl ProviderDynamicToolResponder for BlockingDynamicResponder {
+        async fn respond(
+            &self,
+            _call: ProviderDynamicToolCall,
+        ) -> Result<ProviderDynamicToolResult, ProviderError> {
+            self.entered.notify_one();
+            std::future::pending::<()>().await;
+            Err(ProviderError::Rejected)
+        }
+    }
+
+    #[tokio::test]
+    async fn unresolved_dynamic_tool_call_keeps_the_interrupt_unsettled() {
+        let counters = Arc::new(Counters::new());
+        let provider: Arc<dyn AiProvider> = Arc::new(AiCodexAppServerProvider::new(
+            dynamic_registration("1.0.0"),
+            pool(counters.clone(), 1, 2),
+        ));
+        let request = dynamic_model_request();
+        let context = provider_context("profile-1", &request);
+        let binding = context
+            .run_binding()
+            .expect("test context should carry the exact run binding");
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let responder = Arc::new(BlockingDynamicResponder {
+            entered: entered.clone(),
+        });
+        let started = tokio::spawn({
+            let provider = provider.clone();
+            async move {
+                let _ = provider
+                    .stream_with_dynamic_tools(request, context, responder)
+                    .await;
+            }
+        });
+        entered.notified().await;
+
+        assert_eq!(
+            provider
+                .interrupt_run(&binding)
+                .await
+                .expect("interrupt should dispatch"),
+            AiProviderRunInterruptOutcome::Requested
+        );
+
+        started.abort();
+        let _ = started.await;
+        assert_eq!(counters.interrupts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn resolved_dynamic_tool_call_has_no_unresolved_adapter_work() {
+        let counters = Arc::new(Counters::new());
+        let provider: Arc<dyn AiProvider> = Arc::new(AiCodexAppServerProvider::new(
+            dynamic_registration("1.0.0"),
+            pool(counters.clone(), 1, 2),
+        ));
+        let request = dynamic_model_request();
+        let context = provider_context("profile-1", &request);
+        let binding = context
+            .run_binding()
+            .expect("test context should carry the exact run binding");
+        let active = provider
+            .stream_with_dynamic_tools(request, context, Arc::new(FakeDynamicResponder))
+            .await
+            .expect("dynamic provider turn should start");
+
+        // The turn answered its dynamic tool call before interruption, so the
+        // adapter has no unresolved tool work. The coordinator's independent
+        // durable-output leg will still demote this settlement before retaining
+        // a binding that persisted tool traffic.
+        assert_eq!(
+            provider
+                .interrupt_run(&binding)
+                .await
+                .expect("interrupt should dispatch"),
+            AiProviderRunInterruptOutcome::RequestedSettled
+        );
+        drop(active);
+    }
+
     #[tokio::test]
     async fn active_dynamic_turn_uses_exact_interrupt_and_close_lifecycle() {
         let counters = Arc::new(Counters::new());
@@ -8599,12 +8795,14 @@ pub(crate) mod tests {
             .stream_with_dynamic_tools(request, context, Arc::new(FakeDynamicResponder))
             .await
             .expect("dynamic provider turn should start");
+        // No dynamic tool call was dispatched, so this interrupt is inside the
+        // measured evidence and reports settlement.
         assert_eq!(
             provider
                 .interrupt_run(&binding)
                 .await
                 .expect("dynamic interrupt should dispatch"),
-            AiProviderRunInterruptOutcome::Requested
+            AiProviderRunInterruptOutcome::RequestedSettled
         );
         assert_eq!(
             provider
@@ -8641,7 +8839,7 @@ pub(crate) mod tests {
                 .interrupt_run(&binding)
                 .await
                 .expect("interrupt should dispatch"),
-            AiProviderRunInterruptOutcome::Requested
+            AiProviderRunInterruptOutcome::RequestedSettled
         );
         assert_eq!(
             provider
@@ -8806,7 +9004,7 @@ pub(crate) mod tests {
             pool.interrupt_run(&binding)
                 .await
                 .expect("interrupt should succeed"),
-            AiProviderRunInterruptOutcome::Requested
+            AiProviderRunInterruptOutcome::RequestedSettled
         );
         assert_eq!(counters.interrupts.load(Ordering::SeqCst), 1);
         assert_eq!(

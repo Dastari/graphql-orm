@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-16
+last_reviewed: 2026-08-21
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -17,6 +17,37 @@ Historical development entries below retain their original dependency and
 checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## [0.83.0] - 2026-08-21
+
+Persistent schema module: **0.62.0**.
+
+### Added
+
+- Codex app-server interrupts can now report a proven settled turn for the
+  reviewed `codex-cli 0.148.0` / `gpt-5.4` deployment when the exact interrupt
+  is acknowledged and no dynamic tool call remains unresolved. The guarantee
+  is explicitly version-observed and must be reverified before a Codex upgrade.
+- `AiProviderRunInterruptOutcome::RequestedSettled` and
+  `AiRuntime::interrupt_all_provider_runs_with_settlement` carry the
+  provider-side proof without changing the existing interruption-count API.
+- `AiProviderSessionService::settle_interrupted_turn` and
+  `require_cleanup_for_run` let a durable store either advance the transcript
+  watermark across the retained unanswered user prompt or invalidate the
+  binding under the exact run fence. Alternate stores deny both by default.
+
+### Changed
+
+- A cancelled retained Codex turn keeps its provider thread only after three
+  independent proofs: exact provider acknowledgement, no unresolved dynamic
+  call plus version-observed partial-output discard, and a transactional ORM
+  check that the run persisted no assistant message, tool call, or checkpoint.
+  Every uncertain or refused case continues through the disclosed
+  cleanup-required path.
+- The persistent schema module advances semantically to 0.62.0 because an
+  existing provider-session binding may now advance its watermark and
+  transcript fingerprint after a settled interrupt. No table, column, index,
+  row rewrite, or backfill is required.
 
 ## [0.82.0] - 2026-08-20
 

@@ -1119,6 +1119,48 @@ impl AiReadOnlyAgentCoordinator {
         }
     }
 
+    /// Applies an interrupt settlement to the retained provider session of a
+    /// cancelled run.
+    ///
+    /// A settled interrupt keeps the binding: the provider proved it discarded
+    /// the interrupted partial turn, and the durable evidence below proves the
+    /// turn persisted nothing, so the retained thread holds exactly the
+    /// interrupted prompt with no reply — which is what the durable transcript
+    /// records too. Everything else invalidates the binding through the same
+    /// disclosed cleanup funnel as any other reset, so the user learns the
+    /// model's context was lost.
+    ///
+    /// The durable leg is deliberately conservative. Settlement needs a run
+    /// that never observed a completed provider turn, never executed a tool,
+    /// and holds no checkpoint; a later turn of the same run has already put
+    /// tool traffic into the thread that the message transcript does not
+    /// reproduce on its own.
+    async fn settle_interrupted_provider_session(
+        &self,
+        lease: &AiRunLease,
+        guard: &AiAgentLoopGuard,
+        settlement: crate::AiRunInterruptSettlement,
+    ) {
+        let Some(service) = &self.provider_session_service else {
+            return;
+        };
+        let no_uncertain_persisted_output = guard.provider_turns() == 0
+            && guard.total_tool_calls() == 0
+            && lease.latest_checkpoint_id().is_none();
+        let settlement = settlement.with_durable_turn_evidence(no_uncertain_persisted_output);
+        if settlement.retains_thread()
+            && service
+                .settle_interrupted_turn(lease, settlement)
+                .await
+                .is_ok()
+        {
+            return;
+        }
+        let _ = service
+            .require_cleanup_for_run(lease, "provider_session_interrupted_unsettled")
+            .await;
+    }
+
     /// Executes one freshly claimed lease through a bounded terminal outcome.
     ///
     /// A successful return means the corresponding terminal or
@@ -1465,7 +1507,9 @@ impl AiReadOnlyAgentCoordinator {
                         .await;
                 }
                 Err(ProviderTurnFailure::LeaseLost(error)) => return Err(error),
-                Err(ProviderTurnFailure::Cancelled) => {
+                Err(ProviderTurnFailure::Cancelled(settlement)) => {
+                    self.settle_interrupted_provider_session(&lease, &guard, settlement)
+                        .await;
                     return Ok(Cancelled {
                         provider_turns: guard.provider_turns(),
                         total_tool_calls: guard.total_tool_calls(),
@@ -1892,8 +1936,12 @@ impl AiReadOnlyAgentCoordinator {
                 result = &mut cancellation => {
                     match result.map_err(ProviderTurnFailure::LeaseLost)? {
                         Some(_) => {
-                            let _ = self.provider_executor.interrupt_run(lease).await;
-                            return Err(ProviderTurnFailure::Cancelled);
+                            let settlement = self
+                                .provider_executor
+                                .interrupt_run(lease)
+                                .await
+                                .unwrap_or(crate::AiRunInterruptSettlement::RequestedUnsettled);
+                            return Err(ProviderTurnFailure::Cancelled(settlement));
                         }
                         None => {
                             match self.run_control.heartbeat(lease).await {
@@ -1937,9 +1985,15 @@ impl AiReadOnlyAgentCoordinator {
                     match result.map_err(ProviderTurnFailure::LeaseLost)? {
                         Some(_) => {
                             let current = lease_state.lock().await.clone();
-                            let _ = self.provider_executor.interrupt_run(&current).await;
+                            // A failed or unrecognized interrupt proves nothing,
+                            // so it fails closed into invalidation.
+                            let settlement = self
+                                .provider_executor
+                                .interrupt_run(&current)
+                                .await
+                                .unwrap_or(crate::AiRunInterruptSettlement::RequestedUnsettled);
                             *lease = current;
-                            return Err(ProviderTurnFailure::Cancelled);
+                            return Err(ProviderTurnFailure::Cancelled(settlement));
                         }
                         None => {
                             let mut current = lease_state.lock().await;
@@ -2002,9 +2056,15 @@ impl AiReadOnlyAgentCoordinator {
                     match result.map_err(ProviderTurnFailure::LeaseLost)? {
                         Some(_) => {
                             let current = lease_state.lock().await.clone();
-                            let _ = self.provider_executor.interrupt_run(&current).await;
+                            // A failed or unrecognized interrupt proves nothing,
+                            // so it fails closed into invalidation.
+                            let settlement = self
+                                .provider_executor
+                                .interrupt_run(&current)
+                                .await
+                                .unwrap_or(crate::AiRunInterruptSettlement::RequestedUnsettled);
                             *lease = current;
-                            return Err(ProviderTurnFailure::Cancelled);
+                            return Err(ProviderTurnFailure::Cancelled(settlement));
                         }
                         None => {
                             let mut current = lease_state.lock().await;
@@ -2193,7 +2253,9 @@ enum ProviderTurnFailure {
     Provider,
     Deferred,
     LeaseLost(AiError),
-    Cancelled,
+    /// Owner cancellation won the fence; the value reports what the resulting
+    /// interrupt proved about the provider's retained thread.
+    Cancelled(crate::AiRunInterruptSettlement),
 }
 
 #[cfg(all(test, feature = "sqlite"))]
@@ -3655,6 +3717,308 @@ mod tests {
             run.final_states().is_empty(),
             "a deferral must not close the run"
         );
+    }
+
+    struct PendingRetainedProviderExecutor {
+        settlement: crate::AiRunInterruptSettlement,
+        interrupts: AtomicUsize,
+        /// Cancellation must land *while* the provider turn is in flight; a run
+        /// cancelled before the turn starts never reaches an interrupt.
+        run: Arc<TestRunControl>,
+    }
+
+    #[async_trait]
+    impl AiAgentProviderTurnExecutor for PendingRetainedProviderExecutor {
+        async fn execute_turn(
+            &self,
+            _lease: &AiRunLease,
+            _plan: AiProviderCallPlan,
+        ) -> Result<AiProviderCallResult, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn execute_retained_turn(
+            &self,
+            _lease: Arc<tokio::sync::Mutex<AiRunLease>>,
+            _plan: AiProviderCallPlan,
+            _session_plan: crate::AiProviderSessionTurnPlan,
+            _session_service: Arc<dyn crate::AiProviderSessionService>,
+            _execution: Option<Arc<dyn AiProviderDynamicToolExecution>>,
+        ) -> Result<AiProviderCallResult, AiError> {
+            self.run.cancelled.store(true, Ordering::SeqCst);
+            std::future::pending().await
+        }
+
+        async fn interrupt_run(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<crate::AiRunInterruptSettlement, AiError> {
+            self.interrupts.fetch_add(1, Ordering::SeqCst);
+            Ok(self.settlement)
+        }
+    }
+
+    #[derive(Default)]
+    struct InterruptSessionService {
+        settlements: AtomicUsize,
+        run_cleanups: AtomicUsize,
+        settlement_fails: bool,
+    }
+
+    #[async_trait]
+    impl crate::AiProviderSessionService for InterruptSessionService {
+        async fn inspect_for_run(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Option<crate::AiProviderSessionBindingView>, AiError> {
+            Ok(None)
+        }
+
+        async fn bind_for_run(
+            &self,
+            _lease: &AiRunLease,
+            _request: crate::AiProviderSessionBindRequest,
+        ) -> Result<crate::AiProviderSessionClaim, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn claim_for_run(
+            &self,
+            _lease: &AiRunLease,
+            _expected: &crate::AiProviderSessionDescriptor,
+            _expected_transcript_fingerprint: &str,
+        ) -> Result<crate::AiProviderSessionClaim, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn open_for_run(
+            &self,
+            _lease: &AiRunLease,
+            _claim: &crate::AiProviderSessionClaim,
+        ) -> Result<crate::AiOpenedProviderSession, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn heartbeat(
+            &self,
+            _lease: &AiRunLease,
+            _claim: &crate::AiProviderSessionClaim,
+        ) -> Result<crate::AiProviderSessionClaim, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn commit_turn(
+            &self,
+            _lease: &AiRunLease,
+            _claim: &crate::AiProviderSessionClaim,
+            _commit: crate::AiProviderSessionCommit,
+        ) -> Result<crate::AiProviderSessionBindingView, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn settle_interrupted_turn(
+            &self,
+            lease: &AiRunLease,
+            settlement: crate::AiRunInterruptSettlement,
+        ) -> Result<crate::AiProviderSessionBindingView, AiError> {
+            assert!(
+                settlement.retains_thread(),
+                "the durable boundary must never be asked to retain an unsettled thread"
+            );
+            self.settlements.fetch_add(1, Ordering::SeqCst);
+            if self.settlement_fails {
+                return Err(AiError::Conflict);
+            }
+            Ok(crate::AiProviderSessionBindingView {
+                binding_id: Uuid::from_u128(7),
+                session_id: lease.session_id(),
+                scope: test_scope(),
+                descriptor: retained_descriptor(),
+                state: crate::AiProviderSessionState::Active,
+                through_message_sequence: 1,
+                transcript_fingerprint: "d".repeat(64),
+                provider_expires_at: None,
+                idle_expires_at: time::OffsetDateTime::now_utc() + Duration::minutes(5),
+                absolute_expires_at: time::OffsetDateTime::now_utc() + Duration::hours(1),
+                row_version: 2,
+            })
+        }
+
+        async fn require_cleanup(
+            &self,
+            _claim: &crate::AiProviderSessionClaim,
+            _reason_code: &str,
+        ) -> Result<(), AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn require_cleanup_for_run(
+            &self,
+            _lease: &AiRunLease,
+            reason_code: &str,
+        ) -> Result<(), AiError> {
+            assert_eq!(reason_code, "provider_session_interrupted_unsettled");
+            self.run_cleanups.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn claim_cleanup(
+            &self,
+            _worker_id: &str,
+        ) -> Result<Option<crate::AiProviderSessionCleanupClaim>, AiError> {
+            Ok(None)
+        }
+
+        async fn open_for_cleanup(
+            &self,
+            _claim: &crate::AiProviderSessionCleanupClaim,
+            _policy: &crate::AiContentProtectionPolicy,
+        ) -> Result<crate::AiProviderSessionDeletionRequest, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn complete_cleanup(
+            &self,
+            _claim: &crate::AiProviderSessionCleanupClaim,
+            _proof: crate::AiProviderSessionAbsenceProof,
+        ) -> Result<(), AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn schedule_cleanup_retry(
+            &self,
+            _claim: &crate::AiProviderSessionCleanupClaim,
+            _delay: Duration,
+            _reason_code: &str,
+        ) -> Result<(), AiError> {
+            Err(AiError::Conflict)
+        }
+    }
+
+    fn interrupted_retained_coordinator(
+        settlement: crate::AiRunInterruptSettlement,
+        settlement_fails: bool,
+    ) -> (
+        AiReadOnlyAgentCoordinator,
+        Arc<InterruptSessionService>,
+        Arc<PendingRetainedProviderExecutor>,
+    ) {
+        let run = Arc::new(TestRunControl::new());
+        let descriptor = retained_descriptor();
+        let planner = Arc::new(TestRetainedChatPlanner {
+            scope: test_scope(),
+            provider_session: crate::AiProviderSessionTurnPlan::new(descriptor, "c".repeat(64))
+                .expect("retained turn plan should validate"),
+        });
+        let provider = Arc::new(PendingRetainedProviderExecutor {
+            settlement,
+            interrupts: AtomicUsize::new(0),
+            run: run.clone(),
+        });
+        let session_service = Arc::new(InterruptSessionService {
+            settlement_fails,
+            ..InterruptSessionService::default()
+        });
+        let forbidden = Arc::new(ChatForbiddenBoundaries::default());
+        let coordinator = AiReadOnlyAgentCoordinator::new(
+            run.clone(),
+            provider.clone(),
+            forbidden.clone(),
+            Arc::new(TestOutputWriter),
+            forbidden.clone(),
+            Arc::new(TestCheckpointWriter),
+            Arc::new(TestRuleResolver),
+            planner,
+            limits(50),
+        )
+        .with_provider_session_service(session_service.clone());
+
+        (coordinator, session_service, provider)
+    }
+
+    async fn interrupted_retained_run(
+        settlement: crate::AiRunInterruptSettlement,
+        lease: &AiRunLease,
+        settlement_fails: bool,
+    ) -> (
+        Arc<InterruptSessionService>,
+        Arc<PendingRetainedProviderExecutor>,
+    ) {
+        let (coordinator, session_service, provider) =
+            interrupted_retained_coordinator(settlement, settlement_fails);
+
+        let outcome = coordinator
+            .execute_claimed(lease)
+            .await
+            .expect("an interrupted run should close as cancelled");
+        assert!(matches!(outcome, Cancelled { .. }));
+        assert_eq!(provider.interrupts.load(Ordering::SeqCst), 1);
+        (session_service, provider)
+    }
+
+    /// A settled interrupt asks the durable boundary to keep the binding and
+    /// never routes through the invalidation funnel.
+    #[tokio::test]
+    async fn settled_interrupt_retains_the_provider_session_binding() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let (service, _) =
+            interrupted_retained_run(crate::AiRunInterruptSettlement::Settled, &lease, false).await;
+
+        assert_eq!(service.settlements.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            service.run_cleanups.load(Ordering::SeqCst),
+            0,
+            "a settled interrupt must not invalidate the retained thread"
+        );
+    }
+
+    /// An acknowledged-but-unsettled interrupt still invalidates through the
+    /// disclosed cleanup funnel.
+    #[tokio::test]
+    async fn unsettled_interrupt_invalidates_the_provider_session_binding() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let (service, _) = interrupted_retained_run(
+            crate::AiRunInterruptSettlement::RequestedUnsettled,
+            &lease,
+            false,
+        )
+        .await;
+
+        assert_eq!(service.settlements.load(Ordering::SeqCst), 0);
+        assert_eq!(service.run_cleanups.load(Ordering::SeqCst), 1);
+    }
+
+    /// Uncertain persisted output demotes an adapter-proven settlement before
+    /// the durable boundary is ever asked to retain the binding.
+    #[tokio::test]
+    async fn uncertain_persisted_output_demotes_a_settled_interrupt() {
+        let lease =
+            AiRunLease::test_running(principal_reference()).test_with_checkpoint(Uuid::new_v4());
+        let (coordinator, service, _) =
+            interrupted_retained_coordinator(crate::AiRunInterruptSettlement::Settled, false);
+        let guard = AiAgentLoopGuard::new(&lease, limits(50).loop_limits);
+        coordinator
+            .settle_interrupted_provider_session(
+                &lease,
+                &guard,
+                crate::AiRunInterruptSettlement::Settled,
+            )
+            .await;
+
+        assert_eq!(service.settlements.load(Ordering::SeqCst), 0);
+        assert_eq!(service.run_cleanups.load(Ordering::SeqCst), 1);
+    }
+
+    /// A durable boundary that refuses the settlement falls back to the same
+    /// disclosed invalidation.
+    #[tokio::test]
+    async fn refused_durable_settlement_falls_back_to_invalidation() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let (service, _) =
+            interrupted_retained_run(crate::AiRunInterruptSettlement::Settled, &lease, true).await;
+
+        assert_eq!(service.settlements.load(Ordering::SeqCst), 1);
+        assert_eq!(service.run_cleanups.load(Ordering::SeqCst), 1);
     }
 
     /// Work item 4.3: once the bounded retry allowance is exhausted while
