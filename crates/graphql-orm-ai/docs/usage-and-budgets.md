@@ -34,8 +34,71 @@ the same transaction. The usage fact has a unique reservation ID, so an exact
 idempotent replay returns the prior result without duplicating usage.
 
 `ReleaseUnused` is permitted only when transport provably did not occur and
-appends no usage. `MarkUncertain` retains capacity and appends no usage;
-privileged recovery remains a separately gated future surface.
+appends no usage. `MarkUncertain` retains capacity and appends no usage; the
+privileged recovery surface is described under
+[Stranded reservations](#stranded-reservations-and-privileged-reclamation).
+
+A denial at reservation happens strictly before the transport boundary. It is
+therefore a certain, local refusal, not provider uncertainty: it consumes no
+provider turn and leaves no reservation held. The coordinator closes such a run
+as terminal `Failed` with outcome code `provider_budget_denied`, and the
+run-failure record admits a retry once capacity exists. It never closes the run
+as `RecoveryRequired`/`provider_turn_uncertain`, which would tell a user that a
+proven refusal could not be confirmed and would permanently refuse retry.
+
+## Stranded reservations and privileged reclamation
+
+Reserved capacity counts against a policy ceiling exactly like committed usage.
+A reservation that never reconciles therefore consumes the ceiling for the rest
+of its policy period, and if enough of them accumulate the deployment starts
+refusing every new provider call.
+
+Two reservation states can strand:
+
+- `uncertain`, when the worker died after the transport boundary; and
+- `reserved`, when the worker died between the reservation transaction and the
+  transport boundary.
+
+Neither carries a durable proof that the provider was not reached, so neither
+may be released. `expires_at` bounds how long a reservation could still belong
+to a live provider call; it does not prove anything about transport.
+
+`aiBudgetScopeCapacity` reports, for one exact scope under
+`ReadBudgetPolicies`, each policy's current-period reserved and committed
+amounts beside its ceilings, counts of unresolved reservations, and a bounded
+oldest-first list carrying each reservation's state, expiry, owning-run
+terminality, CAS version, and whether it meets the deployment and durable
+time/run conditions to be a reclamation candidate. The mutation still rechecks
+current authorization, recent MFA, exact CAS, scope, and stored-graph
+integrity. Every count is a lower bound when `truncated` is set. Alarm on a
+rising unresolved count rather than on the eventual refusal to serve.
+
+`reclaimAiBudgetReservation` resolves one exact reservation. It requires
+`ManageBudgetReclamation` for the exact scope, a current user principal with
+recent MFA, the deployment-owned
+`OrmAiConfigurationService::with_budget_reservation_reclamation` opt-in, an
+exact CAS version, an expiry that has already passed by the deployment's
+`minimum_expired_age`, and an owning run that reached a durable terminal state
+holding no lease. It then commits the reservation's own reserved amounts as
+authoritative usage, appends one usage fact and one redacted audit fact, and
+CAS-updates the reservation to `committed`, all in one state-machine
+transaction.
+
+That resolution is conservative by construction: it charges the estimate that
+was already being held, so it can only over-count. It also does not create
+headroom. The reserved column falls by exactly the amount the committed column
+rises, and `reserved + committed` against the ceiling is unchanged. What it
+does is make held capacity accountable, reportable, and finite instead of
+permanently unreachable. A deployment that needs headroom back raises or
+replaces the policy through `upsertAiBudgetPolicy`; the crate will not
+manufacture an absence proof to release capacity it cannot account for.
+
+Reclamation is **not** performed automatically by expired-lease recovery or any
+other maintenance pass. Automation would buy nothing operationally, because
+committing frees no headroom, while it would add an unattended writer of
+authoritative usage facts attributed to a principal who is not present. The
+decision to charge an unprovable turn stays with an authorized, MFA-current,
+audited human.
 
 `input_tokens` is the provider-reported total. `cached_input_tokens` is a
 validated subset, not an additional amount. Deployment pricing can calculate
@@ -46,8 +109,10 @@ authoritative total.
 
 Budget policies are managed only through `AiConfigurationQueryRoot` and
 `AiConfigurationMutationRoot`; private generated CRUD is not an application
-surface. The host authorizes `ReadBudgetPolicies` and `ManageBudgetPolicies`
-separately. Mutations also require a current user principal with recent MFA.
+surface. The host authorizes `ReadBudgetPolicies`, `ManageBudgetPolicies`, and
+`ManageBudgetReclamation` separately; a host that does not recognize an action
+must return `false`. Mutations also require a current user principal with
+recent MFA.
 
 Before enabling mutations, the deployment must call
 `OrmAiConfigurationService::with_budget_policy_management` with
@@ -186,9 +251,11 @@ failure closes the query.
 ## Migration, backup, and restore
 
 The usage ledger was introduced by schema module `0.17.0`; current deployments
-apply module `0.54.0`, whose append-only immutable pricing catalog includes
-defaulted web/file-search per-call rates. Keep workers, configuration writes,
-and readers closed during each managed migration. Unsupported legacy private
+apply module `0.62.0`, which adds a scope/tenant/state/expiry index to
+`graphql_orm_ai_budget_reservations` so stranded-reservation reporting is a
+bounded indexed read. Module `0.54.0`'s append-only immutable pricing catalog
+includes defaulted web/file-search per-call rates. Keep workers, configuration
+writes, and readers closed during each managed migration. Unsupported legacy private
 usage rows must be proven from
 complete committed reservation evidence or removed; never fabricate a binding.
 Existing committed reservations are not automatically treated as historical

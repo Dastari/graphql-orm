@@ -19,6 +19,108 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased: budget reclamation and pre-transport denial (crate 0.83.0 to 0.84.0; schema 0.62.0 to 0.63.0)
+
+### Schema module
+
+The AI schema module advances **0.62.0 to 0.63.0**. It adds **no entity, no
+column, and no constraint**, and needs **no data migration or backfill**.
+`graphql_orm_ai_budget_reservations` exposes `scope_kind`, `scope_id`,
+`tenant_id`, and `expires_at` to typed internal predicates and gains the composite index
+`idx_graphql_orm_ai_budget_reservations_scope_state`
+(`scope_kind, scope_id, tenant_id, state, expires_at`), so the new stranded-reservation
+report is a bounded indexed read rather than a table scan. Existing rows and
+events remain readable at the previous module version and after the upgrade.
+Apply and verify the module before serving traffic.
+
+### Source-breaking changes
+
+`AiConfigurationAction` gained the variant `ManageBudgetReclamation`. Any
+exhaustive `match` in a host `AiConfigurationAccessPolicy` must handle it.
+Authorize it only for the administrators you would trust to charge an
+unprovable provider turn to a budget; a host that does not want the surface
+returns `false` and it stays closed.
+
+`AiConfigurationService` gained `budget_scope_capacity` and
+`reclaim_budget_reservation`. Both have fail-closed default implementations
+that return `AiError::InvalidConfiguration`, so an existing custom
+implementation still compiles and does not silently gain the surface.
+
+### New public API
+
+- `AiBudgetScopeCapacityView`, `AiBudgetPolicyCapacityView`, and
+  `AiBudgetReservationCapacityView` are the redacted capacity views. They carry
+  capacity accounting, reservation state, expiry, owning-run linkage and CAS
+  versions only; never a prompt, transcript, provider payload, principal
+  identity, or credential. `reclaimable` identifies a deployment/time/run
+  candidate only; mutation authorization, recent MFA, CAS, scope and stored
+  graph integrity are rechecked separately.
+- `ReclaimAiBudgetReservationInput { scope, reservation_id, expected_version }`.
+- `AiBudgetReclamationLimits::new(minimum_expired_age, maximum_reservation_scan)`
+  and `OrmAiConfigurationService::with_budget_reservation_reclamation`.
+
+### New GraphQL
+
+`AiConfigurationQueryRoot` gains `aiBudgetScopeCapacity(scope)`, authorized by
+the existing `ReadBudgetPolicies` action. `AiConfigurationMutationRoot` gains
+`reclaimAiBudgetReservation(input)`, authorized by `ManageBudgetReclamation`
+plus recent MFA plus the deployment opt-in. No existing field changed.
+
+To enable reclamation:
+
+```rust,ignore
+let configuration = OrmAiConfigurationService::new(/* ... */)
+    .with_budget_policy_management(policy_limits)
+    .with_budget_reservation_reclamation(AiBudgetReclamationLimits::new(
+        time::Duration::hours(6),
+        200,
+    )?);
+```
+
+Without that call, `aiBudgetScopeCapacity` still works and every reservation
+reports `reclaimable: false`, while `reclaimAiBudgetReservation` fails closed
+as invalid configuration.
+
+### Behavioural changes with no API change
+
+A run returning the proof-bearing `AiError::PreTransportBudgetDenied` now
+terminates `Failed` with outcome code `provider_budget_denied`. The executor
+may produce that variant only when reservation failed before dispatch or when
+an already-created reservation was durably released before dispatch. It
+previously terminated `RecoveryRequired` with `provider_turn_uncertain`, which
+told users a proven local refusal could not be confirmed and made the run
+permanently unretryable. `provider_budget_denied` is on the retryable failure
+allowlist, so `AiRunFailure.admission` is `AiRunRetryAdmission::Allowed` and a
+client may author a new run for the same durable user message once capacity
+exists. A client that keys UI text off `provider_turn_uncertain` for this case
+must move it to the new code. The supervised coordinator makes the same
+distinction. Generic `AiError::BudgetDenied`, including post-transport dynamic
+tool-call and rule ceilings, remains uncertain and must not use this path.
+
+A provider call whose post-reservation authorization binding fails now releases
+its reservation. Nothing had been dispatched, so the release is provable.
+
+### What deliberately did not change
+
+Reclamation commits; it never releases. An `uncertain` or `reserved`
+reservation carries no durable proof that the provider was not reached, so
+releasing it would fabricate an absence proof. Committing the held estimate can
+only over-count.
+
+Reclamation therefore **does not create headroom**: the reserved column falls
+by exactly the amount the committed column rises, and `reserved + committed`
+against the ceiling is unchanged. A deployment whose ceiling is already
+exhausted by stranded reservations raises or replaces the policy through
+`upsertAiBudgetPolicy`. The value of reclamation is that held capacity becomes
+accountable, reportable, and finite instead of permanently unreachable, and
+that the condition is now observable before it becomes an outage.
+
+Reclamation is not automatic. Expired-lease recovery and every other
+maintenance pass are unchanged. Automating a commit would free no headroom
+while adding an unattended writer of authoritative usage facts attributed to an
+absent principal; the decision to charge an unprovable turn stays with an
+authorized, MFA-current, audited human.
+
 ## 0.82.0 to 0.83.0: settled retained Codex interruption
 
 Adopt `graphql-orm-ai` 0.83.0 at one reviewed full monorepo revision.

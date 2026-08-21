@@ -18,6 +18,66 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [Unreleased]
+
+Persistent schema module: **0.63.0**.
+
+### Added
+
+- `aiBudgetScopeCapacity` reports, for one exact scope, each budget policy's
+  current-period reserved and committed amounts beside its ceilings, counts of
+  unresolved reservations, and a bounded oldest-first list of them with expiry,
+  owning-run terminality, CAS version, and reclaimability. Reserved capacity
+  counts against a ceiling exactly like committed usage, so a host can now
+  alarm on stranded reservations instead of discovering them as a total refusal
+  to serve. Authorized by the existing `ReadBudgetPolicies` action.
+- `reclaimAiBudgetReservation` resolves one stranded budget reservation whose
+  capacity could previously never leave the reserved column. It requires the
+  new `AiConfigurationAction::ManageBudgetReclamation`, recent MFA, an exact
+  CAS version, an expiry already past the deployment's `minimum_expired_age`,
+  and an owning run in a durable terminal state holding no lease. It commits
+  the reservation's own reserved amounts as authoritative usage and appends one
+  usage fact and one redacted audit fact in the same transaction. It never
+  releases capacity: an `uncertain` or `reserved` reservation carries no proof
+  that the provider was not reached, so the only safe resolution is the
+  conservative one, which can over-count and never under-counts.
+- `AiBudgetReclamationLimits` and
+  `OrmAiConfigurationService::with_budget_reservation_reclamation` are the
+  deployment opt-in for the reclamation surface. Without them, capacity
+  reporting still works and every reservation reports `reclaimable: false`.
+
+### Changed
+
+- **A proven pre-transport budget denial is no longer reported as provider
+  uncertainty.** `AiError::PreTransportBudgetDenied` is produced only when the
+  atomic reservation was refused before dispatch, or an already-created
+  reservation was durably released before dispatch. Such a run now terminates
+  `Failed` with outcome code `provider_budget_denied` instead of
+  `RecoveryRequired` with `provider_turn_uncertain`, and
+  `provider_budget_denied` joins the retryable failure allowlist so the
+  terminal-event failure record reports `AiRunRetryAdmission::Allowed`. The
+  supervised coordinator makes the same distinction. Generic
+  `AiError::BudgetDenied`, including a limit reached inside a dynamic tool
+  loop, remains uncertain and can never claim transport absence.
+- A provider call whose post-reservation authorization binding fails now
+  releases its reservation instead of leaving capacity held until the policy
+  period rolled. Nothing had been dispatched, so the release is provable.
+
+### Breaking
+
+- `AiConfigurationAction` gained `ManageBudgetReclamation`. Exhaustive matches
+  in host access policies must handle it; a host that does not recognize it
+  must deny.
+- `AiError` gained the proof-bearing `PreTransportBudgetDenied` variant through
+  `graphql-orm-ai-tool-profiles` 0.7.0. It shares the existing public code with
+  `BudgetDenied`, but exhaustive internal matches must preserve their distinct
+  transport semantics.
+- The persistent schema module advances to 0.63.0. It adds no entity, column,
+  or constraint. It makes `scope_kind`, `scope_id`, `tenant_id`, and
+  `expires_at` available to typed internal predicates and adds one composite
+  scope/tenant/state/expiry index, so stranded-reservation reporting is a
+  bounded indexed read.
+
 ## [0.83.0] - 2026-08-21
 
 Persistent schema module: **0.62.0**.

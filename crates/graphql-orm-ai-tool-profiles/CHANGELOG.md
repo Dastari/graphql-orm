@@ -10,6 +10,23 @@ supersedes: []
 
 # Changelog
 
+## [0.7.0] - 2026-08-21
+
+### Added
+
+- `AiError::PreTransportBudgetDenied` is the closed execution-boundary signal
+  for an atomic budget refusal proven to occur before provider dispatch and
+  after any created reservation was released. It retains the existing public
+  `AI_BUDGET_DENIED` code while preventing generic tool-loop budget limits from
+  being mistaken for proof that provider transport never occurred.
+
+### Breaking
+
+- `AiError` gained `PreTransportBudgetDenied`. Although the enum is
+  non-exhaustive, in-crate and deliberately exhaustive consumers must handle
+  the new variant. `BudgetDenied` remains the generic limit error and carries
+  no transport-absence proof.
+
 ## [0.6.0] - 2026-08-16
 
 ### Added

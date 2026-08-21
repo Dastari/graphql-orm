@@ -34,6 +34,15 @@ pub enum AiConfigurationAction {
     ReadBudgetPolicies,
     /// Create, alter, enable, or disable budget policies.
     ManageBudgetPolicies,
+    /// Resolve a stranded budget reservation whose capacity can otherwise
+    /// never leave the reserved column.
+    ///
+    /// This is deliberately separate from [`Self::ManageBudgetPolicies`]. It
+    /// does not change a ceiling; it converts held capacity into an
+    /// authoritative usage fact for one exact reservation. A host that does
+    /// not recognize this action must return `false` and keep the surface
+    /// closed.
+    ManageBudgetReclamation,
     /// Read immutable provider/model pricing versions.
     ReadPricingCatalog,
     /// Append immutable provider/model pricing versions.
@@ -262,6 +271,151 @@ pub struct AiBudgetPolicyView {
     pub row_version: i64,
     /// Update time in Unix seconds.
     pub updated_at: i64,
+}
+
+/// Observable capacity of one budget policy for its current period.
+///
+/// Reserved and committed amounts are both counted against the policy ceiling.
+/// Reserved capacity that never reconciles is therefore indistinguishable from
+/// spend, which is why the stranded-reservation counts below sit beside it.
+#[derive(Clone, Debug, SimpleObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct AiBudgetPolicyCapacityView {
+    /// Policy ID.
+    pub policy_id: Uuid,
+    /// Stable reset interval.
+    pub interval_kind: String,
+    /// Whether the policy participates in new reservations.
+    pub enabled: bool,
+    /// Deterministic key of the period these amounts describe, absent when no
+    /// counter row exists yet for the current period.
+    pub period_key: Option<String>,
+    /// Period start in Unix seconds, absent with `period_key`.
+    pub period_started_at: Option<i64>,
+    /// Period end in Unix seconds, absent with `period_key`.
+    pub period_ends_at: Option<i64>,
+    /// Input tokens currently held by unreconciled reservations.
+    pub reserved_input_tokens: i64,
+    /// Output tokens currently held by unreconciled reservations.
+    pub reserved_output_tokens: i64,
+    /// Tool units currently held by unreconciled reservations.
+    pub reserved_tool_units: i64,
+    /// Image units currently held by unreconciled reservations.
+    pub reserved_image_units: i64,
+    /// Cost microunits currently held by unreconciled reservations.
+    pub reserved_cost_microunits: i64,
+    /// Runs currently held by unreconciled reservations.
+    pub reserved_runs: i64,
+    /// Committed input tokens for the period.
+    pub committed_input_tokens: i64,
+    /// Committed output tokens for the period.
+    pub committed_output_tokens: i64,
+    /// Committed tool units for the period.
+    pub committed_tool_units: i64,
+    /// Committed image units for the period.
+    pub committed_image_units: i64,
+    /// Committed cost microunits for the period.
+    pub committed_cost_microunits: i64,
+    /// Committed runs for the period.
+    pub committed_runs: i64,
+    /// Configured input-token ceiling.
+    pub maximum_input_tokens: Option<i64>,
+    /// Configured output-token ceiling.
+    pub maximum_output_tokens: Option<i64>,
+    /// Configured tool-unit ceiling.
+    pub maximum_tool_units: Option<i64>,
+    /// Configured image-unit ceiling.
+    pub maximum_image_units: Option<i64>,
+    /// Configured cost ceiling in microunits.
+    pub maximum_cost_microunits: Option<i64>,
+    /// Configured run ceiling.
+    pub maximum_runs: Option<i64>,
+}
+
+/// One unreconciled budget reservation visible to budget administration.
+///
+/// It carries capacity accounting and durable run linkage only: never a
+/// prompt, transcript, provider payload, principal identity, or credential.
+#[derive(Clone, Debug, SimpleObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct AiBudgetReservationCapacityView {
+    /// Reservation ID.
+    pub id: Uuid,
+    /// Owning run.
+    pub run_id: Uuid,
+    /// Stable reservation state: `reserved`, `uncertain`, or `committed`
+    /// after reclamation.
+    pub state: String,
+    /// Reservation expiry in Unix seconds.
+    pub expires_at: i64,
+    /// Creation time in Unix seconds.
+    pub created_at: i64,
+    /// Whether the reservation's expiry has passed.
+    pub expired: bool,
+    /// Whether the owning run reached a terminal state.
+    pub run_terminal: bool,
+    /// Whether the deployment is enabled and the durable time/run conditions
+    /// make this reservation a reclamation candidate. The mutation separately
+    /// rechecks current authorization, recent MFA, exact CAS, scope and stored
+    /// graph integrity; this field grants no authority and does not predict
+    /// those later checks.
+    pub reclaimable: bool,
+    /// Input tokens originally reserved. These count as held capacity only
+    /// while the reservation is unresolved.
+    pub reserved_input_tokens: i64,
+    /// Output tokens originally reserved. These count as held capacity only
+    /// while the reservation is unresolved.
+    pub reserved_output_tokens: i64,
+    /// Tool units originally reserved. These count as held capacity only
+    /// while the reservation is unresolved.
+    pub reserved_tool_units: i64,
+    /// Image units originally reserved. These count as held capacity only
+    /// while the reservation is unresolved.
+    pub reserved_image_units: i64,
+    /// Cost microunits originally reserved. These count as held capacity only
+    /// while the reservation is unresolved.
+    pub reserved_cost_microunits: i64,
+    /// Runs originally reserved. These count as held capacity only while the
+    /// reservation is unresolved.
+    pub reserved_runs: i64,
+    /// CAS version required to reclaim it.
+    pub row_version: i64,
+}
+
+/// Bounded capacity and stranded-reservation report for one exact scope.
+#[derive(Clone, Debug, SimpleObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct AiBudgetScopeCapacityView {
+    /// Current-period capacity for every policy bound to the exact scope.
+    pub policies: Vec<AiBudgetPolicyCapacityView>,
+    /// Reservations in state `uncertain` for the scope within the bounded
+    /// read window.
+    pub uncertain_reservation_count: i64,
+    /// Reservations in state `reserved` for the scope within the bounded read
+    /// window.
+    pub reserved_reservation_count: i64,
+    /// Unreconciled reservations whose expiry has already passed.
+    pub expired_reservation_count: i64,
+    /// Unreconciled reservations meeting the deployment and durable time/run
+    /// candidate conditions. Mutation authorization and CAS are separate.
+    pub reclaimable_reservation_count: i64,
+    /// Oldest unreconciled reservations first, bounded by the read window.
+    pub reservations: Vec<AiBudgetReservationCapacityView>,
+    /// Whether the bounded read window was filled, making every count above a
+    /// lower bound rather than an exact total.
+    pub truncated: bool,
+}
+
+/// Exact one-shot privileged reclamation of one stranded reservation.
+#[derive(Clone, Debug, InputObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct ReclaimAiBudgetReservationInput {
+    /// Exact scope the reservation must belong to.
+    pub scope: AiScopeInput,
+    /// Reservation to resolve.
+    pub reservation_id: Uuid,
+    /// Expected reservation CAS version.
+    pub expected_version: i64,
 }
 
 /// Provider profile CAS upsert.
@@ -501,6 +655,53 @@ pub trait AiConfigurationService: Send + Sync {
         principal: &AuthPrincipal,
         input: UpsertAiBudgetPolicyInput,
     ) -> Result<AiBudgetPolicyView, AiError>;
+
+    /// Reports bounded reserved/committed capacity and stranded reservations
+    /// for one exact scope.
+    ///
+    /// The default implementation fails closed so an existing backend does not
+    /// gain a budget-observability surface implicitly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] unless the backend implements
+    /// the surface; implementations return [`AiError::Forbidden`] for a denied
+    /// read and a safe library error for persistence failure.
+    async fn budget_scope_capacity(
+        &self,
+        _principal: &AuthPrincipal,
+        _scope: AiScope,
+    ) -> Result<AiBudgetScopeCapacityView, AiError> {
+        Err(AiError::InvalidConfiguration(
+            "budget capacity reporting is not implemented by this service".to_owned(),
+        ))
+    }
+
+    /// Resolves one expired stranded reservation by committing the capacity it
+    /// already holds as authoritative usage, and audits the decision.
+    ///
+    /// This never proves that the provider was not reached. It commits the
+    /// held estimate, which can only over-count, so that capacity stops being
+    /// unreachable. The default implementation fails closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] unless the backend implements
+    /// and the deployment enables the surface, [`AiError::RecentMfaRequired`]
+    /// without current recent MFA, [`AiError::Forbidden`] for a denied action,
+    /// [`AiError::NotFound`] for an unknown reservation or one outside the
+    /// exact scope, and [`AiError::Conflict`] when the reservation is already
+    /// resolved, has not expired long enough, still has an active run, or
+    /// fails its CAS.
+    async fn reclaim_budget_reservation(
+        &self,
+        _principal: &AuthPrincipal,
+        _input: ReclaimAiBudgetReservationInput,
+    ) -> Result<AiBudgetReservationCapacityView, AiError> {
+        Err(AiError::InvalidConfiguration(
+            "budget reservation reclamation is not implemented by this service".to_owned(),
+        ))
+    }
 }
 
 /// Composable redacted configuration query root.
@@ -577,6 +778,23 @@ impl AiConfigurationQueryRoot {
             .extend());
         }
         Ok(policies)
+    }
+
+    /// Reports bounded budget capacity and stranded reservations for a scope.
+    ///
+    /// Reserved capacity counts against the ceiling exactly like committed
+    /// usage, so a host should alarm on a rising unreconciled reservation
+    /// count before it becomes a refusal to serve.
+    async fn ai_budget_scope_capacity(
+        &self,
+        context: &Context<'_>,
+        scope: AiScopeInput,
+    ) -> async_graphql::Result<AiBudgetScopeCapacityView> {
+        let principal = agql_auth::principal_from_ctx(context)?;
+        configuration_service(context)?
+            .budget_scope_capacity(&principal, scope.into())
+            .await
+            .map_err(extend)
     }
 
     /// Lists bounded immutable pricing versions for one exact route.
@@ -693,6 +911,25 @@ impl AiConfigurationMutationRoot {
         let principal = agql_auth::principal_from_ctx(context)?;
         configuration_service(context)?
             .upsert_budget_policy(&principal, input)
+            .await
+            .map_err(extend)
+    }
+
+    /// Resolves one expired stranded budget reservation.
+    ///
+    /// The reserved amounts are committed as authoritative usage. That can
+    /// over-count and never under-counts, and it does not create headroom: the
+    /// reserved column falls by exactly the amount the committed column rises.
+    /// It exists so held capacity is accountable and reportable instead of
+    /// permanently unreachable.
+    async fn reclaim_ai_budget_reservation(
+        &self,
+        context: &Context<'_>,
+        input: ReclaimAiBudgetReservationInput,
+    ) -> async_graphql::Result<AiBudgetReservationCapacityView> {
+        let principal = agql_auth::principal_from_ctx(context)?;
+        configuration_service(context)?
+            .reclaim_budget_reservation(&principal, input)
             .await
             .map_err(extend)
     }

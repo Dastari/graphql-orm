@@ -2898,6 +2898,7 @@ impl AiProviderCallExecutor {
                 result.provider_session_claim = Some(current_claim);
                 Ok(result)
             }
+            Err(error @ AiError::PreTransportBudgetDenied) => Err(error),
             Err(error) => {
                 let _ = session_service
                     .require_cleanup(&current_claim, "provider_session_turn_ambiguous")
@@ -2955,23 +2956,35 @@ impl AiProviderCallExecutor {
             return Err(AiError::Forbidden);
         }
 
-        let reservation = self
+        let reservation = match self
             .budget_service
             .reserve(&principal, plan.budget.clone())
-            .await?;
-        let authorized_budget = reservation
-            .authorize_provider_call_with_reasoning_effort(
-                lease.run_id(),
-                lease.attempt_id(),
-                lease.lease_generation(),
-                &plan.provider_kind,
-                &plan.request.model,
-                plan.request.reasoning_effort,
-                plan.request.maximum_output_tokens.unwrap_or(0),
-                plan.request.maximum_builtin_tool_calls(),
-                self.clock.now(),
-            )
-            .map_err(|_| AiError::BudgetDenied)?;
+            .await
+        {
+            Ok(reservation) => reservation,
+            Err(AiError::BudgetDenied) => return Err(AiError::PreTransportBudgetDenied),
+            Err(error) => return Err(error),
+        };
+        let authorized_budget = match reservation.authorize_provider_call_with_reasoning_effort(
+            lease.run_id(),
+            lease.attempt_id(),
+            lease.lease_generation(),
+            &plan.provider_kind,
+            &plan.request.model,
+            plan.request.reasoning_effort,
+            plan.request.maximum_output_tokens.unwrap_or(0),
+            plan.request.maximum_builtin_tool_calls(),
+            self.clock.now(),
+        ) {
+            Ok(authorized) => authorized,
+            Err(_) => {
+                // The reservation exists but nothing was dispatched, so this is
+                // a provable release rather than capacity that would sit in the
+                // reserved column until its policy period rolled.
+                self.release_unstarted(&lease, &reservation).await?;
+                return Err(AiError::PreTransportBudgetDenied);
+            }
+        };
 
         let mut context = match self
             .authorize_and_audit_transfers(&lease, &plan, authorized_budget)
@@ -2980,7 +2993,10 @@ impl AiProviderCallExecutor {
             Ok(context) => context,
             Err(error) => {
                 self.release_unstarted(&lease, &reservation).await?;
-                return Err(error);
+                return Err(match error {
+                    AiError::BudgetDenied => AiError::PreTransportBudgetDenied,
+                    error => error,
+                });
             }
         };
 
@@ -3118,12 +3134,18 @@ impl AiProviderCallExecutor {
             .and_then(|calls| usize::try_from(calls).ok())
             .unwrap_or(self.limits.maximum_builtin_tool_calls);
         let request_snapshot = plan.request.clone();
-        let model_inference_manifest = plan
+        let model_inference_manifest = match plan
             .transfers
             .iter()
             .find(|manifest| manifest.capability == AiEgressCapability::ModelInference)
             .cloned()
-            .ok_or(AiError::EgressDenied)?;
+        {
+            Some(manifest) => manifest,
+            None => {
+                self.release_unstarted(&lease, &reservation).await?;
+                return Err(AiError::EgressDenied);
+            }
+        };
         let previous_response_id =
             plan.request
                 .continuation
@@ -8687,6 +8709,98 @@ mod tests {
             .expect("reservation state should query")
     }
 
+    async fn reservation_count(database: &Database<SqliteBackend>) -> i64 {
+        database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiBudgetReservationRecord>()
+                        .count()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("reservation count should query")
+    }
+
+    #[tokio::test]
+    async fn budget_denial_happens_before_transport_and_leaves_no_reservation() {
+        let fixture = fixture(Vec::new()).await;
+        let policy = fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiBudgetPolicyRecord>()
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("policy query should succeed")
+            .into_iter()
+            .next()
+            .expect("the fixture seeds one budget policy");
+        AiBudgetPolicyRecord::update_by_id(
+            &fixture.database,
+            &policy.id,
+            UpdateAiBudgetPolicyRecordInput {
+                maximum_input_tokens: Some(Some(10)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("policy ceiling should narrow below the planned estimate");
+
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate"),
+        );
+        let error = executor
+            .execute(&fixture.lease, plan(&fixture))
+            .await
+            .expect_err("an over-ceiling reservation must be denied");
+
+        assert!(matches!(error, AiError::PreTransportBudgetDenied));
+        assert_eq!(fixture.mock.request_count(), 0);
+        assert_eq!(reservation_count(&fixture.database).await, 0);
+    }
+
+    #[tokio::test]
+    async fn post_reservation_budget_binding_denial_releases_before_transport() {
+        let fixture = fixture(Vec::new()).await;
+        let mut plan = plan(&fixture);
+        // The plan was valid when authored, but this adversarial mutation asks
+        // the executor to authorize more output than the reservation holds.
+        // The executor must release the already-created reservation before it
+        // returns the proof-bearing pre-transport denial.
+        plan.request.maximum_output_tokens = Some(101);
+
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate"),
+        );
+        let error = executor
+            .execute(&fixture.lease, plan)
+            .await
+            .expect_err("a reservation that does not authorize the request must be denied");
+
+        assert!(matches!(error, AiError::PreTransportBudgetDenied));
+        assert_eq!(fixture.mock.request_count(), 0);
+        assert_eq!(reservation_state(&fixture.database).await, "released");
+    }
+
     #[tokio::test]
     async fn successful_mock_turn_audits_egress_and_commits_authoritative_usage() {
         let fixture = fixture(vec![
@@ -9061,6 +9175,145 @@ mod tests {
             fixture.mock.provider_session_activations(),
             vec![AiProviderSessionActivation::NewlyBoundEmpty]
         );
+    }
+
+    #[tokio::test]
+    async fn retained_pre_transport_budget_denial_does_not_require_cursor_cleanup() {
+        let cursor = AiProviderSessionCursor::new("mock.thread", "budget-denied-empty-thread")
+            .expect("test cursor should validate");
+        let fixture = fixture_with_provider(
+            MockProvider::new(Vec::new()).with_provider_session_cursor(cursor),
+        )
+        .await;
+        let session = AiSessionRecord::find_by_id(&fixture.database, &fixture.lease.session_id().0)
+            .await
+            .expect("session lookup should succeed")
+            .expect("session should exist");
+        let update = AiSessionRecord::compare_and_swap(
+            &fixture.database,
+            &session.id,
+            session.row_version,
+            AiSessionRecordWhereInput::default(),
+            UpdateAiSessionRecordInput {
+                message_head: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("session watermark update should succeed");
+        assert!(matches!(update, ConditionalUpdateOutcome::Updated(_)));
+        AiMessageRecord::insert(
+            &fixture.database,
+            CreateAiMessageRecordInput {
+                id: fixture.lease.input_message_id(),
+                session_id: fixture.lease.session_id().0,
+                sequence: 1,
+                message_role: "user".to_owned(),
+                author_principal_kind: Some("user".to_owned()),
+                author_subject: Some(fixture.principal.subject().to_owned()),
+                client_message_id: Some(Uuid::new_v4()),
+                content_hash: Some("c".repeat(64)),
+                run_id: Some(fixture.lease.run_id().0),
+                provider_kind: None,
+                provider_model: None,
+                protected_preview: None,
+                block_count: 1,
+                completion_state: "complete".to_owned(),
+                finalized_at: Some(OffsetDateTime::now_utc().unix_timestamp()),
+                content_purged_at: None,
+            },
+        )
+        .await
+        .expect("input message should insert");
+        let policy = fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiBudgetPolicyRecord>()
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("policy query should succeed")
+            .into_iter()
+            .next()
+            .expect("the fixture seeds one budget policy");
+        AiBudgetPolicyRecord::update_by_id(
+            &fixture.database,
+            &policy.id,
+            UpdateAiBudgetPolicyRecordInput {
+                maximum_input_tokens: Some(Some(10)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("policy ceiling should narrow below the planned estimate");
+
+        let provider_sessions = Arc::new(
+            OrmAiProviderSessionService::new(
+                fixture.database.clone(),
+                Arc::new(AllowAccess),
+                Arc::new(ProtectionPolicy),
+                Arc::new(DatabaseManagedContentProtector),
+                Arc::new(Resolver(fixture.principal.clone())),
+                Arc::new(SystemClock),
+                AiProviderSessionLimits::default(),
+                Duration::minutes(5),
+            )
+            .expect("provider-session service should validate"),
+        );
+        let descriptor = AiProviderSessionDescriptor::new(
+            ProviderKind::OpenAiCompatible,
+            "mock-profile",
+            "mock-model",
+            "a".repeat(64),
+            "mock-retained/v1",
+            "b".repeat(64),
+        )
+        .expect("descriptor should validate");
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("provider limits should validate"),
+        );
+
+        let error = executor
+            .execute_with_provider_session(
+                Arc::new(Mutex::new(fixture.lease.clone())),
+                plan(&fixture),
+                AiProviderSessionTurnPlan::new(descriptor, "d".repeat(64))
+                    .expect("session plan should validate"),
+                provider_sessions,
+                None,
+            )
+            .await
+            .expect_err("the local budget denial must remain certain");
+
+        assert!(matches!(error, AiError::PreTransportBudgetDenied));
+        assert_eq!(fixture.mock.request_count(), 0);
+        let bindings = fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<crate::orm_provider_session::AiProviderSessionBindingRecord>()
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("provider-session binding query should succeed");
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].state, AiProviderSessionState::Claimed.as_str());
+        assert!(bindings[0].cleanup_reason_code.is_none());
     }
 
     #[tokio::test]

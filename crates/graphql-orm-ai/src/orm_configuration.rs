@@ -8,9 +8,10 @@ use agql_auth::{AuthPrincipal, Clock, RecentMfaPolicy};
 use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
-use graphql_orm::graphql::filters::StringFilter;
+use graphql_orm::graphql::filters::{StringFilter, UuidFilter};
 use graphql_orm::graphql::orm::{
-    ConditionalUpdateOutcome, DefaultWriteBackend, TransactionError, TransactionMode,
+    ConditionalUpdateOutcome, DefaultWriteBackend, OrderDirection, TransactionError,
+    TransactionMode,
 };
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -18,13 +19,16 @@ use serde_json::json;
 use url::Url;
 use uuid::Uuid;
 
+use crate::orm_budget::BudgetPeriod;
 use crate::persistence::*;
 use crate::{
-    AiBudgetAmounts, AiBudgetPolicyView, AiConfigurationAccessPolicy, AiConfigurationAction,
-    AiConfigurationService, AiContentProtectionMode, AiContentProtectionPolicy,
-    AiContentProtectionPolicyResolver, AiContentProtectionPolicyView, AiError,
-    AiOpenAiCompatibleProfileInput, AiOpenAiCompatibleProfileView, AiProviderEndpointPolicy,
-    AiProviderKindInput, AiProviderProfileView, AiRetentionPolicyView, AiScope, AiSecretStore,
+    AiBudgetAmounts, AiBudgetPolicyCapacityView, AiBudgetPolicyView,
+    AiBudgetReservationCapacityView, AiBudgetScopeCapacityView, AiConfigurationAccessPolicy,
+    AiConfigurationAction, AiConfigurationService, AiContentProtectionMode,
+    AiContentProtectionPolicy, AiContentProtectionPolicyResolver, AiContentProtectionPolicyView,
+    AiError, AiOpenAiCompatibleProfileInput, AiOpenAiCompatibleProfileView,
+    AiProviderEndpointPolicy, AiProviderKindInput, AiProviderProfileView, AiRetentionPolicyView,
+    AiRunState, AiScope, AiSecretStore, ReclaimAiBudgetReservationInput,
     RemoveAiProviderCredentialInput, SecretRef, SetAiContentProtectionPolicyInput,
     SetAiRetentionPolicyInput, UpsertAiBudgetPolicyInput, UpsertAiProviderProfileInput,
 };
@@ -73,6 +77,74 @@ impl AiBudgetPolicyManagementLimits {
     }
 }
 
+/// Deployment hard bounds for privileged budget-reservation reclamation.
+///
+/// This type proves only that the deployment reviewed and enabled the surface
+/// and chose how long an expired reservation must remain unresolved. It grants
+/// no authority: the host still authorizes
+/// [`AiConfigurationAction::ManageBudgetReclamation`] for the exact scope and
+/// the caller still needs current recent MFA.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AiBudgetReclamationLimits {
+    minimum_expired_age: time::Duration,
+    maximum_reservation_scan: usize,
+}
+
+impl AiBudgetReclamationLimits {
+    /// Creates validated deployment reclamation bounds.
+    ///
+    /// `minimum_expired_age` is how long a reservation's `expires_at` must
+    /// already have passed before it may be resolved. It exists so an
+    /// in-flight provider turn whose worker is merely slow can never be
+    /// charged out from underneath itself. `maximum_reservation_scan` is a
+    /// deployment ceiling; the active database pagination maximum may narrow
+    /// the reported window further, in which case a full page is
+    /// conservatively marked truncated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] unless the age is positive
+    /// and the bounded read window is in `1..=1000`.
+    pub fn new(
+        minimum_expired_age: time::Duration,
+        maximum_reservation_scan: usize,
+    ) -> Result<Self, AiError> {
+        if !minimum_expired_age.is_positive() || !(1..=1000).contains(&maximum_reservation_scan) {
+            return Err(AiError::InvalidConfiguration(
+                "invalid budget reclamation limits".to_owned(),
+            ));
+        }
+        Ok(Self {
+            minimum_expired_age,
+            maximum_reservation_scan,
+        })
+    }
+
+    /// Returns how long an expiry must already have passed.
+    pub const fn minimum_expired_age(self) -> time::Duration {
+        self.minimum_expired_age
+    }
+
+    /// Returns the bounded reservation read window.
+    pub const fn maximum_reservation_scan(self) -> usize {
+        self.maximum_reservation_scan
+    }
+}
+
+/// Bounded read window used when the deployment has not enabled reclamation.
+const DEFAULT_BUDGET_RESERVATION_SCAN: usize = 200;
+
+/// Durable run states that can no longer reconcile their own reservation.
+const TERMINAL_RUN_STATES: [&str; 4] = [
+    AiRunState::Completed.as_str(),
+    AiRunState::Failed.as_str(),
+    AiRunState::Cancelled.as_str(),
+    AiRunState::RecoveryRequired.as_str(),
+];
+
+/// Reservation states that still hold capacity against a policy ceiling.
+const UNRESOLVED_RESERVATION_STATES: [&str; 2] = ["reserved", "uncertain"];
+
 /// Durable configuration backend using generated ORM APIs and a compensating
 /// secret-reference saga. Secret plaintext never enters an ORM input.
 #[derive(Clone)]
@@ -84,6 +156,7 @@ pub struct OrmAiConfigurationService {
     clock: Arc<dyn Clock>,
     secret_store: Arc<dyn AiSecretStore>,
     budget_policy_limits: Option<AiBudgetPolicyManagementLimits>,
+    budget_reclamation_limits: Option<AiBudgetReclamationLimits>,
 }
 
 impl OrmAiConfigurationService {
@@ -104,6 +177,7 @@ impl OrmAiConfigurationService {
             clock,
             secret_store,
             budget_policy_limits: None,
+            budget_reclamation_limits: None,
         }
     }
 
@@ -113,6 +187,22 @@ impl OrmAiConfigurationService {
     /// authorized but mutations fail closed as invalid configuration.
     pub fn with_budget_policy_management(mut self, limits: AiBudgetPolicyManagementLimits) -> Self {
         self.budget_policy_limits = Some(limits);
+        self
+    }
+
+    /// Enables privileged reclamation of stranded budget reservations under
+    /// deployment hard bounds.
+    ///
+    /// Without this explicit opt-in, capacity reporting still works and every
+    /// reservation reports `reclaimable: false`, while the mutation fails
+    /// closed as invalid configuration. Enabling it does not authorize anyone:
+    /// the host still decides
+    /// [`AiConfigurationAction::ManageBudgetReclamation`] per exact scope.
+    pub fn with_budget_reservation_reclamation(
+        mut self,
+        limits: AiBudgetReclamationLimits,
+    ) -> Self {
+        self.budget_reclamation_limits = Some(limits);
         self
     }
 
@@ -1004,6 +1094,315 @@ impl AiConfigurationService for OrmAiConfigurationService {
             .map_err(map_transaction)?;
         Ok(budget_policy_view(&record))
     }
+
+    async fn budget_scope_capacity(
+        &self,
+        principal: &AuthPrincipal,
+        scope: AiScope,
+    ) -> Result<AiBudgetScopeCapacityView, AiError> {
+        self.require_access(principal, &scope, AiConfigurationAction::ReadBudgetPolicies)
+            .await?;
+        let now = self.clock.now();
+        let reclamation = self.budget_reclamation_limits;
+        let requested_window = reclamation.map_or(DEFAULT_BUDGET_RESERVATION_SCAN, |limits| {
+            limits.maximum_reservation_scan()
+        });
+        // Typed ORM queries always honor the database's pagination ceiling.
+        // Narrow the administrative window to that ceiling instead of asking
+        // for a larger page that the ORM would silently clamp. When the
+        // ceiling leaves no room for a look-ahead record, a full page is
+        // conservatively reported as truncated.
+        let database_maximum = self
+            .database
+            .pagination_config()
+            .max_limit
+            .and_then(|maximum| usize::try_from(maximum.max(0)).ok());
+        let window =
+            database_maximum.map_or(requested_window, |maximum| requested_window.min(maximum));
+        let has_lookahead = database_maximum.is_none_or(|maximum| window < maximum);
+        let requested_scan = if has_lookahead {
+            window.saturating_add(1)
+        } else {
+            window
+        };
+        let scan_limit = i64::try_from(requested_scan)
+            .map_err(|_| AiError::InvalidConfiguration("invalid scan window".to_owned()))?;
+        let exact_scope_key = scope_key(&scope);
+        let query_scope = scope.clone();
+        let (policies, counters, reservations, run_reclamation_evidence) = self
+            .database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    let policies = tx
+                        .query::<AiBudgetPolicyRecord>()
+                        .filter(AiBudgetPolicyRecordWhereInput {
+                            scope_key: Some(StringFilter {
+                                eq: Some(exact_scope_key.clone()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .default_order()
+                        .limit(101)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if policies.len() > 100 {
+                        return Err(OrmPublicError::new(OrmErrorCode::PageLimitExceeded));
+                    }
+                    if policies.iter().any(|record| {
+                        record.scope_key != exact_scope_key
+                            || record.scope_kind != query_scope.kind
+                            || record.scope_id != query_scope.id
+                            || record.tenant_id != query_scope.tenant_id
+                    }) {
+                        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                    }
+
+                    let mut counters = Vec::with_capacity(policies.len());
+                    for policy in &policies {
+                        let period =
+                            crate::orm_budget::budget_period(&policy.interval_kind, now)
+                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let counter = tx
+                            .query::<AiBudgetCounterRecord>()
+                            .filter(AiBudgetCounterRecordWhereInput {
+                                budget_policy_id: Some(UuidFilter {
+                                    eq: Some(policy.id),
+                                    ..Default::default()
+                                }),
+                                period_key: Some(StringFilter {
+                                    eq: Some(period.key.clone()),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .limit(1)
+                            .fetch_one()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        counters.push((period, counter));
+                    }
+
+                    let tenant_id = Some(match &query_scope.tenant_id {
+                        Some(tenant_id) => StringFilter {
+                            eq: Some(tenant_id.clone()),
+                            ..Default::default()
+                        },
+                        None => StringFilter {
+                            is_null: Some(true),
+                            ..Default::default()
+                        },
+                    });
+                    let reservations = tx
+                        .query::<AiBudgetReservationRecord>()
+                        .filter(AiBudgetReservationRecordWhereInput {
+                            scope_kind: Some(StringFilter {
+                                eq: Some(query_scope.kind.clone()),
+                                ..Default::default()
+                            }),
+                            scope_id: Some(StringFilter {
+                                eq: Some(query_scope.id.clone()),
+                                ..Default::default()
+                            }),
+                            tenant_id,
+                            state: Some(StringFilter {
+                                in_list: Some(
+                                    UNRESOLVED_RESERVATION_STATES
+                                        .iter()
+                                        .map(|state| (*state).to_owned())
+                                        .collect(),
+                                ),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .order_by(AiBudgetReservationRecordOrderByInput {
+                            created_at: Some(OrderDirection::Asc),
+                        })
+                        .limit(scan_limit)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if reservations
+                        .iter()
+                        .any(|record| record.tenant_id != query_scope.tenant_id)
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                    }
+
+                    let mut run_reclamation_evidence = Vec::with_capacity(reservations.len());
+                    for reservation in &reservations {
+                        let run = tx
+                            .find_by_id::<AiRunRecord>(&reservation.run_id)
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        run_reclamation_evidence.push(run.map_or((false, false), |run| {
+                            (
+                                run.session_id == reservation.session_id
+                                    && TERMINAL_RUN_STATES.contains(&run.state.as_str()),
+                                run.session_id == reservation.session_id
+                                    && run.lease_owner.is_none()
+                                    && run.lease_expires_at.is_none(),
+                            )
+                        }));
+                    }
+                    Ok((policies, counters, reservations, run_reclamation_evidence))
+                })
+            })
+            .await
+            .map_err(map_transaction)?;
+
+        let truncated = if has_lookahead {
+            reservations.len() > window
+        } else {
+            reservations.len() >= window
+        };
+        let policy_views = policies
+            .iter()
+            .zip(counters.iter())
+            .map(|(policy, (period, counter))| {
+                budget_policy_capacity_view(policy, period, counter.as_ref())
+            })
+            .collect::<Vec<_>>();
+        let mut uncertain_reservation_count = 0_i64;
+        let mut reserved_reservation_count = 0_i64;
+        let mut expired_reservation_count = 0_i64;
+        let mut reclaimable_reservation_count = 0_i64;
+        let mut reservation_views = Vec::with_capacity(reservations.len().min(window));
+        for (record, (run_terminal, run_lease_free)) in reservations
+            .iter()
+            .take(window)
+            .zip(run_reclamation_evidence)
+        {
+            let view = budget_reservation_capacity_view(
+                record,
+                run_terminal,
+                run_lease_free,
+                now,
+                reclamation,
+            );
+            if record.state == "uncertain" {
+                uncertain_reservation_count = uncertain_reservation_count.saturating_add(1);
+            } else {
+                reserved_reservation_count = reserved_reservation_count.saturating_add(1);
+            }
+            if view.expired {
+                expired_reservation_count = expired_reservation_count.saturating_add(1);
+            }
+            if view.reclaimable {
+                reclaimable_reservation_count = reclaimable_reservation_count.saturating_add(1);
+            }
+            reservation_views.push(view);
+        }
+        Ok(AiBudgetScopeCapacityView {
+            policies: policy_views,
+            uncertain_reservation_count,
+            reserved_reservation_count,
+            expired_reservation_count,
+            reclaimable_reservation_count,
+            reservations: reservation_views,
+            truncated,
+        })
+    }
+
+    async fn reclaim_budget_reservation(
+        &self,
+        principal: &AuthPrincipal,
+        input: ReclaimAiBudgetReservationInput,
+    ) -> Result<AiBudgetReservationCapacityView, AiError> {
+        self.require_recent_mfa(principal)?;
+        let scope: AiScope = input.scope.clone().into();
+        self.require_access(
+            principal,
+            &scope,
+            AiConfigurationAction::ManageBudgetReclamation,
+        )
+        .await?;
+        let limits = self.budget_reclamation_limits.ok_or_else(|| {
+            AiError::InvalidConfiguration(
+                "budget reservation reclamation is not enabled".to_owned(),
+            )
+        })?;
+        if input.expected_version < 0 {
+            return Err(AiError::InvalidInput(
+                "invalid budget reservation version".to_owned(),
+            ));
+        }
+        let now = self.clock.now();
+        let reclaimable_before = now
+            .checked_sub(limits.minimum_expired_age())
+            .ok_or_else(|| AiError::InvalidConfiguration("budget time overflow".to_owned()))?
+            .unix_timestamp();
+        let actor_kind = principal_kind(principal);
+        let actor_subject = principal.subject().to_owned();
+        let reservation_id = input.reservation_id;
+        let expected_version = input.expected_version;
+        let updated = self
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let record = tx
+                        .find_by_id::<AiBudgetReservationRecord>(&reservation_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    if record.scope_kind != scope.kind
+                        || record.scope_id != scope.id
+                        || record.tenant_id != scope.tenant_id
+                    {
+                        return Err(OrmPublicError::not_found());
+                    }
+                    if record.row_version != expected_version
+                        || !UNRESOLVED_RESERVATION_STATES.contains(&record.state.as_str())
+                        || record.expires_at > reclaimable_before
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    // Authoritative evidence: the owning run reached a durable
+                    // terminal state and holds no lease, so no worker can ever
+                    // reconcile this reservation from its own transport
+                    // knowledge.
+                    let run = tx
+                        .find_by_id::<AiRunRecord>(&record.run_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                    if run.session_id != record.session_id
+                        || !TERMINAL_RUN_STATES.contains(&run.state.as_str())
+                        || run.lease_owner.is_some()
+                        || run.lease_expires_at.is_some()
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let previous_state = record.state.clone();
+                    let updated =
+                        crate::orm_budget::commit_stranded_reservation(tx, &record, now).await?;
+                    insert_audit(
+                        tx,
+                        AuditFact {
+                            actor_principal_kind: &actor_kind,
+                            actor_subject: &actor_subject,
+                            action: "ai.budget_reservation.reclaim",
+                            resource_kind: "budget_reservation",
+                            resource_reference: &updated.id.to_string(),
+                            outcome: "allowed",
+                            reason_code: if previous_state == "uncertain" {
+                                "expired_uncertain_reservation_committed"
+                            } else {
+                                "expired_reserved_reservation_committed"
+                            },
+                            policy_version: Some(updated.row_version.to_string()),
+                        },
+                    )
+                    .await?;
+                    Ok(updated)
+                })
+            })
+            .await
+            .map_err(map_transaction)?;
+        Ok(budget_reclaimed_reservation_view(&updated))
+    }
 }
 
 #[async_trait]
@@ -1328,6 +1727,94 @@ fn budget_policy_view(record: &AiBudgetPolicyRecord) -> AiBudgetPolicyView {
     }
 }
 
+fn budget_policy_capacity_view(
+    policy: &AiBudgetPolicyRecord,
+    period: &BudgetPeriod,
+    counter: Option<&AiBudgetCounterRecord>,
+) -> AiBudgetPolicyCapacityView {
+    AiBudgetPolicyCapacityView {
+        policy_id: policy.id,
+        interval_kind: policy.interval_kind.clone(),
+        enabled: policy.enabled,
+        period_key: counter.map(|_| period.key.clone()),
+        period_started_at: counter.map(|_| period.started_at),
+        period_ends_at: counter.map(|_| period.ends_at),
+        reserved_input_tokens: counter.map_or(0, |row| row.reserved_input_tokens),
+        reserved_output_tokens: counter.map_or(0, |row| row.reserved_output_tokens),
+        reserved_tool_units: counter.map_or(0, |row| row.reserved_tool_units),
+        reserved_image_units: counter.map_or(0, |row| row.reserved_image_units),
+        reserved_cost_microunits: counter.map_or(0, |row| row.reserved_cost_microunits),
+        reserved_runs: counter.map_or(0, |row| row.reserved_runs),
+        committed_input_tokens: counter.map_or(0, |row| row.committed_input_tokens),
+        committed_output_tokens: counter.map_or(0, |row| row.committed_output_tokens),
+        committed_tool_units: counter.map_or(0, |row| row.committed_tool_units),
+        committed_image_units: counter.map_or(0, |row| row.committed_image_units),
+        committed_cost_microunits: counter.map_or(0, |row| row.committed_cost_microunits),
+        committed_runs: counter.map_or(0, |row| row.committed_runs),
+        maximum_input_tokens: policy.maximum_input_tokens,
+        maximum_output_tokens: policy.maximum_output_tokens,
+        maximum_tool_units: policy.maximum_tool_units,
+        maximum_image_units: policy.maximum_image_units,
+        maximum_cost_microunits: policy.maximum_cost_microunits,
+        maximum_runs: policy.maximum_runs,
+    }
+}
+
+fn budget_reservation_capacity_view(
+    record: &AiBudgetReservationRecord,
+    run_terminal: bool,
+    run_lease_free: bool,
+    now: time::OffsetDateTime,
+    reclamation: Option<AiBudgetReclamationLimits>,
+) -> AiBudgetReservationCapacityView {
+    let expired = record.expires_at <= now.unix_timestamp();
+    let reclaimable = run_terminal
+        && run_lease_free
+        && reclamation.is_some_and(|limits| {
+            now.checked_sub(limits.minimum_expired_age())
+                .is_some_and(|threshold| record.expires_at <= threshold.unix_timestamp())
+        });
+    AiBudgetReservationCapacityView {
+        id: record.id,
+        run_id: record.run_id,
+        state: record.state.clone(),
+        expires_at: record.expires_at,
+        created_at: record.created_at,
+        expired,
+        run_terminal,
+        reclaimable,
+        reserved_input_tokens: record.reserved_input_tokens,
+        reserved_output_tokens: record.reserved_output_tokens,
+        reserved_tool_units: record.reserved_tool_units,
+        reserved_image_units: record.reserved_image_units,
+        reserved_cost_microunits: record.reserved_cost_microunits,
+        reserved_runs: record.reserved_runs,
+        row_version: record.row_version,
+    }
+}
+
+fn budget_reclaimed_reservation_view(
+    record: &AiBudgetReservationRecord,
+) -> AiBudgetReservationCapacityView {
+    AiBudgetReservationCapacityView {
+        id: record.id,
+        run_id: record.run_id,
+        state: record.state.clone(),
+        expires_at: record.expires_at,
+        created_at: record.created_at,
+        expired: true,
+        run_terminal: true,
+        reclaimable: false,
+        reserved_input_tokens: record.reserved_input_tokens,
+        reserved_output_tokens: record.reserved_output_tokens,
+        reserved_tool_units: record.reserved_tool_units,
+        reserved_image_units: record.reserved_image_units,
+        reserved_cost_microunits: record.reserved_cost_microunits,
+        reserved_runs: record.reserved_runs,
+        row_version: record.row_version,
+    }
+}
+
 fn exact_scope_key_for_record(record: &AiBudgetPolicyRecord) -> String {
     scope_key(&AiScope {
         kind: record.scope_kind.clone(),
@@ -1537,5 +2024,842 @@ fn map_orm(error: OrmPublicError) -> AiError {
         OrmErrorCode::ServiceUnavailable
         | OrmErrorCode::InternalError
         | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod tests {
+    use agql_auth::{
+        AccessTokenMetadata, AssuranceMatchMode, AuthUser, FixedClock, MfaAcceptance,
+        ResolvedPrincipal, SessionAssurance, SessionContext,
+    };
+    use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
+    use graphql_orm::prelude::{Database, SqliteBackend};
+    use time::Duration;
+
+    use super::*;
+    use crate::orm_budget::{AiBudgetServiceLimits, OrmAiBudgetService};
+    use crate::{
+        AiBudgetReconciliation, AiBudgetReconciliationOutcome, AiBudgetReservationRequest,
+        AiBudgetService, AiRunId, AiSessionId, ModelReasoningEffort, ProviderKind,
+    };
+
+    const TENANT: &str = "tenant-1";
+    const SUBJECT: &str = "budget-admin";
+    const RESERVED_INPUT_TOKENS: u64 = 100;
+
+    struct DenyConfiguration;
+
+    #[async_trait]
+    impl AiConfigurationAccessPolicy for DenyConfiguration {
+        async fn can_configure(
+            &self,
+            _principal: &AuthPrincipal,
+            _scope: &AiScope,
+            _action: AiConfigurationAction,
+        ) -> bool {
+            false
+        }
+    }
+
+    struct AllowConfiguration;
+
+    #[async_trait]
+    impl AiConfigurationAccessPolicy for AllowConfiguration {
+        async fn can_configure(
+            &self,
+            _principal: &AuthPrincipal,
+            _scope: &AiScope,
+            _action: AiConfigurationAction,
+        ) -> bool {
+            true
+        }
+    }
+
+    struct RejectEndpoints;
+
+    impl AiProviderEndpointPolicy for RejectEndpoints {
+        fn authorize_endpoint(
+            &self,
+            _provider_kind: AiProviderKindInput,
+            _normalized_url: &str,
+        ) -> bool {
+            false
+        }
+    }
+
+    #[derive(Default)]
+    struct UnusedSecretStore;
+
+    #[async_trait]
+    impl AiSecretStore for UnusedSecretStore {
+        async fn resolve(
+            &self,
+            _reference: &SecretRef,
+        ) -> Result<SecretString, crate::SecretError> {
+            Err(crate::SecretError::Unavailable)
+        }
+
+        async fn put(
+            &self,
+            _reference: Option<&SecretRef>,
+            _value: SecretString,
+        ) -> Result<SecretRef, crate::SecretError> {
+            Err(crate::SecretError::Unavailable)
+        }
+
+        async fn delete(&self, _reference: &SecretRef) -> Result<(), crate::SecretError> {
+            Ok(())
+        }
+    }
+
+    fn scope() -> AiScope {
+        AiScope::new("tenant", TENANT).with_tenant_id(TENANT)
+    }
+
+    fn scope_input() -> crate::AiScopeInput {
+        crate::AiScopeInput {
+            kind: "tenant".to_owned(),
+            id: TENANT.to_owned(),
+            tenant_id: Some(TENANT.to_owned()),
+        }
+    }
+
+    fn admin_principal(now: time::OffsetDateTime) -> AuthPrincipal {
+        let assurance = SessionAssurance::new(
+            now,
+            ["otp", "pwd"],
+            Some("urn:test:loa:2".to_owned()),
+            Some("test".to_owned()),
+            MfaAcceptance::Satisfied,
+        )
+        .expect("test assurance should validate");
+        AuthPrincipal::User(AuthUser {
+            user_id: SUBJECT.to_owned(),
+            session_id: Uuid::new_v4(),
+            roles: vec!["admin".to_owned()],
+            scopes: vec![],
+            session: SessionContext::default().with_assurance(assurance),
+            token_claims: AccessTokenMetadata {
+                auth_time: Some(now.unix_timestamp()),
+                amr: Some(vec!["otp".to_owned(), "pwd".to_owned()]),
+                acr: Some("urn:test:loa:2".to_owned()),
+                tenant_id: Some(TENANT.to_owned()),
+                ..AccessTokenMetadata::default()
+            },
+        })
+    }
+
+    fn stale_mfa_principal() -> AuthPrincipal {
+        AuthPrincipal::User(AuthUser {
+            user_id: SUBJECT.to_owned(),
+            session_id: Uuid::new_v4(),
+            roles: vec!["admin".to_owned()],
+            scopes: vec![],
+            session: SessionContext::default(),
+            token_claims: AccessTokenMetadata {
+                tenant_id: Some(TENANT.to_owned()),
+                ..AccessTokenMetadata::default()
+            },
+        })
+    }
+
+    fn configuration_service(
+        database: Database<SqliteBackend>,
+        access_policy: Arc<dyn AiConfigurationAccessPolicy>,
+        now: time::OffsetDateTime,
+        reclamation: bool,
+    ) -> OrmAiConfigurationService {
+        let service = OrmAiConfigurationService::new(
+            database,
+            access_policy,
+            Arc::new(RejectEndpoints),
+            RecentMfaPolicy {
+                maximum_age: Duration::minutes(5),
+                clock_skew: Duration::seconds(30),
+                allowed_amr: vec!["otp".to_owned()],
+                allowed_acr: vec!["urn:test:loa:2".to_owned()],
+                match_mode: AssuranceMatchMode::All,
+            },
+            Arc::new(FixedClock::new(now)),
+            Arc::new(UnusedSecretStore),
+        );
+        if reclamation {
+            service.with_budget_reservation_reclamation(
+                AiBudgetReclamationLimits::new(Duration::hours(1), 200)
+                    .expect("reclamation limits should validate"),
+            )
+        } else {
+            service
+        }
+    }
+
+    /// Seeds a policy, session, running run, and one `uncertain` reservation
+    /// created through the real budget service and marked uncertain through the
+    /// real transport-boundary reconciliation.
+    async fn stranded_reservation_fixture() -> (Database<SqliteBackend>, time::OffsetDateTime, Uuid)
+    {
+        let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+            .await
+            .expect("in-memory SQLite should open");
+        let module = crate::AiSchemaModule;
+        let plan = database
+            .schema()
+            .plan_migration_to_entities(
+                "ai-budget-reclaim-test-v1",
+                "AI budget reclamation test",
+                module.entities(),
+            )
+            .await
+            .expect("AI schema migration should plan");
+        database
+            .schema()
+            .apply_migration(&plan, ApplyOptions::default())
+            .await
+            .expect("AI schema migration should apply");
+
+        let now = time::OffsetDateTime::from_unix_timestamp(1_800_000_000)
+            .expect("fixed test timestamp should be valid");
+        AiBudgetPolicyRecord::insert(
+            &database,
+            CreateAiBudgetPolicyRecordInput {
+                scope_key: scope_key(&scope()),
+                scope_kind: "tenant".to_owned(),
+                scope_id: TENANT.to_owned(),
+                tenant_id: Some(TENANT.to_owned()),
+                principal_kind: None,
+                principal_subject: None,
+                interval_kind: "month".to_owned(),
+                maximum_input_tokens: Some(1_000),
+                maximum_output_tokens: Some(1_000),
+                maximum_tool_units: Some(100),
+                maximum_image_units: Some(100),
+                maximum_cost_microunits: Some(10_000),
+                maximum_runs: Some(100),
+                enabled: true,
+            },
+        )
+        .await
+        .expect("budget policy should seed");
+
+        let principal = admin_principal(now);
+        let resolved = ResolvedPrincipal::new(principal.reference(), principal.clone(), now)
+            .expect("fresh principal should resolve");
+        let session_id = AiSessionId::new();
+        let run_id = AiRunId::new();
+        let attempt_id = Uuid::new_v4();
+        AiSessionRecord::insert(
+            &database,
+            CreateAiSessionRecordInput {
+                id: session_id.0,
+                owner_principal_kind: "user".to_owned(),
+                owner_subject: SUBJECT.to_owned(),
+                tenant_id: Some(TENANT.to_owned()),
+                scope_kind: "tenant".to_owned(),
+                scope_id: TENANT.to_owned(),
+                title: "Budget reclamation".to_owned(),
+                title_revision: 0,
+                title_source: "default".to_owned(),
+                state: "active".to_owned(),
+                stream_head: 0,
+                message_head: 0,
+                last_activity_at: now.unix_timestamp(),
+                archived_at: None,
+                deleted_at: None,
+            },
+        )
+        .await
+        .expect("session should seed");
+        AiRunRecord::insert(
+            &database,
+            CreateAiRunRecordInput {
+                id: run_id.0,
+                session_id: session_id.0,
+                input_message_id: Uuid::new_v4(),
+                principal_reference: serde_json::to_value(resolved.reference())
+                    .expect("principal reference should serialize"),
+                state: "running".to_owned(),
+                attempt_id: Some(attempt_id),
+                lease_owner: Some("worker-test".to_owned()),
+                lease_generation: 1,
+                lease_expires_at: Some((now + Duration::minutes(4)).unix_timestamp()),
+                lease_heartbeat_at: Some(now.unix_timestamp()),
+                retry_count: 0,
+                next_attempt_at: None,
+                error_code: None,
+                latest_checkpoint_id: None,
+                cancellation_request_id: None,
+                cancellation_requested_at: None,
+            },
+        )
+        .await
+        .expect("running run should seed");
+
+        let budget = OrmAiBudgetService::new(
+            database.clone(),
+            Arc::new(FixedClock::new(now)),
+            AiBudgetServiceLimits::new(
+                AiBudgetAmounts {
+                    input_tokens: 1_000,
+                    output_tokens: 1_000,
+                    tool_units: 100,
+                    image_units: 100,
+                    cost_microunits: 10_000,
+                    runs: 1,
+                },
+                Duration::minutes(5),
+                Duration::seconds(30),
+                16,
+                8,
+            )
+            .expect("budget service limits should validate"),
+        );
+        let reservation = budget
+            .reserve(
+                &resolved,
+                AiBudgetReservationRequest {
+                    scope: scope(),
+                    session_id,
+                    run_id,
+                    attempt_id,
+                    lease_generation: 1,
+                    provider_kind: ProviderKind::OpenAi,
+                    model: "test-model".to_owned(),
+                    reasoning_effort: ModelReasoningEffort::Unspecified,
+                    pricing_policy_version: "pricing-test-v1".to_owned(),
+                    estimate: AiBudgetAmounts {
+                        input_tokens: RESERVED_INPUT_TOKENS,
+                        output_tokens: 10,
+                        tool_units: 0,
+                        image_units: 0,
+                        cost_microunits: 100,
+                        runs: 1,
+                    },
+                    idempotency_key: "reclaim-test-1".to_owned(),
+                    expires_at: now + Duration::minutes(2),
+                },
+            )
+            .await
+            .expect("reservation should be granted");
+        budget
+            .reconcile(
+                &resolved,
+                AiBudgetReconciliation {
+                    reservation_id: reservation.id(),
+                    attempt_id,
+                    lease_generation: 1,
+                    actual: None,
+                    cached_input_tokens: None,
+                    outcome: AiBudgetReconciliationOutcome::MarkUncertain,
+                },
+            )
+            .await
+            .expect("transport boundary should mark the reservation uncertain");
+        (database, now, reservation.id().0)
+    }
+
+    async fn terminate_run(database: &Database<SqliteBackend>) {
+        let run = database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiRunRecord>()
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("run query should succeed")
+            .into_iter()
+            .next()
+            .expect("one run was seeded");
+        AiRunRecord::update_by_id(
+            database,
+            &run.id,
+            UpdateAiRunRecordInput {
+                state: Some("recovery_required".to_owned()),
+                attempt_id: Some(None),
+                lease_owner: Some(None),
+                lease_expires_at: Some(None),
+                lease_heartbeat_at: Some(None),
+                error_code: Some(Some("provider_turn_uncertain".to_owned())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("run should reach a terminal state");
+    }
+
+    async fn make_run_terminal_without_releasing_lease(database: &Database<SqliteBackend>) {
+        let run = database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiRunRecord>()
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("run query should succeed")
+            .into_iter()
+            .next()
+            .expect("one run was seeded");
+        AiRunRecord::update_by_id(
+            database,
+            &run.id,
+            UpdateAiRunRecordInput {
+                state: Some("recovery_required".to_owned()),
+                error_code: Some(Some("provider_turn_uncertain".to_owned())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("test should create inconsistent terminal lease evidence");
+    }
+
+    async fn expire_reservation(
+        database: &Database<SqliteBackend>,
+        reservation_id: Uuid,
+        expires_at: i64,
+    ) {
+        AiBudgetReservationRecord::update_by_id(
+            database,
+            &reservation_id,
+            UpdateAiBudgetReservationRecordInput {
+                expires_at: Some(expires_at),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("reservation expiry should rewind");
+    }
+
+    async fn usage_entries(database: &Database<SqliteBackend>) -> Vec<AiUsageEntryRecord> {
+        database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiUsageEntryRecord>()
+                        .limit(10)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("usage query should succeed")
+    }
+
+    async fn audit_actions(database: &Database<SqliteBackend>) -> Vec<String> {
+        database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiAuditEventRecord>()
+                        .limit(20)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("audit query should succeed")
+            .into_iter()
+            .map(|record| record.action)
+            .collect()
+    }
+
+    async fn seed_other_tenant_reservation(database: &Database<SqliteBackend>) -> Uuid {
+        let original = database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiBudgetReservationRecord>()
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("reservation query should succeed")
+            .into_iter()
+            .next()
+            .expect("one reservation was seeded");
+        let inserted = AiBudgetReservationRecord::insert(
+            database,
+            CreateAiBudgetReservationRecordInput {
+                budget_counter_ids: original.budget_counter_ids,
+                scope_kind: original.scope_kind,
+                scope_id: original.scope_id,
+                tenant_id: Some("other-tenant".to_owned()),
+                principal_kind: original.principal_kind,
+                principal_subject: "other-user".to_owned(),
+                session_id: original.session_id,
+                run_id: original.run_id,
+                attempt_id: original.attempt_id,
+                lease_generation: original.lease_generation,
+                provider_kind: original.provider_kind,
+                provider_model: original.provider_model,
+                reasoning_effort: original.reasoning_effort,
+                pricing_policy_version: original.pricing_policy_version,
+                reserved_input_tokens: original.reserved_input_tokens,
+                reserved_output_tokens: original.reserved_output_tokens,
+                reserved_tool_units: original.reserved_tool_units,
+                reserved_image_units: original.reserved_image_units,
+                reserved_cost_microunits: original.reserved_cost_microunits,
+                reserved_runs: original.reserved_runs,
+                actual_input_tokens: original.actual_input_tokens,
+                actual_cached_input_tokens: original.actual_cached_input_tokens,
+                actual_output_tokens: original.actual_output_tokens,
+                actual_tool_units: original.actual_tool_units,
+                actual_image_units: original.actual_image_units,
+                actual_cost_microunits: original.actual_cost_microunits,
+                actual_runs: original.actual_runs,
+                idempotency_key: "other-tenant-reservation".to_owned(),
+                state: original.state,
+                expires_at: original.expires_at,
+                reconciled_at: original.reconciled_at,
+            },
+        )
+        .await
+        .expect("other-tenant reservation should seed");
+        inserted.id
+    }
+
+    #[tokio::test]
+    async fn expired_uncertain_reservation_is_reclaimable_and_reported() {
+        let (database, now, reservation_id) = stranded_reservation_fixture().await;
+        let service =
+            configuration_service(database.clone(), Arc::new(AllowConfiguration), now, true);
+        let principal = admin_principal(now);
+
+        let before = service
+            .budget_scope_capacity(&principal, scope())
+            .await
+            .expect("capacity reporting should succeed");
+        assert_eq!(before.policies.len(), 1);
+        assert_eq!(
+            before.policies[0].reserved_input_tokens,
+            RESERVED_INPUT_TOKENS as i64
+        );
+        assert_eq!(before.policies[0].committed_input_tokens, 0);
+        assert_eq!(before.uncertain_reservation_count, 1);
+        assert_eq!(before.reserved_reservation_count, 0);
+        assert!(!before.truncated);
+        assert_eq!(before.reservations.len(), 1);
+        assert!(!before.reservations[0].expired);
+        assert!(!before.reservations[0].run_terminal);
+        assert!(!before.reservations[0].reclaimable);
+
+        terminate_run(&database).await;
+        expire_reservation(
+            &database,
+            reservation_id,
+            (now - Duration::days(2)).unix_timestamp(),
+        )
+        .await;
+
+        let stranded = service
+            .budget_scope_capacity(&principal, scope())
+            .await
+            .expect("capacity reporting should succeed");
+        assert_eq!(stranded.expired_reservation_count, 1);
+        assert_eq!(stranded.reclaimable_reservation_count, 1);
+        assert!(stranded.reservations[0].reclaimable);
+        let expected_version = stranded.reservations[0].row_version;
+
+        assert!(matches!(
+            service
+                .reclaim_budget_reservation(
+                    &principal,
+                    ReclaimAiBudgetReservationInput {
+                        scope: scope_input(),
+                        reservation_id,
+                        expected_version: expected_version + 5,
+                    },
+                )
+                .await,
+            Err(AiError::Conflict)
+        ));
+
+        let reclaimed = service
+            .reclaim_budget_reservation(
+                &principal,
+                ReclaimAiBudgetReservationInput {
+                    scope: scope_input(),
+                    reservation_id,
+                    expected_version,
+                },
+            )
+            .await
+            .expect("an expired uncertain reservation on a terminal run reclaims");
+        assert_eq!(reclaimed.state, "committed");
+        assert_eq!(
+            reclaimed.reserved_input_tokens,
+            RESERVED_INPUT_TOKENS as i64
+        );
+
+        let after = service
+            .budget_scope_capacity(&principal, scope())
+            .await
+            .expect("capacity reporting should succeed");
+        assert_eq!(after.policies[0].reserved_input_tokens, 0);
+        assert_eq!(
+            after.policies[0].committed_input_tokens,
+            RESERVED_INPUT_TOKENS as i64
+        );
+        assert_eq!(after.uncertain_reservation_count, 0);
+        assert_eq!(after.reclaimable_reservation_count, 0);
+        assert!(after.reservations.is_empty());
+
+        let usage = usage_entries(&database).await;
+        assert_eq!(usage.len(), 1);
+        assert_eq!(usage[0].budget_reservation_id, reservation_id);
+        assert_eq!(usage[0].input_tokens, RESERVED_INPUT_TOKENS as i64);
+        assert_eq!(usage[0].cached_input_tokens, 0);
+        assert!(
+            audit_actions(&database)
+                .await
+                .contains(&"ai.budget_reservation.reclaim".to_owned())
+        );
+
+        // Replay of the same exact-version request cannot double-count.
+        assert!(matches!(
+            service
+                .reclaim_budget_reservation(
+                    &principal,
+                    ReclaimAiBudgetReservationInput {
+                        scope: scope_input(),
+                        reservation_id,
+                        expected_version,
+                    },
+                )
+                .await,
+            Err(AiError::Conflict)
+        ));
+    }
+
+    #[tokio::test]
+    async fn unexpired_or_active_uncertain_reservations_are_not_reclaimable() {
+        let (database, now, reservation_id) = stranded_reservation_fixture().await;
+        let service =
+            configuration_service(database.clone(), Arc::new(AllowConfiguration), now, true);
+        let principal = admin_principal(now);
+        let version = service
+            .budget_scope_capacity(&principal, scope())
+            .await
+            .expect("capacity reporting should succeed")
+            .reservations[0]
+            .row_version;
+
+        // Expired long ago, but the owning run is still running.
+        expire_reservation(
+            &database,
+            reservation_id,
+            (now - Duration::days(2)).unix_timestamp(),
+        )
+        .await;
+        assert!(matches!(
+            service
+                .reclaim_budget_reservation(
+                    &principal,
+                    ReclaimAiBudgetReservationInput {
+                        scope: scope_input(),
+                        reservation_id,
+                        expected_version: version,
+                    },
+                )
+                .await,
+            Err(AiError::Conflict)
+        ));
+
+        // A terminal state alone is insufficient while stale lease evidence
+        // remains. Reporting and mutation must agree on the same fail-closed
+        // reclaimability predicate.
+        make_run_terminal_without_releasing_lease(&database).await;
+        let terminal_but_leased = service
+            .budget_scope_capacity(&principal, scope())
+            .await
+            .expect("capacity reporting should succeed");
+        assert!(terminal_but_leased.reservations[0].run_terminal);
+        assert!(!terminal_but_leased.reservations[0].reclaimable);
+        assert!(matches!(
+            service
+                .reclaim_budget_reservation(
+                    &principal,
+                    ReclaimAiBudgetReservationInput {
+                        scope: scope_input(),
+                        reservation_id,
+                        expected_version: terminal_but_leased.reservations[0].row_version,
+                    },
+                )
+                .await,
+            Err(AiError::Conflict)
+        ));
+
+        // Terminal run, but the expiry grace has not elapsed.
+        terminate_run(&database).await;
+        expire_reservation(
+            &database,
+            reservation_id,
+            (now - Duration::minutes(1)).unix_timestamp(),
+        )
+        .await;
+        let capacity = service
+            .budget_scope_capacity(&principal, scope())
+            .await
+            .expect("capacity reporting should succeed");
+        assert!(capacity.reservations[0].expired);
+        assert!(capacity.reservations[0].run_terminal);
+        assert!(!capacity.reservations[0].reclaimable);
+        assert!(matches!(
+            service
+                .reclaim_budget_reservation(
+                    &principal,
+                    ReclaimAiBudgetReservationInput {
+                        scope: scope_input(),
+                        reservation_id,
+                        expected_version: capacity.reservations[0].row_version,
+                    },
+                )
+                .await,
+            Err(AiError::Conflict)
+        ));
+
+        // Nothing moved between the reserved and committed columns.
+        assert_eq!(
+            capacity.policies[0].reserved_input_tokens,
+            RESERVED_INPUT_TOKENS as i64
+        );
+        assert_eq!(capacity.policies[0].committed_input_tokens, 0);
+        assert!(usage_entries(&database).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reclamation_requires_authorization_recent_mfa_and_deployment_opt_in() {
+        let (database, now, reservation_id) = stranded_reservation_fixture().await;
+        terminate_run(&database).await;
+        expire_reservation(
+            &database,
+            reservation_id,
+            (now - Duration::days(2)).unix_timestamp(),
+        )
+        .await;
+        let principal = admin_principal(now);
+        let input = || ReclaimAiBudgetReservationInput {
+            scope: scope_input(),
+            reservation_id,
+            expected_version: 1,
+        };
+
+        let denied =
+            configuration_service(database.clone(), Arc::new(DenyConfiguration), now, true);
+        assert!(matches!(
+            denied.reclaim_budget_reservation(&principal, input()).await,
+            Err(AiError::Forbidden)
+        ));
+        assert!(matches!(
+            denied.budget_scope_capacity(&principal, scope()).await,
+            Err(AiError::Forbidden)
+        ));
+
+        let allowed =
+            configuration_service(database.clone(), Arc::new(AllowConfiguration), now, true);
+        assert!(matches!(
+            allowed
+                .reclaim_budget_reservation(&stale_mfa_principal(), input())
+                .await,
+            Err(AiError::RecentMfaRequired)
+        ));
+
+        let unconfigured =
+            configuration_service(database.clone(), Arc::new(AllowConfiguration), now, false);
+        assert!(matches!(
+            unconfigured
+                .reclaim_budget_reservation(&principal, input())
+                .await,
+            Err(AiError::InvalidConfiguration(_))
+        ));
+        assert!(
+            !unconfigured
+                .budget_scope_capacity(&principal, scope())
+                .await
+                .expect("capacity reporting works without the reclamation opt-in")
+                .reservations[0]
+                .reclaimable
+        );
+
+        // No refused path may move capacity or append usage.
+        assert!(usage_entries(&database).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn capacity_reporting_filters_the_exact_tenant_before_its_bound() {
+        let (database, now, reservation_id) = stranded_reservation_fixture().await;
+        let _other_reservation = seed_other_tenant_reservation(&database).await;
+        let service = configuration_service(database, Arc::new(AllowConfiguration), now, true);
+
+        let capacity = service
+            .budget_scope_capacity(&admin_principal(now), scope())
+            .await
+            .expect("exact-tenant capacity reporting should succeed");
+
+        assert_eq!(capacity.reservations.len(), 1);
+        assert_eq!(capacity.reservations[0].id, reservation_id);
+        assert!(!capacity.truncated);
+    }
+
+    #[tokio::test]
+    async fn reclamation_rejects_a_cross_scope_counter_link() {
+        let (database, now, _reservation_id) = stranded_reservation_fixture().await;
+        let other_reservation_id = seed_other_tenant_reservation(&database).await;
+        terminate_run(&database).await;
+        expire_reservation(
+            &database,
+            other_reservation_id,
+            (now - Duration::days(2)).unix_timestamp(),
+        )
+        .await;
+        let service =
+            configuration_service(database.clone(), Arc::new(AllowConfiguration), now, true);
+        let other_scope = AiScope::new("tenant", TENANT).with_tenant_id("other-tenant");
+        let candidate = service
+            .budget_scope_capacity(&admin_principal(now), other_scope.clone())
+            .await
+            .expect("the malformed reservation remains observable")
+            .reservations
+            .into_iter()
+            .next()
+            .expect("the other-tenant reservation should be visible");
+        assert!(candidate.reclaimable);
+
+        assert!(matches!(
+            service
+                .reclaim_budget_reservation(
+                    &admin_principal(now),
+                    ReclaimAiBudgetReservationInput {
+                        scope: crate::AiScopeInput {
+                            kind: other_scope.kind,
+                            id: other_scope.id,
+                            tenant_id: other_scope.tenant_id,
+                        },
+                        reservation_id: other_reservation_id,
+                        expected_version: candidate.row_version,
+                    },
+                )
+                .await,
+            Err(AiError::PersistenceFailed)
+        ));
+        assert!(usage_entries(&database).await.is_empty());
+        let original_capacity = service
+            .budget_scope_capacity(&admin_principal(now), scope())
+            .await
+            .expect("the original scope capacity remains readable");
+        assert_eq!(
+            original_capacity.policies[0].reserved_input_tokens,
+            RESERVED_INPUT_TOKENS as i64
+        );
+        assert_eq!(original_capacity.policies[0].committed_input_tokens, 0);
     }
 }

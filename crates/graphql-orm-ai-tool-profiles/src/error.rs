@@ -31,6 +31,14 @@ pub enum AiError {
     /// No applicable atomic budget had enough capacity for the operation.
     #[error("AI budget denied")]
     BudgetDenied,
+    /// Provider execution was denied by an atomic budget before dispatch.
+    ///
+    /// This is an execution-boundary proof, not a generic budget error. It may
+    /// be returned only when provider transport was never attempted and no
+    /// budget reservation remains held. Budget limits reached during a
+    /// provider/tool loop must use [`Self::BudgetDenied`] instead.
+    #[error("AI budget denied")]
+    PreTransportBudgetDenied,
     /// Input failed a public schema contract.
     #[error("invalid AI input: {0}")]
     InvalidInput(String),
@@ -66,6 +74,7 @@ impl AiError {
             Self::RecentMfaRequired => "AI_RECENT_MFA_REQUIRED",
             Self::EgressDenied => "AI_EGRESS_DENIED",
             Self::BudgetDenied => "AI_BUDGET_DENIED",
+            Self::PreTransportBudgetDenied => "AI_BUDGET_DENIED",
             Self::InvalidInput(_) => "AI_INVALID_INPUT",
             Self::ReauthorizationFailed => "AI_REAUTHORIZATION_FAILED",
             Self::ToolExecutionFailed => "AI_TOOL_EXECUTION_FAILED",
