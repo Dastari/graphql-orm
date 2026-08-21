@@ -618,6 +618,45 @@ impl AiCodexAppServerTurnInput {
         Ok(turn)
     }
 
+    /// Creates one retained dynamic-tool turn for a host-owned readiness
+    /// probe.
+    ///
+    /// The input is bound to the exact bootstrap instructions and complete
+    /// dynamic-tool set that the host supplied when it created the empty
+    /// retained thread. This constructor adds no provider, process, tool
+    /// execution, egress, or application authority; the host remains
+    /// responsible for running the probe in its reviewed sandbox and for
+    /// returning no application data.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidRequest`] when the model, prompt,
+    /// tools, bootstrap binding, reasoning effort, or output ceiling cannot
+    /// form a valid retained dynamic-tool turn.
+    pub fn retained_dynamic_tool_readiness_probe(
+        model: impl Into<String>,
+        bootstrap: &AiCodexAppServerBootstrapInstructions,
+        prompt: impl Into<String>,
+        tools: Vec<ModelToolDefinition>,
+        reasoning_effort: ModelReasoningEffort,
+        maximum_output_tokens: u64,
+    ) -> Result<Self, ProviderError> {
+        if tools.is_empty() {
+            return Err(ProviderError::InvalidRequest);
+        }
+        let mut turn = Self::new(
+            model,
+            bootstrap.blocks.clone(),
+            vec![prompt.into()],
+            reasoning_effort,
+            maximum_output_tokens,
+        )?;
+        turn.retained_bootstrap_fingerprint = Some(bootstrap.fingerprint().to_owned());
+        turn.tools = tools;
+        turn.validate()?;
+        Ok(turn)
+    }
+
     fn validate(&self) -> Result<(), ProviderError> {
         let text_bytes = self
             .instructions
@@ -6133,6 +6172,47 @@ pub(crate) mod tests {
             continuation.pointer("/params/environments"),
             Some(&json!([]))
         );
+    }
+
+    #[test]
+    fn retained_dynamic_readiness_probe_is_bootstrap_and_surface_bound() {
+        let bootstrap = bootstrap_instructions();
+        let tool = dynamic_tool();
+        let input = AiCodexAppServerTurnInput::retained_dynamic_tool_readiness_probe(
+            "model-1",
+            &bootstrap,
+            "Call the named readiness tool exactly once.",
+            vec![tool.clone()],
+            ModelReasoningEffort::Medium,
+            128,
+        )
+        .expect("readiness input should validate");
+
+        assert_eq!(input.model(), "model-1");
+        assert_eq!(
+            input.input(),
+            &["Call the named readiness tool exactly once.".to_owned()]
+        );
+        assert_eq!(input.instructions(), bootstrap.blocks.as_slice());
+        assert_eq!(input.tools(), &[tool]);
+        assert_eq!(
+            input.retained_bootstrap_fingerprint.as_deref(),
+            Some(bootstrap.fingerprint())
+        );
+        assert_eq!(input.reasoning_effort(), ModelReasoningEffort::Medium);
+        assert_eq!(input.maximum_output_tokens(), 128);
+
+        assert!(matches!(
+            AiCodexAppServerTurnInput::retained_dynamic_tool_readiness_probe(
+                "model-1",
+                &bootstrap,
+                "Call the named readiness tool exactly once.",
+                Vec::new(),
+                ModelReasoningEffort::Medium,
+                128,
+            ),
+            Err(ProviderError::InvalidRequest)
+        ));
     }
 
     #[test]
