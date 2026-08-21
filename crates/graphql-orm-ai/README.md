@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.85.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.86.0", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -189,6 +189,12 @@ unreconciled reservation carries no proof that the provider was not reached.
 A denial at reservation is pre-transport and certain: the run fails with
 `provider_budget_denied` and stays retryable. See the
 [usage and budgets guide](docs/usage-and-budgets.md).
+
+A local stateless adapter can likewise close a refused provider-native item as
+`provider_native_item_rejected` only after the completed turn's authoritative
+usage is committed and both adapter and executor prove there was no admitted
+answer or host tool effect. That failure is retryable. Incomplete, retained, or
+otherwise ambiguous provider turns remain recovery-required.
 
 ## Reasoning effort profiles
 

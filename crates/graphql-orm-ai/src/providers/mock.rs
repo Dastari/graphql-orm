@@ -51,6 +51,8 @@ pub struct MockProvider {
     #[cfg(test)]
     stream_failure: Option<crate::AiProviderFailureCategory>,
     #[cfg(test)]
+    stateless_native_item_rejected: bool,
+    #[cfg(test)]
     prepare_failure: Option<crate::AiProviderFailureCategory>,
     #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
     provider_session_cursor: Option<crate::AiProviderSessionCursor>,
@@ -89,6 +91,8 @@ impl MockProvider {
             background_retrieval_failure: None,
             #[cfg(test)]
             stream_failure: None,
+            #[cfg(test)]
+            stateless_native_item_rejected: false,
             #[cfg(test)]
             prepare_failure: None,
             #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
@@ -138,6 +142,12 @@ impl MockProvider {
         category: crate::AiProviderFailureCategory,
     ) -> Self {
         self.stream_failure = Some(category);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_stateless_native_item_rejection(mut self) -> Self {
+        self.stateless_native_item_rejected = true;
         self
     }
 
@@ -277,9 +287,17 @@ impl AiProvider for MockProvider {
         };
         #[cfg(not(test))]
         let events = self.events.clone();
-        Ok(Box::pin(stream::iter(
-            events.iter().cloned().map(Ok).collect::<Vec<_>>(),
-        )))
+        #[cfg(test)]
+        let stream_items = {
+            let mut stream_items = events.iter().cloned().map(Ok).collect::<Vec<_>>();
+            if self.stateless_native_item_rejected {
+                stream_items.push(Err(ProviderError::StatelessNativeItemRejected));
+            }
+            stream_items
+        };
+        #[cfg(not(test))]
+        let stream_items = events.iter().cloned().map(Ok).collect::<Vec<_>>();
+        Ok(Box::pin(stream::iter(stream_items)))
     }
 
     #[cfg(any(feature = "sqlite", feature = "postgres"))]

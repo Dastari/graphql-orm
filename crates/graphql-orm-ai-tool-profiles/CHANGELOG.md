@@ -3,12 +3,27 @@ title: "graphql-orm-ai-tool-profiles changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-21
+last_reviewed: 2026-08-22
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # Changelog
+
+## [0.9.0] - 2026-08-22
+
+### Added
+
+- `AiError::StatelessNativeItemRejected` is the proof-bearing terminal error
+  for a completed, authoritatively metered StatelessReplay turn whose refused
+  provider-native item was contained and produced no admitted answer or host
+  tool effect. It retains the stable `AI_PROVIDER_FAILED` public code.
+
+### Security
+
+- The variant is not a generic rejection category. An incomplete, retained,
+  unmetered, content-producing, tool-producing, or uncontained provider turn
+  must remain `ProviderFailed` and preserve uncertainty.
 
 ## [0.8.0] - 2026-08-21
 

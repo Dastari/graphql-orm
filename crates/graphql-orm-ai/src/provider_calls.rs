@@ -3408,6 +3408,7 @@ impl AiProviderCallExecutor {
         let mut started_builtin_calls = BTreeMap::<String, String>::new();
         let mut completed_builtin_calls = BTreeSet::new();
         let mut reasoning_summary_bytes = 0_u64;
+        let mut stateless_native_item_rejected = false;
         let mut live_coalescer = self
             .live_delta_sink
             .as_ref()
@@ -3460,10 +3461,22 @@ impl AiProviderCallExecutor {
             let Some(item) = item else {
                 break;
             };
-            let event = item.map_err(|error| {
-                self.record_provider_failure(error.safe_category());
-                AiError::ProviderFailed
-            })?;
+            if stateless_native_item_rejected {
+                self.record_provider_failure(AiProviderFailureCategory::ProtocolViolation);
+                return Err(AiError::ProviderFailed);
+            }
+            let event = match item {
+                Ok(event) => event,
+                Err(error @ ProviderError::StatelessNativeItemRejected) => {
+                    self.record_provider_error(&error);
+                    stateless_native_item_rejected = true;
+                    continue;
+                }
+                Err(error) => {
+                    self.record_provider_error(&error);
+                    return Err(AiError::ProviderFailed);
+                }
+            };
             let event_bytes = serde_json::to_vec(&event)
                 .map_err(|_| AiError::ProviderFailed)?
                 .len();
@@ -3658,6 +3671,22 @@ impl AiProviderCallExecutor {
         if started_builtin_calls.len() != completed_builtin_calls.len() {
             return Err(AiError::ProviderFailed);
         }
+        if stateless_native_item_rejected
+            && (request_snapshot.continuation_mode != ModelContinuationMode::StatelessReplay
+                || provider_response_id.is_some()
+                || events.iter().any(|event| {
+                    !matches!(
+                        event,
+                        ProviderEvent::ResponseStarted { response_id: None }
+                            | ProviderEvent::ReasoningSummaryDelta { .. }
+                            | ProviderEvent::Usage { .. }
+                            | ProviderEvent::ResponseCompleted { response_id: None }
+                    )
+                }))
+        {
+            self.record_provider_failure(AiProviderFailureCategory::ProtocolViolation);
+            return Err(AiError::ProviderFailed);
+        }
         let mut builtin_usage = AiProviderBuiltinUsage::default();
         for (call_id, kind) in &started_builtin_calls {
             if !completed_builtin_calls.contains(call_id) {
@@ -3748,6 +3777,10 @@ impl AiProviderCallExecutor {
                 },
             )
             .await?;
+
+        if stateless_native_item_rejected {
+            return Err(AiError::StatelessNativeItemRejected);
+        }
 
         Ok(AiProviderCallResult {
             session_id: lease.session_id(),
@@ -9188,6 +9221,78 @@ mod tests {
             )
             .await
             .expect("caller can terminally finish after handling the result");
+    }
+
+    #[tokio::test]
+    async fn completed_stateless_native_item_refusal_commits_usage_and_returns_exact_proof() {
+        let fixture = fixture_with_provider(
+            MockProvider::new(vec![
+                ProviderEvent::ResponseStarted { response_id: None },
+                ProviderEvent::Usage {
+                    input_tokens: 12,
+                    output_tokens: 3,
+                    cached_input_tokens: 2,
+                },
+                ProviderEvent::ResponseCompleted { response_id: None },
+            ])
+            .with_stateless_native_item_rejection(),
+        )
+        .await;
+        let mut provider_plan = plan(&fixture);
+        provider_plan.request.continuation_mode = ModelContinuationMode::StatelessReplay;
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate"),
+        );
+
+        assert!(matches!(
+            executor.execute(&fixture.lease, provider_plan).await,
+            Err(AiError::StatelessNativeItemRejected)
+        ));
+        assert_eq!(fixture.mock.request_count(), 1);
+        assert_eq!(reservation_state(&fixture.database).await, "committed");
+    }
+
+    #[tokio::test]
+    async fn stateless_native_item_refusal_with_an_answer_remains_uncertain() {
+        let fixture = fixture_with_provider(
+            MockProvider::new(vec![
+                ProviderEvent::ResponseStarted { response_id: None },
+                ProviderEvent::TextDelta {
+                    text: "an answer that must prevent clean retry".to_owned(),
+                },
+                ProviderEvent::Usage {
+                    input_tokens: 12,
+                    output_tokens: 3,
+                    cached_input_tokens: 2,
+                },
+                ProviderEvent::ResponseCompleted { response_id: None },
+            ])
+            .with_stateless_native_item_rejection(),
+        )
+        .await;
+        let mut provider_plan = plan(&fixture);
+        provider_plan.request.continuation_mode = ModelContinuationMode::StatelessReplay;
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate"),
+        );
+
+        assert!(matches!(
+            executor.execute(&fixture.lease, provider_plan).await,
+            Err(AiError::ProviderFailed)
+        ));
+        assert_eq!(reservation_state(&fixture.database).await, "uncertain");
     }
 
     #[tokio::test]

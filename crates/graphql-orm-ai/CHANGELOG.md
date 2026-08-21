@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-21
+last_reviewed: 2026-08-22
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -17,6 +17,38 @@ Historical development entries below retain their original dependency and
 checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## [0.86.0] - 2026-08-22
+
+Persistent schema module: **0.63.0** (unchanged from 0.85.0).
+
+### Added
+
+- `ProviderError::StatelessNativeItemRejected` is the adapter-to-executor
+  terminal signal for a completed provider-native item that a stateless local
+  deployment proves was contained outside the admitted host tool surface.
+- `AiError::StatelessNativeItemRejected`, supplied by
+  `graphql-orm-ai-tool-profiles` 0.9.0, carries the executor's stronger proof
+  into the read-only and supervised coordinators.
+
+### Changed
+
+- A proven stateless native-item refusal now terminates `Failed` with outcome
+  code `provider_native_item_rejected` and admits retry instead of becoming
+  `RecoveryRequired/provider_turn_uncertain`.
+- The provider-call executor drains and validates authoritative completion and
+  usage before accepting this proof, settles actual tokens/cost, and commits
+  the budget reservation even though no provider result is returned.
+
+### Security
+
+- The certain path is limited to `StatelessReplay` with no response cursor,
+  answer, citation, application-tool event, hosted-tool event, or unknown
+  provider event. An incomplete stream, retained turn, answer delta, or any
+  unproven native effect remains ordinary provider uncertainty.
+
+There is no schema, data, protected-payload, GraphQL SDL, backup or restore
+migration in this release.
 
 ## [0.85.0] - 2026-08-21
 
