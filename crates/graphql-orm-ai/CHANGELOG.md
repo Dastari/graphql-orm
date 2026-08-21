@@ -18,6 +18,30 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.87.0] - 2026-08-22
+
+Persistent schema module: **0.63.0** (unchanged from 0.86.0).
+
+### Added
+
+- `AiCodexAppServerTurnInput::retained_dynamic_tool_readiness_probe` lets a
+  reviewed host issue one startup probe against the exact bootstrap-bound,
+  complete retained dynamic-tool surface before advertising readiness.
+- `AiCodexAppServerProtocolActor::dynamic_tool_readiness_response` can settle
+  only the probe's exact expected tool call with the fixed content-free result
+  `{"ready":true}`, allowing the host to finish and delete the test thread.
+
+### Security
+
+- The constructor only prepares validated input. It grants no provider,
+  process, tool-execution, egress or application authority, requires a
+  nonempty exact tool set and binds the retained bootstrap fingerprint. The
+  actor cannot use the fixed readiness response for an ordinary or different
+  tool call, and it cannot carry application content.
+
+There is no schema, data, protected-payload, GraphQL SDL, backup or restore
+migration in this release.
+
 ## [0.86.0] - 2026-08-22
 
 Persistent schema module: **0.63.0** (unchanged from 0.85.0).

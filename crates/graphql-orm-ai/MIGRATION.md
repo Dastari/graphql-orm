@@ -19,6 +19,26 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.86.0 to 0.87.0: retained dynamic-tool readiness input
+
+Adopt `graphql-orm-ai` 0.87.0 from one reviewed full monorepo revision. The AI
+schema module remains **0.63.0**. There is no database, data, table, column,
+index, constraint, backfill, GraphQL SDL, protected-payload, backup or restore
+migration.
+
+Hosts that readiness-test an installed Codex app-server may construct a
+bootstrap-fingerprint-bound retained turn with
+`AiCodexAppServerTurnInput::retained_dynamic_tool_readiness_probe`. Supply the
+same complete dynamic-tool definitions and reasoning effort used to create the
+empty retained thread, plus the exact tool ID that the model must select. The
+constructor only validates input; it does not grant process, provider,
+application-tool, egress or result authority. After the actor admits that
+exact call, use `dynamic_tool_readiness_response` to return the sole fixed
+`{"ready":true}` result, finish the turn and delete the thread. The actor
+rejects this response on an ordinary turn or another tool, and the result
+cannot contain application data. Keep the probe inside the reviewed host
+sandbox.
+
 ## 0.85.0 to 0.86.0: metered stateless native-item refusal
 
 Adopt `graphql-orm-ai` 0.86.0 and `graphql-orm-ai-tool-profiles` 0.9.0 from one
