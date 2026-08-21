@@ -10,10 +10,15 @@ supersedes: []
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.85.0` with AI schema module
+`graphql-orm-ai` is at crate version `0.86.0` with AI schema module
 `0.63.0`. It uses workspace `graphql-orm` `0.23.0`, backend-neutral
-`graphql-orm-ai-tool-profiles` `0.8.0`, and external `agql-auth`
+`graphql-orm-ai-tool-profiles` `0.9.0`, and external `agql-auth`
 `0.15.0` at `e841ffd382082ad7419be259fe957f949b956ff7`.
+
+Completed stateless local-provider turns can carry a proof-bearing contained
+native-item refusal after authoritative usage settlement. Those runs close as
+retryable `Failed/provider_native_item_rejected`; every ambiguous provider
+turn retains the recovery-required boundary.
 
 The active work order, dependencies, and exit gates are maintained in the
 [AI production-readiness plan](../../../docs/plans/active/ai-production-readiness/README.md).

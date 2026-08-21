@@ -1851,6 +1851,18 @@ pub enum ProviderError {
     /// Provider rejected safe request metadata.
     #[error("provider rejected request")]
     Rejected,
+    /// A completed, metered stateless turn contained one provider-native item
+    /// that the adapter's deployment contract proves was contained outside
+    /// the admitted host tool surface.
+    ///
+    /// Adapters must emit this only as the terminal stream error after
+    /// authoritative usage and completion events. The call executor performs
+    /// the remaining stateless/no-answer/no-tool proof before promoting it to
+    /// [`AiError::StatelessNativeItemRejected`]. A parse error, incomplete
+    /// stream, retained turn, or uncontained native operation is
+    /// [`Self::Rejected`] or another ordinary uncertain provider error.
+    #[error("stateless provider-native item rejected")]
+    StatelessNativeItemRejected,
     /// A newly bound empty retained thread failed a closed activation check.
     #[error("provider newly-bound turn rejected: {0}")]
     NewlyBoundTurnRejected(AiCodexBoundTurnRejection),
@@ -1877,6 +1889,7 @@ impl ProviderError {
             | Self::BudgetDenied
             | Self::Unsupported
             | Self::Rejected
+            | Self::StatelessNativeItemRejected
             | Self::NewlyBoundTurnRejected(_) => AiProviderFailureCategory::ProviderRejection,
             Self::RateLimited => AiProviderFailureCategory::RateLimit,
             Self::Unavailable => AiProviderFailureCategory::TransportUnavailable,

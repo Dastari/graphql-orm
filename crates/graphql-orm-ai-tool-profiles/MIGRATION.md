@@ -3,12 +3,30 @@ title: "graphql-orm-ai-tool-profiles migration guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-21
+last_reviewed: 2026-08-22
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.8.0 to 0.9.0: proof-bearing stateless native-item refusal
+
+Adopt `graphql-orm-ai-tool-profiles` 0.9.0 with `graphql-orm-ai` 0.86.0 from
+one reviewed full monorepo revision.
+
+`AiError` gains `StatelessNativeItemRejected`. Only the provider-call executor
+may return it, after committing authoritative usage for a completed
+StatelessReplay turn and proving that no assistant answer, application tool,
+hosted tool, citation, cursor, or unknown provider event was admitted. The
+provider adapter must separately prove the refused native item was contained.
+Every incomplete or ambiguous turn remains `ProviderFailed`.
+
+The new variant deliberately retains the stable `AI_PROVIDER_FAILED` public
+code. Update deliberately exhaustive internal matches so it cannot be folded
+back into provider uncertainty. There is no schema, database, data, GraphQL
+SDL, manifest, capability, fingerprint, protected-content, credential, or AI
+schema-module migration from this package change.
 
 ## 0.7.0 to 0.8.0: canonical federated capability-index sets
 

@@ -4037,6 +4037,7 @@ fn classify_background_retrieval_error(
         | ProviderError::BudgetDenied
         | ProviderError::Unsupported
         | ProviderError::Rejected
+        | ProviderError::StatelessNativeItemRejected
         | ProviderError::NewlyBoundTurnRejected(_)
         | ProviderError::Cancelled
         | ProviderError::Classified(_) => {

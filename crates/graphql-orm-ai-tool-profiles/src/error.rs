@@ -51,6 +51,17 @@ pub enum AiError {
     /// Provider operation failed safely.
     #[error("AI provider operation failed")]
     ProviderFailed,
+    /// A stateless provider turn completed and was metered, but the adapter
+    /// refused one provider-native item outside the admitted model surface.
+    ///
+    /// This is a proof-bearing terminal classification, not a generic parser
+    /// error. It may be returned only after authoritative usage was committed,
+    /// no assistant answer was admitted, no application or hosted tool effect
+    /// crossed the host boundary, and the adapter's deployment contract proves
+    /// the refused native item was contained. Retained-session turns and
+    /// incomplete streams must use [`Self::ProviderFailed`] instead.
+    #[error("AI provider-native item was rejected")]
+    StatelessNativeItemRejected,
     /// Runtime has not passed startup/restore readiness checks.
     #[error("AI runtime is not ready")]
     RuntimeNotReady,
@@ -79,10 +90,24 @@ impl AiError {
             Self::ReauthorizationFailed => "AI_REAUTHORIZATION_FAILED",
             Self::ToolExecutionFailed => "AI_TOOL_EXECUTION_FAILED",
             Self::ProviderFailed => "AI_PROVIDER_FAILED",
+            Self::StatelessNativeItemRejected => "AI_PROVIDER_FAILED",
             Self::RuntimeNotReady => "AI_RUNTIME_NOT_READY",
             Self::PersistenceFailed => "AI_PERSISTENCE_FAILED",
             Self::ProviderSessionDeferred => "AI_PROVIDER_SESSION_DEFERRED",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stateless_native_item_rejection_keeps_the_provider_failure_public_code() {
+        assert_eq!(
+            AiError::StatelessNativeItemRejected.public_code(),
+            "AI_PROVIDER_FAILED"
+        );
     }
 }
 

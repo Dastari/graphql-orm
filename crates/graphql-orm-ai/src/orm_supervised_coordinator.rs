@@ -1099,6 +1099,16 @@ impl AiSupervisedAgentCoordinator {
                     .finish_failed(&lease, &guard, "provider_budget_denied")
                     .await;
             }
+            Err(SupervisedProviderTurnFailure::StatelessNativeItemRejected) => {
+                if let Some((service, claim)) = &reclaimed {
+                    let _ = service
+                        .require_cleanup(claim, "provider_session_reclaimed_handoff_failed")
+                        .await;
+                }
+                return self
+                    .finish_failed(&lease, &guard, "provider_native_item_rejected")
+                    .await;
+            }
             Err(SupervisedProviderTurnFailure::LeaseLost(error)) => return Err(error),
         };
         if self.run_control.cancellation(&lease).await?.is_some() {
@@ -1713,10 +1723,11 @@ impl AiSupervisedAgentCoordinator {
 enum SupervisedProviderTurnFailure {
     Provider,
     BudgetDenied,
+    StatelessNativeItemRejected,
     LeaseLost(AiError),
 }
 
-/// Separates a certain pre-transport budget refusal from an uncertain turn.
+/// Separates proof-bearing refusals from an uncertain turn.
 ///
 /// See the read-only coordinator for the full argument: the atomic budget
 /// reservation happens before the transport boundary, so a denial proves no
@@ -1724,6 +1735,9 @@ enum SupervisedProviderTurnFailure {
 const fn classify_supervised_turn_failure(error: &AiError) -> SupervisedProviderTurnFailure {
     match error {
         AiError::PreTransportBudgetDenied => SupervisedProviderTurnFailure::BudgetDenied,
+        AiError::StatelessNativeItemRejected => {
+            SupervisedProviderTurnFailure::StatelessNativeItemRejected
+        }
         _ => SupervisedProviderTurnFailure::Provider,
     }
 }

@@ -407,6 +407,7 @@ const fn is_retryable_failure_code(code: &str) -> bool {
             | b"provider_unavailable"
             | b"provider_rate_limited"
             | b"provider_request_rejected"
+            | b"provider_native_item_rejected"
             | b"runtime_not_ready"
     )
 }

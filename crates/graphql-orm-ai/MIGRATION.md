@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-21
+last_reviewed: 2026-08-22
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -18,6 +18,34 @@ Migration entries preserve the dependency and schema facts for the checkpoint
 they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## 0.85.0 to 0.86.0: metered stateless native-item refusal
+
+Adopt `graphql-orm-ai` 0.86.0 and `graphql-orm-ai-tool-profiles` 0.9.0 from one
+reviewed full monorepo revision. The AI schema module remains **0.63.0**. There
+is no database, data, table, column, index, constraint, backfill, GraphQL SDL,
+protected-payload, backup or restore migration.
+
+An adapter may end a dispatched stream with
+`ProviderError::StatelessNativeItemRejected` only after it has emitted an
+authoritative `Usage` and `ResponseCompleted`, and only when its deployment
+contract proves the refused provider-native item was contained. The executor
+accepts that claim only for `ModelContinuationMode::StatelessReplay` with no
+provider cursor, assistant text, citation, application-tool event,
+provider-hosted-tool event, or unknown event. It settles the authoritative
+usage, commits the reservation, and returns
+`AiError::StatelessNativeItemRejected`. Do not use either variant for a parser
+error, incomplete stream, retained session, unmetered response, or an operation
+that might have escaped the provider sandbox.
+
+The read-only and supervised coordinators close this proof as `Failed` with
+outcome code `provider_native_item_rejected`. That code is explicitly admitted
+by `classify_run_retry` when no assistant output exists, so the failure record
+offers a new run over the same user message. All generic provider errors still
+close for recovery because their effects remain uncertain. Clients that
+previously rendered this exact adapter refusal as
+`provider_turn_uncertain` should render the new bounded failure code and expose
+their existing retry action.
 
 ## 0.84.0 to 0.85.0: executable federated bounded capability delivery
 

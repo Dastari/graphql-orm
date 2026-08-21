@@ -476,11 +476,14 @@ pub trait AiAgentProviderTurnExecutor: Send + Sync {
     /// Executes one exactly planned turn for the current attempt/generation.
     ///
     /// Returning [`AiError::PreTransportBudgetDenied`] is a proof-bearing
-    /// contract: the
-    /// denial must have occurred before provider transport, and no budget
-    /// reservation may remain held. Once transport might have occurred, an
-    /// executor must return [`AiError::ProviderFailed`] instead so the
-    /// coordinator preserves uncertainty.
+    /// contract: the denial must have occurred before provider transport, and
+    /// no budget reservation may remain held. Returning
+    /// [`AiError::StatelessNativeItemRejected`] is also proof-bearing: the
+    /// completed StatelessReplay turn's authoritative usage must already be
+    /// committed, no answer or admitted tool effect may exist, and the adapter
+    /// must prove the refused native item was contained. Every other error
+    /// after transport might have occurred must be [`AiError::ProviderFailed`]
+    /// so the coordinator preserves uncertainty.
     ///
     /// # Errors
     ///
@@ -1716,6 +1719,11 @@ impl AiReadOnlyAgentCoordinator {
                         .finish_failed(&lease, &guard, "provider_budget_denied")
                         .await;
                 }
+                Err(ProviderTurnFailure::StatelessNativeItemRejected) => {
+                    return self
+                        .finish_failed(&lease, &guard, "provider_native_item_rejected")
+                        .await;
+                }
                 Err(ProviderTurnFailure::LeaseLost(error)) => return Err(error),
                 Err(ProviderTurnFailure::Cancelled(settlement)) => {
                     self.settle_interrupted_provider_session(&lease, &guard, settlement)
@@ -2503,6 +2511,7 @@ impl AiReadOnlyAgentCoordinator {
 enum ProviderTurnFailure {
     Provider,
     BudgetDenied,
+    StatelessNativeItemRejected,
     Deferred,
     LeaseLost(AiError),
     /// Owner cancellation won the fence; the value reports what the resulting
@@ -2510,16 +2519,20 @@ enum ProviderTurnFailure {
     Cancelled(crate::AiRunInterruptSettlement),
 }
 
-/// Separates a certain pre-transport refusal from an uncertain provider turn.
+/// Separates proof-bearing refusals from an uncertain provider turn.
 ///
 /// The budget reservation is taken before the transport boundary and inside
 /// the same call that later dispatches. A denial therefore proves that no
 /// bytes crossed the provider boundary, that no provider turn was consumed,
-/// and that the atomic reservation transaction left nothing held. Every other
-/// executor error keeps the fail-closed uncertain classification.
+/// and that the atomic reservation transaction left nothing held. A stateless
+/// native-item refusal is separately proof-bearing only after the
+/// executor has committed authoritative usage and proven that no answer or
+/// admitted host tool effect exists. Every other executor error keeps the
+/// fail-closed uncertain classification.
 const fn classify_provider_turn_failure(error: &AiError) -> ProviderTurnFailure {
     match error {
         AiError::PreTransportBudgetDenied => ProviderTurnFailure::BudgetDenied,
+        AiError::StatelessNativeItemRejected => ProviderTurnFailure::StatelessNativeItemRejected,
         _ => ProviderTurnFailure::Provider,
     }
 }
@@ -3872,6 +3885,63 @@ mod tests {
                     produced_assistant_output: false,
                 },
                 Some("provider_budget_denied"),
+            ),
+            crate::AiRunRetryAdmission::Allowed
+        );
+    }
+
+    #[tokio::test]
+    async fn metered_stateless_native_item_refusal_is_failed_and_retryable() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        let provider = Arc::new(TestProviderExecutor {
+            responses: Mutex::new(VecDeque::from([Err(AiError::StatelessNativeItemRejected)])),
+            delay: None,
+        });
+        let planner = Arc::new(TestChatPlanner {
+            scope: test_scope(),
+            continuation_count: AtomicUsize::new(0),
+        });
+        let forbidden = Arc::new(ChatForbiddenBoundaries::default());
+        let coordinator = AiReadOnlyAgentCoordinator::new(
+            run.clone(),
+            provider.clone(),
+            forbidden.clone(),
+            Arc::new(TestOutputWriter),
+            forbidden.clone(),
+            Arc::new(TestCheckpointWriter),
+            Arc::new(TestRuleResolver),
+            planner,
+            limits(50),
+        );
+
+        let outcome = coordinator
+            .execute_claimed(&lease)
+            .await
+            .expect("a proof-bearing native-item refusal should fail cleanly");
+
+        assert_eq!(
+            outcome,
+            Failed {
+                provider_turns: 0,
+                total_tool_calls: 0,
+            }
+        );
+        assert_eq!(run.final_states(), vec![AiRunState::Failed]);
+        assert_eq!(
+            run.final_codes(),
+            vec!["provider_native_item_rejected".to_owned()]
+        );
+        assert_eq!(provider.remaining_responses(), 0);
+        assert_eq!(forbidden.tool_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(forbidden.provider_checkpoints.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            crate::classify_run_retry(
+                crate::AiRunRetryEvidence {
+                    terminal: crate::AiRunTerminalEvent::Failed,
+                    produced_assistant_output: false,
+                },
+                Some("provider_native_item_rejected"),
             ),
             crate::AiRunRetryAdmission::Allowed
         );
