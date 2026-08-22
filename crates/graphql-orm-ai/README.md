@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.91.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.91.1", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -158,6 +158,13 @@ only that flag while the per-thread configuration still sets the feature
 false. The protocol actor rejects any native item that is nevertheless
 emitted. Reverify both direct delivery and the negative native-item matrix
 before upgrading Codex.
+
+The Codex schema projector preserves bounded nullable scalar `type` arrays in
+the crate-authored FixedBroker definitions. It does not pass through arbitrary
+JSON Schema unions: only unique combinations of supported scalar types plus
+`null`, with compatible enums and constraints, are admitted. Full-surface
+readiness must project all three FixedBroker definitions before the host is
+ready.
 
 See the [session reliability adoption contract](docs/session-reliability-adoption.md).
 

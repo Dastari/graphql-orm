@@ -18,6 +18,27 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.91.1] - 2026-08-23
+
+Persistent schema module: **0.63.0** (unchanged from 0.91.0).
+
+### Fixed
+
+- The Codex app-server schema projector now preserves bounded nullable scalar
+  `type` arrays used by the crate-authored FixedBroker definitions. Codex
+  0.148.0 accepts these schemas directly; previously the adapter rejected the
+  discovery and execute definitions before starting a readiness turn.
+
+### Security
+
+- Type-array projection is limited to unique combinations of `string`,
+  `integer`, `number`, `boolean`, and `null`, requires `null` plus at least one
+  non-null scalar, validates compatible enums and constraints, and still
+  rejects object, array, unbounded, malformed, or unknown union shapes.
+
+There is no schema, data, protected-payload, GraphQL SDL, backup or restore
+migration in this release.
+
 ## [0.91.0] - 2026-08-22
 
 Persistent schema module: **0.63.0** (unchanged from 0.90.1).
