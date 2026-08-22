@@ -177,6 +177,17 @@ collaboration, images, browser/computer use, and hosted search. This is defense
 in depth: the process sandbox remains authoritative if a provider version
 ignores a feature toggle.
 
+The sole process-level exception is measured on Codex 0.148.0: adding
+`--disable code_mode_host` to this otherwise identical profile made a retained
+GPT-5.6 Luna turn complete without issuing its offered tool, while omitting
+that one argument produced the direct `dynamicToolCall` / `item/tool/call`.
+`codex_arguments()` therefore omits only that disable. The actor still sends
+`features.code_mode_host=false`, `features.code_mode=false`, and
+`features.code_mode_only=false` per thread; shell, file, MCP, browser, web, and
+every other native item remain unavailable and are rejected by the protocol
+actor if emitted. Re-run the direct-tool readiness probe and negative native-
+item suite before adopting another Codex version.
+
 Only a reviewed `Direct` model-tool declaration can construct this profile.
 Codex models declared `CodeMode` or `CodeModeOnly` are rejected rather than
 silently losing dynamic tools or requiring a native Code Mode host. Such a

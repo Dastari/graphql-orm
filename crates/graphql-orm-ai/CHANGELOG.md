@@ -18,6 +18,27 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.88.0] - 2026-08-22
+
+Persistent schema module: **0.63.0** (unchanged from 0.87.0).
+
+### Changed
+
+- The closed Codex dynamic-tool launch profile omits only the process-level
+  `--disable code_mode_host` argument, which Codex 0.148.0 was measured to
+  require for direct `dynamicToolCall` delivery to GPT-5.6 Luna.
+
+### Security
+
+- Code Mode, Code Mode-only routing, shell, files, MCP, browser, hosted web
+  search, and every other native surface remain disabled. The per-thread
+  configuration still sets `features.code_mode_host=false`, and the protocol
+  actor rejects command, file, MCP, collaboration, search, and image items at
+  both lifecycle boundaries.
+
+There is no schema, data, protected-payload, GraphQL SDL, backup or restore
+migration in this release.
+
 ## [0.87.0] - 2026-08-22
 
 Persistent schema module: **0.63.0** (unchanged from 0.86.0).
