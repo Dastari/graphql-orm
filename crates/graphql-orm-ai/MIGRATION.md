@@ -19,6 +19,24 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.88.0 to 0.88.1: Codex FixedBroker schema projection
+
+Adopt `graphql-orm-ai` 0.88.1 from one reviewed full monorepo revision. The AI
+schema module remains **0.63.0**. There is no database, data, table, column,
+index, constraint, backfill, GraphQL SDL, protected-payload, backup or restore
+migration.
+
+Hosts using the Codex app-server adapter should rerun readiness against their
+complete capability surface. The adapter now projects the crate-authored
+FixedBroker discovery, describe, and execute definitions without rewriting
+their bounded nullable scalar `type` arrays. Codex 0.148.0 was measured to
+accept the preserved form and deliver the offered dynamic tool directly.
+
+No host API changes are required. Unknown, duplicate, non-nullable, structural,
+or otherwise malformed type unions continue to fail closed before a provider
+turn. Keep the 0.88.0 closed launch profile, full-surface readiness guard, and
+negative native-item checks unchanged.
+
 ## 0.87.0 to 0.88.0: direct GPT-5.6 dynamic tools on Codex 0.148.0
 
 Adopt `graphql-orm-ai` 0.88.0 from one reviewed full monorepo revision. The AI

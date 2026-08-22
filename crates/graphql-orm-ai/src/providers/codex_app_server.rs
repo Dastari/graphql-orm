@@ -4795,6 +4795,9 @@ fn project_codex_schema_node(schema: &Value, depth: usize) -> Result<Value, Prov
     }) {
         return Err(ProviderError::Rejected);
     }
+    if let Some(schema_types) = object.get("type").and_then(Value::as_array) {
+        return project_codex_nullable_scalar_union(object, schema_types);
+    }
     let schema_type = object
         .get("type")
         .and_then(Value::as_str)
@@ -4980,6 +4983,129 @@ fn project_codex_schema_node(schema: &Value, depth: usize) -> Result<Value, Prov
         );
     }
     Ok(Value::Object(projected))
+}
+
+fn project_codex_nullable_scalar_union(
+    object: &serde_json::Map<String, Value>,
+    schema_types: &[Value],
+) -> Result<Value, ProviderError> {
+    if !(2..=5).contains(&schema_types.len())
+        || object.keys().any(|key| {
+            matches!(
+                key.as_str(),
+                "properties"
+                    | "required"
+                    | "additionalProperties"
+                    | "items"
+                    | "minItems"
+                    | "maxItems"
+                    | "uniqueItems"
+            )
+        })
+    {
+        return Err(ProviderError::Rejected);
+    }
+    let mut unique_types = BTreeSet::new();
+    for schema_type in schema_types {
+        let schema_type = schema_type.as_str().ok_or(ProviderError::Rejected)?;
+        if !matches!(
+            schema_type,
+            "string" | "integer" | "number" | "boolean" | "null"
+        ) || !unique_types.insert(schema_type)
+        {
+            return Err(ProviderError::Rejected);
+        }
+    }
+    if !unique_types.contains("null") || unique_types.len() < 2 {
+        return Err(ProviderError::Rejected);
+    }
+
+    let description = object
+        .get("description")
+        .map(|value| value.as_str().ok_or(ProviderError::Rejected))
+        .transpose()?
+        .unwrap_or_default();
+    validate_codex_schema_description(description)?;
+
+    let mut constraint_notes = Vec::new();
+    let minimum_length = optional_u64(object, "minLength")?;
+    let maximum_length = optional_u64(object, "maxLength")?;
+    if (minimum_length.is_some() || maximum_length.is_some()) && !unique_types.contains("string") {
+        return Err(ProviderError::Rejected);
+    }
+    if minimum_length
+        .zip(maximum_length)
+        .is_some_and(|(minimum, maximum)| minimum > maximum)
+    {
+        return Err(ProviderError::Rejected);
+    }
+    if let Some(minimum) = minimum_length {
+        constraint_notes.push(format!("minimum length {minimum}"));
+    }
+    if let Some(maximum) = maximum_length {
+        constraint_notes.push(format!("maximum length {maximum}"));
+    }
+
+    let minimum = optional_number(object, "minimum")?;
+    let maximum = optional_number(object, "maximum")?;
+    if (minimum.is_some() || maximum.is_some())
+        && !unique_types.contains("integer")
+        && !unique_types.contains("number")
+    {
+        return Err(ProviderError::Rejected);
+    }
+    if minimum
+        .zip(maximum)
+        .is_some_and(|(minimum, maximum)| minimum > maximum)
+    {
+        return Err(ProviderError::Rejected);
+    }
+    if let Some(minimum) = minimum {
+        constraint_notes.push(format!("minimum {minimum}"));
+    }
+    if let Some(maximum) = maximum {
+        constraint_notes.push(format!("maximum {maximum}"));
+    }
+
+    let mut projected =
+        serde_json::Map::from_iter([("type".to_owned(), Value::Array(schema_types.to_vec()))]);
+    if let Some(values) = object.get("enum") {
+        let values = values.as_array().ok_or(ProviderError::Rejected)?;
+        if values.is_empty()
+            || values.len() > 100
+            || values.iter().any(|value| {
+                !codex_scalar_union_accepts(value, &unique_types)
+                    || value
+                        .as_str()
+                        .is_some_and(|value| value.is_empty() || value.len() > 200)
+            })
+        {
+            return Err(ProviderError::Rejected);
+        }
+        projected.insert("enum".to_owned(), Value::Array(values.clone()));
+    }
+    let projected_description = projected_codex_description(description, &constraint_notes)?;
+    if !projected_description.is_empty() {
+        projected.insert(
+            "description".to_owned(),
+            Value::String(projected_description),
+        );
+    }
+    Ok(Value::Object(projected))
+}
+
+fn codex_scalar_union_accepts(value: &Value, schema_types: &BTreeSet<&str>) -> bool {
+    match value {
+        Value::Null => schema_types.contains("null"),
+        Value::Bool(_) => schema_types.contains("boolean"),
+        Value::String(_) => schema_types.contains("string"),
+        Value::Number(number) => {
+            schema_types.contains("number")
+                || (schema_types.contains("integer")
+                    && (number.as_i64().is_some() || number.as_u64().is_some()))
+        }
+        Value::Array(_) | Value::Object(_) => false,
+    }
 }
 
 fn validate_codex_schema_description(description: &str) -> Result<(), ProviderError> {
@@ -6519,6 +6645,79 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn fixed_broker_definitions_project_their_nullable_scalar_unions_for_codex() {
+        let definitions = crate::capability_broker_definitions(&"a".repeat(64))
+            .expect("fixed broker definitions should compile");
+        assert_eq!(definitions.len(), 3);
+        let projected = project_codex_dynamic_tools(&definitions)
+            .expect("every crate-authored fixed broker schema should project");
+        assert_eq!(projected.protocol_values.len(), 3);
+
+        let discover = projected
+            .protocol_values
+            .iter()
+            .find(|tool| tool.get("name") == Some(&json!("graphql_capabilities_discover")))
+            .expect("discover projection should exist");
+        assert_eq!(
+            discover.pointer("/inputSchema/properties/namespace/type"),
+            Some(&json!(["string", "null"]))
+        );
+        assert_eq!(
+            discover.pointer("/inputSchema/properties/kind/enum"),
+            Some(&json!(["generated_query", null]))
+        );
+
+        let execute = projected
+            .protocol_values
+            .iter()
+            .find(|tool| tool.get("name") == Some(&json!("graphql_capabilities_execute")))
+            .expect("execute projection should exist");
+        assert_eq!(
+            execute.pointer("/inputSchema/properties/arguments/items/properties/value/type"),
+            Some(&json!(["string", "integer", "number", "boolean", "null"]))
+        );
+        assert_eq!(
+            execute.pointer("/inputSchema/properties/maximumItems/type"),
+            Some(&json!(["integer", "null"]))
+        );
+        assert!(
+            execute
+                .pointer("/inputSchema/properties/maximumItems/description")
+                .and_then(Value::as_str)
+                .is_some_and(|description| {
+                    description.contains("minimum 1") && description.contains("maximum 10000")
+                })
+        );
+        for tool in &projected.protocol_values {
+            jsonschema::validator_for(&tool["inputSchema"])
+                .expect("projected fixed broker schema should remain valid JSON Schema");
+        }
+    }
+
+    #[test]
+    fn codex_nullable_scalar_union_projection_rejects_widened_or_malformed_shapes() {
+        for malformed in [
+            json!({"type": ["null"]}),
+            json!({"type": ["string", "integer"]}),
+            json!({"type": ["string", "string", "null"]}),
+            json!({"type": ["object", "null"]}),
+            json!({
+                "type": ["string", "null"],
+                "properties": {},
+                "additionalProperties": false
+            }),
+            json!({"type": ["boolean", "null"], "minimum": 1}),
+            json!({"type": ["integer", "null"], "enum": ["not-an-integer", null]}),
+            json!({"type": ["string", "null"], "enum": [false, null]}),
+        ] {
+            assert!(matches!(
+                project_codex_schema_node(&malformed, 0),
+                Err(ProviderError::Rejected)
+            ));
+        }
+    }
+
+    #[test]
     fn finite_relational_query_plan_projects_without_generic_schema_passthrough() {
         let tool = ModelToolDefinition {
             tool_id: "inventory.query.records.auto".to_owned(),
@@ -6601,7 +6800,7 @@ pub(crate) mod tests {
                 .and_then(Value::as_str)
                 .is_some_and(|description| description.contains("maximum 25"))
         );
-        assert!(schema.to_string().find("anyOf").is_none());
+        assert!(!schema.to_string().contains("anyOf"));
     }
 
     fn named_semantic_type(name: &str, nullable: bool) -> GraphqlSemanticTypeRef {
