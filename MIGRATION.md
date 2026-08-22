@@ -13,13 +13,16 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
-## Current Git revision: agql-auth 0.16 alignment
+## 0.23.0 to 0.24.0: agql-auth 0.16 alignment
 
 Hosts enabling `auth-agql` or depending directly on `agql-auth` must align to
-version 0.16.0 at the workspace's reviewed full revision. This retains one
-public auth type universe. Version 0.16 adds consumer-supplied exact-only
-hierarchical matcher policy; the ORM bridge remains projection-only and does
-not select or install that policy. No database, schema, token, or stored-data
+version 0.16.0 at merged revision
+`3bc38cd94794f1e868a9cc3a5551047b95a32105`. Adopt `graphql-orm` and the
+aligned `graphql-orm-macros` 0.24.0 from the same reviewed monorepo revision.
+This retains one public auth type universe. Version 0.16 adds
+consumer-supplied exact-only hierarchical matcher policy; the ORM bridge
+remains projection-only and does not select or install that policy. No
+database, schema, GraphQL SDL, generated-code, token, backup, or stored-data
 migration is required.
 
 ## 0.22.1 to 0.23.0: explicit collection-bound semantics
@@ -1193,5 +1196,5 @@ access path.
 - No JWT, OIDC, cookie, wildcard, or application-specific scope logic was added to `graphql-orm`.
 - PostgreSQL RLS helper functions still use exact scope matching.
 - The current `auth-agql` feature targets `agql-auth` 0.16.0 at revision
-  `e6439aa034babb6827e9253977f760667ea6b7eb`; earlier release sections above
+  `3bc38cd94794f1e868a9cc3a5551047b95a32105`; earlier release sections above
   retain their historical pins.

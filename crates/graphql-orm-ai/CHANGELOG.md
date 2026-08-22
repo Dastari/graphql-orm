@@ -18,6 +18,23 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.89.0] - 2026-08-22
+
+Persistent schema module: **0.63.0** (unchanged from 0.88.0).
+
+### Changed
+
+- Aligned the public `agql-auth` type universe to 0.16.0 at merged revision
+  `3bc38cd94794f1e868a9cc3a5551047b95a32105`. This matters to consumers because
+  the AI prelude publicly re-exports `CurrentPrincipalResolver`,
+  `PrincipalReference`, and `ResolvedPrincipal`.
+- Hosts that depend directly on `agql-auth` must use that same full revision.
+  AI authorization, principal rehydration, provider, and persistence behavior
+  are unchanged.
+
+There is no schema, data, protected-payload, GraphQL SDL, backup or restore
+migration in this release.
+
 ## [0.88.0] - 2026-08-22
 
 Persistent schema module: **0.63.0** (unchanged from 0.87.0).

@@ -4867,12 +4867,10 @@ pub(crate) fn generate_graphql_operations(
             #(#retention_event_id_values)*
             ::graphql_orm::graphql::orm::composite_key_id(&bind_values)
         }}
+    } else if pk_is_bytes {
+        quote! { ::graphql_orm::graphql::orm::binary_key_id(&self.#pk_field) }
     } else {
-        if pk_is_bytes {
-            quote! { ::graphql_orm::graphql::orm::binary_key_id(&self.#pk_field) }
-        } else {
-            quote! { self.#pk_field.to_string() }
-        }
+        quote! { self.#pk_field.to_string() }
     };
     let retention_surface = if entity_meta.retention_policy.is_some() {
         quote! {

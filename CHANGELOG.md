@@ -14,6 +14,25 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.24.0 - 2026-08-22
+
+Companion macros crate: `graphql-orm-macros` **0.24.0**. Generated ORM and
+macro behavior is unchanged.
+
+- Updated the optional `auth-agql` dependency to `agql-auth` 0.16.0 at merged
+  revision `3bc38cd94794f1e868a9cc3a5551047b95a32105`. The bridge remains a
+  projection of an already accepted principal and does not select matcher
+  policy or gain token-issuer responsibilities.
+- Hosts that enable `auth-agql` and also depend directly on `agql-auth` must
+  use the same exact revision so public principal and assurance types resolve
+  from one source universe.
+- Collapsed an equivalent macro-generation branch and removed a redundant
+  doctest wrapper to remain warnings-clean under the pinned Clippy toolchain;
+  emitted tokens and the compile-fail probe are unchanged.
+
+No database, GraphQL SDL, generated-code, migration-history, backup, token, or
+stored-data migration is required.
+
 ## 0.23.0 - 2026-08-14
 
 Companion macros crate: `graphql-orm-macros` **0.23.0**. Backend-neutral

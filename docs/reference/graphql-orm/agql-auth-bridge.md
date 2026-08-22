@@ -16,13 +16,13 @@ supersedes: []
 ## Dependency
 
 ```toml
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.23.0", features = ["sqlite", "auth-agql"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.24.0", features = ["sqlite", "auth-agql"] }
 # Host applications may depend on agql-auth directly as well. The optional
 # graphql-orm auth-agql feature pins the exact upstream release:
 # git = "https://github.com/Dastari/agql-auth.git"
-# rev = "e6439aa034babb6827e9253977f760667ea6b7eb"
+# rev = "3bc38cd94794f1e868a9cc3a5551047b95a32105"
 # version = "0.16.0"
-agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "e6439aa034babb6827e9253977f760667ea6b7eb", version = "0.16.0" }
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "3bc38cd94794f1e868a9cc3a5551047b95a32105", version = "0.16.0" }
 ```
 
 Both projects are intentionally Git-only. Cargo's crates.io packaging flow cannot package

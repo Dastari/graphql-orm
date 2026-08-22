@@ -6601,7 +6601,7 @@ pub(crate) mod tests {
                 .and_then(Value::as_str)
                 .is_some_and(|description| description.contains("maximum 25"))
         );
-        assert!(schema.to_string().find("anyOf").is_none());
+        assert!(!schema.to_string().contains("anyOf"));
     }
 
     fn named_semantic_type(name: &str, nullable: bool) -> GraphqlSemanticTypeRef {

@@ -362,17 +362,23 @@ fn build_hierarchical_scope_matcher(
     exact_only_scopes.dedup();
     exact_only_scope_patterns.sort();
     exact_only_scope_patterns.dedup();
-    let matcher = HierarchicalScopeMatch::new(HierarchicalScopeOptions {
-        separator,
-        wildcard,
-        wildcard_matches_multi_segment: wildcard_matches_multi_segment
-            .unwrap_or(defaults.wildcard_matches_multi_segment),
-        allow_universal_wildcard: allow_universal_wildcard
-            .unwrap_or(defaults.allow_universal_wildcard),
-        super_scopes,
-        exact_only_scopes,
-        exact_only_scope_patterns,
-    });
+    let options = HierarchicalScopeOptions::default()
+        .with_separator(separator)
+        .with_wildcard(wildcard)
+        .with_wildcard_matches_multi_segment(
+            wildcard_matches_multi_segment.unwrap_or(defaults.wildcard_matches_multi_segment),
+        )
+        .with_allow_universal_wildcard(
+            allow_universal_wildcard.unwrap_or(defaults.allow_universal_wildcard),
+        )
+        .with_super_scopes(super_scopes)
+        .with_exact_only_scopes(exact_only_scopes)
+        .with_exact_only_scope_patterns(exact_only_scope_patterns);
+    let matcher = HierarchicalScopeMatch::new(options).map_err(|error| {
+        invalid(format!(
+            "scopeMatcher hierarchical options are invalid: {error}"
+        ))
+    })?;
     Ok(config.with_scope_matcher(Arc::new(AgqlScopeMatcher::new(Arc::new(matcher)))))
 }
 
@@ -838,5 +844,27 @@ mod tests {
                 .to_string()
                 .contains("kind `exact` does not accept hierarchical options")
         );
+    }
+
+    #[cfg(feature = "auth-agql")]
+    #[test]
+    fn hierarchical_file_matcher_rejects_bare_wildcard_exact_only_pattern() {
+        let json = FILE.replacen(
+            "\"authentication\":",
+            r#""scopeMatcher": {
+                "kind": "hierarchical",
+                "allowUniversalWildcard": true,
+                "exactOnlyScopePatterns": ["*"]
+            },
+            "authentication":"#,
+            1,
+        );
+        let error = RouterFileConfig::from_json(&json)
+            .unwrap()
+            .into_router_config_with(|name| {
+                Ok((name == "PRODUCTS_SCHEMA_TOKEN").then(|| "Bearer secret".to_owned()))
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("must not be the bare wildcard"));
     }
 }

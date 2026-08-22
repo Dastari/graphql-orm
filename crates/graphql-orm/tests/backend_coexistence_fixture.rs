@@ -71,8 +71,8 @@ fn assert_direct_host_dependency_resolves_one_exact_agql_auth_universe() {
         .as_str()
         .expect("agql-auth source must be present");
     assert!(
-        source.contains("rev=e6439aa034babb6827e9253977f760667ea6b7eb")
-            && source.ends_with("#e6439aa034babb6827e9253977f760667ea6b7eb"),
+        source.contains("rev=3bc38cd94794f1e868a9cc3a5551047b95a32105")
+            && source.ends_with("#3bc38cd94794f1e868a9cc3a5551047b95a32105"),
         "unexpected agql-auth source: {source}",
     );
 }

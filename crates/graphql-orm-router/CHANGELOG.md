@@ -18,8 +18,9 @@ supersedes: []
   from the optional resource-server matcher.
 - Updated the optional `agql-auth` adapter to 0.16.0 for consumer-supplied
   exact-only fixed scopes and resource-qualified scope patterns.
-- Applied the configured matcher uniformly to fixed and rendered operation
-  requirements. Subgraph resolver authorization remains authoritative.
+- Supplied the configured matcher to the existing authorization path shared by
+  fixed and rendered operation requirements; operation evaluation code is
+  unchanged. Subgraph resolver authorization remains authoritative.
 
 No descriptor, GraphQL schema, token wire, or stored-data migration is
 required. Hierarchical file configuration requires the `auth-agql` feature.

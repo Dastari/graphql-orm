@@ -10,16 +10,16 @@ use graphql_orm::graphql::orm::{
 use graphql_orm::graphql::orm::{RuntimeFieldState, RuntimeProjection};
 
 #[cfg(feature = "sqlite")]
-const _: () = assert!(
+const _: [(); 1] = [();
     <graphql_orm::graphql::orm::SqliteBackend as graphql_orm::graphql::orm::RuntimeRowDecoder>::RUNTIME_ROW_DECODING_SUPPORTED
-);
+        as usize];
 #[cfg(feature = "mssql")]
-const _: () = assert!(
+const _: [(); 1] = [();
     !<graphql_orm::graphql::orm::MssqlBackend as graphql_orm::graphql::orm::RuntimeRowDecoder>::RUNTIME_ROW_DECODING_SUPPORTED
-);
-const _: () = assert!(
+        as usize];
+const _: [(); 1] = [();
     !<graphql_orm::graphql::orm::NoDefaultBackend as graphql_orm::graphql::orm::RuntimeRowDecoder>::RUNTIME_ROW_DECODING_SUPPORTED
-);
+        as usize];
 
 fn collection_id(value: &str) -> CollectionId {
     CollectionId::new(value).expect("test collection ID")

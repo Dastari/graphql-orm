@@ -47,7 +47,7 @@ reviewed full SHA for the release:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.23.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.24.0", default-features = false, features = ["sqlite"] }
 ```
 
 Choose exactly the backend support needed by each service. Cargo can unify
