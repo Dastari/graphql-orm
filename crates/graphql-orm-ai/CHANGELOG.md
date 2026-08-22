@@ -18,6 +18,29 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.88.2] - 2026-08-22
+
+Persistent schema module: **0.63.0** (unchanged from 0.88.1).
+
+### Fixed
+
+- Codex app-server registrations can now admit an exact capability-delivery
+  session binding after validating its model, reasoning effort, and embedded
+  executable/sandbox registration identity. Retained thread creation, resume,
+  failed-bind cleanup, and detached cleanup all recognize that complete
+  binding instead of rejecting it as though it were a raw registration
+  fingerprint.
+
+### Security
+
+- Capability-session admission accepts the validated binding object, never an
+  arbitrary fingerprint. The admitted fingerprint remains bound to the exact
+  delivery mode, capability-index set, static bootstrap tools, provider
+  projection, model, reasoning effort, and immutable Codex registration.
+
+There is no schema, data, protected-payload, GraphQL SDL, backup or restore
+migration in this release.
+
 ## [0.88.1] - 2026-08-22
 
 Persistent schema module: **0.63.0** (unchanged from 0.88.0).

@@ -19,6 +19,27 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.88.1 to 0.88.2: retained capability-session admission
+
+Adopt `graphql-orm-ai` 0.88.2 from one reviewed full monorepo revision. The AI
+schema module remains **0.63.0**. There is no database, data, table, column,
+index, constraint, backfill, GraphQL SDL, protected-payload, backup or restore
+migration.
+
+Codex app-server hosts that persist
+`AiProviderSessionDescriptor::new_with_capability_binding` descriptors must
+install the same exact `AiProviderCapabilitySessionBinding` on the immutable
+`AiCodexAppServerRegistration` before constructing the provider and cleanup
+service. The registration rejects a binding unless its model and reasoning
+effort are admitted and its embedded registration identity equals the exact
+effort-bound executable, sandbox, launch-profile, bootstrap, and adapter
+identity.
+
+The admission overlay deliberately does not alter that underlying identity:
+the binding already incorporates it, avoiding a circular fingerprint. Hosts
+must not accept or reconstruct a bare final fingerprint. Existing raw
+registration descriptors remain compatible.
+
 ## 0.88.0 to 0.88.1: Codex FixedBroker schema projection
 
 Adopt `graphql-orm-ai` 0.88.1 from one reviewed full monorepo revision. The AI
