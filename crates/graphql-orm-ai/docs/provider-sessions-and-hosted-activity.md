@@ -110,6 +110,44 @@ and bind the new effort fingerprint. Pre-0.80 v3 registration fingerprints
 are accepted only by the deletion adapter for draining; they are never valid
 for a turn or resume.
 
+A retained capability-delivery descriptor persists the complete
+`AiProviderCapabilitySessionBinding::fingerprint()` instead of that raw value.
+Install the exact binding object on the Codex registration before constructing
+the provider and cleanup adapter:
+
+```rust
+let raw_registration =
+    registration.provider_session_fingerprint(selected_effort)?;
+let binding = AiProviderCapabilitySessionBinding::new(
+    delivery_mode,
+    capability_index_set_fingerprint,
+    static_bootstrap_tool_fingerprints,
+    provider_projection_version,
+    logical_model,
+    selected_effort,
+    raw_registration,
+)?;
+let registration = registration
+    .with_capability_session_binding(binding.clone())?;
+let descriptor = AiProviderSessionDescriptor::new_with_capability_binding(
+    ProviderKind::LocalHarness,
+    registration.provider_profile_id(),
+    registration.protocol_version(),
+    policy_fingerprint,
+    &binding,
+)?;
+```
+
+Admission validates the model, effort, delivery mode, and embedded raw
+registration identity; it never accepts a bare final fingerprint. The overlay
+does not change `registration.identity()` because the binding already embeds
+that value. Applying an identity-bearing registration builder afterward clears
+all prior capability admissions, so hosts install the binding last. The same
+exact admission fences empty-thread creation, retained turns, failed-bind
+discard, and detached cleanup. Frozen `EagerExact`, `ProviderDeferred`, and
+`FixedBroker` bindings are representable; `ClientDeferred` cannot freeze later
+definition installation into one Codex thread and remains rejected.
+
 For stateless operation the scope is one ephemeral Codex thread: the actor
 retains the selected effort through `thread/start` and its `turn/start`, then
 clears it only after the terminal turn notification. A later ephemeral thread
