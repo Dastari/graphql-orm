@@ -10,10 +10,10 @@ supersedes: []
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.89.0` with AI schema module
-`0.63.0`. It uses workspace `graphql-orm` `0.24.0`, backend-neutral
+`graphql-orm-ai` is at crate version `0.90.0` with AI schema module
+`0.63.0`. It uses workspace `graphql-orm` `0.25.0`, backend-neutral
 `graphql-orm-ai-tool-profiles` `0.9.0`, and external `agql-auth`
-`0.16.0` at `3bc38cd94794f1e868a9cc3a5551047b95a32105`.
+`0.17.0` at `82650a447f3b6875160254fa1293b3a0e305c224`.
 
 Completed stateless local-provider turns can carry a proof-bearing contained
 native-item refusal after authoritative usage settlement. Those runs close as

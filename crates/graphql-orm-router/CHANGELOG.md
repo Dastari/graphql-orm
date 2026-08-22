@@ -10,6 +10,23 @@ supersedes: []
 
 # Changelog
 
+## 0.3.0 - 2026-08-22
+
+- Added optional strict `authentication.roleScopeCatalogue` configuration for
+  a bounded, signed, versioned role-to-scope catalogue fetched alongside JWKS.
+- Access-token roles are validated and expanded through the neutral
+  `agql-auth` 0.17.0 provider contract. Expanded scopes are unioned with direct
+  scopes before the existing preflight matcher runs.
+- Initial retrieval, signature/key/issuer/audience/purpose binding, catalogue
+  structure, and lifetime are mandatory before readiness. Failed refresh keeps
+  a still-current complete snapshot; role-bearing credentials fail closed once
+  it is stale or expired. Direct-scope-only credentials remain independent.
+
+No membership, role name, scope value, private key, issuer endpoint, or cache
+authority is supplied by the router. Resolver authorization remains
+authoritative. Omission preserves 0.2.0 behavior; the optional catalogue
+requires the `auth-agql` feature.
+
 ## 0.2.0 - 2026-08-22
 
 - Added strict `scopeMatcher` file configuration. Omission and `kind: exact`

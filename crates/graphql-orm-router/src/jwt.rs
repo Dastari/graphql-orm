@@ -6,6 +6,11 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(feature = "auth-agql")]
+use agql_auth::{
+    RoleScopeCatalogueClaims, RoleScopeExpansionProvider, SignedRoleScopeCatalogue,
+    StaticRoleScopeExpansion, effective_scopes,
+};
 use futures::{StreamExt, future::BoxFuture};
 use jsonwebtoken::{
     Algorithm, DecodingKey, Validation, decode, decode_header,
@@ -25,8 +30,97 @@ const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_MAX_JWKS_BYTES: usize = 1024 * 1024;
+const DEFAULT_MAX_ROLE_SCOPE_CATALOGUE_BYTES: usize = 1024 * 1024;
 const MAX_JWKS_KEYS: usize = 128;
 const MAX_LEEWAY: Duration = Duration::from_secs(5 * 60);
+#[cfg(feature = "auth-agql")]
+const MAX_ACCESS_TOKEN_ROLES: usize = 256;
+#[cfg(feature = "auth-agql")]
+const MAX_ACCESS_TOKEN_ROLE_LENGTH: usize = 512;
+
+/// Remote signed role-scope catalogue configuration.
+#[derive(Clone)]
+pub struct RoleScopeCatalogueConfig {
+    url: Url,
+    audience: String,
+    cache_ttl: Duration,
+    max_body_bytes: usize,
+    allow_insecure_loopback_http: bool,
+}
+
+impl RoleScopeCatalogueConfig {
+    /// Creates secure defaults for one catalogue URL and signature audience.
+    pub fn new(url: impl AsRef<str>, audience: impl Into<String>) -> Result<Self, RouterError> {
+        let url = Url::parse(url.as_ref()).map_err(|_| {
+            invalid_configuration("role-scope catalogue URL is not a valid absolute URL")
+        })?;
+        Ok(Self {
+            url,
+            audience: audience.into(),
+            cache_ttl: DEFAULT_CACHE_TTL,
+            max_body_bytes: DEFAULT_MAX_ROLE_SCOPE_CATALOGUE_BYTES,
+            allow_insecure_loopback_http: false,
+        })
+    }
+
+    /// Sets the maximum age and signed lifetime accepted for one snapshot.
+    pub fn with_cache_ttl(mut self, cache_ttl: Duration) -> Self {
+        self.cache_ttl = cache_ttl;
+        self
+    }
+
+    /// Sets the maximum accepted response body size.
+    pub fn with_max_body_bytes(mut self, max_body_bytes: usize) -> Self {
+        self.max_body_bytes = max_body_bytes;
+        self
+    }
+
+    /// Permits plain HTTP only for an explicit loopback development endpoint.
+    pub fn allow_insecure_loopback_http_for_development(mut self, allow: bool) -> Self {
+        self.allow_insecure_loopback_http = allow;
+        self
+    }
+
+    #[cfg(feature = "auth-agql")]
+    fn validate(&self, refresh_interval: Duration) -> Result<(), RouterError> {
+        if self.audience.trim().is_empty() {
+            return Err(invalid_configuration(
+                "role-scope catalogue audience must not be empty",
+            ));
+        }
+        if self.cache_ttl.is_zero() || refresh_interval >= self.cache_ttl {
+            return Err(invalid_configuration(
+                "role-scope catalogue cache TTL must be greater than the authentication refresh interval",
+            ));
+        }
+        if self.max_body_bytes == 0 {
+            return Err(invalid_configuration(
+                "role-scope catalogue body limit must be greater than zero",
+            ));
+        }
+        validate_public_resource_url(
+            &self.url,
+            self.allow_insecure_loopback_http,
+            "role-scope catalogue",
+        )
+    }
+}
+
+impl fmt::Debug for RoleScopeCatalogueConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RoleScopeCatalogueConfig")
+            .field("origin", &redacted_origin(&self.url))
+            .field("audience", &self.audience)
+            .field("cache_ttl", &self.cache_ttl)
+            .field("max_body_bytes", &self.max_body_bytes)
+            .field(
+                "allow_insecure_loopback_http",
+                &self.allow_insecure_loopback_http,
+            )
+            .finish()
+    }
+}
 
 /// Whether the project-specific JWT `scopes` array is accepted during migration.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -69,6 +163,7 @@ pub struct JwksAuthenticationConfig {
     legacy_scope_claims: LegacyScopeClaims,
     allow_insecure_loopback_http: bool,
     clock: Arc<dyn AuthenticationClock>,
+    role_scope_catalogue: Option<RoleScopeCatalogueConfig>,
 }
 
 impl JwksAuthenticationConfig {
@@ -93,6 +188,7 @@ impl JwksAuthenticationConfig {
             legacy_scope_claims: LegacyScopeClaims::Reject,
             allow_insecure_loopback_http: false,
             clock: Arc::new(SystemAuthenticationClock),
+            role_scope_catalogue: None,
         })
     }
 
@@ -146,6 +242,12 @@ impl JwksAuthenticationConfig {
         self
     }
 
+    /// Enables verified role-to-scope expansion from a remote signed catalogue.
+    pub fn with_role_scope_catalogue(mut self, catalogue: RoleScopeCatalogueConfig) -> Self {
+        self.role_scope_catalogue = Some(catalogue);
+        self
+    }
+
     fn validate(&self) -> Result<(), RouterError> {
         if self.issuer.trim().is_empty() {
             return Err(invalid_configuration(
@@ -187,23 +289,20 @@ impl JwksAuthenticationConfig {
                 "authentication clock leeway must not exceed 300 seconds",
             ));
         }
-        if !self.jwks_url.username().is_empty()
-            || self.jwks_url.password().is_some()
-            || self.jwks_url.query().is_some()
-            || self.jwks_url.fragment().is_some()
-        {
+        validate_public_resource_url(
+            &self.jwks_url,
+            self.allow_insecure_loopback_http,
+            "authentication JWKS",
+        )?;
+        #[cfg(not(feature = "auth-agql"))]
+        if self.role_scope_catalogue.is_some() {
             return Err(invalid_configuration(
-                "authentication JWKS URL must not contain credentials, a query, or a fragment",
+                "role-scope catalogue expansion requires the auth-agql feature",
             ));
         }
-        match self.jwks_url.scheme() {
-            "https" => {}
-            "http" if self.allow_insecure_loopback_http && is_loopback_url(&self.jwks_url) => {}
-            _ => {
-                return Err(invalid_configuration(
-                    "authentication JWKS URL must use HTTPS (plain HTTP is available only for explicit loopback development)",
-                ));
-            }
+        #[cfg(feature = "auth-agql")]
+        if let Some(catalogue) = &self.role_scope_catalogue {
+            catalogue.validate(self.refresh_interval)?;
         }
         Ok(())
     }
@@ -222,6 +321,7 @@ impl fmt::Debug for JwksAuthenticationConfig {
             .field("max_jwks_bytes", &self.max_jwks_bytes)
             .field("leeway", &self.leeway)
             .field("legacy_scope_claims", &self.legacy_scope_claims)
+            .field("role_scope_catalogue", &self.role_scope_catalogue)
             .field(
                 "allow_insecure_loopback_http",
                 &self.allow_insecure_loopback_http,
@@ -236,6 +336,8 @@ pub struct JwksAuthenticationProvider {
     config: JwksAuthenticationConfig,
     client: Client,
     cache: Arc<RwLock<Option<JwksCache>>>,
+    #[cfg(feature = "auth-agql")]
+    role_scope_cache: Arc<RwLock<Option<RoleScopeCache>>>,
 }
 
 impl JwksAuthenticationProvider {
@@ -254,41 +356,19 @@ impl JwksAuthenticationProvider {
             config,
             client,
             cache: Arc::new(RwLock::new(None)),
+            #[cfg(feature = "auth-agql")]
+            role_scope_cache: Arc::new(RwLock::new(None)),
         })
     }
 
     async fn refresh_keys(&self) -> Result<(), AuthenticationError> {
-        let response = self
-            .client
-            .get(self.config.jwks_url.clone())
-            .send()
-            .await
-            .map_err(|_| AuthenticationError::unavailable("JWKS retrieval failed"))?;
-        if !response.status().is_success() {
-            return Err(AuthenticationError::unavailable(
-                "JWKS endpoint returned an unsuccessful status",
-            ));
-        }
-        if response
-            .content_length()
-            .is_some_and(|length| length > self.config.max_jwks_bytes as u64)
-        {
-            return Err(AuthenticationError::unavailable(
-                "JWKS response exceeded its configured body limit",
-            ));
-        }
-        let mut body = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk =
-                chunk.map_err(|_| AuthenticationError::unavailable("JWKS response read failed"))?;
-            if body.len().saturating_add(chunk.len()) > self.config.max_jwks_bytes {
-                return Err(AuthenticationError::unavailable(
-                    "JWKS response exceeded its configured body limit",
-                ));
-            }
-            body.extend_from_slice(&chunk);
-        }
+        let body = self
+            .fetch_bounded(
+                self.config.jwks_url.clone(),
+                self.config.max_jwks_bytes,
+                "JWKS",
+            )
+            .await?;
         let document = serde_json::from_slice::<JwkSet>(&body)
             .map_err(|_| AuthenticationError::unavailable("JWKS document is malformed"))?;
         let keys = validate_jwks(document)?;
@@ -298,6 +378,131 @@ impl JwksAuthenticationProvider {
             .write()
             .map_err(|_| AuthenticationError::unavailable("JWKS cache is unavailable"))?;
         *cache = Some(JwksCache { loaded_at, keys });
+        Ok(())
+    }
+
+    async fn fetch_bounded(
+        &self,
+        url: Url,
+        maximum_bytes: usize,
+        resource: &'static str,
+    ) -> Result<Vec<u8>, AuthenticationError> {
+        let response = self.client.get(url).send().await.map_err(|_| {
+            AuthenticationError::unavailable(format!("{resource} retrieval failed"))
+        })?;
+        if !response.status().is_success() {
+            return Err(AuthenticationError::unavailable(format!(
+                "{resource} endpoint returned an unsuccessful status"
+            )));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > maximum_bytes as u64)
+        {
+            return Err(AuthenticationError::unavailable(format!(
+                "{resource} response exceeded its configured body limit"
+            )));
+        }
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| {
+                AuthenticationError::unavailable(format!("{resource} response read failed"))
+            })?;
+            if body.len().saturating_add(chunk.len()) > maximum_bytes {
+                return Err(AuthenticationError::unavailable(format!(
+                    "{resource} response exceeded its configured body limit"
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    }
+
+    #[cfg(feature = "auth-agql")]
+    async fn refresh_role_scope_catalogue(&self) -> Result<(), AuthenticationError> {
+        let Some(config) = &self.config.role_scope_catalogue else {
+            return Ok(());
+        };
+        let body = self
+            .fetch_bounded(
+                config.url.clone(),
+                config.max_body_bytes,
+                "role-scope catalogue",
+            )
+            .await?;
+        let envelope = serde_json::from_slice::<SignedRoleScopeCatalogue>(&body).map_err(|_| {
+            AuthenticationError::unavailable("role-scope catalogue document is malformed")
+        })?;
+        envelope.validate_structure().map_err(|_| {
+            AuthenticationError::unavailable("role-scope catalogue document is invalid")
+        })?;
+        let header = decode_header(&envelope.signature).map_err(|_| {
+            AuthenticationError::unavailable("role-scope catalogue signature is malformed")
+        })?;
+        if header.alg != Algorithm::RS256 {
+            return Err(AuthenticationError::unavailable(
+                "role-scope catalogue signature algorithm is invalid",
+            ));
+        }
+        let kid = header
+            .kid
+            .as_deref()
+            .filter(|kid| !kid.is_empty())
+            .ok_or_else(|| {
+                AuthenticationError::unavailable("role-scope catalogue signature has no key ID")
+            })?;
+        let key = self.decoding_key(kid)?;
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_required_spec_claims(&["exp", "iat", "iss", "aud"]);
+        validation.set_issuer(&[self.config.issuer.as_str()]);
+        validation.set_audience(&[config.audience.as_str()]);
+        validation.validate_exp = false;
+        validation.validate_nbf = false;
+        let claims = decode::<RoleScopeCatalogueClaims>(&envelope.signature, &key, &validation)
+            .map_err(|_| {
+                AuthenticationError::unavailable("role-scope catalogue signature is invalid")
+            })?
+            .claims;
+        let now = unix_timestamp(self.config.clock.as_ref())?;
+        let maximum_lifetime = i64::try_from(config.cache_ttl.as_secs()).map_err(|_| {
+            AuthenticationError::unavailable("role-scope catalogue cache TTL is invalid")
+        })?;
+        claims
+            .validate_binding(
+                &envelope,
+                &self.config.issuer,
+                &config.audience,
+                now,
+                maximum_lifetime,
+            )
+            .map_err(|_| {
+                AuthenticationError::unavailable("role-scope catalogue signature is not bound")
+            })?;
+        let provider = StaticRoleScopeExpansion::new(&envelope.catalogue).map_err(|_| {
+            AuthenticationError::unavailable("role-scope catalogue expansion is invalid")
+        })?;
+        let expires_at = u64::try_from(claims.exp)
+            .ok()
+            .and_then(|value| UNIX_EPOCH.checked_add(Duration::from_secs(value)))
+            .ok_or_else(|| {
+                AuthenticationError::unavailable("role-scope catalogue expiry is invalid")
+            })?;
+        let mut cache = self.role_scope_cache.write().map_err(|_| {
+            AuthenticationError::unavailable("role-scope catalogue cache is unavailable")
+        })?;
+        *cache = Some(RoleScopeCache {
+            loaded_at: self.config.clock.now(),
+            expires_at,
+            provider,
+        });
+        Ok(())
+    }
+
+    async fn refresh_verification_state(&self) -> Result<(), AuthenticationError> {
+        self.refresh_keys().await?;
+        #[cfg(feature = "auth-agql")]
+        self.refresh_role_scope_catalogue().await?;
         Ok(())
     }
 
@@ -320,6 +525,41 @@ impl JwksAuthenticationProvider {
             AuthenticationError::invalid_credential("bearer credential references an unknown key")
         })
     }
+
+    #[cfg(feature = "auth-agql")]
+    fn expand_roles(
+        &self,
+        roles: &[String],
+        direct_scopes: Vec<String>,
+    ) -> Result<Vec<String>, AuthenticationError> {
+        let Some(config) = &self.config.role_scope_catalogue else {
+            return Ok(direct_scopes);
+        };
+        if roles.is_empty() {
+            return Ok(direct_scopes);
+        }
+        let now = self.config.clock.now();
+        let cache = self.role_scope_cache.read().map_err(|_| {
+            AuthenticationError::unavailable("role-scope catalogue cache is unavailable")
+        })?;
+        let cache = cache.as_ref().ok_or_else(|| {
+            AuthenticationError::unavailable("role-scope catalogue cache is not initialized")
+        })?;
+        let age = now.duration_since(cache.loaded_at).map_err(|_| {
+            AuthenticationError::unavailable(
+                "authentication clock moved before role-scope catalogue load time",
+            )
+        })?;
+        if age >= config.cache_ttl || now >= cache.expires_at {
+            return Err(AuthenticationError::unavailable(
+                "role-scope catalogue cache is stale",
+            ));
+        }
+        let expansion = cache.provider.expand_roles(roles).map_err(|_| {
+            AuthenticationError::unavailable("role-scope catalogue expansion failed")
+        })?;
+        Ok(effective_scopes(direct_scopes, &expansion))
+    }
 }
 
 impl fmt::Debug for JwksAuthenticationProvider {
@@ -339,7 +579,7 @@ impl fmt::Debug for JwksAuthenticationProvider {
 
 impl AuthenticationProvider for JwksAuthenticationProvider {
     fn initialize(&self) -> BoxFuture<'_, Result<(), AuthenticationError>> {
-        Box::pin(async move { self.refresh_keys().await })
+        Box::pin(async move { self.refresh_verification_state().await })
     }
 
     fn authenticate_bearer(
@@ -367,6 +607,8 @@ impl AuthenticationProvider for JwksAuthenticationProvider {
             .claims;
         validate_time_claims(&claims, self.config.clock.as_ref(), self.config.leeway)?;
         let scopes = parse_scope_claims(&claims.additional, self.config.legacy_scope_claims)?;
+        #[cfg(feature = "auth-agql")]
+        let scopes = self.expand_roles(&claims.roles, scopes)?;
         let expires_at = UNIX_EPOCH.checked_add(Duration::from_secs(claims.exp));
         let expires_at = expires_at.ok_or_else(invalid_token)?;
         AuthenticatedPrincipal::new(claims.sub, scopes, Some(expires_at))
@@ -381,7 +623,7 @@ impl AuthenticationProvider for JwksAuthenticationProvider {
     }
 
     fn refresh(&self) -> BoxFuture<'_, Result<(), AuthenticationError>> {
-        Box::pin(async move { self.refresh_keys().await })
+        Box::pin(async move { self.refresh_verification_state().await })
     }
 }
 
@@ -390,14 +632,46 @@ struct JwksCache {
     keys: BTreeMap<String, DecodingKey>,
 }
 
+#[cfg(feature = "auth-agql")]
+struct RoleScopeCache {
+    loaded_at: SystemTime,
+    expires_at: SystemTime,
+    provider: StaticRoleScopeExpansion,
+}
+
 #[derive(Deserialize)]
 struct JwtClaims {
     sub: String,
     exp: u64,
     #[serde(default)]
     nbf: Option<u64>,
+    #[cfg(feature = "auth-agql")]
+    #[serde(default, deserialize_with = "deserialize_roles")]
+    roles: Vec<String>,
     #[serde(flatten)]
     additional: BTreeMap<String, JsonValue>,
+}
+
+#[cfg(feature = "auth-agql")]
+fn deserialize_roles<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut roles = Vec::<String>::deserialize(deserializer)?;
+    if roles.len() > MAX_ACCESS_TOKEN_ROLES
+        || roles.iter().any(|role| {
+            role.is_empty()
+                || role.len() > MAX_ACCESS_TOKEN_ROLE_LENGTH
+                || role
+                    .bytes()
+                    .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        })
+    {
+        return Err(serde::de::Error::custom("invalid access-token roles"));
+    }
+    roles.sort();
+    roles.dedup();
+    Ok(roles)
 }
 
 fn validate_jwks(document: JwkSet) -> Result<BTreeMap<String, DecodingKey>, AuthenticationError> {
@@ -450,11 +724,9 @@ fn validate_time_claims(
     clock: &dyn AuthenticationClock,
     leeway: Duration,
 ) -> Result<(), AuthenticationError> {
-    let now = clock
-        .now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| AuthenticationError::unavailable("authentication clock precedes unix epoch"))?
-        .as_secs();
+    let now = u64::try_from(unix_timestamp(clock)?).map_err(|_| {
+        AuthenticationError::unavailable("authentication clock precedes unix epoch")
+    })?;
     let skew = leeway.as_secs();
     if claims.exp.saturating_add(skew) <= now {
         return Err(AuthenticationError::invalid_credential(
@@ -468,6 +740,16 @@ fn validate_time_claims(
         return Err(invalid_token());
     }
     Ok(())
+}
+
+fn unix_timestamp(clock: &dyn AuthenticationClock) -> Result<i64, AuthenticationError> {
+    let seconds = clock
+        .now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| AuthenticationError::unavailable("authentication clock precedes unix epoch"))?
+        .as_secs();
+    i64::try_from(seconds)
+        .map_err(|_| AuthenticationError::unavailable("authentication clock is out of range"))
 }
 
 pub(crate) fn parse_scope_claims(
@@ -542,12 +824,35 @@ fn valid_scope_token(scope: &str) -> bool {
             .all(|byte| matches!(byte, 0x21 | 0x23..=0x5b | 0x5d..=0x7e))
 }
 
-fn invalid_configuration(message: &'static str) -> RouterError {
+fn invalid_configuration(message: impl Into<String>) -> RouterError {
     RouterError::new(RouterErrorKind::InvalidConfiguration, message)
 }
 
 fn invalid_token() -> AuthenticationError {
     AuthenticationError::invalid_credential("invalid bearer credential")
+}
+
+fn validate_public_resource_url(
+    url: &Url,
+    allow_insecure_loopback_http: bool,
+    resource: &'static str,
+) -> Result<(), RouterError> {
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(invalid_configuration(format!(
+            "{resource} URL must not contain credentials, a query, or a fragment"
+        )));
+    }
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if allow_insecure_loopback_http && is_loopback_url(url) => Ok(()),
+        _ => Err(invalid_configuration(format!(
+            "{resource} URL must use HTTPS (plain HTTP is available only for explicit loopback development)"
+        ))),
+    }
 }
 
 fn is_loopback_url(url: &Url) -> bool {

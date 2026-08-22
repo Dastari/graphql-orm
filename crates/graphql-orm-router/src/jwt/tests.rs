@@ -12,6 +12,12 @@ use std::{
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, jwk::Jwk};
 use serde_json::{Value as JsonValue, json};
 
+#[cfg(feature = "auth-agql")]
+use agql_auth::{
+    RoleScopeCatalogue, RoleScopeCatalogueClaims, RoleScopeDefinition, RoleScopeGrant,
+    SignedRoleScopeCatalogue,
+};
+
 use super::*;
 use crate::{AuthenticationErrorKind, AuthenticationProvider};
 
@@ -159,6 +165,32 @@ fn token(kid: &str, claims: JsonValue) -> String {
     .unwrap()
 }
 
+#[cfg(feature = "auth-agql")]
+fn signed_catalogue(kid: &str, issued_at: i64, expires_at: i64) -> String {
+    let catalogue = RoleScopeCatalogue::new(
+        "revision-7",
+        [
+            RoleScopeDefinition::new("inventory.read"),
+            RoleScopeDefinition::new("inventory.write").exact_only(),
+            RoleScopeDefinition::new("profile.read"),
+        ],
+        [RoleScopeGrant::new(
+            "inventory-operator",
+            "Inventory operator",
+            ["inventory.read", "inventory.write"],
+        )],
+    );
+    let claims = RoleScopeCatalogueClaims::new(
+        catalogue.clone(),
+        "https://issuer.test",
+        "role-catalogue-clients",
+        issued_at,
+        expires_at,
+    );
+    let signature = token(kid, serde_json::to_value(claims).unwrap());
+    serde_json::to_string(&SignedRoleScopeCatalogue::new(catalogue, signature)).unwrap()
+}
+
 fn claims(exp: u64) -> JsonValue {
     json!({
         "sub": "user-7",
@@ -183,6 +215,27 @@ fn provider(
             .with_legacy_scope_claims(legacy)
             .with_clock(clock)
             .allow_insecure_loopback_http_for_development(true);
+    JwksAuthenticationProvider::new(config).unwrap()
+}
+
+#[cfg(feature = "auth-agql")]
+fn provider_with_catalogue(
+    keys: &JwksFixture,
+    catalogue: &JwksFixture,
+    clock: Arc<TestClock>,
+) -> JwksAuthenticationProvider {
+    let role_scope = RoleScopeCatalogueConfig::new(catalogue.url(), "role-catalogue-clients")
+        .unwrap()
+        .with_cache_ttl(Duration::from_secs(10))
+        .allow_insecure_loopback_http_for_development(true);
+    let config =
+        JwksAuthenticationConfig::new(keys.url(), "https://issuer.test", ["graphql-router"])
+            .unwrap()
+            .with_cache_ttl(Duration::from_secs(100))
+            .with_refresh_interval(Duration::from_secs(5))
+            .with_clock(clock)
+            .allow_insecure_loopback_http_for_development(true)
+            .with_role_scope_catalogue(role_scope);
     JwksAuthenticationProvider::new(config).unwrap()
 }
 
@@ -411,4 +464,98 @@ fn configuration_and_debug_output_keep_secure_defaults_and_redact_keys() {
     assert!(!diagnostics.contains(&modulus));
     assert!(!diagnostics.contains("BEGIN RSA"));
     assert!(diagnostics.contains("cached_key_count"));
+}
+
+#[cfg(feature = "auth-agql")]
+#[test]
+fn signed_role_catalogue_expands_roles_and_preserves_direct_scopes() {
+    let keys = JwksFixture::start(jwks("key-a"));
+    let catalogue = JwksFixture::start(signed_catalogue("key-a", 1_000, 1_010));
+    let clock = Arc::new(TestClock::at(1_000));
+    let provider = provider_with_catalogue(&keys, &catalogue, clock);
+    initialize(&provider).unwrap();
+    assert_eq!(keys.requests.load(Ordering::Relaxed), 1);
+    assert_eq!(catalogue.requests.load(Ordering::Relaxed), 1);
+
+    let credential = token(
+        "key-a",
+        json!({
+            "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
+            "exp": 1_100, "scope": "profile.read",
+            "roles": ["inventory-operator", "unknown-role"]
+        }),
+    );
+    assert_eq!(
+        provider.authenticate_bearer(&credential).unwrap().scopes(),
+        &["inventory.read", "inventory.write", "profile.read"]
+    );
+}
+
+#[cfg(feature = "auth-agql")]
+#[test]
+fn role_catalogue_is_mandatory_current_and_verified_for_role_bearers() {
+    let keys = JwksFixture::start(jwks("key-a"));
+    let catalogue = JwksFixture::start(signed_catalogue("key-a", 1_000, 1_010));
+    let clock = Arc::new(TestClock::at(1_000));
+    let provider = provider_with_catalogue(&keys, &catalogue, clock.clone());
+    initialize(&provider).unwrap();
+    let role_credential = token(
+        "key-a",
+        json!({
+            "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
+            "exp": 1_100, "roles": ["inventory-operator"]
+        }),
+    );
+    provider.authenticate_bearer(&role_credential).unwrap();
+
+    catalogue.set_status(503);
+    assert_eq!(
+        refresh(&provider).unwrap_err().kind(),
+        AuthenticationErrorKind::Unavailable
+    );
+    provider.authenticate_bearer(&role_credential).unwrap();
+    clock.set(1_010);
+    assert_eq!(
+        provider
+            .authenticate_bearer(&role_credential)
+            .unwrap_err()
+            .kind(),
+        AuthenticationErrorKind::Unavailable
+    );
+
+    let direct_only = token(
+        "key-a",
+        json!({
+            "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
+            "exp": 1_100, "scope": "profile.read"
+        }),
+    );
+    assert_eq!(
+        provider.authenticate_bearer(&direct_only).unwrap().scopes(),
+        &["profile.read"]
+    );
+
+    let malformed = token(
+        "key-a",
+        json!({
+            "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
+            "exp": 1_100, "roles": ["bad role"]
+        }),
+    );
+    assert_eq!(
+        provider.authenticate_bearer(&malformed).unwrap_err().kind(),
+        AuthenticationErrorKind::InvalidCredential
+    );
+}
+
+#[cfg(feature = "auth-agql")]
+#[test]
+fn forged_role_catalogue_fails_router_initialization() {
+    let keys = JwksFixture::start(jwks("key-a"));
+    let catalogue = JwksFixture::start(signed_catalogue("other-key", 1_000, 1_010));
+    let provider = provider_with_catalogue(&keys, &catalogue, Arc::new(TestClock::at(1_000)));
+    assert_eq!(
+        initialize(&provider).unwrap_err().kind(),
+        AuthenticationErrorKind::InvalidCredential
+    );
 }

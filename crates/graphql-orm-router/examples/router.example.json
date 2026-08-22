@@ -6,7 +6,13 @@
     "issuer": "https://identity.example",
     "audiences": ["graphql-router"],
     "refreshIntervalSeconds": 300,
-    "cacheTtlSeconds": 900
+    "cacheTtlSeconds": 900,
+    "roleScopeCatalogue": {
+      "url": "https://identity.example/auth/catalogue",
+      "audience": "graphql-resource-servers",
+      "cacheTtlSeconds": 900,
+      "maxBodyBytes": 1048576
+    }
   },
   "scopeMatcher": {
     "kind": "exact"

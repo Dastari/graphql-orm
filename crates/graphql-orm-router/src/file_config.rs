@@ -12,9 +12,9 @@ use agql_auth::{HierarchicalScopeMatch, HierarchicalScopeOptions};
 use crate::AgqlScopeMatcher;
 use crate::{
     AdminConfig, ExactScopeMatcher, JwksAuthenticationConfig, JwksAuthenticationProvider,
-    LegacyScopeClaims, NetworkCidr, NetworkPolicy, RequestLimits, RouterConfig, RouterError,
-    RouterErrorKind, RouterLogLevel, RouterTelemetryConfig, StaticSubgraph, SubscriptionConfig,
-    TrustedSubgraph,
+    LegacyScopeClaims, NetworkCidr, NetworkPolicy, RequestLimits, RoleScopeCatalogueConfig,
+    RouterConfig, RouterError, RouterErrorKind, RouterLogLevel, RouterTelemetryConfig,
+    StaticSubgraph, SubscriptionConfig, TrustedSubgraph,
 };
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -129,6 +129,20 @@ impl RouterFileConfig {
                 .allow_insecure_loopback_http_for_development(
                     authentication.allow_insecure_loopback_jwks,
                 );
+            if let Some(catalogue) = authentication.role_scope_catalogue {
+                let mut role_scope =
+                    RoleScopeCatalogueConfig::new(catalogue.url, catalogue.audience)?;
+                if let Some(seconds) = catalogue.cache_ttl_seconds {
+                    role_scope = role_scope.with_cache_ttl(Duration::from_secs(seconds));
+                }
+                if let Some(bytes) = catalogue.max_body_bytes {
+                    role_scope = role_scope.with_max_body_bytes(bytes);
+                }
+                role_scope = role_scope.allow_insecure_loopback_http_for_development(
+                    catalogue.allow_insecure_loopback_http,
+                );
+                jwks = jwks.with_role_scope_catalogue(role_scope);
+            }
             config = config
                 .with_authentication_provider(Arc::new(JwksAuthenticationProvider::new(jwks)?));
         }
@@ -271,6 +285,18 @@ struct FileAuthentication {
     accept_legacy_scopes: bool,
     #[serde(default)]
     allow_insecure_loopback_jwks: bool,
+    role_scope_catalogue: Option<FileRoleScopeCatalogue>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FileRoleScopeCatalogue {
+    url: String,
+    audience: String,
+    cache_ttl_seconds: Option<u64>,
+    max_body_bytes: Option<usize>,
+    #[serde(default)]
+    allow_insecure_loopback_http: bool,
 }
 
 /// File-owned scope policy. Omission and `kind: exact` preserve the router's
@@ -844,6 +870,57 @@ mod tests {
                 .to_string()
                 .contains("kind `exact` does not accept hierarchical options")
         );
+    }
+
+    #[cfg(feature = "auth-agql")]
+    #[test]
+    fn signed_role_scope_catalogue_file_configuration_is_strict_and_opt_in() {
+        let json = FILE.replacen(
+            r#""audiences": ["router"]"#,
+            r#""audiences": ["router"],
+            "refreshIntervalSeconds": 30,
+            "roleScopeCatalogue": {
+                "url": "https://identity.example/role-scopes",
+                "audience": "resource-servers",
+                "cacheTtlSeconds": 120,
+                "maxBodyBytes": 262144
+            }"#,
+            1,
+        );
+        RouterFileConfig::from_json(&json)
+            .unwrap()
+            .into_router_config_with(|name| {
+                Ok((name == "PRODUCTS_SCHEMA_TOKEN").then(|| "Bearer secret".to_owned()))
+            })
+            .unwrap();
+
+        let unknown = json.replacen(
+            r#""maxBodyBytes": 262144"#,
+            r#""maxBodyBytes": 262144, "consumerPolicy": true"#,
+            1,
+        );
+        assert!(RouterFileConfig::from_json(&unknown).is_err());
+    }
+
+    #[cfg(not(feature = "auth-agql"))]
+    #[test]
+    fn signed_role_scope_catalogue_requires_auth_agql_feature() {
+        let json = FILE.replacen(
+            r#""audiences": ["router"]"#,
+            r#""audiences": ["router"],
+            "roleScopeCatalogue": {
+                "url": "https://identity.example/role-scopes",
+                "audience": "resource-servers"
+            }"#,
+            1,
+        );
+        let error = RouterFileConfig::from_json(&json)
+            .unwrap()
+            .into_router_config_with(|name| {
+                Ok((name == "PRODUCTS_SCHEMA_TOKEN").then(|| "Bearer secret".to_owned()))
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("auth-agql"));
     }
 
     #[cfg(feature = "auth-agql")]

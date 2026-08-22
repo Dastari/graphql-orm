@@ -43,6 +43,7 @@ The public field-level source contracts are:
 | [`RouterTelemetryConfig`](../src/config.rs) | Log and optional Prometheus listener settings. |
 | [`AdminConfig`](../src/config.rs) | Separate authenticated administration listener and scopes. |
 | [`JwksAuthenticationConfig`](../src/jwt.rs) | RS256 public-key verification, issuer/audience, cache, and bounded JWKS fetch. |
+| [`RoleScopeCatalogueConfig`](../src/jwt.rs) | Optional signed role-to-scope catalogue retrieval and cache bounds. |
 | [`NetworkPolicy`](../src/network.rs) | Dynamic destination host/port/CIDR/DNS policy. |
 | [`RouterFileConfig`](../src/file_config.rs) | Strict file representation and environment-secret mapping. |
 
@@ -85,6 +86,21 @@ array. JWKS uses HTTPS. Plain HTTP is accepted only for loopback when
 `allowInsecureLoopbackJwks` is explicitly true. Optional bounds are
 `cacheTtlSeconds`, `refreshIntervalSeconds`, `requestTimeoutMs`,
 `maxJwksBytes`, and `leewaySeconds`. `acceptLegacyScopes` defaults false.
+
+`roleScopeCatalogue` is optional and requires `auth-agql`. It accepts `url`,
+`audience`, `cacheTtlSeconds`, `maxBodyBytes`, and
+`allowInsecureLoopbackHttp`. Its URL is HTTPS-only except for explicit
+loopback development, has no credentials/query/fragment, and uses the
+authentication request timeout and refresh interval. The refresh interval must
+be shorter than the catalogue TTL. Startup verifies the RS256 signature with
+the JWKS cache and binds the exact catalogue, issuer, audience, purpose, and
+signed lifetime before readiness.
+
+When configured, well-formed token roles expand through the current verified
+catalogue and are unioned with direct token scopes. Unknown roles grant
+nothing. Role-bearing credentials fail closed when no current verified
+catalogue exists; direct-scope-only credentials do not depend on that optional
+authority source.
 
 The router validates RS256 public keys only. Configuration has no private-key,
 token-signing, session, refresh-token, or RSA-decryption field.
