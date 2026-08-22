@@ -10,6 +10,14 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.3.0 to 0.3.1
+
+Align direct `agql-auth` consumers to 0.17.1 at reviewed full revision
+`b792241b7d9bb46bad81dde4534ae5b39857f614` and rebuild the router from the
+same reviewed monorepo revision. Existing configuration, catalogue expansion,
+scope matching, and accepted token semantics are unchanged. No descriptor,
+GraphQL schema, stored-data, or router configuration migration is required.
+
 ## 0.2.0 to 0.3.0
 
 Align direct `agql-auth` consumers to 0.17.0 at the reviewed full revision.

@@ -10,6 +10,17 @@ supersedes: []
 
 # Changelog
 
+## 0.3.1 - 2026-08-22
+
+- Aligned the optional resource-server adapter to `agql-auth` 0.17.1 at merged
+  revision `b792241b7d9bb46bad81dde4534ae5b39857f614`.
+- The upstream patch omits default-valued session-context fields only when
+  issuing tokens. Router validation, signed role-catalogue expansion, scope
+  matching, configuration, and authorization preflight are unchanged.
+
+No router configuration, descriptor, GraphQL schema, token acceptance,
+membership, or stored-data migration is required.
+
 ## 0.3.0 - 2026-08-22
 
 - Added optional strict `authentication.roleScopeCatalogue` configuration for

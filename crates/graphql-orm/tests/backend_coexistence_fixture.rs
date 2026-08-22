@@ -66,13 +66,13 @@ fn assert_direct_host_dependency_resolves_one_exact_agql_auth_universe() {
         .filter(|package| package["name"] == "agql-auth")
         .collect::<Vec<_>>();
     assert_eq!(agql_auth.len(), 1, "resolved metadata:\n{metadata}");
-    assert_eq!(agql_auth[0]["version"], "0.17.0");
+    assert_eq!(agql_auth[0]["version"], "0.17.1");
     let source = agql_auth[0]["source"]
         .as_str()
         .expect("agql-auth source must be present");
     assert!(
-        source.contains("rev=82650a447f3b6875160254fa1293b3a0e305c224")
-            && source.ends_with("#82650a447f3b6875160254fa1293b3a0e305c224"),
+        source.contains("rev=b792241b7d9bb46bad81dde4534ae5b39857f614")
+            && source.ends_with("#b792241b7d9bb46bad81dde4534ae5b39857f614"),
         "unexpected agql-auth source: {source}",
     );
 }
