@@ -26,7 +26,7 @@ This unpublished package is Git-only:
 
 ```toml
 [dependencies]
-graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.2.0" }
+graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.3.0" }
 ```
 
 Enable `auth-agql` only when adapting a separately configured
@@ -67,7 +67,7 @@ composition warnings before serving.
 
 | Surface | Default or boundary |
 | --- | --- |
-| Authentication | Fail-closed; anonymous mode is explicit development-only. |
+| Authentication | Fail-closed; optional signed role expansion requires `auth-agql`. |
 | Scope matching | Exact by default; hierarchical matching requires `auth-agql` and explicit file or programmatic configuration. |
 | Public path | `/graphql`; `/health` and `/readiness` are also exposed. |
 | Subgraphs | At least one static source; file configuration requires strict JSON. |

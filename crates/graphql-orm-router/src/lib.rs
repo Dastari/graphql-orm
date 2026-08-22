@@ -81,7 +81,7 @@ pub use auth::{
 };
 pub use jwt::{
     AuthenticationClock, JwksAuthenticationConfig, JwksAuthenticationProvider, LegacyScopeClaims,
-    SystemAuthenticationClock,
+    RoleScopeCatalogueConfig, SystemAuthenticationClock,
 };
 pub use lifecycle::{
     RouterHandle, RouterStatus, SchemaRefreshOutcome, SubgraphRuntimeState, SubgraphSourceKind,

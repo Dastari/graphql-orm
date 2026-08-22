@@ -10,6 +10,26 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.2.0 to 0.3.0
+
+Align direct `agql-auth` consumers to 0.17.0 at the reviewed full revision.
+Existing configurations remain unchanged when `roleScopeCatalogue` is omitted.
+
+To adopt compact role grants, first publish a signed
+`agql_auth::SignedRoleScopeCatalogue`, then build the router with `auth-agql`
+and configure `authentication.roleScopeCatalogue` with its HTTPS URL, exact
+signature audience, cache TTL, and body limit. The authentication refresh
+interval must be shorter than the catalogue TTL. Run `--check` while the
+catalogue and JWKS endpoints are available; initial verification is a readiness
+gate.
+
+Only after every resource server expands the same verified role IDs should an
+issuer remove expanded scopes from access tokens. A role-bearing token is
+denied when the catalogue is absent, forged, expired, stale, or invalid. A
+failed refresh preserves a still-current snapshot. Roll back by restoring
+expanded scope issuance and removing `roleScopeCatalogue` after all compact
+tokens expire.
+
 ## 0.1.4 to 0.2.0
 
 Replace the reviewed full-revision pin and rebuild the router. Hosts that also
