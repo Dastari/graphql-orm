@@ -19,6 +19,29 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.87.0 to 0.88.0: direct GPT-5.6 dynamic tools on Codex 0.148.0
+
+Adopt `graphql-orm-ai` 0.88.0 from one reviewed full monorepo revision. The AI
+schema module remains **0.63.0**. There is no database, data, table, column,
+index, constraint, backfill, GraphQL SDL, protected-payload, backup or restore
+migration.
+
+Hosts must continue applying
+`AiCodexAppServerLaunchProfile::codex_arguments()` unchanged. On Codex 0.148.0,
+the profile now omits only `--disable code_mode_host`: an otherwise identical
+GPT-5.6 Luna probe completed without calling its offered direct tool when that
+argument was present, and emitted `dynamicToolCall` / `item/tool/call` when it
+was absent. Do not infer that Code Mode or another native surface is admitted.
+The actor still sends `features.code_mode_host=false`,
+`features.code_mode=false`, `features.code_mode_only=false`, and every other
+closed feature setting per thread; the process sandbox and protocol actor
+continue to deny shell, file, MCP, browser, hosted-search, collaboration,
+image, and arbitrary server-request items.
+
+Before changing Codex versions, run a retained direct-tool readiness probe and
+the negative native-item lifecycle tests. A non-dynamic route or any native
+item must fail readiness rather than falling back to Code Mode or execution.
+
 ## 0.86.0 to 0.87.0: retained dynamic-tool readiness input
 
 Adopt `graphql-orm-ai` 0.87.0 from one reviewed full monorepo revision. The AI

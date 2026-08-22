@@ -60,6 +60,7 @@ const OPTED_OUT_NOTIFICATION_METHODS: [&str; 5] = [
 const REMOTE_CONTROL_STATUS_CHANGED: &str = "remoteControl/status/changed";
 const RUNTIME_WARNING: &str = "warning";
 const THREAD_TOKEN_USAGE_UPDATED: &str = "thread/tokenUsage/updated";
+const CODE_MODE_HOST_FEATURE: &str = "code_mode_host";
 
 const DYNAMIC_TOOLS_ONLY_DISABLED_FEATURES: &[&str] = &[
     "apps",
@@ -274,15 +275,27 @@ impl AiCodexAppServerLaunchProfile {
     ///
     /// The dynamic profile deliberately disables every native execution,
     /// browser, hosted-search, connector, collaboration, image, plugin, and
-    /// interactive tool feature it relies on being absent. The factory must
-    /// also clear the environment, use a private configuration home containing
-    /// no project configuration or MCP servers, use an empty working
-    /// directory, and apply its reviewed external sandbox.
+    /// interactive tool feature it relies on being absent. Codex 0.148.0 is
+    /// the measured exception for the internal `code_mode_host` process gate:
+    /// disabling that one gate suppresses direct `dynamicToolCall` delivery,
+    /// so it remains available at process launch while Code Mode, Code
+    /// Mode-only routing, and the host itself remain false in the closed
+    /// per-thread configuration. The factory must also clear the environment,
+    /// use a private configuration home containing no project configuration
+    /// or MCP servers, use an empty working directory, and apply its reviewed
+    /// external sandbox.
     #[must_use]
     pub fn codex_arguments(self) -> Vec<&'static str> {
         let mut arguments = vec!["app-server", "--stdio", "--strict-config"];
         if self.supports_experimental_dynamic_tools() {
             for feature in DYNAMIC_TOOLS_ONLY_DISABLED_FEATURES {
+                // Codex 0.148.0 suppresses direct `dynamicToolCall` delivery
+                // when this process-level feature gate is disabled. The
+                // per-thread configuration below still sets it false beside
+                // Code Mode and every model-native tool surface.
+                if *feature == CODE_MODE_HOST_FEATURE {
+                    continue;
+                }
                 arguments.extend(["--disable", *feature]);
             }
         }
@@ -7426,6 +7439,15 @@ pub(crate) mod tests {
         );
         assert!(!arguments.contains(&"--enable"));
         for feature in DYNAMIC_TOOLS_ONLY_DISABLED_FEATURES {
+            if *feature == CODE_MODE_HOST_FEATURE {
+                assert!(
+                    !arguments
+                        .windows(2)
+                        .any(|pair| pair == ["--disable", *feature]),
+                    "Codex 0.148.0 requires the process-level {feature} gate for direct dynamicToolCall delivery"
+                );
+                continue;
+            }
             assert!(
                 arguments
                     .windows(2)
@@ -10360,6 +10382,43 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn direct_dynamic_tool_turn_rejects_every_native_item_surface() {
+        let input = AiCodexAppServerTurnInput::try_from_dynamic_request(dynamic_model_request())
+            .expect("dynamic request should convert");
+        for item_type in [
+            "commandExecution",
+            "fileChange",
+            "mcpToolCall",
+            "collabToolCall",
+            "webSearch",
+            "imageView",
+        ] {
+            for (method, timestamp) in [
+                ("item/started", "startedAtMs"),
+                ("item/completed", "completedAtMs"),
+            ] {
+                let mut actor = initialized_protocol_actor();
+                let thread_id = start_bound_dynamic_thread(&mut actor, input.tools());
+                start_bound_dynamic_turn(&mut actor, &thread_id, &input, "turn-native-1", 3);
+                let mut params = json!({
+                    "item": {"type": item_type, "id": "native-item-1"},
+                    "threadId": thread_id,
+                    "turnId": "turn-native-1",
+                });
+                params
+                    .as_object_mut()
+                    .expect("native item params should be an object")
+                    .insert(timestamp.to_owned(), json!(1));
+                let frame = lifecycle_notification(method, params);
+                assert!(
+                    matches!(actor.accept(&frame), Err(ProviderError::Rejected)),
+                    "native item {item_type} at {method} must fail the direct dynamic-tool turn"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn protocol_accepts_only_correlated_responses_and_allowlisted_notifications() {
         let mut unbound =
             AiCodexAppServerProtocolActor::new(16 * 1024).expect("test guard should validate");
@@ -10608,6 +10667,13 @@ pub(crate) mod tests {
         assert!(start.contains("\"sandbox\":\"read-only\""));
         let start_value: Value =
             serde_json::from_str(start.trim()).expect("dynamic start should remain valid JSON");
+        for feature in DYNAMIC_TOOLS_ONLY_DISABLED_FEATURES {
+            assert_eq!(
+                start_value.pointer(&format!("/params/config/features.{feature}")),
+                Some(&Value::Bool(false)),
+                "thread config must disable native feature {feature}"
+            );
+        }
         assert_eq!(
             start_value.pointer("/params/environments"),
             Some(&json!([]))
@@ -10622,6 +10688,14 @@ pub(crate) mod tests {
         );
         assert_eq!(
             start_value.pointer("/params/config/features.code_mode"),
+            Some(&Value::Bool(false))
+        );
+        assert_eq!(
+            start_value.pointer("/params/config/features.code_mode_host"),
+            Some(&Value::Bool(false))
+        );
+        assert_eq!(
+            start_value.pointer("/params/config/features.code_mode_only"),
             Some(&Value::Bool(false))
         );
         assert_eq!(
