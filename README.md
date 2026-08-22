@@ -42,12 +42,12 @@ schema changes explicitly.
 
 Packages are distributed from this repository, not crates.io. Pin the reviewed
 release revision, not a moving branch or tag. The current coordinated
-`graphql-orm` version is 0.25.0. Replace the placeholder below with the final
+`graphql-orm` version is 0.25.1. Replace the placeholder below with the final
 reviewed full SHA for the release:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.25.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.25.1", default-features = false, features = ["sqlite"] }
 ```
 
 Choose exactly the backend support needed by each service. Cargo can unify

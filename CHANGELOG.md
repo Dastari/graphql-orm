@@ -14,6 +14,20 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.25.1 - 2026-08-22
+
+Companion macros crate: `graphql-orm-macros` **0.25.1**. Generated ORM and
+database behavior are unchanged.
+
+- Aligned the optional `auth-agql` bridge to `agql-auth` 0.17.1 at merged full
+  revision `b792241b7d9bb46bad81dde4534ae5b39857f614`, retaining one public auth
+  type universe for direct consumers.
+- The upstream patch omits only default-valued session-context fields during
+  serialization. Bridge projection, authorization, schema, database policy,
+  and generated resolver behavior are unchanged.
+- The companion macro version remains aligned as required by the workspace
+  release contract; its emitted code and public behavior are unchanged.
+
 ## 0.25.0 - 2026-08-22
 
 Companion macros crate: `graphql-orm-macros` **0.25.0**. Generated ORM and
