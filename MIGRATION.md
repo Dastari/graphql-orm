@@ -13,6 +13,16 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.25.1 to 0.26.0: agql-auth 0.18.0 alignment
+
+Git consumers using `auth-agql` must align direct `agql-auth` dependencies to
+0.18.0 at merged revision `527d15d28e3c295a6f6b5e6d74559a7aecdc1322`.
+Adopt aligned `graphql-orm` and `graphql-orm-macros` 0.26.0 from the same
+reviewed monorepo revision. The bridge remains projection-only. Hosts adopting
+typed authorization-role grants follow the upstream issuer/resource-server
+rollout; no ORM schema, migration, generated-code, database-policy, or
+stored-data change is required.
+
 ## 0.25.0 to 0.25.1: agql-auth 0.17.1 alignment
 
 Git consumers using `auth-agql` must align direct `agql-auth` dependencies to

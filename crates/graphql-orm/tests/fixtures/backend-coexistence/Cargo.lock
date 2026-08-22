@@ -10,8 +10,8 @@ checksum = "fe438c63458706e03479442743baae6c88256498e6431708f6dfc520a26515d3"
 
 [[package]]
 name = "agql-auth"
-version = "0.17.1"
-source = "git+https://github.com/Dastari/agql-auth.git?rev=b792241b7d9bb46bad81dde4534ae5b39857f614#b792241b7d9bb46bad81dde4534ae5b39857f614"
+version = "0.18.0"
+source = "git+https://github.com/Dastari/agql-auth.git?rev=527d15d28e3c295a6f6b5e6d74559a7aecdc1322#527d15d28e3c295a6f6b5e6d74559a7aecdc1322"
 dependencies = [
  "argon2",
  "async-graphql",
@@ -1304,7 +1304,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.25.1"
+version = "0.26.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -1329,7 +1329,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai"
-version = "0.90.1"
+version = "0.91.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -1372,7 +1372,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.25.1"
+version = "0.26.0"
 dependencies = [
  "convert_case",
  "proc-macro2",

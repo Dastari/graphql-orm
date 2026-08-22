@@ -73,6 +73,8 @@ struct JwksFixture {
     body: Arc<Mutex<String>>,
     status: Arc<AtomicU16>,
     requests: Arc<AtomicUsize>,
+    #[cfg(feature = "auth-agql")]
+    last_request: Arc<Mutex<String>>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -85,10 +87,14 @@ impl JwksFixture {
         let body = Arc::new(Mutex::new(body));
         let status = Arc::new(AtomicU16::new(200));
         let requests = Arc::new(AtomicUsize::new(0));
+        #[cfg(feature = "auth-agql")]
+        let last_request = Arc::new(Mutex::new(String::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let thread_body = body.clone();
         let thread_status = status.clone();
         let thread_requests = requests.clone();
+        #[cfg(feature = "auth-agql")]
+        let thread_last_request = last_request.clone();
         let thread_stop = stop.clone();
         let thread = thread::spawn(move || {
             while !thread_stop.load(Ordering::Relaxed) {
@@ -96,7 +102,15 @@ impl JwksFixture {
                     Ok((mut stream, _)) => {
                         thread_requests.fetch_add(1, Ordering::Relaxed);
                         let mut request = [0_u8; 2048];
+                        #[cfg(feature = "auth-agql")]
+                        let bytes_read = stream.read(&mut request).unwrap_or_default();
+                        #[cfg(not(feature = "auth-agql"))]
                         let _ = stream.read(&mut request);
+                        #[cfg(feature = "auth-agql")]
+                        {
+                            *thread_last_request.lock().unwrap() =
+                                String::from_utf8_lossy(&request[..bytes_read]).into_owned();
+                        }
                         let body = thread_body.lock().unwrap().clone();
                         let status = thread_status.load(Ordering::Relaxed);
                         let reason = if status == 200 { "OK" } else { "Unavailable" };
@@ -118,6 +132,8 @@ impl JwksFixture {
             body,
             status,
             requests,
+            #[cfg(feature = "auth-agql")]
+            last_request,
             stop,
             thread: Some(thread),
         }
@@ -167,6 +183,11 @@ fn token(kid: &str, claims: JsonValue) -> String {
 
 #[cfg(feature = "auth-agql")]
 fn signed_catalogue(kid: &str, issued_at: i64, expires_at: i64) -> String {
+    signed_catalogue_with_role(kid, issued_at, expires_at, "inventory-operator")
+}
+
+#[cfg(feature = "auth-agql")]
+fn signed_catalogue_with_role(kid: &str, issued_at: i64, expires_at: i64, role_id: &str) -> String {
     let catalogue = RoleScopeCatalogue::new(
         "revision-7",
         [
@@ -175,7 +196,7 @@ fn signed_catalogue(kid: &str, issued_at: i64, expires_at: i64) -> String {
             RoleScopeDefinition::new("profile.read"),
         ],
         [RoleScopeGrant::new(
-            "inventory-operator",
+            role_id,
             "Inventory operator",
             ["inventory.read", "inventory.write"],
         )],
@@ -253,6 +274,15 @@ fn refresh(provider: &JwksAuthenticationProvider) -> Result<(), AuthenticationEr
         .name("jwks-refresh-test")
         .build(ntex::rt::DefaultRuntime)
         .block_on(async move { provider.refresh().await })
+}
+
+#[cfg(feature = "auth-agql")]
+fn refresh_catalogue(provider: &JwksAuthenticationProvider) -> Result<(), AuthenticationError> {
+    let provider = provider.clone();
+    ntex::rt::System::build()
+        .name("role-scope-refresh-test")
+        .build(ntex::rt::DefaultRuntime)
+        .block_on(async move { provider.refresh_role_scope_catalogue().await })
 }
 
 #[test]
@@ -475,6 +505,8 @@ fn signed_role_catalogue_expands_roles_and_preserves_direct_scopes() {
     let provider = provider_with_catalogue(&keys, &catalogue, clock);
     initialize(&provider).unwrap();
     assert_eq!(keys.requests.load(Ordering::Relaxed), 1);
+    assert_eq!(catalogue.requests.load(Ordering::Relaxed), 0);
+    refresh_catalogue(&provider).unwrap();
     assert_eq!(catalogue.requests.load(Ordering::Relaxed), 1);
 
     let credential = token(
@@ -482,7 +514,8 @@ fn signed_role_catalogue_expands_roles_and_preserves_direct_scopes() {
         json!({
             "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
             "exp": 1_100, "scope": "profile.read",
-            "roles": ["inventory-operator", "unknown-role"]
+            "roles": ["application-admin"],
+            "authorization_roles": ["inventory-operator"]
         }),
     );
     assert_eq!(
@@ -493,17 +526,46 @@ fn signed_role_catalogue_expands_roles_and_preserves_direct_scopes() {
 
 #[cfg(feature = "auth-agql")]
 #[test]
+fn role_catalogue_request_headers_are_applied_and_redacted() {
+    let keys = JwksFixture::start(jwks("key-a"));
+    let catalogue = JwksFixture::start(signed_catalogue("key-a", 1_000, 1_010));
+    let role_scope = RoleScopeCatalogueConfig::new(catalogue.url(), "role-catalogue-clients")
+        .unwrap()
+        .with_cache_ttl(Duration::from_secs(10))
+        .allow_insecure_loopback_http_for_development(true)
+        .with_request_header("x-catalogue-token", "catalogue-secret")
+        .unwrap();
+    let config =
+        JwksAuthenticationConfig::new(keys.url(), "https://issuer.test", ["graphql-router"])
+            .unwrap()
+            .with_cache_ttl(Duration::from_secs(100))
+            .with_refresh_interval(Duration::from_secs(5))
+            .with_clock(Arc::new(TestClock::at(1_000)))
+            .allow_insecure_loopback_http_for_development(true)
+            .with_role_scope_catalogue(role_scope);
+    let provider = JwksAuthenticationProvider::new(config).unwrap();
+    assert!(!format!("{provider:?}").contains("catalogue-secret"));
+
+    initialize(&provider).unwrap();
+    refresh_catalogue(&provider).unwrap();
+    let request = catalogue.last_request.lock().unwrap().to_ascii_lowercase();
+    assert!(request.contains("x-catalogue-token: catalogue-secret"));
+}
+
+#[cfg(feature = "auth-agql")]
+#[test]
 fn role_catalogue_is_mandatory_current_and_verified_for_role_bearers() {
     let keys = JwksFixture::start(jwks("key-a"));
     let catalogue = JwksFixture::start(signed_catalogue("key-a", 1_000, 1_010));
     let clock = Arc::new(TestClock::at(1_000));
     let provider = provider_with_catalogue(&keys, &catalogue, clock.clone());
     initialize(&provider).unwrap();
+    refresh_catalogue(&provider).unwrap();
     let role_credential = token(
         "key-a",
         json!({
             "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
-            "exp": 1_100, "roles": ["inventory-operator"]
+            "exp": 1_100, "authorization_roles": ["inventory-operator"]
         }),
     );
     provider.authenticate_bearer(&role_credential).unwrap();
@@ -518,10 +580,11 @@ fn role_catalogue_is_mandatory_current_and_verified_for_role_bearers() {
     assert_eq!(
         provider
             .authenticate_bearer(&role_credential)
-            .unwrap_err()
-            .kind(),
-        AuthenticationErrorKind::Unavailable
+            .unwrap()
+            .scopes(),
+        &["inventory.read", "inventory.write"]
     );
+    assert_eq!(provider.role_scope_stale_serve_total(), 1);
 
     let direct_only = token(
         "key-a",
@@ -539,7 +602,7 @@ fn role_catalogue_is_mandatory_current_and_verified_for_role_bearers() {
         "key-a",
         json!({
             "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
-            "exp": 1_100, "roles": ["bad role"]
+            "exp": 1_100, "authorization_roles": ["bad role"]
         }),
     );
     assert_eq!(
@@ -550,12 +613,251 @@ fn role_catalogue_is_mandatory_current_and_verified_for_role_bearers() {
 
 #[cfg(feature = "auth-agql")]
 #[test]
-fn forged_role_catalogue_fails_router_initialization() {
+fn forged_role_catalogue_does_not_block_startup_and_role_bearers_fail_closed() {
     let keys = JwksFixture::start(jwks("key-a"));
     let catalogue = JwksFixture::start(signed_catalogue("other-key", 1_000, 1_010));
     let provider = provider_with_catalogue(&keys, &catalogue, Arc::new(TestClock::at(1_000)));
+    initialize(&provider).unwrap();
+    assert_eq!(catalogue.requests.load(Ordering::Relaxed), 0);
+    let role_credential = token(
+        "key-a",
+        json!({
+            "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
+            "exp": 1_100, "authorization_roles": ["inventory-operator"]
+        }),
+    );
     assert_eq!(
-        initialize(&provider).unwrap_err().kind(),
-        AuthenticationErrorKind::InvalidCredential
+        provider
+            .authenticate_bearer(&role_credential)
+            .unwrap_err()
+            .kind(),
+        AuthenticationErrorKind::Unavailable
+    );
+}
+
+#[cfg(feature = "auth-agql")]
+#[test]
+fn first_role_catalogue_fetch_is_lazy_and_retried_on_demand() {
+    let keys = JwksFixture::start(jwks("key-a"));
+    let catalogue = JwksFixture::start(signed_catalogue("key-a", 1_000, 1_010));
+    catalogue.set_status(503);
+    let provider = provider_with_catalogue(&keys, &catalogue, Arc::new(TestClock::at(1_000)));
+    initialize(&provider).unwrap();
+    assert_eq!(catalogue.requests.load(Ordering::Relaxed), 0);
+    catalogue.set_status(200);
+
+    let credential = token(
+        "key-a",
+        json!({
+            "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
+            "exp": 1_100, "authorization_roles": ["inventory-operator"]
+        }),
+    );
+    let provider_for_request = provider.clone();
+    let credential_for_request = credential.clone();
+    let request_count = catalogue.requests.clone();
+    let request_count_for_wait = request_count.clone();
+    let first = ntex::rt::System::build()
+        .name("lazy-role-scope-fetch-test")
+        .build(ntex::rt::DefaultRuntime)
+        .block_on(async move {
+            let result = provider_for_request.authenticate_bearer(&credential_for_request);
+            for _ in 0..100 {
+                if request_count_for_wait.load(Ordering::Relaxed) >= 1
+                    && !provider_for_request
+                        .role_scope_refresh_in_flight
+                        .load(Ordering::Acquire)
+                {
+                    break;
+                }
+                hive_router::tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            result
+        });
+    assert_eq!(
+        first.unwrap_err().kind(),
+        AuthenticationErrorKind::Unavailable
+    );
+    assert_eq!(request_count.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        provider.authenticate_bearer(&credential).unwrap().scopes(),
+        &["inventory.read", "inventory.write"]
+    );
+}
+
+#[cfg(feature = "auth-agql")]
+#[test]
+fn failed_lazy_catalogue_fetch_observes_retry_backoff() {
+    let keys = JwksFixture::start(jwks("key-a"));
+    let catalogue = JwksFixture::start(signed_catalogue("key-a", 1_000, 1_010));
+    catalogue.set_status(503);
+    let clock = Arc::new(TestClock::at(1_000));
+    let provider = provider_with_catalogue(&keys, &catalogue, clock.clone());
+    initialize(&provider).unwrap();
+    let credential = token(
+        "key-a",
+        json!({
+            "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
+            "exp": 1_100, "authorization_roles": ["inventory-operator"]
+        }),
+    );
+
+    let provider_for_request = provider.clone();
+    let credential_for_request = credential.clone();
+    let request_count = catalogue.requests.clone();
+    ntex::rt::System::build()
+        .name("role-scope-backoff-test")
+        .build(ntex::rt::DefaultRuntime)
+        .block_on(async move {
+            assert!(
+                provider_for_request
+                    .authenticate_bearer(&credential_for_request)
+                    .is_err()
+            );
+            for _ in 0..100 {
+                if request_count.load(Ordering::Relaxed) >= 1
+                    && !provider_for_request
+                        .role_scope_refresh_in_flight
+                        .load(Ordering::Acquire)
+                {
+                    break;
+                }
+                hive_router::tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            assert!(
+                provider_for_request
+                    .authenticate_bearer(&credential_for_request)
+                    .is_err()
+            );
+            hive_router::tokio::time::sleep(Duration::from_millis(5)).await;
+        });
+    assert_eq!(catalogue.requests.load(Ordering::Relaxed), 1);
+
+    catalogue.set_status(200);
+    clock.set(1_001);
+    let provider_for_request = provider.clone();
+    let credential_for_request = credential.clone();
+    let request_count = catalogue.requests.clone();
+    ntex::rt::System::build()
+        .name("role-scope-backoff-retry-test")
+        .build(ntex::rt::DefaultRuntime)
+        .block_on(async move {
+            assert!(
+                provider_for_request
+                    .authenticate_bearer(&credential_for_request)
+                    .is_err()
+            );
+            for _ in 0..100 {
+                if request_count.load(Ordering::Relaxed) >= 2
+                    && !provider_for_request
+                        .role_scope_refresh_in_flight
+                        .load(Ordering::Acquire)
+                {
+                    break;
+                }
+                hive_router::tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        });
+    assert_eq!(catalogue.requests.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        provider.authenticate_bearer(&credential).unwrap().scopes(),
+        &["inventory.read", "inventory.write"]
+    );
+}
+
+#[cfg(feature = "auth-agql")]
+#[test]
+fn application_roles_do_not_require_or_feed_catalogue_expansion() {
+    let keys = JwksFixture::start(jwks("key-a"));
+    let provider = provider(
+        &keys,
+        Arc::new(TestClock::at(1_000)),
+        LegacyScopeClaims::Reject,
+    );
+    initialize(&provider).unwrap();
+    let application_role = token(
+        "key-a",
+        json!({
+            "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
+            "exp": 1_100, "scope": "profile.read", "roles": ["application-admin"]
+        }),
+    );
+    assert_eq!(
+        provider
+            .authenticate_bearer(&application_role)
+            .unwrap()
+            .scopes(),
+        &["profile.read"]
+    );
+
+    let authorization_role = token(
+        "key-a",
+        json!({
+            "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
+            "exp": 1_100, "scope": "profile.read",
+            "authorization_roles": ["inventory-operator"]
+        }),
+    );
+    assert_eq!(
+        provider
+            .authenticate_bearer(&authorization_role)
+            .unwrap_err()
+            .kind(),
+        AuthenticationErrorKind::Unavailable
+    );
+}
+
+#[cfg(feature = "auth-agql")]
+#[test]
+fn unknown_authorization_role_fails_instead_of_dropping_inherited_scopes() {
+    let keys = JwksFixture::start(jwks("key-a"));
+    let catalogue = JwksFixture::start(signed_catalogue("key-a", 1_000, 1_010));
+    let provider = provider_with_catalogue(&keys, &catalogue, Arc::new(TestClock::at(1_000)));
+    initialize(&provider).unwrap();
+    refresh_catalogue(&provider).unwrap();
+    catalogue.replace(signed_catalogue_with_role(
+        "key-a",
+        1_000,
+        1_010,
+        "replacement-role",
+    ));
+    let credential = token(
+        "key-a",
+        json!({
+            "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
+            "exp": 1_100, "scope": "profile.read",
+            "authorization_roles": ["replacement-role"]
+        }),
+    );
+    let provider_for_request = provider.clone();
+    let credential_for_request = credential.clone();
+    let request_count = catalogue.requests.clone();
+    let request_count_for_wait = request_count.clone();
+    let request_result = ntex::rt::System::build()
+        .name("role-scope-refresh-request-test")
+        .build(ntex::rt::DefaultRuntime)
+        .block_on(async move {
+            let result = provider_for_request.authenticate_bearer(&credential_for_request);
+            for _ in 0..100 {
+                if request_count_for_wait.load(Ordering::Relaxed) >= 2
+                    && !provider_for_request
+                        .role_scope_refresh_in_flight
+                        .load(Ordering::Acquire)
+                {
+                    break;
+                }
+                hive_router::tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            result
+        });
+    assert_eq!(
+        request_result.unwrap_err().kind(),
+        AuthenticationErrorKind::Unavailable
+    );
+    assert!(request_count.load(Ordering::Relaxed) >= 2);
+
+    assert_eq!(
+        provider.authenticate_bearer(&credential).unwrap().scopes(),
+        &["inventory.read", "inventory.write", "profile.read"]
     );
 }

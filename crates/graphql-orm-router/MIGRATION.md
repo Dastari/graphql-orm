@@ -10,6 +10,27 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.3.1 to 0.4.0
+
+Align direct `agql-auth` consumers to 0.18.0 at merged revision
+`527d15d28e3c295a6f6b5e6d74559a7aecdc1322`. Issuers place catalogue-backed
+grants in the distinct `authorization_roles` claim; ordinary application
+`roles` are no longer an expansion input.
+
+Deploy resource-server support before minting that claim. Configure a literal
+`url` or `urlFromEnv`, and load any request credentials with
+`requestHeadersFromEnv`. `maximumSignedLifetimeSeconds` and
+`clockSkewLeewaySeconds` validate newly fetched signatures independently of
+the local `cacheTtlSeconds` refresh age. Optional `retryBackoffSeconds` and
+`maximumRetryBackoffSeconds` bound lazy-fetch retries. The role catalogue is no longer a
+startup readiness gate. Until the lazy fetch succeeds, role-bearing requests
+fail closed while direct-scope-only requests continue. After one successful
+verification, refresh failures preserve the last-good snapshot and surface
+warning/metric signals.
+
+No schema or stored-data migration is implied. Roll back only after restoring
+expanded direct scopes and allowing typed compact tokens to expire.
+
 ## 0.3.0 to 0.3.1
 
 Align direct `agql-auth` consumers to 0.17.1 at reviewed full revision

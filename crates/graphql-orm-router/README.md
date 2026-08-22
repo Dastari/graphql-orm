@@ -26,7 +26,7 @@ This unpublished package is Git-only:
 
 ```toml
 [dependencies]
-graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.3.1" }
+graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.4.0" }
 ```
 
 Enable `auth-agql` only when adapting a separately configured

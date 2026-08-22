@@ -20,10 +20,12 @@ supersedes: []
 5. Execute a representative authenticated query and subscription before
    accepting traffic.
 
-Startup is fail closed. JWKS initialization, all source fetches, descriptor
+Startup is fail closed for JWKS initialization, all source fetches, descriptor
 binding, complete composition, authorization-catalog validation, and runtime
-construction finish before the public listener binds. Do not treat liveness as
-readiness.
+construction before the public listener binds. The optional role-scope
+catalogue is deliberately not a startup dependency: its first fetch is lazy,
+and only authorization-role-bearing requests fail while no verified snapshot
+exists. Do not treat liveness as readiness.
 
 The optional admin listener provides authenticated `GET /_router/status`,
 `GET /_router/metrics`, `POST /_router/refresh`,
@@ -59,6 +61,8 @@ Hive Prometheus exporter adds execution histograms and the pinned subscription
 counters
 `hive.router.subscriptions.clients.lagged_messages_total` and
 `hive.router.subscriptions.subgraphs.dropped_messages_total`.
+Embedding hosts can also read `role_scope_stale_serve_total` from the JWKS
+provider and alert on any non-zero increase; stale serves emit warning logs.
 
 ## Reload and recovery
 
