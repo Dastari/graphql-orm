@@ -226,12 +226,20 @@ configuration or exact Codex registration, and expose only
 Set the same selected value on `ModelRequest::reasoning_effort` and
 `AiBudgetReservationRequest::reasoning_effort`. The runtime rejects an
 explicit value absent from the active model profile before provider execution.
-For retained Codex sessions, create the provider-session descriptor with
-`registration.provider_session_fingerprint(selected_effort)?`; the app-server
-override affects subsequent turns, so changing effort requires exact cursor
-cleanup and rebind. Effort selection neither enables visible reasoning
-summaries nor grants tools, egress, filesystem, shell, browser, MCP, approval,
-or mutation authority. See the
+For retained Codex sessions without capability delivery, create the
+provider-session descriptor with
+`registration.provider_session_fingerprint(selected_effort)?`. A retained
+capability-delivery host instead constructs the exact
+`AiProviderCapabilitySessionBinding` from that raw fingerprint, installs the
+binding with `registration.with_capability_session_binding(binding.clone())?`,
+and persists a descriptor created by
+`AiProviderSessionDescriptor::new_with_capability_binding`. The adapter
+validates the binding's embedded raw identity and then recognizes its complete
+fingerprint for create, resume, and cleanup. The app-server effort override
+affects subsequent turns, so changing effort requires exact cursor cleanup and
+rebind. Effort selection neither enables visible reasoning summaries nor
+grants tools, egress, filesystem, shell, browser, MCP, approval, or mutation
+authority. See the
 [provider-session guide](docs/provider-sessions-and-hosted-activity.md) and
 [migration guide](MIGRATION.md).
 
