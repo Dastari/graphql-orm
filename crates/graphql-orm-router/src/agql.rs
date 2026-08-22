@@ -19,9 +19,7 @@ impl AgqlAuthenticationProvider {
 
     /// Adapts the validator's exact or host-configured matcher to router policy.
     pub fn scope_matcher(&self) -> AgqlScopeMatcher {
-        AgqlScopeMatcher {
-            matcher: self.validator.scope_matcher(),
-        }
+        AgqlScopeMatcher::new(self.validator.scope_matcher())
     }
 }
 
@@ -58,6 +56,13 @@ impl AuthenticationProvider for AgqlAuthenticationProvider {
 #[derive(Clone)]
 pub struct AgqlScopeMatcher {
     matcher: Arc<dyn ScopeMatch>,
+}
+
+impl AgqlScopeMatcher {
+    /// Adapts a host-configured `agql-auth` matcher to router policy.
+    pub fn new(matcher: Arc<dyn ScopeMatch>) -> Self {
+        Self { matcher }
+    }
 }
 
 impl fmt::Debug for AgqlScopeMatcher {

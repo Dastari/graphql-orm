@@ -5,10 +5,16 @@ use std::{
 
 use serde::Deserialize;
 
+#[cfg(feature = "auth-agql")]
+use agql_auth::{HierarchicalScopeMatch, HierarchicalScopeOptions};
+
+#[cfg(feature = "auth-agql")]
+use crate::AgqlScopeMatcher;
 use crate::{
-    AdminConfig, JwksAuthenticationConfig, JwksAuthenticationProvider, LegacyScopeClaims,
-    NetworkCidr, NetworkPolicy, RequestLimits, RouterConfig, RouterError, RouterErrorKind,
-    RouterLogLevel, RouterTelemetryConfig, StaticSubgraph, SubscriptionConfig, TrustedSubgraph,
+    AdminConfig, ExactScopeMatcher, JwksAuthenticationConfig, JwksAuthenticationProvider,
+    LegacyScopeClaims, NetworkCidr, NetworkPolicy, RequestLimits, RouterConfig, RouterError,
+    RouterErrorKind, RouterLogLevel, RouterTelemetryConfig, StaticSubgraph, SubscriptionConfig,
+    TrustedSubgraph,
 };
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -28,6 +34,7 @@ pub struct RouterFileConfig {
     #[serde(default)]
     anonymous_development: bool,
     authentication: Option<FileAuthentication>,
+    scope_matcher: Option<FileScopeMatcher>,
     subgraphs: Vec<FileSubgraph>,
     #[serde(default)]
     forwarded_headers: Vec<String>,
@@ -89,6 +96,9 @@ impl RouterFileConfig {
         let mut config = RouterConfig::builder(listener)
             .with_graphql_path(self.graphql_path)
             .allow_anonymous_development(self.anonymous_development);
+        if let Some(scope_matcher) = self.scope_matcher {
+            config = scope_matcher.apply(config)?;
+        }
         if let Some(authentication) = self.authentication {
             let mut jwks = JwksAuthenticationConfig::new(
                 authentication.jwks_url,
@@ -261,6 +271,165 @@ struct FileAuthentication {
     accept_legacy_scopes: bool,
     #[serde(default)]
     allow_insecure_loopback_jwks: bool,
+}
+
+/// File-owned scope policy. Omission and `kind: exact` preserve the router's
+/// historical exact-string behavior.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FileScopeMatcher {
+    kind: FileScopeMatcherKind,
+    separator: Option<char>,
+    wildcard: Option<String>,
+    wildcard_matches_multi_segment: Option<bool>,
+    allow_universal_wildcard: Option<bool>,
+    #[serde(default)]
+    super_scopes: Vec<String>,
+    #[serde(default)]
+    exact_only_scopes: Vec<String>,
+    #[serde(default)]
+    exact_only_scope_patterns: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum FileScopeMatcherKind {
+    Exact,
+    Hierarchical,
+}
+
+impl FileScopeMatcher {
+    fn apply(self, config: RouterConfig) -> Result<RouterConfig, RouterError> {
+        match self.kind {
+            FileScopeMatcherKind::Exact => {
+                if self.separator.is_some()
+                    || self.wildcard.is_some()
+                    || self.wildcard_matches_multi_segment.is_some()
+                    || self.allow_universal_wildcard.is_some()
+                    || !self.super_scopes.is_empty()
+                    || !self.exact_only_scopes.is_empty()
+                    || !self.exact_only_scope_patterns.is_empty()
+                {
+                    return Err(invalid(
+                        "scopeMatcher kind `exact` does not accept hierarchical options",
+                    ));
+                }
+                Ok(config.with_scope_matcher(Arc::new(ExactScopeMatcher)))
+            }
+            FileScopeMatcherKind::Hierarchical => build_hierarchical_scope_matcher(
+                config,
+                self.separator,
+                self.wildcard,
+                self.wildcard_matches_multi_segment,
+                self.allow_universal_wildcard,
+                self.super_scopes,
+                self.exact_only_scopes,
+                self.exact_only_scope_patterns,
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "auth-agql")]
+#[allow(clippy::too_many_arguments)]
+fn build_hierarchical_scope_matcher(
+    config: RouterConfig,
+    separator: Option<char>,
+    wildcard: Option<String>,
+    wildcard_matches_multi_segment: Option<bool>,
+    allow_universal_wildcard: Option<bool>,
+    mut super_scopes: Vec<String>,
+    mut exact_only_scopes: Vec<String>,
+    mut exact_only_scope_patterns: Vec<String>,
+) -> Result<RouterConfig, RouterError> {
+    let defaults = HierarchicalScopeOptions::default();
+    let separator = separator.unwrap_or(defaults.separator);
+    let wildcard = wildcard.unwrap_or(defaults.wildcard);
+    validate_scope_syntax(separator, &wildcard)?;
+    for (field, scopes) in [
+        ("superScopes", super_scopes.as_slice()),
+        ("exactOnlyScopes", exact_only_scopes.as_slice()),
+        (
+            "exactOnlyScopePatterns",
+            exact_only_scope_patterns.as_slice(),
+        ),
+    ] {
+        validate_scope_values(field, scopes)?;
+    }
+    super_scopes.sort();
+    super_scopes.dedup();
+    exact_only_scopes.sort();
+    exact_only_scopes.dedup();
+    exact_only_scope_patterns.sort();
+    exact_only_scope_patterns.dedup();
+    let options = HierarchicalScopeOptions::default()
+        .with_separator(separator)
+        .with_wildcard(wildcard)
+        .with_wildcard_matches_multi_segment(
+            wildcard_matches_multi_segment.unwrap_or(defaults.wildcard_matches_multi_segment),
+        )
+        .with_allow_universal_wildcard(
+            allow_universal_wildcard.unwrap_or(defaults.allow_universal_wildcard),
+        )
+        .with_super_scopes(super_scopes)
+        .with_exact_only_scopes(exact_only_scopes)
+        .with_exact_only_scope_patterns(exact_only_scope_patterns);
+    let matcher = HierarchicalScopeMatch::new(options).map_err(|error| {
+        invalid(format!(
+            "scopeMatcher hierarchical options are invalid: {error}"
+        ))
+    })?;
+    Ok(config.with_scope_matcher(Arc::new(AgqlScopeMatcher::new(Arc::new(matcher)))))
+}
+
+#[cfg(not(feature = "auth-agql"))]
+#[allow(clippy::too_many_arguments)]
+fn build_hierarchical_scope_matcher(
+    _config: RouterConfig,
+    _separator: Option<char>,
+    _wildcard: Option<String>,
+    _wildcard_matches_multi_segment: Option<bool>,
+    _allow_universal_wildcard: Option<bool>,
+    _super_scopes: Vec<String>,
+    _exact_only_scopes: Vec<String>,
+    _exact_only_scope_patterns: Vec<String>,
+) -> Result<RouterConfig, RouterError> {
+    Err(invalid(
+        "scopeMatcher kind `hierarchical` requires the `auth-agql` feature",
+    ))
+}
+
+#[cfg(feature = "auth-agql")]
+fn validate_scope_syntax(separator: char, wildcard: &str) -> Result<(), RouterError> {
+    if separator.is_whitespace() || separator.is_control() {
+        return Err(invalid("scopeMatcher separator must be visible"));
+    }
+    if wildcard.is_empty()
+        || wildcard.contains(separator)
+        || wildcard
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err(invalid(
+            "scopeMatcher wildcard must be a non-empty segment without whitespace",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "auth-agql")]
+fn validate_scope_values(field: &str, scopes: &[String]) -> Result<(), RouterError> {
+    if scopes.iter().any(|scope| {
+        scope.is_empty()
+            || scope
+                .chars()
+                .any(|character| character.is_whitespace() || character.is_control())
+    }) {
+        return Err(invalid(format!(
+            "scopeMatcher {field} contains an empty scope or whitespace"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -561,6 +730,12 @@ mod tests {
             config.subgraphs[0].schema_headers["authorization"],
             "Bearer schema-secret"
         );
+        assert!(
+            config
+                .scope_matcher
+                .matches("products.read", "products.read")
+        );
+        assert!(!config.scope_matcher.matches("products.*", "products.read"));
         assert!(!format!("{config:?}").contains("schema-secret"));
     }
 
@@ -573,5 +748,123 @@ mod tests {
                 .into_router_config_with(|_| Ok(None))
                 .is_err()
         );
+    }
+
+    #[cfg(feature = "auth-agql")]
+    #[test]
+    fn hierarchical_file_matcher_applies_super_wildcard_and_exact_only_matrix() {
+        let json = FILE.replacen(
+            "\"authentication\":",
+            r#""scopeMatcher": {
+                "kind": "hierarchical",
+                "superScopes": ["platform.admin"],
+                "exactOnlyScopes": ["payments.credentials.release"],
+                "exactOnlyScopePatterns": ["payments.account.*.credentials.release"]
+            },
+            "authentication":"#,
+            1,
+        );
+        let config = RouterFileConfig::from_json(&json)
+            .unwrap()
+            .into_router_config_with(|name| {
+                Ok((name == "PRODUCTS_SCHEMA_TOKEN").then(|| "Bearer secret".to_owned()))
+            })
+            .unwrap();
+        let matcher = config.scope_matcher;
+
+        for (granted, required, expected) in [
+            ("platform.admin", "orders.read", true),
+            ("orders.*", "orders.read", true),
+            ("orders.read", "orders.read", true),
+            ("platform.admin", "payments.credentials.release", false),
+            ("payments.*", "payments.credentials.release", false),
+            (
+                "payments.credentials.release",
+                "payments.credentials.release",
+                true,
+            ),
+            (
+                "platform.admin",
+                "payments.account.7.credentials.release",
+                false,
+            ),
+            (
+                "payments.account.*",
+                "payments.account.7.credentials.release",
+                false,
+            ),
+            (
+                "payments.account.7.credentials.release",
+                "payments.account.7.credentials.release",
+                true,
+            ),
+        ] {
+            assert_eq!(
+                matcher.matches(granted, required),
+                expected,
+                "grant {granted:?} for requirement {required:?}"
+            );
+        }
+    }
+
+    #[cfg(not(feature = "auth-agql"))]
+    #[test]
+    fn hierarchical_file_matcher_requires_auth_agql_feature() {
+        let json = FILE.replacen(
+            "\"authentication\":",
+            r#""scopeMatcher": {"kind": "hierarchical"},
+            "authentication":"#,
+            1,
+        );
+        let error = RouterFileConfig::from_json(&json)
+            .unwrap()
+            .into_router_config_with(|name| {
+                Ok((name == "PRODUCTS_SCHEMA_TOKEN").then(|| "Bearer secret".to_owned()))
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("auth-agql"));
+    }
+
+    #[test]
+    fn exact_file_matcher_rejects_hierarchical_options() {
+        let json = FILE.replacen(
+            "\"authentication\":",
+            r#""scopeMatcher": {"kind": "exact", "superScopes": ["platform.admin"]},
+            "authentication":"#,
+            1,
+        );
+        let error = RouterFileConfig::from_json(&json)
+            .unwrap()
+            .into_router_config_with(|name| {
+                Ok((name == "PRODUCTS_SCHEMA_TOKEN").then(|| "Bearer secret".to_owned()))
+            })
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("kind `exact` does not accept hierarchical options")
+        );
+    }
+
+    #[cfg(feature = "auth-agql")]
+    #[test]
+    fn hierarchical_file_matcher_rejects_bare_wildcard_exact_only_pattern() {
+        let json = FILE.replacen(
+            "\"authentication\":",
+            r#""scopeMatcher": {
+                "kind": "hierarchical",
+                "allowUniversalWildcard": true,
+                "exactOnlyScopePatterns": ["*"]
+            },
+            "authentication":"#,
+            1,
+        );
+        let error = RouterFileConfig::from_json(&json)
+            .unwrap()
+            .into_router_config_with(|name| {
+                Ok((name == "PRODUCTS_SCHEMA_TOKEN").then(|| "Bearer secret".to_owned()))
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("must not be the bare wildcard"));
     }
 }

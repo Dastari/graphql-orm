@@ -508,7 +508,6 @@ pub mod types;
 ///     pub name: String,
 /// }
 ///
-/// fn main() {}
 /// ```
 ///
 /// ...but generate no single-key write helpers:
@@ -535,10 +534,8 @@ pub mod types;
 ///     pub name: String,
 /// }
 ///
-/// fn main() {
-///     let _ = CompositeWriteRecord::create;
-///     let _ = CompositeWriteRecord::update_by_id;
-/// }
+/// let _ = CompositeWriteRecord::create;
+/// let _ = CompositeWriteRecord::update_by_id;
 /// ```
 #[cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
 pub mod generated_api_absence_probes {}

@@ -8,6 +8,9 @@
     "refreshIntervalSeconds": 300,
     "cacheTtlSeconds": 900
   },
+  "scopeMatcher": {
+    "kind": "exact"
+  },
   "subgraphs": [
     {
       "name": "products",

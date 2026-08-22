@@ -19,6 +19,21 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.88.0 to 0.89.0: agql-auth 0.16 type-universe alignment
+
+Adopt `graphql-orm-ai` 0.89.0 from one reviewed full monorepo revision and
+align every direct `agql-auth` dependency to version 0.16.0 at merged revision
+`3bc38cd94794f1e868a9cc3a5551047b95a32105`. The AI prelude publicly
+re-exports `CurrentPrincipalResolver`, `PrincipalReference`, and
+`ResolvedPrincipal`, so resolving another source revision would create a
+different public Rust type universe even though these type contracts are
+otherwise unchanged.
+
+The AI schema module remains **0.63.0**. There is no database, data, table,
+column, index, constraint, backfill, GraphQL SDL, protected-payload, backup or
+restore migration. AI authorization, principal rehydration, and provider
+behavior are unchanged.
+
 ## 0.87.0 to 0.88.0: direct GPT-5.6 dynamic tools on Codex 0.148.0
 
 Adopt `graphql-orm-ai` 0.88.0 from one reviewed full monorepo revision. The AI
