@@ -18,6 +18,26 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.88.3] - 2026-08-22
+
+Persistent schema module: **0.63.0** (unchanged from 0.88.2).
+
+### Changed
+
+- The workspace now resolves the exact external `agql-auth` 0.16.0 revision
+  `3bc38cd94794f1e868a9cc3a5551047b95a32105`. Hosts already using that
+  revision retain one `AuthPrincipal` and `ResolvedPrincipal` type universe
+  across their application and `graphql-orm-ai`.
+
+### Security
+
+- `agql-auth` 0.16's consumer-configured exact-only matcher requirements do
+  not grant AI resolver, tool, egress, retention, or provider authority.
+  Matcher policy remains owned by the host resource server.
+
+There is no schema, data, protected-payload, GraphQL SDL, backup or restore
+migration in this release.
+
 ## [0.88.2] - 2026-08-22
 
 Persistent schema module: **0.63.0** (unchanged from 0.88.1).

@@ -19,6 +19,20 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.88.2 to 0.88.3: agql-auth 0.16 type-universe alignment
+
+Adopt `graphql-orm-ai` 0.88.3 from one reviewed full monorepo revision and
+align every direct host dependency on `agql-auth` to version 0.16.0 at exact
+revision `3bc38cd94794f1e868a9cc3a5551047b95a32105`. Mixing that revision with
+the earlier 0.15 workspace pin creates distinct principal types and must not
+be worked around with path overrides or duplicated conversion layers.
+
+The AI schema module remains **0.63.0**. There is no database, data, table,
+column, index, constraint, backfill, GraphQL SDL, protected-payload, backup or
+restore migration. Version 0.16 adds host-configured exact-only matcher
+requirements; `graphql-orm-ai` does not choose or relax those resource-server
+rules and requires no AI provider or coordinator API change.
+
 ## 0.88.1 to 0.88.2: retained capability-session admission
 
 Adopt `graphql-orm-ai` 0.88.2 from one reviewed full monorepo revision. The AI

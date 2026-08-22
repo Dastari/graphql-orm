@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "e841ffd382082ad7419be259fe957f949b956ff7", version = "0.15.0" }
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "3bc38cd94794f1e868a9cc3a5551047b95a32105", version = "0.16.0" }
 async-graphql = { version = "7", features = ["dataloader", "uuid"] }
 graphql-orm = { path = "../../../../", default-features = false, features = [
   "sqlite",
