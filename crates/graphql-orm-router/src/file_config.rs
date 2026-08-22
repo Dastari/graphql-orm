@@ -130,17 +130,50 @@ impl RouterFileConfig {
                     authentication.allow_insecure_loopback_jwks,
                 );
             if let Some(catalogue) = authentication.role_scope_catalogue {
+                let catalogue_url = resolve_configured_value(
+                    catalogue.url,
+                    catalogue.url_from_env,
+                    "role-scope catalogue URL",
+                    &environment,
+                )?;
                 let mut role_scope =
-                    RoleScopeCatalogueConfig::new(catalogue.url, catalogue.audience)?;
+                    RoleScopeCatalogueConfig::new(catalogue_url, catalogue.audience)?;
                 if let Some(seconds) = catalogue.cache_ttl_seconds {
                     role_scope = role_scope.with_cache_ttl(Duration::from_secs(seconds));
+                }
+                if let Some(seconds) = catalogue.maximum_signed_lifetime_seconds {
+                    role_scope =
+                        role_scope.with_maximum_signed_lifetime(Duration::from_secs(seconds));
+                }
+                if let Some(seconds) = catalogue.clock_skew_leeway_seconds {
+                    role_scope = role_scope.with_clock_skew_leeway(Duration::from_secs(seconds));
+                }
+                if catalogue.retry_backoff_seconds.is_some()
+                    || catalogue.maximum_retry_backoff_seconds.is_some()
+                {
+                    role_scope = role_scope.with_retry_backoff(
+                        Duration::from_secs(catalogue.retry_backoff_seconds.unwrap_or(1)),
+                        Duration::from_secs(catalogue.maximum_retry_backoff_seconds.unwrap_or(60)),
+                    );
                 }
                 if let Some(bytes) = catalogue.max_body_bytes {
                     role_scope = role_scope.with_max_body_bytes(bytes);
                 }
-                role_scope = role_scope.allow_insecure_loopback_http_for_development(
+                for (name, value) in resolve_headers_for(
+                    catalogue.request_headers_from_env,
+                    &environment,
+                    "role-scope catalogue request header",
+                )? {
+                    role_scope = role_scope.with_request_header(name, value)?;
+                }
+                let allow_insecure_loopback_http = resolve_optional_bool(
                     catalogue.allow_insecure_loopback_http,
-                );
+                    catalogue.allow_insecure_loopback_http_from_env,
+                    "role-scope catalogue insecure-loopback policy",
+                    &environment,
+                )?;
+                role_scope = role_scope
+                    .allow_insecure_loopback_http_for_development(allow_insecure_loopback_http);
                 jwks = jwks.with_role_scope_catalogue(role_scope);
             }
             config = config
@@ -291,12 +324,20 @@ struct FileAuthentication {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FileRoleScopeCatalogue {
-    url: String,
+    url: Option<String>,
+    url_from_env: Option<String>,
     audience: String,
     cache_ttl_seconds: Option<u64>,
+    maximum_signed_lifetime_seconds: Option<u64>,
+    clock_skew_leeway_seconds: Option<u64>,
+    retry_backoff_seconds: Option<u64>,
+    maximum_retry_backoff_seconds: Option<u64>,
     max_body_bytes: Option<usize>,
     #[serde(default)]
     allow_insecure_loopback_http: bool,
+    allow_insecure_loopback_http_from_env: Option<String>,
+    #[serde(default)]
+    request_headers_from_env: BTreeMap<String, String>,
 }
 
 /// File-owned scope policy. Omission and `kind: exact` preserve the router's
@@ -652,22 +693,76 @@ fn resolve_headers(
     headers: BTreeMap<String, String>,
     environment: &impl Fn(&str) -> Result<Option<String>, RouterError>,
 ) -> Result<BTreeMap<String, String>, RouterError> {
+    resolve_headers_for(headers, environment, "schema header")
+}
+
+fn resolve_headers_for(
+    headers: BTreeMap<String, String>,
+    environment: &impl Fn(&str) -> Result<Option<String>, RouterError>,
+    resource: &'static str,
+) -> Result<BTreeMap<String, String>, RouterError> {
     headers
         .into_iter()
         .map(|(name, variable)| {
             let value = environment(&variable)?.ok_or_else(|| {
                 invalid(format!(
-                    "required schema header environment variable `{variable}` is missing"
+                    "required {resource} environment variable `{variable}` is missing"
                 ))
             })?;
             if value.is_empty() {
                 return Err(invalid(format!(
-                    "required schema header environment variable `{variable}` is empty"
+                    "required {resource} environment variable `{variable}` is empty"
                 )));
             }
             Ok((name, value))
         })
         .collect()
+}
+
+fn resolve_configured_value(
+    literal: Option<String>,
+    from_environment: Option<String>,
+    resource: &'static str,
+    environment: &impl Fn(&str) -> Result<Option<String>, RouterError>,
+) -> Result<String, RouterError> {
+    match (literal, from_environment) {
+        (Some(value), None) if !value.is_empty() => Ok(value),
+        (None, Some(variable)) => environment(&variable)?
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                invalid(format!(
+                    "required {resource} environment variable `{variable}` is missing or empty"
+                ))
+            }),
+        (Some(_), Some(_)) => Err(invalid(format!(
+            "{resource} must select exactly one of a literal value or an environment variable"
+        ))),
+        _ => Err(invalid(format!("{resource} is required"))),
+    }
+}
+
+fn resolve_optional_bool(
+    literal: bool,
+    from_environment: Option<String>,
+    resource: &'static str,
+    environment: &impl Fn(&str) -> Result<Option<String>, RouterError>,
+) -> Result<bool, RouterError> {
+    let Some(variable) = from_environment else {
+        return Ok(literal);
+    };
+    if literal {
+        return Err(invalid(format!(
+            "{resource} must select either the literal flag or an environment variable"
+        )));
+    }
+    match environment(&variable)?.as_deref() {
+        Some("1" | "true" | "TRUE") => Ok(true),
+        Some("0" | "false" | "FALSE") => Ok(false),
+        Some(_) => Err(invalid(format!(
+            "{resource} environment variable `{variable}` must be true or false"
+        ))),
+        None => Ok(false),
+    }
 }
 
 fn read_environment(name: &str) -> Result<Option<String>, RouterError> {
@@ -880,19 +975,37 @@ mod tests {
             r#""audiences": ["router"],
             "refreshIntervalSeconds": 30,
             "roleScopeCatalogue": {
-                "url": "https://identity.example/role-scopes",
+                "urlFromEnv": "ROLE_SCOPE_URL",
                 "audience": "resource-servers",
                 "cacheTtlSeconds": 120,
-                "maxBodyBytes": 262144
+                "maximumSignedLifetimeSeconds": 86400,
+                "clockSkewLeewaySeconds": 30,
+                "retryBackoffSeconds": 2,
+                "maximumRetryBackoffSeconds": 30,
+                "maxBodyBytes": 262144,
+                "requestHeadersFromEnv": {"authorization": "ROLE_SCOPE_TOKEN"}
             }"#,
             1,
         );
         RouterFileConfig::from_json(&json)
             .unwrap()
             .into_router_config_with(|name| {
-                Ok((name == "PRODUCTS_SCHEMA_TOKEN").then(|| "Bearer secret".to_owned()))
+                Ok(match name {
+                    "PRODUCTS_SCHEMA_TOKEN" => Some("Bearer schema-secret".to_owned()),
+                    "ROLE_SCOPE_URL" => Some("https://identity.example/role-scopes".to_owned()),
+                    "ROLE_SCOPE_TOKEN" => Some("Bearer catalogue-secret".to_owned()),
+                    _ => None,
+                })
             })
             .unwrap();
+
+        let missing = RouterFileConfig::from_json(&json)
+            .unwrap()
+            .into_router_config_with(|name| {
+                Ok((name == "PRODUCTS_SCHEMA_TOKEN").then(|| "Bearer schema-secret".to_owned()))
+            })
+            .unwrap_err();
+        assert!(missing.to_string().contains("ROLE_SCOPE_URL"));
 
         let unknown = json.replacen(
             r#""maxBodyBytes": 262144"#,

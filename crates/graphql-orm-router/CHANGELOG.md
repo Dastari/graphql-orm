@@ -10,6 +10,25 @@ supersedes: []
 
 # Changelog
 
+## 0.4.0 - 2026-08-22
+
+- Aligned the optional adapter to generic `agql-auth` 0.18.0 at merged revision
+  `527d15d28e3c295a6f6b5e6d74559a7aecdc1322` and expand only the distinct typed
+  `authorization_roles` claim. Application roles keep their existing meaning.
+- Role-catalogue URLs and request headers can be sourced from named environment
+  variables. Header values are omitted from file configuration and diagnostics.
+- Role-catalogue fetch is lazy and uses configurable bounded exponential retry
+  backoff rather than becoming a startup dependency. Unknown role IDs trigger
+  an immediate refresh and fail the affected request.
+- Failed refresh preserves the last signature-verified snapshot past its soft
+  age or signed expiry, with warning logs and a process-local stale-serve
+  counter. Signed maximum lifetime, clock leeway, and local refresh age are
+  independent settings.
+
+No descriptor, GraphQL schema, membership, or stored-data migration is
+required. Issuers adopting compact grants must emit the typed
+`authorization_roles` claim before relying on this expansion path.
+
 ## 0.3.1 - 2026-08-22
 
 - Aligned the optional resource-server adapter to `agql-auth` 0.17.1 at merged

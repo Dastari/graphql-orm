@@ -19,6 +19,15 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.90.1 to 0.91.0: agql-auth 0.18.0 type-universe alignment
+
+Adopt `graphql-orm-ai` 0.91.0 from one reviewed full monorepo revision and
+align every direct `agql-auth` dependency to version 0.18.0 at merged revision
+`527d15d28e3c295a6f6b5e6d74559a7aecdc1322`. The new typed authorization-role
+metadata is additive to the public principal type. The schema module remains
+**0.63.0**; no database, data, provider, GraphQL SDL, protected-payload,
+backup, restore, or runtime migration is required.
+
 ## 0.90.0 to 0.90.1: agql-auth 0.17.1 type-universe alignment
 
 Adopt `graphql-orm-ai` 0.90.1 from one reviewed full monorepo revision and

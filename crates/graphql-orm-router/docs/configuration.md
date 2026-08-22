@@ -87,20 +87,33 @@ array. JWKS uses HTTPS. Plain HTTP is accepted only for loopback when
 `cacheTtlSeconds`, `refreshIntervalSeconds`, `requestTimeoutMs`,
 `maxJwksBytes`, and `leewaySeconds`. `acceptLegacyScopes` defaults false.
 
-`roleScopeCatalogue` is optional and requires `auth-agql`. It accepts `url`,
-`audience`, `cacheTtlSeconds`, `maxBodyBytes`, and
-`allowInsecureLoopbackHttp`. Its URL is HTTPS-only except for explicit
-loopback development, has no credentials/query/fragment, and uses the
-authentication request timeout and refresh interval. The refresh interval must
-be shorter than the catalogue TTL. Startup verifies the RS256 signature with
-the JWKS cache and binds the exact catalogue, issuer, audience, purpose, and
-signed lifetime before readiness.
+`roleScopeCatalogue` is optional and requires `auth-agql`. Select exactly one
+of literal `url` or `urlFromEnv`. Request headers are loaded only through
+`requestHeadersFromEnv`; values never appear in JSON or diagnostics. Optional
+bounds are `cacheTtlSeconds`, `maximumSignedLifetimeSeconds`,
+`clockSkewLeewaySeconds`, `retryBackoffSeconds`,
+`maximumRetryBackoffSeconds`, and `maxBodyBytes`. Its URL is HTTPS-only except for
+explicit loopback development. The literal `allowInsecureLoopbackHttp` flag or
+`allowInsecureLoopbackHttpFromEnv` can opt into that development exception,
+but both cannot be set together.
 
-When configured, well-formed token roles expand through the current verified
-catalogue and are unioned with direct token scopes. Unknown roles grant
-nothing. Role-bearing credentials fail closed when no current verified
-catalogue exists; direct-scope-only credentials do not depend on that optional
-authority source.
+JWKS remains the startup authentication dependency. The role catalogue is
+fetched lazily on the first authorization-role-bearing request and retried with
+bounded exponential backoff as well as by the ordinary authentication refresh
+loop. A fetch verifies the RS256 signature
+with the JWKS cache and binds the exact catalogue, issuer, audience, purpose,
+and independently configured signed lifetime. `cacheTtlSeconds` is only the
+soft refresh age; it does not cap issuer lifetime.
+
+When configured, the distinct typed `authorization_roles` claim expands
+through the last signature-verified catalogue and is unioned with direct token
+scopes. Application `roles` are not expanded. Unknown authorization roles fail
+explicitly and request an immediate refresh. A failed refresh preserves and
+continues serving the last verified snapshot past its soft age or signed
+expiry, increments `role_scope_stale_serve_total`, and emits rate-limited warning
+logs. A role-bearing credential fails closed only when no verified snapshot is
+available or its role remains unknown; direct-scope-only credentials do not
+depend on the optional authority source.
 
 The router validates RS256 public keys only. Configuration has no private-key,
 token-signing, session, refresh-token, or RSA-decryption field.
