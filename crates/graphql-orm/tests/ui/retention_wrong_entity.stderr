@@ -2,7 +2,13 @@ error[E0277]: the trait bound `OrdinaryEvent: RetentionPurge` is not satisfied
   --> tests/ui/retention_wrong_entity.rs:18:22
    |
 18 |                     .purge::<OrdinaryEvent>(
-   |                      ^^^^^ the trait `RetentionPurge` is not implemented for `OrdinaryEvent`
+   |                      ^^^^^ unsatisfied trait bound
+   |
+help: the trait `RetentionPurge` is not implemented for `OrdinaryEvent`
+  --> tests/ui/retention_wrong_entity.rs:5:1
+   |
+ 5 | struct OrdinaryEvent {
+   | ^^^^^^^^^^^^^^^^^^^^
 
 error[E0277]: the trait bound `OrdinaryEvent: RetentionPurge` is not satisfied
   --> tests/ui/retention_wrong_entity.rs:17:17
@@ -12,8 +18,13 @@ error[E0277]: the trait bound `OrdinaryEvent: RetentionPurge` is not satisfied
 19 | |                         OrdinaryEventWhereInput::default(),
 20 | |                         MutationLimit::new(1)?,
 21 | |                     )
-   | |_____________________^ the trait `RetentionPurge` is not implemented for `OrdinaryEvent`
+   | |_____________________^ unsatisfied trait bound
    |
+help: the trait `RetentionPurge` is not implemented for `OrdinaryEvent`
+  --> tests/ui/retention_wrong_entity.rs:5:1
+   |
+ 5 | struct OrdinaryEvent {
+   | ^^^^^^^^^^^^^^^^^^^^
 note: required by a bound in `RetentionContext::<'tx, B>::purge`
   --> src/graphql/orm/core.rs
    |
@@ -27,8 +38,13 @@ error[E0277]: the trait bound `OrdinaryEvent: RetentionPurge` is not satisfied
   --> tests/ui/retention_wrong_entity.rs:22:22
    |
 22 |                     .await
-   |                      ^^^^^ the trait `RetentionPurge` is not implemented for `OrdinaryEvent`
+   |                      ^^^^^ unsatisfied trait bound
    |
+help: the trait `RetentionPurge` is not implemented for `OrdinaryEvent`
+  --> tests/ui/retention_wrong_entity.rs:5:1
+   |
+ 5 | struct OrdinaryEvent {
+   | ^^^^^^^^^^^^^^^^^^^^
 note: required by a bound in `RetentionContext::<'tx, B>::purge`
   --> src/graphql/orm/core.rs
    |
