@@ -1183,6 +1183,6 @@ access path.
 
 - No JWT, OIDC, cookie, wildcard, or application-specific scope logic was added to `graphql-orm`.
 - PostgreSQL RLS helper functions still use exact scope matching.
-- The current `auth-agql` feature targets `agql-auth` 0.15.0 at revision
-  `e841ffd382082ad7419be259fe957f949b956ff7`; earlier release sections above
+- The current `auth-agql` feature targets `agql-auth` 0.16.0 at revision
+  `3bc38cd94794f1e868a9cc3a5551047b95a32105`; earlier release sections above
   retain their historical pins.

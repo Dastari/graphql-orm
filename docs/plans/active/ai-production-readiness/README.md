@@ -36,7 +36,7 @@ retention, or restore proofs remain closed.
 - `graphql-orm-backup` 0.7 snapshot, repository, verification, and restore
   orchestration.
 - `graphql-orm-storage` 0.6 streaming provider boundary.
-- Exact external `agql-auth` 0.15 revision declared by the workspace.
+- Exact external `agql-auth` 0.16 revision declared by the workspace.
 - Test-owned SQLite and disposable PostgreSQL infrastructure.
 
 ## Acceptance gates

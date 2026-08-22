@@ -19,7 +19,7 @@ changes.
 | Package | Version | Path | Default features | Direct internal dependencies |
 | --- | --- | --- | --- | --- |
 | `graphql-orm` | `0.23.0` | `crates/graphql-orm` | `sqlite` | `graphql-orm-macros`, `graphql-orm-operation-catalog`, `graphql-orm-router-protocol` (dev-only) |
-| `graphql-orm-ai` | `0.88.2` | `crates/graphql-orm-ai` | `sqlite` | `graphql-orm`, `graphql-orm-ai-tool-profiles`, `graphql-orm-storage` |
+| `graphql-orm-ai` | `0.88.3` | `crates/graphql-orm-ai` | `sqlite` | `graphql-orm`, `graphql-orm-ai-tool-profiles`, `graphql-orm-storage` |
 | `graphql-orm-ai-tool-profiles` | `0.9.0` | `crates/graphql-orm-ai-tool-profiles` | none | `graphql-orm-operation-catalog`, `graphql-orm-router-protocol` (dev-only) |
 | `graphql-orm-backup` | `0.7.1` | `crates/graphql-orm-backup` | `local` | `graphql-orm` (optional), `graphql-orm-storage` |
 | `graphql-orm-macros` | `0.23.0` | `crates/graphql-orm-macros` | `sqlite` | none |
@@ -30,7 +30,7 @@ changes.
 
 External exact-revision dependency:
 
-- `agql-auth` requirement `^0.15.0`, source `git+https://github.com/Dastari/agql-auth.git?rev=e841ffd382082ad7419be259fe957f949b956ff7`, consumed by `graphql-orm`, `graphql-orm-ai`, `graphql-orm-router`.
+- `agql-auth` requirement `^0.16.0`, source `git+https://github.com/Dastari/agql-auth.git?rev=3bc38cd94794f1e868a9cc3a5551047b95a32105`, consumed by `graphql-orm`, `graphql-orm-ai`, `graphql-orm-router`.
 
 <!-- END GENERATED WORKSPACE PACKAGES -->
 
