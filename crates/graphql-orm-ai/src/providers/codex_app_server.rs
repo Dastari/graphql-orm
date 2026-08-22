@@ -24,12 +24,12 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 use crate::{
-    AiProvider, AiProviderFailureCategory, AiProviderRunBinding, AiProviderRunCloseOutcome,
-    AiProviderRunCloseReason, AiProviderRunInterruptOutcome, ModelContinuationMode,
-    ModelInputBlock, ModelReasoningEffort, ModelReasoningEffortProfile,
-    ModelReasoningSummaryRequest, ModelRequest, ModelToolDefinition, ProviderCapabilities,
-    ProviderDynamicToolCall, ProviderDynamicToolResponder, ProviderError, ProviderEventStream,
-    ProviderKind, ProviderRequestContext,
+    AiProvider, AiProviderCapabilitySessionBinding, AiProviderFailureCategory,
+    AiProviderRunBinding, AiProviderRunCloseOutcome, AiProviderRunCloseReason,
+    AiProviderRunInterruptOutcome, ModelContinuationMode, ModelInputBlock, ModelReasoningEffort,
+    ModelReasoningEffortProfile, ModelReasoningSummaryRequest, ModelRequest, ModelToolDefinition,
+    ProviderCapabilities, ProviderDynamicToolCall, ProviderDynamicToolResponder, ProviderError,
+    ProviderEventStream, ProviderKind, ProviderRequestContext,
 };
 
 const MAXIMUM_PROCESSES: usize = 4_096;
@@ -44,6 +44,7 @@ const MAXIMUM_VERSION_BYTES: usize = 200;
 const MAXIMUM_RUNTIME_WARNING_MESSAGE_BYTES: usize = 4 * 1024;
 const MAXIMUM_RUNTIME_WARNING_BYTES_PER_TURN: usize = 16 * 1024;
 const MAXIMUM_RUNTIME_WARNINGS_PER_TURN: usize = 8;
+const MAXIMUM_CAPABILITY_SESSION_BINDINGS: usize = 256;
 const MAXIMUM_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 fn provider_timeout_error() -> ProviderError {
@@ -345,6 +346,7 @@ pub struct AiCodexAppServerRegistration {
     launch_profile: AiCodexAppServerLaunchProfile,
     bootstrap_instructions: AiCodexAppServerBootstrapInstructions,
     reasoning_effort_profile: Option<ModelReasoningEffortProfile>,
+    capability_session_bindings: BTreeMap<String, AiProviderCapabilitySessionBinding>,
     identity: String,
 }
 
@@ -392,6 +394,7 @@ impl AiCodexAppServerRegistration {
             launch_profile,
             bootstrap_instructions,
             reasoning_effort_profile: None,
+            capability_session_bindings: BTreeMap::new(),
             identity: String::new(),
         };
         registration.refresh_identity();
@@ -453,7 +456,69 @@ impl AiCodexAppServerRegistration {
         Ok(self)
     }
 
+    /// Admits one exact capability-delivery binding for retained sessions.
+    ///
+    /// The binding's complete fingerprint may then appear in a durable
+    /// provider-session descriptor. Its embedded registration identity must
+    /// equal this registration's exact effort-bound executable, sandbox,
+    /// launch-profile, bootstrap, and adapter identity. The admission overlay
+    /// does not alter that underlying identity because the binding already
+    /// incorporates it; changing the identity still invalidates the binding.
+    ///
+    /// This method accepts the validated binding object, never a bare final
+    /// fingerprint. It grants no capability discovery, execution, retention,
+    /// egress, budget, or resolver authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidConfiguration`] unless the registration
+    /// supports retained dynamic tools and the binding uses `EagerExact`,
+    /// `ProviderDeferred`, or `FixedBroker` with an exact matching model,
+    /// reasoning effort, and embedded registration identity. Client-deferred
+    /// definitions cannot be frozen into one retained Codex thread.
+    pub fn with_capability_session_binding(
+        mut self,
+        binding: AiProviderCapabilitySessionBinding,
+    ) -> Result<Self, ProviderError> {
+        let expected_registration_identity =
+            self.provider_session_fingerprint(binding.reasoning_effort())?;
+        if !self.experimental_dynamic_tools()
+            || !matches!(
+                binding.delivery_mode(),
+                crate::AiCapabilityDeliveryMode::EagerExact
+                    | crate::AiCapabilityDeliveryMode::ProviderDeferred
+                    | crate::AiCapabilityDeliveryMode::FixedBroker
+            )
+            || binding.model() != self.logical_model
+            || binding.registration_identity() != expected_registration_identity
+            || (self.capability_session_bindings.len() >= MAXIMUM_CAPABILITY_SESSION_BINDINGS
+                && !self
+                    .capability_session_bindings
+                    .contains_key(binding.fingerprint()))
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "invalid Codex capability-session binding".to_owned(),
+            ));
+        }
+        if self
+            .capability_session_bindings
+            .get(binding.fingerprint())
+            .is_some_and(|existing| existing != &binding)
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "conflicting Codex capability-session binding".to_owned(),
+            ));
+        }
+        self.capability_session_bindings
+            .insert(binding.fingerprint().to_owned(), binding);
+        Ok(self)
+    }
+
     fn refresh_identity(&mut self) {
+        // Every admitted capability binding incorporates the previous raw
+        // identity. An identity-bearing builder used afterward must therefore
+        // discard those admissions rather than retaining stale fingerprints.
+        self.capability_session_bindings.clear();
         self.identity = registration_identity(self);
     }
 
@@ -541,17 +606,31 @@ impl AiCodexAppServerRegistration {
     }
 
     fn admits_provider_session_fingerprint(&self, fingerprint: &str) -> bool {
-        std::iter::once(ModelReasoningEffort::Unspecified)
-            .chain(
-                self.reasoning_effort_profile
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(|profile| profile.supported().iter().copied()),
-            )
-            .any(|effort| {
-                self.provider_session_fingerprint(effort)
-                    .is_ok_and(|expected| expected == fingerprint)
-            })
+        self.capability_session_bindings.contains_key(fingerprint)
+            || std::iter::once(ModelReasoningEffort::Unspecified)
+                .chain(
+                    self.reasoning_effort_profile
+                        .as_ref()
+                        .into_iter()
+                        .flat_map(|profile| profile.supported().iter().copied()),
+                )
+                .any(|effort| {
+                    self.provider_session_fingerprint(effort)
+                        .is_ok_and(|expected| expected == fingerprint)
+                })
+    }
+
+    fn admits_provider_session_effort(
+        &self,
+        fingerprint: &str,
+        effort: ModelReasoningEffort,
+    ) -> bool {
+        self.provider_session_fingerprint(effort)
+            .is_ok_and(|expected| expected == fingerprint)
+            || self
+                .capability_session_bindings
+                .get(fingerprint)
+                .is_some_and(|binding| binding.reasoning_effort() == effort)
     }
 
     fn admits_cleanup_fingerprint(&self, fingerprint: &str) -> bool {
@@ -1266,13 +1345,13 @@ impl AiProvider for AiCodexAppServerProvider {
     ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
         self.capabilities()
             .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
-        let session_fingerprint = self
-            .registration
-            .provider_session_fingerprint(request.reasoning_effort)?;
         if descriptor.provider_kind() != &ProviderKind::LocalHarness
             || descriptor.provider_profile_id() != self.registration.provider_profile_id()
             || descriptor.provider_model() != self.registration.logical_model()
-            || descriptor.registration_fingerprint() != session_fingerprint
+            || !self.registration.admits_provider_session_effort(
+                descriptor.registration_fingerprint(),
+                request.reasoning_effort,
+            )
             || descriptor.protocol_version() != self.registration.protocol_version()
         {
             return Err(ProviderError::Rejected);
@@ -1785,11 +1864,10 @@ fn retained_session_matches_effort(
     session: &crate::AiOpenedProviderSession,
     effort: ModelReasoningEffort,
 ) -> bool {
-    registration
-        .provider_session_fingerprint(effort)
-        .is_ok_and(|fingerprint| {
-            session.claim().descriptor().registration_fingerprint() == fingerprint
-        })
+    registration.admits_provider_session_effort(
+        session.claim().descriptor().registration_fingerprint(),
+        effort,
+    )
 }
 
 struct ActiveTurnGuard {
@@ -4795,6 +4873,9 @@ fn project_codex_schema_node(schema: &Value, depth: usize) -> Result<Value, Prov
     }) {
         return Err(ProviderError::Rejected);
     }
+    if let Some(schema_types) = object.get("type").and_then(Value::as_array) {
+        return project_codex_nullable_scalar_union(object, schema_types);
+    }
     let schema_type = object
         .get("type")
         .and_then(Value::as_str)
@@ -4980,6 +5061,129 @@ fn project_codex_schema_node(schema: &Value, depth: usize) -> Result<Value, Prov
         );
     }
     Ok(Value::Object(projected))
+}
+
+fn project_codex_nullable_scalar_union(
+    object: &serde_json::Map<String, Value>,
+    schema_types: &[Value],
+) -> Result<Value, ProviderError> {
+    if !(2..=5).contains(&schema_types.len())
+        || object.keys().any(|key| {
+            matches!(
+                key.as_str(),
+                "properties"
+                    | "required"
+                    | "additionalProperties"
+                    | "items"
+                    | "minItems"
+                    | "maxItems"
+                    | "uniqueItems"
+            )
+        })
+    {
+        return Err(ProviderError::Rejected);
+    }
+    let mut unique_types = BTreeSet::new();
+    for schema_type in schema_types {
+        let schema_type = schema_type.as_str().ok_or(ProviderError::Rejected)?;
+        if !matches!(
+            schema_type,
+            "string" | "integer" | "number" | "boolean" | "null"
+        ) || !unique_types.insert(schema_type)
+        {
+            return Err(ProviderError::Rejected);
+        }
+    }
+    if !unique_types.contains("null") || unique_types.len() < 2 {
+        return Err(ProviderError::Rejected);
+    }
+
+    let description = object
+        .get("description")
+        .map(|value| value.as_str().ok_or(ProviderError::Rejected))
+        .transpose()?
+        .unwrap_or_default();
+    validate_codex_schema_description(description)?;
+
+    let mut constraint_notes = Vec::new();
+    let minimum_length = optional_u64(object, "minLength")?;
+    let maximum_length = optional_u64(object, "maxLength")?;
+    if (minimum_length.is_some() || maximum_length.is_some()) && !unique_types.contains("string") {
+        return Err(ProviderError::Rejected);
+    }
+    if minimum_length
+        .zip(maximum_length)
+        .is_some_and(|(minimum, maximum)| minimum > maximum)
+    {
+        return Err(ProviderError::Rejected);
+    }
+    if let Some(minimum) = minimum_length {
+        constraint_notes.push(format!("minimum length {minimum}"));
+    }
+    if let Some(maximum) = maximum_length {
+        constraint_notes.push(format!("maximum length {maximum}"));
+    }
+
+    let minimum = optional_number(object, "minimum")?;
+    let maximum = optional_number(object, "maximum")?;
+    if (minimum.is_some() || maximum.is_some())
+        && !unique_types.contains("integer")
+        && !unique_types.contains("number")
+    {
+        return Err(ProviderError::Rejected);
+    }
+    if minimum
+        .zip(maximum)
+        .is_some_and(|(minimum, maximum)| minimum > maximum)
+    {
+        return Err(ProviderError::Rejected);
+    }
+    if let Some(minimum) = minimum {
+        constraint_notes.push(format!("minimum {minimum}"));
+    }
+    if let Some(maximum) = maximum {
+        constraint_notes.push(format!("maximum {maximum}"));
+    }
+
+    let mut projected =
+        serde_json::Map::from_iter([("type".to_owned(), Value::Array(schema_types.to_vec()))]);
+    if let Some(values) = object.get("enum") {
+        let values = values.as_array().ok_or(ProviderError::Rejected)?;
+        if values.is_empty()
+            || values.len() > 100
+            || values.iter().any(|value| {
+                !codex_scalar_union_accepts(value, &unique_types)
+                    || value
+                        .as_str()
+                        .is_some_and(|value| value.is_empty() || value.len() > 200)
+            })
+        {
+            return Err(ProviderError::Rejected);
+        }
+        projected.insert("enum".to_owned(), Value::Array(values.clone()));
+    }
+    let projected_description = projected_codex_description(description, &constraint_notes)?;
+    if !projected_description.is_empty() {
+        projected.insert(
+            "description".to_owned(),
+            Value::String(projected_description),
+        );
+    }
+    Ok(Value::Object(projected))
+}
+
+fn codex_scalar_union_accepts(value: &Value, schema_types: &BTreeSet<&str>) -> bool {
+    match value {
+        Value::Null => schema_types.contains("null"),
+        Value::Bool(_) => schema_types.contains("boolean"),
+        Value::String(_) => schema_types.contains("string"),
+        Value::Number(number) => {
+            schema_types.contains("number")
+                || (schema_types.contains("integer")
+                    && (number.as_i64().is_some() || number.as_u64().is_some()))
+        }
+        Value::Array(_) | Value::Object(_) => false,
+    }
 }
 
 fn validate_codex_schema_description(description: &str) -> Result<(), ProviderError> {
@@ -5654,6 +5858,14 @@ pub(crate) mod tests {
             "d".repeat(64),
         )
         .expect("provider-session descriptor should validate");
+        opened_session_with_descriptor(binding, cursor, descriptor)
+    }
+
+    fn opened_session_with_descriptor(
+        binding: AiProviderRunBinding,
+        cursor: crate::AiProviderSessionCursor,
+        descriptor: crate::AiProviderSessionDescriptor,
+    ) -> crate::AiOpenedProviderSession {
         let claim = crate::AiProviderSessionClaim {
             binding_id: Uuid::new_v4(),
             session_id: binding.session_id(),
@@ -5703,6 +5915,53 @@ pub(crate) mod tests {
             .expect("test registration should validate")
             .with_launch_profile(profile),
         )
+    }
+
+    fn capability_session_binding(
+        registration: &AiCodexAppServerRegistration,
+        effort: ModelReasoningEffort,
+    ) -> AiProviderCapabilitySessionBinding {
+        capability_session_binding_with_mode(
+            registration,
+            effort,
+            crate::AiCapabilityDeliveryMode::FixedBroker,
+        )
+    }
+
+    fn capability_session_binding_with_mode(
+        registration: &AiCodexAppServerRegistration,
+        effort: ModelReasoningEffort,
+        mode: crate::AiCapabilityDeliveryMode,
+    ) -> AiProviderCapabilitySessionBinding {
+        AiProviderCapabilitySessionBinding::new(
+            mode,
+            "c".repeat(64),
+            BTreeSet::from([dynamic_tool().fingerprint]),
+            "test-fixed-broker-v1",
+            registration.logical_model(),
+            effort,
+            registration
+                .provider_session_fingerprint(effort)
+                .expect("selected effort should fingerprint"),
+        )
+        .expect("capability-session binding should validate")
+    }
+
+    fn capability_registration(
+        effort: ModelReasoningEffort,
+    ) -> (
+        Arc<AiCodexAppServerRegistration>,
+        AiProviderCapabilitySessionBinding,
+    ) {
+        let base = dynamic_registration("1.0.0");
+        let binding = capability_session_binding(&base, effort);
+        let registration = Arc::new(
+            (*base)
+                .clone()
+                .with_capability_session_binding(binding.clone())
+                .expect("exact capability-session binding should be admitted"),
+        );
+        (registration, binding)
     }
 
     fn reasoning_effort_profile() -> ModelReasoningEffortProfile {
@@ -6061,6 +6320,72 @@ pub(crate) mod tests {
             (*registration("1.0.0"))
                 .clone()
                 .with_reasoning_effort_profile(wrong_model),
+            Err(ProviderError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn capability_session_admission_validates_the_embedded_registration_identity() {
+        let base = dynamic_registration("1.0.0");
+        let identity = base.identity().to_owned();
+        let binding = capability_session_binding(&base, ModelReasoningEffort::Unspecified);
+        let admitted = (*base)
+            .clone()
+            .with_capability_session_binding(binding.clone())
+            .expect("exact binding should be admitted");
+        assert_eq!(admitted.identity(), identity);
+        assert!(admitted.admits_provider_session_fingerprint(binding.fingerprint()));
+        assert!(admitted.admits_provider_session_effort(
+            binding.fingerprint(),
+            ModelReasoningEffort::Unspecified,
+        ));
+        assert!(admitted.admits_cleanup_fingerprint(binding.fingerprint()));
+        let changed = admitted.with_bootstrap_instructions(trusted_bootstrap());
+        assert!(!changed.admits_provider_session_fingerprint(binding.fingerprint()));
+
+        let eager = capability_session_binding_with_mode(
+            &base,
+            ModelReasoningEffort::Unspecified,
+            crate::AiCapabilityDeliveryMode::EagerExact,
+        );
+        let eager_registration = (*base)
+            .clone()
+            .with_capability_session_binding(eager.clone())
+            .expect("a frozen eager direct-tool binding should be admitted");
+        assert!(eager_registration.admits_provider_session_effort(
+            eager.fingerprint(),
+            ModelReasoningEffort::Unspecified,
+        ));
+
+        let wrong_identity = AiProviderCapabilitySessionBinding::new(
+            crate::AiCapabilityDeliveryMode::FixedBroker,
+            binding.capability_index_fingerprint(),
+            binding.static_bootstrap_tool_fingerprints().clone(),
+            binding.provider_projection_version(),
+            binding.model(),
+            binding.reasoning_effort(),
+            "f".repeat(64),
+        )
+        .expect("synthetic mismatched binding should be structurally valid");
+        assert!(matches!(
+            (*base)
+                .clone()
+                .with_capability_session_binding(wrong_identity),
+            Err(ProviderError::InvalidConfiguration(_))
+        ));
+
+        let wrong_model = AiProviderCapabilitySessionBinding::new(
+            crate::AiCapabilityDeliveryMode::FixedBroker,
+            binding.capability_index_fingerprint(),
+            binding.static_bootstrap_tool_fingerprints().clone(),
+            binding.provider_projection_version(),
+            "other-model",
+            binding.reasoning_effort(),
+            binding.registration_identity(),
+        )
+        .expect("synthetic mismatched binding should be structurally valid");
+        assert!(matches!(
+            (*base).clone().with_capability_session_binding(wrong_model),
             Err(ProviderError::InvalidConfiguration(_))
         ));
     }
@@ -6516,6 +6841,79 @@ pub(crate) mod tests {
         let substituted_projection = project_codex_dynamic_tools(&[substituted])
             .expect("syntactically valid substituted descriptor should project distinctly");
         assert_ne!(projected.fingerprints, substituted_projection.fingerprints);
+    }
+
+    #[test]
+    fn fixed_broker_definitions_project_their_nullable_scalar_unions_for_codex() {
+        let definitions = crate::capability_broker_definitions(&"a".repeat(64))
+            .expect("fixed broker definitions should compile");
+        assert_eq!(definitions.len(), 3);
+        let projected = project_codex_dynamic_tools(&definitions)
+            .expect("every crate-authored fixed broker schema should project");
+        assert_eq!(projected.protocol_values.len(), 3);
+
+        let discover = projected
+            .protocol_values
+            .iter()
+            .find(|tool| tool.get("name") == Some(&json!("graphql_capabilities_discover")))
+            .expect("discover projection should exist");
+        assert_eq!(
+            discover.pointer("/inputSchema/properties/namespace/type"),
+            Some(&json!(["string", "null"]))
+        );
+        assert_eq!(
+            discover.pointer("/inputSchema/properties/kind/enum"),
+            Some(&json!(["generated_query", null]))
+        );
+
+        let execute = projected
+            .protocol_values
+            .iter()
+            .find(|tool| tool.get("name") == Some(&json!("graphql_capabilities_execute")))
+            .expect("execute projection should exist");
+        assert_eq!(
+            execute.pointer("/inputSchema/properties/arguments/items/properties/value/type"),
+            Some(&json!(["string", "integer", "number", "boolean", "null"]))
+        );
+        assert_eq!(
+            execute.pointer("/inputSchema/properties/maximumItems/type"),
+            Some(&json!(["integer", "null"]))
+        );
+        assert!(
+            execute
+                .pointer("/inputSchema/properties/maximumItems/description")
+                .and_then(Value::as_str)
+                .is_some_and(|description| {
+                    description.contains("minimum 1") && description.contains("maximum 10000")
+                })
+        );
+        for tool in &projected.protocol_values {
+            jsonschema::validator_for(&tool["inputSchema"])
+                .expect("projected fixed broker schema should remain valid JSON Schema");
+        }
+    }
+
+    #[test]
+    fn codex_nullable_scalar_union_projection_rejects_widened_or_malformed_shapes() {
+        for malformed in [
+            json!({"type": ["null"]}),
+            json!({"type": ["string", "integer"]}),
+            json!({"type": ["string", "string", "null"]}),
+            json!({"type": ["object", "null"]}),
+            json!({
+                "type": ["string", "null"],
+                "properties": {},
+                "additionalProperties": false
+            }),
+            json!({"type": ["boolean", "null"], "minimum": 1}),
+            json!({"type": ["integer", "null"], "enum": ["not-an-integer", null]}),
+            json!({"type": ["string", "null"], "enum": [false, null]}),
+        ] {
+            assert!(matches!(
+                project_codex_schema_node(&malformed, 0),
+                Err(ProviderError::Rejected)
+            ));
+        }
     }
 
     #[test]
@@ -7943,6 +8341,91 @@ pub(crate) mod tests {
         assert_eq!(counters.launches.load(Ordering::SeqCst), 1);
         assert_eq!(counters.bound_turns.load(Ordering::SeqCst), 1);
         assert_eq!(counters.retained_turns.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn capability_bound_session_creates_resumes_and_discards_under_exact_admission() {
+        let counters = Arc::new(Counters::new());
+        let (registration, capability_binding) =
+            capability_registration(ModelReasoningEffort::Unspecified);
+        let provider =
+            AiCodexAppServerProvider::new(registration.clone(), pool(counters.clone(), 2, 4));
+        let request = dynamic_model_request();
+        let context = provider_context(registration.provider_profile_id(), &request);
+        let run_binding = context
+            .run_binding()
+            .expect("executor context should carry the exact run binding");
+        let descriptor = crate::AiProviderSessionDescriptor::new_with_capability_binding(
+            ProviderKind::LocalHarness,
+            registration.provider_profile_id(),
+            registration.protocol_version(),
+            "d".repeat(64),
+            &capability_binding,
+        )
+        .expect("capability-bound descriptor should validate");
+
+        let unadmitted = AiCodexAppServerProvider::new(
+            dynamic_registration("1.0.0"),
+            pool(Arc::new(Counters::new()), 1, 2),
+        );
+        assert!(matches!(
+            unadmitted
+                .create_empty_session(&run_binding, &descriptor, &request)
+                .await,
+            Err(ProviderError::Rejected)
+        ));
+
+        let cursor = provider
+            .create_empty_session(&run_binding, &descriptor, &request)
+            .await
+            .expect("admitted capability-bound session should create");
+        let opened =
+            opened_session_with_descriptor(run_binding, cursor.clone(), descriptor.clone())
+                .activate_newly_bound_empty(run_binding, &cursor)
+                .expect("newly bound cursor should activate");
+        let first = provider
+            .stream_with_dynamic_tools(
+                request.clone(),
+                context
+                    .clone()
+                    .with_provider_session(opened)
+                    .expect("opened session should match the request"),
+                Arc::new(FakeDynamicResponder),
+            )
+            .await
+            .expect("first capability-bound turn should start")
+            .collect::<Vec<_>>()
+            .await;
+        assert!(first.iter().all(Result::is_ok));
+
+        let resumed = opened_session_with_descriptor(run_binding, cursor, descriptor.clone());
+        let continuation = provider
+            .stream_with_dynamic_tools(
+                request.clone(),
+                context
+                    .with_provider_session(resumed)
+                    .expect("resumed session should match the request"),
+                Arc::new(FakeDynamicResponder),
+            )
+            .await
+            .expect("capability-bound retained turn should resume")
+            .collect::<Vec<_>>()
+            .await;
+        assert!(continuation.iter().all(Result::is_ok));
+
+        let cleanup_binding = binding_for_owner(2);
+        let cleanup_cursor = provider
+            .create_empty_session(&cleanup_binding, &descriptor, &request)
+            .await
+            .expect("second exact empty session should create");
+        provider
+            .discard_empty_session(&cleanup_binding, &descriptor, &cleanup_cursor)
+            .await
+            .expect("failed-bind cleanup should admit the capability fingerprint");
+        assert_eq!(counters.bound_turns.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.retained_turns.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.deleted_threads.load(Ordering::SeqCst), 1);
+        assert!(registration.admits_cleanup_fingerprint(descriptor.registration_fingerprint()));
     }
 
     #[tokio::test]

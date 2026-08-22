@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.91.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.91.1", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -159,6 +159,13 @@ false. The protocol actor rejects any native item that is nevertheless
 emitted. Reverify both direct delivery and the negative native-item matrix
 before upgrading Codex.
 
+The Codex schema projector preserves bounded nullable scalar `type` arrays in
+the crate-authored FixedBroker definitions. It does not pass through arbitrary
+JSON Schema unions: only unique combinations of supported scalar types plus
+`null`, with compatible enums and constraints, are admitted. Full-surface
+readiness must project all three FixedBroker definitions before the host is
+ready.
+
 See the [session reliability adoption contract](docs/session-reliability-adoption.md).
 
 ## Features and capability boundary
@@ -219,12 +226,20 @@ configuration or exact Codex registration, and expose only
 Set the same selected value on `ModelRequest::reasoning_effort` and
 `AiBudgetReservationRequest::reasoning_effort`. The runtime rejects an
 explicit value absent from the active model profile before provider execution.
-For retained Codex sessions, create the provider-session descriptor with
-`registration.provider_session_fingerprint(selected_effort)?`; the app-server
-override affects subsequent turns, so changing effort requires exact cursor
-cleanup and rebind. Effort selection neither enables visible reasoning
-summaries nor grants tools, egress, filesystem, shell, browser, MCP, approval,
-or mutation authority. See the
+For retained Codex sessions without capability delivery, create the
+provider-session descriptor with
+`registration.provider_session_fingerprint(selected_effort)?`. A retained
+capability-delivery host instead constructs the exact
+`AiProviderCapabilitySessionBinding` from that raw fingerprint, installs the
+binding with `registration.with_capability_session_binding(binding.clone())?`,
+and persists a descriptor created by
+`AiProviderSessionDescriptor::new_with_capability_binding`. The adapter
+validates the binding's embedded raw identity and then recognizes its complete
+fingerprint for create, resume, and cleanup. The app-server effort override
+affects subsequent turns, so changing effort requires exact cursor cleanup and
+rebind. Effort selection neither enables visible reasoning summaries nor
+grants tools, egress, filesystem, shell, browser, MCP, approval, or mutation
+authority. See the
 [provider-session guide](docs/provider-sessions-and-hosted-activity.md) and
 [migration guide](MIGRATION.md).
 

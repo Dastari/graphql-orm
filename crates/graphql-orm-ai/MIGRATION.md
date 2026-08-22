@@ -19,6 +19,38 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.91.0 to 0.91.1: Codex FixedBroker projection and retained session admission
+
+Adopt `graphql-orm-ai` 0.91.1 from one reviewed full monorepo revision. The AI
+schema module remains **0.63.0**. There is no database, data, table, column,
+index, constraint, backfill, GraphQL SDL, protected-payload, backup or restore
+migration.
+
+Hosts using the Codex app-server adapter should rerun readiness against their
+complete capability surface. The adapter now projects the crate-authored
+FixedBroker discovery, describe, and execute definitions without rewriting
+their bounded nullable scalar `type` arrays. Codex 0.148.0 was measured to
+accept the preserved form and deliver the offered dynamic tool directly.
+
+No host API changes are required. Unknown, duplicate, non-nullable, structural,
+or otherwise malformed type unions continue to fail closed before a provider
+turn. Keep the closed launch profile, full-surface readiness guard, and
+negative native-item checks unchanged.
+
+Codex app-server hosts that persist
+`AiProviderSessionDescriptor::new_with_capability_binding` descriptors must
+install the same exact `AiProviderCapabilitySessionBinding` on the immutable
+`AiCodexAppServerRegistration` before constructing the provider and cleanup
+service. The registration rejects a binding unless its model and reasoning
+effort are admitted and its embedded registration identity equals the exact
+effort-bound executable, sandbox, launch-profile, bootstrap, and adapter
+identity.
+
+The admission overlay deliberately does not alter that underlying identity:
+the binding already incorporates it, avoiding a circular fingerprint. Hosts
+must not accept or reconstruct a bare final fingerprint. Existing raw
+registration descriptors remain compatible.
+
 ## 0.90.1 to 0.91.0: agql-auth 0.18.0 type-universe alignment
 
 Adopt `graphql-orm-ai` 0.91.0 from one reviewed full monorepo revision and

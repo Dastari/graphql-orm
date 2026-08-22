@@ -18,6 +18,37 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.91.1] - 2026-08-23
+
+Persistent schema module: **0.63.0** (unchanged from 0.91.0).
+
+### Fixed
+
+- The Codex app-server schema projector now preserves bounded nullable scalar
+  `type` arrays used by the crate-authored FixedBroker definitions. Codex
+  0.148.0 accepts these schemas directly; previously the adapter rejected the
+  discovery and execute definitions before starting a readiness turn.
+- Codex app-server registrations can now admit an exact capability-delivery
+  session binding after validating its model, reasoning effort, and embedded
+  executable/sandbox registration identity. Retained thread creation, resume,
+  failed-bind cleanup, and detached cleanup all recognize that complete
+  binding instead of rejecting it as though it were a raw registration
+  fingerprint.
+
+### Security
+
+- Type-array projection is limited to unique combinations of `string`,
+  `integer`, `number`, `boolean`, and `null`, requires `null` plus at least one
+  non-null scalar, validates compatible enums and constraints, and still
+  rejects object, array, unbounded, malformed, or unknown union shapes.
+- Capability-session admission accepts the validated binding object, never an
+  arbitrary fingerprint. The admitted fingerprint remains bound to the exact
+  delivery mode, capability-index set, static bootstrap tools, provider
+  projection, model, reasoning effort, and immutable Codex registration.
+
+There is no schema, data, protected-payload, GraphQL SDL, backup or restore
+migration in this release.
+
 ## [0.91.0] - 2026-08-22
 
 Persistent schema module: **0.63.0** (unchanged from 0.90.1).
