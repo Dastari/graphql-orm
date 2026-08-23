@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-22
+last_reviewed: 2026-08-23
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -18,6 +18,36 @@ Migration entries preserve the dependency and schema facts for the checkpoint
 they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## 0.92.0 to 0.93.0: opt-in Codex app-server native web search
+
+Adopt `graphql-orm-ai` 0.93.0 from one reviewed full monorepo revision. The AI
+schema module remains **0.63.0**. There is no database, data, table, column,
+index, constraint, backfill, GraphQL SDL, protected-payload, backup or restore
+migration.
+
+Existing registrations remain search-disabled. A reviewed host opts in with
+`AiCodexAppServerLaunchProfile::with_web_search(true)`, applies that exact
+profile's `codex_arguments()`, and implements
+`AiCodexAppServerRunProcess::create_empty_thread_with_web_search` for retained
+threads. The default trait implementation accepts only `None` and preserves
+existing disabled-search implementations.
+
+Enabled requests must include exactly one `ModelBuiltinTool::WebSearch`, an
+ordinary WebSearch egress proof, and `maximum_builtin_tool_calls`. `PublicWeb`
+and `AllowedDomains` are supported. `BlockedDomains` remains unsupported
+because the reviewed native app-server protocol exposes no exclusion filter.
+The protocol actor emits `AiCodexAppServerInbound::WebSearchLifecycle` with
+typed bounded result metadata; process implementations map those events to
+the provider-neutral built-in start/completion stream used for usage and
+pricing.
+
+The app-server does not accept the built-in call ceiling as a wire setting.
+The actor rejects a start beyond the host ceiling, but that over-limit native
+operation may already have begun before its start notification is observed.
+Search result bodies also enter model context before completion metadata is
+delivered. Hosts must describe those limits honestly and must not present
+post-result validation as pre-context classification.
 
 ## 0.91.1 to 0.92.0: owner-authorized tool arguments and safe failures
 

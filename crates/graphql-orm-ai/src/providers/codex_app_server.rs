@@ -26,10 +26,11 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use crate::{
     AiProvider, AiProviderCapabilitySessionBinding, AiProviderFailureCategory,
     AiProviderRunBinding, AiProviderRunCloseOutcome, AiProviderRunCloseReason,
-    AiProviderRunInterruptOutcome, ModelContinuationMode, ModelInputBlock, ModelReasoningEffort,
-    ModelReasoningEffortProfile, ModelReasoningSummaryRequest, ModelRequest, ModelToolDefinition,
-    ProviderCapabilities, ProviderDynamicToolCall, ProviderDynamicToolResponder, ProviderError,
-    ProviderEventStream, ProviderKind, ProviderRequestContext,
+    AiProviderRunInterruptOutcome, ModelBuiltinTool, ModelContinuationMode, ModelInputBlock,
+    ModelReasoningEffort, ModelReasoningEffortProfile, ModelReasoningSummaryRequest, ModelRequest,
+    ModelToolDefinition, ModelWebSearchDomainPolicy, ProviderCapabilities, ProviderDynamicToolCall,
+    ProviderDynamicToolResponder, ProviderError, ProviderEventStream, ProviderKind,
+    ProviderRequestContext,
 };
 
 const MAXIMUM_PROCESSES: usize = 4_096;
@@ -45,6 +46,9 @@ const MAXIMUM_RUNTIME_WARNING_MESSAGE_BYTES: usize = 4 * 1024;
 const MAXIMUM_RUNTIME_WARNING_BYTES_PER_TURN: usize = 16 * 1024;
 const MAXIMUM_RUNTIME_WARNINGS_PER_TURN: usize = 8;
 const MAXIMUM_CAPABILITY_SESSION_BINDINGS: usize = 256;
+const MAXIMUM_WEB_SEARCH_RESULTS_PER_CALL: usize = 100;
+const MAXIMUM_WEB_SEARCH_RESULT_BYTES_PER_CALL: usize = 1024 * 1024;
+const MAXIMUM_WEB_SEARCH_FIELD_BYTES: usize = 64 * 1024;
 const MAXIMUM_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 fn provider_timeout_error() -> ProviderError {
@@ -231,13 +235,14 @@ enum AiCodexAppServerLaunchProfileKind {
 ///
 /// The dynamic-tools-only profile fixes the reviewed CLI feature disables,
 /// supplies an empty environment list for every dynamic thread/turn, disables
-/// ordinary utility and hosted-search tools in thread configuration, and
-/// requires an isolated configuration home. The process factory remains
+/// ordinary utility tools and hosted search by default in thread
+/// configuration, and requires an isolated configuration home. The process factory remains
 /// responsible for applying the returned argument vector and operating-system
 /// sandbox exactly; it cannot substitute a broader profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AiCodexAppServerLaunchProfile {
     kind: AiCodexAppServerLaunchProfileKind,
+    web_search: bool,
 }
 
 impl AiCodexAppServerLaunchProfile {
@@ -245,6 +250,7 @@ impl AiCodexAppServerLaunchProfile {
     pub const fn strict_text_only_v1() -> Self {
         Self {
             kind: AiCodexAppServerLaunchProfileKind::StrictTextOnlyV1,
+            web_search: false,
         }
     }
 
@@ -269,14 +275,29 @@ impl AiCodexAppServerLaunchProfile {
         }
         Ok(Self {
             kind: AiCodexAppServerLaunchProfileKind::ExperimentalDynamicToolsOnlyV1,
+            web_search: false,
         })
+    }
+
+    /// Enables or disables native provider-hosted web search for this profile.
+    ///
+    /// Search is disabled by default. Enabling it changes the immutable
+    /// registration identity, removes only the `standalone_web_search`
+    /// process disable, and permits one request-authorized web-search policy
+    /// to be projected into the closed thread configuration. It does not
+    /// enable shell, browser control, MCP, files, or another native surface.
+    #[must_use]
+    pub const fn with_web_search(mut self, enabled: bool) -> Self {
+        self.web_search = enabled;
+        self
     }
 
     /// Exact CLI arguments following the reviewed Codex executable path.
     ///
     /// The dynamic profile deliberately disables every native execution,
-    /// browser, hosted-search, connector, collaboration, image, plugin, and
-    /// interactive tool feature it relies on being absent. Codex 0.148.0 is
+    /// browser, connector, collaboration, image, plugin, and interactive tool
+    /// feature it relies on being absent. Hosted search remains in that list
+    /// unless [`Self::with_web_search`] enables its sole exception. Codex 0.148.0 is
     /// the measured exception for the internal `code_mode_host` process gate:
     /// disabling that one gate suppresses direct `dynamicToolCall` delivery,
     /// so it remains available at process launch while Code Mode, Code
@@ -297,6 +318,9 @@ impl AiCodexAppServerLaunchProfile {
                 if *feature == CODE_MODE_HOST_FEATURE {
                     continue;
                 }
+                if *feature == "standalone_web_search" && self.web_search {
+                    continue;
+                }
                 arguments.extend(["--disable", *feature]);
             }
         }
@@ -312,6 +336,11 @@ impl AiCodexAppServerLaunchProfile {
         )
     }
 
+    /// Whether this profile admits request-authorized native web search.
+    pub const fn web_search_enabled(self) -> bool {
+        self.web_search
+    }
+
     /// Whether the process must use a private configuration home containing
     /// only the minimum provider authentication material.
     pub const fn requires_isolated_configuration_home(self) -> bool {
@@ -319,10 +348,16 @@ impl AiCodexAppServerLaunchProfile {
     }
 
     fn identity_label(self) -> &'static str {
-        match self.kind {
-            AiCodexAppServerLaunchProfileKind::StrictTextOnlyV1 => "strict-text-only-v1",
-            AiCodexAppServerLaunchProfileKind::ExperimentalDynamicToolsOnlyV1 => {
+        match (self.kind, self.web_search) {
+            (AiCodexAppServerLaunchProfileKind::StrictTextOnlyV1, false) => "strict-text-only-v1",
+            (AiCodexAppServerLaunchProfileKind::StrictTextOnlyV1, true) => {
+                "strict-text-only-v1-web-search"
+            }
+            (AiCodexAppServerLaunchProfileKind::ExperimentalDynamicToolsOnlyV1, false) => {
                 "experimental-dynamic-tools-only-v1"
+            }
+            (AiCodexAppServerLaunchProfileKind::ExperimentalDynamicToolsOnlyV1, true) => {
+                "experimental-dynamic-tools-only-v1-web-search"
             }
         }
     }
@@ -646,7 +681,30 @@ impl AiCodexAppServerRegistration {
     }
 }
 
-/// Bounded text-only input for one fresh app-server turn.
+/// Exact request-authorized native web-search settings for one app-server turn.
+///
+/// This value is derived from [`ModelRequest::builtin_tools`] and its shared
+/// built-in call ceiling. Consumers cannot use it to authorize search without
+/// the ordinary request egress and budget proofs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiCodexAppServerWebSearchTurnConfig {
+    domain_policy: ModelWebSearchDomainPolicy,
+    maximum_calls: u64,
+}
+
+impl AiCodexAppServerWebSearchTurnConfig {
+    /// Exact host-authored public-web or allow-domain policy.
+    pub const fn domain_policy(&self) -> &ModelWebSearchDomainPolicy {
+        &self.domain_policy
+    }
+
+    /// Maximum native web-search item lifecycles admitted for the turn.
+    pub const fn maximum_calls(&self) -> u64 {
+        self.maximum_calls
+    }
+}
+
+/// Bounded text and optional native-search input for one fresh app-server turn.
 ///
 /// This type has no tool, URL, path, shell, environment, browser, image, MCP,
 /// app, credential, or generic JSON-RPC field. It intentionally cannot model
@@ -658,6 +716,7 @@ pub struct AiCodexAppServerTurnInput {
     retained_bootstrap_fingerprint: Option<String>,
     input: Vec<String>,
     tools: Vec<ModelToolDefinition>,
+    web_search: Option<AiCodexAppServerWebSearchTurnConfig>,
     reasoning_effort: ModelReasoningEffort,
     maximum_output_tokens: u64,
     readiness_probe_tool_id: Option<String>,
@@ -677,6 +736,7 @@ impl std::fmt::Debug for AiCodexAppServerTurnInput {
             .field("input", &"<protected>")
             .field("input_count", &self.input.len())
             .field("tool_count", &self.tools.len())
+            .field("web_search", &self.web_search)
             .field("reasoning_effort", &self.reasoning_effort)
             .field("maximum_output_tokens", &self.maximum_output_tokens)
             .field("readiness_probe", &self.readiness_probe_tool_id.is_some())
@@ -705,6 +765,7 @@ impl AiCodexAppServerTurnInput {
             retained_bootstrap_fingerprint: None,
             input,
             tools: Vec::new(),
+            web_search: None,
             reasoning_effort,
             maximum_output_tokens,
             readiness_probe_tool_id: None,
@@ -778,6 +839,14 @@ impl AiCodexAppServerTurnInput {
                 .any(|value| value.contains('\0'))
             || self.maximum_output_tokens == 0
             || self.maximum_output_tokens > u64::from(u32::MAX)
+            || self.web_search.as_ref().is_some_and(|search| {
+                search.maximum_calls == 0
+                    || !matches!(
+                        search.domain_policy,
+                        ModelWebSearchDomainPolicy::PublicWeb
+                            | ModelWebSearchDomainPolicy::AllowedDomains { .. }
+                    )
+            })
         {
             return Err(ProviderError::InvalidRequest);
         }
@@ -822,6 +891,11 @@ impl AiCodexAppServerTurnInput {
         &self.tools
     }
 
+    /// Request-authorized native web-search configuration, when supplied.
+    pub fn web_search(&self) -> Option<&AiCodexAppServerWebSearchTurnConfig> {
+        self.web_search.as_ref()
+    }
+
     /// Exact validated reasoning-effort selection for this turn.
     pub const fn reasoning_effort(&self) -> ModelReasoningEffort {
         self.reasoning_effort
@@ -853,11 +927,10 @@ impl AiCodexAppServerTurnInput {
         expected_mode: ModelContinuationMode,
     ) -> Result<Self, ProviderError> {
         request.validate()?;
+        let web_search = codex_web_search_turn_config(&request)?;
         if request.continuation.is_some()
             || request.continuation_mode != expected_mode
             || !request.tools.is_empty()
-            || !request.builtin_tools.is_empty()
-            || request.maximum_builtin_tool_calls.is_some()
             || request.reasoning_summary != ModelReasoningSummaryRequest::Disabled
             || request.output_schema.is_some()
         {
@@ -873,7 +946,7 @@ impl AiCodexAppServerTurnInput {
                 | ModelInputBlock::Attachment { .. } => Err(ProviderError::Unsupported),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Self::new(
+        let mut turn = Self::new(
             request.model,
             request.instructions,
             input,
@@ -881,16 +954,18 @@ impl AiCodexAppServerTurnInput {
             request
                 .maximum_output_tokens
                 .ok_or(ProviderError::InvalidRequest)?,
-        )
+        )?;
+        turn.web_search = web_search;
+        turn.validate()?;
+        Ok(turn)
     }
 
     fn try_from_dynamic_request(request: ModelRequest) -> Result<Self, ProviderError> {
         request.validate()?;
+        let web_search = codex_web_search_turn_config(&request)?;
         if request.tools.is_empty()
             || request.continuation.is_some()
             || request.continuation_mode != ModelContinuationMode::ProviderRetained
-            || !request.builtin_tools.is_empty()
-            || request.maximum_builtin_tool_calls.is_some()
             || request.reasoning_summary != ModelReasoningSummaryRequest::Disabled
             || request.output_schema.is_some()
         {
@@ -919,6 +994,7 @@ impl AiCodexAppServerTurnInput {
                 .ok_or(ProviderError::InvalidRequest)?,
         )?;
         turn.tools = request.tools;
+        turn.web_search = web_search;
         turn.validate()?;
         Ok(turn)
     }
@@ -940,6 +1016,32 @@ impl AiCodexAppServerTurnInput {
                 .fingerprint()
                 .to_owned(),
         )
+    }
+}
+
+fn codex_web_search_turn_config(
+    request: &ModelRequest,
+) -> Result<Option<AiCodexAppServerWebSearchTurnConfig>, ProviderError> {
+    match request.builtin_tools.as_slice() {
+        [] => {
+            if request.maximum_builtin_tool_calls.is_some() {
+                Err(ProviderError::InvalidRequest)
+            } else {
+                Ok(None)
+            }
+        }
+        [ModelBuiltinTool::WebSearch { domains }] => {
+            if matches!(domains, ModelWebSearchDomainPolicy::BlockedDomains { .. }) {
+                return Err(ProviderError::Unsupported);
+            }
+            Ok(Some(AiCodexAppServerWebSearchTurnConfig {
+                domain_policy: domains.clone(),
+                maximum_calls: request
+                    .maximum_builtin_tool_calls
+                    .ok_or(ProviderError::InvalidRequest)?,
+            }))
+        }
+        _ => Err(ProviderError::Unsupported),
     }
 }
 
@@ -1086,9 +1188,10 @@ impl Default for AiCodexAppServerRunLimits {
 /// The default registration is tool-free and starts fresh ephemeral threads.
 /// An exact provider-session turn may instead resume a protected cursor, and
 /// an explicit experimental registration may offer reviewed dynamic tools
-/// whose execution remains coordinator-owned. Provider built-ins, stateless
-/// conversation continuations, attachments, structured output, and raw
-/// reasoning remain unavailable.
+/// whose execution remains coordinator-owned. Native web search is a separate
+/// default-off built-in. Other provider built-ins, stateless conversation
+/// continuations, attachments, structured output, and raw reasoning remain
+/// unavailable.
 #[derive(Clone, Debug)]
 pub struct AiCodexAppServerProvider {
     registration: Arc<AiCodexAppServerRegistration>,
@@ -1122,6 +1225,20 @@ impl AiCodexAppServerProvider {
             clock,
         }
     }
+}
+
+fn validate_registration_web_search(
+    registration: &AiCodexAppServerRegistration,
+    request: &ModelRequest,
+) -> Result<(), ProviderError> {
+    let requested = request
+        .builtin_tools
+        .iter()
+        .any(|tool| matches!(tool, ModelBuiltinTool::WebSearch { .. }));
+    if requested && !registration.launch_profile().web_search_enabled() {
+        return Err(ProviderError::Unsupported);
+    }
+    Ok(())
 }
 
 /// Bounded deletion/absence adapter for retained Codex app-server threads.
@@ -1193,6 +1310,10 @@ impl AiProvider for AiCodexAppServerProvider {
             },
             streaming: true,
             custom_tools: dynamic_tools_available,
+            web_search: self.registration.launch_profile().web_search_enabled()
+                && self
+                    .pool
+                    .supports_launch_profile(self.registration.launch_profile()),
             provider_retained_continuation: true,
             local: true,
             reasoning_effort_profiles: self
@@ -1218,6 +1339,7 @@ impl AiProvider for AiCodexAppServerProvider {
             &request,
             self.registration.provider_profile_id(),
         )?;
+        validate_registration_web_search(&self.registration, &request)?;
         let binding = context.run_binding().ok_or(ProviderError::Rejected)?;
         let retained = context.provider_session().cloned();
         if retained.as_ref().is_some_and(|session| {
@@ -1274,6 +1396,7 @@ impl AiProvider for AiCodexAppServerProvider {
             &request,
             self.registration.provider_profile_id(),
         )?;
+        validate_registration_web_search(&self.registration, &request)?;
         let binding = context.run_binding().ok_or(ProviderError::Rejected)?;
         let retained = context.provider_session().cloned();
         if retained.as_ref().is_some_and(|session| {
@@ -1345,6 +1468,7 @@ impl AiProvider for AiCodexAppServerProvider {
     ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
         self.capabilities()
             .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
+        validate_registration_web_search(&self.registration, request)?;
         if descriptor.provider_kind() != &ProviderKind::LocalHarness
             || descriptor.provider_profile_id() != self.registration.provider_profile_id()
             || descriptor.provider_model() != self.registration.logical_model()
@@ -1380,6 +1504,7 @@ impl AiProvider for AiCodexAppServerProvider {
                 self.registration.clone(),
                 input.reasoning_effort(),
                 input.tools().to_vec(),
+                input.web_search().cloned(),
             )
             .await
     }
@@ -1429,6 +1554,26 @@ pub trait AiCodexAppServerRunProcess: Send + Sync {
         _dynamic_tools: Vec<ModelToolDefinition>,
     ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
         Err(ProviderError::Unsupported)
+    }
+
+    /// Creates one durable empty provider thread with optional native search.
+    ///
+    /// The default preserves disabled-search consumers by delegating `None`
+    /// to [`Self::create_empty_thread`]. Implementations must override this
+    /// method before accepting an enabled search configuration.
+    async fn create_empty_thread_with_web_search(
+        &self,
+        model: &str,
+        reasoning_effort: ModelReasoningEffort,
+        bootstrap: &AiCodexAppServerBootstrapInstructions,
+        dynamic_tools: Vec<ModelToolDefinition>,
+        web_search: Option<AiCodexAppServerWebSearchTurnConfig>,
+    ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
+        if web_search.is_some() {
+            return Err(ProviderError::Unsupported);
+        }
+        self.create_empty_thread(model, reasoning_effort, bootstrap, dynamic_tools)
+            .await
     }
 
     /// Starts one fresh, text-only thread/turn on the retained process.
@@ -1605,9 +1750,16 @@ impl AiCodexAppServerLaunchedProcess {
         reasoning_effort: ModelReasoningEffort,
         bootstrap: &AiCodexAppServerBootstrapInstructions,
         dynamic_tools: Vec<ModelToolDefinition>,
+        web_search: Option<AiCodexAppServerWebSearchTurnConfig>,
     ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
         self.process
-            .create_empty_thread(model, reasoning_effort, bootstrap, dynamic_tools)
+            .create_empty_thread_with_web_search(
+                model,
+                reasoning_effort,
+                bootstrap,
+                dynamic_tools,
+                web_search,
+            )
             .await
     }
 
@@ -1833,6 +1985,7 @@ enum EmptyThreadActivation {
         bootstrap_fingerprint: String,
         reasoning_effort: ModelReasoningEffort,
         dynamic_tools: Vec<ModelToolDefinition>,
+        web_search: Option<AiCodexAppServerWebSearchTurnConfig>,
     },
     Consumed,
 }
@@ -1914,9 +2067,11 @@ impl AiCodexAppServerRunPool {
         registration: Arc<AiCodexAppServerRegistration>,
         reasoning_effort: ModelReasoningEffort,
         dynamic_tools: Vec<ModelToolDefinition>,
+        web_search: Option<AiCodexAppServerWebSearchTurnConfig>,
     ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
         if !self.supports_launch_profile(registration.launch_profile())
             || (!dynamic_tools.is_empty() && !registration.experimental_dynamic_tools())
+            || (web_search.is_some() && !registration.launch_profile().web_search_enabled())
         {
             return Err(ProviderError::Unsupported);
         }
@@ -1952,6 +2107,7 @@ impl AiCodexAppServerRunPool {
                 reasoning_effort,
                 registration.bootstrap_instructions(),
                 dynamic_tools.clone(),
+                web_search.clone(),
             ),
         )
         .await;
@@ -1966,6 +2122,7 @@ impl AiCodexAppServerRunPool {
                         .to_owned(),
                     reasoning_effort,
                     dynamic_tools,
+                    web_search,
                 };
                 Ok(cursor)
             }
@@ -2338,6 +2495,7 @@ impl AiCodexAppServerRunPool {
                     bootstrap_fingerprint,
                     reasoning_effort,
                     dynamic_tools,
+                    web_search,
                 } => {
                     if cursor_fingerprint != &session.cursor().fingerprint() {
                         Some(crate::AiCodexBoundTurnRejection::CursorFingerprintMismatch)
@@ -2345,7 +2503,9 @@ impl AiCodexAppServerRunPool {
                         Some(crate::AiCodexBoundTurnRejection::BootstrapFingerprintMismatch)
                     } else if *reasoning_effort != input.reasoning_effort() {
                         Some(crate::AiCodexBoundTurnRejection::ReasoningEffortMismatch)
-                    } else if dynamic_tools != input.tools() {
+                    } else if dynamic_tools != input.tools()
+                        || web_search.as_ref() != input.web_search()
+                    {
                         Some(crate::AiCodexBoundTurnRejection::FrozenDefinitionMismatch)
                     } else {
                         *activation = EmptyThreadActivation::Consumed;
@@ -2941,6 +3101,74 @@ enum ClientMethod {
     TurnInterrupt,
 }
 
+/// Bounded provider-authored action associated with one native web-search item.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AiCodexAppServerWebSearchAction {
+    /// One search query or provider-authored query batch.
+    Search {
+        /// Optional primary query.
+        query: Option<String>,
+        /// Optional provider-authored query batch.
+        queries: Vec<String>,
+    },
+    /// Open one provider-selected result page.
+    OpenPage {
+        /// Optional HTTPS page URL.
+        url: Option<String>,
+    },
+    /// Find one pattern in a provider-selected page.
+    FindInPage {
+        /// Optional HTTPS page URL.
+        url: Option<String>,
+        /// Optional bounded pattern.
+        pattern: Option<String>,
+    },
+    /// Provider reported another bounded web-search action without details.
+    Other,
+}
+
+/// One validated structured result exposed by a native web-search completion.
+///
+/// Result metadata is provider-authored and is not a trust or classification
+/// proof. The adapter verifies an HTTPS URL, matching normalized host, bounded
+/// text, and the active allow-domain policy before exposing it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiCodexAppServerWebSearchResult {
+    domain: String,
+    url: String,
+    title: String,
+    snippet: String,
+    reference_id: String,
+}
+
+impl AiCodexAppServerWebSearchResult {
+    /// Normalized result domain.
+    pub fn domain(&self) -> &str {
+        &self.domain
+    }
+
+    /// Validated HTTPS result URL.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Provider-authored result title.
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// Provider-authored result snippet.
+    pub fn snippet(&self) -> &str {
+        &self.snippet
+    }
+
+    /// Opaque provider result reference.
+    pub fn reference_id(&self) -> &str {
+        &self.reference_id
+    }
+}
+
 /// One strictly admitted inbound Codex app-server envelope.
 ///
 /// The actor admits only responses correlated to one of its closed outbound
@@ -2989,6 +3217,21 @@ pub enum AiCodexAppServerInbound {
     /// hidden reasoning never crosses this boundary.
     ReasoningLifecycle {
         /// Whether this is the item start or terminal completion.
+        completed: bool,
+    },
+    /// Exact native web-search item lifecycle admitted for the active turn.
+    WebSearchLifecycle {
+        /// Exact provider turn reference.
+        turn_id: String,
+        /// Opaque native web-search item/call identifier.
+        call_id: String,
+        /// Provider-authored action, available on completion when reported.
+        action: Option<AiCodexAppServerWebSearchAction>,
+        /// Bounded provider-authored query, absent for an empty start frame.
+        query: Option<String>,
+        /// Validated structured search results, empty on start or no matches.
+        results: Vec<AiCodexAppServerWebSearchResult>,
+        /// Whether this is the terminal completion lifecycle.
         completed: bool,
     },
     /// Content-free retained-thread usage snapshot observed during an exact
@@ -3047,6 +3290,22 @@ impl std::fmt::Debug for AiCodexAppServerInbound {
             Self::RuntimeWarning => formatter.write_str("AiCodexAppServerInbound::RuntimeWarning"),
             Self::ReasoningLifecycle { completed } => formatter
                 .debug_struct("AiCodexAppServerInbound::ReasoningLifecycle")
+                .field("completed", completed)
+                .finish(),
+            Self::WebSearchLifecycle {
+                turn_id,
+                call_id,
+                action,
+                query,
+                results,
+                completed,
+            } => formatter
+                .debug_struct("AiCodexAppServerInbound::WebSearchLifecycle")
+                .field("turn_id", turn_id)
+                .field("call_id", call_id)
+                .field("action_present", &action.is_some())
+                .field("query_present", &query.is_some())
+                .field("result_count", &results.len())
                 .field("completed", completed)
                 .finish(),
             Self::RetainedResumeUsageSnapshot => {
@@ -3122,6 +3381,9 @@ pub struct AiCodexAppServerProtocolActor {
     retained_model: Option<String>,
     retained_reasoning_effort: Option<ModelReasoningEffort>,
     retained_bootstrap_fingerprint: Option<String>,
+    thread_web_search_domain_policy: Option<ModelWebSearchDomainPolicy>,
+    active_web_search_maximum_calls: Option<u64>,
+    started_web_search_calls: u64,
     dynamic_tools: BTreeMap<String, ModelToolDefinition>,
     dynamic_tool_projection_fingerprints: BTreeMap<String, String>,
     pending_dynamic_requests: BTreeMap<u64, (String, String)>,
@@ -3166,6 +3428,9 @@ impl AiCodexAppServerProtocolActor {
             retained_model: None,
             retained_reasoning_effort: None,
             retained_bootstrap_fingerprint: None,
+            thread_web_search_domain_policy: None,
+            active_web_search_maximum_calls: None,
+            started_web_search_calls: 0,
             dynamic_tools: BTreeMap::new(),
             dynamic_tool_projection_fingerprints: BTreeMap::new(),
             pending_dynamic_requests: BTreeMap::new(),
@@ -3293,6 +3558,8 @@ impl AiCodexAppServerProtocolActor {
             || !self.responded_dynamic_calls.is_empty()
             || !self.started_items.is_empty()
             || !self.completed_items.is_empty()
+            || self.active_web_search_maximum_calls.is_some()
+            || self.started_web_search_calls != 0
         {
             return Err(ProviderError::Rejected);
         }
@@ -3349,10 +3616,14 @@ impl AiCodexAppServerProtocolActor {
                 "ephemeral": true,
                 "approvalPolicy": "never",
                 "sandbox": "read-only",
+                "config": closed_thread_config(input.web_search()),
             }),
         )?;
         self.begin_new_thread_lifecycle();
         self.retained_reasoning_effort = Some(input.reasoning_effort());
+        self.thread_web_search_domain_policy = input
+            .web_search()
+            .map(|search| search.domain_policy().clone());
         Ok(frame)
     }
 
@@ -3369,6 +3640,29 @@ impl AiCodexAppServerProtocolActor {
         reasoning_effort: ModelReasoningEffort,
         bootstrap: &AiCodexAppServerBootstrapInstructions,
         dynamic_tools: &[ModelToolDefinition],
+    ) -> Result<Vec<u8>, ProviderError> {
+        self.start_persistent_empty_thread_with_web_search(
+            model,
+            reasoning_effort,
+            bootstrap,
+            dynamic_tools,
+            None,
+        )
+    }
+
+    /// Creates a durable empty thread with one request-authorized native
+    /// web-search configuration.
+    ///
+    /// Search remains disabled when `web_search` is `None`. The supplied
+    /// domain policy is frozen into the thread and must match every retained
+    /// turn on that cursor.
+    pub fn start_persistent_empty_thread_with_web_search(
+        &mut self,
+        model: &str,
+        reasoning_effort: ModelReasoningEffort,
+        bootstrap: &AiCodexAppServerBootstrapInstructions,
+        dynamic_tools: &[ModelToolDefinition],
+        web_search: Option<&AiCodexAppServerWebSearchTurnConfig>,
     ) -> Result<Vec<u8>, ProviderError> {
         self.validate_thread_lifecycle_boundary()?;
         if !valid_identifier(model)
@@ -3391,6 +3685,7 @@ impl AiCodexAppServerProtocolActor {
             "ephemeral": false,
             "approvalPolicy": "never",
             "sandbox": "read-only",
+            "config": closed_thread_config(web_search),
         });
         if !projected_tools.protocol_values.is_empty() {
             let params = params.as_object_mut().ok_or(ProviderError::Rejected)?;
@@ -3398,7 +3693,6 @@ impl AiCodexAppServerProtocolActor {
                 "dynamicTools".to_owned(),
                 Value::Array(projected_tools.protocol_values),
             );
-            params.insert("config".to_owned(), dynamic_tools_only_thread_config());
             params.insert("environments".to_owned(), Value::Array(Vec::new()));
         }
         let frame = self.request(ClientMethod::ThreadStart, "thread/start", params)?;
@@ -3406,6 +3700,8 @@ impl AiCodexAppServerProtocolActor {
         self.retained_model = Some(model.to_owned());
         self.retained_reasoning_effort = Some(reasoning_effort);
         self.retained_bootstrap_fingerprint = Some(bootstrap.fingerprint().to_owned());
+        self.thread_web_search_domain_policy =
+            web_search.map(|search| search.domain_policy().clone());
         self.dynamic_tools = projected_tools.definitions;
         self.dynamic_tool_projection_fingerprints = projected_tools.fingerprints;
         Ok(frame)
@@ -3452,6 +3748,10 @@ impl AiCodexAppServerProtocolActor {
             || !self.pending_dynamic_requests.is_empty()
             || !self.started_dynamic_calls.is_empty()
             || !self.responded_dynamic_calls.is_empty()
+            || self.thread_web_search_domain_policy
+                != input
+                    .web_search()
+                    .map(|search| search.domain_policy().clone())
         {
             return Err(ProviderError::Rejected);
         }
@@ -3474,17 +3774,21 @@ impl AiCodexAppServerProtocolActor {
             "approvalPolicy": "never",
             "sandbox": "read-only",
         });
-        if !input.tools().is_empty() {
-            params
-                .as_object_mut()
-                .ok_or(ProviderError::Rejected)?
-                .insert("config".to_owned(), dynamic_tools_only_thread_config());
-        }
+        params
+            .as_object_mut()
+            .ok_or(ProviderError::Rejected)?
+            .insert(
+                "config".to_owned(),
+                closed_thread_config(input.web_search()),
+            );
         let frame = self.request(ClientMethod::ThreadResume, "thread/resume", params)?;
         self.begin_resume_lifecycle(cursor.expose_to_provider_adapter());
         self.retained_model = Some(input.model().to_owned());
         self.retained_reasoning_effort = Some(input.reasoning_effort());
         self.retained_bootstrap_fingerprint = Some(input_instruction_fingerprint);
+        self.thread_web_search_domain_policy = input
+            .web_search()
+            .map(|search| search.domain_policy().clone());
         self.dynamic_tools = projected_tools.definitions;
         self.dynamic_tool_projection_fingerprints = projected_tools.fingerprints;
         Ok(frame)
@@ -3557,12 +3861,15 @@ impl AiCodexAppServerProtocolActor {
                 "dynamicTools": projected_tools.protocol_values,
                 "approvalPolicy": "never",
                 "sandbox": "read-only",
-                "config": dynamic_tools_only_thread_config(),
+                "config": closed_thread_config(input.web_search()),
                 "environments": [],
             }),
         )?;
         self.begin_new_thread_lifecycle();
         self.retained_reasoning_effort = Some(input.reasoning_effort());
+        self.thread_web_search_domain_policy = input
+            .web_search()
+            .map(|search| search.domain_policy().clone());
         self.dynamic_tools = projected_tools.definitions;
         self.dynamic_tool_projection_fingerprints = projected_tools.fingerprints;
         Ok(frame)
@@ -3694,6 +4001,12 @@ impl AiCodexAppServerProtocolActor {
             || !self.started_items.is_empty()
             || !self.completed_items.is_empty()
             || self.readiness_probe_tool_id.is_some()
+            || self.thread_web_search_domain_policy
+                != input
+                    .web_search()
+                    .map(|search| search.domain_policy().clone())
+            || self.active_web_search_maximum_calls.is_some()
+            || self.started_web_search_calls != 0
         {
             return Err(ProviderError::InvalidRequest);
         }
@@ -3720,6 +4033,9 @@ impl AiCodexAppServerProtocolActor {
         self.readiness_probe_tool_id = input.readiness_probe_tool_id.clone();
         self.runtime_warning_count = 0;
         self.runtime_warning_bytes = 0;
+        self.active_web_search_maximum_calls =
+            input.web_search().map(|search| search.maximum_calls());
+        self.started_web_search_calls = 0;
         Ok(frame)
     }
 
@@ -3925,6 +4241,16 @@ impl AiCodexAppServerProtocolActor {
         {
             return self.accept_empty_reasoning_lifecycle(method, &params);
         }
+        if matches!(method, "item/started" | "item/completed")
+            && params
+                .get("item")
+                .and_then(Value::as_object)
+                .and_then(|item| item.get("type"))
+                .and_then(Value::as_str)
+                == Some("webSearch")
+        {
+            return self.accept_web_search_lifecycle(method, &params);
+        }
         validate_allowed_notification(method, &params)?;
         self.accept_notification_binding(method, &params)?;
         if method == "turn/completed" {
@@ -3932,11 +4258,16 @@ impl AiCodexAppServerProtocolActor {
                 || !self.started_dynamic_calls.is_empty()
                 || !self.responded_dynamic_calls.is_empty()
                 || self.readiness_probe_tool_id.is_some()
+                || self
+                    .started_items
+                    .values()
+                    .any(|item_type| item_type == "webSearch")
             {
                 return Err(ProviderError::Rejected);
             }
             if self.retained_model.is_none() {
                 self.retained_reasoning_effort = None;
+                self.thread_web_search_domain_policy = None;
                 self.dynamic_tools.clear();
                 self.dynamic_tool_projection_fingerprints.clear();
             }
@@ -3946,6 +4277,8 @@ impl AiCodexAppServerProtocolActor {
             self.turn_started_observed = false;
             self.runtime_warning_count = 0;
             self.runtime_warning_bytes = 0;
+            self.active_web_search_maximum_calls = None;
+            self.started_web_search_calls = 0;
             self.started_items.clear();
             self.completed_items.clear();
         }
@@ -4125,6 +4458,107 @@ impl AiCodexAppServerProtocolActor {
         Ok(AiCodexAppServerInbound::ReasoningLifecycle { completed })
     }
 
+    fn accept_web_search_lifecycle(
+        &mut self,
+        method: &str,
+        params: &Value,
+    ) -> Result<AiCodexAppServerInbound, ProviderError> {
+        self.validate_active_turn(
+            direct_reference(params, "threadId")?,
+            direct_reference(params, "turnId")?,
+        )?;
+        let turn_id = direct_reference(params, "turnId")?.to_owned();
+        let params = params.as_object().ok_or(ProviderError::Rejected)?;
+        let timestamp_key = if method == "item/started" {
+            "startedAtMs"
+        } else {
+            "completedAtMs"
+        };
+        if params.keys().any(|key| {
+            !matches!(key.as_str(), "item" | "threadId" | "turnId") && key != timestamp_key
+        }) || params
+            .get(timestamp_key)
+            .and_then(Value::as_i64)
+            .is_none_or(|timestamp| timestamp <= 0)
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let item = params
+            .get("item")
+            .and_then(Value::as_object)
+            .ok_or(ProviderError::Rejected)?;
+        if item
+            .keys()
+            .any(|key| !matches!(key.as_str(), "action" | "id" | "query" | "results" | "type"))
+            || item.get("type").and_then(Value::as_str) != Some("webSearch")
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let call_id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| valid_reference(value))
+            .ok_or(ProviderError::Rejected)?
+            .to_owned();
+        let completed = method == "item/completed";
+        if !completed {
+            let maximum_calls = self
+                .active_web_search_maximum_calls
+                .ok_or(ProviderError::Rejected)?;
+            if item.get("action").is_some_and(|value| !value.is_null())
+                || item.get("query").and_then(Value::as_str) != Some("")
+                || item.get("results").is_some_and(|value| !value.is_null())
+                || self.started_web_search_calls >= maximum_calls
+                || self.completed_items.contains(&call_id)
+                || self
+                    .started_items
+                    .insert(call_id.clone(), "webSearch".to_owned())
+                    .is_some()
+            {
+                return Err(ProviderError::Rejected);
+            }
+            self.started_web_search_calls += 1;
+            return Ok(AiCodexAppServerInbound::WebSearchLifecycle {
+                turn_id,
+                call_id,
+                action: None,
+                query: None,
+                results: Vec::new(),
+                completed: false,
+            });
+        }
+        if self.started_items.remove(&call_id).as_deref() != Some("webSearch")
+            || !self.completed_items.insert(call_id.clone())
+            || self.completed_items.len() > MAXIMUM_TEXT_BLOCKS
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let query = item
+            .get("query")
+            .and_then(Value::as_str)
+            .filter(|query| {
+                !query.trim().is_empty()
+                    && query.len() <= MAXIMUM_WEB_SEARCH_FIELD_BYTES
+                    && !query.contains('\0')
+            })
+            .ok_or(ProviderError::Rejected)?
+            .to_owned();
+        let domain_policy = self
+            .thread_web_search_domain_policy
+            .as_ref()
+            .ok_or(ProviderError::Rejected)?;
+        let action = parse_web_search_action(item.get("action"), &query, domain_policy)?;
+        let results = parse_web_search_results(item.get("results"), domain_policy)?;
+        Ok(AiCodexAppServerInbound::WebSearchLifecycle {
+            turn_id,
+            call_id,
+            action,
+            query: Some(query),
+            results,
+            completed: true,
+        })
+    }
+
     fn accept_retained_usage_snapshot(
         &mut self,
         params: &Value,
@@ -4225,6 +4659,9 @@ impl AiCodexAppServerProtocolActor {
                 self.retained_model = None;
                 self.retained_reasoning_effort = None;
                 self.retained_bootstrap_fingerprint = None;
+                self.thread_web_search_domain_policy = None;
+                self.active_web_search_maximum_calls = None;
+                self.started_web_search_calls = 0;
                 self.dynamic_tools.clear();
                 self.dynamic_tool_projection_fingerprints.clear();
                 self.deleting_thread_id = None;
@@ -4626,17 +5063,228 @@ fn initialization_capabilities(experimental_api: bool) -> Value {
     Value::Object(capabilities)
 }
 
-fn dynamic_tools_only_thread_config() -> Value {
+fn closed_thread_config(web_search: Option<&AiCodexAppServerWebSearchTurnConfig>) -> Value {
     let mut config = serde_json::Map::new();
     for feature in DYNAMIC_TOOLS_ONLY_DISABLED_FEATURES {
-        config.insert(format!("features.{feature}"), Value::Bool(false));
+        let enabled = *feature == "standalone_web_search" && web_search.is_some();
+        config.insert(format!("features.{feature}"), Value::Bool(enabled));
     }
     config.insert("tools.update_plan.enabled".to_owned(), Value::Bool(false));
     config.insert(
         "web_search".to_owned(),
-        Value::String("disabled".to_owned()),
+        Value::String(if web_search.is_some() {
+            "live".to_owned()
+        } else {
+            "disabled".to_owned()
+        }),
     );
+    if let Some(AiCodexAppServerWebSearchTurnConfig {
+        domain_policy: ModelWebSearchDomainPolicy::AllowedDomains { domains },
+        ..
+    }) = web_search
+    {
+        config.insert(
+            "tools.web_search.allowed_domains".to_owned(),
+            json!(domains),
+        );
+    }
     Value::Object(config)
+}
+
+fn parse_web_search_action(
+    value: Option<&Value>,
+    completed_query: &str,
+    domain_policy: &ModelWebSearchDomainPolicy,
+) -> Result<Option<AiCodexAppServerWebSearchAction>, ProviderError> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let object = value.as_object().ok_or(ProviderError::Rejected)?;
+    let action_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or(ProviderError::Rejected)?;
+    let action = match action_type {
+        "search" => {
+            if object
+                .keys()
+                .any(|key| !matches!(key.as_str(), "queries" | "query" | "type"))
+            {
+                return Err(ProviderError::Rejected);
+            }
+            let query = bounded_optional_web_search_string(object.get("query"))?;
+            if query
+                .as_deref()
+                .is_some_and(|query| query != completed_query)
+            {
+                return Err(ProviderError::Rejected);
+            }
+            let queries = match object.get("queries") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(values)) if values.len() <= 16 => values
+                    .iter()
+                    .map(|value| {
+                        bounded_optional_web_search_string(Some(value))?
+                            .filter(|value| !value.trim().is_empty())
+                            .ok_or(ProviderError::Rejected)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                _ => return Err(ProviderError::Rejected),
+            };
+            AiCodexAppServerWebSearchAction::Search { query, queries }
+        }
+        "openPage" => {
+            if object
+                .keys()
+                .any(|key| !matches!(key.as_str(), "type" | "url"))
+            {
+                return Err(ProviderError::Rejected);
+            }
+            AiCodexAppServerWebSearchAction::OpenPage {
+                url: validate_optional_web_search_url(object.get("url"), domain_policy)?,
+            }
+        }
+        "findInPage" => {
+            if object
+                .keys()
+                .any(|key| !matches!(key.as_str(), "pattern" | "type" | "url"))
+            {
+                return Err(ProviderError::Rejected);
+            }
+            AiCodexAppServerWebSearchAction::FindInPage {
+                url: validate_optional_web_search_url(object.get("url"), domain_policy)?,
+                pattern: bounded_optional_web_search_string(object.get("pattern"))?,
+            }
+        }
+        "other" if object.len() == 1 => AiCodexAppServerWebSearchAction::Other,
+        _ => return Err(ProviderError::Rejected),
+    };
+    Ok(Some(action))
+}
+
+fn bounded_optional_web_search_string(
+    value: Option<&Value>,
+) -> Result<Option<String>, ProviderError> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value))
+            if value.len() <= MAXIMUM_WEB_SEARCH_FIELD_BYTES && !value.contains('\0') =>
+        {
+            Ok(Some(value.clone()))
+        }
+        _ => Err(ProviderError::Rejected),
+    }
+}
+
+fn validate_optional_web_search_url(
+    value: Option<&Value>,
+    domain_policy: &ModelWebSearchDomainPolicy,
+) -> Result<Option<String>, ProviderError> {
+    let Some(value) = bounded_optional_web_search_string(value)? else {
+        return Ok(None);
+    };
+    validate_web_search_url(&value, None, domain_policy)?;
+    Ok(Some(value))
+}
+
+fn parse_web_search_results(
+    value: Option<&Value>,
+    domain_policy: &ModelWebSearchDomainPolicy,
+) -> Result<Vec<AiCodexAppServerWebSearchResult>, ProviderError> {
+    let values = match value {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Array(values)) if values.len() <= MAXIMUM_WEB_SEARCH_RESULTS_PER_CALL => values,
+        _ => return Err(ProviderError::Rejected),
+    };
+    let mut total_bytes = 0_usize;
+    values
+        .iter()
+        .map(|value| {
+            let object = value.as_object().ok_or(ProviderError::Rejected)?;
+            if object.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "domain" | "ref_id" | "snippet" | "title" | "type" | "url"
+                )
+            }) || object.get("type").and_then(Value::as_str) != Some("text_result")
+            {
+                return Err(ProviderError::Rejected);
+            }
+            let required = |key: &str| {
+                object
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .filter(|value| {
+                        value.len() <= MAXIMUM_WEB_SEARCH_FIELD_BYTES && !value.contains('\0')
+                    })
+                    .ok_or(ProviderError::Rejected)
+            };
+            let domain = required("domain")?;
+            if domain != domain.to_ascii_lowercase()
+                || !crate::provider::valid_web_domain(domain)
+                || !web_search_domain_allowed(domain, domain_policy)
+            {
+                return Err(ProviderError::Rejected);
+            }
+            let url = required("url")?;
+            validate_web_search_url(url, Some(domain), domain_policy)?;
+            let title = required("title")?;
+            let snippet = required("snippet")?;
+            let reference_id = required("ref_id")?;
+            if !valid_reference(reference_id) {
+                return Err(ProviderError::Rejected);
+            }
+            for field in [domain, url, title, snippet, reference_id] {
+                total_bytes = total_bytes
+                    .checked_add(field.len())
+                    .ok_or(ProviderError::Rejected)?;
+            }
+            if total_bytes > MAXIMUM_WEB_SEARCH_RESULT_BYTES_PER_CALL {
+                return Err(ProviderError::Rejected);
+            }
+            Ok(AiCodexAppServerWebSearchResult {
+                domain: domain.to_owned(),
+                url: url.to_owned(),
+                title: title.to_owned(),
+                snippet: snippet.to_owned(),
+                reference_id: reference_id.to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn validate_web_search_url(
+    value: &str,
+    expected_domain: Option<&str>,
+    domain_policy: &ModelWebSearchDomainPolicy,
+) -> Result<(), ProviderError> {
+    let parsed = url::Url::parse(value).map_err(|_| ProviderError::Rejected)?;
+    let domain = parsed
+        .host_str()
+        .filter(|domain| crate::provider::valid_web_domain(domain))
+        .ok_or(ProviderError::Rejected)?;
+    if parsed.scheme() != "https"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || expected_domain.is_some_and(|expected| expected != domain)
+        || !web_search_domain_allowed(domain, domain_policy)
+    {
+        return Err(ProviderError::Rejected);
+    }
+    Ok(())
+}
+
+fn web_search_domain_allowed(domain: &str, domain_policy: &ModelWebSearchDomainPolicy) -> bool {
+    match domain_policy {
+        ModelWebSearchDomainPolicy::PublicWeb => true,
+        ModelWebSearchDomainPolicy::AllowedDomains { domains } => domains.iter().any(|allowed| {
+            domain == allowed
+                || domain
+                    .strip_suffix(allowed)
+                    .is_some_and(|prefix| prefix.ends_with('.'))
+        }),
+        ModelWebSearchDomainPolicy::BlockedDomains { .. } => false,
+    }
 }
 
 fn validate_allowed_notification(method: &str, params: &Value) -> Result<(), ProviderError> {
@@ -5903,6 +6551,26 @@ pub(crate) mod tests {
             AiCodexAppServerModelToolMode::Direct,
         )
         .expect("direct-tool launch profile should validate");
+        Arc::new(
+            AiCodexAppServerRegistration::new(
+                "profile-1",
+                "model-1",
+                "a".repeat(64),
+                version,
+                "sandbox-empty",
+                AI_CODEX_APP_SERVER_PROTOCOL_V2,
+            )
+            .expect("test registration should validate")
+            .with_launch_profile(profile),
+        )
+    }
+
+    fn web_search_registration(version: &str) -> Arc<AiCodexAppServerRegistration> {
+        let profile = AiCodexAppServerLaunchProfile::experimental_dynamic_tools_only_v1(
+            AiCodexAppServerModelToolMode::Direct,
+        )
+        .expect("direct-tool launch profile should validate")
+        .with_web_search(true);
         Arc::new(
             AiCodexAppServerRegistration::new(
                 "profile-1",
@@ -7853,6 +8521,26 @@ pub(crate) mod tests {
                 "missing disabled feature {feature}"
             );
         }
+
+        let web_profile = profile.with_web_search(true);
+        let web_arguments = web_profile.codex_arguments();
+        assert!(web_profile.web_search_enabled());
+        assert!(
+            !web_arguments
+                .windows(2)
+                .any(|pair| pair == ["--disable", "standalone_web_search"])
+        );
+        for feature in DYNAMIC_TOOLS_ONLY_DISABLED_FEATURES {
+            if matches!(*feature, CODE_MODE_HOST_FEATURE | "standalone_web_search") {
+                continue;
+            }
+            assert!(
+                web_arguments
+                    .windows(2)
+                    .any(|pair| pair == ["--disable", *feature]),
+                "web search must not widen native feature {feature}"
+            );
+        }
     }
 
     #[test]
@@ -7867,6 +8555,12 @@ pub(crate) mod tests {
         assert!(!capabilities.stateless_continuation);
         assert!(!capabilities.web_search);
         assert!(!capabilities.code_execution);
+
+        let web_provider = AiCodexAppServerProvider::new(
+            web_search_registration("1.0.0"),
+            pool(Arc::new(Counters::new()), 1, 2),
+        );
+        assert!(web_provider.capabilities().web_search);
 
         let dynamic_provider = AiCodexAppServerProvider::new(
             dynamic_registration("1.0.0"),
@@ -7932,6 +8626,28 @@ pub(crate) mod tests {
             tools: vec![dynamic_tool()],
             ..model_request()
         }
+    }
+
+    fn web_search_model_request(
+        domains: ModelWebSearchDomainPolicy,
+        maximum_calls: u64,
+    ) -> ModelRequest {
+        ModelRequest {
+            builtin_tools: vec![ModelBuiltinTool::WebSearch { domains }],
+            maximum_builtin_tool_calls: Some(maximum_calls),
+            ..model_request()
+        }
+    }
+
+    fn web_search_turn(
+        domains: ModelWebSearchDomainPolicy,
+        maximum_calls: u64,
+    ) -> AiCodexAppServerTurnInput {
+        AiCodexAppServerTurnInput::try_from_model_request(web_search_model_request(
+            domains,
+            maximum_calls,
+        ))
+        .expect("web-search request should convert")
     }
 
     fn initialized_protocol_actor() -> AiCodexAppServerProtocolActor {
@@ -8095,6 +8811,33 @@ pub(crate) mod tests {
         actor
     }
 
+    fn active_web_search_protocol_actor(
+        domains: ModelWebSearchDomainPolicy,
+        maximum_calls: u64,
+    ) -> AiCodexAppServerProtocolActor {
+        let input = web_search_turn(domains, maximum_calls);
+        let mut actor = initialized_protocol_actor();
+        actor
+            .start_fresh_thread(&input)
+            .expect("web-search thread start should encode");
+        actor
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
+            .expect("thread response should bind");
+        actor
+            .accept(&thread_started_notification("thread-1"))
+            .expect("thread notification should bind");
+        actor
+            .start_turn("thread-1", &input)
+            .expect("web-search turn start should encode");
+        actor
+            .accept(br#"{"id":3,"result":{"turn":{"id":"turn-1"}}}"#)
+            .expect("turn response should bind");
+        actor
+            .accept(&turn_started_notification("thread-1", "turn-1"))
+            .expect("turn notification should bind");
+        actor
+    }
+
     fn deleting_protocol_actor() -> AiCodexAppServerProtocolActor {
         let mut actor = initialized_protocol_actor();
         actor
@@ -8235,6 +8978,7 @@ pub(crate) mod tests {
                 dynamic_registration("1.0.0"),
                 ModelReasoningEffort::Unspecified,
                 vec![dynamic_tool()],
+                None,
             )
             .await
             .expect("empty retained thread should create");
@@ -8252,6 +8996,7 @@ pub(crate) mod tests {
                 registration("1.0.0"),
                 ModelReasoningEffort::Unspecified,
                 vec![dynamic_tool()],
+                None,
             )
             .await,
             Err(ProviderError::Unsupported)
@@ -8270,6 +9015,7 @@ pub(crate) mod tests {
                 registration.clone(),
                 ModelReasoningEffort::Unspecified,
                 vec![dynamic_tool()],
+                None,
             )
             .await
             .expect("retained dynamic thread should create");
@@ -8841,6 +9587,7 @@ pub(crate) mod tests {
                 registration.clone(),
                 request.reasoning_effort,
                 request.tools.clone(),
+                None,
             )
             .await
             .expect("mixed empty thread should create");
@@ -8974,6 +9721,7 @@ pub(crate) mod tests {
                 registration.clone(),
                 ModelReasoningEffort::Unspecified,
                 Vec::new(),
+                None,
             )
             .await
             .expect("empty retained thread should create");
@@ -9012,6 +9760,7 @@ pub(crate) mod tests {
                 registration.clone(),
                 ModelReasoningEffort::Unspecified,
                 vec![dynamic_tool()],
+                None,
             )
             .await
             .expect("empty retained thread should create");
@@ -9136,6 +9885,7 @@ pub(crate) mod tests {
                 registration.clone(),
                 ModelReasoningEffort::Unspecified,
                 vec![dynamic_tool()],
+                None,
             )
             .await
             .expect("empty dynamic thread should create");
@@ -9174,6 +9924,7 @@ pub(crate) mod tests {
                 registration.clone(),
                 ModelReasoningEffort::High,
                 Vec::new(),
+                None,
             )
             .await
             .expect("empty thread should create");
@@ -10258,6 +11009,194 @@ pub(crate) mod tests {
                         "summary": [],
                         "extra": true,
                     },
+                }),
+            )),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[test]
+    fn native_web_search_thread_config_is_request_driven_and_allow_domain_aware() {
+        let domains = ModelWebSearchDomainPolicy::allowed_domains(vec!["example.com".to_owned()])
+            .expect("allow-domain policy should validate");
+        let input = web_search_turn(domains, 2);
+        let mut actor = initialized_protocol_actor();
+        let frame = actor
+            .start_fresh_thread(&input)
+            .expect("enabled web-search thread should encode");
+        let frame: Value = serde_json::from_slice(&frame).expect("thread frame should decode");
+        assert_eq!(
+            frame.pointer("/params/config/features.standalone_web_search"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            frame.pointer("/params/config/web_search"),
+            Some(&json!("live"))
+        );
+        assert_eq!(
+            frame.pointer("/params/config/tools.web_search.allowed_domains"),
+            Some(&json!(["example.com"]))
+        );
+        assert_eq!(
+            frame.pointer("/params/config/features.shell_tool"),
+            Some(&Value::Bool(false))
+        );
+
+        let disabled = initialized_protocol_actor()
+            .start_fresh_thread(&turn())
+            .expect("disabled web-search thread should encode");
+        let disabled: Value =
+            serde_json::from_slice(&disabled).expect("disabled frame should decode");
+        assert_eq!(
+            disabled.pointer("/params/config/features.standalone_web_search"),
+            Some(&Value::Bool(false))
+        );
+        assert_eq!(
+            disabled.pointer("/params/config/web_search"),
+            Some(&json!("disabled"))
+        );
+
+        assert!(matches!(
+            AiCodexAppServerTurnInput::try_from_model_request(web_search_model_request(
+                ModelWebSearchDomainPolicy::blocked_domains(vec!["example.com".to_owned()])
+                    .expect("block-domain policy should validate"),
+                2,
+            )),
+            Err(ProviderError::Unsupported)
+        ));
+    }
+
+    #[test]
+    fn native_web_search_lifecycle_surfaces_results_and_enforces_turn_ceiling() {
+        let policy = ModelWebSearchDomainPolicy::allowed_domains(vec!["example.com".to_owned()])
+            .expect("allow-domain policy should validate");
+        let mut actor = active_web_search_protocol_actor(policy, 1);
+        let started = actor
+            .accept(&lifecycle_notification(
+                "item/started",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "startedAtMs": 1,
+                    "item": {
+                        "action": null,
+                        "id": "search-1",
+                        "query": "",
+                        "results": null,
+                        "type": "webSearch"
+                    }
+                }),
+            ))
+            .expect("web-search start should be admitted");
+        assert!(matches!(
+            started,
+            AiCodexAppServerInbound::WebSearchLifecycle {
+                ref call_id,
+                completed: false,
+                ..
+            } if call_id == "search-1"
+        ));
+        let completed = actor
+            .accept(&lifecycle_notification(
+                "item/completed",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "completedAtMs": 2,
+                    "item": {
+                        "action": {"queries": null, "query": "example.com", "type": "search"},
+                        "id": "search-1",
+                        "query": "example.com",
+                        "results": [{
+                            "domain": "www.example.com",
+                            "ref_id": "turn0search0",
+                            "snippet": "Example result",
+                            "title": "Example Domain",
+                            "type": "text_result",
+                            "url": "https://www.example.com/"
+                        }],
+                        "type": "webSearch"
+                    }
+                }),
+            ))
+            .expect("web-search completion should be admitted");
+        match completed {
+            AiCodexAppServerInbound::WebSearchLifecycle {
+                call_id,
+                query,
+                results,
+                completed,
+                ..
+            } => {
+                assert_eq!(call_id, "search-1");
+                assert_eq!(query.as_deref(), Some("example.com"));
+                assert!(completed);
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].domain(), "www.example.com");
+                assert_eq!(results[0].url(), "https://www.example.com/");
+                assert_eq!(results[0].title(), "Example Domain");
+                assert_eq!(results[0].snippet(), "Example result");
+                assert_eq!(results[0].reference_id(), "turn0search0");
+            }
+            other => panic!("unexpected inbound: {other:?}"),
+        }
+        assert!(matches!(
+            actor.accept(&lifecycle_notification(
+                "item/started",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "startedAtMs": 3,
+                    "item": {
+                        "action": null,
+                        "id": "search-2",
+                        "query": "",
+                        "results": null,
+                        "type": "webSearch"
+                    }
+                }),
+            )),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[test]
+    fn native_web_search_rejects_results_outside_the_active_allow_domains() {
+        let policy = ModelWebSearchDomainPolicy::allowed_domains(vec!["example.com".to_owned()])
+            .expect("allow-domain policy should validate");
+        let mut actor = active_web_search_protocol_actor(policy, 1);
+        actor
+            .accept(&lifecycle_notification(
+                "item/started",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "startedAtMs": 1,
+                    "item": {"action": null, "id": "search-1", "query": "", "results": null, "type": "webSearch"}
+                }),
+            ))
+            .expect("web-search start should be admitted");
+        assert!(matches!(
+            actor.accept(&lifecycle_notification(
+                "item/completed",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "completedAtMs": 2,
+                    "item": {
+                        "action": {"query": "outside", "type": "search"},
+                        "id": "search-1",
+                        "query": "outside",
+                        "results": [{
+                            "domain": "outside.test",
+                            "ref_id": "turn0search0",
+                            "snippet": "Outside result",
+                            "title": "Outside",
+                            "type": "text_result",
+                            "url": "https://outside.test/"
+                        }],
+                        "type": "webSearch"
+                    }
                 }),
             )),
             Err(ProviderError::Rejected)

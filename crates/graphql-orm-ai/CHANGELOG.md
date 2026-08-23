@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-22
+last_reviewed: 2026-08-23
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -17,6 +17,40 @@ Historical development entries below retain their original dependency and
 checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## [0.93.0] - 2026-08-23
+
+Persistent schema module: **0.63.0** (unchanged from 0.92.0).
+
+### Added
+
+- The Codex app-server launch profile now has a generic, default-disabled
+  `with_web_search(bool)` setting. An enabled profile removes only the
+  `standalone_web_search` process disable, advertises the reviewed web-search
+  capability, and projects request-authorized `PublicWeb` or allowed-domain
+  policy into the closed thread configuration.
+- The strict protocol actor now admits correlated native `webSearch` item
+  start/completion lifecycles and exposes bounded typed actions, queries, call
+  identifiers, and structured result metadata. Consumers can count exact
+  lifecycles, settle completed-call pricing, and audit returned domains.
+
+### Security
+
+- Search remains off for every existing registration. Shell, Code Mode, MCP,
+  browser/computer control, files, plugins, collaboration, and other native
+  surfaces remain disabled when search is enabled.
+- Allowed-domain results are independently checked for HTTPS URLs, matching
+  normalized hosts, subdomain scope, field/result byte ceilings, exact
+  lifecycle correlation, and the request's maximum call count. Native Codex
+  has no block-domain control, so `BlockedDomains` requests fail as
+  unsupported rather than silently broadening access.
+- Search results enter provider model context before the completion lifecycle
+  reaches the consumer. Exposed result metadata supports downstream audit and
+  classification, but does not represent pre-context mediation or source
+  trust.
+
+There is no schema, data, protected-payload, GraphQL SDL, backup or restore
+migration in this release.
 
 ## [0.92.0] - 2026-08-23
 

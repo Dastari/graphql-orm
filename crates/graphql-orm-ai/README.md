@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.92.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.93.0", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -154,14 +154,18 @@ for `codex-cli 0.148.0` with `gpt-5.4`; reverify it before upgrading Codex. Any
 missing proof continues through the disclosed cleanup-and-rebind path.
 
 The retained dynamic-tool launch profile is version-observed on Codex 0.148.0.
-It disables Code Mode, Code Mode-only routing, shell, files, MCP, browser,
-hosted search, and every other native item surface. Its sole process-level
-exception is `code_mode_host`: `--disable code_mode_host` suppresses direct
+It disables Code Mode, Code Mode-only routing, shell, files, MCP, browser, and
+every other native item surface by default. Native web search has a separate
+default-off `with_web_search(bool)` profile setting and still requires an exact
+request built-in, egress proof, supported PublicWeb/allow-domain policy, and
+call ceiling. Its other sole process-level exception is `code_mode_host`:
+`--disable code_mode_host` suppresses direct
 `dynamicToolCall` delivery on that Codex version, so the launch arguments omit
 only that flag while the per-thread configuration still sets the feature
-false. The protocol actor rejects any native item that is nevertheless
-emitted. Reverify both direct delivery and the negative native-item matrix
-before upgrading Codex.
+false. When native search is enabled, the actor admits only its exact bounded
+item lifecycle and exposes structured result metadata for host accounting and
+audit; results enter model context before that completion event. Reverify both
+direct delivery and the negative native-item matrix before upgrading Codex.
 
 The Codex schema projector preserves bounded nullable scalar `type` arrays in
 the crate-authored FixedBroker definitions. It does not pass through arbitrary
