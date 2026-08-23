@@ -49,7 +49,7 @@ pub struct AiToolCallResultPreviewView {
 ///
 /// Implementations receive the exact registered request and an already
 /// protected-and-opened result after current owner, session, scope,
-/// descriptor, and tool policy checks. They must apply the application's
+/// descriptor opt-in, and fresh tool policy checks. They must apply the application's
 /// current row and field policy and return a subset suitable for this
 /// principal. The library validates the returned value against the
 /// fingerprinted descriptor policy and disclosure schema.

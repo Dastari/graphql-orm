@@ -4298,6 +4298,22 @@ mod tests {
 
     struct RecordIdPreviewAuthorizer(Arc<AtomicBool>);
 
+    struct ResultOnlyPreviewAuthorizer;
+
+    fn project_record_id(
+        request: &ToolGraphqlRequest,
+        result: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let result_id = result
+            .get("record")
+            .and_then(|record| record.get("recordId"));
+        (result_id == request.variables.get("recordId")).then(|| {
+            json!({"record": {
+                "recordId": result_id.cloned().unwrap_or_default(),
+            }})
+        })
+    }
+
     #[async_trait]
     impl AiToolResultPreviewAuthorizer for RecordIdPreviewAuthorizer {
         async fn authorize_and_project_arguments(
@@ -4321,15 +4337,21 @@ mod tests {
             if !self.0.load(Ordering::SeqCst) {
                 return Ok(None);
             }
-            let result_id = result
-                .get("record")
-                .and_then(|record| record.get("recordId"));
-            if result_id != request.variables.get("recordId") {
-                return Ok(None);
-            }
-            Ok(Some(json!({"record": {
-                "recordId": result_id.cloned().unwrap_or_default(),
-            }})))
+            Ok(project_record_id(request, result))
+        }
+    }
+
+    #[async_trait]
+    impl AiToolResultPreviewAuthorizer for ResultOnlyPreviewAuthorizer {
+        async fn authorize_and_project(
+            &self,
+            _principal: &ResolvedPrincipal,
+            _scope: &AiScope,
+            _descriptor: &AiToolDescriptor,
+            request: &ToolGraphqlRequest,
+            result: &serde_json::Value,
+        ) -> Result<Option<serde_json::Value>, AiError> {
+            Ok(project_record_id(request, result))
         }
     }
 
@@ -10800,6 +10822,27 @@ mod tests {
             Some(json!({"recordId": "54"}))
         );
         assert_eq!(preview.preview.0, json!({"record": {"recordId": "54"}}));
+        let result_only_preview_service = OrmAiToolCallResultPreviewService::new(
+            fixture.database.clone(),
+            fixture.runtime.clone(),
+            Arc::new(ResultOnlyPreviewAuthorizer),
+        );
+        let result_only_preview = result_only_preview_service
+            .result_preview(
+                &fixture.principal,
+                AiToolCallResultPreviewInput {
+                    session_id: fixture.lease.session_id().0,
+                    tool_call_id: persisted.id().0,
+                },
+            )
+            .await
+            .expect("result-only host preview should resolve")
+            .expect("reviewed result preview should remain present");
+        assert_eq!(result_only_preview.arguments, None);
+        assert_eq!(
+            result_only_preview.preview.0,
+            json!({"record": {"recordId": "54"}})
+        );
         let successful_protected_result = record
             .protected_result
             .clone()
@@ -10868,6 +10911,20 @@ mod tests {
             })
             .await
             .expect("test call should become one safe failure");
+        fixture.tool_policy_version.store(0, Ordering::SeqCst);
+        assert!(matches!(
+            preview_service
+                .result_preview(
+                    &fixture.principal,
+                    AiToolCallResultPreviewInput {
+                        session_id: fixture.lease.session_id().0,
+                        tool_call_id: persisted.id().0,
+                    },
+                )
+                .await,
+            Err(AiError::Forbidden)
+        ));
+        fixture.tool_policy_version.store(1, Ordering::SeqCst);
         let failed_preview = preview_service
             .result_preview(
                 &fixture.principal,
@@ -10885,6 +10942,139 @@ mod tests {
             Some(json!({"recordId": "54"}))
         );
         assert_eq!(failed_preview.preview.0, safe_failure);
+        let no_preview_descriptor = fixture
+            .runtime
+            .tool_catalog()
+            .descriptor(&AiToolId::parse("records.update").expect("tool ID should parse"))
+            .expect("fixture should register a tool without browser preview");
+        assert!(no_preview_descriptor.browser_result_preview.is_none());
+        let failed_tool_id = record.tool_id.clone();
+        let failed_tool_fingerprint = record.tool_fingerprint.clone();
+        let no_preview_fingerprint = no_preview_descriptor.fingerprint.clone();
+        record = fixture
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    match tx
+                        .compare_and_swap::<AiToolCallRecord>(
+                            &record.id,
+                            record.row_version,
+                            AiToolCallRecordWhereInput::default(),
+                            UpdateAiToolCallRecordInput {
+                                tool_id: Some("records.update".to_owned()),
+                                tool_fingerprint: Some(no_preview_fingerprint),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?
+                    {
+                        ConditionalUpdateOutcome::Updated(updated) => Ok(updated),
+                        _ => Err(OrmPublicError::new(OrmErrorCode::Conflict)),
+                    }
+                })
+            })
+            .await
+            .expect("test failure should bind a descriptor without browser preview");
+        assert!(
+            preview_service
+                .result_preview(
+                    &fixture.principal,
+                    AiToolCallResultPreviewInput {
+                        session_id: fixture.lease.session_id().0,
+                        tool_call_id: persisted.id().0,
+                    },
+                )
+                .await
+                .expect("missing browser opt-in should be non-disclosing")
+                .is_none()
+        );
+        record = fixture
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    match tx
+                        .compare_and_swap::<AiToolCallRecord>(
+                            &record.id,
+                            record.row_version,
+                            AiToolCallRecordWhereInput::default(),
+                            UpdateAiToolCallRecordInput {
+                                tool_id: Some(failed_tool_id),
+                                tool_fingerprint: Some(failed_tool_fingerprint),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?
+                    {
+                        ConditionalUpdateOutcome::Updated(updated) => Ok(updated),
+                        _ => Err(OrmPublicError::new(OrmErrorCode::Conflict)),
+                    }
+                })
+            })
+            .await
+            .expect("test failure should restore its preview descriptor");
+        record = fixture
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    match tx
+                        .compare_and_swap::<AiToolCallRecord>(
+                            &record.id,
+                            record.row_version,
+                            AiToolCallRecordWhereInput::default(),
+                            UpdateAiToolCallRecordInput {
+                                state: Some("egress_denied".to_owned()),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?
+                    {
+                        ConditionalUpdateOutcome::Updated(updated) => Ok(updated),
+                        _ => Err(OrmPublicError::new(OrmErrorCode::Conflict)),
+                    }
+                })
+            })
+            .await
+            .expect("test failure should become egress-denied");
+        assert!(
+            preview_service
+                .result_preview(
+                    &fixture.principal,
+                    AiToolCallResultPreviewInput {
+                        session_id: fixture.lease.session_id().0,
+                        tool_call_id: persisted.id().0,
+                    },
+                )
+                .await
+                .expect("egress denial should be non-disclosing")
+                .is_none()
+        );
+        record = fixture
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    match tx
+                        .compare_and_swap::<AiToolCallRecord>(
+                            &record.id,
+                            record.row_version,
+                            AiToolCallRecordWhereInput::default(),
+                            UpdateAiToolCallRecordInput {
+                                state: Some("execution_failed".to_owned()),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?
+                    {
+                        ConditionalUpdateOutcome::Updated(updated) => Ok(updated),
+                        _ => Err(OrmPublicError::new(OrmErrorCode::Conflict)),
+                    }
+                })
+            })
+            .await
+            .expect("test failure should restore its execution-failed state");
         record = fixture
             .database
             .transaction(TransactionMode::StateMachine, move |tx| {

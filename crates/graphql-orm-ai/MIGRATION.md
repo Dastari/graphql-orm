@@ -19,6 +19,20 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.93.1 to 0.93.2: consistent current-policy browser preview gates
+
+Adopt `graphql-orm-ai` 0.93.2 from one reviewed full monorepo revision. The AI
+schema module remains **0.63.0**. There is no database, data, table, column,
+index, constraint, backfill, protected-payload, GraphQL SDL, backup, or restore
+migration.
+
+Hosts do not need to change an API implementation. Failed tool-call previews
+now require an exact current descriptor with `browser_result_preview` enabled
+and a fresh successful host tool-policy preauthorization, matching successful
+preview behavior. Egress-denied rows no longer produce a browser preview.
+Existing `AiToolResultPreviewAuthorizer` implementations that do not override
+`authorize_and_project_arguments` continue returning `None` for arguments.
+
 ## 0.93.0 to 0.93.1: public web-search configuration export
 
 Adopt `graphql-orm-ai` 0.93.1 from one reviewed full monorepo revision. The AI

@@ -18,6 +18,30 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.93.2] - 2026-08-23
+
+Persistent schema module: **0.63.0** (unchanged from 0.93.1).
+
+### Fixed
+
+- Failed application-tool previews now require the descriptor's explicit
+  browser-preview opt-in and the same fresh current host tool-policy
+  preauthorization as successful previews.
+- Egress-denied rows are never browser-previewable, even if their persisted
+  authorization code resembles a public failure envelope.
+- The safe failure-code browser mapping now has an exhaustive enum guard, so
+  adding a failure variant requires an explicit visibility decision.
+
+### Security
+
+- Failure previews remain current-owner, current-session/scope-authority,
+  exact-descriptor, public-classification, exact-envelope, and host-projection
+  gated. Revoked tool policy or missing browser opt-in now fails closed before
+  protected arguments or results can cross the browser boundary.
+
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, GraphQL SDL, backup, or restore migration.
+
 ## [0.93.1] - 2026-08-23
 
 Persistent schema module: **0.63.0** (unchanged from 0.93.0).

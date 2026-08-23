@@ -149,7 +149,7 @@ impl AiToolCallResultPreviewService for OrmAiToolCallResultPreviewService {
             .authorization_code
             .as_deref()
             .and_then(application_tool_failure_code)
-            .filter(|_| matches!(call.state.as_str(), "execution_failed" | "egress_denied"));
+            .filter(|_| call.state == "execution_failed");
         if call.run_id != run.id
             || (!successful && safe_failure.is_none())
             || call.completed_at.is_none()
@@ -164,7 +164,12 @@ impl AiToolCallResultPreviewService for OrmAiToolCallResultPreviewService {
             .runtime
             .tool_catalog()
             .descriptor(&tool_id)
-            .filter(|descriptor| descriptor.fingerprint == call.tool_fingerprint);
+            .filter(|descriptor| descriptor.fingerprint == call.tool_fingerprint)
+            .ok_or(AiError::Forbidden)?;
+        let preview_policy = match descriptor.browser_result_preview {
+            Some(policy) => policy,
+            None => return Ok(None),
+        };
         let policy = self
             .runtime
             .content_protection_policy_resolver()
@@ -172,73 +177,6 @@ impl AiToolCallResultPreviewService for OrmAiToolCallResultPreviewService {
             .await?;
         if !policy.ready || policy.scope != scope {
             return Err(AiError::RuntimeNotReady);
-        }
-        if let Some(code) = safe_failure {
-            let classification = parse_classification(
-                call.result_classification
-                    .as_deref()
-                    .ok_or(AiError::PersistenceFailed)?,
-            )?;
-            if classification != DataClassification::Public {
-                return Err(AiError::PersistenceFailed);
-            }
-            let stored = self
-                .open(
-                    &policy,
-                    protection_context(call.id, "protected_result", &scope),
-                    call.protected_result
-                        .as_ref()
-                        .ok_or(AiError::PersistenceFailed)?,
-                )
-                .await?;
-            let preview = extract_safe_failure(&stored, code)?;
-            let arguments = if let Some(descriptor) = descriptor
-                && descriptor.browser_result_preview.is_some()
-            {
-                let stored_arguments = self
-                    .open(
-                        &policy,
-                        protection_context(call.id, "protected_arguments", &scope),
-                        call.protected_arguments
-                            .as_ref()
-                            .ok_or(AiError::PersistenceFailed)?,
-                    )
-                    .await?;
-                self.project_arguments(&current, &scope, descriptor, &stored_arguments)
-                    .await?
-            } else {
-                None
-            };
-            return Ok(Some(AiToolCallResultPreviewView {
-                session_id: session.id,
-                run_id: run.id,
-                tool_call_id: call.id,
-                tool_id: call.tool_id,
-                classification: classification_name(classification).to_owned(),
-                arguments: arguments.map(async_graphql::Json),
-                preview: async_graphql::Json(preview),
-            }));
-        }
-        let descriptor = descriptor.ok_or(AiError::Forbidden)?;
-        let preview_policy = match descriptor.browser_result_preview {
-            Some(policy) => policy,
-            None => return Ok(None),
-        };
-        let disclosure = self
-            .runtime
-            .tool_catalog()
-            .disclosure_schema(&tool_id)
-            .filter(|schema| {
-                call.disclosure_schema_fingerprint.as_deref() == Some(schema.fingerprint.as_str())
-            })
-            .ok_or(AiError::Forbidden)?;
-        let classification = parse_classification(
-            call.result_classification
-                .as_deref()
-                .ok_or(AiError::PersistenceFailed)?,
-        )?;
-        if classification > preview_policy.maximum_classification {
-            return Ok(None);
         }
         let arguments = self
             .open(
@@ -289,6 +227,51 @@ impl AiToolCallResultPreviewService for OrmAiToolCallResultPreviewService {
                 &request.variables,
             )
             .await?;
+        if let Some(code) = safe_failure {
+            let classification = parse_classification(
+                call.result_classification
+                    .as_deref()
+                    .ok_or(AiError::PersistenceFailed)?,
+            )?;
+            if classification != DataClassification::Public {
+                return Err(AiError::PersistenceFailed);
+            }
+            let stored = self
+                .open(
+                    &policy,
+                    protection_context(call.id, "protected_result", &scope),
+                    call.protected_result
+                        .as_ref()
+                        .ok_or(AiError::PersistenceFailed)?,
+                )
+                .await?;
+            let preview = extract_safe_failure(&stored, code)?;
+            return Ok(Some(AiToolCallResultPreviewView {
+                session_id: session.id,
+                run_id: run.id,
+                tool_call_id: call.id,
+                tool_id: call.tool_id,
+                classification: classification_name(classification).to_owned(),
+                arguments: arguments.map(async_graphql::Json),
+                preview: async_graphql::Json(preview),
+            }));
+        }
+        let disclosure = self
+            .runtime
+            .tool_catalog()
+            .disclosure_schema(&tool_id)
+            .filter(|schema| {
+                call.disclosure_schema_fingerprint.as_deref() == Some(schema.fingerprint.as_str())
+            })
+            .ok_or(AiError::Forbidden)?;
+        let classification = parse_classification(
+            call.result_classification
+                .as_deref()
+                .ok_or(AiError::PersistenceFailed)?,
+        )?;
+        if classification > preview_policy.maximum_classification {
+            return Ok(None);
+        }
         let stored = self
             .open(
                 &policy,
@@ -386,18 +369,38 @@ fn extract_exact_result(value: &serde_json::Value) -> Result<&serde_json::Value,
 fn application_tool_failure_code(value: &str) -> Option<crate::AiApplicationToolFailureCode> {
     use crate::AiApplicationToolFailureCode as Code;
 
-    match value {
-        "invalid_arguments" => Some(Code::InvalidArguments),
-        "selection_too_large" => Some(Code::SelectionTooLarge),
-        "relationship_depth_exceeded" => Some(Code::RelationshipDepthExceeded),
-        "result_budget_exceeded" => Some(Code::ResultBudgetExceeded),
-        "capability_stale" => Some(Code::CapabilityStale),
-        "authorization_denied" => Some(Code::AuthorizationDenied),
-        "temporarily_unavailable" => Some(Code::TemporarilyUnavailable),
-        "tool_unavailable" => Some(Code::ToolUnavailable),
-        "resolver_validation_failed" => Some(Code::ResolverValidationFailed),
-        "not_found" => Some(Code::NotFound),
-        _ => None,
+    let code = match value {
+        "invalid_arguments" => Code::InvalidArguments,
+        "selection_too_large" => Code::SelectionTooLarge,
+        "relationship_depth_exceeded" => Code::RelationshipDepthExceeded,
+        "result_budget_exceeded" => Code::ResultBudgetExceeded,
+        "capability_stale" => Code::CapabilityStale,
+        "authorization_denied" => Code::AuthorizationDenied,
+        "temporarily_unavailable" => Code::TemporarilyUnavailable,
+        "tool_unavailable" => Code::ToolUnavailable,
+        "resolver_validation_failed" => Code::ResolverValidationFailed,
+        "not_found" => Code::NotFound,
+        _ => return None,
+    };
+    Some(exhaustive_browser_failure_code(code))
+}
+
+const fn exhaustive_browser_failure_code(
+    code: crate::AiApplicationToolFailureCode,
+) -> crate::AiApplicationToolFailureCode {
+    use crate::AiApplicationToolFailureCode as Code;
+
+    match code {
+        Code::InvalidArguments
+        | Code::SelectionTooLarge
+        | Code::RelationshipDepthExceeded
+        | Code::ResultBudgetExceeded
+        | Code::CapabilityStale
+        | Code::AuthorizationDenied
+        | Code::TemporarilyUnavailable
+        | Code::ToolUnavailable
+        | Code::ResolverValidationFailed
+        | Code::NotFound => code,
     }
 }
 
