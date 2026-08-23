@@ -10,6 +10,27 @@ supersedes: []
 
 # Changelog
 
+## [0.10.0] - 2026-08-23
+
+### Added
+
+- Capability indexes now carry conservative compiler-owned maximum root and
+  total result-record costs and whether an explicit root bound is required.
+
+### Changed
+
+- Discovery selects an inferred mechanical list, details, search, keyset, or
+  aggregate shape before ranking entity, execution target, namespace, and
+  lexical relevance.
+- The canonical capability-index contract version is now `2`; index and set
+  fingerprints intentionally change.
+
+### Security
+
+- Shape and cost metadata remain descriptive only. Current host policy,
+  short-lived load bindings, compiler validation, and resolver authorization
+  remain mandatory.
+
 ## [0.9.0] - 2026-08-22
 
 ### Added

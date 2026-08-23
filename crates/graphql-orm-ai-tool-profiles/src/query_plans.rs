@@ -142,6 +142,23 @@ impl Default for AiGraphqlQueryCapabilityLimits {
     }
 }
 
+/// Conservative compiler-owned result-record cost bounds for one capability.
+///
+/// These values describe the largest root and complete selected result the
+/// closed compiler can admit. They are planning metadata only: they do not
+/// reserve budget, authorize execution, or predict the number of rows an
+/// authoritative resolver will actually return.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AiGraphqlResultRecordCostEstimate {
+    /// Maximum records admitted at the root before relationship expansion.
+    pub maximum_root_records: u32,
+    /// Maximum records admitted across the complete selected result.
+    pub maximum_total_records: u32,
+    /// Whether the provider plan must choose an explicit positive root bound.
+    pub root_bound_required: bool,
+}
+
 /// One closed model-authored relationship selection.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -318,6 +335,32 @@ impl AiGraphqlQueryCapability {
     /// Returns whether this is an opt-in generated aggregate root.
     pub fn is_aggregate(&self) -> bool {
         self.operation.generated_category == Some(GeneratedGraphqlOperationCategory::Aggregate)
+    }
+
+    /// Returns conservative result-record bounds owned by the closed compiler.
+    ///
+    /// The estimate is independent of runtime data and grants no authority.
+    /// Relationship selections remain subject to the total-record ceiling.
+    pub fn result_record_cost_estimate(&self) -> AiGraphqlResultRecordCostEstimate {
+        let root_bound_required = self.output.requires_root_bound();
+        let maximum_root_records = match self.output {
+            QueryOutput::Scalar {
+                maximum_items: Some(maximum),
+                ..
+            } => maximum,
+            QueryOutput::Entity { .. } | QueryOutput::Aggregate { .. } if root_bound_required => {
+                self.limits
+                    .maximum_list_items
+                    .min(self.limits.maximum_result_records)
+            }
+            QueryOutput::Entity { .. } | QueryOutput::Scalar { .. } => 1,
+            QueryOutput::Aggregate { .. } => self.limits.maximum_result_records,
+        };
+        AiGraphqlResultRecordCostEstimate {
+            maximum_root_records,
+            maximum_total_records: self.limits.maximum_result_records,
+            root_bound_required,
+        }
     }
 
     /// Compiles one typed plan into an exact immutable execution contract.
@@ -1157,6 +1200,11 @@ impl AiGraphqlMutationCapability {
         self.execution_policy
     }
 
+    /// Returns conservative result-record bounds owned by the closed compiler.
+    pub fn result_record_cost_estimate(&self) -> AiGraphqlResultRecordCostEstimate {
+        self.base.result_record_cost_estimate()
+    }
+
     /// Compiles one closed mutation plan into an exact server-owned operation.
     ///
     /// # Errors
@@ -1510,6 +1558,11 @@ impl AiGraphqlSubscriptionCapability {
     /// Returns the exact semantic operation fingerprint.
     pub fn semantic_operation_fingerprint(&self) -> &str {
         self.base.semantic_operation_fingerprint()
+    }
+
+    /// Returns conservative per-event result-record bounds owned by the closed compiler.
+    pub fn result_record_cost_estimate(&self) -> AiGraphqlResultRecordCostEstimate {
+        self.base.result_record_cost_estimate()
     }
 
     /// Compiles one bounded plan into an immutable subscription contract.

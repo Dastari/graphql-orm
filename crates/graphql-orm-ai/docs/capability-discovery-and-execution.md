@@ -3,7 +3,7 @@ title: "Capability discovery and execution"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-21
+last_reviewed: 2026-08-23
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -70,7 +70,11 @@ AiCapabilityIndexSet::compile([Arc::new(index)])
 
 The built-in search uses bounded normalized lexical terms, optional exact
 namespace/kind/entity-or-operation filters, deterministic scores and stable ID
-tie-breaking. It needs no embeddings or external database. A host may later
+tie-breaking. When the request declares list, details, search, keyset-page, or
+aggregate intent, the matching compiler-owned operation shape is selected
+before entity, target/namespace and lexical-description ranking. If the active
+set has no such shape, discovery falls back to ordinary relevance rather than
+inventing an operation. It needs no embeddings or external database. A host may later
 implement the closed current-index-set and authority traits with a reviewed
 search service, but returned IDs and fingerprints must still bind to the
 canonical set and the candidate's exact owning index.
@@ -170,7 +174,10 @@ principal and passes the selected generated query through the ordinary policy,
 delegation, resolver and disclosure boundary.
 
 Fixed-broker `describe` returns the exact compact planning schema only on
-demand. The complete description, including that schema, is bounded by
+demand. It also reports conservative compiler-owned maximum root and total
+result-record costs plus whether the plan must choose a positive root bound;
+these values are planning metadata, not execution authority or observed row
+counts. The complete description, including that schema, is bounded by
 `AiCapabilityDeliveryLimits::maximum_describe_bytes` (512 KiB by default and
 4 MiB at the compiled ceiling). An oversized schema is not truncated or
 partially exposed: the response sets `planSchemaAvailable` to `false`, and the

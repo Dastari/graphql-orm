@@ -18,6 +18,24 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.94.0] - 2026-08-23
+
+Persistent schema module: **0.63.0** (unchanged from 0.93.2).
+
+### Added
+
+- Fixed-broker `describe` results now include conservative compiler-owned root
+  and total result-record costs and disclose whether a root bound is required.
+
+### Changed
+
+- Capability discovery adopts tool-profile index contract version `2` and
+  ranks mechanical operation shape before entity, execution target, namespace,
+  and lexical relevance.
+
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, GraphQL SDL, backup, or restore migration.
+
 ## [0.93.2] - 2026-08-23
 
 Persistent schema module: **0.63.0** (unchanged from 0.93.1).

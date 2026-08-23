@@ -24,7 +24,7 @@ are separate runtime decisions and must remain default-deny.
 
 ```toml
 [dependencies]
-graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.9.0" }
+graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.10.0" }
 serde_json = "1"
 ```
 
@@ -121,12 +121,17 @@ semantic summaries and exact fingerprints. It intentionally contains no JSON
 Schema, GraphQL document/SDL, database name, resolver URL, policy expression,
 credential, authority or secret/hidden field.
 
-`AiCapabilityIndex::search` provides bounded deterministic lexical discovery
-with exact namespace/kind/entity filters and stable ID tie-breaking. Search
+`AiCapabilityIndex::search` provides bounded deterministic discovery with
+exact namespace/kind/entity filters and stable ID tie-breaking. A declared
+list, details, search, keyset, or aggregate intent first selects the matching
+compiler-owned operation shape; public entity, execution-target, and namespace
+relevance rank next, and lexical description matches break ties within that
+shape. Search
 returns exact candidate/index/schema/semantic/target-policy fingerprints but
-grants no authority. The runtime package owns current-principal rehydration,
-policy reapplication, short-lived loaded bindings and ordinary resolver
-execution.
+grants no authority. Each entry also carries conservative compiler-owned root
+and total result-record bounds for later planning. The runtime package owns
+current-principal rehydration, policy reapplication, short-lived loaded
+bindings and ordinary resolver execution.
 
 Opt-in aggregate roots use the same catalogue and a fixed result projection.
 Their filters, grouping, metrics, operators, and group limits remain typed and

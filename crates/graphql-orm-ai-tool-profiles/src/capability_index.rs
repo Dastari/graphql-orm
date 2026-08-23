@@ -22,13 +22,13 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     AiApprovalRule, AiError, AiGraphqlMutationCapabilityCatalog, AiGraphqlQueryCapabilityCatalog,
-    AiGraphqlSubscriptionCapabilityCatalog, AiToolDescriptor, AiToolId, AiToolOperationDomain,
-    AiToolOperationKind, AiToolRisk, DataClassification, GraphqlExecutionTargetId,
-    canonical_json::canonical_json_bytes,
+    AiGraphqlResultRecordCostEstimate, AiGraphqlSubscriptionCapabilityCatalog, AiToolDescriptor,
+    AiToolId, AiToolOperationDomain, AiToolOperationKind, AiToolRisk, DataClassification,
+    GraphqlExecutionTargetId, canonical_json::canonical_json_bytes,
 };
 
 /// Current compact capability-index contract version.
-pub const AI_CAPABILITY_INDEX_VERSION: u16 = 1;
+pub const AI_CAPABILITY_INDEX_VERSION: u16 = 2;
 
 /// Current deterministic multi-target capability-index-set contract version.
 pub const AI_CAPABILITY_INDEX_SET_VERSION: u16 = 1;
@@ -238,6 +238,8 @@ pub struct AiCapabilityIndexEntry {
     pub result_classification: DataClassification,
     /// Bounded result description.
     pub result_description: String,
+    /// Conservative compiler-owned result-record planning bounds.
+    pub result_record_cost: AiGraphqlResultRecordCostEstimate,
     /// Risk classification.
     pub risk: AiToolRisk,
     /// Approval classification.
@@ -352,6 +354,7 @@ impl AiCapabilityIndex {
                     capability.id().clone(),
                     AiCapabilityKind::GeneratedQuery,
                     capability.fingerprint(),
+                    capability.result_record_cost_estimate(),
                     catalogue.fingerprint(),
                     operation,
                     &entities,
@@ -373,6 +376,7 @@ impl AiCapabilityIndex {
                     capability.id().clone(),
                     AiCapabilityKind::GeneratedMutation,
                     capability.fingerprint(),
+                    capability.result_record_cost_estimate(),
                     catalogue.fingerprint(),
                     operation,
                     &entities,
@@ -394,6 +398,7 @@ impl AiCapabilityIndex {
                     capability.id().clone(),
                     AiCapabilityKind::GeneratedSubscription,
                     capability.fingerprint(),
+                    capability.result_record_cost_estimate(),
                     catalogue.fingerprint(),
                     operation,
                     &entities,
@@ -496,27 +501,14 @@ impl AiCapabilityIndex {
         query: &AiCapabilitySearchQuery,
     ) -> Result<AiCapabilitySearchResult, AiError> {
         query.validate(self.limits.maximum_search_results)?;
-        let terms = search_terms(&query.text);
-        let mut ranked = self
-            .entries
-            .values()
-            .filter(|entry| entry_matches_query(entry, query))
-            .filter_map(|entry| {
-                let score = search_score(entry, &terms);
-                (score > 0).then_some((score, entry))
-            })
-            .collect::<Vec<_>>();
-        ranked.sort_by(|left, right| {
-            right
-                .0
-                .cmp(&left.0)
-                .then_with(|| left.1.id.cmp(&right.1.id))
-        });
-        let candidates = ranked
-            .into_iter()
-            .take(usize::from(query.maximum_results))
-            .map(|(_, entry)| search_candidate(entry))
-            .collect();
+        let candidates = rank_entries(
+            self.entries.values().map(|entry| (&self.target_id, entry)),
+            query,
+        )
+        .into_iter()
+        .take(usize::from(query.maximum_results))
+        .map(|(_, entry)| search_candidate(entry))
+        .collect();
         Ok(AiCapabilitySearchResult {
             index_fingerprint: self.fingerprint.clone(),
             schema_fingerprint: self.schema_fingerprint.clone(),
@@ -705,28 +697,19 @@ impl AiCapabilityIndexSet {
         query: &AiCapabilitySearchQuery,
     ) -> Result<AiCapabilityIndexSetSearchResult, AiError> {
         query.validate(self.maximum_search_results)?;
-        let terms = search_terms(&query.text);
-        let mut ranked = self
-            .indexes
-            .values()
-            .flat_map(|index| index.entries.values())
-            .filter(|entry| entry_matches_query(entry, query))
-            .filter_map(|entry| {
-                let score = search_score(entry, &terms);
-                (score > 0).then_some((score, entry))
-            })
-            .collect::<Vec<_>>();
-        ranked.sort_by(|left, right| {
-            right
-                .0
-                .cmp(&left.0)
-                .then_with(|| left.1.id.cmp(&right.1.id))
-        });
-        let candidates = ranked
-            .into_iter()
-            .take(usize::from(query.maximum_results))
-            .map(|(_, entry)| search_candidate(entry))
-            .collect();
+        let candidates = rank_entries(
+            self.indexes.values().flat_map(|index| {
+                index
+                    .entries
+                    .values()
+                    .map(|entry| (&index.target_id, entry))
+            }),
+            query,
+        )
+        .into_iter()
+        .take(usize::from(query.maximum_results))
+        .map(|(_, entry)| search_candidate(entry))
+        .collect();
         Ok(AiCapabilityIndexSetSearchResult {
             index_set_fingerprint: self.fingerprint.clone(),
             candidates,
@@ -847,6 +830,42 @@ fn entry_matches_query(entry: &AiCapabilityIndexEntry, query: &AiCapabilitySearc
         })
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct SearchRank {
+    shape: u8,
+    entity: u16,
+    target: u16,
+    namespace: u16,
+    lexical: u64,
+}
+
+fn rank_entries<'a>(
+    entries: impl IntoIterator<Item = (&'a GraphqlExecutionTargetId, &'a AiCapabilityIndexEntry)>,
+    query: &AiCapabilitySearchQuery,
+) -> Vec<(SearchRank, &'a AiCapabilityIndexEntry)> {
+    let terms = search_terms(&query.text);
+    let shape_intent = search_shape_intent(&terms);
+    let mut ranked = entries
+        .into_iter()
+        .filter(|(_, entry)| entry_matches_query(entry, query))
+        .filter_map(|(target_id, entry)| {
+            let rank = search_rank(target_id, entry, &terms, shape_intent);
+            (rank.entity > 0 || rank.target > 0 || rank.namespace > 0 || rank.lexical > 0)
+                .then_some((rank, entry))
+        })
+        .collect::<Vec<_>>();
+    if shape_intent.is_some() && ranked.iter().any(|(rank, _)| rank.shape > 0) {
+        ranked.retain(|(rank, _)| rank.shape > 0);
+    }
+    ranked.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.id.cmp(&right.1.id))
+    });
+    ranked
+}
+
 fn search_candidate(entry: &AiCapabilityIndexEntry) -> AiCapabilitySearchCandidate {
     AiCapabilitySearchCandidate {
         id: entry.id.clone(),
@@ -867,6 +886,7 @@ fn generated_entry(
     id: AiToolId,
     kind: AiCapabilityKind,
     capability_fingerprint: &str,
+    result_record_cost: AiGraphqlResultRecordCostEstimate,
     catalogue_fingerprint: &str,
     operation: &GraphqlSemanticOperationDescriptor,
     entities: &BTreeMap<&str, &graphql_orm_operation_catalog::GraphqlEntitySemanticMetadata>,
@@ -921,6 +941,7 @@ fn generated_entry(
         aggregate_features,
         result_classification,
         result_description: generated_result_description(operation),
+        result_record_cost,
         risk: generated_risk(kind, operation),
         approval: generated_approval(kind, operation),
         capability_fingerprint: capability_fingerprint.to_owned(),
@@ -1006,6 +1027,11 @@ fn static_entry(
             "Bounded result: at most {} records and {} bytes.",
             descriptor.maximum_result_records, descriptor.maximum_result_bytes
         ),
+        result_record_cost: AiGraphqlResultRecordCostEstimate {
+            maximum_root_records: descriptor.maximum_result_records,
+            maximum_total_records: descriptor.maximum_result_records,
+            root_bound_required: false,
+        },
         risk: descriptor.risk,
         approval: descriptor.approval,
         capability_fingerprint: descriptor.fingerprint.clone(),
@@ -1327,7 +1353,12 @@ fn aggregate_name(operator: GraphqlAggregateOperator) -> &'static str {
     }
 }
 
-fn search_score(entry: &AiCapabilityIndexEntry, terms: &BTreeSet<String>) -> u64 {
+fn search_rank(
+    target_id: &GraphqlExecutionTargetId,
+    entry: &AiCapabilityIndexEntry,
+    terms: &BTreeSet<String>,
+    shape_intent: Option<AiCapabilityOperationShape>,
+) -> SearchRank {
     let mut score = 0_u64;
     let id = search_terms(entry.id.as_str());
     let name = search_terms(&entry.name);
@@ -1337,6 +1368,7 @@ fn search_score(entry: &AiCapabilityIndexEntry, terms: &BTreeSet<String>) -> u64
         .as_deref()
         .map(search_terms)
         .unwrap_or_default();
+    let target = search_terms(target_id.as_str());
     let description = search_terms(&entry.description);
     let relationships = entry
         .relationships
@@ -1354,6 +1386,9 @@ fn search_score(entry: &AiCapabilityIndexEntry, terms: &BTreeSet<String>) -> u64
         .flat_map(|field| search_terms(&format!("{} {}", field.name, field.description)))
         .collect::<BTreeSet<_>>();
     for term in terms {
+        if search_shape_term(term) && entry.operation_shape != AiCapabilityOperationShape::Custom {
+            continue;
+        }
         score += u64::from(id.contains(term)) * 10;
         score += u64::from(name.contains(term)) * 9;
         score += u64::from(operation.contains(term)) * 8;
@@ -1361,9 +1396,70 @@ fn search_score(entry: &AiCapabilityIndexEntry, terms: &BTreeSet<String>) -> u64
         score += u64::from(relationships.contains(term)) * 7;
         score += u64::from(fields.contains(term)) * 4;
         score += u64::from(description.contains(term)) * 3;
-        score += u64::from(semantic_key(shape_name(entry.operation_shape)) == *term) * 6;
     }
-    score
+    SearchRank {
+        shape: u8::from(shape_intent == Some(entry.operation_shape)),
+        entity: u16::try_from(terms.intersection(&entity).count()).unwrap_or(u16::MAX),
+        target: u16::try_from(terms.intersection(&target).count()).unwrap_or(u16::MAX),
+        namespace: u16::try_from(terms.intersection(&search_terms(&entry.namespace)).count())
+            .unwrap_or(u16::MAX),
+        lexical: score,
+    }
+}
+
+fn search_shape_intent(terms: &BTreeSet<String>) -> Option<AiCapabilityOperationShape> {
+    if terms.contains("count")
+        || terms.contains("aggregate")
+        || terms.contains("total")
+        || terms.contains("number")
+        || terms.contains("how") && terms.contains("many")
+    {
+        Some(AiCapabilityOperationShape::Aggregate)
+    } else if terms.contains("detail") || terms.contains("single") || terms.contains("specific") {
+        Some(AiCapabilityOperationShape::Details)
+    } else if terms.contains("search")
+        || terms.contains("find")
+        || terms.contains("match")
+        || terms.contains("lookup")
+    {
+        Some(AiCapabilityOperationShape::Search)
+    } else if terms.contains("keyset") || terms.contains("page") || terms.contains("next") {
+        Some(AiCapabilityOperationShape::KeysetList)
+    } else if terms.contains("list")
+        || terms.contains("all")
+        || terms.contains("latest")
+        || terms.contains("recent")
+    {
+        Some(AiCapabilityOperationShape::List)
+    } else {
+        None
+    }
+}
+
+fn search_shape_term(term: &str) -> bool {
+    matches!(
+        term,
+        "count"
+            | "aggregate"
+            | "total"
+            | "number"
+            | "how"
+            | "many"
+            | "detail"
+            | "single"
+            | "specific"
+            | "search"
+            | "find"
+            | "match"
+            | "lookup"
+            | "keyset"
+            | "page"
+            | "next"
+            | "list"
+            | "all"
+            | "latest"
+            | "recent"
+    )
 }
 
 fn search_terms(value: &str) -> BTreeSet<String> {
@@ -1441,6 +1537,95 @@ mod tests {
         )
         .expect("descriptor")
         .with_maximum_classification(DataClassification::Public)
+    }
+
+    fn synthetic_shape_index() -> AiCapabilityIndex {
+        let semantic = semantic_catalogue();
+        let target_id = GraphqlExecutionTargetId::parse("synthetic-application").expect("target");
+        let mut entries = BTreeMap::new();
+        for entity_index in 0..101 {
+            let entity = format!("SyntheticEntity{entity_index:03}");
+            for shape in [
+                AiCapabilityOperationShape::List,
+                AiCapabilityOperationShape::Details,
+                AiCapabilityOperationShape::Aggregate,
+                AiCapabilityOperationShape::Search,
+            ] {
+                let shape_id = match shape {
+                    AiCapabilityOperationShape::List => "list",
+                    AiCapabilityOperationShape::Details => "details",
+                    AiCapabilityOperationShape::Aggregate => "aggregate",
+                    AiCapabilityOperationShape::Search => "search",
+                    _ => unreachable!("synthetic shape is fixed"),
+                };
+                let id = format!("inventory.synthetic_{entity_index:03}_{shape_id}");
+                let mut entry = static_entry(
+                    descriptor(
+                        &id,
+                        &format!("Use {entity} records for an operator investigation."),
+                        0,
+                    ),
+                    &target_id,
+                    "synthetic-schema-v1",
+                    &semantic.fingerprint,
+                    "synthetic-policy-v1",
+                )
+                .expect("synthetic entry");
+                entry.kind = AiCapabilityKind::GeneratedQuery;
+                entry.name = format!("{} {entity}", shape_name(shape));
+                entry.entity_name = Some(entity.clone());
+                entry.operation_name = format!("Synthetic{entity_index:03}{shape_id}");
+                entry.operation_shape = shape;
+                entry.fingerprint = entry_fingerprint(&entry);
+                assert!(entries.insert(entry.id.clone(), entry).is_none());
+            }
+        }
+        AiCapabilityIndex {
+            version: AI_CAPABILITY_INDEX_VERSION,
+            target_id,
+            schema_fingerprint: "synthetic-schema-v1".to_owned(),
+            semantic_catalogue_fingerprint: semantic.fingerprint,
+            target_policy_fingerprint: "synthetic-policy-v1".to_owned(),
+            entries,
+            fingerprint: "a".repeat(64),
+            limits: AiCapabilityIndexLimits::default(),
+        }
+    }
+
+    #[test]
+    fn four_hundred_capabilities_rank_mechanical_shape_before_lexical_ties() {
+        let index = synthetic_shape_index();
+        assert_eq!(index.entries().len(), 404);
+        for (text, expected) in [
+            (
+                "list SyntheticEntity042 records",
+                AiCapabilityOperationShape::List,
+            ),
+            (
+                "details of SyntheticEntity042",
+                AiCapabilityOperationShape::Details,
+            ),
+            (
+                "how many SyntheticEntity042 records",
+                AiCapabilityOperationShape::Aggregate,
+            ),
+        ] {
+            let result = index
+                .search(&AiCapabilitySearchQuery {
+                    text: text.to_owned(),
+                    namespace: None,
+                    kind: Some(AiCapabilityKind::GeneratedQuery),
+                    entity_or_operation: None,
+                    maximum_results: 1,
+                })
+                .expect("shape-aware search");
+            assert_eq!(result.candidates.len(), 1);
+            assert_eq!(result.candidates[0].operation_shape, expected);
+            assert_eq!(
+                result.candidates[0].entity_name.as_deref(),
+                Some("SyntheticEntity042")
+            );
+        }
     }
 
     #[test]
@@ -1645,6 +1830,42 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn index_set_search_ranks_execution_target_before_lexical_ties() {
+        let semantic = semantic_catalogue();
+        let compile = |target: &str, id: &str| {
+            Arc::new(
+                AiCapabilityIndex::compile(
+                    GraphqlExecutionTargetId::parse(target).expect("target"),
+                    format!("schema-{target}"),
+                    &semantic,
+                    None,
+                    None,
+                    None,
+                    [descriptor(id, "Inspect matching operational records.", 0)],
+                    format!("policy-{target}"),
+                    AiCapabilityIndexLimits::default(),
+                )
+                .expect("index"),
+            )
+        };
+        let set = AiCapabilityIndexSet::compile([
+            compile("alpha-service", "inventory.records"),
+            compile("beta-service", "workforce.records"),
+        ])
+        .expect("set");
+        let result = set
+            .search(&AiCapabilitySearchQuery {
+                text: "beta service operational records".to_owned(),
+                namespace: None,
+                kind: None,
+                entity_or_operation: None,
+                maximum_results: 1,
+            })
+            .expect("search");
+        assert_eq!(result.candidates[0].id.as_str(), "workforce.records");
     }
 
     #[test]
