@@ -3,7 +3,7 @@ title: "graphql-orm-ai"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-16
+last_reviewed: 2026-08-23
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.93.1", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.93.2", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -80,9 +80,11 @@ the compiled test-backed recipe and the missing reusable bootstrap API.
   messages, durable watermark, active/recent runs, tool calls, provider
   activity and retention reset state for race-free replay/live handoff.
 - An owner-authorized tool-call preview rehydrates current authority before
-  returning host-projected arguments and either a disclosure-validated result
-  or the exact content-free safe failure envelope. Secret results never enter
-  this browser contract.
+  requiring the exact descriptor's browser-preview opt-in and freshly
+  reauthorizing current host tool policy. It then returns host-projected
+  arguments and either a disclosure-validated result or the exact
+  content-free safe failure envelope. Egress-denied and secret results never
+  enter this browser contract.
 - Provider-neutral adapters plus deterministic network-free mocks.
 - Optional provider profiles, attachments, skills, UI intents, rules, and
   usage/pricing controls, each behind independent proof and policy boundaries.
