@@ -978,7 +978,7 @@ fn serialized_bytes(value: &impl Serialize) -> Option<u64> {
         .and_then(|encoded| u64::try_from(encoded.len()).ok())
 }
 
-fn valid_web_domain(value: &str) -> bool {
+pub(crate) fn valid_web_domain(value: &str) -> bool {
     let value = value.strip_prefix("*.").unwrap_or(value);
     !value.is_empty()
         && value.len() <= 253

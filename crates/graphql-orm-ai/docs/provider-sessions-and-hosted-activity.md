@@ -28,7 +28,7 @@ operation whose resolver makes the final authorization decision.
 | Contract | Default | Durable provider state | Application tools |
 | --- | --- | --- | --- |
 | JSONL `local-harness` | disabled | none | exact stateless replay supported |
-| Codex app-server v2 | disabled | run process plus optional protected thread cursor | default-off experimental dynamic tools through the coordinator |
+| Codex app-server v2 | disabled | run process plus optional protected thread cursor | default-off dynamic tools and independently default-off native web search |
 | Native OpenAI hosted search | absent from each request | Responses continuation only when selected | mixed retained continuation supported |
 | Visible reasoning summary | disabled | protected activity/final blocks | authority-neutral |
 | Reasoning effort | provider/registration default | exact request, budget, checkpoint, and retained-session fingerprint | authority-neutral |
@@ -211,19 +211,20 @@ containing no project config or MCP servers, an empty working directory, and
 the registered operating-system sandbox. The actor additionally sends empty
 thread/turn environments and a closed thread config that disables shell,
 unified execution, Code Mode, utility tools, connectors, plugins,
-collaboration, images, browser/computer use, and hosted search. This is defense
-in depth: the process sandbox remains authoritative if a provider version
-ignores a feature toggle.
+collaboration, images, browser/computer use, and, by default, hosted search.
+This is defense in depth: the process sandbox remains authoritative if a
+provider version ignores a feature toggle.
 
-The sole process-level exception is measured on Codex 0.148.0: adding
+The always-present process-level exception is measured on Codex 0.148.0: adding
 `--disable code_mode_host` to this otherwise identical profile made a retained
 GPT-5.6 Luna turn complete without issuing its offered tool, while omitting
 that one argument produced the direct `dynamicToolCall` / `item/tool/call`.
 `codex_arguments()` therefore omits only that disable. The actor still sends
 `features.code_mode_host=false`, `features.code_mode=false`, and
-`features.code_mode_only=false` per thread; shell, file, MCP, browser, web, and
-every other native item remain unavailable and are rejected by the protocol
-actor if emitted. Re-run the direct-tool readiness probe and negative native-
+`features.code_mode_only=false` per thread; shell, file, MCP, browser, and every
+other native item remain unavailable and are rejected by the protocol actor if
+emitted. A registration may separately opt into only native web search as
+described below. Re-run the direct-tool readiness probe and negative native-
 item suite before adopting another Codex version.
 
 Only a reviewed `Direct` model-tool declaration can construct this profile.
@@ -243,8 +244,9 @@ server sends it anyway. The actor admits only initialization, exact thread
 start/resume/delete, turn start/interruption, correlated responses, the closed
 visible-event allowlist, and—only for an experimental registration—the exact
 documented `item/tool/call` server request. Commands, shell, files, patches,
-MCP, collaboration, images, hosted web search, browser control, raw reasoning,
-and arbitrary methods remain forbidden.
+MCP, collaboration, images, browser control, raw reasoning, and arbitrary
+methods remain forbidden. Native web-search items are admitted only for an
+enabled profile and exact request configuration.
 
 Codex may emit the documented generic `warning` while a turn is open. The
 actor accepts only the exact positive-timestamp envelope, an optional thread ID
@@ -389,6 +391,33 @@ cumulative `maximum_web_search_calls` ceiling. The coordinator carries actual
 completed search usage across protected checkpoints, so a continuation cannot
 reset it. Provider start without completion is not billable completion
 evidence and leaves uncertain transport to the existing recovery path.
+
+The Codex app-server profile is independently default-off through
+`with_web_search(false)`. Setting it to `true` changes the immutable
+registration identity and removes only the process-level
+`--disable standalone_web_search`; the closed per-thread configuration still
+turns search on only when the current `ModelRequest` contains the authorized
+built-in. `PublicWeb` and `AllowedDomains` are supported. Allowed domains are
+sent as `tools.web_search.allowed_domains` and every returned HTTPS result is
+checked again against the same exact domain/subdomain policy. `BlockedDomains`
+fails as unsupported because the reviewed app-server configuration has no
+native exclusion list.
+
+Codex reports each native operation as a correlated `webSearch` item start and
+completion. The strict actor exposes a typed call ID, action, query, and
+bounded result records containing domain, HTTPS URL, title, snippet, and
+provider reference. This gives a process implementation exact lifecycle
+counts, completed-call pricing evidence, and observed-domain audit data. The
+actor rejects starts beyond `maximum_builtin_tool_calls`; because app-server
+does not accept that ceiling on the wire, an over-limit native operation may
+have begun before its start notification reaches the host.
+
+Native results are provider-hosted: they enter model context before the
+completion event reaches the consumer. Result validation and downstream
+classification are therefore post-result audit, not pre-context mediation.
+The request's WebSearch egress proof still governs whether the capability is
+offered at all, and surfaced result metadata is provider-authored rather than
+source-trust evidence.
 
 Native OpenAI Responses can offer hosted search and reviewed application tools
 in the same `ProviderRetained` request. Application calls still return to the

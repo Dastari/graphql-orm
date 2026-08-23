@@ -26,9 +26,11 @@ The separate `provider-codex-app-server` feature adds a second local boundary:
 one strictly allowlisted process may be retained for an exact claimed run, and
 an explicitly planned turn may resume one protected provider-thread cursor.
 Experimental app-server dynamic tools are default-off and use only the
-ordinary coordinator-owned registered GraphQL tool path. Structured output,
-hosted web, files, images, shell, MCP, browser control, and generic JSON-RPC
-remain unavailable. Its construction and exact limitations are in
+ordinary coordinator-owned registered GraphQL tool path. Native web search is
+separately default-off and may be enabled by an immutable launch profile plus
+an exact request built-in, egress proof, supported domain policy, and call
+ceiling. Structured output, files, images, shell, MCP, browser control, and
+generic JSON-RPC remain unavailable. Its construction and exact limitations are in
 [provider sessions, hosted search, and visible activity](provider-sessions-and-hosted-activity.md).
 
 ## Authority split
