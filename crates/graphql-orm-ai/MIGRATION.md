@@ -19,6 +19,14 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.93.0 to 0.93.1: public web-search configuration export
+
+Adopt `graphql-orm-ai` 0.93.1 from one reviewed full monorepo revision. The AI
+schema module remains **0.63.0**. There is no database, data, GraphQL SDL,
+protected-payload, backup or restore migration. The only change is the missing
+crate-root re-export for `AiCodexAppServerWebSearchTurnConfig`; consumers can
+now name the existing public retained-process trait argument.
+
 ## 0.92.0 to 0.93.0: opt-in Codex app-server native web search
 
 Adopt `graphql-orm-ai` 0.93.0 from one reviewed full monorepo revision. The AI
