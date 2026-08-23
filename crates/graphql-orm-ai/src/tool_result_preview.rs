@@ -31,7 +31,17 @@ pub struct AiToolCallResultPreviewView {
     pub tool_id: String,
     /// Persisted result classification.
     pub classification: String,
+    /// Host-projected tool arguments safe for the current browser principal.
+    ///
+    /// `None` means the host withheld the arguments. This field is independently
+    /// authorized from the result and never falls back to the protected stored
+    /// value.
+    pub arguments: Option<async_graphql::Json<serde_json::Value>>,
     /// Host-projected value validated against the descriptor disclosure schema.
+    ///
+    /// A failed read tool returns only the crate-authored, content-free
+    /// [`crate::AiApplicationToolFailureEnvelope`] after its persisted code and
+    /// payload agree exactly.
     pub preview: async_graphql::Json<serde_json::Value>,
 }
 
@@ -45,6 +55,24 @@ pub struct AiToolCallResultPreviewView {
 /// fingerprinted descriptor policy and disclosure schema.
 #[async_trait]
 pub trait AiToolResultPreviewAuthorizer: Send + Sync {
+    /// Returns a currently authorized argument projection, or `None` to
+    /// disclose no arguments.
+    ///
+    /// The service has already rehydrated the current session owner, checked
+    /// session/scope read authority, reopened the protected value, and bound
+    /// the exact registered descriptor. Implementations must withhold secret
+    /// values and keep the projection bounded. The library never substitutes
+    /// the stored arguments when this method returns `None`.
+    async fn authorize_and_project_arguments(
+        &self,
+        _principal: &ResolvedPrincipal,
+        _scope: &AiScope,
+        _descriptor: &AiToolDescriptor,
+        _arguments: &serde_json::Value,
+    ) -> Result<Option<serde_json::Value>, AiError> {
+        Ok(None)
+    }
+
     /// Returns a currently authorized subset, or `None` to disclose nothing.
     async fn authorize_and_project(
         &self,

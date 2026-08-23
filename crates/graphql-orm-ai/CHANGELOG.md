@@ -18,6 +18,36 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.92.0] - 2026-08-23
+
+Persistent schema module: **0.63.0** (unchanged from 0.91.1).
+
+### Added
+
+- `AiToolCallResultPreviewView` now includes an optional host-projected
+  `arguments` value. `AiToolResultPreviewAuthorizer` has a default-deny
+  `authorize_and_project_arguments` seam so existing hosts disclose nothing
+  until they opt in.
+- Owner-authorized previews now return the existing versioned, content-free
+  `AiApplicationToolFailureEnvelope` for a durably failed read tool when its
+  state, public classification, stored authorization code, and protected
+  envelope agree exactly.
+
+### Security
+
+- The preview service still rehydrates the current principal and checks exact
+  session ownership plus current session/scope read authority. Successful
+  results retain descriptor fingerprint, current tool policy, disclosure
+  schema, classification, depth, record, and byte validation.
+- Argument projection is independently default-deny, host-authored, and
+  capped at 64 KiB. A missing/stale descriptor can return only the public safe
+  failure envelope, never stored arguments. Secret-classified results remain
+  unavailable to the browser.
+
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, backup, or restore migration. The GraphQL SDL adds the
+nullable `Arguments` field to the existing tool-call preview object.
+
 ## [0.91.1] - 2026-08-23
 
 Persistent schema module: **0.63.0** (unchanged from 0.91.0).

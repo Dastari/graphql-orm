@@ -4300,6 +4300,16 @@ mod tests {
 
     #[async_trait]
     impl AiToolResultPreviewAuthorizer for RecordIdPreviewAuthorizer {
+        async fn authorize_and_project_arguments(
+            &self,
+            _principal: &ResolvedPrincipal,
+            _scope: &AiScope,
+            _descriptor: &AiToolDescriptor,
+            arguments: &serde_json::Value,
+        ) -> Result<Option<serde_json::Value>, AiError> {
+            Ok(self.0.load(Ordering::SeqCst).then(|| arguments.clone()))
+        }
+
         async fn authorize_and_project(
             &self,
             _principal: &ResolvedPrincipal,
@@ -10696,7 +10706,7 @@ mod tests {
             .observe_tool_result(&persisted)
             .expect("durable result should match the pending provider call");
 
-        let record = AiToolCallRecord::find_by_id(&fixture.database, &persisted.id().0)
+        let mut record = AiToolCallRecord::find_by_id(&fixture.database, &persisted.id().0)
             .await
             .expect("tool call lookup should succeed")
             .expect("tool call should exist");
@@ -10785,7 +10795,132 @@ mod tests {
             .expect("reviewed browser preview should be present");
         assert_eq!(preview.run_id, fixture.lease.run_id().0);
         assert_eq!(preview.tool_id, "records.read");
+        assert_eq!(
+            preview.arguments.map(|arguments| arguments.0),
+            Some(json!({"recordId": "54"}))
+        );
         assert_eq!(preview.preview.0, json!({"record": {"recordId": "54"}}));
+        let successful_protected_result = record
+            .protected_result
+            .clone()
+            .expect("successful result should remain protected");
+        let successful_authorization_policy_version = record.authorization_policy_version.clone();
+        let successful_authorization_state_digest = record.authorization_state_digest.clone();
+        let successful_disclosure_schema_fingerprint = record.disclosure_schema_fingerprint.clone();
+        let successful_result_classification = record.result_classification.clone();
+        let protection_policy = fixture
+            .runtime
+            .content_protection_policy_resolver()
+            .resolve(&fixture.principal, &fixture.scope)
+            .await
+            .expect("test protection policy should resolve");
+        let safe_failure = AiApplicationToolFailureEnvelope::new(
+            AiApplicationToolFailureCode::AuthorizationDenied,
+        )
+        .to_json();
+        let protected_safe_failure = fixture
+            .runtime
+            .content_protector()
+            .protect(
+                &protection_policy,
+                &ContentProtectionContext {
+                    entity: "graphql_orm_ai_tool_calls".to_owned(),
+                    row_id: record.id.to_string(),
+                    field: "protected_result".to_owned(),
+                    scope: fixture.scope.clone(),
+                },
+                safe_failure.clone(),
+            )
+            .await
+            .expect("safe failure should protect");
+        record = fixture
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                let protected_safe_failure = serde_json::to_value(protected_safe_failure)
+                    .expect("protected failure should serialize");
+                Box::pin(async move {
+                    match tx
+                        .compare_and_swap::<AiToolCallRecord>(
+                            &record.id,
+                            record.row_version,
+                            AiToolCallRecordWhereInput::default(),
+                            UpdateAiToolCallRecordInput {
+                                protected_result: Some(Some(protected_safe_failure)),
+                                authorization_code: Some(Some(
+                                    AiApplicationToolFailureCode::AuthorizationDenied
+                                        .as_str()
+                                        .to_owned(),
+                                )),
+                                authorization_policy_version: Some(None),
+                                authorization_state_digest: Some(None),
+                                result_classification: Some(Some("public".to_owned())),
+                                state: Some("execution_failed".to_owned()),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?
+                    {
+                        ConditionalUpdateOutcome::Updated(updated) => Ok(updated),
+                        _ => Err(OrmPublicError::new(OrmErrorCode::Conflict)),
+                    }
+                })
+            })
+            .await
+            .expect("test call should become one safe failure");
+        let failed_preview = preview_service
+            .result_preview(
+                &fixture.principal,
+                AiToolCallResultPreviewInput {
+                    session_id: fixture.lease.session_id().0,
+                    tool_call_id: persisted.id().0,
+                },
+            )
+            .await
+            .expect("safe failed preview should resolve")
+            .expect("safe failed preview should be visible");
+        assert_eq!(failed_preview.classification, "public");
+        assert_eq!(
+            failed_preview.arguments.map(|arguments| arguments.0),
+            Some(json!({"recordId": "54"}))
+        );
+        assert_eq!(failed_preview.preview.0, safe_failure);
+        record = fixture
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    match tx
+                        .compare_and_swap::<AiToolCallRecord>(
+                            &record.id,
+                            record.row_version,
+                            AiToolCallRecordWhereInput::default(),
+                            UpdateAiToolCallRecordInput {
+                                protected_result: Some(Some(successful_protected_result)),
+                                authorization_code: Some(Some("allowed".to_owned())),
+                                authorization_policy_version: Some(
+                                    successful_authorization_policy_version,
+                                ),
+                                authorization_state_digest: Some(
+                                    successful_authorization_state_digest,
+                                ),
+                                disclosure_schema_fingerprint: Some(
+                                    successful_disclosure_schema_fingerprint,
+                                ),
+                                result_classification: Some(successful_result_classification),
+                                state: Some("completed".to_owned()),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?
+                    {
+                        ConditionalUpdateOutcome::Updated(updated) => Ok(updated),
+                        _ => Err(OrmPublicError::new(OrmErrorCode::Conflict)),
+                    }
+                })
+            })
+            .await
+            .expect("test call should restore its successful result");
         assert!(matches!(
             preview_service
                 .result_preview(
