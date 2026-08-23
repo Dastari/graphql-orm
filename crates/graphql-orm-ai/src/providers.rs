@@ -69,4 +69,5 @@ pub use codex_app_server::{
     AiCodexAppServerModelToolMode, AiCodexAppServerProtocolActor, AiCodexAppServerProvider,
     AiCodexAppServerRegistration, AiCodexAppServerRunLimits, AiCodexAppServerRunPool,
     AiCodexAppServerRunProcess, AiCodexAppServerRunProcessFactory, AiCodexAppServerTurnInput,
+    AiCodexAppServerWebSearchTurnConfig,
 };

@@ -18,6 +18,19 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.93.1] - 2026-08-23
+
+Persistent schema module: **0.63.0** (unchanged from 0.93.0).
+
+### Fixed
+
+- Re-export `AiCodexAppServerWebSearchTurnConfig` from the crate root so
+  downstream implementations of the public retained-process trait can name
+  its web-search configuration argument.
+
+There is no schema, data, protected-payload, GraphQL SDL, backup or restore
+migration in this release.
+
 ## [0.93.0] - 2026-08-23
 
 Persistent schema module: **0.63.0** (unchanged from 0.92.0).
