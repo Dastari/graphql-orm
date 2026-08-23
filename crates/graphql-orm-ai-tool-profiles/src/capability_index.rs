@@ -843,20 +843,17 @@ fn rank_entries<'a>(
     entries: impl IntoIterator<Item = (&'a GraphqlExecutionTargetId, &'a AiCapabilityIndexEntry)>,
     query: &AiCapabilitySearchQuery,
 ) -> Vec<(SearchRank, &'a AiCapabilityIndexEntry)> {
-    let terms = search_terms(&query.text);
-    let shape_intent = search_shape_intent(&terms);
+    let tokens = search_tokens(&query.text);
+    let terms = tokens.iter().cloned().collect::<BTreeSet<_>>();
+    let shape_intent = search_shape_intent(&tokens);
     let mut ranked = entries
         .into_iter()
         .filter(|(_, entry)| entry_matches_query(entry, query))
         .filter_map(|(target_id, entry)| {
             let rank = search_rank(target_id, entry, &terms, shape_intent);
-            (rank.entity > 0 || rank.target > 0 || rank.namespace > 0 || rank.lexical > 0)
-                .then_some((rank, entry))
+            (rank.lexical > 0).then_some((rank, entry))
         })
         .collect::<Vec<_>>();
-    if shape_intent.is_some() && ranked.iter().any(|(rank, _)| rank.shape > 0) {
-        ranked.retain(|(rank, _)| rank.shape > 0);
-    }
     ranked.sort_by(|left, right| {
         right
             .0
@@ -1407,29 +1404,22 @@ fn search_rank(
     }
 }
 
-fn search_shape_intent(terms: &BTreeSet<String>) -> Option<AiCapabilityOperationShape> {
-    if terms.contains("count")
-        || terms.contains("aggregate")
-        || terms.contains("total")
-        || terms.contains("number")
-        || terms.contains("how") && terms.contains("many")
-    {
+fn search_shape_intent(tokens: &[String]) -> Option<AiCapabilityOperationShape> {
+    let contains = |term: &str| tokens.iter().any(|token| token == term);
+    let contains_phrase = |left: &str, right: &str| {
+        tokens
+            .windows(2)
+            .any(|pair| pair[0] == left && pair[1] == right)
+    };
+    if contains("count") || contains("aggregate") || contains_phrase("how", "many") {
         Some(AiCapabilityOperationShape::Aggregate)
-    } else if terms.contains("detail") || terms.contains("single") || terms.contains("specific") {
+    } else if contains("detail") {
         Some(AiCapabilityOperationShape::Details)
-    } else if terms.contains("search")
-        || terms.contains("find")
-        || terms.contains("match")
-        || terms.contains("lookup")
-    {
+    } else if contains("search") {
         Some(AiCapabilityOperationShape::Search)
-    } else if terms.contains("keyset") || terms.contains("page") || terms.contains("next") {
+    } else if contains("keyset") || contains("pagination") || contains("paginated") {
         Some(AiCapabilityOperationShape::KeysetList)
-    } else if terms.contains("list")
-        || terms.contains("all")
-        || terms.contains("latest")
-        || terms.contains("recent")
-    {
+    } else if contains("list") {
         Some(AiCapabilityOperationShape::List)
     } else {
         None
@@ -1441,28 +1431,22 @@ fn search_shape_term(term: &str) -> bool {
         term,
         "count"
             | "aggregate"
-            | "total"
-            | "number"
             | "how"
             | "many"
             | "detail"
-            | "single"
-            | "specific"
             | "search"
-            | "find"
-            | "match"
-            | "lookup"
             | "keyset"
-            | "page"
-            | "next"
+            | "pagination"
+            | "paginated"
             | "list"
-            | "all"
-            | "latest"
-            | "recent"
     )
 }
 
 fn search_terms(value: &str) -> BTreeSet<String> {
+    search_tokens(value).into_iter().collect()
+}
+
+fn search_tokens(value: &str) -> Vec<String> {
     value
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter_map(|term| {
@@ -1539,23 +1523,25 @@ mod tests {
         .with_maximum_classification(DataClassification::Public)
     }
 
-    fn synthetic_shape_index() -> AiCapabilityIndex {
+    fn synthetic_shape_index(entity_count: usize) -> AiCapabilityIndex {
         let semantic = semantic_catalogue();
         let target_id = GraphqlExecutionTargetId::parse("synthetic-application").expect("target");
         let mut entries = BTreeMap::new();
-        for entity_index in 0..101 {
+        for entity_index in 0..entity_count {
             let entity = format!("SyntheticEntity{entity_index:03}");
             for shape in [
                 AiCapabilityOperationShape::List,
                 AiCapabilityOperationShape::Details,
                 AiCapabilityOperationShape::Aggregate,
                 AiCapabilityOperationShape::Search,
+                AiCapabilityOperationShape::KeysetList,
             ] {
                 let shape_id = match shape {
                     AiCapabilityOperationShape::List => "list",
                     AiCapabilityOperationShape::Details => "details",
                     AiCapabilityOperationShape::Aggregate => "aggregate",
                     AiCapabilityOperationShape::Search => "search",
+                    AiCapabilityOperationShape::KeysetList => "keyset",
                     _ => unreachable!("synthetic shape is fixed"),
                 };
                 let id = format!("inventory.synthetic_{entity_index:03}_{shape_id}");
@@ -1593,9 +1579,9 @@ mod tests {
     }
 
     #[test]
-    fn four_hundred_capabilities_rank_mechanical_shape_before_lexical_ties() {
-        let index = synthetic_shape_index();
-        assert_eq!(index.entries().len(), 404);
+    fn five_hundred_capabilities_rank_explicit_shape_deterministically_and_stay_bounded() {
+        let index = synthetic_shape_index(101);
+        assert_eq!(index.entries().len(), 505);
         for (text, expected) in [
             (
                 "list SyntheticEntity042 records",
@@ -1608,6 +1594,14 @@ mod tests {
             (
                 "how many SyntheticEntity042 records",
                 AiCapabilityOperationShape::Aggregate,
+            ),
+            (
+                "search SyntheticEntity042 records",
+                AiCapabilityOperationShape::Search,
+            ),
+            (
+                "pagination for SyntheticEntity042 records",
+                AiCapabilityOperationShape::KeysetList,
             ),
         ] {
             let result = index
@@ -1626,6 +1620,120 @@ mod tests {
                 Some("SyntheticEntity042")
             );
         }
+
+        let query = AiCapabilitySearchQuery {
+            text: "list records".to_owned(),
+            namespace: None,
+            kind: Some(AiCapabilityKind::GeneratedQuery),
+            entity_or_operation: None,
+            maximum_results: 7,
+        };
+        let first = index.search(&query).expect("first bounded search");
+        let second = index.search(&query).expect("second bounded search");
+        assert_eq!(first, second);
+        assert_eq!(first.candidates.len(), 7);
+        assert!(
+            first
+                .candidates
+                .iter()
+                .all(|candidate| candidate.operation_shape == AiCapabilityOperationShape::List)
+        );
+        assert_eq!(
+            first
+                .candidates
+                .iter()
+                .map(|candidate| candidate.id.as_str())
+                .collect::<Vec<_>>(),
+            (0..7)
+                .map(|index| format!("inventory.synthetic_{index:03}_list"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn shape_rank_preserves_lexically_relevant_mixed_shape_candidates() {
+        let index = synthetic_shape_index(1);
+        let result = index
+            .search(&AiCapabilitySearchQuery {
+                text: "list SyntheticEntity000 records".to_owned(),
+                namespace: None,
+                kind: Some(AiCapabilityKind::GeneratedQuery),
+                entity_or_operation: None,
+                maximum_results: 5,
+            })
+            .expect("mixed-shape search");
+        assert_eq!(result.candidates.len(), 5);
+        assert_eq!(
+            result.candidates[0].operation_shape,
+            AiCapabilityOperationShape::List
+        );
+        assert_eq!(
+            result
+                .candidates
+                .iter()
+                .map(|candidate| candidate.operation_shape)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                AiCapabilityOperationShape::List,
+                AiCapabilityOperationShape::Details,
+                AiCapabilityOperationShape::Aggregate,
+                AiCapabilityOperationShape::Search,
+                AiCapabilityOperationShape::KeysetList,
+            ])
+        );
+    }
+
+    #[test]
+    fn ordinary_request_vocabulary_does_not_infer_operation_shape() {
+        for text in [
+            "total value",
+            "number assigned",
+            "single owner",
+            "specific policy",
+            "find matching records",
+            "lookup code",
+            "next action",
+            "page content",
+            "all current records",
+            "latest revision",
+            "recent incident",
+            "many records explain how they changed",
+        ] {
+            assert_eq!(
+                search_shape_intent(&search_tokens(text)),
+                None,
+                "unexpected shape intent for {text:?}"
+            );
+        }
+        for (text, expected) in [
+            ("count records", AiCapabilityOperationShape::Aggregate),
+            ("how many records", AiCapabilityOperationShape::Aggregate),
+            ("record details", AiCapabilityOperationShape::Details),
+            ("search records", AiCapabilityOperationShape::Search),
+            ("paginated records", AiCapabilityOperationShape::KeysetList),
+            ("list records", AiCapabilityOperationShape::List),
+        ] {
+            assert_eq!(
+                search_shape_intent(&search_tokens(text)),
+                Some(expected),
+                "missing explicit shape intent for {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_query_cannot_admit_zero_lexical_candidates_at_high_cardinality() {
+        let index = synthetic_shape_index(101);
+        let result = index
+            .search(&AiCapabilitySearchQuery {
+                text: "list unrelated phrase".to_owned(),
+                namespace: None,
+                kind: Some(AiCapabilityKind::GeneratedQuery),
+                entity_or_operation: None,
+                maximum_results: 32,
+            })
+            .expect("unrelated search");
+        assert!(result.candidates.is_empty());
     }
 
     #[test]

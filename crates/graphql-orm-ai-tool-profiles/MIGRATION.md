@@ -18,9 +18,10 @@ refresh retained provider-session bindings: the canonical index contract is
 now version `2`, and the added result-record cost metadata changes entry,
 index, and index-set fingerprints.
 
-Search callers keep the same request type. List/details/search/keyset/aggregate
-language now selects the matching mechanical operation shape before entity,
-namespace, and lexical ranking. Fixed-broker descriptions add
+Search callers keep the same request type. Explicit
+list/details/search/keyset/aggregate language now ranks the matching mechanical
+operation shape before entity, namespace, and lexical relevance while keeping
+other lexically relevant shapes eligible. Fixed-broker descriptions add
 `resultRecordCost` with compiler-owned `maximumRootRecords`,
 `maximumTotalRecords`, and `rootBoundRequired` fields.
 

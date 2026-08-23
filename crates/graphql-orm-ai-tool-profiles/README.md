@@ -122,11 +122,11 @@ Schema, GraphQL document/SDL, database name, resolver URL, policy expression,
 credential, authority or secret/hidden field.
 
 `AiCapabilityIndex::search` provides bounded deterministic discovery with
-exact namespace/kind/entity filters and stable ID tie-breaking. A declared
-list, details, search, keyset, or aggregate intent first selects the matching
-compiler-owned operation shape; public entity, execution-target, and namespace
-relevance rank next, and lexical description matches break ties within that
-shape. Search
+exact namespace/kind/entity filters and stable ID tie-breaking. Explicit list,
+details, search, keyset, or aggregate intent ranks the matching compiler-owned
+operation shape first; public entity, execution-target, and namespace relevance
+rank next. Every candidate still requires positive lexical relevance, and
+non-matching shapes remain eligible. Search
 returns exact candidate/index/schema/semantic/target-policy fingerprints but
 grants no authority. Each entry also carries conservative compiler-owned root
 and total result-record bounds for later planning. The runtime package owns

@@ -19,9 +19,9 @@ supersedes: []
 
 ### Changed
 
-- Discovery selects an inferred mechanical list, details, search, keyset, or
-  aggregate shape before ranking entity, execution target, namespace, and
-  lexical relevance.
+- Discovery ranks a narrowly inferred mechanical list, details, search,
+  keyset, or aggregate shape before entity, execution target, namespace, and
+  lexical relevance without discarding relevant mixed-shape results.
 - The canonical capability-index contract version is now `2`; index and set
   fingerprints intentionally change.
 

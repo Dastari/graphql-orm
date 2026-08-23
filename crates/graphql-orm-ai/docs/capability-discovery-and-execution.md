@@ -70,11 +70,11 @@ AiCapabilityIndexSet::compile([Arc::new(index)])
 
 The built-in search uses bounded normalized lexical terms, optional exact
 namespace/kind/entity-or-operation filters, deterministic scores and stable ID
-tie-breaking. When the request declares list, details, search, keyset-page, or
-aggregate intent, the matching compiler-owned operation shape is selected
-before entity, target/namespace and lexical-description ranking. If the active
-set has no such shape, discovery falls back to ordinary relevance rather than
-inventing an operation. It needs no embeddings or external database. A host may later
+tie-breaking. Narrow, explicit list, details, search, keyset-page, or aggregate
+intent ranks the matching compiler-owned operation shape before entity,
+target/namespace and lexical-description relevance. Every result must retain a
+positive lexical match, and relevant non-matching shapes are not discarded. It
+needs no embeddings or external database. A host may later
 implement the closed current-index-set and authority traits with a reviewed
 search service, but returned IDs and fingerprints must still bind to the
 canonical set and the candidate's exact owning index.
