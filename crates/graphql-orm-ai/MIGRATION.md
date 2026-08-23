@@ -19,6 +19,26 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.91.1 to 0.92.0: owner-authorized tool arguments and safe failures
+
+Adopt `graphql-orm-ai` 0.92.0 from one reviewed full monorepo revision. The AI
+schema module remains **0.63.0**. There is no database, data, table, column,
+index, constraint, backfill, protected-payload, backup, or restore migration.
+
+The existing `aiToolCallResultPreview` GraphQL object adds nullable
+`arguments`. Successful `preview` values are unchanged. A durably failed
+read-only call can now return the crate-authored public failure envelope as
+`preview`, including its stable code and retryable flag, instead of returning
+no object. Clients should render that envelope as a safe error and must not
+infer resolver details that are absent from it.
+
+`AiToolResultPreviewAuthorizer` implementations may override the new
+`authorize_and_project_arguments` method. Its default returns `None`, so
+existing implementations remain default-deny. Hosts opting in must project
+only arguments safe for the rehydrated current browser principal and must
+withhold secrets. Existing direct `AiToolCallResultPreviewView` struct literals
+must initialize the new `arguments` field.
+
 ## 0.91.0 to 0.91.1: Codex FixedBroker projection and retained session admission
 
 Adopt `graphql-orm-ai` 0.91.1 from one reviewed full monorepo revision. The AI

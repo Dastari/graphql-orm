@@ -19,6 +19,8 @@ use crate::{
     GraphqlInvocationContext, ProtectedContentEnvelope, ToolGraphqlRequest,
 };
 
+const MAXIMUM_BROWSER_ARGUMENT_BYTES: usize = 64 * 1024;
+
 /// Generated-ORM result-preview service for application hosts.
 pub struct OrmAiToolCallResultPreviewService {
     database: Database<DefaultWriteBackend>,
@@ -54,6 +56,30 @@ impl OrmAiToolCallResultPreviewService {
             .open(policy, &context, &envelope)
             .await
             .map_err(map_protection)
+    }
+
+    async fn project_arguments(
+        &self,
+        principal: &agql_auth::ResolvedPrincipal,
+        scope: &crate::AiScope,
+        descriptor: &crate::AiToolDescriptor,
+        arguments: &serde_json::Value,
+    ) -> Result<Option<serde_json::Value>, AiError> {
+        let Some(projected) = self
+            .authorizer
+            .authorize_and_project_arguments(principal, scope, descriptor, arguments)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if serde_json::to_vec(&projected)
+            .map_err(|_| AiError::PersistenceFailed)?
+            .len()
+            > MAXIMUM_BROWSER_ARGUMENT_BYTES
+        {
+            return Err(AiError::Forbidden);
+        }
+        Ok(Some(projected))
     }
 }
 
@@ -117,13 +143,19 @@ impl AiToolCallResultPreviewService for OrmAiToolCallResultPreviewService {
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .filter(|run| run.session_id == session.id)
             .ok_or(AiError::NotFound)?;
+        let successful =
+            call.state == "completed" && call.authorization_code.as_deref() == Some("allowed");
+        let safe_failure = call
+            .authorization_code
+            .as_deref()
+            .and_then(application_tool_failure_code)
+            .filter(|_| matches!(call.state.as_str(), "execution_failed" | "egress_denied"));
         if call.run_id != run.id
-            || call.state != "completed"
+            || (!successful && safe_failure.is_none())
             || call.completed_at.is_none()
             || call.payload_purged_at.is_some()
             || call.protected_result.is_none()
             || call.protected_arguments.is_none()
-            || call.authorization_code.as_deref() != Some("allowed")
         {
             return Ok(None);
         }
@@ -132,8 +164,62 @@ impl AiToolCallResultPreviewService for OrmAiToolCallResultPreviewService {
             .runtime
             .tool_catalog()
             .descriptor(&tool_id)
-            .filter(|descriptor| descriptor.fingerprint == call.tool_fingerprint)
-            .ok_or(AiError::Forbidden)?;
+            .filter(|descriptor| descriptor.fingerprint == call.tool_fingerprint);
+        let policy = self
+            .runtime
+            .content_protection_policy_resolver()
+            .resolve(current.principal(), &scope)
+            .await?;
+        if !policy.ready || policy.scope != scope {
+            return Err(AiError::RuntimeNotReady);
+        }
+        if let Some(code) = safe_failure {
+            let classification = parse_classification(
+                call.result_classification
+                    .as_deref()
+                    .ok_or(AiError::PersistenceFailed)?,
+            )?;
+            if classification != DataClassification::Public {
+                return Err(AiError::PersistenceFailed);
+            }
+            let stored = self
+                .open(
+                    &policy,
+                    protection_context(call.id, "protected_result", &scope),
+                    call.protected_result
+                        .as_ref()
+                        .ok_or(AiError::PersistenceFailed)?,
+                )
+                .await?;
+            let preview = extract_safe_failure(&stored, code)?;
+            let arguments = if let Some(descriptor) = descriptor
+                && descriptor.browser_result_preview.is_some()
+            {
+                let stored_arguments = self
+                    .open(
+                        &policy,
+                        protection_context(call.id, "protected_arguments", &scope),
+                        call.protected_arguments
+                            .as_ref()
+                            .ok_or(AiError::PersistenceFailed)?,
+                    )
+                    .await?;
+                self.project_arguments(&current, &scope, descriptor, &stored_arguments)
+                    .await?
+            } else {
+                None
+            };
+            return Ok(Some(AiToolCallResultPreviewView {
+                session_id: session.id,
+                run_id: run.id,
+                tool_call_id: call.id,
+                tool_id: call.tool_id,
+                classification: classification_name(classification).to_owned(),
+                arguments: arguments.map(async_graphql::Json),
+                preview: async_graphql::Json(preview),
+            }));
+        }
+        let descriptor = descriptor.ok_or(AiError::Forbidden)?;
         let preview_policy = match descriptor.browser_result_preview {
             Some(policy) => policy,
             None => return Ok(None),
@@ -153,14 +239,6 @@ impl AiToolCallResultPreviewService for OrmAiToolCallResultPreviewService {
         )?;
         if classification > preview_policy.maximum_classification {
             return Ok(None);
-        }
-        let policy = self
-            .runtime
-            .content_protection_policy_resolver()
-            .resolve(current.principal(), &scope)
-            .await?;
-        if !policy.ready || policy.scope != scope {
-            return Err(AiError::RuntimeNotReady);
         }
         let arguments = self
             .open(
@@ -203,6 +281,14 @@ impl AiToolCallResultPreviewService for OrmAiToolCallResultPreviewService {
         if preauthorization.principal().reference() != &requested_reference {
             return Err(AiError::ReauthorizationFailed);
         }
+        let arguments = self
+            .project_arguments(
+                preauthorization.principal(),
+                &scope,
+                descriptor,
+                &request.variables,
+            )
+            .await?;
         let stored = self
             .open(
                 &policy,
@@ -251,6 +337,7 @@ impl AiToolCallResultPreviewService for OrmAiToolCallResultPreviewService {
             tool_call_id: call.id,
             tool_id: descriptor.id.as_str().to_owned(),
             classification: classification_name(classification).to_owned(),
+            arguments: arguments.map(async_graphql::Json),
             preview: async_graphql::Json(preview),
         }))
     }
@@ -294,6 +381,41 @@ fn extract_exact_result(value: &serde_json::Value) -> Result<&serde_json::Value,
         return Err(AiError::PersistenceFailed);
     }
     object.get("data").ok_or(AiError::PersistenceFailed)
+}
+
+fn application_tool_failure_code(value: &str) -> Option<crate::AiApplicationToolFailureCode> {
+    use crate::AiApplicationToolFailureCode as Code;
+
+    match value {
+        "invalid_arguments" => Some(Code::InvalidArguments),
+        "selection_too_large" => Some(Code::SelectionTooLarge),
+        "relationship_depth_exceeded" => Some(Code::RelationshipDepthExceeded),
+        "result_budget_exceeded" => Some(Code::ResultBudgetExceeded),
+        "capability_stale" => Some(Code::CapabilityStale),
+        "authorization_denied" => Some(Code::AuthorizationDenied),
+        "temporarily_unavailable" => Some(Code::TemporarilyUnavailable),
+        "tool_unavailable" => Some(Code::ToolUnavailable),
+        "resolver_validation_failed" => Some(Code::ResolverValidationFailed),
+        "not_found" => Some(Code::NotFound),
+        _ => None,
+    }
+}
+
+fn extract_safe_failure(
+    value: &serde_json::Value,
+    code: crate::AiApplicationToolFailureCode,
+) -> Result<serde_json::Value, AiError> {
+    let object = value.as_object().ok_or(AiError::PersistenceFailed)?;
+    if object.len() != 4
+        || object.get("version").and_then(serde_json::Value::as_u64)
+            != Some(u64::from(crate::AI_APPLICATION_TOOL_FAILURE_VERSION))
+        || object.get("ok").and_then(serde_json::Value::as_bool) != Some(false)
+        || object.get("code").and_then(serde_json::Value::as_str) != Some(code.as_str())
+        || object.get("retryable").and_then(serde_json::Value::as_bool) != Some(code.retryable())
+    {
+        return Err(AiError::PersistenceFailed);
+    }
+    Ok(value.clone())
 }
 
 fn json_shape(value: &serde_json::Value, depth: usize) -> Result<(usize, u64), AiError> {
@@ -347,5 +469,36 @@ const fn classification_name(value: DataClassification) -> &'static str {
         DataClassification::Confidential => "confidential",
         DataClassification::Restricted => "restricted",
         DataClassification::Secret => "secret",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{application_tool_failure_code, extract_safe_failure};
+    use crate::{AiApplicationToolFailureCode, AiApplicationToolFailureEnvelope, AiError};
+
+    #[test]
+    fn safe_failure_preview_accepts_only_the_exact_content_free_envelope() {
+        let code = AiApplicationToolFailureCode::AuthorizationDenied;
+        let envelope = AiApplicationToolFailureEnvelope::new(code).to_json();
+        assert_eq!(application_tool_failure_code(code.as_str()), Some(code));
+        assert_eq!(
+            extract_safe_failure(&envelope, code).expect("exact safe envelope should validate"),
+            envelope
+        );
+
+        let mut mismatched =
+            AiApplicationToolFailureEnvelope::new(AiApplicationToolFailureCode::ToolUnavailable)
+                .to_json();
+        assert!(matches!(
+            extract_safe_failure(&mismatched, code),
+            Err(AiError::PersistenceFailed)
+        ));
+        mismatched["code"] = serde_json::Value::String(code.as_str().to_owned());
+        mismatched["detail"] = serde_json::Value::String("must not cross".to_owned());
+        assert!(matches!(
+            extract_safe_failure(&mismatched, code),
+            Err(AiError::PersistenceFailed)
+        ));
     }
 }

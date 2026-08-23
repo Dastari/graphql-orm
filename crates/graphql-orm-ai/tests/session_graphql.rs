@@ -74,6 +74,7 @@ impl AiToolCallResultPreviewService for RecordingToolPreviewService {
             tool_call_id: input.tool_call_id,
             tool_id: "records.read".to_owned(),
             classification: "internal".to_owned(),
+            arguments: Some(async_graphql::Json(json!({"recordId": "54"}))),
             preview: async_graphql::Json(json!({"recordId": "54"})),
         }))
     }
@@ -533,7 +534,7 @@ async fn tool_result_preview_query_passes_exact_pair_and_current_principal() {
     let response = schema
         .execute(
             Request::new(format!(
-                "{{ aiToolCallResultPreview(input: {{ sessionId: \"{session_id}\", toolCallId: \"{tool_call_id}\" }}) {{ sessionId runId toolCallId toolId classification preview }} }}"
+                "{{ aiToolCallResultPreview(input: {{ sessionId: \"{session_id}\", toolCallId: \"{tool_call_id}\" }}) {{ sessionId runId toolCallId toolId classification arguments preview }} }}"
             ))
             .data(principal("preview-owner")),
         )
@@ -549,6 +550,7 @@ async fn tool_result_preview_query_passes_exact_pair_and_current_principal() {
                 "toolCallId": tool_call_id,
                 "toolId": "records.read",
                 "classification": "internal",
+                "arguments": {"recordId": "54"},
                 "preview": {"recordId": "54"},
             }
         })
