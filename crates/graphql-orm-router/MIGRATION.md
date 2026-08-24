@@ -10,6 +10,34 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.4.0 to 0.5.0
+
+Align direct `agql-auth` consumers to 0.19.0 at reviewed merged revision
+`1d2e9fe2e1576105212a7b340a11abf8cad0382d` so the process resolves one matcher
+type universe.
+
+Existing router configuration needs no change. Omitted `scopeMatcher`,
+`kind: "exact"`, and hierarchical matchers without the new field preserve their
+previous decisions. To let caller-supplied super-scopes satisfy exact-only
+requirements, build with `auth-agql` and explicitly set:
+
+```json
+{
+  "scopeMatcher": {
+    "kind": "hierarchical",
+    "superScopes": ["root.admin", "operations.breakglass"],
+    "allowSuperScopesForExactOnly": true,
+    "exactOnlyScopes": ["payments.credentials.release"]
+  }
+}
+```
+
+The option recognizes only exact membership in `superScopes`. Direct exact
+grants continue to satisfy exact-only requirements, while universal, trailing,
+and segment wildcard matches remain denied. Disable or omit the option to
+restore the previous behavior. No descriptor, GraphQL schema, token wire,
+role, or stored-data migration is implied.
+
 ## 0.3.1 to 0.4.0
 
 Align direct `agql-auth` consumers to 0.18.0 at merged revision

@@ -129,13 +129,16 @@ Scope matching is a separate resource-server policy. Omission or
 | `wildcardMatchesMultiSegment` | `true`; a trailing wildcard matches the remaining hierarchy. |
 | `allowUniversalWildcard` | `false`; a bare wildcard has no implicit authority. |
 | `superScopes` | Empty; each listed grant satisfies ordinary requirements. |
-| `exactOnlyScopes` | Empty; each listed requirement accepts only an equal grant. |
-| `exactOnlyScopePatterns` | Empty; matching resource-qualified requirements accept only equal grants. |
+| `allowSuperScopesForExactOnly` | `false`; when enabled, exactly configured super-scopes also satisfy exact-only requirements. |
+| `exactOnlyScopes` | Empty; wildcard-derived grants never satisfy a listed requirement. |
+| `exactOnlyScopePatterns` | Empty; wildcard-derived grants never satisfy matching resource-qualified requirements. |
 
-Exact-only requirements are evaluated before super-scope and wildcard rules.
-Lists are normalized and deduplicated at startup. The router applies this one
-matcher to fixed and rendered operation requirements; resolver guards remain
-authoritative.
+Exact-only requirements always reject wildcard-derived matches. Direct exact
+grants remain valid. Configured super-scopes remain excluded by default and
+become valid only when `allowSuperScopesForExactOnly` is explicitly enabled;
+membership in `superScopes` is exact and case-sensitive. Lists are normalized
+and deduplicated at startup. The router applies this one matcher to fixed and
+rendered operation requirements; resolver guards remain authoritative.
 
 For programmatic setup, `JwksAuthenticationConfig::new` requires a JWKS URL,
 issuer, and non-empty audiences. It defaults to a 15-minute key cache,

@@ -350,6 +350,7 @@ struct FileScopeMatcher {
     wildcard: Option<String>,
     wildcard_matches_multi_segment: Option<bool>,
     allow_universal_wildcard: Option<bool>,
+    allow_super_scopes_for_exact_only: Option<bool>,
     #[serde(default)]
     super_scopes: Vec<String>,
     #[serde(default)]
@@ -373,6 +374,7 @@ impl FileScopeMatcher {
                     || self.wildcard.is_some()
                     || self.wildcard_matches_multi_segment.is_some()
                     || self.allow_universal_wildcard.is_some()
+                    || self.allow_super_scopes_for_exact_only.is_some()
                     || !self.super_scopes.is_empty()
                     || !self.exact_only_scopes.is_empty()
                     || !self.exact_only_scope_patterns.is_empty()
@@ -389,6 +391,7 @@ impl FileScopeMatcher {
                 self.wildcard,
                 self.wildcard_matches_multi_segment,
                 self.allow_universal_wildcard,
+                self.allow_super_scopes_for_exact_only,
                 self.super_scopes,
                 self.exact_only_scopes,
                 self.exact_only_scope_patterns,
@@ -405,6 +408,7 @@ fn build_hierarchical_scope_matcher(
     wildcard: Option<String>,
     wildcard_matches_multi_segment: Option<bool>,
     allow_universal_wildcard: Option<bool>,
+    allow_super_scopes_for_exact_only: Option<bool>,
     mut super_scopes: Vec<String>,
     mut exact_only_scopes: Vec<String>,
     mut exact_only_scope_patterns: Vec<String>,
@@ -438,6 +442,9 @@ fn build_hierarchical_scope_matcher(
         .with_allow_universal_wildcard(
             allow_universal_wildcard.unwrap_or(defaults.allow_universal_wildcard),
         )
+        .with_allow_super_scopes_for_exact_only(
+            allow_super_scopes_for_exact_only.unwrap_or(defaults.allow_super_scopes_for_exact_only),
+        )
         .with_super_scopes(super_scopes)
         .with_exact_only_scopes(exact_only_scopes)
         .with_exact_only_scope_patterns(exact_only_scope_patterns);
@@ -457,6 +464,7 @@ fn build_hierarchical_scope_matcher(
     _wildcard: Option<String>,
     _wildcard_matches_multi_segment: Option<bool>,
     _allow_universal_wildcard: Option<bool>,
+    _allow_super_scopes_for_exact_only: Option<bool>,
     _super_scopes: Vec<String>,
     _exact_only_scopes: Vec<String>,
     _exact_only_scope_patterns: Vec<String>,
@@ -873,59 +881,149 @@ mod tests {
 
     #[cfg(feature = "auth-agql")]
     #[test]
-    fn hierarchical_file_matcher_applies_super_wildcard_and_exact_only_matrix() {
+    fn hierarchical_file_matcher_preserves_default_and_flips_only_configured_super_scopes() {
         let json = FILE.replacen(
             "\"authentication\":",
             r#""scopeMatcher": {
                 "kind": "hierarchical",
-                "superScopes": ["platform.admin"],
+                "allowUniversalWildcard": true,
+                "superScopes": ["root.admin", "operations.breakglass"],
                 "exactOnlyScopes": ["payments.credentials.release"],
                 "exactOnlyScopePatterns": ["payments.account.*.credentials.release"]
             },
             "authentication":"#,
             1,
         );
-        let config = RouterFileConfig::from_json(&json)
+        let compatibility_default = RouterFileConfig::from_json(&json)
             .unwrap()
             .into_router_config_with(|name| {
                 Ok((name == "PRODUCTS_SCHEMA_TOKEN").then(|| "Bearer secret".to_owned()))
             })
             .unwrap();
-        let matcher = config.scope_matcher;
+        let enabled_json = json.replacen(
+            r#""kind": "hierarchical","#,
+            r#""kind": "hierarchical",
+                "allowSuperScopesForExactOnly": true,"#,
+            1,
+        );
+        let enabled = RouterFileConfig::from_json(&enabled_json)
+            .unwrap()
+            .into_router_config_with(|name| {
+                Ok((name == "PRODUCTS_SCHEMA_TOKEN").then(|| "Bearer secret".to_owned()))
+            })
+            .unwrap();
 
         for (granted, required, expected) in [
-            ("platform.admin", "orders.read", true),
-            ("orders.*", "orders.read", true),
             ("orders.read", "orders.read", true),
-            ("platform.admin", "payments.credentials.release", false),
-            ("payments.*", "payments.credentials.release", false),
+            ("orders.*", "orders.read", true),
+            ("orders.*", "orders.items.read", true),
+            ("orders.*.read", "orders.items.read", true),
+            ("*", "orders.delete", true),
+            ("root.admin", "orders.delete", true),
+            ("operations.breakglass", "orders.delete", true),
+            ("root.admin.copy", "orders.delete", false),
+            ("unrelated.scope", "orders.delete", false),
+        ] {
+            assert_eq!(
+                compatibility_default
+                    .scope_matcher
+                    .matches(granted, required),
+                expected,
+                "default ordinary grant {granted:?} for requirement {required:?}"
+            );
+            assert_eq!(
+                enabled.scope_matcher.matches(granted, required),
+                expected,
+                "enabled ordinary grant {granted:?} for requirement {required:?}"
+            );
+        }
+
+        for (granted, required, default_expected, enabled_expected) in [
             (
                 "payments.credentials.release",
                 "payments.credentials.release",
                 true,
+                true,
+            ),
+            ("payments.*", "payments.credentials.release", false, false),
+            (
+                "payments.*.release",
+                "payments.credentials.release",
+                false,
+                false,
+            ),
+            ("*", "payments.credentials.release", false, false),
+            ("root.admin", "payments.credentials.release", false, true),
+            (
+                "operations.breakglass",
+                "payments.credentials.release",
+                false,
+                true,
             ),
             (
-                "platform.admin",
+                "root.admin.copy",
+                "payments.credentials.release",
+                false,
+                false,
+            ),
+            (
+                "unrelated.scope",
+                "payments.credentials.release",
+                false,
+                false,
+            ),
+            (
+                "root.admin",
                 "payments.account.7.credentials.release",
                 false,
+                true,
             ),
             (
                 "payments.account.*",
                 "payments.account.7.credentials.release",
                 false,
+                false,
             ),
             (
                 "payments.account.7.credentials.release",
                 "payments.account.7.credentials.release",
                 true,
+                true,
             ),
         ] {
             assert_eq!(
-                matcher.matches(granted, required),
-                expected,
-                "grant {granted:?} for requirement {required:?}"
+                compatibility_default
+                    .scope_matcher
+                    .matches(granted, required),
+                default_expected,
+                "default exact-only grant {granted:?} for requirement {required:?}"
+            );
+            assert_eq!(
+                enabled.scope_matcher.matches(granted, required),
+                enabled_expected,
+                "enabled exact-only grant {granted:?} for requirement {required:?}"
             );
         }
+    }
+
+    #[test]
+    fn exact_only_super_scope_file_option_is_strictly_parsed() {
+        let malformed = FILE.replacen(
+            "\"authentication\":",
+            r#""scopeMatcher": {
+                "kind": "hierarchical",
+                "allowSuperScopesForExactOnly": "yes"
+            },
+            "authentication":"#,
+            1,
+        );
+        assert!(RouterFileConfig::from_json(&malformed).is_err());
+
+        let unknown = malformed.replace(
+            r#""allowSuperScopesForExactOnly": "yes""#,
+            r#""exactOnlySuperScopes": true"#,
+        );
+        assert!(RouterFileConfig::from_json(&unknown).is_err());
     }
 
     #[cfg(not(feature = "auth-agql"))]
@@ -950,7 +1048,7 @@ mod tests {
     fn exact_file_matcher_rejects_hierarchical_options() {
         let json = FILE.replacen(
             "\"authentication\":",
-            r#""scopeMatcher": {"kind": "exact", "superScopes": ["platform.admin"]},
+            r#""scopeMatcher": {"kind": "exact", "allowSuperScopesForExactOnly": false},
             "authentication":"#,
             1,
         );

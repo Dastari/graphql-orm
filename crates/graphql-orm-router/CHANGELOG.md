@@ -10,6 +10,21 @@ supersedes: []
 
 # Changelog
 
+## 0.5.0 - 2026-08-24
+
+- Aligned the optional adapter to generic `agql-auth` 0.19.0 at reviewed merged
+  revision `1d2e9fe2e1576105212a7b340a11abf8cad0382d`.
+- Added strict hierarchical `scopeMatcher.allowSuperScopesForExactOnly` file
+  configuration. It is disabled by default. When enabled, only exact
+  membership in caller-supplied `superScopes` can satisfy an exact-only
+  requirement; wildcard-derived, similar, and unrelated grants remain denied.
+- Added router-level compatibility and enabled-policy truth tables covering
+  ordinary requirements, fixed and patterned exact-only requirements,
+  multiple configured super-scopes, and malformed or unknown configuration.
+
+No descriptor, GraphQL schema, token wire, role, or stored-data migration is
+required. Subgraph resolver authorization remains authoritative.
+
 ## 0.4.0 - 2026-08-22
 
 - Aligned the optional adapter to generic `agql-auth` 0.18.0 at merged revision

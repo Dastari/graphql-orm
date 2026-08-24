@@ -87,8 +87,8 @@ dependencies = [
 
 [[package]]
 name = "agql-auth"
-version = "0.18.0"
-source = "git+https://github.com/Dastari/agql-auth.git?rev=527d15d28e3c295a6f6b5e6d74559a7aecdc1322#527d15d28e3c295a6f6b5e6d74559a7aecdc1322"
+version = "0.19.0"
+source = "git+https://github.com/Dastari/agql-auth.git?rev=1d2e9fe2e1576105212a7b340a11abf8cad0382d#1d2e9fe2e1576105212a7b340a11abf8cad0382d"
 dependencies = [
  "argon2",
  "async-graphql",
@@ -3193,7 +3193,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-router"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "agql-auth",
  "arc-swap",
