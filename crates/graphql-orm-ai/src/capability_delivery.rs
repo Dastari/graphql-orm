@@ -1570,6 +1570,7 @@ fn planning_contract(
         "shape": entry.operation_shape,
         "resultClassification": entry.result_classification,
         "resultDescription": entry.result_description,
+        "resultRecordCost": entry.result_record_cost,
         "risk": entry.risk,
         "approval": entry.approval,
         "scalarFields": entry.scalar_fields,
@@ -3071,6 +3072,63 @@ mod tests {
             insert_broker_argument(&mut value, "filter.raw", json!({"sql": "never"}), &mut seen,),
             Err(AiError::InvalidInput(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn describe_exposes_compiler_owned_result_record_cost_bounds() {
+        let principal = principal();
+        let principal_reference = principal.reference();
+        let current_index = Arc::new(CurrentIndex(RwLock::new(generated_index(
+            "target-policy-v1",
+        ))));
+        let broker = AiCapabilityDiscoveryBroker::new(
+            Arc::new(Resolver(principal)),
+            current_index,
+            Arc::new(Authority {
+                allowed: AtomicBool::new(true),
+                policy_fingerprint: RwLock::new("current-policy-v1".to_owned()),
+            }),
+            Arc::new(FixedClock::new(OffsetDateTime::UNIX_EPOCH)),
+            Duration::seconds(30),
+        )
+        .expect("broker");
+        let session = AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default())
+            .expect("broker session");
+        let run = run_binding();
+        let discovery = broker
+            .dispatch_discover(
+                &principal_reference,
+                &run,
+                &session,
+                &json!({
+                    "text": "reviewed application record",
+                    "kind": "generated_query",
+                    "maximumResults": 1
+                }),
+            )
+            .await
+            .expect("discovery");
+        let candidate = &discovery["candidates"][0];
+        let description = broker
+            .dispatch_describe(
+                &principal_reference,
+                &run,
+                &session,
+                &json!({
+                    "capabilityId": candidate["capabilityId"],
+                    "candidateFingerprint": candidate["candidateFingerprint"]
+                }),
+            )
+            .await
+            .expect("description");
+        assert_eq!(
+            description.contract()["resultRecordCost"],
+            json!({
+                "maximumRootRecords": 1,
+                "maximumTotalRecords": 100,
+                "rootBoundRequired": false
+            })
+        );
     }
 
     #[test]

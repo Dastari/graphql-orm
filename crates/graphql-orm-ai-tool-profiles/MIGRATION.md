@@ -10,6 +10,24 @@ supersedes: []
 
 # Migration Guide
 
+## 0.9.0 to 0.10.0: shape-aware discovery and record-cost metadata
+
+Adopt `graphql-orm-ai-tool-profiles` 0.10.0 with `graphql-orm-ai` 0.94.0 from
+one reviewed full monorepo revision. Recompile every capability index and
+refresh retained provider-session bindings: the canonical index contract is
+now version `2`, and the added result-record cost metadata changes entry,
+index, and index-set fingerprints.
+
+Search callers keep the same request type. Explicit
+list/details/search/keyset/aggregate language now ranks the matching mechanical
+operation shape before entity, namespace, and lexical relevance while keeping
+other lexically relevant shapes eligible. Fixed-broker descriptions add
+`resultRecordCost` with compiler-owned `maximumRootRecords`,
+`maximumTotalRecords`, and `rootBoundRequired` fields.
+
+There is no database, data, GraphQL SDL, protected-content, backup, restore, or
+persistent AI schema-module migration. Discovery remains non-authoritative.
+
 ## 0.8.0 to 0.9.0: proof-bearing stateless native-item refusal
 
 Adopt `graphql-orm-ai-tool-profiles` 0.9.0 with `graphql-orm-ai` 0.86.0 from

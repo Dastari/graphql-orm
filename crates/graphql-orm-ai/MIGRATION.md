@@ -19,6 +19,18 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.93.2 to 0.94.0: shape-aware capability discovery
+
+Adopt `graphql-orm-ai` 0.94.0 and `graphql-orm-ai-tool-profiles` 0.10.0 from one
+reviewed full monorepo revision. Recompile capability indexes and refresh
+retained provider-session bindings because index contract version `2` changes
+entry, index, and index-set fingerprints.
+
+Search request APIs are unchanged. Fixed-broker descriptions add bounded
+`resultRecordCost` planning metadata. The AI schema module remains **0.63.0**;
+there is no database, data, GraphQL SDL, protected-payload, backup, or restore
+migration.
+
 ## 0.93.1 to 0.93.2: consistent current-policy browser preview gates
 
 Adopt `graphql-orm-ai` 0.93.2 from one reviewed full monorepo revision. The AI
