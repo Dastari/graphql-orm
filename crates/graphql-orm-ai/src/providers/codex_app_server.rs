@@ -3227,9 +3227,11 @@ pub enum AiCodexAppServerInbound {
         call_id: String,
         /// Provider-authored action, available on completion when reported.
         action: Option<AiCodexAppServerWebSearchAction>,
-        /// Bounded provider-authored query, absent for an empty start frame.
+        /// Bounded provider-authored query, absent on start and possibly empty
+        /// on completion for non-search actions.
         query: Option<String>,
-        /// Validated structured search results, empty on start or no matches.
+        /// Validated structured search results, empty on start, no matches, or
+        /// when the provider reports only opaque forward-compatible results.
         results: Vec<AiCodexAppServerWebSearchResult>,
         /// Whether this is the terminal completion lifecycle.
         completed: bool,
@@ -4536,11 +4538,7 @@ impl AiCodexAppServerProtocolActor {
         let query = item
             .get("query")
             .and_then(Value::as_str)
-            .filter(|query| {
-                !query.trim().is_empty()
-                    && query.len() <= MAXIMUM_WEB_SEARCH_FIELD_BYTES
-                    && !query.contains('\0')
-            })
+            .filter(|query| query.len() <= MAXIMUM_WEB_SEARCH_FIELD_BYTES && !query.contains('\0'))
             .ok_or(ProviderError::Rejected)?
             .to_owned();
         let domain_policy = self
@@ -5113,10 +5111,11 @@ fn parse_web_search_action(
                 return Err(ProviderError::Rejected);
             }
             let query = bounded_optional_web_search_string(object.get("query"))?;
-            if query
-                .as_deref()
-                .is_some_and(|query| query != completed_query)
-            {
+            if query.as_deref().is_some_and(|query| {
+                !query.trim().is_empty()
+                    && !completed_query.trim().is_empty()
+                    && query != completed_query
+            }) {
                 return Err(ProviderError::Rejected);
             }
             let queries = match object.get("queries") {
@@ -5131,6 +5130,12 @@ fn parse_web_search_action(
                     .collect::<Result<Vec<_>, _>>()?,
                 _ => return Err(ProviderError::Rejected),
             };
+            if completed_query.trim().is_empty()
+                && query.as_deref().is_none_or(|query| query.trim().is_empty())
+                && queries.is_empty()
+            {
+                return Err(ProviderError::Rejected);
+            }
             AiCodexAppServerWebSearchAction::Search { query, queries }
         }
         "openPage" => {
@@ -5196,61 +5201,60 @@ fn parse_web_search_results(
         Some(Value::Array(values)) if values.len() <= MAXIMUM_WEB_SEARCH_RESULTS_PER_CALL => values,
         _ => return Err(ProviderError::Rejected),
     };
-    let mut total_bytes = 0_usize;
-    values
-        .iter()
-        .map(|value| {
-            let object = value.as_object().ok_or(ProviderError::Rejected)?;
-            if object.keys().any(|key| {
-                !matches!(
-                    key.as_str(),
-                    "domain" | "ref_id" | "snippet" | "title" | "type" | "url"
-                )
-            }) || object.get("type").and_then(Value::as_str) != Some("text_result")
-            {
-                return Err(ProviderError::Rejected);
-            }
-            let required = |key: &str| {
-                object
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .filter(|value| {
-                        value.len() <= MAXIMUM_WEB_SEARCH_FIELD_BYTES && !value.contains('\0')
-                    })
-                    .ok_or(ProviderError::Rejected)
-            };
-            let domain = required("domain")?;
-            if domain != domain.to_ascii_lowercase()
-                || !crate::provider::valid_web_domain(domain)
-                || !web_search_domain_allowed(domain, domain_policy)
-            {
-                return Err(ProviderError::Rejected);
-            }
-            let url = required("url")?;
-            validate_web_search_url(url, Some(domain), domain_policy)?;
-            let title = required("title")?;
-            let snippet = required("snippet")?;
-            let reference_id = required("ref_id")?;
-            if !valid_reference(reference_id) {
-                return Err(ProviderError::Rejected);
-            }
-            for field in [domain, url, title, snippet, reference_id] {
-                total_bytes = total_bytes
-                    .checked_add(field.len())
-                    .ok_or(ProviderError::Rejected)?;
-            }
-            if total_bytes > MAXIMUM_WEB_SEARCH_RESULT_BYTES_PER_CALL {
-                return Err(ProviderError::Rejected);
-            }
-            Ok(AiCodexAppServerWebSearchResult {
-                domain: domain.to_owned(),
-                url: url.to_owned(),
-                title: title.to_owned(),
-                snippet: snippet.to_owned(),
-                reference_id: reference_id.to_owned(),
-            })
-        })
-        .collect()
+    // Codex deliberately keeps this array opaque at the app-server boundary
+    // so result fields and result kinds can evolve independently. Bound the
+    // complete wire payload before selecting the stable metadata subset that
+    // this adapter is prepared to expose.
+    if serde_json::to_vec(values)
+        .map_err(|_| ProviderError::Rejected)?
+        .len()
+        > MAXIMUM_WEB_SEARCH_RESULT_BYTES_PER_CALL
+    {
+        return Err(ProviderError::Rejected);
+    }
+    let mut results = Vec::new();
+    for value in values {
+        let Some(object) = value.as_object() else {
+            continue;
+        };
+        // Unknown opaque entries remain available to the provider's own model
+        // context but never become trusted or typed host metadata.
+        if object.get("type").and_then(Value::as_str) != Some("text_result") {
+            continue;
+        }
+        let required = |key: &str| {
+            object
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|value| {
+                    value.len() <= MAXIMUM_WEB_SEARCH_FIELD_BYTES && !value.contains('\0')
+                })
+                .ok_or(ProviderError::Rejected)
+        };
+        let domain = required("domain")?;
+        if domain != domain.to_ascii_lowercase()
+            || !crate::provider::valid_web_domain(domain)
+            || !web_search_domain_allowed(domain, domain_policy)
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let url = required("url")?;
+        validate_web_search_url(url, Some(domain), domain_policy)?;
+        let title = required("title")?;
+        let snippet = required("snippet")?;
+        let reference_id = required("ref_id")?;
+        if !valid_reference(reference_id) {
+            return Err(ProviderError::Rejected);
+        }
+        results.push(AiCodexAppServerWebSearchResult {
+            domain: domain.to_owned(),
+            url: url.to_owned(),
+            title: title.to_owned(),
+            snippet: snippet.to_owned(),
+            reference_id: reference_id.to_owned(),
+        });
+    }
+    Ok(results)
 }
 
 fn validate_web_search_url(
@@ -11157,6 +11161,100 @@ pub(crate) mod tests {
                 }),
             )),
             Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[test]
+    fn native_web_search_admits_empty_other_and_opaque_result_extensions() {
+        let policy = ModelWebSearchDomainPolicy::allowed_domains(vec!["example.com".to_owned()])
+            .expect("allow-domain policy should validate");
+        let mut actor = active_web_search_protocol_actor(policy, 1);
+        actor
+            .accept(&lifecycle_notification(
+                "item/started",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "startedAtMs": 1,
+                    "item": {"action": null, "id": "search-1", "query": "", "results": null, "type": "webSearch"}
+                }),
+            ))
+            .expect("web-search start should be admitted");
+        let completed = actor
+            .accept(&lifecycle_notification(
+                "item/completed",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "completedAtMs": 2,
+                    "item": {
+                        "action": {"type": "other"},
+                        "id": "search-1",
+                        "query": "",
+                        "results": [
+                            {
+                                "domain": "www.example.com",
+                                "ref_id": "turn0search0",
+                                "snippet": "Example result",
+                                "thumbnail_url": "https://www.example.com/thumbnail.png",
+                                "title": "Example Domain",
+                                "type": "text_result",
+                                "url": "https://www.example.com/"
+                            },
+                            {
+                                "payload": {"future": true},
+                                "type": "future_result"
+                            },
+                            true
+                        ],
+                        "type": "webSearch"
+                    }
+                }),
+            ))
+            .expect("schema-compatible opaque result extensions should be admitted");
+        match completed {
+            AiCodexAppServerInbound::WebSearchLifecycle {
+                action,
+                query,
+                results,
+                completed,
+                ..
+            } => {
+                assert_eq!(action, Some(AiCodexAppServerWebSearchAction::Other));
+                assert_eq!(query.as_deref(), Some(""));
+                assert!(completed);
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].domain(), "www.example.com");
+            }
+            other => panic!("unexpected inbound: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn native_web_search_bounds_opaque_results_and_requires_search_terms() {
+        let oversized = "x".repeat(MAXIMUM_WEB_SEARCH_RESULT_BYTES_PER_CALL);
+        assert!(matches!(
+            parse_web_search_results(
+                Some(&json!([{"payload": oversized, "type": "future_result"}])),
+                &ModelWebSearchDomainPolicy::PublicWeb,
+            ),
+            Err(ProviderError::Rejected)
+        ));
+        assert!(matches!(
+            parse_web_search_action(
+                Some(&json!({"query": "", "queries": [], "type": "search"})),
+                "",
+                &ModelWebSearchDomainPolicy::PublicWeb,
+            ),
+            Err(ProviderError::Rejected)
+        ));
+        assert!(matches!(
+            parse_web_search_action(
+                Some(&json!({"queries": ["example.com"], "type": "search"})),
+                "",
+                &ModelWebSearchDomainPolicy::PublicWeb,
+            ),
+            Ok(Some(AiCodexAppServerWebSearchAction::Search { .. }))
         ));
     }
 

@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.95.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.95.1", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -165,9 +165,15 @@ call ceiling. Its other sole process-level exception is `code_mode_host`:
 `dynamicToolCall` delivery on that Codex version, so the launch arguments omit
 only that flag while the per-thread configuration still sets the feature
 false. When native search is enabled, the actor admits only its exact bounded
-item lifecycle and exposes structured result metadata for host accounting and
-audit; results enter model context before that completion event. Reverify both
-direct delivery and the negative native-item matrix before upgrading Codex.
+item lifecycle and exposes recognized, validated structured result metadata
+for host accounting and audit; results enter model context before that
+completion event. Completion queries follow the action contract, so non-search
+actions may report an empty query. The provider's opaque result array is
+bounded as a whole; recognized text results retain strict HTTPS,
+normalized-domain, allow-domain, reference, and field-size validation, while
+unrecognized result types and unexposed extension fields do not become host
+metadata. Reverify both direct delivery and the negative native-item matrix
+before upgrading Codex.
 
 The Codex schema projector preserves bounded nullable scalar `type` arrays in
 the crate-authored FixedBroker definitions. It does not pass through arbitrary

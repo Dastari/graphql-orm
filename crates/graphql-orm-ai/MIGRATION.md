@@ -19,6 +19,20 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.95.0 to 0.95.1: forward-compatible Codex web-search completion
+
+Adopt `graphql-orm-ai` 0.95.1 from one reviewed full monorepo revision. Hosts
+do not need to change their API implementation. A completed non-search action
+may now expose `Some("")` through the existing optional query field. The
+structured result vector contains only recognized, fully validated text-result
+metadata; opaque future result types and unexposed extension fields are
+bounded but do not cross that typed boundary.
+
+Search authority, egress proof, domain policy, call ceilings, strict lifecycle
+correlation, and recognized-result URL/domain validation are unchanged. The AI
+schema module remains **0.63.0**; there is no database, data, GraphQL SDL,
+protected-payload, backup, or restore migration.
+
 ## 0.94.0 to 0.95.0: retained dynamic tools with governed built-ins
 
 Adopt `graphql-orm-ai` 0.95.0 from one reviewed full monorepo revision. Hosts
