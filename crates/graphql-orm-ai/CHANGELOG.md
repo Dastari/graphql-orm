@@ -18,6 +18,28 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.95.0] - 2026-08-25
+
+Persistent schema module: **0.63.0** (unchanged from 0.94.0).
+
+### Fixed
+
+- Initial provider-retained dynamic application-tool plans now admit
+  independently governed provider built-ins, including hosted search, instead
+  of rejecting the combined plan before provider transport.
+
+### Security
+
+- Coexistence does not grant a built-in capability. The provider call still
+  requires a structurally valid built-in request, an exact provider capability,
+  resolved-rule permission, separately authorized egress, bounded call and
+  budget capacity, and authoritative lifecycle usage accounting. Attachments,
+  tool-result input, reasoning summaries, output schemas, and continuations
+  remain prohibited by the initial dynamic-tool constructor.
+
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, GraphQL SDL, backup, or restore migration.
+
 ## [0.94.0] - 2026-08-23
 
 Persistent schema module: **0.63.0** (unchanged from 0.93.2).

@@ -320,6 +320,14 @@ disclosure- and egress-approved result is returned to app-server. Unknown,
 duplicate, stale, over-limit, changed-policy, or incomplete calls poison the
 turn and make a retained cursor cleanup-only.
 
+A retained dynamic-tool turn may also carry provider built-ins that already
+passed the ordinary provider-call contract. Coexistence itself grants nothing:
+each built-in still requires exact provider capability and resolved-rule
+permission, its own authorized egress transfer, a request call ceiling, atomic
+budget capacity, and authoritative start/completion accounting. The initial
+dynamic-tool boundary continues to reject attachments, tool-result input,
+reasoning summaries, output schemas, and continuations.
+
 Owning subgraphs compile generated or custom profiles into a canonical
 manifest and register it in `AiToolCatalog`. Build the provider definition with
 `AiToolCatalog::read_only_model_definition`; do not copy the description,
