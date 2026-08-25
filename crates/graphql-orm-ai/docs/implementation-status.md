@@ -10,7 +10,7 @@ supersedes: []
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.95.0` with AI schema module
+`graphql-orm-ai` is at crate version `0.95.1` with AI schema module
 `0.63.0`. It uses workspace `graphql-orm` `0.26.0`, backend-neutral
 `graphql-orm-ai-tool-profiles` `0.10.0`, and external `agql-auth`
 `0.18.0` at `527d15d28e3c295a6f6b5e6d74559a7aecdc1322`.
@@ -47,8 +47,11 @@ verification evidence belongs in the focused guides.
   dynamic-tools-only launch profile, a direct-tool model declaration, and a
   process-factory profile attestation; every exact call
   rechecks current rules and uses the ordinary registered GraphQL tool,
-  disclosure, egress, budget, and resolver authorization path. Generic
-  protocol bridging, shell, files, hosted web, MCP, and browser remain closed.
+  disclosure, egress, budget, and resolver authorization path. Native web
+  search is separately default-off and requires exact request capability,
+  egress, domain policy, and call ceilings; its opaque result envelope is
+  bounded while only validated structured metadata crosses the host boundary.
+  Generic protocol bridging, shell, files, MCP, and browser remain closed.
   Initialization uses one library-owned notification opt-out profile, while
   response-authoritative deletion, empty reasoning lifecycle, and retained
   cumulative-usage replay are admitted only through typed content-free

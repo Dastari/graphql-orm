@@ -18,6 +18,28 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.95.1] - 2026-08-25
+
+Persistent schema module: **0.63.0** (unchanged from 0.95.0).
+
+### Fixed
+
+- The Codex app-server web-search lifecycle now follows the generated 0.148.0
+  action contract: non-search completions may carry an empty query, bounded
+  extension fields no longer reject recognized text results, and opaque future
+  result types are accepted without being exposed as structured host metadata.
+
+### Security
+
+- The complete opaque result array remains count- and byte-bounded. Recognized
+  text results still require bounded fields, a valid reference, an HTTPS URL,
+  matching normalized host, and the active domain policy before exposure.
+  Strict frame correlation, lifecycle pairing, and per-turn call ceilings are
+  unchanged.
+
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, GraphQL SDL, backup, or restore migration.
+
 ## [0.95.0] - 2026-08-25
 
 Persistent schema module: **0.63.0** (unchanged from 0.94.0).
