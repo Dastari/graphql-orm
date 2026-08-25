@@ -1124,7 +1124,6 @@ impl AiProviderCallPlan {
         !self.request.tools.is_empty()
             && self.request.continuation.is_none()
             && self.request.continuation_mode == ModelContinuationMode::ProviderRetained
-            && self.request.builtin_tools.is_empty()
             && self.request.reasoning_summary.maximum_bytes().is_none()
             && self.request.output_schema.is_none()
             && !self.request.input.iter().any(|block| {
@@ -1476,6 +1475,17 @@ impl AiProviderCallPlan {
         let mut plan = Self::test_chat_plan(lease, scope);
         plan.request.builtin_tools = vec![ModelBuiltinTool::CodeInterpreter];
         plan.request.maximum_builtin_tool_calls = Some(1);
+        plan
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_dynamic_builtin_plan(lease: &AiRunLease, scope: crate::AiScope) -> Self {
+        let mut plan = Self::test_plan(lease, scope, false);
+        plan.request.builtin_tools = vec![ModelBuiltinTool::WebSearch {
+            domains: crate::ModelWebSearchDomainPolicy::PublicWeb,
+        }];
+        plan.request.maximum_builtin_tool_calls = Some(2);
+        plan.budget.estimate.tool_units = 2;
         plan
     }
 
@@ -5669,6 +5679,35 @@ mod tests {
             .expect("both custom-tool capabilities should permit the estimate");
     }
 
+    #[tokio::test]
+    async fn retained_dynamic_tools_and_governed_web_search_share_one_plan() {
+        let fixture = fixture(Vec::new()).await;
+        let plan = dynamic_web_search_plan(&fixture, 2);
+        let resolution = AiAgentRuleResolution::new(
+            test_rules(fixture.scope.clone()),
+            OffsetDateTime::now_utc(),
+        )
+        .expect("test rules should resolve");
+        plan.project_rule_usage(&resolution, AiRuleRunUsage::default(), false)
+            .expect("the combined tool and hosted-search estimate should fit current rules");
+
+        crate::AiReadOnlyAgentTurnPlan::new_experimental_dynamic_tools(
+            plan,
+            crate::AiToolResultEgressRoute::new(
+                "mock-profile",
+                "local-mock",
+                AiDestinationTrust::ManagedProvider,
+                "test_inference",
+                "none",
+                "egress-v1",
+            )
+            .expect("test result-egress route should validate"),
+            resolution.rules().clone(),
+            false,
+        )
+        .expect("governed hosted search should coexist with retained dynamic tools");
+    }
+
     fn plan(fixture: &Fixture) -> AiProviderCallPlan {
         let request = ModelRequest {
             model: "mock-model".to_owned(),
@@ -8295,6 +8334,34 @@ mod tests {
             &policy,
         )
         .expect("registered enabled read-only tool plan should validate")
+    }
+
+    fn dynamic_web_search_plan(
+        fixture: &Fixture,
+        maximum_builtin_tool_calls: u64,
+    ) -> AiProviderCallPlan {
+        let mut base = tool_plan(fixture);
+        base.request.builtin_tools = vec![ModelBuiltinTool::WebSearch {
+            domains: crate::ModelWebSearchDomainPolicy::AllowedDomains {
+                domains: vec!["example.com".to_owned()],
+            },
+        }];
+        base.request.maximum_builtin_tool_calls = Some(maximum_builtin_tool_calls);
+        base.budget.estimate.tool_units = maximum_builtin_tool_calls;
+        base.transfers[0].estimated_bytes = base.request.conservative_egress_bytes();
+        let mut web_search_manifest = base.transfers[0].clone();
+        web_search_manifest.capability = AiEgressCapability::WebSearch;
+        base.transfers.push(web_search_manifest);
+        AiProviderCallPlan::new_with_tools(
+            base.provider_kind,
+            base.request,
+            base.budget,
+            base.transfers,
+            base.correlation_id,
+            fixture.runtime.tool_catalog(),
+            &static_read_policy(fixture),
+        )
+        .expect("dynamic-tool and web-search provider plan should validate")
     }
 
     fn static_read_policy(fixture: &Fixture) -> AiToolPolicySet {

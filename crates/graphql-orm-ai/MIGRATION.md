@@ -19,6 +19,20 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.94.0 to 0.95.0: retained dynamic tools with governed built-ins
+
+Adopt `graphql-orm-ai` 0.95.0 from one reviewed full monorepo revision. Hosts
+may now use `AiReadOnlyAgentTurnPlan::new_experimental_dynamic_tools` for an
+initial provider-retained request that combines registered application tools
+with provider built-ins already validated by `AiProviderCallPlan`.
+
+No new authority is implied by coexistence. Continue supplying each built-in's
+provider capability, resolved-rule permission, separate egress manifest,
+bounded call ceiling, atomic budget capacity, and lifecycle usage accounting.
+Existing dynamic-tool requests without built-ins are unchanged. The AI schema
+module remains **0.63.0**; there is no database, data, GraphQL SDL,
+protected-payload, backup, or restore migration.
+
 ## 0.93.2 to 0.94.0: shape-aware capability discovery
 
 Adopt `graphql-orm-ai` 0.94.0 and `graphql-orm-ai-tool-profiles` 0.10.0 from one

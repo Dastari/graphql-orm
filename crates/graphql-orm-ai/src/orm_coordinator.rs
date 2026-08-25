@@ -154,8 +154,11 @@ impl AiReadOnlyAgentTurnPlan {
     ///
     /// Returns [`AiError::InvalidInput`] unless the plan contains at least one
     /// application tool, is an initial provider-retained request without
-    /// built-ins, attachments, result input, reasoning summaries, or an output
-    /// schema, is exactly rule-bound, and has a valid result-egress route.
+    /// attachments, result input, reasoning summaries, or an output schema,
+    /// is exactly rule-bound, and has a valid result-egress route. Validated
+    /// provider built-ins may coexist with the application tools; their
+    /// capability, egress, budget, and usage proofs remain independently
+    /// enforced by the provider-call plan and executor.
     pub fn new_experimental_dynamic_tools(
         provider_call: AiProviderCallPlan,
         result_egress_route: AiToolResultEgressRoute,
@@ -3830,6 +3833,26 @@ mod tests {
                 false,
             ),
             Err(AiError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn retained_dynamic_tool_factory_accepts_validated_provider_builtins() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let scope = test_scope();
+        let provider_call = AiProviderCallPlan::test_dynamic_builtin_plan(&lease, scope.clone());
+
+        let plan = AiReadOnlyAgentTurnPlan::new_experimental_dynamic_tools(
+            provider_call,
+            test_route(),
+            test_rules(scope),
+            false,
+        )
+        .expect("a validated hosted built-in may coexist with retained dynamic tools");
+        let (_, _, _, mode, _, _, _, _) = plan.into_parts();
+        assert!(matches!(
+            mode,
+            AiReadOnlyAgentTurnMode::ExperimentalDynamicTools(_)
         ));
     }
 
