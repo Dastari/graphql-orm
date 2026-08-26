@@ -10,6 +10,23 @@ supersedes: []
 
 # Changelog
 
+## [0.10.1] - 2026-08-26
+
+### Fixed
+
+- Compact query, mutation, and subscription schemas now encode their exact
+  scalar selection allow-list as one string enum instead of repeating one
+  described `const` schema for every reachable path. Wide relationship graphs
+  therefore remain within the provider-schema byte contract without removing
+  public paths or weakening plan validation.
+
+### Security
+
+- Selection paths remain a closed compiler-owned allow-list. Unknown, hidden,
+  secret, `NeverExport`, stale, cyclic, over-depth, over-cardinality, and
+  over-budget plans continue to fail closed; canonical discovery retains the
+  public field descriptions omitted from the repeated provider schema.
+
 ## [0.10.0] - 2026-08-23
 
 ### Added

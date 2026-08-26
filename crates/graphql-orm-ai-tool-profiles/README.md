@@ -24,7 +24,7 @@ are separate runtime decisions and must remain default-deny.
 
 ```toml
 [dependencies]
-graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.10.0" }
+graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.10.1" }
 serde_json = "1"
 ```
 
@@ -104,8 +104,12 @@ variables schema, disclosure shape, limits, and plan fingerprint. Registration
 is discovery only; a fresh target/current-principal policy and the ordinary
 resolver remain authoritative at execution.
 
-The compact selection schema is a finite list of public paths, so adding deep
-relationships does not recursively duplicate the entire nested field map.
+The compact selection schema is one finite string enum of public paths, so
+adding deep relationships does not recursively duplicate either the nested
+field map or scalar descriptions at every reachable path. Public scalar and
+relationship descriptions remain in the canonical discovery index; typed
+relationship arguments retain their adjacent descriptions in the loaded
+planning schema.
 Generated entity `WhereInput` objects still omit recursive `And`/`Or`/`Not`
 connectives; all non-recursive typed filter fields remain available.
 Handwritten recursive inputs fail readiness rather than being approximated.
