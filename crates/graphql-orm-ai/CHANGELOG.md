@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-23
+last_reviewed: 2026-08-27
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -17,6 +17,34 @@ Historical development entries below retain their original dependency and
 checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## [0.95.6] - 2026-08-27
+
+Persistent schema module: **0.63.0** (unchanged from 0.95.5).
+
+### Fixed
+
+- The Codex app-server actor now admits schema-valid completed web-search
+  attempts whose opaque text-result record omits success-only domain or URL
+  metadata. It also admits bounded credential-free HTTP page actions reported
+  by the provider. Incomplete and non-HTTPS result records remain available to
+  the provider model but do not cross the typed host-metadata boundary. The
+  host-authored call ceiling is now frozen into the retained-thread contract
+  and supplied as a trusted model instruction as well as being enforced by
+  the actor.
+
+### Security
+
+- The complete opaque result array remains count- and byte-bounded. Any
+  bounded action or result URL must use HTTP or HTTPS without credentials and
+  satisfy normalized-host and active domain-policy rules. Only complete HTTPS
+  result records with a valid reference are exposed as typed host metadata.
+  Strict frame correlation and lifecycle pairing are unchanged. The model-
+  facing ceiling is defense in depth; the actor remains authoritative and
+  rejects any excess lifecycle.
+
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, GraphQL SDL, backup, or restore migration.
 
 ## [0.95.5] - 2026-08-26
 
