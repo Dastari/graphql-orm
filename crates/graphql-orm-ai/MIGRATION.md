@@ -19,6 +19,20 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.95.4 to 0.95.5: schema-compatible Codex notification envelopes
+
+Adopt `graphql-orm-ai` 0.95.5 from one reviewed full monorepo revision. Hosts
+need no API or configuration change. The strict Codex app-server actor now
+matches the generated 0.148.0 server-notification union: the outer
+`emittedAtMs` field may be absent for any allowlisted notification, while a
+supplied field must remain a positive signed integer.
+
+The exact method allowlist, required method-specific fields and lifecycle
+timestamps, active thread/turn/item correlation, content bounds, warning
+ceilings, and native-surface restrictions remain unchanged. The AI schema
+module remains **0.63.0**; there is no database, data, GraphQL SDL, protected-
+payload, backup, or restore migration.
+
 ## 0.95.3 to 0.95.4: schema-compatible Codex runtime warnings
 
 Adopt `graphql-orm-ai` 0.95.4 from one reviewed full monorepo revision. Hosts

@@ -4212,11 +4212,7 @@ impl AiCodexAppServerProtocolActor {
         }
         let notification: CodexAppServerNotificationEnvelope =
             serde_json::from_slice(frame).map_err(|_| ProviderError::Rejected)?;
-        if notification.method == RUNTIME_WARNING {
-            notification.validate_runtime_warning()?;
-        } else {
-            notification.validate()?;
-        }
+        notification.validate()?;
         if notification.method == REMOTE_CONTROL_STATUS_CHANGED {
             return self.accept_disabled_remote_control_status(notification);
         }
@@ -4913,13 +4909,6 @@ struct CodexAppServerNotificationEnvelope {
 
 impl CodexAppServerNotificationEnvelope {
     fn validate(&self) -> Result<(), ProviderError> {
-        if !matches!(self.emitted_at_ms.0, Some(value) if value > 0) || !self.params.is_object() {
-            return Err(ProviderError::Rejected);
-        }
-        Ok(())
-    }
-
-    fn validate_runtime_warning(&self) -> Result<(), ProviderError> {
         if self
             .emitted_at_ms
             .0
@@ -5325,6 +5314,18 @@ fn web_search_domain_allowed(domain: &str, domain_policy: &ModelWebSearchDomainP
 fn validate_allowed_notification(method: &str, params: &Value) -> Result<(), ProviderError> {
     let object = params.as_object().ok_or(ProviderError::Rejected)?;
     if matches!(method, "item/started" | "item/completed") {
+        let timestamp_key = if method == "item/started" {
+            "startedAtMs"
+        } else {
+            "completedAtMs"
+        };
+        if object
+            .get(timestamp_key)
+            .and_then(Value::as_i64)
+            .is_none_or(|timestamp| timestamp <= 0)
+        {
+            return Err(ProviderError::Rejected);
+        }
         let item_type = object
             .get("item")
             .and_then(Value::as_object)
@@ -8731,6 +8732,14 @@ pub(crate) mod tests {
         .expect("lifecycle notification should encode")
     }
 
+    fn lifecycle_notification_without_timestamp(method: &str, params: Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "method": method,
+            "params": params,
+        }))
+        .expect("timestamp-free lifecycle notification should encode")
+    }
+
     fn runtime_warning_notification(thread_id: Option<&str>, message: &str) -> Vec<u8> {
         let params = thread_id.map_or_else(
             || json!({"message": message}),
@@ -8744,11 +8753,7 @@ pub(crate) mod tests {
             || json!({"message": message}),
             |thread_id| json!({"threadId": thread_id, "message": message}),
         );
-        serde_json::to_vec(&json!({
-            "method": RUNTIME_WARNING,
-            "params": params,
-        }))
-        .expect("runtime warning notification should encode")
+        lifecycle_notification_without_timestamp(RUNTIME_WARNING, params)
     }
 
     fn reasoning_lifecycle_notification(
@@ -10958,13 +10963,6 @@ pub(crate) mod tests {
             assert!(matches!(actor.accept(frame), Err(ProviderError::Rejected)));
         }
 
-        let mut non_warning = active_protocol_actor();
-        assert!(matches!(
-            non_warning
-                .accept(br#"{"method":"thread/started","params":{"thread":{"id":"thread-2"}}}"#),
-            Err(ProviderError::Rejected)
-        ));
-
         for message in ["", "   ", "contains\ncontrol", "contains\u{7f}control"] {
             let mut actor = active_protocol_actor();
             assert!(matches!(
@@ -11019,6 +11017,182 @@ pub(crate) mod tests {
         }
         assert!(matches!(
             byte_limited.accept(&runtime_warning_notification(None, "overflow")),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[test]
+    fn protocol_accepts_schema_optional_outer_notification_timestamps() {
+        let mut actor = initialized_protocol_actor();
+        actor
+            .start_fresh_thread(&turn())
+            .expect("thread start should encode");
+        actor
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
+            .expect("thread response should bind");
+        actor
+            .accept(&lifecycle_notification_without_timestamp(
+                "thread/started",
+                json!({"thread": {"id": "thread-1"}}),
+            ))
+            .expect("thread notification should not require an outer timestamp");
+        actor
+            .start_turn("thread-1", &turn())
+            .expect("turn should encode");
+        actor
+            .accept(br#"{"id":3,"result":{"turn":{"id":"turn-1"}}}"#)
+            .expect("turn response should bind");
+        actor
+            .accept(&lifecycle_notification_without_timestamp(
+                "turn/started",
+                json!({
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-1", "items": [], "status": "inProgress"},
+                }),
+            ))
+            .expect("turn notification should not require an outer timestamp");
+        actor
+            .accept(&lifecycle_notification_without_timestamp(
+                "item/started",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "startedAtMs": 1,
+                    "item": {"id": "item-1", "type": "agentMessage", "text": ""},
+                }),
+            ))
+            .expect("item start should not require an outer timestamp");
+        actor
+            .accept(&lifecycle_notification_without_timestamp(
+                "item/agentMessage/delta",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "item-1",
+                    "delta": "hello",
+                }),
+            ))
+            .expect("message delta should not require an outer timestamp");
+        actor
+            .accept(&lifecycle_notification_without_timestamp(
+                THREAD_TOKEN_USAGE_UPDATED,
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "tokenUsage": {
+                        "last": {
+                            "cacheWriteInputTokens": 0,
+                            "cachedInputTokens": 0,
+                            "inputTokens": 1,
+                            "outputTokens": 1,
+                            "reasoningOutputTokens": 0,
+                            "totalTokens": 2,
+                        },
+                        "total": {
+                            "cacheWriteInputTokens": 0,
+                            "cachedInputTokens": 0,
+                            "inputTokens": 1,
+                            "outputTokens": 1,
+                            "reasoningOutputTokens": 0,
+                            "totalTokens": 2,
+                        },
+                        "modelContextWindow": 128000,
+                    },
+                }),
+            ))
+            .expect("usage should not require an outer timestamp");
+        actor
+            .accept(&lifecycle_notification_without_timestamp(
+                "item/completed",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "completedAtMs": 2,
+                    "item": {"id": "item-1", "type": "agentMessage", "text": "hello"},
+                }),
+            ))
+            .expect("item completion should not require an outer timestamp");
+        actor
+            .accept(&lifecycle_notification_without_timestamp(
+                "turn/completed",
+                json!({
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-1", "items": [], "status": "completed"},
+                }),
+            ))
+            .expect("turn completion should not require an outer timestamp");
+    }
+
+    #[test]
+    fn protocol_rejects_invalid_present_outer_notification_timestamps() {
+        let malformed = [
+            br#"{"emittedAtMs":null,"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1","startedAtMs":1,"item":{"id":"item-1","type":"agentMessage","text":""}}}"#.as_slice(),
+            br#"{"emittedAtMs":0,"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1","startedAtMs":1,"item":{"id":"item-1","type":"agentMessage","text":""}}}"#,
+            br#"{"emittedAtMs":-1,"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1","startedAtMs":1,"item":{"id":"item-1","type":"agentMessage","text":""}}}"#,
+            br#"{"emittedAtMs":9223372036854775808,"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1","startedAtMs":1,"item":{"id":"item-1","type":"agentMessage","text":""}}}"#,
+            br#"{"emittedAtMs":"1","method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1","startedAtMs":1,"item":{"id":"item-1","type":"agentMessage","text":""}}}"#,
+            br#"{"emittedAtMs":1,"emittedAtMs":2,"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1","startedAtMs":1,"item":{"id":"item-1","type":"agentMessage","text":""}}}"#,
+            br#"{"emittedAtMs":1,"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1","startedAtMs":1,"item":{"id":"item-1","type":"agentMessage","text":""}},"extra":true}"#,
+        ];
+        for frame in malformed {
+            let mut actor = active_protocol_actor();
+            assert!(matches!(actor.accept(frame), Err(ProviderError::Rejected)));
+        }
+
+        let invalid_inner_timestamps = [
+            json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": {"id": "item-1", "type": "agentMessage", "text": ""},
+            }),
+            json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "startedAtMs": null,
+                "item": {"id": "item-1", "type": "agentMessage", "text": ""},
+            }),
+            json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "startedAtMs": 0,
+                "item": {"id": "item-1", "type": "agentMessage", "text": ""},
+            }),
+            json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "startedAtMs": -1,
+                "item": {"id": "item-1", "type": "agentMessage", "text": ""},
+            }),
+            json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "startedAtMs": "1",
+                "item": {"id": "item-1", "type": "agentMessage", "text": ""},
+            }),
+            json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "startedAtMs": 9223372036854775808_u64,
+                "item": {"id": "item-1", "type": "agentMessage", "text": ""},
+            }),
+        ];
+        for params in invalid_inner_timestamps {
+            let mut actor = active_protocol_actor();
+            assert!(matches!(
+                actor.accept(&lifecycle_notification_without_timestamp(
+                    "item/started",
+                    params,
+                )),
+                Err(ProviderError::Rejected)
+            ));
+        }
+
+        let mut forbidden = active_protocol_actor();
+        assert!(matches!(
+            forbidden.accept(&lifecycle_notification_without_timestamp(
+                "turn/steer",
+                json!({}),
+            )),
             Err(ProviderError::Rejected)
         ));
     }
@@ -11787,8 +11961,7 @@ pub(crate) mod tests {
 
     #[test]
     fn protocol_rejects_invalid_lifecycle_envelopes_and_thread_correlation() {
-        let invalid_frames: [&[u8]; 7] = [
-            br#"{"method":"thread/started","params":{"thread":{"id":"thread-1"}}}"#,
+        let invalid_frames: [&[u8]; 6] = [
             br#"{"emittedAtMs":0,"method":"thread/started","params":{"thread":{"id":"thread-1"}}}"#,
             br#"{"emittedAtMs":-1,"method":"thread/started","params":{"thread":{"id":"thread-1"}}}"#,
             br#"{"emittedAtMs":9223372036854775808,"method":"thread/started","params":{"thread":{"id":"thread-1"}}}"#,
