@@ -3,8 +3,9 @@ use crate::backend::{
     backend_marker_tokens, backend_pool_type_tokens, backend_quote_identifier_path, resolve_backend,
 };
 use crate::entity::{
-    collect_parsed_fields, has_graphql_complex, parse_entity_metadata,
-    relation_change_propagation_tokens, relation_delete_policy_tokens, resolver_auth_mode_tokens,
+    RelationConditionMetadata, RelationConditionValue, collect_parsed_fields, has_graphql_complex,
+    parse_entity_metadata, relation_change_propagation_tokens, relation_delete_policy_tokens,
+    resolver_auth_mode_tokens,
 };
 use crate::naming::graphql_field_name;
 use crate::relationship_contract::GeneratedRelationshipArgumentContract;
@@ -26,6 +27,15 @@ struct RelationDef {
     on_delete: proc_macro2::TokenStream,
     propagate_change: proc_macro2::TokenStream,
     storage_kind: RelationStorageKind,
+    source_condition: Option<ResolvedSourceCondition>,
+    target_condition: Option<RelationConditionMetadata>,
+}
+
+struct ResolvedSourceCondition {
+    field_name: syn::Ident,
+    kind: RelationValueKind,
+    optional: bool,
+    value: RelationConditionValue,
 }
 
 #[derive(Copy, Clone)]
@@ -133,6 +143,70 @@ fn relation_key_part_kind_tokens(kind: RelationValueKind) -> proc_macro2::TokenS
         RelationValueKind::Bool => {
             quote! { ::graphql_orm::graphql::loaders::RelationKeyPartKind::Bool }
         }
+    }
+}
+
+fn condition_value_matches_kind(value: &RelationConditionValue, kind: RelationValueKind) -> bool {
+    matches!(
+        (value, kind),
+        (RelationConditionValue::String(_), RelationValueKind::String)
+            | (RelationConditionValue::Integer(_), RelationValueKind::Int)
+            | (RelationConditionValue::Float(_), RelationValueKind::Float)
+            | (RelationConditionValue::Boolean(_), RelationValueKind::Bool)
+    )
+}
+
+fn condition_sql_value_tokens(value: &RelationConditionValue) -> proc_macro2::TokenStream {
+    match value {
+        RelationConditionValue::String(value) => {
+            quote! { ::graphql_orm::graphql::orm::SqlValue::String(#value.to_owned()) }
+        }
+        RelationConditionValue::Integer(value) => {
+            quote! { ::graphql_orm::graphql::orm::SqlValue::Int(#value) }
+        }
+        RelationConditionValue::Float(value) => {
+            quote! { ::graphql_orm::graphql::orm::SqlValue::Float(#value) }
+        }
+        RelationConditionValue::Boolean(value) => {
+            quote! { ::graphql_orm::graphql::orm::SqlValue::Bool(#value) }
+        }
+    }
+}
+
+fn source_condition_tokens(
+    condition: Option<&ResolvedSourceCondition>,
+    receiver: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let Some(condition) = condition else {
+        return quote! { true };
+    };
+    let field_name = &condition.field_name;
+    match (&condition.value, condition.kind, condition.optional) {
+        (RelationConditionValue::String(value), RelationValueKind::String, false) => {
+            quote! { #receiver.#field_name == #value }
+        }
+        (RelationConditionValue::String(value), RelationValueKind::String, true) => {
+            quote! { #receiver.#field_name.as_deref() == Some(#value) }
+        }
+        (RelationConditionValue::Integer(value), RelationValueKind::Int, false) => {
+            quote! { (#receiver.#field_name as i64) == #value }
+        }
+        (RelationConditionValue::Integer(value), RelationValueKind::Int, true) => {
+            quote! { #receiver.#field_name.is_some_and(|value| (value as i64) == #value) }
+        }
+        (RelationConditionValue::Float(value), RelationValueKind::Float, false) => {
+            quote! { (#receiver.#field_name as f64) == #value }
+        }
+        (RelationConditionValue::Float(value), RelationValueKind::Float, true) => {
+            quote! { #receiver.#field_name.is_some_and(|value| (value as f64) == #value) }
+        }
+        (RelationConditionValue::Boolean(value), RelationValueKind::Bool, false) => {
+            quote! { #receiver.#field_name == #value }
+        }
+        (RelationConditionValue::Boolean(value), RelationValueKind::Bool, true) => {
+            quote! { #receiver.#field_name == Some(#value) }
+        }
+        _ => quote! { false },
     }
 }
 
@@ -277,6 +351,63 @@ pub(crate) fn generate_graphql_relations(
         }
         let source_supports_dataloader = true;
         let is_multiple = meta.relation_multiple;
+        let emits_foreign_key = meta.relation_emit_foreign_key.unwrap_or(!is_multiple);
+        if (meta.relation_source_condition.is_some() || meta.relation_target_condition.is_some())
+            && emits_foreign_key
+        {
+            return Err(syn::Error::new_spanned(
+                field,
+                "conditional relations require `emit_fk = false` because they do not describe an unconditional physical foreign key",
+            ));
+        }
+        let source_condition = if let Some(condition) = &meta.relation_source_condition {
+            let source_field = parsed_fields
+                .iter()
+                .find(|parsed| {
+                    parsed
+                        .field
+                        .ident
+                        .as_ref()
+                        .is_some_and(|ident| ident == condition.member.as_str())
+                })
+                .ok_or_else(|| {
+                    syn::Error::new_spanned(
+                        field,
+                        format!(
+                            "Relation '{}' source condition references unknown field '{}' on '{}'",
+                            rust_name, condition.member, struct_name
+                        ),
+                    )
+                })?;
+            if source_field.meta.is_relation || source_field.meta.skip_db {
+                return Err(syn::Error::new_spanned(
+                    &source_field.field,
+                    "relation source conditions require a persisted scalar field",
+                ));
+            }
+            let (kind, optional) = classify_relation_value_type(&source_field.field.ty).ok_or_else(
+                || {
+                    syn::Error::new_spanned(
+                        &source_field.field.ty,
+                        "relation source condition fields must be String/int/float/bool (optionals allowed)",
+                    )
+                },
+            )?;
+            if !condition_value_matches_kind(&condition.value, kind) {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "relation source condition value does not match the source field type",
+                ));
+            }
+            Some(ResolvedSourceCondition {
+                field_name: source_field.field.ident.clone().expect("named field"),
+                kind,
+                optional,
+                value: condition.value.clone(),
+            })
+        } else {
+            None
+        };
         let on_delete =
             relation_delete_policy_tokens(meta.relation_on_delete.as_deref(), field.span())?;
         let propagate_change = relation_change_propagation_tokens(
@@ -300,10 +431,12 @@ pub(crate) fn generate_graphql_relations(
             source_kinds,
             source_optional,
             source_supports_dataloader,
-            emit_foreign_key: meta.relation_emit_foreign_key.unwrap_or(!is_multiple),
+            emit_foreign_key: emits_foreign_key,
             on_delete,
             propagate_change,
             storage_kind,
+            source_condition,
+            target_condition: meta.relation_target_condition.clone(),
         });
     }
 
@@ -355,6 +488,7 @@ pub(crate) fn generate_graphql_relations(
         .map(|r| -> syn::Result<proc_macro2::TokenStream> {
         let field_name = &r.field_name;
         let graphql_name = &r.graphql_name;
+        let relation_loader_identity = format!("{struct_name}::{graphql_name}");
         let description = &r.description;
         let fk_columns_sql = r
             .fk_columns
@@ -366,6 +500,7 @@ pub(crate) fn generate_graphql_relations(
         let source_fields = &r.source_field_idents;
         let source_kinds = &r.source_kinds;
         let source_optional = &r.source_optional;
+        let source_condition = source_condition_tokens(r.source_condition.as_ref(), quote! { self });
         let key_part_kind_tokens = source_kinds
             .iter()
             .copied()
@@ -426,6 +561,54 @@ pub(crate) fn generate_graphql_relations(
         let edge_type = syn::Ident::new(&edge_type_str, struct_name.span());
         let list_relation_complexity = "{ let requested = page.as_ref().and_then(|page| page.limit).unwrap_or(::graphql_orm::graphql::orm::PaginationConfig::DEFAULT_LIMIT); let capped = requested.max(0).min(::graphql_orm::graphql::orm::PaginationConfig::DEFAULT_MAX_LIMIT); 2 + (capped as usize).saturating_mul(child_complexity) }";
         let single_relation_complexity = "2 + child_complexity";
+        let source_condition_multiple_guard = quote! {
+            if !(#source_condition) {
+                let page_info = ::graphql_orm::graphql::pagination::PageInfo {
+                    has_next_page: false,
+                    has_previous_page: false,
+                    start_cursor: None,
+                    end_cursor: None,
+                    total_count: Some(0),
+                };
+                return Ok(#connection_type { edges: Vec::new(), page_info });
+            }
+        };
+        let source_condition_single_guard = quote! {
+            if !(#source_condition) {
+                return Ok(None);
+            }
+        };
+
+        let (target_condition_filter, fallback_target_predicate, fallback_target_value) =
+            if let Some(condition) = &r.target_condition {
+                let target_column_sql =
+                    backend_quote_identifier_path(backend, &condition.member);
+                let target_value = condition_sql_value_tokens(&condition.value);
+                let placeholder_index = r.fk_columns.len() + 1;
+                (
+                    quote! {
+                        Some::<::graphql_orm::graphql::orm::FilterExpression>(
+                            ::graphql_orm::graphql::orm::FilterExpression::trusted_fragment(
+                            format!("{} = ?", #target_column_sql),
+                            vec![#target_value],
+                        ))
+                    },
+                    quote! {
+                        Some::<String>(format!(
+                            "{} = {}",
+                            #target_column_sql,
+                            #target_type::__gom_placeholder(#placeholder_index),
+                        ))
+                    },
+                    quote! { Some::<::graphql_orm::graphql::orm::SqlValue>(#target_value) },
+                )
+            } else {
+                (
+                    quote! { None::<::graphql_orm::graphql::orm::FilterExpression> },
+                    quote! { None::<String> },
+                    quote! { None::<::graphql_orm::graphql::orm::SqlValue> },
+                )
+            };
 
         let source_binding_multiple = if source_optional.iter().any(|is_option| *is_option) {
             quote! {
@@ -500,7 +683,7 @@ pub(crate) fn generate_graphql_relations(
                     None
                 };
             ::graphql_orm::graphql::loaders::CompositeRelationQueryKey {
-                relation: #graphql_name,
+                relation: #relation_loader_identity,
                 parent_key: relation_loader_key.clone(),
                 parent_values: relation_sql_values.clone(),
                 fk_columns: vec![#(#fk_columns_sql),*],
@@ -514,7 +697,18 @@ pub(crate) fn generate_graphql_relations(
                 page_signature: __gom_relation_pagination
                     .as_ref()
                     .map(|page| format!("limit={:?};offset={}", page.limit, page.offset)),
-                filter: where_input.as_ref().and_then(|filter| filter.to_filter_expression()),
+                filter: {
+                    let supplied = where_input
+                        .as_ref()
+                        .and_then(|filter| filter.to_filter_expression());
+                    match (#target_condition_filter, supplied) {
+                        (Some(fixed), Some(supplied)) => Some(
+                            ::graphql_orm::graphql::orm::FilterExpression::And(vec![fixed, supplied]),
+                        ),
+                        (Some(fixed), None) => Some(fixed),
+                        (None, supplied) => supplied,
+                    }
+                },
                 sorts: order_by
                     .as_ref()
                     .and_then(|order| order.to_sort_expression())
@@ -527,7 +721,7 @@ pub(crate) fn generate_graphql_relations(
 
         let single_relation_query_key = quote! {
             ::graphql_orm::graphql::loaders::CompositeRelationQueryKey {
-                relation: #graphql_name,
+                relation: #relation_loader_identity,
                 parent_key: relation_loader_key.clone(),
                 parent_values: relation_sql_values.clone(),
                 fk_columns: vec![#(#fk_columns_sql),*],
@@ -535,7 +729,7 @@ pub(crate) fn generate_graphql_relations(
                 where_signature: None,
                 order_signature: None,
                 page_signature: None,
-                filter: None,
+                filter: #target_condition_filter,
                 sorts: Vec::new(),
                 pagination: None,
                 auth_context: auth_context.clone(),
@@ -552,7 +746,13 @@ pub(crate) fn generate_graphql_relations(
             })
             .collect::<Vec<_>>();
         let fallback_relation_clause = quote! {
-            vec![#(#fallback_predicate_parts),*].join(" AND ")
+            {
+                let mut predicates = vec![#(#fallback_predicate_parts),*];
+                if let Some(predicate) = #fallback_target_predicate {
+                    predicates.push(predicate);
+                }
+                predicates.join(" AND ")
+            }
         };
 
         if r.is_multiple {
@@ -586,6 +786,7 @@ pub(crate) fn generate_graphql_relations(
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, DatabaseOrderBy, EntityQuery, SqlValue};
 
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                    #source_condition_multiple_guard
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                     let auth_context = ctx
                         .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
@@ -641,8 +842,12 @@ pub(crate) fn generate_graphql_relations(
                             })
                     } else {
                         // Slow path: Use direct query with full SQL support
+                        let mut relation_sql_values = relation_sql_values.clone();
+                        if let Some(value) = #fallback_target_value {
+                            relation_sql_values.push(value);
+                        }
                         let mut query = EntityQuery::<#target_type, #backend_marker>::new()
-                            .where_values(&#fallback_relation_clause, relation_sql_values.clone());
+                            .where_values(&#fallback_relation_clause, relation_sql_values);
 
                         if let Some(ref filter) = where_input {
                             query = query.filter(filter);
@@ -732,6 +937,7 @@ pub(crate) fn generate_graphql_relations(
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, SqlValue};
 
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                    #source_condition_single_guard
                     if self.#field_name.is_some() {
                         #preloaded_single
                     }
@@ -760,8 +966,12 @@ pub(crate) fn generate_graphql_relations(
                             .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?
                             .and_then(|mut result| result.entities.drain(..).next())
                     } else {
+                        let mut relation_sql_values = relation_sql_values.clone();
+                        if let Some(value) = #fallback_target_value {
+                            relation_sql_values.push(value);
+                        }
                         EntityQuery::<#target_type, #backend_marker>::new()
-                            .where_values(&#fallback_relation_clause, relation_sql_values.clone())
+                            .where_values(&#fallback_relation_clause, relation_sql_values)
                             .fetch_one_with_auth(db, auth_context.as_ref())
                             .await
                             .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?
@@ -781,6 +991,22 @@ pub(crate) fn generate_graphql_relations(
             let graphql_name = &r.graphql_name;
             let target_type = syn::Ident::new(&r.target_type_str, struct_name.span());
             let storage_kind = r.storage_kind;
+            let source_condition =
+                source_condition_tokens(r.source_condition.as_ref(), quote! { entity });
+            let (bulk_target_column, bulk_target_value) = if let Some(condition) = &r.target_condition
+            {
+                let column = backend_quote_identifier_path(backend, &condition.member);
+                let value = condition_sql_value_tokens(&condition.value);
+                (
+                    quote! { Some::<&str>(#column) },
+                    quote! { Some::<::graphql_orm::graphql::orm::SqlValue>(#value) },
+                )
+            } else {
+                (
+                    quote! { None::<&str> },
+                    quote! { None::<::graphql_orm::graphql::orm::SqlValue> },
+                )
+            };
             let fk_columns_sql = r
                 .fk_columns
                 .iter()
@@ -862,6 +1088,9 @@ pub(crate) fn generate_graphql_relations(
 
             let entity_key_pair_expr = quote! {
                 (|| {
+                    if !(#source_condition) {
+                        return None;
+                    }
                     let mut relation_sql_values = Vec::new();
                     let mut relation_key_parts = Vec::new();
                     #(#source_value_bindings)*
@@ -873,6 +1102,9 @@ pub(crate) fn generate_graphql_relations(
             };
             let entity_key_expr = quote! {
                 (|| {
+                    if !(#source_condition) {
+                        return None;
+                    }
                     let mut relation_key_parts = Vec::new();
                     #(#source_key_bindings)*
                     Some(::graphql_orm::graphql::loaders::RelationKey::new(relation_key_parts))
@@ -976,11 +1208,11 @@ pub(crate) fn generate_graphql_relations(
                     let mut grouped: #grouped_type = std::collections::HashMap::new();
 
                     if !unique_relation_keys.is_empty() {
-                        let bind_values = unique_relation_keys
+                        let mut bind_values = unique_relation_keys
                             .iter()
                             .flat_map(|(_, values)| values.iter().cloned())
                             .collect::<Vec<_>>();
-                        let relation_predicate = if #relation_key_arity == 1 {
+                        let mut relation_predicate = if #relation_key_arity == 1 {
                             let placeholders = (0..unique_relation_keys.len())
                                 .map(|index| <#target_type>::__gom_placeholder(index + 1))
                                 .collect::<Vec<_>>();
@@ -1002,6 +1234,17 @@ pub(crate) fn generate_graphql_relations(
                                 .collect::<Vec<_>>()
                                 .join(" OR ")
                         };
+                        if let (Some(column), Some(value)) =
+                            (#bulk_target_column, #bulk_target_value)
+                        {
+                            let placeholder =
+                                <#target_type>::__gom_placeholder(bind_values.len() + 1);
+                            relation_predicate = format!(
+                                "({}) AND {} = {}",
+                                relation_predicate, column, placeholder,
+                            );
+                            bind_values.push(value);
+                        }
                         let relation_key_projections = vec![
                             #(format!(
                                 "{} AS {}",

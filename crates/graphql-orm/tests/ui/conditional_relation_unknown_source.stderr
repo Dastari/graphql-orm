@@ -1,0 +1,11 @@
+error: Relation 'target' source condition references unknown field 'missing_kind' on 'Record'
+  --> tests/ui/conditional_relation_unknown_source.rs:31:5
+   |
+31 | /     #[relation(
+32 | |         target = "Target",
+33 | |         from = "target_id",
+34 | |         to = "id",
+...  |
+37 | |     )]
+38 | |     pub target: Option<Target>,
+   | |______________________________^

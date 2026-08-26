@@ -3,7 +3,7 @@ title: GraphQL ORM macro and attribute reference
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-08-26
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -141,6 +141,28 @@ one string or an array of string literals for a composite key. `multiple`
 changes the relation cardinality. `emit_fk` is a boolean; `on_delete` and
 `propagate_change` are strings validated for the selected backend/policy.
 Relations are not ordinary persisted fields.
+
+Polymorphic references can add one fixed discriminator condition:
+
+```rust,ignore
+#[graphql(skip)]
+#[relation(
+    target = "Document",
+    from = "reference_id",
+    to = "id",
+    source_condition(field = "reference_kind", equals = 1),
+    emit_fk = false
+)]
+pub document: Option<Document>;
+```
+
+The reverse collection uses
+`target_condition(column = "reference_kind", equals = 1)`. Condition values
+accept string, integer, float, and boolean literals. `source_condition` names a
+persisted scalar Rust field and must match its type; `target_condition` names a
+physical target column. Either condition requires `emit_fk = false`. Fixed
+conditions are always bound parameters and apply to every resolver and
+batch-preload path.
 
 A generated to-many relationship exposes nullable `Where`, `OrderBy`, and
 `Page` objects. In particular, its ordering contract is one nullable

@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-26
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,25 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## 0.27.0 - 2026-08-26
+
+Companion macros crate: `graphql-orm-macros` **0.27.0**.
+
+- Added opt-in, compile-time `source_condition` and `target_condition` predicates
+  for relationships over externally managed polymorphic reference columns.
+  Generated single, pageable, DataLoader, and nested bulk-preload paths enforce
+  the same fixed predicate with bound values.
+- Qualified generated relation-loader identities by source entity, preventing
+  equal relationship field names on different parent types from sharing an
+  incompatible cached result.
+- Conditional relationships must set `emit_fk = false`; they describe a
+  resolver join, not an unconditional physical foreign key.
+
+Existing relationship declarations and GraphQL SDL are unchanged. No database
+or stored-data migration is required. Consumers that add conditional
+relationships should regenerate semantic catalogues and dependent capability
+fingerprints.
 
 ## 0.26.0 - 2026-08-22
 

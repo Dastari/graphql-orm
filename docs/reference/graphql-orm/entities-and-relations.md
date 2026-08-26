@@ -3,7 +3,7 @@ title: "Entities And Relations"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-26
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -301,6 +301,54 @@ The macro validates:
 
 Target columns are metadata literals used for generated SQL. Invalid target names are caught by the
 database when the generated query runs.
+
+## Conditional Polymorphic Relations
+
+Some externally managed schemas reuse one reference column for several target
+types and store a discriminator beside it. Declare that shape without inventing
+an unconditional foreign key by adding a compile-time source condition:
+
+```rust
+#[graphql(skip)]
+#[relation(
+    target = "Document",
+    from = "reference_id",
+    to = "id",
+    source_condition(field = "reference_kind", equals = 1),
+    emit_fk = false
+)]
+pub document: Option<Document>,
+```
+
+When `reference_kind` does not equal the declared value, the generated resolver
+returns `None` (or an empty connection) without loading the target. The same
+condition is honored by nested bulk preloading.
+
+Declare the reverse collection with a target condition:
+
+```rust
+#[graphql(skip)]
+#[relation(
+    target = "Activity",
+    from = "id",
+    to = "reference_id",
+    target_condition(column = "reference_kind", equals = 1),
+    multiple,
+    emit_fk = false
+)]
+pub activity: Vec<Activity>,
+```
+
+Target conditions are macro-owned SQL predicates with bound values. They are
+combined with caller-supplied relationship filters and applied consistently to
+single loads, pageable loads, DataLoader batches, and nested bulk-preload
+queries. Supported literal types are string, integer, float, and boolean. A
+source condition names a persisted Rust field and is compile-time type checked;
+a target condition names a physical target column, like `to`.
+
+Conditional relationships must use `emit_fk = false`. They describe a logical
+join whose validity depends on a discriminator and therefore cannot represent
+an unconditional database foreign key.
 
 ## Nested Relation Batching
 

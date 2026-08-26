@@ -3,7 +3,7 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-08-26
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -29,7 +29,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.26.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.27.0", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the
@@ -120,6 +120,10 @@ README remains project-neutral.
   multiple `COUNT`, `MIN`, `MAX`, and `SUM` expressions in the database;
   `aggregate = true` separately opts a schema into a generated bounded
   aggregate query root.
+- **Conditional relations:** externally managed polymorphic references can use
+  compile-time source or target discriminator conditions. Every generated
+  resolver and batching path enforces the same bound-value predicate, and the
+  declaration must disable physical foreign-key emission.
 
 ## Errors and security boundaries
 
