@@ -10,6 +10,22 @@ supersedes: []
 
 # Changelog
 
+## [0.10.2] - 2026-08-26
+
+### Added
+
+- `AiGraphqlQueryCapabilityCatalog::compile_with_options` accepts a generic,
+  bounded relationship-argument projection depth. A host can keep every deep
+  scalar path and collection bound available while omitting typed relationship
+  argument objects beyond the selected depth.
+
+### Security
+
+- The option cannot add a path, field, argument, or bound. Omitted
+  relationship-argument paths are closed by `additionalProperties: false`,
+  while the canonical compiler, disclosure policy, result budgets, target
+  binding, and resolver authorization remain authoritative.
+
 ## [0.10.1] - 2026-08-26
 
 ### Fixed

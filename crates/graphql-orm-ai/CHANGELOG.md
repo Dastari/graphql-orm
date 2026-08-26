@@ -18,6 +18,26 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.95.3] - 2026-08-26
+
+Persistent schema module: **0.63.0** (unchanged from 0.95.2).
+
+### Added
+
+- Hosts may use the dependency-owned bounded relationship-argument projection
+  policy when compiling generated query catalogues. Deep selections and
+  collection bounds remain available when a deployment omits provider-authored
+  relationship filters from wide schemas.
+
+### Security
+
+- Default compilation is unchanged. A restricted projection only removes
+  provider input; the canonical compiler, current target and principal policy,
+  disclosure enforcement, and resolver authorization remain mandatory.
+
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, GraphQL SDL, backup, or restore migration.
+
 ## [0.95.2] - 2026-08-26
 
 Persistent schema module: **0.63.0** (unchanged from 0.95.1).

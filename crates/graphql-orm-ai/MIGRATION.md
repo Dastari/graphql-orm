@@ -19,6 +19,19 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.95.2 to 0.95.3: bounded relationship-argument projection
+
+Adopt `graphql-orm-ai` 0.95.3 and `graphql-orm-ai-tool-profiles` 0.10.2 from
+one reviewed full monorepo revision. Existing hosts need no code change. A host
+that opts into a restricted relationship-argument depth must rebuild exact
+capability and provider-session bindings because the provider schema and its
+fingerprint change.
+
+The compact execution payload remains closed: omitted relationship paths
+cannot carry arguments, while deep scalar paths and collection bounds remain
+available. The AI schema module remains **0.63.0**; there is no database, data,
+GraphQL SDL, protected-payload, backup, or restore migration.
+
 ## 0.95.1 to 0.95.2: compact closed selection allowlists
 
 Adopt `graphql-orm-ai` 0.95.2 and `graphql-orm-ai-tool-profiles` 0.10.1 from

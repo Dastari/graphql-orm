@@ -24,7 +24,7 @@ are separate runtime decisions and must remain default-deny.
 
 ```toml
 [dependencies]
-graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.10.1" }
+graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.10.2" }
 serde_json = "1"
 ```
 
@@ -115,6 +115,15 @@ connectives; all non-recursive typed filter fields remain available.
 Handwritten recursive inputs fail readiness rather than being approximated.
 Relationship arguments, including the single nullable to-many `OrderByInput`,
 continue to match the finished SDL exactly.
+
+For a relationship-rich schema whose complete typed argument map is larger
+than the provider contract, use `compile_with_options` with
+`AiGraphqlQueryCapabilityOptions::new(depth)`. The depth limits only
+provider-authored relationship arguments: all exact scalar paths and
+collection bounds remain available. A zero depth makes
+`relationshipArguments` a closed empty object, so the provider can still make
+one bounded deep read or use typed root filters without inventing nested
+filters. The ordinary `compile` entrypoint keeps the complete argument surface.
 
 ## Canonical capability index
 
