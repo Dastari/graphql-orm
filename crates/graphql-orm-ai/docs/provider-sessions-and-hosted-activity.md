@@ -249,13 +249,16 @@ methods remain forbidden. Native web-search items are admitted only for an
 enabled profile and exact request configuration.
 
 Codex may emit the documented generic `warning` while a turn is open. The
-actor accepts only the exact positive-timestamp envelope, an optional thread ID
-matching the active thread, and a bounded non-empty control-free message. It
-limits each turn to eight warnings and 16 KiB total text, discards every field,
-and returns only `AiCodexAppServerInbound::RuntimeWarning`. Hosts treat that
+actor accepts only the exact generated 0.148.0 envelope, whose outer
+`emittedAtMs` is optional for this method; a present timestamp must remain a
+positive signed integer. The optional thread ID must match the active thread,
+and the message must be bounded, non-empty, and control-free. The actor limits
+each turn to eight warnings and 16 KiB total text, discards every field, and
+returns only `AiCodexAppServerInbound::RuntimeWarning`. Hosts treat that
 variant as a non-fatal control event; they never log or forward the warning
-text. Warnings outside the current turn and every other generic notification
-remain rejected.
+text. Warnings outside the current turn, malformed timestamps, and every other
+generic notification remain rejected. All non-warning notifications retain
+the mandatory positive `emittedAtMs` envelope check.
 
 Every turn explicitly requests `summary: "none"`. Codex may still report an
 empty reasoning item lifecycle. The actor accepts only an exact paired item

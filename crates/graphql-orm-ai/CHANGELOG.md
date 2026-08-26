@@ -18,6 +18,28 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.95.4] - 2026-08-26
+
+Persistent schema module: **0.63.0** (unchanged from 0.95.3).
+
+### Fixed
+
+- The Codex app-server actor now follows the generated 0.148.0 generic-warning
+  contract by accepting a missing outer `emittedAtMs` field during an exactly
+  correlated turn. A timestamp supplied by Codex remains strictly validated.
+
+### Security
+
+- This compatibility applies only to the content-free `warning` event. Its
+  exact params, lifecycle and thread correlation, control-character checks,
+  per-message size, per-turn count and aggregate byte ceilings remain
+  enforced. `null`, non-integer, non-positive, duplicate, malformed,
+  mismatched, late, and flooding warnings remain rejected. Every other server
+  notification still requires a positive signed `emittedAtMs`.
+
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, GraphQL SDL, backup, or restore migration.
+
 ## [0.95.3] - 2026-08-26
 
 Persistent schema module: **0.63.0** (unchanged from 0.95.2).

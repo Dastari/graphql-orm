@@ -3363,8 +3363,11 @@ enum ThreadLifecycleOperation {
 /// There is intentionally no generic request builder. The provider-specific
 /// process actor may emit only the explicitly typed initialization, thread,
 /// turn, interruption, deletion, and dynamic-tool response methods represented
-/// here. Admitted server notifications require the complete positive signed
-/// `emittedAtMs` envelope and exact lifecycle correlation. Initialization
+/// here. Admitted server notifications require exact lifecycle correlation;
+/// all notifications except the documented generic `warning` also require the
+/// complete positive signed `emittedAtMs` envelope. Codex 0.148.0 declares
+/// that timestamp optional for `warning`, and a present timestamp remains
+/// strictly validated. Initialization
 /// negotiates one fixed opt-out profile for unused thread, MCP, and account
 /// notifications; those methods remain rejected if the server emits them.
 /// Deletion uses only its exact correlated response. A documented generic
@@ -4209,7 +4212,11 @@ impl AiCodexAppServerProtocolActor {
         }
         let notification: CodexAppServerNotificationEnvelope =
             serde_json::from_slice(frame).map_err(|_| ProviderError::Rejected)?;
-        notification.validate()?;
+        if notification.method == RUNTIME_WARNING {
+            notification.validate_runtime_warning()?;
+        } else {
+            notification.validate()?;
+        }
         if notification.method == REMOTE_CONTROL_STATUS_CHANGED {
             return self.accept_disabled_remote_control_status(notification);
         }
@@ -4900,16 +4907,40 @@ impl AiCodexAppServerProtocolActor {
 struct CodexAppServerNotificationEnvelope {
     method: String,
     params: Value,
-    #[serde(rename = "emittedAtMs")]
-    emitted_at_ms: i64,
+    #[serde(default, rename = "emittedAtMs")]
+    emitted_at_ms: OptionalNotificationTimestamp,
 }
 
 impl CodexAppServerNotificationEnvelope {
     fn validate(&self) -> Result<(), ProviderError> {
-        if self.emitted_at_ms <= 0 || !self.params.is_object() {
+        if !matches!(self.emitted_at_ms.0, Some(value) if value > 0) || !self.params.is_object() {
             return Err(ProviderError::Rejected);
         }
         Ok(())
+    }
+
+    fn validate_runtime_warning(&self) -> Result<(), ProviderError> {
+        if self
+            .emitted_at_ms
+            .0
+            .is_some_and(|emitted_at_ms| emitted_at_ms <= 0)
+            || !self.params.is_object()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct OptionalNotificationTimestamp(Option<i64>);
+
+impl<'de> Deserialize<'de> for OptionalNotificationTimestamp {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        i64::deserialize(deserializer).map(|value| Self(Some(value)))
     }
 }
 
@@ -8708,6 +8739,18 @@ pub(crate) mod tests {
         lifecycle_notification(RUNTIME_WARNING, params)
     }
 
+    fn runtime_warning_without_timestamp(thread_id: Option<&str>, message: &str) -> Vec<u8> {
+        let params = thread_id.map_or_else(
+            || json!({"message": message}),
+            |thread_id| json!({"threadId": thread_id, "message": message}),
+        );
+        serde_json::to_vec(&json!({
+            "method": RUNTIME_WARNING,
+            "params": params,
+        }))
+        .expect("runtime warning notification should encode")
+    }
+
     fn reasoning_lifecycle_notification(
         method: &str,
         item_id: &str,
@@ -10827,6 +10870,13 @@ pub(crate) mod tests {
             actor.accept(&warning),
             Err(ProviderError::Rejected)
         ));
+        assert!(matches!(
+            actor.accept(&runtime_warning_without_timestamp(
+                Some("thread-1"),
+                "Still outside the warning admission window."
+            )),
+            Err(ProviderError::Rejected)
+        ));
 
         actor
             .start_turn("thread-1", &turn())
@@ -10842,6 +10892,13 @@ pub(crate) mod tests {
         assert!(!format!("{inbound:?}").contains("Code Mode"));
         assert!(matches!(
             actor.accept(&runtime_warning_notification(None, "Still unavailable.")),
+            Ok(AiCodexAppServerInbound::RuntimeWarning)
+        ));
+        assert!(matches!(
+            actor.accept(&runtime_warning_without_timestamp(
+                Some("thread-1"),
+                "Timestamp metadata is optional for this warning."
+            )),
             Ok(AiCodexAppServerInbound::RuntimeWarning)
         ));
         assert!(matches!(
@@ -10885,7 +10942,7 @@ pub(crate) mod tests {
     #[test]
     fn protocol_rejects_malformed_mismatched_late_or_flooding_runtime_warnings() {
         let malformed = [
-            br#"{"method":"warning","params":{"message":"bounded"}}"#.as_slice(),
+            br#"{"emittedAtMs":null,"method":"warning","params":{"message":"bounded"}}"#.as_slice(),
             br#"{"emittedAtMs":0,"method":"warning","params":{"message":"bounded"}}"#,
             br#"{"emittedAtMs":-1,"method":"warning","params":{"message":"bounded"}}"#,
             br#"{"emittedAtMs":9223372036854775808,"method":"warning","params":{"message":"bounded"}}"#,
@@ -10900,6 +10957,13 @@ pub(crate) mod tests {
             let mut actor = active_protocol_actor();
             assert!(matches!(actor.accept(frame), Err(ProviderError::Rejected)));
         }
+
+        let mut non_warning = active_protocol_actor();
+        assert!(matches!(
+            non_warning
+                .accept(br#"{"method":"thread/started","params":{"thread":{"id":"thread-2"}}}"#),
+            Err(ProviderError::Rejected)
+        ));
 
         for message in ["", "   ", "contains\ncontrol", "contains\u{7f}control"] {
             let mut actor = active_protocol_actor();
@@ -10919,6 +10983,13 @@ pub(crate) mod tests {
         let mut mismatched = active_protocol_actor();
         assert!(matches!(
             mismatched.accept(&runtime_warning_notification(
+                Some("thread-other"),
+                "bounded",
+            )),
+            Err(ProviderError::Rejected)
+        ));
+        assert!(matches!(
+            mismatched.accept(&runtime_warning_without_timestamp(
                 Some("thread-other"),
                 "bounded",
             )),
