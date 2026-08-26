@@ -65,6 +65,71 @@ pub struct AiGraphqlQueryCapabilityLimits {
     pub maximum_schema_bytes: u32,
 }
 
+/// Provider-schema projection options for automatic query capabilities.
+///
+/// The canonical compiler and resolver validation remain unchanged. This
+/// policy only controls which typed relationship-argument contracts are
+/// offered to a provider. A depth of zero keeps every relationship selectable
+/// and bounded while requiring its argument object to stay empty.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    try_from = "AiGraphqlQueryCapabilityOptionsWire"
+)]
+pub struct AiGraphqlQueryCapabilityOptions {
+    maximum_relationship_argument_depth: u8,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AiGraphqlQueryCapabilityOptionsWire {
+    maximum_relationship_argument_depth: u8,
+}
+
+impl TryFrom<AiGraphqlQueryCapabilityOptionsWire> for AiGraphqlQueryCapabilityOptions {
+    type Error = AiError;
+
+    fn try_from(value: AiGraphqlQueryCapabilityOptionsWire) -> Result<Self, Self::Error> {
+        Self::new(value.maximum_relationship_argument_depth)
+    }
+}
+
+impl AiGraphqlQueryCapabilityOptions {
+    /// Creates a provider projection with a maximum relationship-argument
+    /// depth. Zero disables provider-authored relationship arguments without
+    /// disabling relationship selection or collection bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the requested depth exceeds the compiler's
+    /// supported relationship depth.
+    pub fn new(maximum_relationship_argument_depth: u8) -> Result<Self, AiError> {
+        if maximum_relationship_argument_depth > 8 {
+            return Err(configuration_error(
+                "relationship argument depth is invalid",
+            ));
+        }
+        Ok(Self {
+            maximum_relationship_argument_depth,
+        })
+    }
+
+    /// Returns the maximum relationship depth whose typed arguments are
+    /// offered to the provider.
+    pub const fn maximum_relationship_argument_depth(self) -> u8 {
+        self.maximum_relationship_argument_depth
+    }
+}
+
+impl Default for AiGraphqlQueryCapabilityOptions {
+    fn default() -> Self {
+        Self {
+            maximum_relationship_argument_depth: 8,
+        }
+    }
+}
+
 impl AiGraphqlQueryCapabilityLimits {
     /// Creates validated deployment ceilings.
     ///
@@ -1010,6 +1075,36 @@ impl AiGraphqlQueryCapabilityCatalog {
         semantic_catalog: &GraphqlSemanticCatalog,
         limits: AiGraphqlQueryCapabilityLimits,
     ) -> Result<Self, AiError> {
+        Self::compile_with_options(
+            subgraph_id,
+            target_id,
+            finished_sdl,
+            semantic_catalog,
+            limits,
+            AiGraphqlQueryCapabilityOptions::default(),
+        )
+    }
+
+    /// Compiles every exposed public query root with an explicit provider
+    /// projection policy.
+    ///
+    /// Relationship selection, scalar allow-lists, collection bounds, the
+    /// canonical typed compiler, and resolver-side validation are unaffected
+    /// by the relationship-argument depth. Paths beyond the selected depth
+    /// simply cannot carry provider-authored arguments.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same fail-closed catalogue errors as [`Self::compile`], or
+    /// an error when the provider projection policy is invalid.
+    pub fn compile_with_options(
+        subgraph_id: &str,
+        target_id: GraphqlExecutionTargetId,
+        finished_sdl: &str,
+        semantic_catalog: &GraphqlSemanticCatalog,
+        limits: AiGraphqlQueryCapabilityLimits,
+        options: AiGraphqlQueryCapabilityOptions,
+    ) -> Result<Self, AiError> {
         validate_public_token(subgraph_id, "subgraph ID")?;
         semantic_catalog
             .validate()
@@ -1056,6 +1151,7 @@ impl AiGraphqlQueryCapabilityCatalog {
                 semantic_catalog,
                 operation,
                 limits,
+                options,
                 GraphqlOperationKind::Query,
             )?;
             if capabilities
@@ -1349,6 +1445,7 @@ impl AiGraphqlMutationCapabilityCatalog {
                 semantic_catalog,
                 operation,
                 limits,
+                AiGraphqlQueryCapabilityOptions::default(),
                 GraphqlOperationKind::Mutation,
             )?;
             let capability = AiGraphqlMutationCapability {
@@ -1770,6 +1867,7 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
                 semantic_catalog,
                 operation,
                 limits.query,
+                AiGraphqlQueryCapabilityOptions::default(),
                 GraphqlOperationKind::Subscription,
             )?;
             base.id = AiToolId::parse(stable_subscription_capability_id(
@@ -2365,14 +2463,21 @@ fn compile_capability(
     semantic_catalog: &GraphqlSemanticCatalog,
     operation: &GraphqlSemanticOperationDescriptor,
     limits: AiGraphqlQueryCapabilityLimits,
+    options: AiGraphqlQueryCapabilityOptions,
     expected_kind: GraphqlOperationKind,
 ) -> Result<AiGraphqlQueryCapability, AiError> {
     let root_field = schema.operation_root_field(expected_kind, &operation.field_name)?;
     validate_operation_against_schema(operation, root_field, expected_kind)?;
     let output = resolve_query_output(schema, semantic_catalog, operation, &root_field.ty, limits)?;
     let argument_schema = build_plan_schema(schema, semantic_catalog, operation, &output, limits)?;
-    let compact_argument_schema =
-        build_compact_plan_schema(schema, semantic_catalog, operation, &output, limits)?;
+    let compact_argument_schema = build_compact_plan_schema(
+        schema,
+        semantic_catalog,
+        operation,
+        &output,
+        limits,
+        options,
+    )?;
     if serde_json::to_vec(&compact_argument_schema)
         .map(|encoded| encoded.len() > MAXIMUM_PROVIDER_SCHEMA_BYTES)
         .unwrap_or(true)
@@ -2762,7 +2867,7 @@ fn build_plan_schema(
 #[derive(Clone)]
 struct CompactRelationshipSchema {
     path: String,
-    arguments: Value,
+    arguments: Option<Value>,
     maximum_items: Option<u32>,
 }
 
@@ -2772,6 +2877,7 @@ fn build_compact_plan_schema(
     operation: &GraphqlSemanticOperationDescriptor,
     output: &QueryOutput,
     limits: AiGraphqlQueryCapabilityLimits,
+    options: AiGraphqlQueryCapabilityOptions,
 ) -> Result<Value, AiError> {
     let root = schema.operation_root_field(operation.kind, &operation.field_name)?;
     let inject_root_bound = root_bound_argument(schema, root, output)?;
@@ -2806,6 +2912,7 @@ fn build_compact_plan_schema(
             0,
             &mut vec![entity.clone()],
             "",
+            options.maximum_relationship_argument_depth(),
             &mut selection_paths,
             &mut relationship_schemas,
         )?;
@@ -2818,7 +2925,9 @@ fn build_compact_plan_schema(
     let mut relationship_arguments = Map::new();
     let mut relationship_limits = Map::new();
     for relationship in relationship_schemas {
-        relationship_arguments.insert(relationship.path.clone(), relationship.arguments);
+        if let Some(arguments) = relationship.arguments {
+            relationship_arguments.insert(relationship.path.clone(), arguments);
+        }
         if let Some(maximum) = relationship.maximum_items {
             relationship_limits.insert(
                 relationship.path,
@@ -2918,6 +3027,7 @@ fn collect_compact_selection_paths(
     depth: u8,
     ancestry: &mut Vec<String>,
     prefix: &str,
+    maximum_relationship_argument_depth: u8,
     selections: &mut Vec<Value>,
     relationships: &mut Vec<CompactRelationshipSchema>,
 ) -> Result<(), AiError> {
@@ -2961,17 +3071,22 @@ fn collect_compact_selection_paths(
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let mut argument_schema = input_object_schema(
-            schema,
-            catalog,
-            &actual.arguments,
-            &descriptions,
-            limits,
-            0,
-            &mut Vec::new(),
-            collection.is_some_and(GraphqlSemanticCollectionBound::model_may_select_maximum),
-        )?;
-        insert_description(&mut argument_schema, Some(&field.description))?;
+        let argument_schema = if depth < maximum_relationship_argument_depth {
+            let mut argument_schema = input_object_schema(
+                schema,
+                catalog,
+                &actual.arguments,
+                &descriptions,
+                limits,
+                0,
+                &mut Vec::new(),
+                collection.is_some_and(GraphqlSemanticCollectionBound::model_may_select_maximum),
+            )?;
+            insert_description(&mut argument_schema, Some(&field.description))?;
+            Some(argument_schema)
+        } else {
+            None
+        };
         let path = join_selection_path(prefix, &field.field_name);
         let maximum_items = match collection {
             Some(GraphqlSemanticCollectionBound::Pageable { .. }) => {
@@ -2993,6 +3108,7 @@ fn collect_compact_selection_paths(
             depth + 1,
             ancestry,
             &path,
+            maximum_relationship_argument_depth,
             selections,
             relationships,
         )?;
@@ -3107,7 +3223,14 @@ fn compact_subscription_plan_schema(
     maximum_duration_seconds: u32,
     maximum_events: u32,
 ) -> Result<Value, AiError> {
-    let mut plan = build_compact_plan_schema(schema, catalog, operation, output, limits)?;
+    let mut plan = build_compact_plan_schema(
+        schema,
+        catalog,
+        operation,
+        output,
+        limits,
+        AiGraphqlQueryCapabilityOptions::default(),
+    )?;
     let object = plan
         .as_object_mut()
         .ok_or_else(|| configuration_error("compact subscription schema is not an object"))?;
@@ -5004,6 +5127,87 @@ mod tests {
                 .contains("children(page: $v1) { edges { node { id label } } }")
         );
         assert_eq!(compiled.variables()["v1"]["limit"], json!(2));
+    }
+
+    #[test]
+    fn relationship_argument_projection_can_be_disabled_without_losing_deep_reads() {
+        let catalog = AiGraphqlQueryCapabilityCatalog::compile_with_options(
+            "inventory",
+            GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
+            &query_sdl(),
+            &semantic_catalog(),
+            AiGraphqlQueryCapabilityLimits::default(),
+            AiGraphqlQueryCapabilityOptions::new(0).expect("argument policy"),
+        )
+        .expect("bounded capability");
+        let capability = catalog.capabilities().next().expect("query capability");
+        assert_eq!(
+            capability
+                .compact_argument_schema()
+                .pointer("/properties/relationshipArguments/properties"),
+            Some(&json!({}))
+        );
+        assert!(
+            capability
+                .compact_argument_schema()
+                .pointer("/properties/relationshipMaximumItems/properties/children")
+                .is_some()
+        );
+        assert!(
+            capability
+                .compact_argument_schema()
+                .pointer("/properties/selections/items/enum")
+                .and_then(Value::as_array)
+                .is_some_and(|paths| paths.contains(&json!("children.label")))
+        );
+
+        let plan = json!({
+            "arguments": {"id": "parent-1"},
+            "selections": ["id", "children.id", "children.label"],
+            "relationshipArguments": {},
+            "relationshipMaximumItems": {"children": 2}
+        });
+        assert!(
+            jsonschema::validator_for(capability.compact_argument_schema())
+                .expect("provider schema")
+                .is_valid(&plan)
+        );
+        let compiled = capability
+            .compile_compact(plan)
+            .expect("deep query without relationship arguments");
+        assert!(
+            compiled
+                .descriptor()
+                .document
+                .contains("children(page: $v1) { edges { node { id label } } }")
+        );
+        assert_eq!(compiled.variables()["v1"]["limit"], json!(2));
+    }
+
+    #[test]
+    fn relationship_argument_projection_rejects_excessive_depth() {
+        let decoded = serde_json::from_value::<AiGraphqlQueryCapabilityOptions>(json!({
+            "maximumRelationshipArgumentDepth": 0
+        }))
+        .expect("valid serialized projection policy");
+        assert_eq!(decoded.maximum_relationship_argument_depth(), 0);
+        assert!(matches!(
+            AiGraphqlQueryCapabilityOptions::new(9),
+            Err(AiError::InvalidConfiguration(_))
+        ));
+        assert!(
+            serde_json::from_value::<AiGraphqlQueryCapabilityOptions>(json!({
+                "maximumRelationshipArgumentDepth": 9
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<AiGraphqlQueryCapabilityOptions>(json!({
+                "maximumRelationshipArgumentDepth": 0,
+                "unexpected": true
+            }))
+            .is_err()
+        );
     }
 
     #[test]

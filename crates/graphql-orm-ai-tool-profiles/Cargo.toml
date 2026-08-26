@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-ai-tool-profiles"
-version = "0.10.1"
+version = "0.10.2"
 edition = "2024"
 authors = ["Toby Martin <toby@dastari.net>"]
 description = "Backend-neutral GraphQL AI tool profile compiler and manifest contracts"

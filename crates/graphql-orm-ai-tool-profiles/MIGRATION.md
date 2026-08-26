@@ -10,6 +10,22 @@ supersedes: []
 
 # Migration Guide
 
+## 0.10.1 to 0.10.2: bounded relationship-argument projection
+
+Adopt `graphql-orm-ai-tool-profiles` 0.10.2 from one reviewed full monorepo
+revision. Existing callers of `AiGraphqlQueryCapabilityCatalog::compile` keep
+the complete relationship-argument surface. Hosts with a relationship-rich
+schema may opt into `compile_with_options` and select the maximum relationship
+depth whose typed arguments should enter provider schemas. A depth of zero
+keeps deep scalar selection and collection bounds but requires
+`relationshipArguments` to remain empty.
+
+The option changes capability and provider-definition fingerprints. Rebuild
+retained bindings after changing it. It grants no authority and does not
+change GraphQL SDL, the canonical plan compiler, disclosure checks, result
+budgets, target policy, or resolver authorization. There is no database, data,
+protected-content, backup, restore, or persistent AI schema-module migration.
+
 ## 0.10.0 to 0.10.1: provider-sized selection allow-lists
 
 Adopt `graphql-orm-ai-tool-profiles` 0.10.1 from one reviewed full monorepo
