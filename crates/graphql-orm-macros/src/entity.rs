@@ -940,6 +940,8 @@ pub(crate) struct FieldMetadata {
     pub(crate) relation_emit_foreign_key: Option<bool>,
     pub(crate) relation_on_delete: Option<String>,
     pub(crate) relation_propagate_change: Option<String>,
+    pub(crate) relation_source_condition: Option<RelationConditionMetadata>,
+    pub(crate) relation_target_condition: Option<RelationConditionMetadata>,
     pub(crate) skip_db: bool,
     /// Skip from generated public GraphQL Create/Update inputs only; field remains in DB,
     /// the Rust entity, and generated trusted Rust Create/Update input structs.
@@ -973,6 +975,20 @@ pub(crate) struct FieldMetadata {
     pub(crate) subscribe: bool,
     pub(crate) read_policy: Option<String>,
     pub(crate) write_policy: Option<String>,
+}
+
+#[derive(Clone)]
+pub(crate) enum RelationConditionValue {
+    String(String),
+    Integer(i64),
+    Float(f64),
+    Boolean(bool),
+}
+
+#[derive(Clone)]
+pub(crate) struct RelationConditionMetadata {
+    pub(crate) member: String,
+    pub(crate) value: RelationConditionValue,
 }
 
 #[derive(Clone)]
@@ -1088,6 +1104,8 @@ impl Default for FieldMetadata {
             relation_emit_foreign_key: None,
             relation_on_delete: None,
             relation_propagate_change: None,
+            relation_source_condition: None,
+            relation_target_condition: None,
             skip_db: false,
             skip_input: false,
             is_private: false,
@@ -1143,6 +1161,67 @@ fn parse_relation_columns(input: ParseStream<'_>) -> syn::Result<Vec<String>> {
             "relation columns must be a string literal or an array of string literals",
         )),
     }
+}
+
+fn parse_relation_condition(
+    nested: syn::meta::ParseNestedMeta<'_>,
+    member_name: &str,
+) -> syn::Result<RelationConditionMetadata> {
+    let mut member = None;
+    let mut condition_value = None;
+    nested.parse_nested_meta(|condition| {
+        if condition.path.is_ident(member_name) {
+            if member.is_some() {
+                return Err(condition.error(format!(
+                    "duplicate relation condition `{member_name}`"
+                )));
+            }
+            let value = condition.value()?;
+            let literal: syn::LitStr = value.parse()?;
+            let literal = literal.value();
+            if literal.trim().is_empty() {
+                return Err(condition.error(format!(
+                    "relation condition `{member_name}` must not be empty"
+                )));
+            }
+            member = Some(literal);
+        } else if condition.path.is_ident("equals") {
+            if condition_value.is_some() {
+                return Err(condition.error("duplicate relation condition `equals`"));
+            }
+            let value = condition.value()?;
+            let literal: syn::Lit = value.parse()?;
+            condition_value = Some(match literal {
+                syn::Lit::Str(value) => RelationConditionValue::String(value.value()),
+                syn::Lit::Int(value) => {
+                    RelationConditionValue::Integer(value.base10_parse()?)
+                }
+                syn::Lit::Float(value) => RelationConditionValue::Float(value.base10_parse()?),
+                syn::Lit::Bool(value) => RelationConditionValue::Boolean(value.value),
+                other => {
+                    return Err(syn::Error::new_spanned(
+                        other,
+                        "relation condition values must be string, integer, float, or boolean literals",
+                    ));
+                }
+            });
+        } else {
+            return Err(condition.error("unsupported relation condition option"));
+        }
+        Ok(())
+    })?;
+
+    Ok(RelationConditionMetadata {
+        member: member.ok_or_else(|| {
+            syn::Error::new(
+                nested.path.span(),
+                format!("relation condition requires `{member_name}`"),
+            )
+        })?,
+        value: condition_value.ok_or_else(|| {
+            syn::Error::new(nested.path.span(), "relation condition requires `equals`")
+        })?,
+    })
 }
 
 fn parse_string_array_expr(input: ParseStream<'_>, message: &str) -> syn::Result<Vec<String>> {
@@ -1855,7 +1934,7 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                 }
                 "relation" => {
                     meta.is_relation = true;
-                    let _ = attr.parse_nested_meta(|nested| {
+                    attr.parse_nested_meta(|nested| {
                         if nested.path.is_ident("target") {
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
@@ -1886,11 +1965,25 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             meta.relation_propagate_change = Some(lit.value());
+                        } else if nested.path.is_ident("source_condition") {
+                            if meta.relation_source_condition.is_some() {
+                                return Err(nested.error("duplicate relation source condition"));
+                            }
+                            meta.relation_source_condition =
+                                Some(parse_relation_condition(nested, "field")?);
+                        } else if nested.path.is_ident("target_condition") {
+                            if meta.relation_target_condition.is_some() {
+                                return Err(nested.error("duplicate relation target condition"));
+                            }
+                            meta.relation_target_condition =
+                                Some(parse_relation_condition(nested, "column")?);
                         } else if nested.path.is_ident("multiple") {
                             meta.relation_multiple = true;
+                        } else {
+                            return Err(nested.error("unsupported relation option"));
                         }
                         Ok(())
-                    });
+                    })?;
                 }
                 "skip_db" => {
                     meta.skip_db = true;
@@ -2696,6 +2789,18 @@ fn generate_entity_impl(
         if field_meta.is_relation || field_meta.skip_db {
             if field_meta.is_relation {
                 validate_relation_delete_policy(struct_name, field, &field_meta, &parsed_fields)?;
+                let emits_foreign_key = field_meta
+                    .relation_emit_foreign_key
+                    .unwrap_or(!field_meta.relation_multiple);
+                if (field_meta.relation_source_condition.is_some()
+                    || field_meta.relation_target_condition.is_some())
+                    && emits_foreign_key
+                {
+                    return Err(syn::Error::new_spanned(
+                        field,
+                        "conditional relations require `emit_fk = false` because they do not describe an unconditional physical foreign key",
+                    ));
+                }
                 let rust_name = field_name.to_string();
                 let graphql_name = graphql_field_name(
                     &field_meta,

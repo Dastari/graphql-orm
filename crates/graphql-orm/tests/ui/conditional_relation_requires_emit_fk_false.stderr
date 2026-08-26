@@ -1,0 +1,11 @@
+error: conditional relations require `emit_fk = false` because they do not describe an unconditional physical foreign key
+  --> tests/ui/conditional_relation_requires_emit_fk_false.rs:32:5
+   |
+32 | /     #[relation(
+33 | |         target = "Target",
+34 | |         from = "target_id",
+35 | |         to = "id",
+36 | |         source_condition(field = "kind", equals = 1)
+37 | |     )]
+38 | |     pub target: Option<Target>,
+   | |______________________________^

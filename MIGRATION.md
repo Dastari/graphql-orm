@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-26
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -12,6 +12,51 @@ supersedes: []
 
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
+
+## 0.26.0 to 0.27.0: conditional polymorphic relationships
+
+Adopt `graphql-orm` and `graphql-orm-macros` 0.27.0 together from one reviewed
+full Git revision. Existing relation declarations need no change.
+
+Externally managed tables that reuse one reference column for multiple target
+types can declare a fixed source discriminator:
+
+```rust
+#[relation(
+    target = "Document",
+    from = "reference_id",
+    to = "id",
+    source_condition(field = "reference_kind", equals = 1),
+    emit_fk = false
+)]
+pub document: Option<Document>,
+```
+
+The inverse collection can constrain the target rows:
+
+```rust
+#[relation(
+    target = "Activity",
+    from = "id",
+    to = "reference_id",
+    target_condition(column = "reference_kind", equals = 1),
+    multiple,
+    emit_fk = false
+)]
+pub activity: Vec<Activity>,
+```
+
+Condition values accept string, integer, float, and boolean literals. A source
+condition must name a persisted scalar Rust field with a matching type; target
+conditions name a physical target column and use the same trusted, bound-value
+SQL path as generated filters. Conditional relationships always require
+`emit_fk = false` because the discriminator makes the join conditional rather
+than a physical foreign-key contract.
+
+No database, table, column, constraint, or stored-data migration is required.
+After adding conditional relationships, regenerate the semantic catalogue and
+any derived capability fingerprints so the new selectable graph is reviewed
+and deployed atomically.
 
 ## 0.25.1 to 0.26.0: agql-auth 0.18.0 alignment
 

@@ -3,7 +3,7 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-08-26
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -16,13 +16,13 @@ macro/runtime versions aligned:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.26.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.27.0", default-features = false, features = ["sqlite"] }
 ```
 
 Direct use is supported for tooling that needs the macro package:
 
 ```toml
-graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.26.0", default-features = false, features = ["sqlite"] }
+graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.27.0", default-features = false, features = ["sqlite"] }
 ```
 
 The direct dependency still requires a compatible `graphql-orm` runtime in the
@@ -110,6 +110,13 @@ object, while generated root list resolvers retain their nullable list of
 non-null ordering objects. The macro derives relation resolver signatures and
 semantic relationship descriptors from the same internal contract so public
 names, nullability and `Where`/`OrderBy`/`Page` shapes remain byte-equivalent.
+
+Conditional relations accept `source_condition(field = "...", equals = ...)`
+or `target_condition(column = "...", equals = ...)` with string, integer,
+float, or boolean literals. Source fields are compile-time type checked; target
+columns are quoted by the selected backend and all values are bound. These
+logical discriminator joins require `emit_fk = false` and are enforced by
+single, pageable, DataLoader, and nested bulk-preload paths.
 
 See [core runtime documentation](../graphql-orm/README.md),
 and the [macro and attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md).
