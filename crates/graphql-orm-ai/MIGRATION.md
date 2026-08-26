@@ -19,6 +19,21 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.95.3 to 0.95.4: schema-compatible Codex runtime warnings
+
+Adopt `graphql-orm-ai` 0.95.4 from one reviewed full monorepo revision. Hosts
+need no API or configuration change. The strict Codex app-server actor now
+admits the generated 0.148.0 `warning` notification when its optional outer
+`emittedAtMs` field is absent, but continues to require a valid positive signed
+integer whenever Codex supplies that field.
+
+The exception is restricted to a warning inside the existing correlated-turn
+window. The warning remains content-free outside the actor, and its exact
+params, active-thread match, message validation, count and byte ceilings are
+unchanged. All other notifications still require `emittedAtMs`. The AI schema
+module remains **0.63.0**; there is no database, data, GraphQL SDL,
+protected-payload, backup, or restore migration.
+
 ## 0.95.2 to 0.95.3: bounded relationship-argument projection
 
 Adopt `graphql-orm-ai` 0.95.3 and `graphql-orm-ai-tool-profiles` 0.10.2 from
