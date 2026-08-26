@@ -18,6 +18,29 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.95.5] - 2026-08-26
+
+Persistent schema module: **0.63.0** (unchanged from 0.95.4).
+
+### Fixed
+
+- The Codex app-server actor now follows the generated 0.148.0 notification
+  envelope contract by accepting an omitted outer `emittedAtMs` field for
+  every allowlisted notification. A supplied timestamp remains strictly
+  validated as a positive signed integer.
+
+### Security
+
+- This compatibility changes only optional outer metadata. The exact method
+  allowlist, required method-specific fields and lifecycle timestamps,
+  thread/turn/item correlation, content bounds, warning ceilings, and native-
+  surface restrictions remain enforced. Explicit `null`, non-integer,
+  non-positive, duplicate, malformed, unknown, mismatched, late, and flooding
+  frames remain rejected.
+
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, GraphQL SDL, backup, or restore migration.
+
 ## [0.95.4] - 2026-08-26
 
 Persistent schema module: **0.63.0** (unchanged from 0.95.3).

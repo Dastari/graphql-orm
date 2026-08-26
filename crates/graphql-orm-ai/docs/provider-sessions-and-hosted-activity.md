@@ -248,17 +248,21 @@ MCP, collaboration, images, browser control, raw reasoning, and arbitrary
 methods remain forbidden. Native web-search items are admitted only for an
 enabled profile and exact request configuration.
 
+The generated 0.148.0 server-notification union makes the outer `emittedAtMs`
+metadata optional for every method. The actor accepts an omitted field but
+requires any supplied value to be a positive signed integer. This changes no
+method-specific contract: required fields and inner lifecycle timestamps,
+active thread/turn/item correlation, content bounds, and the closed method
+allowlist remain mandatory.
+
 Codex may emit the documented generic `warning` while a turn is open. The
-actor accepts only the exact generated 0.148.0 envelope, whose outer
-`emittedAtMs` is optional for this method; a present timestamp must remain a
-positive signed integer. The optional thread ID must match the active thread,
-and the message must be bounded, non-empty, and control-free. The actor limits
-each turn to eight warnings and 16 KiB total text, discards every field, and
-returns only `AiCodexAppServerInbound::RuntimeWarning`. Hosts treat that
-variant as a non-fatal control event; they never log or forward the warning
-text. Warnings outside the current turn, malformed timestamps, and every other
-generic notification remain rejected. All non-warning notifications retain
-the mandatory positive `emittedAtMs` envelope check.
+optional thread ID must match the active thread, and the message must be
+bounded, non-empty, and control-free. The actor limits each turn to eight
+warnings and 16 KiB total text, discards every field, and returns only
+`AiCodexAppServerInbound::RuntimeWarning`. Hosts treat that variant as a
+non-fatal control event; they never log or forward the warning text. Warnings
+outside the current turn and malformed, mismatched, late, or flooding warnings
+remain rejected.
 
 Every turn explicitly requests `summary: "none"`. Codex may still report an
 empty reasoning item lifecycle. The actor accepts only an exact paired item
