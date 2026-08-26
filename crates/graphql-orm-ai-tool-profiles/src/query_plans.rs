@@ -2795,7 +2795,7 @@ fn build_compact_plan_schema(
         &mut Vec::new(),
         inject_root_bound,
     )?;
-    let mut selection_alternatives = Vec::new();
+    let mut selection_paths = Vec::new();
     let mut relationship_schemas = Vec::new();
     if let QueryOutput::Entity { entity, .. } = output {
         collect_compact_selection_paths(
@@ -2806,10 +2806,10 @@ fn build_compact_plan_schema(
             0,
             &mut vec![entity.clone()],
             "",
-            &mut selection_alternatives,
+            &mut selection_paths,
             &mut relationship_schemas,
         )?;
-        if selection_alternatives.is_empty() {
+        if selection_paths.is_empty() {
             return Err(configuration_error(
                 "query entity has no compact exportable selections",
             ));
@@ -2841,7 +2841,7 @@ fn build_compact_plan_schema(
             json!({
                 "type": "array",
                 "description": "Explicit public scalar selection paths. No select-all behavior.",
-                "items": { "oneOf": selection_alternatives },
+                "items": { "type": "string", "enum": selection_paths },
                 "minItems": 1,
                 "maxItems": i64::from(limits.maximum_selected_fields),
                 "uniqueItems": true,
@@ -2929,10 +2929,7 @@ fn collect_compact_selection_paths(
     {
         schema.object_field(entity_name, &field.field_name)?;
         let path = join_selection_path(prefix, &field.field_name);
-        selections.push(json!({
-            "const": path,
-            "description": field.description,
-        }));
+        selections.push(Value::String(path));
     }
     if depth + 1 >= limits.maximum_depth {
         return Ok(());
@@ -4974,6 +4971,24 @@ mod tests {
         assert!(compact_schema.contains("children.label"));
         assert!(compact_schema.contains("Bounded related child records."));
         assert!(!compact_schema.contains("credential"));
+        assert_eq!(
+            capability
+                .compact_argument_schema()
+                .pointer("/properties/selections/items/type"),
+            Some(&json!("string"))
+        );
+        assert!(
+            capability
+                .compact_argument_schema()
+                .pointer("/properties/selections/items/enum")
+                .is_some()
+        );
+        assert!(
+            capability
+                .compact_argument_schema()
+                .pointer("/properties/selections/items/oneOf")
+                .is_none()
+        );
         let compiled = capability
             .compile_compact(json!({
                 "arguments": {"id": "parent-1"},
@@ -4989,6 +5004,104 @@ mod tests {
                 .contains("children(page: $v1) { edges { node { id label } } }")
         );
         assert_eq!(compiled.variables()["v1"]["limit"], json!(2));
+    }
+
+    #[test]
+    fn compact_selection_allowlist_stays_within_provider_limits_for_wide_graphs() {
+        const LEVELS: usize = 4;
+        const RELATIONSHIPS_PER_LEVEL: usize = 5;
+        const SCALARS_PER_ENTITY: usize = 16;
+
+        let mut sdl = String::from("schema { query: Query }\ntype Query { ReadRoot: Level0! }\n");
+        let mut entities = Vec::new();
+        for level in 0..LEVELS {
+            let entity_name = format!("Level{level}");
+            sdl.push_str(&format!("type {entity_name} {{\n"));
+            let mut fields = Vec::new();
+            for scalar in 0..SCALARS_PER_ENTITY {
+                let name = format!("value{scalar}");
+                sdl.push_str(&format!("  {name}: String!\n"));
+                let mut field = scalar_field(
+                    &name,
+                    GraphqlSemanticClassification::Internal,
+                    GraphqlSemanticExport::Exportable,
+                );
+                field.description = format!("Public {name} value. {}", "x".repeat(900));
+                fields.push(field);
+            }
+            if level + 1 < LEVELS {
+                for relationship in 0..RELATIONSHIPS_PER_LEVEL {
+                    let field_name = format!("related{relationship}");
+                    let target = format!("Level{}", level + 1);
+                    sdl.push_str(&format!("  {field_name}: {target}!\n"));
+                    fields.push(GraphqlSemanticFieldMetadata {
+                        field_name,
+                        description: "A related public record.".to_owned(),
+                        type_ref: GraphqlSemanticTypeRef::named(
+                            &target,
+                            GraphqlSemanticTypeKind::Object,
+                            false,
+                        ),
+                        selectable: true,
+                        filter_operators: Vec::new(),
+                        sortable: false,
+                        groupable: false,
+                        aggregate_operators: Vec::new(),
+                        aggregate_value_kind: None,
+                        relationship: Some(GraphqlSemanticRelationshipDescriptor {
+                            target,
+                            cardinality: GraphqlSemanticRelationshipCardinality::One,
+                            arguments: Vec::new(),
+                            collection_bound: None,
+                        }),
+                        classification: GraphqlSemanticClassification::Internal,
+                        export: GraphqlSemanticExport::Exportable,
+                        has_field_policy: false,
+                    });
+                }
+            }
+            sdl.push_str("}\n");
+            entities.push(GraphqlEntitySemanticMetadata {
+                entity_name,
+                description: "One public graph level.".to_owned(),
+                default_classification: GraphqlSemanticClassification::Internal,
+                fields: fields.into_boxed_slice(),
+            });
+        }
+        let operation = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Query,
+            "ReadRoot",
+            "Read the bounded public graph root.",
+            Vec::new(),
+            GraphqlSemanticTypeRef::named("Level0", GraphqlSemanticTypeKind::Object, false),
+            true,
+        )
+        .expect("query semantics");
+        let semantics = GraphqlSemanticCatalog::compose_with_custom(
+            entities,
+            &GraphqlOperationCatalog::compose(std::iter::empty()),
+            [operation],
+        )
+        .expect("wide semantic graph");
+
+        let capabilities = AiGraphqlQueryCapabilityCatalog::compile(
+            "wide",
+            GraphqlExecutionTargetId::parse("wide.graphql").expect("target"),
+            &sdl,
+            &semantics,
+            AiGraphqlQueryCapabilityLimits::default(),
+        )
+        .expect("wide graph must retain a provider-sized compact contract");
+        let capability = capabilities.capabilities().next().expect("capability");
+        let compact = serde_json::to_vec(capability.compact_argument_schema()).expect("schema");
+        assert!(compact.len() < MAXIMUM_PROVIDER_SCHEMA_BYTES);
+        let paths = capability
+            .compact_argument_schema()
+            .pointer("/properties/selections/items/enum")
+            .and_then(Value::as_array)
+            .expect("closed selection allowlist");
+        assert_eq!(paths.len(), 2_496);
+        assert!(paths.contains(&json!("related4.related4.related4.value15")));
     }
 
     #[test]

@@ -8126,11 +8126,15 @@ pub(crate) mod tests {
         assert!(
             definition
                 .parameters
-                .pointer("/properties/selections/items/oneOf")
+                .pointer("/properties/selections/items/enum")
                 .and_then(Value::as_array)
-                .is_some_and(|alternatives| alternatives
-                    .iter()
-                    .any(|alternative| alternative.get("const") == Some(&json!("children.id"))))
+                .is_some_and(|values| values.contains(&json!("children.id")))
+        );
+        assert!(
+            definition
+                .parameters
+                .pointer("/properties/selections/items/oneOf")
+                .is_none()
         );
 
         let projected = project_codex_dynamic_tools(std::slice::from_ref(&definition))

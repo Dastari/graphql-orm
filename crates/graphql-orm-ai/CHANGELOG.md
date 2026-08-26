@@ -18,6 +18,26 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.95.2] - 2026-08-26
+
+Persistent schema module: **0.63.0** (unchanged from 0.95.1).
+
+### Changed
+
+- Fixed-broker generated-query definitions now expose exact public scalar
+  selection paths as one closed string enum. This preserves the existing
+  compact-plan JSON while keeping wide relationship graphs within provider
+  schema-size limits.
+
+### Security
+
+- The compiler-owned selection allowlist remains exact and closed. Unknown,
+  hidden, secret, non-exportable, cyclic, over-depth, over-cardinality, stale,
+  and over-budget plans remain rejected.
+
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, GraphQL SDL, backup, or restore migration.
+
 ## [0.95.1] - 2026-08-25
 
 Persistent schema module: **0.63.0** (unchanged from 0.95.0).

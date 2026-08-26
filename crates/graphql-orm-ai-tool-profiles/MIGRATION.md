@@ -10,6 +10,24 @@ supersedes: []
 
 # Migration Guide
 
+## 0.10.0 to 0.10.1: provider-sized selection allow-lists
+
+Adopt `graphql-orm-ai-tool-profiles` 0.10.1 from one reviewed full monorepo
+revision. Recompile generated capability catalogues and refresh exact
+capability/provider-session bindings because the compact JSON Schema and its
+derived capability fingerprints change.
+
+The compact plan JSON is unchanged: callers still submit a `selections` array
+of exact public scalar paths plus typed relationship arguments and bounds. The
+schema now represents those paths as one closed string enum instead of a
+separate described `const` alternative per path. Public descriptions remain
+available through the canonical capability index, and relationship argument
+descriptions remain in the loaded schema.
+
+There is no database, data, GraphQL SDL, protected-content, backup, restore, or
+persistent AI schema-module migration. Resolver authorization, target policy,
+disclosure validation, and result budgets remain authoritative.
+
 ## 0.9.0 to 0.10.0: shape-aware discovery and record-cost metadata
 
 Adopt `graphql-orm-ai-tool-profiles` 0.10.0 with `graphql-orm-ai` 0.94.0 from
