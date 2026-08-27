@@ -656,8 +656,7 @@ mod service {
             let lease = lease.clone();
             let claim_principal_reference = lease.principal_reference().clone();
             let scope_for_insert = scope.clone();
-            let record = self
-                .database
+            self.database
                 .transaction(TransactionMode::StateMachine, move |tx| {
                     Box::pin(async move {
                         let current_run = load_and_validate_active_lease(tx, &lease, now).await?;
@@ -787,12 +786,12 @@ mod service {
                             now,
                         )
                         .await?;
-                        Ok(inserted)
+                        claim_from_record(&inserted, &claim_principal_reference)
+                            .map_err(ai_error_to_orm)
                     })
                 })
                 .await
-                .map_err(map_transaction)?;
-            claim_from_record(&record, &claim_principal_reference)
+                .map_err(map_transaction)
         }
 
         async fn rebind_for_run(
@@ -852,8 +851,7 @@ mod service {
             let scope_for_update = scope.clone();
             let lease = lease.clone();
             let claim_principal_reference = lease.principal_reference().clone();
-            let record = self
-                .database
+            self.database
                 .transaction(TransactionMode::StateMachine, move |tx| {
                     Box::pin(async move {
                         let current_run = load_and_validate_active_lease(tx, &lease, now).await?;
@@ -1022,12 +1020,12 @@ mod service {
                             now,
                         )
                         .await?;
-                        Ok(updated)
+                        claim_from_record(&updated, &claim_principal_reference)
+                            .map_err(ai_error_to_orm)
                     })
                 })
                 .await
-                .map_err(map_transaction)?;
-            claim_from_record(&record, &claim_principal_reference)
+                .map_err(map_transaction)
         }
 
         async fn claim_for_run(
@@ -1053,8 +1051,9 @@ mod service {
             let expected_transcript_fingerprint = expected_transcript_fingerprint.to_owned();
             let lease = lease.clone();
             let claim_principal_reference = lease.principal_reference().clone();
-            let record = self
-                .database
+            let serialized_principal_reference = serde_json::to_value(&claim_principal_reference)
+                .map_err(|_| AiError::PersistenceFailed)?;
+            self.database
                 .transaction(TransactionMode::StateMachine, move |tx| {
                     Box::pin(async move {
                         let run = load_and_validate_active_lease(tx, &lease, now).await?;
@@ -1116,6 +1115,8 @@ mod service {
                             .claim_generation
                             .checked_add(1)
                             .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        let principal_rotated =
+                            binding.principal_reference != serialized_principal_reference;
                         let outcome = tx
                             .compare_and_swap::<AiProviderSessionBindingRecord>(
                                 &binding.id,
@@ -1130,6 +1131,7 @@ mod service {
                                     ..Default::default()
                                 },
                                 UpdateAiProviderSessionBindingRecordInput {
+                                    principal_reference: Some(serialized_principal_reference),
                                     state: Some(
                                         AiProviderSessionState::Claimed.as_str().to_owned(),
                                     ),
@@ -1146,18 +1148,26 @@ mod service {
                             )
                             .await
                             .map_err(OrmPublicError::from)?;
-                        match outcome {
-                            ConditionalUpdateOutcome::Updated(updated) => Ok(updated),
-                            ConditionalUpdateOutcome::NotFound
-                            | ConditionalUpdateOutcome::Conflict => {
-                                Err(OrmPublicError::new(OrmErrorCode::Conflict))
-                            }
+                        let ConditionalUpdateOutcome::Updated(updated) = outcome else {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        };
+                        if principal_rotated {
+                            append_audit(
+                                tx,
+                                "ai.provider_session.principal_rotated",
+                                updated.id,
+                                "provider_session_current_principal_rotated",
+                                lease.run_id().0,
+                                now,
+                            )
+                            .await?;
                         }
+                        claim_from_record(&updated, &claim_principal_reference)
+                            .map_err(ai_error_to_orm)
                     })
                 })
                 .await
-                .map_err(map_transaction)?;
-            claim_from_record(&record, &claim_principal_reference)
+                .map_err(map_transaction)
         }
 
         async fn open_for_run(
@@ -1211,8 +1221,7 @@ mod service {
             let lease = lease.clone();
             let claim_principal_reference = lease.principal_reference().clone();
             let claim = claim.clone();
-            let record = self
-                .database
+            self.database
                 .transaction(TransactionMode::StateMachine, move |tx| {
                     Box::pin(async move {
                         load_and_validate_active_lease(tx, &lease, now).await?;
@@ -1234,18 +1243,15 @@ mod service {
                             )
                             .await
                             .map_err(OrmPublicError::from)?;
-                        match outcome {
-                            ConditionalUpdateOutcome::Updated(updated) => Ok(updated),
-                            ConditionalUpdateOutcome::NotFound
-                            | ConditionalUpdateOutcome::Conflict => {
-                                Err(OrmPublicError::new(OrmErrorCode::Conflict))
-                            }
-                        }
+                        let ConditionalUpdateOutcome::Updated(updated) = outcome else {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        };
+                        claim_from_record(&updated, &claim_principal_reference)
+                            .map_err(ai_error_to_orm)
                     })
                 })
                 .await
-                .map_err(map_transaction)?;
-            claim_from_record(&record, &claim_principal_reference)
+                .map_err(map_transaction)
         }
 
         async fn park_for_wait(
@@ -1682,8 +1688,9 @@ mod service {
                 .ok_or(AiError::Conflict)?;
             let lease = lease.clone();
             let principal_reference = lease.principal_reference().clone();
-            let record = self
-                .database
+            let serialized_principal_reference = serde_json::to_value(&principal_reference)
+                .map_err(|_| AiError::PersistenceFailed)?;
+            self.database
                 .transaction(TransactionMode::StateMachine, move |tx| {
                     Box::pin(async move {
                         let run = load_and_validate_active_lease(tx, &lease, now).await?;
@@ -1729,6 +1736,8 @@ mod service {
                             .claim_generation
                             .checked_add(1)
                             .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        let principal_rotated =
+                            binding.principal_reference != serialized_principal_reference;
                         let outcome = tx
                             .compare_and_swap::<AiProviderSessionBindingRecord>(
                                 &binding.id,
@@ -1743,6 +1752,7 @@ mod service {
                                     ..Default::default()
                                 },
                                 UpdateAiProviderSessionBindingRecordInput {
+                                    principal_reference: Some(serialized_principal_reference),
                                     state: Some(
                                         AiProviderSessionState::Claimed.as_str().to_owned(),
                                     ),
@@ -1771,12 +1781,22 @@ mod service {
                             now,
                         )
                         .await?;
-                        Ok(updated)
+                        if principal_rotated {
+                            append_audit(
+                                tx,
+                                "ai.provider_session.principal_rotated",
+                                updated.id,
+                                "provider_session_current_principal_rotated",
+                                lease.run_id().0,
+                                now,
+                            )
+                            .await?;
+                        }
+                        claim_from_record(&updated, &principal_reference).map_err(ai_error_to_orm)
                     })
                 })
                 .await
-                .map_err(map_transaction)?;
-            claim_from_record(&record, &principal_reference)
+                .map_err(map_transaction)
         }
 
         async fn commit_turn(

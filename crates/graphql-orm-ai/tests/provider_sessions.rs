@@ -1,8 +1,8 @@
 #![cfg(feature = "sqlite")]
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 
 use agql_auth::{
     AccessTokenMetadata, AuthPrincipal, AuthUser, Clock, CurrentPrincipalResolver, FixedClock,
@@ -73,7 +73,7 @@ fn protection_policy(scope: AiScope) -> AiContentProtectionPolicy {
 }
 
 struct PrincipalResolver {
-    principals: BTreeMap<String, AuthPrincipal>,
+    principals: Arc<RwLock<BTreeMap<String, AuthPrincipal>>>,
     active: Arc<AtomicBool>,
     clock: Arc<FixedClock>,
 }
@@ -89,6 +89,8 @@ impl CurrentPrincipalResolver for PrincipalResolver {
         }
         let principal = self
             .principals
+            .read()
+            .expect("principal test store should be available")
             .get(&reference.subject)
             .cloned()
             .ok_or(agql_auth::AuthError::Forbidden)?;
@@ -119,6 +121,7 @@ struct ProviderSessionFixture {
     other: AuthPrincipal,
     access_allowed: Arc<AtomicBool>,
     principal_active: Arc<AtomicBool>,
+    principals: Arc<RwLock<BTreeMap<String, AuthPrincipal>>>,
     clock: Arc<FixedClock>,
 }
 
@@ -153,11 +156,12 @@ async fn provider_session_fixture() -> ProviderSessionFixture {
     let protection_resolver: Arc<dyn AiContentProtectionPolicyResolver> =
         Arc::new(ProtectionPolicy);
     let content_protector: Arc<dyn AiContentProtector> = Arc::new(DatabaseManagedContentProtector);
+    let principals = Arc::new(RwLock::new(BTreeMap::from([
+        ("provider-session-owner".to_owned(), owner.clone()),
+        ("provider-session-other".to_owned(), other.clone()),
+    ])));
     let principal_resolver: Arc<dyn CurrentPrincipalResolver> = Arc::new(PrincipalResolver {
-        principals: BTreeMap::from([
-            ("provider-session-owner".to_owned(), owner.clone()),
-            ("provider-session-other".to_owned(), other.clone()),
-        ]),
+        principals: principals.clone(),
         active: principal_active.clone(),
         clock: clock.clone(),
     });
@@ -206,6 +210,7 @@ async fn provider_session_fixture() -> ProviderSessionFixture {
         other,
         access_allowed,
         principal_active,
+        principals,
         clock,
     }
 }
@@ -615,6 +620,90 @@ async fn settled_interrupt_advances_the_durable_watermark_and_reuses_the_thread(
         opened.cursor().expose_to_provider_adapter(),
         "settled-interrupt-thread"
     );
+}
+
+#[tokio::test]
+async fn provider_session_resume_atomically_rotates_a_fresh_current_principal() {
+    let fixture = provider_session_fixture().await;
+    let owner = fixture.owner.clone();
+    let first = active_run(&fixture, &owner, "principal-rotation-workspace").await;
+    let descriptor = AiProviderSessionDescriptor::new(
+        ProviderKind::LocalHarness,
+        "reviewed-local-profile",
+        "reviewed-model",
+        "a".repeat(64),
+        "codex-app-server/v2",
+        "b".repeat(64),
+    )
+    .expect("provider descriptor should validate");
+    let first_claim = fixture
+        .provider_sessions
+        .bind_for_run(
+            &first,
+            AiProviderSessionBindRequest::new(
+                descriptor.clone(),
+                AiProviderSessionCursor::new("codex.thread", "principal-rotation-thread")
+                    .expect("cursor should validate"),
+                "c".repeat(64),
+                Some(fixture.clock.now() + Duration::hours(1)),
+            )
+            .expect("bind request should validate"),
+        )
+        .await
+        .expect("initial principal should bind the empty provider session");
+    fixture
+        .cancellation
+        .request_cancellation(
+            &owner,
+            CancelAiRunInput {
+                session_id: first.session_id().0,
+                run_id: first.run_id().0,
+                client_request_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("owner cancellation should become durable");
+    let active = fixture
+        .provider_sessions
+        .settle_interrupted_turn(&first, AiRunInterruptSettlement::Settled)
+        .await
+        .expect("settled empty turn should release the retained provider session");
+    assert_eq!(active.state(), AiProviderSessionState::Active);
+
+    let refreshed_owner = principal(owner.subject());
+    assert_ne!(owner.reference(), refreshed_owner.reference());
+    fixture
+        .principals
+        .write()
+        .expect("principal test store should be available")
+        .insert(owner.subject().to_owned(), refreshed_owner.clone());
+    let next = next_active_run(&fixture, &refreshed_owner, first.session_id()).await;
+
+    fixture.access_allowed.store(false, Ordering::SeqCst);
+    assert!(matches!(
+        fixture
+            .provider_sessions
+            .claim_for_run(&next, &descriptor, active.transcript_fingerprint())
+            .await,
+        Err(AiError::Forbidden)
+    ));
+    fixture.access_allowed.store(true, Ordering::SeqCst);
+
+    let refreshed_claim = fixture
+        .provider_sessions
+        .claim_for_run(&next, &descriptor, active.transcript_fingerprint())
+        .await
+        .expect("freshly authorized owner reference should atomically claim the same thread");
+    let opened = fixture
+        .provider_sessions
+        .open_for_run(&next, &refreshed_claim)
+        .await
+        .expect("rotated claim should open under the fresh run fence");
+    assert_eq!(
+        opened.cursor().expose_to_provider_adapter(),
+        "principal-rotation-thread"
+    );
+    assert_ne!(first_claim.run_id(), refreshed_claim.run_id());
 }
 
 #[tokio::test]

@@ -235,8 +235,14 @@ provisional history, not proof of a completed assistant message; see the
 [live-streaming guide](live-streaming.md).
 
 Durable provider-session cursors are protected state, never authority. A row
-binds exact owner/scope/principal, provider profile/model/protocol/
+binds an exact stable owner/scope and the latest freshly authorized run
+principal reference, plus provider profile/model/protocol/
 registration/policy identity, transcript watermark, and run claim generation.
+After current-principal resolution and owner/scope/access proofs, a new run may
+atomically rotate only that safe principal reference; credential refresh is
+not authority transfer. A different owner or scope and every stale fence fail
+before a claim commits, and claim-proof construction is part of the same
+transaction so an error cannot strand an unowned claimed row.
 An ambiguous or cancelled turn is invalidated for cleanup rather than resumed.
 Successful cleanup clears the cursor into an exact absence-proven `Deleted`
 tombstone. A later current-authority run may replace only that exact

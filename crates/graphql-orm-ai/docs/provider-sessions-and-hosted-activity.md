@@ -481,7 +481,8 @@ returns the existing reset-required signal.
 `OrmAiProviderSessionService` owns one private binding row per AI session. It
 stores a content-protected opaque cursor plus:
 
-- owner principal reference, tenant, and scope;
+- durable owner identity, tenant and scope, plus the latest freshly authorized
+  run principal reference;
 - provider kind/profile/model;
 - executable or adapter registration fingerprint and protocol version;
 - host policy fingerprint;
@@ -508,12 +509,22 @@ enforce this creation order:
 
 Later-run resume uses `claim_for_run` and then `open_for_run`. Both require the exact
 descriptor and transcript evidence, current principal/session/scope access,
-and current run fence. Its provider adapter performs the strict
+and current run fence. After those proofs, `claim_for_run` atomically rotates
+the stored safe principal reference to the current run reference while keeping
+the stable owner and exact scope unchanged. A credential or login-session
+refresh for that same authorized owner therefore does not reset provider
+context. Revocation, a different owner or scope, or any stale fence fails
+before the row becomes claimed. Its provider adapter performs the strict
 `thread/resume` response/notification lifecycle before `turn/start`; it cannot
 reuse the one-shot newly-bound activation. A crash, cancellation, protocol error, ambiguous
 provider state, output-persistence failure, policy/profile/model/executable
 drift, or rejected cursor calls `require_cleanup`; v1 never guesses provider
 state or advances a watermark from incomplete evidence.
+
+Every mutating path constructs its private claim proof and appends any required
+redacted audit inside the same state-machine transaction. A construction or
+audit failure rolls the mutation back; it cannot commit a claimed or renewed
+row that the caller has no exact proof to clean up.
 
 `disposition_for_run` is the authoritative planning boundary. It reports
 `New`, exact `Resume`, `Unavailable`, or `RebindAllowed`; hosts must not infer
