@@ -18,6 +18,38 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.95.7] - 2026-08-27
+
+Persistent schema module: **0.64.0** (advanced from 0.63.0).
+
+### Fixed
+
+- A later retained provider turn now atomically adopts the freshly authorized
+  run principal reference after proving the same durable session owner and
+  scope. Credential or login-session rotation for that owner no longer turns
+  a valid conversation binding into an unrecoverable claimed row.
+- Bind, rebind, ordinary claim, claim heartbeat, and wait reclaim now
+  materialize their exact private claim proof inside the state-machine
+  transaction. Any claim-construction or audit failure rolls back the state
+  mutation instead of stranding a row behind a proof the caller never
+  received.
+
+### Security
+
+- Principal rotation is not identity or authority transfer. Every run still
+  resolves the current credential, proves the durable owner and exact scope,
+  applies current access and content-protection policy, and wins the exact
+  run and binding fences before the stored safe reference changes. Different
+  owners, scopes, stale fences, revoked authority, malformed records, and
+  concurrent claim attempts remain rejected.
+- The rotation audit contains only stable binding/run identifiers and a closed
+  reason code; it records no token, cursor, prompt, result, role, or scope
+  content.
+
+The schema module advances because the durable principal-reference semantics
+change. There is no entity, table, column, index, constraint, protected-
+payload, GraphQL SDL, backup, restore, or data backfill migration.
+
 ## [0.95.6] - 2026-08-27
 
 Persistent schema module: **0.63.0** (unchanged from 0.95.5).

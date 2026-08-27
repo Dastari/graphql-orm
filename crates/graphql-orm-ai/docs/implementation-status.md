@@ -3,15 +3,15 @@ title: "Implementation Status"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-23
+last_reviewed: 2026-08-27
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.95.3` with AI schema module
-`0.63.0`. It uses workspace `graphql-orm` `0.26.0`, backend-neutral
+`graphql-orm-ai` is at crate version `0.95.7` with AI schema module
+`0.64.0`. It uses workspace `graphql-orm` `0.27.0`, backend-neutral
 `graphql-orm-ai-tool-profiles` `0.10.0`, and external `agql-auth`
 `0.18.0` at `527d15d28e3c295a6f6b5e6d74559a7aecdc1322`.
 

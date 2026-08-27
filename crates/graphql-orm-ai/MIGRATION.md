@@ -19,6 +19,27 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.95.6 to 0.95.7: current-principal retained-session rotation
+
+Adopt `graphql-orm-ai` 0.95.7 from one reviewed full monorepo revision. No host
+API or configuration change is required. A retained provider-session claim now
+atomically replaces its stored safe principal reference with the freshly
+resolved current run reference after the service proves the same durable
+session owner, exact scope, current access and protection policy, and run and
+binding fences. A refreshed credential or login session for the same
+authorized owner can therefore continue the retained provider thread.
+
+Hosts must continue treating principal references as safe rehydration inputs,
+not authority snapshots. Different owner/scope identity, revoked authority,
+stale or concurrent fences, and failed current-principal resolution still fail
+closed before a claim commits. Claim proof construction and redacted rotation
+audit now occur inside each mutating state-machine transaction, so failure
+rolls back instead of leaving an unowned `claimed` row.
+
+The AI schema module advances **0.63.0 to 0.64.0** for the changed persistent
+binding semantics. There is no entity, table, column, index, constraint,
+protected-payload, GraphQL SDL, backup, restore, or data backfill migration.
+
 ## 0.95.5 to 0.95.6: incomplete Codex web-search result metadata
 
 Adopt `graphql-orm-ai` 0.95.6 from one reviewed full monorepo revision. Hosts
