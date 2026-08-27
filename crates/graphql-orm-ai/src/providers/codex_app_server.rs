@@ -3114,12 +3114,12 @@ pub enum AiCodexAppServerWebSearchAction {
     },
     /// Open one provider-selected result page.
     OpenPage {
-        /// Optional HTTPS page URL.
+        /// Optional bounded provider-observed HTTP or HTTPS page URL.
         url: Option<String>,
     },
     /// Find one pattern in a provider-selected page.
     FindInPage {
-        /// Optional HTTPS page URL.
+        /// Optional bounded provider-observed HTTP or HTTPS page URL.
         url: Option<String>,
         /// Optional bounded pattern.
         pattern: Option<String>,
@@ -3387,6 +3387,7 @@ pub struct AiCodexAppServerProtocolActor {
     retained_reasoning_effort: Option<ModelReasoningEffort>,
     retained_bootstrap_fingerprint: Option<String>,
     thread_web_search_domain_policy: Option<ModelWebSearchDomainPolicy>,
+    thread_web_search_maximum_calls: Option<u64>,
     active_web_search_maximum_calls: Option<u64>,
     started_web_search_calls: u64,
     dynamic_tools: BTreeMap<String, ModelToolDefinition>,
@@ -3434,6 +3435,7 @@ impl AiCodexAppServerProtocolActor {
             retained_reasoning_effort: None,
             retained_bootstrap_fingerprint: None,
             thread_web_search_domain_policy: None,
+            thread_web_search_maximum_calls: None,
             active_web_search_maximum_calls: None,
             started_web_search_calls: 0,
             dynamic_tools: BTreeMap::new(),
@@ -3607,11 +3609,10 @@ impl AiCodexAppServerProtocolActor {
         {
             return Err(ProviderError::Rejected);
         }
-        let developer_instructions = if input.instructions().is_empty() {
-            Value::Null
-        } else {
-            Value::String(input.instructions().join("\n\n"))
-        };
+        let developer_instructions = developer_instructions_with_web_search_limit(
+            (!input.instructions().is_empty()).then(|| input.instructions().join("\n\n")),
+            input.web_search(),
+        );
         let frame = self.request(
             ClientMethod::ThreadStart,
             "thread/start",
@@ -3629,6 +3630,8 @@ impl AiCodexAppServerProtocolActor {
         self.thread_web_search_domain_policy = input
             .web_search()
             .map(|search| search.domain_policy().clone());
+        self.thread_web_search_maximum_calls =
+            input.web_search().map(|search| search.maximum_calls());
         Ok(frame)
     }
 
@@ -3659,8 +3662,10 @@ impl AiCodexAppServerProtocolActor {
     /// web-search configuration.
     ///
     /// Search remains disabled when `web_search` is `None`. The supplied
-    /// domain policy is frozen into the thread and must match every retained
-    /// turn on that cursor.
+    /// domain policy and call ceiling are frozen into the thread and must
+    /// match every retained turn on that cursor. The ceiling is also included
+    /// in trusted developer instructions while the actor independently
+    /// enforces it.
     pub fn start_persistent_empty_thread_with_web_search(
         &mut self,
         model: &str,
@@ -3686,7 +3691,10 @@ impl AiCodexAppServerProtocolActor {
         let projected_tools = project_codex_dynamic_tools(dynamic_tools)?;
         let mut params = json!({
             "model": model,
-            "developerInstructions": bootstrap.joined().map_or(Value::Null, Value::String),
+            "developerInstructions": developer_instructions_with_web_search_limit(
+                bootstrap.joined(),
+                web_search,
+            ),
             "ephemeral": false,
             "approvalPolicy": "never",
             "sandbox": "read-only",
@@ -3707,6 +3715,8 @@ impl AiCodexAppServerProtocolActor {
         self.retained_bootstrap_fingerprint = Some(bootstrap.fingerprint().to_owned());
         self.thread_web_search_domain_policy =
             web_search.map(|search| search.domain_policy().clone());
+        self.thread_web_search_maximum_calls =
+            web_search.map(AiCodexAppServerWebSearchTurnConfig::maximum_calls);
         self.dynamic_tools = projected_tools.definitions;
         self.dynamic_tool_projection_fingerprints = projected_tools.fingerprints;
         Ok(frame)
@@ -3757,15 +3767,16 @@ impl AiCodexAppServerProtocolActor {
                 != input
                     .web_search()
                     .map(|search| search.domain_policy().clone())
+            || self.thread_web_search_maximum_calls
+                != input.web_search().map(|search| search.maximum_calls())
         {
             return Err(ProviderError::Rejected);
         }
         let projected_tools = project_codex_dynamic_tools(input.tools())?;
-        let developer_instructions = if input.instructions().is_empty() {
-            Value::Null
-        } else {
-            Value::String(input.instructions().join("\n\n"))
-        };
+        let developer_instructions = developer_instructions_with_web_search_limit(
+            (!input.instructions().is_empty()).then(|| input.instructions().join("\n\n")),
+            input.web_search(),
+        );
         if self.retained_model.is_some()
             && (self.dynamic_tools != projected_tools.definitions
                 || self.dynamic_tool_projection_fingerprints != projected_tools.fingerprints)
@@ -3794,6 +3805,8 @@ impl AiCodexAppServerProtocolActor {
         self.thread_web_search_domain_policy = input
             .web_search()
             .map(|search| search.domain_policy().clone());
+        self.thread_web_search_maximum_calls =
+            input.web_search().map(|search| search.maximum_calls());
         self.dynamic_tools = projected_tools.definitions;
         self.dynamic_tool_projection_fingerprints = projected_tools.fingerprints;
         Ok(frame)
@@ -3851,11 +3864,10 @@ impl AiCodexAppServerProtocolActor {
             return Err(ProviderError::Rejected);
         }
         let projected_tools = project_codex_dynamic_tools(input.tools())?;
-        let developer_instructions = if input.instructions().is_empty() {
-            Value::Null
-        } else {
-            Value::String(input.instructions().join("\n\n"))
-        };
+        let developer_instructions = developer_instructions_with_web_search_limit(
+            (!input.instructions().is_empty()).then(|| input.instructions().join("\n\n")),
+            input.web_search(),
+        );
         let frame = self.request(
             ClientMethod::ThreadStart,
             "thread/start",
@@ -3875,6 +3887,8 @@ impl AiCodexAppServerProtocolActor {
         self.thread_web_search_domain_policy = input
             .web_search()
             .map(|search| search.domain_policy().clone());
+        self.thread_web_search_maximum_calls =
+            input.web_search().map(|search| search.maximum_calls());
         self.dynamic_tools = projected_tools.definitions;
         self.dynamic_tool_projection_fingerprints = projected_tools.fingerprints;
         Ok(frame)
@@ -4010,6 +4024,8 @@ impl AiCodexAppServerProtocolActor {
                 != input
                     .web_search()
                     .map(|search| search.domain_policy().clone())
+            || self.thread_web_search_maximum_calls
+                != input.web_search().map(|search| search.maximum_calls())
             || self.active_web_search_maximum_calls.is_some()
             || self.started_web_search_calls != 0
         {
@@ -4273,6 +4289,7 @@ impl AiCodexAppServerProtocolActor {
             if self.retained_model.is_none() {
                 self.retained_reasoning_effort = None;
                 self.thread_web_search_domain_policy = None;
+                self.thread_web_search_maximum_calls = None;
                 self.dynamic_tools.clear();
                 self.dynamic_tool_projection_fingerprints.clear();
             }
@@ -4661,6 +4678,7 @@ impl AiCodexAppServerProtocolActor {
                 self.retained_reasoning_effort = None;
                 self.retained_bootstrap_fingerprint = None;
                 self.thread_web_search_domain_policy = None;
+                self.thread_web_search_maximum_calls = None;
                 self.active_web_search_maximum_calls = None;
                 self.started_web_search_calls = 0;
                 self.dynamic_tools.clear();
@@ -5081,6 +5099,27 @@ fn initialization_capabilities(experimental_api: bool) -> Value {
     Value::Object(capabilities)
 }
 
+fn developer_instructions_with_web_search_limit(
+    base: Option<String>,
+    web_search: Option<&AiCodexAppServerWebSearchTurnConfig>,
+) -> Value {
+    let Some(web_search) = web_search else {
+        return base.map_or(Value::Null, Value::String);
+    };
+    let limit = format!(
+        "Hosted web search is limited to at most {} calls in each user turn. Stop searching and answer from the available evidence before reaching that limit.",
+        web_search.maximum_calls()
+    );
+    Value::String(match base {
+        Some(mut base) => {
+            base.push_str("\n\n");
+            base.push_str(&limit);
+            base
+        }
+        None => limit,
+    })
+}
+
 fn closed_thread_config(web_search: Option<&AiCodexAppServerWebSearchTurnConfig>) -> Value {
     let mut config = serde_json::Map::new();
     for feature in DYNAMIC_TOOLS_ONLY_DISABLED_FEATURES {
@@ -5208,7 +5247,7 @@ fn validate_optional_web_search_url(
     let Some(value) = bounded_optional_web_search_string(value)? else {
         return Ok(None);
     };
-    validate_web_search_url(&value, None, domain_policy)?;
+    validate_observed_web_search_url(&value, None, domain_policy)?;
     Ok(Some(value))
 }
 
@@ -5242,29 +5281,46 @@ fn parse_web_search_results(
         if object.get("type").and_then(Value::as_str) != Some("text_result") {
             continue;
         }
-        let required = |key: &str| {
-            object
-                .get(key)
-                .and_then(Value::as_str)
-                .filter(|value| {
-                    value.len() <= MAXIMUM_WEB_SEARCH_FIELD_BYTES && !value.contains('\0')
-                })
-                .ok_or(ProviderError::Rejected)
+        let bounded = |key: &str| {
+            object.get(key).and_then(Value::as_str).filter(|value| {
+                value.len() <= MAXIMUM_WEB_SEARCH_FIELD_BYTES && !value.contains('\0')
+            })
         };
-        let domain = required("domain")?;
-        if domain != domain.to_ascii_lowercase()
-            || !crate::provider::valid_web_domain(domain)
-            || !web_search_domain_allowed(domain, domain_policy)
+        let domain = bounded("domain");
+        if let Some(domain) = domain
+            && (domain != domain.to_ascii_lowercase()
+                || !crate::provider::valid_web_domain(domain)
+                || !web_search_domain_allowed(domain, domain_policy))
         {
             return Err(ProviderError::Rejected);
         }
-        let url = required("url")?;
-        validate_web_search_url(url, Some(domain), domain_policy)?;
-        let title = required("title")?;
-        let snippet = required("snippet")?;
-        let reference_id = required("ref_id")?;
+        let url = bounded("url");
+        if let Some(url) = url {
+            validate_observed_web_search_url(url, domain, domain_policy)?;
+        }
+        // Codex keeps result records opaque and may emit a partial text result
+        // for a completed attempt that found no retrievable page. Such a
+        // record remains available to the provider's own model context, but
+        // it is not promoted to trusted host metadata. Present domain/URL
+        // fields were still policy-checked above.
+        let (Some(domain), Some(url), Some(title), Some(snippet), Some(reference_id)) = (
+            domain,
+            url,
+            bounded("title"),
+            bounded("snippet"),
+            bounded("ref_id"),
+        ) else {
+            continue;
+        };
         if !valid_reference(reference_id) {
             return Err(ProviderError::Rejected);
+        }
+        if url::Url::parse(url)
+            .map_err(|_| ProviderError::Rejected)?
+            .scheme()
+            != "https"
+        {
+            continue;
         }
         results.push(AiCodexAppServerWebSearchResult {
             domain: domain.to_owned(),
@@ -5277,7 +5333,7 @@ fn parse_web_search_results(
     Ok(results)
 }
 
-fn validate_web_search_url(
+fn validate_observed_web_search_url(
     value: &str,
     expected_domain: Option<&str>,
     domain_policy: &ModelWebSearchDomainPolicy,
@@ -5287,7 +5343,7 @@ fn validate_web_search_url(
         .host_str()
         .filter(|domain| crate::provider::valid_web_domain(domain))
         .ok_or(ProviderError::Rejected)?;
-    if parsed.scheme() != "https"
+    if !matches!(parsed.scheme(), "http" | "https")
         || !parsed.username().is_empty()
         || parsed.password().is_some()
         || expected_domain.is_some_and(|expected| expected != domain)
@@ -6114,12 +6170,23 @@ pub(crate) mod tests {
 
     impl LiveCodexProcess {
         fn launch(executable: &str, root: PathBuf) -> Self {
+            Self::launch_with_profile(
+                executable,
+                root,
+                AiCodexAppServerLaunchProfile::experimental_dynamic_tools_only_v1(
+                    AiCodexAppServerModelToolMode::Direct,
+                )
+                .expect("direct-tool live profile should validate"),
+            )
+        }
+
+        fn launch_with_profile(
+            executable: &str,
+            root: PathBuf,
+            profile: AiCodexAppServerLaunchProfile,
+        ) -> Self {
             assert!(root.is_absolute());
             assert!(root.is_dir());
-            let profile = AiCodexAppServerLaunchProfile::experimental_dynamic_tools_only_v1(
-                AiCodexAppServerModelToolMode::Direct,
-            )
-            .expect("direct-tool live profile should validate");
             let mut command = Command::new(executable);
             command.args(profile.codex_arguments());
             let mut child = command
@@ -11290,10 +11357,35 @@ pub(crate) mod tests {
             frame.pointer("/params/config/tools.web_search.allowed_domains"),
             Some(&json!(["example.com"]))
         );
+        assert_eq!(actor.thread_web_search_maximum_calls, Some(2));
+        assert!(
+            frame
+                .pointer("/params/developerInstructions")
+                .and_then(Value::as_str)
+                .is_some_and(|instructions| instructions.contains("at most 2 calls"))
+        );
         assert_eq!(
             frame.pointer("/params/config/features.shell_tool"),
             Some(&Value::Bool(false))
         );
+        actor
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
+            .expect("thread response should bind");
+        actor
+            .accept(&thread_started_notification("thread-1"))
+            .expect("thread notification should bind");
+        let changed_ceiling = web_search_turn(
+            ModelWebSearchDomainPolicy::allowed_domains(vec!["example.com".to_owned()])
+                .expect("allow-domain policy should validate"),
+            3,
+        );
+        assert!(matches!(
+            actor.start_turn("thread-1", &changed_ceiling),
+            Err(ProviderError::InvalidRequest)
+        ));
+        actor
+            .start_turn("thread-1", &input)
+            .expect("the frozen ceiling should remain usable");
 
         let disabled = initialized_protocol_actor()
             .start_fresh_thread(&turn())
@@ -11477,6 +11569,110 @@ pub(crate) mod tests {
             }
             other => panic!("unexpected inbound: {other:?}"),
         }
+    }
+
+    #[test]
+    fn native_web_search_admits_completed_attempt_without_retrievable_page_metadata() {
+        let policy = ModelWebSearchDomainPolicy::allowed_domains(vec!["example.com".to_owned()])
+            .expect("allow-domain policy should validate");
+        let mut actor = active_web_search_protocol_actor(policy, 1);
+        actor
+            .accept(&lifecycle_notification(
+                "item/started",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "startedAtMs": 1,
+                    "item": {"action": null, "id": "search-1", "query": "", "results": null, "type": "webSearch"}
+                }),
+            ))
+            .expect("web-search start should be admitted");
+        let completed = actor
+            .accept(&lifecycle_notification(
+                "item/completed",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "completedAtMs": 2,
+                    "item": {
+                        "action": {"type": "openPage", "url": "http://example.com/missing"},
+                        "id": "search-1",
+                        "query": "https://example.com/missing",
+                        "results": [{
+                            "ref_id": "turn0view0",
+                            "snippet": "The requested page could not be retrieved.",
+                            "title": "Unavailable page",
+                            "type": "text_result"
+                        }],
+                        "type": "webSearch"
+                    }
+                }),
+            ))
+            .expect("a completed attempt with opaque partial metadata should be admitted");
+        match completed {
+            AiCodexAppServerInbound::WebSearchLifecycle {
+                action,
+                results,
+                completed,
+                ..
+            } => {
+                assert_eq!(
+                    action,
+                    Some(AiCodexAppServerWebSearchAction::OpenPage {
+                        url: Some("http://example.com/missing".to_owned())
+                    })
+                );
+                assert!(results.is_empty());
+                assert!(completed);
+            }
+            other => panic!("unexpected inbound: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn native_web_search_partial_results_still_enforce_present_domain_and_url_policy() {
+        let policy = ModelWebSearchDomainPolicy::allowed_domains(vec!["example.com".to_owned()])
+            .expect("allow-domain policy should validate");
+        for result in [
+            json!({
+                "domain": "outside.test",
+                "snippet": "No retrievable page.",
+                "type": "text_result"
+            }),
+            json!({
+                "snippet": "No retrievable page.",
+                "type": "text_result",
+                "url": "https://outside.test/missing"
+            }),
+        ] {
+            assert!(matches!(
+                parse_web_search_results(Some(&json!([result])), &policy),
+                Err(ProviderError::Rejected)
+            ));
+        }
+        assert!(matches!(
+            parse_web_search_action(
+                Some(&json!({"type": "openPage", "url": "ftp://example.com/file"})),
+                "",
+                &policy,
+            ),
+            Err(ProviderError::Rejected)
+        ));
+        assert_eq!(
+            parse_web_search_results(
+                Some(&json!([{
+                    "domain": "example.com",
+                    "ref_id": "turn0view0",
+                    "snippet": "Observed over HTTP.",
+                    "title": "Observed page",
+                    "type": "text_result",
+                    "url": "http://example.com/page"
+                }])),
+                &policy,
+            )
+            .expect("bounded in-policy HTTP metadata should remain opaque"),
+            Vec::new()
+        );
     }
 
     #[test]
@@ -13259,5 +13455,214 @@ pub(crate) mod tests {
             }
         }
         assert!(delete_response_observed);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires the reviewed Codex CLI 0.148.0 binary and disposable configured home"]
+    async fn live_codex_0148_unreachable_url_web_search_uses_strict_actor() {
+        let executable = std::env::var("GRAPHQL_ORM_AI_CODEX_0148_BIN")
+            .expect("set GRAPHQL_ORM_AI_CODEX_0148_BIN to the reviewed absolute binary path");
+        assert!(PathBuf::from(&executable).is_absolute());
+        let version = Command::new(&executable)
+            .arg("--version")
+            .env_clear()
+            .output()
+            .expect("reviewed Codex version should execute");
+        assert!(version.status.success());
+        assert_eq!(
+            String::from_utf8(version.stdout)
+                .expect("version should be UTF-8")
+                .trim(),
+            "codex-cli 0.148.0"
+        );
+
+        let configured_home = PathBuf::from(
+            std::env::var_os("GRAPHQL_ORM_AI_CODEX_0148_HOME")
+                .expect("set GRAPHQL_ORM_AI_CODEX_0148_HOME to a disposable configured home"),
+        );
+        let profile = AiCodexAppServerLaunchProfile::experimental_dynamic_tools_only_v1(
+            AiCodexAppServerModelToolMode::Direct,
+        )
+        .expect("direct-tool live profile should validate")
+        .with_web_search(true);
+        let mut process =
+            LiveCodexProcess::launch_with_profile(&executable, configured_home, profile);
+        let mut actor =
+            AiCodexAppServerProtocolActor::new(MAXIMUM_FRAME_BYTES).expect("actor should validate");
+        process.send(
+            &actor
+                .initialize_with_dynamic_tools(
+                    "graphql_orm_ai_live_test",
+                    "GraphQL ORM AI live test",
+                    "0.148.0",
+                )
+                .expect("initialize should encode"),
+        );
+        loop {
+            match actor
+                .accept(&process.receive())
+                .expect("initialization frame should be strictly admitted")
+            {
+                AiCodexAppServerInbound::Response {
+                    method: "initialize",
+                    ..
+                } => break,
+                AiCodexAppServerInbound::RemoteControlDisabled => {}
+                other => panic!("unexpected initialization frame: {other:?}"),
+            }
+        }
+        process.send(
+            &actor
+                .initialized()
+                .expect("initialized notification should encode"),
+        );
+
+        let bootstrap = bootstrap_instructions();
+        let mut request = dynamic_model_request();
+        request.model = "gpt-5.6-luna".to_owned();
+        request.reasoning_effort = ModelReasoningEffort::XHigh;
+        request.input = vec![ModelInputBlock::Text {
+            text: std::env::var("GRAPHQL_ORM_AI_CODEX_0148_WEB_SEARCH_PROMPT").unwrap_or_else(
+                |_| {
+                    "Tell me about the public site https://host-that-does-not-exist.invalid/"
+                        .to_owned()
+                },
+            ),
+        }];
+        request.builtin_tools = vec![ModelBuiltinTool::WebSearch {
+            domains: ModelWebSearchDomainPolicy::PublicWeb,
+        }];
+        request.maximum_builtin_tool_calls = Some(8);
+        request.maximum_output_tokens = Some(512);
+        let input =
+            AiCodexAppServerTurnInput::try_from_retained_dynamic_request(request, &bootstrap)
+                .expect("retained web-search input should validate");
+        process.send(
+            &actor
+                .start_persistent_empty_thread_with_web_search(
+                    input.model(),
+                    input.reasoning_effort(),
+                    &bootstrap,
+                    input.tools(),
+                    input.web_search(),
+                )
+                .expect("persistent web-search thread should encode"),
+        );
+        let mut response_thread_id = None;
+        let mut notification_thread_id = None;
+        for _ in 0..8 {
+            match actor
+                .accept(&process.receive())
+                .expect("thread frame should be admitted")
+            {
+                AiCodexAppServerInbound::Response {
+                    method: "thread/start",
+                    result,
+                    ..
+                } => {
+                    response_thread_id = Some(
+                        nested_reference(&result, "thread", "id")
+                            .expect("response thread identity should validate")
+                            .to_owned(),
+                    );
+                }
+                AiCodexAppServerInbound::Notification { method, params }
+                    if method == "thread/started" =>
+                {
+                    notification_thread_id = Some(
+                        nested_reference(&params, "thread", "id")
+                            .expect("notification thread identity should validate")
+                            .to_owned(),
+                    );
+                }
+                AiCodexAppServerInbound::RemoteControlDisabled => {}
+                other => panic!("unexpected thread frame: {other:?}"),
+            }
+            if response_thread_id.is_some() && notification_thread_id.is_some() {
+                break;
+            }
+        }
+        assert_eq!(response_thread_id, notification_thread_id);
+        let thread_id = response_thread_id.expect("both thread lifecycle frames should arrive");
+        process.send(
+            &actor
+                .start_turn(&thread_id, &input)
+                .expect("web-search turn should encode"),
+        );
+
+        let mut completed_searches = 0_u32;
+        let mut turn_completed = false;
+        for _ in 0..1_024 {
+            let frame = process.receive();
+            let envelope: Value =
+                serde_json::from_slice(&frame).expect("web-search frame should remain valid JSON");
+            let inbound = actor.accept(&frame).unwrap_or_else(|error| {
+                let item = envelope.pointer("/params/item");
+                let item_keys = item
+                    .and_then(Value::as_object)
+                    .map(|object| object.keys().cloned().collect::<Vec<_>>());
+                let action = item.and_then(|item| item.get("action"));
+                let action_keys = action
+                    .and_then(Value::as_object)
+                    .map(|object| object.keys().cloned().collect::<Vec<_>>());
+                let action_url = action.and_then(|action| action.get("url"));
+                let action_url_shape = action_url.map(|url| {
+                    let parsed = url.as_str().and_then(|url| url::Url::parse(url).ok());
+                    (
+                        match url {
+                            Value::Null => "null",
+                            Value::String(_) => "string",
+                            _ => "other",
+                        },
+                        url.as_str().map(str::len),
+                        parsed.as_ref().map(url::Url::scheme).map(str::to_owned),
+                    )
+                });
+                let result_shapes = item
+                    .and_then(|item| item.get("results"))
+                    .and_then(Value::as_array)
+                    .map(|results| {
+                        results
+                            .iter()
+                            .map(|result| {
+                                (
+                                    result.get("type").and_then(Value::as_str).map(str::to_owned),
+                                    result
+                                        .as_object()
+                                        .map(|object| object.keys().cloned().collect::<Vec<_>>()),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                panic!(
+                    "web-search frame was rejected: {error:?}; method={:?}; item_type={:?}; item_keys={item_keys:?}; action_type={:?}; action_keys={action_keys:?}; action_url_shape={action_url_shape:?}; query_bytes={:?}; result_shapes={result_shapes:?}; started_searches={}; maximum_searches={:?}",
+                    envelope.get("method").and_then(Value::as_str),
+                    item.and_then(|item| item.get("type")).and_then(Value::as_str),
+                    action.and_then(|action| action.get("type")).and_then(Value::as_str),
+                    item.and_then(|item| item.get("query")).and_then(Value::as_str).map(str::len),
+                    actor.started_web_search_calls,
+                    actor.active_web_search_maximum_calls,
+                );
+            });
+            match inbound {
+                AiCodexAppServerInbound::WebSearchLifecycle {
+                    completed: true, ..
+                } => completed_searches += 1,
+                AiCodexAppServerInbound::Notification { ref method, .. }
+                    if method == "turn/completed" =>
+                {
+                    turn_completed = true;
+                    break;
+                }
+                AiCodexAppServerInbound::Response { .. }
+                | AiCodexAppServerInbound::Notification { .. }
+                | AiCodexAppServerInbound::WebSearchLifecycle { .. }
+                | AiCodexAppServerInbound::ReasoningLifecycle { .. }
+                | AiCodexAppServerInbound::RuntimeWarning => {}
+                other => panic!("unexpected web-search frame: {other:?}"),
+            }
+        }
+        assert!(turn_completed);
+        assert!(completed_searches > 0);
     }
 }

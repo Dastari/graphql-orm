@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-23
+last_reviewed: 2026-08-27
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -18,6 +18,26 @@ Migration entries preserve the dependency and schema facts for the checkpoint
 they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## 0.95.5 to 0.95.6: incomplete Codex web-search result metadata
+
+Adopt `graphql-orm-ai` 0.95.6 from one reviewed full monorepo revision. Hosts
+need no API or configuration change. A schema-valid completed search attempt
+may now carry an opaque text-result record without domain or URL metadata when
+no page was retrievable, and its provider-observed page action may use bounded
+credential-free HTTP. The completed call remains observable, while incomplete
+and non-HTTPS records are omitted from the existing structured result vector.
+The existing host-authored call ceiling is also frozen into each retained
+thread and supplied as a trusted model instruction; no new configuration is
+required.
+
+The opaque array remains count- and byte-bounded. Present action and result
+URLs must use HTTP or HTTPS without credentials and satisfy normalized-host
+and active domain-policy validation before completion is admitted. Only
+complete HTTPS records with valid references become typed host metadata. The
+actor remains authoritative over the call ceiling. The AI schema module
+remains **0.63.0**; there is no database, data, GraphQL SDL, protected-payload,
+backup, or restore migration.
 
 ## 0.95.4 to 0.95.5: schema-compatible Codex notification envelopes
 

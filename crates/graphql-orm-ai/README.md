@@ -3,7 +3,7 @@ title: "graphql-orm-ai"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-23
+last_reviewed: 2026-08-27
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.95.5", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.95.6", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -171,9 +171,15 @@ completion event. Completion queries follow the action contract, so non-search
 actions may report an empty query. The provider's opaque result array is
 bounded as a whole; recognized text results retain strict HTTPS,
 normalized-domain, allow-domain, reference, and field-size validation, while
-unrecognized result types and unexposed extension fields do not become host
-metadata. Reverify both direct delivery and the negative native-item matrix
-before upgrading Codex.
+unrecognized result types, unexposed extension fields, and incomplete records
+without success-only domain or URL metadata do not become host metadata.
+Provider-observed page actions may contain bounded credential-free HTTP or
+HTTPS URLs; present domains and URLs remain policy-checked even on an
+incomplete record, and only complete HTTPS results become structured host
+metadata. The host-authored per-turn call ceiling is frozen into retained
+thread state, supplied as a trusted model instruction, and independently
+enforced by the actor. Reverify both direct delivery and the negative native-
+item matrix before upgrading Codex.
 
 The Codex schema projector preserves bounded nullable scalar `type` arrays in
 the crate-authored FixedBroker definitions. It does not pass through arbitrary
