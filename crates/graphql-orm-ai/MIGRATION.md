@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-27
+last_reviewed: 2026-08-28
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -18,6 +18,24 @@ Migration entries preserve the dependency and schema facts for the checkpoint
 they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## 0.95.7 to 0.95.8: detached retained-session cleanup
+
+Adopt `graphql-orm-ai` 0.95.8 from one reviewed full monorepo revision. No host
+API or configuration change is required. A cleanup service may now launch a
+fresh initialized Codex app-server process and delete the exact protected
+retained-thread cursor without first resuming it. A successful empty correlated
+response authoritatively completes deletion so the existing durable
+provider-session state machine can issue its bounded rebind authorization.
+
+Hosts must continue passing only protected cursors obtained through the durable
+session service. The protocol actor still rejects invalid cursor kinds or
+references, actors bound to another thread, active or pending work, concurrent
+lifecycle operations, malformed or non-empty results, response mismatches, and
+repeated deletion.
+
+The AI schema module remains **0.64.0**. There is no database, data, GraphQL
+SDL, protected-payload, backup, restore, or data backfill migration.
 
 ## 0.95.6 to 0.95.7: current-principal retained-session rotation
 

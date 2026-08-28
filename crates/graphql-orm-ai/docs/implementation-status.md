@@ -3,14 +3,14 @@ title: "Implementation Status"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-27
+last_reviewed: 2026-08-28
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.95.7` with AI schema module
+`graphql-orm-ai` is at crate version `0.95.8` with AI schema module
 `0.64.0`. It uses workspace `graphql-orm` `0.27.0`, backend-neutral
 `graphql-orm-ai-tool-profiles` `0.10.0`, and external `agql-auth`
 `0.18.0` at `527d15d28e3c295a6f6b5e6d74559a7aecdc1322`.
@@ -67,11 +67,13 @@ verification evidence belongs in the focused guides.
   cursors under exact owner/scope/run/descriptor/transcript fencing and an
   exact deletion/absence lifecycle. An absence-proven deleted generation may
   be replaced once through a crate-issued short-lived rebind authorization;
-  cleanup/backoff, expiry, descriptor drift, and restore quarantine remain
-  unavailable. Cursor state is separate from warm processes, private from
-  GraphQL, backup-redacted, and readiness-blocking on portable restore until
-  drained. Provider failures may additionally emit only a closed content-free
-  operational category without changing conservative run semantics.
+  exact cleanup may use a fresh initialized provider process without resuming
+  the retained thread. Cleanup/backoff, expiry, descriptor drift, and restore
+  quarantine remain unavailable. Cursor state is separate from warm processes,
+  private from GraphQL, backup-redacted, and readiness-blocking on portable
+  restore until drained. Provider failures may additionally emit only a closed
+  content-free operational category without changing conservative run
+  semantics.
 - Retained human-approval waits atomically release the source lease with a
   protected parked checkpoint and nonterminal attempt outcome. Exact
   confirmation is crash-repairable, and only a confirmed graph can create the
