@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.95.8", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.95.9", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -62,7 +62,10 @@ the compiled test-backed recipe and the missing reusable bootstrap API.
   cancellation, recovery, retention, and current-principal rehydration.
 - Exact provider-session cleanup may run in a fresh initialized adapter process,
   so uncertain retained sessions can be deleted and rebound without resuming or
-  discarding the host's durable conversation history.
+  discarding the host's durable conversation history. If deletion returns an
+  unstructured provider error, a second fresh process may instead prove absence
+  by exhaustively scanning the bounded active and archived state index. Raw
+  thread metadata is discarded inside the protocol actor.
 - Watermark-bounded, contiguous durable session and owner-inbox replay whose
   `HasMore` contract remains correct at the configured ORM page maximum.
 - Default-deny application tools with server-authored documents and static
@@ -150,6 +153,18 @@ message under current policy where re-execution is provably safe;
 Invalidating a retained provider thread emits `provider_session_reset` or
 `provider_session_rebound` so a host can tell the user the model's context was
 reset even though the durable transcript reads as continuous.
+
+Codex cleanup treats a successful empty `thread/delete` result as authoritative.
+An ambiguous delete failure is never interpreted by error message. The reviewed
+fallback launches a separate initialized process and scans every source kind in
+both active and archived `thread/list` state-DB partitions with stable creation
+ordering, exact cursor matching, fixed page and total-record ceilings, pagination
+loop rejection, and empty-turn enforcement. Only content-free continue,
+target-present, or absence-confirmed outcomes cross the protocol actor boundary;
+titles, previews, paths, and other thread metadata are neither returned nor
+logged. Any malformed page, provider error, timeout, target match, changing or
+unbounded pagination, or host without the reviewed scan implementation remains
+fail-closed in cleanup backoff.
 
 The reviewed Codex app-server adapter can retain a thread after Stop only when
 the exact interrupt was acknowledged, no dynamic tool call remains unresolved,

@@ -49,7 +49,24 @@ const MAXIMUM_CAPABILITY_SESSION_BINDINGS: usize = 256;
 const MAXIMUM_WEB_SEARCH_RESULTS_PER_CALL: usize = 100;
 const MAXIMUM_WEB_SEARCH_RESULT_BYTES_PER_CALL: usize = 1024 * 1024;
 const MAXIMUM_WEB_SEARCH_FIELD_BYTES: usize = 64 * 1024;
+const THREAD_STATE_INDEX_PAGE_SIZE: usize = 100;
+const MAXIMUM_THREAD_STATE_INDEX_PAGES: usize = 512;
+const MAXIMUM_THREAD_STATE_INDEX_RECORDS: usize =
+    THREAD_STATE_INDEX_PAGE_SIZE * MAXIMUM_THREAD_STATE_INDEX_PAGES;
 const MAXIMUM_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+const ALL_THREAD_SOURCE_KINDS: [&str; 10] = [
+    "cli",
+    "vscode",
+    "exec",
+    "appServer",
+    "subAgent",
+    "subAgentReview",
+    "subAgentCompact",
+    "subAgentThreadSpawn",
+    "subAgentOther",
+    "unknown",
+];
 
 fn provider_timeout_error() -> ProviderError {
     ProviderError::Classified(AiProviderFailureCategory::Timeout)
@@ -1277,7 +1294,7 @@ impl crate::AiProviderSessionDeletionService for AiCodexAppServerProviderSession
             return Err(ProviderError::Rejected);
         }
         self.pool
-            .delete_detached_thread(self.registration.clone(), request.cursor())
+            .delete_or_confirm_detached_thread_absent(self.registration.clone(), request.cursor())
             .await?;
         Ok(crate::AiProviderSessionAbsenceProof::for_request(
             request,
@@ -1676,6 +1693,27 @@ pub trait AiCodexAppServerRunProcess: Send + Sync {
         Err(ProviderError::Unsupported)
     }
 
+    /// Authoritatively confirms that one exact provider thread cursor is
+    /// absent from the complete provider state index.
+    ///
+    /// Implementations must use
+    /// [`AiCodexAppServerProtocolActor::begin_thread_absence_confirmation`]
+    /// and drive only its content-free continuation outcomes to completion.
+    /// They must never log, retain, or expose raw thread-list frames or any
+    /// provider-authored thread metadata. The default remains fail-closed for
+    /// hosts that have not implemented the reviewed state-index protocol.
+    ///
+    /// # Errors
+    ///
+    /// Returns a non-sensitive error unless the actor exhausts both active and
+    /// archived state-index partitions without observing the exact cursor.
+    async fn confirm_thread_absent(
+        &self,
+        _cursor: &crate::AiProviderSessionCursor,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::Unsupported)
+    }
+
     /// Interrupts the exact active turn.
     ///
     /// # Errors
@@ -1821,6 +1859,13 @@ impl AiCodexAppServerLaunchedProcess {
         cursor: &crate::AiProviderSessionCursor,
     ) -> Result<(), ProviderError> {
         self.process.delete_thread(cursor).await
+    }
+
+    async fn confirm_thread_absent(
+        &self,
+        cursor: &crate::AiProviderSessionCursor,
+    ) -> Result<(), ProviderError> {
+        self.process.confirm_thread_absent(cursor).await
     }
 
     async fn interrupt(&self) -> Result<(), ProviderError> {
@@ -2206,7 +2251,7 @@ impl AiCodexAppServerRunPool {
         }
     }
 
-    async fn delete_detached_thread(
+    async fn delete_or_confirm_detached_thread_absent(
         &self,
         registration: Arc<AiCodexAppServerRegistration>,
         cursor: &crate::AiProviderSessionCursor,
@@ -2222,13 +2267,39 @@ impl AiCodexAppServerRunPool {
             .map_err(|_| ProviderError::RateLimited)?;
         let process = tokio::time::timeout(
             self.inner.limits.startup_timeout,
+            self.inner.factory.launch(registration.clone()),
+        )
+        .await
+        .map_err(|_| provider_timeout_error())??;
+        let deletion = match tokio::time::timeout(
+            self.inner.limits.shutdown_timeout,
+            process.delete_thread(cursor),
+        )
+        .await
+        {
+            Ok(deletion) => deletion,
+            Err(_) => Err(provider_timeout_error()),
+        };
+        let _ = tokio::time::timeout(
+            self.inner.limits.shutdown_timeout,
+            process.shutdown(AiProviderRunCloseReason::Completed),
+        )
+        .await;
+        drop(process);
+        if deletion.is_ok() {
+            drop(permit);
+            return Ok(());
+        }
+
+        let process = tokio::time::timeout(
+            self.inner.limits.startup_timeout,
             self.inner.factory.launch(registration),
         )
         .await
         .map_err(|_| provider_timeout_error())??;
-        let result = tokio::time::timeout(
-            self.inner.limits.shutdown_timeout,
-            process.delete_thread(cursor),
+        let confirmation = tokio::time::timeout(
+            self.inner.limits.startup_timeout,
+            process.confirm_thread_absent(cursor),
         )
         .await
         .map_err(|_| provider_timeout_error())?;
@@ -2239,7 +2310,7 @@ impl AiCodexAppServerRunPool {
         .await;
         drop(process);
         drop(permit);
-        result
+        confirmation
     }
 
     /// Starts one fresh turn, reusing the exact run's existing process.
@@ -3097,8 +3168,38 @@ enum ClientMethod {
     ThreadStart,
     ThreadResume,
     ThreadDelete,
+    ThreadList,
     TurnStart,
     TurnInterrupt,
+}
+
+#[derive(Clone)]
+struct ThreadAbsenceScanState {
+    target_fingerprint: String,
+    archived: bool,
+    next_cursor: Option<String>,
+    seen_cursor_fingerprints: BTreeSet<String>,
+    pages: usize,
+    records: usize,
+    awaiting_response: bool,
+}
+
+impl std::fmt::Debug for ThreadAbsenceScanState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ThreadAbsenceScanState")
+            .field("target", &"<opaque-reference-fingerprint>")
+            .field("archived", &self.archived)
+            .field(
+                "next_cursor",
+                &self.next_cursor.as_ref().map(|_| "<opaque>"),
+            )
+            .field("seen_cursor_count", &self.seen_cursor_fingerprints.len())
+            .field("pages", &self.pages)
+            .field("records", &self.records)
+            .field("awaiting_response", &self.awaiting_response)
+            .finish()
+    }
 }
 
 /// Bounded provider-authored action associated with one native web-search item.
@@ -3187,6 +3288,19 @@ pub enum AiCodexAppServerInbound {
         /// Bounded object result after envelope validation.
         result: Value,
     },
+    /// One bounded state-index page was validated and discarded; the actor is
+    /// ready to encode the next page or archived partition request.
+    ThreadAbsenceScanContinue,
+    /// The exact protected cursor was observed in the provider state index.
+    ///
+    /// No provider thread metadata crosses the actor boundary.
+    ThreadAbsenceTargetPresent,
+    /// Both active and archived state-index partitions were exhausted without
+    /// observing the exact protected cursor.
+    ///
+    /// This content-free outcome is the only index-based absence proof the
+    /// process adapter may accept.
+    ThreadAbsenceConfirmed,
     /// Exact allowlisted server notification.
     Notification {
         /// Allowlisted notification method.
@@ -3281,6 +3395,15 @@ impl std::fmt::Debug for AiCodexAppServerInbound {
                 .field("method", method)
                 .field("result", &"<provider-content>")
                 .finish(),
+            Self::ThreadAbsenceScanContinue => {
+                formatter.write_str("AiCodexAppServerInbound::ThreadAbsenceScanContinue")
+            }
+            Self::ThreadAbsenceTargetPresent => {
+                formatter.write_str("AiCodexAppServerInbound::ThreadAbsenceTargetPresent")
+            }
+            Self::ThreadAbsenceConfirmed => {
+                formatter.write_str("AiCodexAppServerInbound::ThreadAbsenceConfirmed")
+            }
             Self::Notification { method, .. } => formatter
                 .debug_struct("AiCodexAppServerInbound::Notification")
                 .field("method", method)
@@ -3370,12 +3493,14 @@ enum ThreadLifecycleOperation {
 /// strictly validated. Initialization
 /// negotiates one fixed opt-out profile for unused thread, MCP, and account
 /// notifications; those methods remain rejected if the server emits them.
-/// Deletion uses only its exact correlated response. A documented generic
-/// `warning` is admitted only as a content-free, turn-correlated,
-/// flood-bounded control event. Empty reasoning-item lifecycles are admitted
-/// only as content-free signals while turn-level reasoning summaries remain
-/// explicitly disabled. All other server-initiated requests and
-/// non-allowlisted notifications fail closed.
+/// Deletion uses only its exact correlated response. An ambiguous deletion
+/// failure may be followed in a separate fresh actor by the exact bounded,
+/// content-discarding active-and-archived state-index absence scan. A
+/// documented generic `warning` is admitted only as a content-free,
+/// turn-correlated, flood-bounded control event. Empty reasoning-item
+/// lifecycles are admitted only as content-free signals while turn-level
+/// reasoning summaries remain explicitly disabled. All other server-initiated
+/// requests and non-allowlisted notifications fail closed.
 #[derive(Debug)]
 pub struct AiCodexAppServerProtocolActor {
     next_id: u64,
@@ -3402,6 +3527,7 @@ pub struct AiCodexAppServerProtocolActor {
     thread_lifecycle_phase: ThreadLifecyclePhase,
     thread_lifecycle_operation: Option<ThreadLifecycleOperation>,
     deleting_thread_id: Option<String>,
+    thread_absence_scan: Option<ThreadAbsenceScanState>,
     retained_usage_snapshot_observed: bool,
     turn_response_observed: bool,
     turn_started_observed: bool,
@@ -3450,6 +3576,7 @@ impl AiCodexAppServerProtocolActor {
             thread_lifecycle_phase: ThreadLifecyclePhase::Ready,
             thread_lifecycle_operation: None,
             deleting_thread_id: None,
+            thread_absence_scan: None,
             retained_usage_snapshot_observed: false,
             turn_response_observed: false,
             turn_started_observed: false,
@@ -3840,6 +3967,105 @@ impl AiCodexAppServerProtocolActor {
         Ok(frame)
     }
 
+    /// Starts a bounded, content-discarding scan of the complete provider
+    /// state index for one exact protected thread cursor.
+    ///
+    /// The actor fixes `useStateDbOnly`, every source kind, stable creation
+    /// ordering, the page size, both active and archived partitions, and the
+    /// total page/record ceilings. Thread turns must be empty. Titles,
+    /// previews, paths, and all other provider metadata are validated only as
+    /// bounded frame content and discarded without crossing the actor
+    /// boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Rejected`] unless the actor is initialized,
+    /// idle, unbound, has no pending operation, and the cursor is the exact
+    /// supported kind and a bounded provider reference.
+    pub fn begin_thread_absence_confirmation(
+        &mut self,
+        cursor: &crate::AiProviderSessionCursor,
+    ) -> Result<Vec<u8>, ProviderError> {
+        self.validate_thread_lifecycle_boundary()?;
+        if !self.initialization_complete
+            || cursor.kind() != "codex.app_server.thread.v2"
+            || !valid_reference(cursor.expose_to_provider_adapter())
+            || self.thread_lifecycle_phase != ThreadLifecyclePhase::Ready
+            || self.active_thread_id.is_some()
+            || !self.pending.is_empty()
+            || self.deleting_thread_id.is_some()
+            || self.thread_absence_scan.is_some()
+        {
+            return Err(ProviderError::Rejected);
+        }
+        self.thread_absence_scan = Some(ThreadAbsenceScanState {
+            target_fingerprint: opaque_reference_fingerprint(cursor.expose_to_provider_adapter()),
+            archived: false,
+            next_cursor: None,
+            seen_cursor_fingerprints: BTreeSet::new(),
+            pages: 0,
+            records: 0,
+            awaiting_response: false,
+        });
+        self.next_thread_absence_scan_request()
+    }
+
+    /// Encodes the next exact state-index page after a content-free
+    /// [`AiCodexAppServerInbound::ThreadAbsenceScanContinue`] outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Rejected`] for missing scan state, a pending
+    /// response, repeated pagination cursor, or an exhausted bound.
+    pub fn continue_thread_absence_confirmation(&mut self) -> Result<Vec<u8>, ProviderError> {
+        self.next_thread_absence_scan_request()
+    }
+
+    fn next_thread_absence_scan_request(&mut self) -> Result<Vec<u8>, ProviderError> {
+        let (archived, cursor) = {
+            let scan = self
+                .thread_absence_scan
+                .as_mut()
+                .ok_or(ProviderError::Rejected)?;
+            if scan.awaiting_response
+                || scan.pages >= MAXIMUM_THREAD_STATE_INDEX_PAGES
+                || scan.records > MAXIMUM_THREAD_STATE_INDEX_RECORDS
+            {
+                return Err(ProviderError::Rejected);
+            }
+            if let Some(cursor) = scan.next_cursor.as_deref()
+                && (!valid_reference(cursor)
+                    || !scan
+                        .seen_cursor_fingerprints
+                        .insert(opaque_reference_fingerprint(cursor)))
+            {
+                return Err(ProviderError::Rejected);
+            }
+            scan.pages += 1;
+            (scan.archived, scan.next_cursor.take())
+        };
+        let mut params = json!({
+            "archived": archived,
+            "limit": THREAD_STATE_INDEX_PAGE_SIZE,
+            "sortDirection": "desc",
+            "sortKey": "created_at",
+            "sourceKinds": ALL_THREAD_SOURCE_KINDS,
+            "useStateDbOnly": true,
+        });
+        if let Some(cursor) = cursor {
+            params
+                .as_object_mut()
+                .ok_or(ProviderError::Rejected)?
+                .insert("cursor".to_owned(), Value::String(cursor));
+        }
+        let frame = self.request(ClientMethod::ThreadList, "thread/list", params)?;
+        self.thread_absence_scan
+            .as_mut()
+            .ok_or(ProviderError::Rejected)?
+            .awaiting_response = true;
+        Ok(frame)
+    }
+
     /// Encodes one ephemeral thread start with the exact reviewed dynamic
     /// tools from this turn.
     ///
@@ -4219,7 +4445,9 @@ impl AiCodexAppServerProtocolActor {
                 .filter(|result| result.is_object())
                 .cloned()
                 .ok_or(ProviderError::Rejected)?;
-            self.accept_correlated_response(method, &result)?;
+            if let Some(inbound) = self.accept_correlated_response(method, &result)? {
+                return Ok(inbound);
+            }
             return Ok(AiCodexAppServerInbound::Response {
                 id,
                 method: client_method_name(method),
@@ -4611,7 +4839,7 @@ impl AiCodexAppServerProtocolActor {
         &mut self,
         method: ClientMethod,
         result: &Value,
-    ) -> Result<(), ProviderError> {
+    ) -> Result<Option<AiCodexAppServerInbound>, ProviderError> {
         match method {
             ClientMethod::ThreadStart | ClientMethod::ThreadResume => {
                 let thread_id = nested_reference(result, "thread", "id")?;
@@ -4690,9 +4918,86 @@ impl AiCodexAppServerProtocolActor {
                 self.thread_lifecycle_operation = None;
                 self.thread_lifecycle_phase = ThreadLifecyclePhase::Deleted;
             }
+            ClientMethod::ThreadList => {
+                return self.accept_thread_absence_scan_page(result).map(Some);
+            }
             ClientMethod::TurnInterrupt => {}
         }
-        Ok(())
+        Ok(None)
+    }
+
+    fn accept_thread_absence_scan_page(
+        &mut self,
+        result: &Value,
+    ) -> Result<AiCodexAppServerInbound, ProviderError> {
+        let object = result.as_object().ok_or(ProviderError::Rejected)?;
+        if object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "backwardsCursor" | "data" | "nextCursor"))
+        {
+            return Err(ProviderError::Rejected);
+        }
+        validate_optional_reference(object.get("backwardsCursor"))?;
+        let next_cursor = validate_optional_reference(object.get("nextCursor"))?;
+        let data = object
+            .get("data")
+            .and_then(Value::as_array)
+            .filter(|data| data.len() <= THREAD_STATE_INDEX_PAGE_SIZE)
+            .ok_or(ProviderError::Rejected)?;
+        if data.is_empty() && next_cursor.is_some() {
+            return Err(ProviderError::Rejected);
+        }
+
+        let target_fingerprint = self
+            .thread_absence_scan
+            .as_ref()
+            .filter(|scan| scan.awaiting_response)
+            .map(|scan| scan.target_fingerprint.as_str())
+            .ok_or(ProviderError::Rejected)?;
+        let mut target_present = false;
+        for thread in data {
+            let thread = thread.as_object().ok_or(ProviderError::Rejected)?;
+            let thread_id = thread
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|thread_id| valid_reference(thread_id))
+                .ok_or(ProviderError::Rejected)?;
+            if thread
+                .get("turns")
+                .and_then(Value::as_array)
+                .is_none_or(|turns| !turns.is_empty())
+            {
+                return Err(ProviderError::Rejected);
+            }
+            target_present |= opaque_reference_fingerprint(thread_id) == target_fingerprint;
+        }
+
+        let scan = self
+            .thread_absence_scan
+            .as_mut()
+            .ok_or(ProviderError::Rejected)?;
+        scan.awaiting_response = false;
+        scan.records = scan
+            .records
+            .checked_add(data.len())
+            .filter(|records| *records <= MAXIMUM_THREAD_STATE_INDEX_RECORDS)
+            .ok_or(ProviderError::Rejected)?;
+        if target_present {
+            self.thread_absence_scan = None;
+            return Ok(AiCodexAppServerInbound::ThreadAbsenceTargetPresent);
+        }
+        if let Some(next_cursor) = next_cursor {
+            scan.next_cursor = Some(next_cursor);
+            return Ok(AiCodexAppServerInbound::ThreadAbsenceScanContinue);
+        }
+        if !scan.archived {
+            scan.archived = true;
+            scan.next_cursor = None;
+            scan.seen_cursor_fingerprints.clear();
+            return Ok(AiCodexAppServerInbound::ThreadAbsenceScanContinue);
+        }
+        self.thread_absence_scan = None;
+        Ok(AiCodexAppServerInbound::ThreadAbsenceConfirmed)
     }
 
     fn accept_disabled_remote_control_status(
@@ -5053,6 +5358,22 @@ fn direct_reference<'a>(value: &'a Value, key: &str) -> Result<&'a str, Provider
         .ok_or(ProviderError::Rejected)
 }
 
+fn validate_optional_reference(value: Option<&Value>) -> Result<Option<String>, ProviderError> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if valid_reference(value) => Ok(Some(value.clone())),
+        _ => Err(ProviderError::Rejected),
+    }
+}
+
+fn opaque_reference_fingerprint(value: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"graphql-orm-ai/codex-app-server-opaque-reference/v1\0");
+    digest.update((value.len() as u64).to_be_bytes());
+    digest.update(value.as_bytes());
+    hex::encode(digest.finalize())
+}
+
 fn nested_reference<'a>(
     value: &'a Value,
     object_key: &str,
@@ -5073,6 +5394,7 @@ fn client_method_name(method: ClientMethod) -> &'static str {
         ClientMethod::ThreadStart => "thread/start",
         ClientMethod::ThreadResume => "thread/resume",
         ClientMethod::ThreadDelete => "thread/delete",
+        ClientMethod::ThreadList => "thread/list",
         ClientMethod::TurnStart => "turn/start",
         ClientMethod::TurnInterrupt => "turn/interrupt",
     }
@@ -6262,6 +6584,9 @@ pub(crate) mod tests {
         bound_turns: AtomicUsize,
         retained_turns: AtomicUsize,
         deleted_threads: AtomicUsize,
+        absence_confirmations: AtomicUsize,
+        delete_fails: AtomicBool,
+        absence_confirmed: AtomicBool,
         tool_free: AtomicBool,
         dynamic_arguments: StdMutex<Option<Value>>,
         reasoning_efforts: StdMutex<Vec<ModelReasoningEffort>>,
@@ -6283,6 +6608,9 @@ pub(crate) mod tests {
                 bound_turns: AtomicUsize::new(0),
                 retained_turns: AtomicUsize::new(0),
                 deleted_threads: AtomicUsize::new(0),
+                absence_confirmations: AtomicUsize::new(0),
+                delete_fails: AtomicBool::new(false),
+                absence_confirmed: AtomicBool::new(true),
                 tool_free: AtomicBool::new(false),
                 dynamic_arguments: StdMutex::new(None),
                 reasoning_efforts: StdMutex::new(Vec::new()),
@@ -6537,7 +6865,29 @@ pub(crate) mod tests {
                 return Err(ProviderError::Rejected);
             }
             self.counters.deleted_threads.fetch_add(1, Ordering::SeqCst);
+            if self.counters.delete_fails.load(Ordering::SeqCst) {
+                return Err(ProviderError::Rejected);
+            }
             Ok(())
+        }
+
+        async fn confirm_thread_absent(
+            &self,
+            cursor: &crate::AiProviderSessionCursor,
+        ) -> Result<(), ProviderError> {
+            if cursor.kind() != "codex.app_server.thread.v2"
+                || cursor.expose_to_provider_adapter() != "thread-retained-test"
+            {
+                return Err(ProviderError::Rejected);
+            }
+            self.counters
+                .absence_confirmations
+                .fetch_add(1, Ordering::SeqCst);
+            if self.counters.absence_confirmed.load(Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err(ProviderError::Rejected)
+            }
         }
 
         async fn interrupt(&self) -> Result<(), ProviderError> {
@@ -9091,6 +9441,46 @@ pub(crate) mod tests {
         }
         assert_eq!(counters.launches.load(Ordering::SeqCst), 1);
         assert_eq!(counters.turns.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn detached_cleanup_uses_a_fresh_process_for_fail_closed_absence_confirmation() {
+        let cursor = crate::AiProviderSessionCursor::new(
+            "codex.app_server.thread.v2",
+            "thread-retained-test",
+        )
+        .expect("retained cursor should validate");
+        let counters = Arc::new(Counters::new());
+        counters.delete_fails.store(true, Ordering::SeqCst);
+        let deletion_pool = pool(counters.clone(), 2, 4);
+
+        deletion_pool
+            .delete_or_confirm_detached_thread_absent(registration("1.0.0"), &cursor)
+            .await
+            .expect("authoritative absence should complete cleanup");
+        assert_eq!(counters.launches.load(Ordering::SeqCst), 2);
+        assert_eq!(counters.deleted_threads.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.absence_confirmations.load(Ordering::SeqCst), 1);
+
+        let present_counters = Arc::new(Counters::new());
+        present_counters.delete_fails.store(true, Ordering::SeqCst);
+        present_counters
+            .absence_confirmed
+            .store(false, Ordering::SeqCst);
+        let present_pool = pool(present_counters.clone(), 2, 4);
+        assert!(matches!(
+            present_pool
+                .delete_or_confirm_detached_thread_absent(registration("1.0.0"), &cursor)
+                .await,
+            Err(ProviderError::Rejected)
+        ));
+        assert_eq!(present_counters.launches.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            present_counters
+                .absence_confirmations
+                .load(Ordering::SeqCst),
+            1
+        );
     }
 
     #[tokio::test]
@@ -13035,6 +13425,169 @@ pub(crate) mod tests {
             .expect("thread notification should bind");
         assert!(matches!(
             bound_to_another_thread.delete_thread(&cursor),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[test]
+    fn detached_cleanup_confirms_absence_only_after_both_state_index_partitions() {
+        let cursor = crate::AiProviderSessionCursor::new(
+            "codex.app_server.thread.v2",
+            "thread-retained-absent",
+        )
+        .expect("retained cursor should validate");
+        let mut actor = initialized_protocol_actor();
+
+        let first = serde_json::from_slice::<Value>(
+            &actor
+                .begin_thread_absence_confirmation(&cursor)
+                .expect("absence scan should start"),
+        )
+        .expect("first scan frame should be JSON");
+        assert_eq!(first["method"], "thread/list");
+        assert_eq!(first["params"]["archived"], false);
+        assert_eq!(first["params"]["limit"], THREAD_STATE_INDEX_PAGE_SIZE);
+        assert_eq!(first["params"]["sortDirection"], "desc");
+        assert_eq!(first["params"]["sortKey"], "created_at");
+        assert_eq!(
+            first["params"]["sourceKinds"],
+            json!(ALL_THREAD_SOURCE_KINDS)
+        );
+        assert_eq!(first["params"]["useStateDbOnly"], true);
+        assert!(first["params"].get("cursor").is_none());
+
+        let first_page = serde_json::to_vec(&json!({
+            "id": 2,
+            "result": {
+                "backwardsCursor": "previous-page",
+                "data": [{
+                    "id": "another-thread",
+                    "preview": "provider content must be discarded",
+                    "turns": [],
+                }],
+                "nextCursor": "next-page",
+            }
+        }))
+        .expect("page should encode");
+        let inbound = actor
+            .accept(&first_page)
+            .expect("first page should validate");
+        assert!(matches!(
+            inbound,
+            AiCodexAppServerInbound::ThreadAbsenceScanContinue
+        ));
+        assert!(!format!("{inbound:?}").contains("provider content"));
+
+        let second = serde_json::from_slice::<Value>(
+            &actor
+                .continue_thread_absence_confirmation()
+                .expect("next active page should encode"),
+        )
+        .expect("second scan frame should be JSON");
+        assert_eq!(second["params"]["archived"], false);
+        assert_eq!(second["params"]["cursor"], "next-page");
+        assert!(matches!(
+            actor.accept(br#"{"id":3,"result":{"data":[],"nextCursor":null}}"#),
+            Ok(AiCodexAppServerInbound::ThreadAbsenceScanContinue)
+        ));
+
+        let archived = serde_json::from_slice::<Value>(
+            &actor
+                .continue_thread_absence_confirmation()
+                .expect("archived partition should encode"),
+        )
+        .expect("archived frame should be JSON");
+        assert_eq!(archived["params"]["archived"], true);
+        assert!(archived["params"].get("cursor").is_none());
+        assert!(matches!(
+            actor.accept(br#"{"id":4,"result":{"data":[],"nextCursor":null}}"#),
+            Ok(AiCodexAppServerInbound::ThreadAbsenceConfirmed)
+        ));
+        assert!(matches!(
+            actor.continue_thread_absence_confirmation(),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[test]
+    fn detached_cleanup_state_index_scan_fails_closed_on_presence_or_bad_pagination() {
+        let cursor = crate::AiProviderSessionCursor::new(
+            "codex.app_server.thread.v2",
+            "thread-retained-present",
+        )
+        .expect("retained cursor should validate");
+        let mut present = initialized_protocol_actor();
+        present
+            .begin_thread_absence_confirmation(&cursor)
+            .expect("presence scan should start");
+        assert!(matches!(
+            present.accept(
+                br#"{"id":2,"result":{"data":[{"id":"thread-retained-present","preview":"secret","turns":[]}]}}"#,
+            ),
+            Ok(AiCodexAppServerInbound::ThreadAbsenceTargetPresent)
+        ));
+
+        let mut turns = initialized_protocol_actor();
+        turns
+            .begin_thread_absence_confirmation(&cursor)
+            .expect("turn-content scan should start");
+        assert!(matches!(
+            turns.accept(
+                br#"{"id":2,"result":{"data":[{"id":"other","turns":[{"id":"turn-1"}]}]}}"#,
+            ),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut repeated = initialized_protocol_actor();
+        repeated
+            .begin_thread_absence_confirmation(&cursor)
+            .expect("pagination scan should start");
+        assert!(matches!(
+            repeated.accept(
+                br#"{"id":2,"result":{"data":[{"id":"other","turns":[]}],"nextCursor":"repeat"}}"#,
+            ),
+            Ok(AiCodexAppServerInbound::ThreadAbsenceScanContinue)
+        ));
+        repeated
+            .continue_thread_absence_confirmation()
+            .expect("first repeated cursor use should encode");
+        assert!(matches!(
+            repeated.accept(
+                br#"{"id":3,"result":{"data":[{"id":"other-2","turns":[]}],"nextCursor":"repeat"}}"#,
+            ),
+            Ok(AiCodexAppServerInbound::ThreadAbsenceScanContinue)
+        ));
+        assert!(matches!(
+            repeated.continue_thread_absence_confirmation(),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut empty_page_cursor = initialized_protocol_actor();
+        empty_page_cursor
+            .begin_thread_absence_confirmation(&cursor)
+            .expect("empty-page scan should start");
+        assert!(matches!(
+            empty_page_cursor.accept(br#"{"id":2,"result":{"data":[],"nextCursor":"impossible"}}"#),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut exhausted = initialized_protocol_actor();
+        exhausted
+            .begin_thread_absence_confirmation(&cursor)
+            .expect("bounded scan should start");
+        assert!(matches!(
+            exhausted.accept(
+                br#"{"id":2,"result":{"data":[{"id":"other","turns":[]}],"nextCursor":"bounded"}}"#,
+            ),
+            Ok(AiCodexAppServerInbound::ThreadAbsenceScanContinue)
+        ));
+        exhausted
+            .thread_absence_scan
+            .as_mut()
+            .expect("scan should remain active")
+            .pages = MAXIMUM_THREAD_STATE_INDEX_PAGES;
+        assert!(matches!(
+            exhausted.continue_thread_absence_confirmation(),
             Err(ProviderError::Rejected)
         ));
     }

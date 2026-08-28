@@ -18,6 +18,31 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.95.9] - 2026-08-28
+
+Persistent schema module: **0.64.0** (unchanged from 0.95.8).
+
+### Fixed
+
+- Retained Codex cleanup no longer depends on interpreting an unstructured
+  `thread/delete` error when the provider thread is already absent. After an
+  ambiguous deletion failure, a second fresh initialized process can now
+  exhaust the provider's bounded active and archived state index and issue an
+  authoritative content-free absence outcome.
+
+### Security
+
+- The fallback fixes state-DB-only reads, all source kinds, the active and
+  archived partitions, stable creation ordering, exact opaque-cursor matching,
+  page and total-record ceilings, pagination progress, empty thread turns, and
+  strict response correlation. Raw thread titles, previews, paths, and metadata
+  are discarded inside the protocol actor and never enter the absence proof or
+  logs. Any target match, malformed or content-bearing turn payload, provider
+  error, timeout, repeated cursor, or exhausted bound fails closed.
+
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, GraphQL SDL, backup, or restore migration.
+
 ## [0.95.8] - 2026-08-28
 
 Persistent schema module: **0.64.0** (unchanged from 0.95.7).
