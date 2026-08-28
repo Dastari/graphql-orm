@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.95.9", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.95.10", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -65,7 +65,9 @@ the compiled test-backed recipe and the missing reusable bootstrap API.
   discarding the host's durable conversation history. If deletion returns an
   unstructured provider error, a second fresh process may instead prove absence
   by exhaustively scanning the bounded active and archived state index. Raw
-  thread metadata is discarded inside the protocol actor.
+  thread metadata is discarded inside the protocol actor. Cleanup remains
+  available across mutable registration, model, and wire-profile upgrades when
+  the host preserves the same provider-state profile and versioned cursor kind.
 - Watermark-bounded, contiguous durable session and owner-inbox replay whose
   `HasMore` contract remains correct at the configured ORM page maximum.
 - Default-deny application tools with server-authored documents and static
@@ -155,6 +157,15 @@ Invalidating a retained provider thread emits `provider_session_reset` or
 reset even though the durable transcript reads as continuous.
 
 Codex cleanup treats a successful empty `thread/delete` result as authoritative.
+The provider profile ID and versioned cursor kind form its stable provider-state
+namespace. A protected cursor is opened only after its authenticated binding to
+the durable descriptor is verified, so mutable model, executable, tool,
+registration-fingerprint, and protocol changes cannot strand an old resource.
+Those mutable fields still fence every create, resume, and turn. A different
+provider family, profile ID, or cursor kind remains rejected before launch.
+Hosts must preserve one profile ID only for one provider state store; moving or
+renaming that namespace requires draining its retained sessions first.
+
 An ambiguous delete failure is never interpreted by error message. The reviewed
 fallback launches a separate initialized process and scans every source kind in
 both active and archived `thread/list` state-DB partitions with stable creation

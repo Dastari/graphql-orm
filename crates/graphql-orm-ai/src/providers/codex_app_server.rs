@@ -685,9 +685,9 @@ impl AiCodexAppServerRegistration {
                 .is_some_and(|binding| binding.reasoning_effort() == effort)
     }
 
-    fn admits_cleanup_fingerprint(&self, fingerprint: &str) -> bool {
-        self.admits_provider_session_fingerprint(fingerprint)
-            || legacy_registration_identity_v3(self) == fingerprint
+    fn owns_cleanup_namespace(&self, descriptor: &crate::AiProviderSessionDescriptor) -> bool {
+        descriptor.provider_kind() == &ProviderKind::LocalHarness
+            && descriptor.provider_profile_id() == self.provider_profile_id
     }
 
     fn reasoning_effort_capabilities(&self) -> ProviderCapabilities {
@@ -1282,13 +1282,7 @@ impl crate::AiProviderSessionDeletionService for AiCodexAppServerProviderSession
         request: &crate::AiProviderSessionDeletionRequest,
     ) -> Result<crate::AiProviderSessionAbsenceProof, ProviderError> {
         let descriptor = request.claim().descriptor();
-        if descriptor.provider_kind() != &ProviderKind::LocalHarness
-            || descriptor.provider_profile_id() != self.registration.provider_profile_id()
-            || descriptor.provider_model() != self.registration.logical_model()
-            || !self
-                .registration
-                .admits_cleanup_fingerprint(descriptor.registration_fingerprint())
-            || descriptor.protocol_version() != self.registration.protocol_version()
+        if !self.registration.owns_cleanup_namespace(descriptor)
             || request.cursor().kind() != "codex.app_server.thread.v2"
         {
             return Err(ProviderError::Rejected);
@@ -6393,28 +6387,6 @@ fn registration_identity(registration: &AiCodexAppServerRegistration) -> String 
     hex::encode(hasher.finalize())
 }
 
-fn legacy_registration_identity_v3(registration: &AiCodexAppServerRegistration) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"graphql-orm-ai/codex-app-server-registration/v3\0");
-    for value in [
-        registration.provider_profile_id.as_str(),
-        registration.logical_model.as_str(),
-        registration.executable_sha256.as_str(),
-        registration.executable_version.as_str(),
-        registration.sandbox_profile.as_str(),
-        registration.protocol_version.as_str(),
-    ] {
-        hasher.update((value.len() as u64).to_be_bytes());
-        hasher.update(value.as_bytes());
-    }
-    let profile = registration.launch_profile.identity_label();
-    hasher.update((profile.len() as u64).to_be_bytes());
-    hasher.update(profile.as_bytes());
-    hasher.update((registration.bootstrap_instructions.fingerprint().len() as u64).to_be_bytes());
-    hasher.update(registration.bootstrap_instructions.fingerprint().as_bytes());
-    hex::encode(hasher.finalize())
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use std::io::{BufRead, BufReader, Write};
@@ -6426,7 +6398,8 @@ pub(crate) mod tests {
     use std::thread::{self, JoinHandle};
 
     use agql_auth::{
-        AccessTokenMetadata, AuthPrincipal, AuthUser, PrincipalReference, SessionContext,
+        AccessTokenMetadata, AuthPrincipal, AuthUser, FixedClock, PrincipalReference,
+        SessionContext,
     };
     use futures::stream;
     use graphql_orm::graphql::orm::{
@@ -6445,8 +6418,9 @@ pub(crate) mod tests {
     use crate::{
         AiGraphqlMutationCapabilityCatalog, AiGraphqlQueryCapabilityCatalog,
         AiGraphqlQueryCapabilityLimits, AiGraphqlSubscriptionCapabilityCatalog,
-        AiGraphqlSubscriptionCapabilityLimits, AiRunId, AiSessionId, AiToolCatalog, AiToolId,
-        GraphqlExecutionTargetId, ProviderDynamicToolResult, ProviderEvent,
+        AiGraphqlSubscriptionCapabilityLimits, AiProviderSessionDeletionService, AiRunId, AiScope,
+        AiSessionId, AiToolCatalog, AiToolId, GraphqlExecutionTargetId, ProviderDynamicToolResult,
+        ProviderEvent,
     };
     use uuid::Uuid;
 
@@ -7411,10 +7385,6 @@ pub(crate) mod tests {
             })
             .collect::<BTreeSet<_>>();
         assert_eq!(fingerprints.len(), efforts.len());
-        let legacy = legacy_registration_identity_v3(&reviewed);
-        assert!(!reviewed.admits_provider_session_fingerprint(&legacy));
-        assert!(reviewed.admits_cleanup_fingerprint(&legacy));
-
         let subset = ModelReasoningEffortProfile::new(
             "model-1",
             [ModelReasoningEffort::Low, ModelReasoningEffort::Medium],
@@ -7463,7 +7433,6 @@ pub(crate) mod tests {
             binding.fingerprint(),
             ModelReasoningEffort::Unspecified,
         ));
-        assert!(admitted.admits_cleanup_fingerprint(binding.fingerprint()));
         let changed = admitted.with_bootstrap_instructions(trusted_bootstrap());
         assert!(!changed.admits_provider_session_fingerprint(binding.fingerprint()));
 
@@ -9483,6 +9452,106 @@ pub(crate) mod tests {
         );
     }
 
+    fn cleanup_request(
+        descriptor: crate::AiProviderSessionDescriptor,
+        cursor: crate::AiProviderSessionCursor,
+    ) -> crate::AiProviderSessionDeletionRequest {
+        let now = time::OffsetDateTime::now_utc();
+        crate::AiProviderSessionDeletionRequest::new(
+            crate::AiProviderSessionCleanupClaim {
+                binding_id: Uuid::new_v4(),
+                session_id: AiSessionId(Uuid::new_v4()),
+                scope: AiScope::new("project", "cleanup-test"),
+                descriptor,
+                cleanup_worker_id: "cleanup-worker".to_owned(),
+                cleanup_generation: 1,
+                cleanup_expires_at: now + time::Duration::minutes(1),
+                row_version: 1,
+            },
+            cursor,
+        )
+    }
+
+    #[tokio::test]
+    async fn detached_cleanup_uses_stable_profile_and_cursor_namespace() {
+        let registration = registration("2.0.0");
+        let counters = Arc::new(Counters::new());
+        let provider =
+            AiCodexAppServerProvider::new(registration.clone(), pool(counters.clone(), 2, 4));
+        let now = time::OffsetDateTime::now_utc();
+        let deletion = provider.provider_session_deletion_service(Arc::new(FixedClock::new(now)));
+        let cursor = crate::AiProviderSessionCursor::new(
+            "codex.app_server.thread.v2",
+            "thread-retained-test",
+        )
+        .expect("retired cursor should validate");
+        let retired = crate::AiProviderSessionDescriptor::new(
+            ProviderKind::LocalHarness,
+            registration.provider_profile_id(),
+            "retired-model",
+            "f".repeat(64),
+            "retired-app-server-protocol",
+            "e".repeat(64),
+        )
+        .expect("retired descriptor should validate");
+
+        deletion
+            .delete_or_confirm_absent(&cleanup_request(retired, cursor.clone()))
+            .await
+            .expect("the stable provider-state namespace should admit cleanup");
+        assert_eq!(counters.launches.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.deleted_threads.load(Ordering::SeqCst), 1);
+
+        for rejected in [
+            crate::AiProviderSessionDescriptor::new(
+                ProviderKind::LocalHarness,
+                "another-profile",
+                registration.logical_model(),
+                "a".repeat(64),
+                registration.protocol_version(),
+                "e".repeat(64),
+            )
+            .expect("cross-profile descriptor should validate"),
+            crate::AiProviderSessionDescriptor::new(
+                ProviderKind::OpenAi,
+                registration.provider_profile_id(),
+                registration.logical_model(),
+                "a".repeat(64),
+                registration.protocol_version(),
+                "e".repeat(64),
+            )
+            .expect("cross-provider descriptor should validate"),
+        ] {
+            assert!(matches!(
+                deletion
+                    .delete_or_confirm_absent(&cleanup_request(rejected, cursor.clone()))
+                    .await,
+                Err(ProviderError::Rejected)
+            ));
+        }
+        let wrong_cursor =
+            crate::AiProviderSessionCursor::new("another.thread.kind", "thread-retained-test")
+                .expect("cross-kind cursor should validate");
+        let current = crate::AiProviderSessionDescriptor::new(
+            ProviderKind::LocalHarness,
+            registration.provider_profile_id(),
+            registration.logical_model(),
+            registration
+                .provider_session_fingerprint(ModelReasoningEffort::Unspecified)
+                .expect("current fingerprint should validate"),
+            registration.protocol_version(),
+            "e".repeat(64),
+        )
+        .expect("current descriptor should validate");
+        assert!(matches!(
+            deletion
+                .delete_or_confirm_absent(&cleanup_request(current, wrong_cursor))
+                .await,
+            Err(ProviderError::Rejected)
+        ));
+        assert_eq!(counters.launches.load(Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn empty_retained_thread_binds_exact_dynamic_definitions_before_content() {
         let counters = Arc::new(Counters::new());
@@ -9687,7 +9756,6 @@ pub(crate) mod tests {
         assert_eq!(counters.bound_turns.load(Ordering::SeqCst), 1);
         assert_eq!(counters.retained_turns.load(Ordering::SeqCst), 1);
         assert_eq!(counters.deleted_threads.load(Ordering::SeqCst), 1);
-        assert!(registration.admits_cleanup_fingerprint(descriptor.registration_fingerprint()));
     }
 
     #[tokio::test]
