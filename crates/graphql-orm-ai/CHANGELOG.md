@@ -18,6 +18,30 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.95.10] - 2026-08-28
+
+Persistent schema module: **0.64.0** (unchanged from 0.95.9).
+
+### Fixed
+
+- Retained Codex cleanup now uses the stable provider profile and versioned
+  cursor kind as its provider-state namespace. Older protected threads can be
+  deleted after model, executable, sandbox, bootstrap, tool, reasoning,
+  registration-fingerprint, or wire-profile changes instead of remaining in
+  cleanup backoff.
+
+### Security
+
+- Mutable registration fields remain mandatory for create, resume, and every
+  turn. Cleanup requests still originate only after the protected cursor's
+  authenticated binding to the complete durable descriptor and cursor
+  fingerprint is verified. The deletion adapter rejects a different provider
+  family, provider profile, or cursor kind before launching a process, and the
+  exact deletion/absence actor remains unchanged and fail-closed.
+
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, GraphQL SDL, backup, or restore migration.
+
 ## [0.95.9] - 2026-08-28
 
 Persistent schema module: **0.64.0** (unchanged from 0.95.8).

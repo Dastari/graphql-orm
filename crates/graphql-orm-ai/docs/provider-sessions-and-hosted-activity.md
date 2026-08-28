@@ -106,9 +106,15 @@ Use `fingerprint`, not `registration.identity()`, in
 `ModelRequest` and matching `AiBudgetReservationRequest` carries
 `selected_effort`. A changed setting cannot resume the cursor: clean up and
 confirm exact absence, issue the ordinary rebind, create a new empty thread,
-and bind the new effort fingerprint. Pre-0.80 v3 registration fingerprints
-are accepted only by the deletion adapter for draining; they are never valid
-for a turn or resume.
+and bind the new effort fingerprint. Cleanup deliberately does not reuse this
+mutable execution fingerprint as its namespace. After the durable service
+authenticates the protected cursor against the complete stored descriptor, the
+deletion adapter admits only the same local provider family, provider profile
+ID, and versioned cursor kind. Model, executable, sandbox, bootstrap, tool,
+reasoning, registration-fingerprint, and wire-profile changes therefore cannot
+strand an older resource, while every create, resume, and turn remains fenced
+by their exact current values. A host must preserve one provider profile ID for
+one provider state store and drain sessions before moving or renaming it.
 
 A retained capability-delivery descriptor persists the complete
 `AiProviderCapabilitySessionBinding::fingerprint()` instead of that raw value.

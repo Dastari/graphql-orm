@@ -19,6 +19,26 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.95.9 to 0.95.10: stable Codex cleanup namespace
+
+Adopt `graphql-orm-ai` 0.95.10 from one reviewed full monorepo revision. No host
+API or configuration change is required when the existing provider profile ID
+continues to identify the same Codex state store. Cleanup now admits an older
+durable descriptor by the stable local-provider profile and versioned cursor
+kind after the protected cursor has been authenticated against that complete
+descriptor. Mutable model, executable, sandbox, bootstrap, tool, reasoning,
+registration-fingerprint, and app-server protocol values no longer strand
+provider resources after an upgrade.
+
+Those mutable values remain exact admission fences for empty-thread creation,
+resume, and every turn. Cross-provider, cross-profile, and cross-cursor-kind
+cleanup remains rejected before process launch. Hosts must not reuse one
+provider profile ID for different state stores; drain retained sessions before
+renaming a profile or moving its state namespace.
+
+The AI schema module remains **0.64.0**. There is no database, data, GraphQL
+SDL, protected-payload, backup, restore, or data backfill migration.
+
 ## 0.95.8 to 0.95.9: provider-native retained-thread absence proof
 
 Adopt `graphql-orm-ai` 0.95.9 from one reviewed full monorepo revision. Existing
