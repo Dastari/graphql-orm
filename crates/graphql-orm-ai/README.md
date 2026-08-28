@@ -3,7 +3,7 @@ title: "graphql-orm-ai"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-27
+last_reviewed: 2026-08-28
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.95.7", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.95.8", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -60,6 +60,9 @@ the compiled test-backed recipe and the missing reusable bootstrap API.
   provider calls, tool calls, approvals, audit, and restore readiness.
 - Fenced durable provider turns, streaming output, bounded checkpoints,
   cancellation, recovery, retention, and current-principal rehydration.
+- Exact provider-session cleanup may run in a fresh initialized adapter process,
+  so uncertain retained sessions can be deleted and rebound without resuming or
+  discarding the host's durable conversation history.
 - Watermark-bounded, contiguous durable session and owner-inbox replay whose
   `HasMore` contract remains correct at the configured ORM page maximum.
 - Default-deny application tools with server-authored documents and static

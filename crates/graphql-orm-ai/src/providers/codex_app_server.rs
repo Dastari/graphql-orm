@@ -3817,16 +3817,16 @@ impl AiCodexAppServerProtocolActor {
         &mut self,
         cursor: &crate::AiProviderSessionCursor,
     ) -> Result<Vec<u8>, ProviderError> {
+        self.validate_thread_lifecycle_boundary()?;
         if cursor.kind() != "codex.app_server.thread.v2"
             || !valid_reference(cursor.expose_to_provider_adapter())
-            || self.thread_lifecycle_phase != ThreadLifecyclePhase::Complete
-            || self.pending_turn_thread_id.is_some()
-            || self.active_turn_id.is_some()
-            || self.deleting_thread_id.is_some()
-            || self
-                .active_thread_id
-                .as_deref()
-                .is_some_and(|thread_id| thread_id != cursor.expose_to_provider_adapter())
+            || match self.thread_lifecycle_phase {
+                ThreadLifecyclePhase::Ready => self.active_thread_id.is_some(),
+                ThreadLifecyclePhase::Complete => {
+                    self.active_thread_id.as_deref() != Some(cursor.expose_to_provider_adapter())
+                }
+                _ => true,
+            }
         {
             return Err(ProviderError::Rejected);
         }
@@ -4667,7 +4667,10 @@ impl AiCodexAppServerProtocolActor {
                     .as_deref()
                     .ok_or(ProviderError::Rejected)?;
                 if !result.as_object().is_some_and(serde_json::Map::is_empty)
-                    || self.active_thread_id.as_deref() != Some(deleting_thread_id)
+                    || self
+                        .active_thread_id
+                        .as_deref()
+                        .is_some_and(|thread_id| thread_id != deleting_thread_id)
                     || self.pending_turn_thread_id.is_some()
                     || self.active_turn_id.is_some()
                 {
@@ -12981,6 +12984,57 @@ pub(crate) mod tests {
         ));
         assert!(matches!(
             guard.delete_thread(&swapped),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[test]
+    fn detached_cleanup_deletes_exact_cursor_without_resuming_it_first() {
+        let cursor = crate::AiProviderSessionCursor::new(
+            "codex.app_server.thread.v2",
+            "thread-retained-detached-cleanup",
+        )
+        .expect("retained cursor should validate");
+        let mut cleanup_guard = initialized_protocol_actor();
+
+        let delete = String::from_utf8(
+            cleanup_guard
+                .delete_thread(&cursor)
+                .expect("detached cleanup should encode the exact cursor"),
+        )
+        .expect("frame should be UTF-8");
+        assert!(delete.contains("\"method\":\"thread/delete\""));
+        assert!(delete.contains("\"threadId\":\"thread-retained-detached-cleanup\""));
+
+        cleanup_guard
+            .accept(br#"{"id":2,"result":{}}"#)
+            .expect("correlated detached delete response should prove completion");
+        assert!(matches!(
+            cleanup_guard.delete_thread(&cursor),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut malformed_response = initialized_protocol_actor();
+        malformed_response
+            .delete_thread(&cursor)
+            .expect("detached cleanup should encode the exact cursor");
+        assert!(matches!(
+            malformed_response.accept(br#"{"id":2,"result":{"deleted":true}}"#),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut bound_to_another_thread = initialized_protocol_actor();
+        bound_to_another_thread
+            .start_fresh_thread(&turn())
+            .expect("thread start should encode");
+        bound_to_another_thread
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-other"}}}"#)
+            .expect("thread response should bind");
+        bound_to_another_thread
+            .accept(&thread_started_notification("thread-other"))
+            .expect("thread notification should bind");
+        assert!(matches!(
+            bound_to_another_thread.delete_thread(&cursor),
             Err(ProviderError::Rejected)
         ));
     }

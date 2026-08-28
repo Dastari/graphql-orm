@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-27
+last_reviewed: 2026-08-28
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -17,6 +17,30 @@ Historical development entries below retain their original dependency and
 checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## [0.95.8] - 2026-08-28
+
+Persistent schema module: **0.64.0** (unchanged from 0.95.7).
+
+### Fixed
+
+- Codex app-server cleanup can now delete one exact protected retained-thread
+  cursor from a fresh initialized process. Cleanup no longer requires that
+  process to have created or resumed the thread first, so a failed or uncertain
+  provider turn can reach authoritative deletion and safe rebind instead of
+  remaining in cleanup backoff indefinitely.
+
+### Security
+
+- Detached deletion remains a closed typed operation. It requires the exact
+  cursor kind and bounded reference, an initialized idle actor, one correlated
+  `thread/delete` request, and an empty success result. An actor bound to a
+  different thread, an active or pending turn, concurrent lifecycle work,
+  malformed or non-empty results, mismatched responses, and repeated deletion
+  are rejected.
+
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, GraphQL SDL, backup, or restore migration.
 
 ## [0.95.7] - 2026-08-27
 
