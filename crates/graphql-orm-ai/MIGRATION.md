@@ -19,6 +19,28 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.95.8 to 0.95.9: provider-native retained-thread absence proof
+
+Adopt `graphql-orm-ai` 0.95.9 from one reviewed full monorepo revision. Existing
+process implementations continue to compile because the new
+`AiCodexAppServerRunProcess::confirm_thread_absent` method defaults to
+`Unsupported`. A host that needs cleanup to recover when `thread/delete`
+returns an unstructured already-absent error must implement that method by
+driving only `AiCodexAppServerProtocolActor::begin_thread_absence_confirmation`,
+its content-free continuation outcomes, and
+`continue_thread_absence_confirmation` to a terminal absence confirmation.
+
+Do not classify provider error codes or messages as not-found. Do not issue a
+generic JSON-RPC request or expose raw `thread/list` results. The actor fixes
+state-DB-only scanning across every source kind and both active and archived
+partitions, stable creation ordering, exact cursor matching, pagination and
+record ceilings, and empty-turn validation. It discards every title, preview,
+path, and other thread field. A target-present outcome and every malformed,
+failed, timed-out, repeated, or unbounded scan remain cleanup failures.
+
+The AI schema module remains **0.64.0**. There is no database, data, GraphQL
+SDL, protected-payload, backup, restore, or data backfill migration.
+
 ## 0.95.7 to 0.95.8: detached retained-session cleanup
 
 Adopt `graphql-orm-ai` 0.95.8 from one reviewed full monorepo revision. No host
