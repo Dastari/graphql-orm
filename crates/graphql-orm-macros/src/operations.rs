@@ -6590,7 +6590,7 @@ pub(crate) fn generate_graphql_operations(
 
                     if let Some(ref orders) = order_by {
                         for order in orders {
-                            query = query.order_by(order);
+                            query = query.order_by_with_context(order, ctx)?;
                         }
                     }
 
@@ -6982,7 +6982,7 @@ pub(crate) fn generate_graphql_operations(
 
                 if let Some(ref orders) = order_by {
                     for order in orders {
-                        query = query.order_by(order);
+                        query = query.order_by_with_context(order, ctx)?;
                     }
                 }
 

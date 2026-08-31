@@ -3,7 +3,7 @@ title: "graphql-orm-backup"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-08-31
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -31,7 +31,7 @@ restore before replacing a production pin.
 
 ```toml
 [dependencies]
-graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.1" }
+graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.2" }
 ```
 
 The default `local` feature provides `LocalBackupRepository`. To supply only a

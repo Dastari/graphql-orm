@@ -14,13 +14,18 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## 0.28.0 - 2026-08-31
+## 0.29.0 - 2026-08-31
 
-Companion macros crate: `graphql-orm-macros` **0.28.0**.
+Companion macros crate: `graphql-orm-macros` **0.29.0**.
 
 - Added repeatable, server-defined `order_expression` declarations for safe
   computed-field ordering. GraphQL clients select only direction; fixed SQL
   expressions are validated at compile time and never accepted from requests.
+  Expressions may declare `:named` binds resolved by an entity-owned function
+  from GraphQL server context; raw placeholders and missing values fail closed.
+- Generated entity and relation ordering appends missing primary-key columns as
+  ascending tie-breakers, keeping equal computed values stable across
+  limit/offset pages.
 - Added opt-in `order_aggregate(name = "...", aggregate = "count")` on
   relations. It generates a direction-only order field backed by a correlated
   count over the relation's declared source and target keys.

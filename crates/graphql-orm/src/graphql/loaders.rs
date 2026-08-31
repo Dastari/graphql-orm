@@ -324,9 +324,17 @@ where
             .iter()
             .map(|column| SortExpression {
                 clause: format!("{column} ASC"),
+                values: Vec::new(),
             })
             .collect::<Vec<_>>();
         sorts.extend(sample.sorts.clone());
+        for primary_key in T::PRIMARY_KEYS {
+            if !sorts.iter().any(|sort| {
+                crate::graphql::orm::sort_clause_mentions_column(&sort.clause, primary_key)
+            }) {
+                sorts.push(SortExpression::unbound(format!("{primary_key} ASC")));
+            }
+        }
         let sort_sql = sorts
             .iter()
             .map(|sort| sort.clause.clone())

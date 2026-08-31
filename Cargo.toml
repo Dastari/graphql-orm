@@ -37,12 +37,12 @@ cynic-parser = { version = "=0.11.2", features = ["pretty"] }
 futures = "0.3"
 getrandom = "0.3"
 graphql-composition = "=0.12.2"
-graphql-orm = { path = "crates/graphql-orm", version = "0.28.0", default-features = false }
+graphql-orm = { path = "crates/graphql-orm", version = "0.29.0", default-features = false }
 graphql-orm-ai-tool-profiles = { path = "crates/graphql-orm-ai-tool-profiles", version = "0.10.2" }
-graphql-orm-backup = { path = "crates/graphql-orm-backup", version = "0.7.1", default-features = false }
+graphql-orm-backup = { path = "crates/graphql-orm-backup", version = "0.7.2", default-features = false }
 graphql-orm-operation-catalog = { path = "crates/graphql-orm-operation-catalog", version = "0.3.0" }
 graphql-orm-router-protocol = { path = "crates/graphql-orm-router-protocol", version = "0.2.1" }
-graphql-orm-storage = { path = "crates/graphql-orm-storage", version = "0.6.1", default-features = false }
+graphql-orm-storage = { path = "crates/graphql-orm-storage", version = "0.6.2", default-features = false }
 hive-router = "=0.0.87"
 hive-router-config = "=0.1.10"
 jsonwebtoken = { version = "=11.0.0", features = ["rust_crypto"] }

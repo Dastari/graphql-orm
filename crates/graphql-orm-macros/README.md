@@ -16,13 +16,13 @@ macro/runtime versions aligned:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.28.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.29.0", default-features = false, features = ["sqlite"] }
 ```
 
 Direct use is supported for tooling that needs the macro package:
 
 ```toml
-graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.28.0", default-features = false, features = ["sqlite"] }
+graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.29.0", default-features = false, features = ["sqlite"] }
 ```
 
 The direct dependency still requires a compatible `graphql-orm` runtime in the
@@ -121,9 +121,13 @@ single, pageable, DataLoader, and nested bulk-preload paths.
 
 Server-defined computed ordering uses repeatable entity-level
 `graphql_orm(order_expression(name = "...", expression = "..."))`
-declarations. The generated input exposes only `OrderDirection`; the fixed,
-validated expression remains compile-time server configuration. Entities that
-need relationship counts can add
+declarations. An expression containing `:named` bind parameters also declares
+`parameters = "server_function_path"`; that function returns
+`OrderExpressionParameters` from the GraphQL server context. The generated
+input exposes only `OrderDirection`; the fixed, validated expression and bind
+names remain compile-time server configuration. Raw backend placeholders are
+rejected, and generated pagination adds missing primary-key tie-breakers.
+Entities that need relationship counts can add
 `order_aggregate(name = "...", aggregate = "count")` to an unconditional,
 readable relation; the generated correlated count uses only its declared key
 mapping and target entity table. Entities that also have handwritten complex fields use
