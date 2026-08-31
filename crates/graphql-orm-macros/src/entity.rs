@@ -15,6 +15,7 @@ pub(crate) struct EntityMetadata {
     pub(crate) description: Option<String>,
     pub(crate) classification: String,
     pub(crate) default_sort: Option<String>,
+    pub(crate) order_expressions: Vec<OrderExpressionMetadata>,
     pub(crate) schema_policy: Option<String>,
     pub(crate) auth: Option<String>,
     pub(crate) schema_only: bool,
@@ -42,6 +43,13 @@ pub(crate) struct EntityMetadata {
     pub(crate) serde_rename_all: Option<String>,
     pub(crate) graphql_rename_fields: Option<String>,
     pub(crate) rls: Option<RlsMetadata>,
+    pub(crate) compose_complex_object: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct OrderExpressionMetadata {
+    pub(crate) name: String,
+    pub(crate) expression: String,
 }
 
 #[derive(Clone, Copy)]
@@ -401,7 +409,9 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
             metadata.rls = Some(parse_rls_metadata(attr)?);
         } else if attr.path().is_ident("graphql_orm") {
             attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("search") {
+                if meta.path.is_ident("compose_complex_object") {
+                    metadata.compose_complex_object = true;
+                } else if meta.path.is_ident("search") {
                     let mut search = SearchEntityMetadata::default();
                     meta.parse_nested_meta(|search_meta| {
                         if search_meta.path.is_ident("index") {
@@ -442,6 +452,42 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                         Ok(())
                     })?;
                     metadata.search = Some(search);
+                } else if meta.path.is_ident("order_expression") {
+                    let mut name = None;
+                    let mut expression = None;
+                    meta.parse_nested_meta(|option| {
+                        if option.path.is_ident("name") {
+                            let value = option.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            validate_graphql_order_name(&lit.value(), lit.span())?;
+                            name = Some(lit.value());
+                        } else if option.path.is_ident("expression") {
+                            let value = option.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            validate_order_expression(&lit.value(), lit.span())?;
+                            expression = Some(lit.value());
+                        } else {
+                            return Err(syn::Error::new(
+                                option.path.span(),
+                                "unsupported order_expression option; expected name or expression",
+                            ));
+                        }
+                        Ok(())
+                    })?;
+                    metadata.order_expressions.push(OrderExpressionMetadata {
+                        name: name.ok_or_else(|| {
+                            syn::Error::new(
+                                meta.path.span(),
+                                "order_expression requires name = \"GraphQLField\"",
+                            )
+                        })?,
+                        expression: expression.ok_or_else(|| {
+                            syn::Error::new(
+                                meta.path.span(),
+                                "order_expression requires expression = \"trusted SQL expression\"",
+                            )
+                        })?,
+                    });
                 } else if meta.path.is_ident("conditional_index") {
                     let mut index = ConditionalIndexMetadata::default();
                     meta.parse_nested_meta(|option| {
@@ -591,6 +637,75 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
     }
 
     Ok(metadata)
+}
+
+fn validate_graphql_order_name(value: &str, span: proc_macro2::Span) -> syn::Result<()> {
+    let mut chars = value.chars();
+    let valid_start = chars
+        .next()
+        .is_some_and(|character| character == '_' || character.is_ascii_alphabetic());
+    if !valid_start
+        || !chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
+        || value.starts_with("__")
+    {
+        return Err(syn::Error::new(
+            span,
+            "order_expression name must be a non-reserved GraphQL name",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_order_expression(value: &str, span: proc_macro2::Span) -> syn::Result<()> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > 4096
+        || value.chars().any(char::is_control)
+        || value.contains(';')
+        || value.contains("--")
+        || value.contains("/*")
+        || value.contains("*/")
+    {
+        return Err(syn::Error::new(
+            span,
+            "order_expression must be one trimmed, non-empty SQL expression without comments, statement separators, or control characters",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod order_expression_tests {
+    use super::{validate_graphql_order_name, validate_order_expression};
+
+    #[test]
+    fn accepts_one_server_defined_expression() {
+        validate_graphql_order_name("Duration", proc_macro2::Span::call_site()).unwrap();
+        validate_order_expression(
+            "COALESCE(finished_at, started_at) - started_at",
+            proc_macro2::Span::call_site(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rejects_reserved_names_and_multi_statement_sql() {
+        assert!(validate_graphql_order_name("__duration", proc_macro2::Span::call_site()).is_err());
+        assert!(
+            validate_order_expression(
+                "finished_at; DROP TABLE jobs",
+                proc_macro2::Span::call_site()
+            )
+            .is_err()
+        );
+        assert!(
+            validate_order_expression(
+                "finished_at /* request-controlled */",
+                proc_macro2::Span::call_site()
+            )
+            .is_err()
+        );
+    }
 }
 
 pub(crate) fn has_repository_entity_attribute(attrs: &[syn::Attribute]) -> bool {
@@ -942,6 +1057,7 @@ pub(crate) struct FieldMetadata {
     pub(crate) relation_propagate_change: Option<String>,
     pub(crate) relation_source_condition: Option<RelationConditionMetadata>,
     pub(crate) relation_target_condition: Option<RelationConditionMetadata>,
+    pub(crate) relation_order_aggregate: Option<RelationOrderAggregateMetadata>,
     pub(crate) skip_db: bool,
     /// Skip from generated public GraphQL Create/Update inputs only; field remains in DB,
     /// the Rust entity, and generated trusted Rust Create/Update input structs.
@@ -989,6 +1105,12 @@ pub(crate) enum RelationConditionValue {
 pub(crate) struct RelationConditionMetadata {
     pub(crate) member: String,
     pub(crate) value: RelationConditionValue,
+}
+
+#[derive(Clone)]
+pub(crate) struct RelationOrderAggregateMetadata {
+    pub(crate) name: String,
+    pub(crate) aggregate: String,
 }
 
 #[derive(Clone)]
@@ -1106,6 +1228,7 @@ impl Default for FieldMetadata {
             relation_propagate_change: None,
             relation_source_condition: None,
             relation_target_condition: None,
+            relation_order_aggregate: None,
             skip_db: false,
             skip_input: false,
             is_private: false,
@@ -1977,6 +2100,50 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             }
                             meta.relation_target_condition =
                                 Some(parse_relation_condition(nested, "column")?);
+                        } else if nested.path.is_ident("order_aggregate") {
+                            if meta.relation_order_aggregate.is_some() {
+                                return Err(nested.error("duplicate relation order_aggregate"));
+                            }
+                            let mut name = None;
+                            let mut aggregate = None;
+                            nested.parse_nested_meta(|option| {
+                                if option.path.is_ident("name") {
+                                    let value = option.value()?;
+                                    let literal: syn::LitStr = value.parse()?;
+                                    validate_graphql_order_name(&literal.value(), literal.span())?;
+                                    name = Some(literal.value());
+                                } else if option.path.is_ident("aggregate") {
+                                    let value = option.value()?;
+                                    let literal: syn::LitStr = value.parse()?;
+                                    let value = literal.value();
+                                    if value != "count" {
+                                        return Err(syn::Error::new(
+                                            literal.span(),
+                                            "relation order_aggregate currently supports only aggregate = \"count\"",
+                                        ));
+                                    }
+                                    aggregate = Some(value);
+                                } else {
+                                    return Err(option.error(
+                                        "unsupported relation order_aggregate option; expected name or aggregate",
+                                    ));
+                                }
+                                Ok(())
+                            })?;
+                            meta.relation_order_aggregate = Some(RelationOrderAggregateMetadata {
+                                name: name.ok_or_else(|| {
+                                    syn::Error::new(
+                                        nested.path.span(),
+                                        "relation order_aggregate requires name = \"GraphQLField\"",
+                                    )
+                                })?,
+                                aggregate: aggregate.ok_or_else(|| {
+                                    syn::Error::new(
+                                        nested.path.span(),
+                                        "relation order_aggregate requires aggregate = \"count\"",
+                                    )
+                                })?,
+                            });
                         } else if nested.path.is_ident("multiple") {
                             meta.relation_multiple = true;
                         } else {
@@ -2749,6 +2916,9 @@ fn generate_entity_impl(
     let mut search_relation_defs = Vec::new();
     let mut search_document_chunks = Vec::new();
     let mut sortable_columns: Vec<(syn::Ident, String)> = Vec::new();
+    let mut relation_order_match_arms = Vec::new();
+    let mut order_by_graphql_names = std::collections::BTreeSet::new();
+    let mut order_by_rust_names = std::collections::BTreeSet::new();
     let mut object_field_methods = Vec::new();
     let mut repository_field_policy_defs = Vec::new();
     let mut semantic_field_defs = Vec::new();
@@ -3017,6 +3187,86 @@ fn generate_entity_impl(
                         search_fields: #search_fields_tokens,
                     }
                 });
+
+                if let Some(order_aggregate) = &field_meta.relation_order_aggregate {
+                    if field_meta.relation_source_condition.is_some()
+                        || field_meta.relation_target_condition.is_some()
+                    {
+                        return Err(syn::Error::new_spanned(
+                            field,
+                            "relation order_aggregate is not supported on conditional relations",
+                        ));
+                    }
+                    if !field_meta.read || field_meta.is_private {
+                        return Err(syn::Error::new_spanned(
+                            field,
+                            "relation order_aggregate requires a readable public relation",
+                        ));
+                    }
+                    debug_assert_eq!(order_aggregate.aggregate, "count");
+                    if !order_by_graphql_names.insert(order_aggregate.name.clone()) {
+                        return Err(syn::Error::new_spanned(
+                            field,
+                            format!(
+                                "duplicate generated ordering field `{}`",
+                                order_aggregate.name
+                            ),
+                        ));
+                    }
+                    let aggregate_name = &order_aggregate.name;
+                    let order_field_name =
+                        rust_ident_from_graphql_name(aggregate_name, field.span());
+                    if !order_by_rust_names.insert(order_field_name.to_string()) {
+                        return Err(syn::Error::new_spanned(
+                            field,
+                            format!(
+                                "ordering field `{aggregate_name}` conflicts with another generated Rust order-input field"
+                            ),
+                        ));
+                    }
+                    let target_type = syn::Ident::new(&target_type, field.span());
+                    let relation_alias = "__graphql_orm_order_relation";
+                    let predicates = source_columns
+                        .iter()
+                        .zip(target_columns.iter())
+                        .map(|(source_column, target_column)| {
+                            let source = parsed_fields
+                                .iter()
+                                .find(|parsed| {
+                                    parsed
+                                        .field
+                                        .ident
+                                        .as_ref()
+                                        .is_some_and(|ident| ident == source_column)
+                                })
+                                .expect("relation source columns were validated above");
+                            let source_physical =
+                                source.meta.db_column.as_deref().unwrap_or(source_column);
+                            format!(
+                                "{relation_alias}.{} = {table_name}.{}",
+                                backend_quote_identifier_path(backend, target_column),
+                                backend_quote_identifier_path(backend, source_physical),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" AND ");
+                    let expression_format = format!(
+                        "(SELECT COUNT(*) FROM {{}} AS {relation_alias} WHERE {predicates}) {{}}"
+                    );
+                    relation_order_match_arms.push(quote! {
+                        if let Some(dir) = &self.#order_field_name {
+                            parts.push(format!(
+                                #expression_format,
+                                <#target_type as ::graphql_orm::graphql::orm::DatabaseEntity>::TABLE_NAME,
+                                dir.to_sql(),
+                            ));
+                        }
+                    });
+                    order_by_fields.push(quote! {
+                        #[graphql(name = #aggregate_name)]
+                        pub #order_field_name: Option<::graphql_orm::graphql::orm::OrderDirection>,
+                    });
+                }
             }
 
             // Initialize relation fields to empty
@@ -3783,6 +4033,20 @@ fn generate_entity_impl(
         // Generate OrderByInput field for sortable fields
         if field_meta.sortable && field_meta.order {
             let order_field_name = rust_ident_from_graphql_name(&graphql_name, field_name.span());
+            if !order_by_graphql_names.insert(graphql_name.clone()) {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    format!("duplicate generated ordering field `{graphql_name}`"),
+                ));
+            }
+            if !order_by_rust_names.insert(order_field_name.to_string()) {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    format!(
+                        "ordering field `{graphql_name}` conflicts with another generated Rust order-input field"
+                    ),
+                ));
+            }
             sortable_columns.push((order_field_name.clone(), db_col_sql.clone()));
             order_by_fields.push(quote! {
                 #[graphql(name = #graphql_name)]
@@ -3861,6 +4125,34 @@ fn generate_entity_impl(
         let row_assignment =
             generate_row_field_assignment(backend, field_name, field_type, &db_col, &field_meta)?;
         from_row_fields.push(row_assignment);
+    }
+
+    for order_expression in &entity_meta.order_expressions {
+        if !order_by_graphql_names.insert(order_expression.name.clone()) {
+            return Err(syn::Error::new(
+                struct_name.span(),
+                format!(
+                    "duplicate generated ordering field `{}`",
+                    order_expression.name
+                ),
+            ));
+        }
+        let graphql_name = &order_expression.name;
+        let order_field_name = rust_ident_from_graphql_name(graphql_name, struct_name.span());
+        if !order_by_rust_names.insert(order_field_name.to_string()) {
+            return Err(syn::Error::new(
+                struct_name.span(),
+                format!(
+                    "ordering field `{graphql_name}` conflicts with another generated Rust order-input field"
+                ),
+            ));
+        }
+        let expression = format!("({})", order_expression.expression);
+        sortable_columns.push((order_field_name.clone(), expression));
+        order_by_fields.push(quote! {
+            #[graphql(name = #graphql_name)]
+            pub #order_field_name: Option<::graphql_orm::graphql::orm::OrderDirection>,
+        });
     }
 
     let default_primary_key = if backend == BackendKind::Mssql {
@@ -4234,6 +4526,7 @@ fn generate_entity_impl(
             fn to_sql_order(&self) -> Option<String> {
                 let mut parts: Vec<String> = Vec::new();
                 #(#order_by_match_arms)*
+                #(#relation_order_match_arms)*
                 if parts.is_empty() {
                     None
                 } else {

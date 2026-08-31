@@ -3,7 +3,7 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-26
+last_reviewed: 2026-08-31
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -29,7 +29,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.27.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.28.0", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the
@@ -49,6 +49,13 @@ The naming features `resolver-case-*`, `argument-case-*`, and `field-case-*`
 are independent groups; enable at most one feature in each group. In a
 multi-backend dependency graph, select `backend = "sqlite" | "postgres" |
 "mssql"` on each entity and in `schema_roots!`.
+
+Companion capabilities remain separate packages rather than core features.
+Depending on `graphql-orm` does not compile or link `graphql-orm-ai`,
+`graphql-orm-storage`, `graphql-orm-backup`, or `graphql-orm-router`; add only
+the companion crates an application uses. For the core crate itself, set
+`default-features = false` and enable one database backend plus only the
+optional bridges needed by the application.
 
 Generated update, delete, predicate-write, and upsert helpers keep the
 authoritative preimage, row/field policy, input transformation, hooks, and DML
@@ -124,6 +131,10 @@ README remains project-neutral.
   compile-time source or target discriminator conditions. Every generated
   resolver and batching path enforces the same bound-value predicate, and the
   declaration must disable physical foreign-key emission.
+- **Server-defined ordering:** computed expressions and opt-in relation counts
+  add direction-only fields to generated order inputs. Relation counts use the
+  declared key mapping and target entity table, so clients never provide SQL,
+  identifiers, or aggregate functions.
 
 ## Errors and security boundaries
 

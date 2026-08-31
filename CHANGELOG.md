@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-26
+last_reviewed: 2026-08-31
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,25 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## 0.28.0 - 2026-08-31
+
+Companion macros crate: `graphql-orm-macros` **0.28.0**.
+
+- Added repeatable, server-defined `order_expression` declarations for safe
+  computed-field ordering. GraphQL clients select only direction; fixed SQL
+  expressions are validated at compile time and never accepted from requests.
+- Added opt-in `order_aggregate(name = "...", aggregate = "count")` on
+  relations. It generates a direction-only order field backed by a correlated
+  count over the relation's declared source and target keys.
+- Added opt-in `graphql_complex_object` composition so handwritten complex
+  fields and generated, batched `GraphQLRelations` resolvers share one
+  async-graphql complex-object implementation.
+
+No database or stored-data migration is required. Adding an order expression
+or relation aggregate changes the entity's GraphQL order-input SDL; adding
+complex-object composition preserves the existing handwritten and relation
+field SDL.
 
 ## 0.27.0 - 2026-08-26
 

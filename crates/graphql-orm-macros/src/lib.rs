@@ -467,6 +467,68 @@ pub fn derive_graphql_relations(input: TokenStream) -> TokenStream {
     }
 }
 
+#[proc_macro_attribute]
+/// Compose handwritten complex fields with resolvers emitted by `GraphQLRelations`.
+///
+/// Apply this to the handwritten inherent `impl` in place of
+/// `async_graphql::ComplexObject`, and mark the entity with
+/// `#[graphql_orm(compose_complex_object)]`.
+pub fn graphql_complex_object(args: TokenStream, input: TokenStream) -> TokenStream {
+    let args = proc_macro2::TokenStream::from(args);
+    let mut item_impl = parse_macro_input!(input as syn::ItemImpl);
+    if item_impl.trait_.is_some() {
+        return syn::Error::new_spanned(
+            &item_impl,
+            "graphql_complex_object requires an inherent impl",
+        )
+        .to_compile_error()
+        .into();
+    }
+    if !item_impl.generics.params.is_empty() {
+        return syn::Error::new_spanned(
+            &item_impl.generics,
+            "graphql_complex_object does not support generic entity impls",
+        )
+        .to_compile_error()
+        .into();
+    }
+    if item_impl.items.iter().any(|item| {
+        matches!(item, syn::ImplItem::Fn(method) if method.sig.ident == "__graphql_orm_generated_relations")
+    }) {
+        return syn::Error::new_spanned(
+            &item_impl,
+            "graphql_complex_object reserves __graphql_orm_generated_relations",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let self_ty = item_impl.self_ty.clone();
+    item_impl.items.push(syn::parse_quote! {
+        #[graphql(flatten)]
+        async fn __graphql_orm_generated_relations(
+            &self,
+        ) -> <#self_ty as ::graphql_orm::graphql::orm::GeneratedRelationsObject>::Object<'_> {
+            <#self_ty as ::graphql_orm::graphql::orm::GeneratedRelationsObject>
+                ::generated_relations_object(self)
+        }
+    });
+
+    let attribute = if args.is_empty() {
+        quote::quote! { #[::graphql_orm::async_graphql::ComplexObject] }
+    } else {
+        quote::quote! { #[::graphql_orm::async_graphql::ComplexObject(#args)] }
+    };
+    quote::quote! {
+        #[allow(unused_imports)]
+        use ::graphql_orm::async_graphql::OutputType as _;
+
+        #attribute
+        #item_impl
+    }
+    .into()
+}
+
 #[proc_macro_derive(
     GraphQLOperations,
     attributes(

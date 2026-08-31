@@ -3,7 +3,7 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-08-26
+last_reviewed: 2026-08-31
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -16,13 +16,13 @@ macro/runtime versions aligned:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.27.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.28.0", default-features = false, features = ["sqlite"] }
 ```
 
 Direct use is supported for tooling that needs the macro package:
 
 ```toml
-graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.27.0", default-features = false, features = ["sqlite"] }
+graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.28.0", default-features = false, features = ["sqlite"] }
 ```
 
 The direct dependency still requires a compatible `graphql-orm` runtime in the
@@ -37,6 +37,7 @@ not connect to a database, run migrations, host GraphQL, or authorize requests.
 | `GraphQLSchemaEntity` | schema metadata only |
 | `RepositoryEntity` | typed repository CRUD and private projections with no GraphQL surface |
 | `GraphQLRelations` | batched single/composite-key relation resolvers |
+| `graphql_complex_object` | handwritten complex fields composed with generated relations |
 | `GraphQLOperations` | generated GraphQL root operation types and operation metadata |
 | `schema_roots!` | query/mutation/subscription roots, schema builders, metadata, and resolved catalog |
 | `graphql_orm_custom_operations` | semantic metadata emitted beside a handwritten root impl |
@@ -117,6 +118,18 @@ float, or boolean literals. Source fields are compile-time type checked; target
 columns are quoted by the selected backend and all values are bound. These
 logical discriminator joins require `emit_fk = false` and are enforced by
 single, pageable, DataLoader, and nested bulk-preload paths.
+
+Server-defined computed ordering uses repeatable entity-level
+`graphql_orm(order_expression(name = "...", expression = "..."))`
+declarations. The generated input exposes only `OrderDirection`; the fixed,
+validated expression remains compile-time server configuration. Entities that
+need relationship counts can add
+`order_aggregate(name = "...", aggregate = "count")` to an unconditional,
+readable relation; the generated correlated count uses only its declared key
+mapping and target entity table. Entities that also have handwritten complex fields use
+`graphql_orm(compose_complex_object)` and apply `graphql_complex_object` to the
+handwritten impl so generated relations are flattened into the same
+`ComplexObject` surface.
 
 See [core runtime documentation](../graphql-orm/README.md),
 and the [macro and attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md).

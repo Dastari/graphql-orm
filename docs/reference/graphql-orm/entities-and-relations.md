@@ -3,7 +3,7 @@ title: "Entities And Relations"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-26
+last_reviewed: 2026-08-31
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -255,6 +255,13 @@ pub struct Post {
 }
 ```
 
+If the entity also defines handwritten `ComplexObject` fields, add
+`#[graphql_orm(compose_complex_object)]` to the entity and replace the
+handwritten impl's `#[ComplexObject]` attribute with
+`#[graphql_complex_object]`. The wrapper flattens the generated relation object
+into the same complex field surface, preserving generated batching and
+filter/order/page arguments without a second conflicting trait impl.
+
 Single-column relation syntax remains:
 
 ```rust
@@ -262,6 +269,27 @@ Single-column relation syntax remains:
 #[relation(target = "Post", from = "id", to = "author_id", multiple)]
 pub posts: Vec<Post>,
 ```
+
+To make a related-row count server-sortable without adding a projection,
+declare an optional count order on a readable relation:
+
+```rust
+#[graphql(skip)]
+#[relation(
+    target = "StaffAssignment",
+    from = "id",
+    to = "policy_id",
+    multiple,
+    order_aggregate(name = "AssignedStaffCount", aggregate = "count")
+)]
+pub staff_assignments: Vec<StaffAssignment>,
+```
+
+This adds `AssignedStaffCount: OrderDirection` to the parent order input. The
+generated SQL is a correlated `COUNT(*)` using the relation key mapping and
+the target entity's table; neither SQL nor identifiers are accepted from the
+request. Index the target key columns used by frequently sorted relations.
+Only `count` is currently accepted, and conditional relations cannot opt in.
 
 Related fields can be copied into the parent search document:
 

@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-26
+last_reviewed: 2026-08-31
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -12,6 +12,51 @@ supersedes: []
 
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
+
+## 0.27.0 to 0.28.0: computed/relation ordering and complex relation composition
+
+Computed fields can join generated ordering without a handwritten query:
+
+```rust
+#[graphql_orm(order_expression(
+    name = "Duration",
+    expression = "finished_at - started_at"
+))]
+```
+
+The expression is trusted, backend-specific server configuration. Requests
+continue to supply only `ASC` or `DESC`. Review the resulting query plan and
+add an expression/index strategy where the selected backend supports one.
+
+A readable relation can expose a server-generated count order without a
+projection:
+
+```rust
+#[relation(
+    target = "StaffAssignment",
+    from = "id",
+    to = "policy_id",
+    multiple,
+    order_aggregate(name = "AssignedStaffCount", aggregate = "count")
+)]
+```
+
+Requests again supply only `ASC` or `DESC`. The macro obtains the target table
+from its entity type and generates the correlated count from the declared key
+mapping. The initial contract supports `count` on unconditional, readable
+relations; conditional relations fail compilation when combined with
+`order_aggregate`.
+
+For a relation entity that already has a handwritten `#[ComplexObject]` impl,
+add `#[graphql_orm(compose_complex_object)]` to the entity and replace that
+impl attribute with `#[graphql_complex_object]`. Handwritten methods remain
+unchanged; generated relations retain their batching and arguments. Do not
+leave both complex-object attributes on the impl.
+
+There is no table, column, constraint, or stored-data migration. Regenerate
+and review GraphQL SDL and semantic/capability fingerprints when adding a new
+ordering field. Review the query plan for correlated relation counts and add
+indexes on the target key columns used by frequently sorted relations.
 
 ## 0.26.0 to 0.27.0: conditional polymorphic relationships
 
