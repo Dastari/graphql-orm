@@ -4726,6 +4726,9 @@ fn generate_entity_impl(
             }
 
             fn to_sql_conditions(&self) -> (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>) {
+                if ::graphql_orm::graphql::orm::DatabaseFilter::validate(self).is_err() {
+                    return (vec!["1 = 0".to_owned()], Vec::new());
+                }
                 let mut conditions = Vec::new();
                 let mut values = Vec::new();
                 let _gom_spatial_prefilter = false;
@@ -4843,6 +4846,9 @@ fn generate_entity_impl(
 
         impl #where_input_name {
             fn __gom_to_sql_prefilter_conditions(&self) -> (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>) {
+                if ::graphql_orm::graphql::orm::DatabaseFilter::validate(self).is_err() {
+                    return (vec!["1 = 0".to_owned()], Vec::new());
+                }
                 let mut conditions = Vec::new();
                 let mut values = Vec::new();
                 let _gom_spatial_prefilter = true;

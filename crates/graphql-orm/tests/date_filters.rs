@@ -3,7 +3,7 @@
 use graphql_orm::async_graphql::{EmptyMutation, EmptySubscription, Schema};
 use graphql_orm::graphql::filters::{
     DateFilter, DateRangeInput, MAX_CALENDAR_DAY_SPAN, MAX_RELATIVE_DAY_OFFSET, RelativeDateInput,
-    SpatialFilter,
+    SpatialFilter, StringFilter,
 };
 use graphql_orm::graphql::orm::spatial::date_filter_matches_at;
 use graphql_orm::prelude::*;
@@ -600,4 +600,48 @@ async fn programmatic_generated_filters_fail_before_database_work() {
         OrmPublicError::from_sqlx(&error).code,
         OrmErrorCode::InvalidInput
     );
+}
+
+#[test]
+fn invalid_nested_filters_render_globally_false() {
+    let invalid_date = CalendarSpatialRecordWhereInput {
+        occurred_at: Some(DateFilter {
+            recent_days: Some(0),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let valid_id = CalendarSpatialRecordWhereInput {
+        id: Some(StringFilter {
+            eq: Some("record-1".to_owned()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    for filter in [
+        CalendarSpatialRecordWhereInput {
+            or: Some(vec![invalid_date.clone(), valid_id]),
+            ..Default::default()
+        },
+        CalendarSpatialRecordWhereInput {
+            not: Some(Box::new(invalid_date.clone())),
+            ..Default::default()
+        },
+    ] {
+        assert!(DatabaseFilter::validate(&filter).is_err());
+        let (conditions, values) = filter.to_sql_conditions();
+        assert_eq!(conditions, vec!["1 = 0"]);
+        assert!(values.is_empty());
+    }
+
+    let spatial_not = CalendarSpatialRecordWhereInput {
+        location: Some(point_filter(1.0, 2.0)),
+        not: Some(Box::new(invalid_date)),
+        ..Default::default()
+    };
+    assert!(spatial_not.requires_in_memory_filtering(DatabaseBackend::Sqlite));
+    let (conditions, values) = spatial_not.to_sql_prefilter_conditions(DatabaseBackend::Sqlite);
+    assert_eq!(conditions, vec!["1 = 0"]);
+    assert!(values.is_empty());
 }
