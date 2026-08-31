@@ -214,6 +214,7 @@ pub(crate) fn generate_graphql_relations(
     input: &DeriveInput,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let struct_name = &input.ident;
+    let entity_visibility = &input.vis;
     let entity_meta = parse_entity_metadata(&input.attrs)?;
     let resolver_auth_mode =
         resolver_auth_mode_tokens(entity_meta.auth.as_deref(), struct_name.span())?;
@@ -1292,7 +1293,38 @@ pub(crate) fn generate_graphql_relations(
     let has_relations = !relations.is_empty();
 
     let complex_object_impl = if has_relations {
-        if legacy_graphql_complex {
+        if legacy_graphql_complex && entity_meta.compose_complex_object {
+            let relation_object = syn::Ident::new(
+                &format!("{struct_name}GeneratedRelations"),
+                struct_name.span(),
+            );
+            let relation_object_name = relation_object.to_string();
+            quote! {
+                #[doc(hidden)]
+                #entity_visibility struct #relation_object<'a>(&'a #struct_name);
+
+                impl<'a> ::std::ops::Deref for #relation_object<'a> {
+                    type Target = #struct_name;
+
+                    fn deref(&self) -> &Self::Target {
+                        self.0
+                    }
+                }
+
+                #[::graphql_orm::async_graphql::Object(name = #relation_object_name)]
+                impl<'a> #relation_object<'a> {
+                    #(#relation_resolvers)*
+                }
+
+                impl ::graphql_orm::graphql::orm::GeneratedRelationsObject for #struct_name {
+                    type Object<'a> = #relation_object<'a> where Self: 'a;
+
+                    fn generated_relations_object(&self) -> Self::Object<'_> {
+                        #relation_object(self)
+                    }
+                }
+            }
+        } else if legacy_graphql_complex {
             quote! {
                 #[::graphql_orm::async_graphql::ComplexObject]
                 impl #struct_name {

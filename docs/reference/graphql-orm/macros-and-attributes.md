@@ -3,7 +3,7 @@ title: GraphQL ORM macro and attribute reference
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-26
+last_reviewed: 2026-08-31
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -24,6 +24,7 @@ does not.
 | `GraphQLSchemaEntity` | schema/entity metadata for validation and planning | you need GraphQL or repository operations |
 | `RepositoryEntity` | typed repository CRUD, filters, ordering, projections, and Rust write inputs | you need generated `async-graphql` types or resolvers |
 | `GraphQLRelations` | relation resolver/loading implementations | the struct has no relation fields |
+| `graphql_complex_object` | handwritten `ComplexObject` fields composed with generated relation fields | the entity does not opt into complex-object composition |
 | `GraphQLOperations` | generated query, mutation, and subscription operation types plus discovery descriptors | the entity uses `#[repository_entity(...)]` |
 | `schema_roots!` | `QueryRoot`, `MutationRoot`, `SubscriptionRoot`, `AppSchema`, schema builders, schema metadata helpers, and operation/semantic catalogs | no generated operation types participate in the schema |
 | `graphql_orm_custom_operations` | canonical semantic metadata beside one handwritten `async-graphql` root impl | the impl is not actually composed into the finished schema |
@@ -75,6 +76,8 @@ schema/search metadata.
 | Option | Accepted shape | Defaults and limits |
 | --- | --- | --- |
 | `search` | `(index = bool, language = "…", tokenizer = "…", min_token_len = integer, fallback = "enabled" | "disabled")` | defaults are supplied by the runtime; only these keys are accepted |
+| `order_expression` | `(name = "GraphQLField", expression = "trusted SQL expression")` | repeatable; the server-fixed expression is parenthesized and the client supplies only `ASC` or `DESC`; comments and statement separators are rejected |
+| `compose_complex_object` | marker | use with `GraphQLRelations`, `#[graphql(complex)]`, and `#[graphql_complex_object]` on the handwritten inherent impl |
 | `conditional_index` | `(name = "…", columns = ["…"], unique = bool, predicate_field = "…", predicate_values = ["…"])` | `columns`, `predicate_field`, and nonempty `predicate_values` are required |
 | `projection` | `(name = "TypeName", fields = [field, …], private = true)` | all three facts are required; public projections are rejected |
 | `operation_authorization` | described below | consumed by `GraphQLOperations` |
@@ -120,6 +123,21 @@ Validation metadata accepted inside `graphql_orm` is `min`, `max`,
 `max_length`, `one_of = ["…"]`, and `gte_field`, `gt_field`, `lte_field`,
 `lt_field` (field-name strings).
 
+Entity-level expression ordering is intended for computed fields whose SQL is
+owned by the server declaration rather than accepted from a GraphQL request:
+
+```rust,ignore
+#[graphql_orm(order_expression(
+    name = "Duration",
+    expression = "finished_at - started_at"
+))]
+```
+
+This adds `Duration: OrderDirection` to the generated order input and lowers it
+to `(finished_at - started_at) ASC|DESC`. Expressions are backend-specific and
+trusted like `default_sort`; the public input never accepts an expression,
+identifier, fragment, or other client-provided SQL.
+
 ### Relations and foreign keys
 
 Use a relation field plus `GraphQLRelations`:
@@ -141,6 +159,52 @@ one string or an array of string literals for a composite key. `multiple`
 changes the relation cardinality. `emit_fk` is a boolean; `on_delete` and
 `propagate_change` are strings validated for the selected backend/policy.
 Relations are not ordinary persisted fields.
+
+An unconditional readable relation can add a correlated count to its parent
+entity's generated order input:
+
+```rust,ignore
+#[relation(
+    target = "StaffAssignment",
+    from = "id",
+    to = "policy_id",
+    multiple,
+    order_aggregate(name = "AssignedStaffCount", aggregate = "count")
+)]
+pub staff_assignments: Vec<StaffAssignment>;
+```
+
+`name` is the GraphQL order-input field and `aggregate` currently accepts only
+`"count"`. The request supplies only `OrderDirection`; the macro obtains the
+target table through `DatabaseEntity` and constructs the correlated aggregate
+from `from`/`to`. The relation must remain public and readable. Combining
+`order_aggregate` with `source_condition` or `target_condition` is rejected so
+conditional predicates continue to use their bound-value resolver path.
+
+When an entity already has handwritten complex fields, opt into one composed
+`ComplexObject` implementation instead of applying async-graphql's attribute
+directly:
+
+```rust,ignore
+#[derive(GraphQLEntity, GraphQLRelations, SimpleObject, Clone)]
+#[graphql(complex)]
+#[graphql_orm(compose_complex_object)]
+struct Job {
+    // persisted and relation fields
+}
+
+#[graphql_complex_object]
+impl Job {
+    async fn duration(&self) -> i64 {
+        self.finished_at - self.started_at
+    }
+}
+```
+
+`graphql_complex_object` delegates schema and resolution for generated
+relations through an internal flattened object, so handwritten fields and
+batched relation resolvers share the one `async_graphql::ComplexObject` trait
+implementation required by `SimpleObject`.
 
 Polymorphic references can add one fixed discriminator condition:
 

@@ -200,6 +200,18 @@ pub trait DatabaseOrderBy {
     }
 }
 
+/// Internal bridge used by the generated complex-object composition macro.
+///
+/// This is public only because macro expansion occurs in the consuming crate.
+#[doc(hidden)]
+pub trait GeneratedRelationsObject {
+    type Object<'a>: crate::async_graphql::ObjectType
+    where
+        Self: 'a;
+
+    fn generated_relations_object(&self) -> Self::Object<'_>;
+}
+
 /// Backend-neutral, policy-aware query builder for macro-generated repository entities.
 ///
 /// Unlike the legacy pool-bound compatibility builders, this type is bound to a
