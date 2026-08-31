@@ -10,6 +10,15 @@ supersedes: []
 
 # Migration Guide
 
+## 0.6.1 to 0.6.2
+
+Version 0.6.2 refreshes maintained workspace guidance and establishes a new
+immutable package tag for the changed package source tree. The public API,
+provider configuration, storage-key layout, persisted metadata, and feature
+defaults are unchanged. No data migration is required. Git consumers should
+move every selected monorepo package to the same reviewed full revision and
+regenerate `Cargo.lock`.
+
 ## 0.6.0 to 0.6.1
 
 Version 0.6.1 publishes the maintained documentation and examples and aligns

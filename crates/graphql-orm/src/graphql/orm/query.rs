@@ -195,8 +195,21 @@ pub trait DatabaseFilter {
 pub trait DatabaseOrderBy {
     fn to_sql_order(&self) -> Option<String>;
 
+    fn requires_context(&self) -> bool {
+        false
+    }
+
     fn to_sort_expression(&self) -> Option<SortExpression> {
-        self.to_sql_order().map(|clause| SortExpression { clause })
+        self.to_sql_order().map(SortExpression::unbound)
+    }
+
+    /// Resolve an ordering expression whose bind values come from trusted
+    /// server context rather than GraphQL input.
+    fn to_sort_expression_with_context(
+        &self,
+        _ctx: &async_graphql::Context<'_>,
+    ) -> async_graphql::Result<Option<SortExpression>> {
+        Ok(self.to_sort_expression())
     }
 }
 
@@ -456,6 +469,60 @@ impl FilterExpression {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SortExpression {
     pub clause: String,
+    pub values: Vec<SqlValue>,
+}
+
+impl SortExpression {
+    pub fn unbound(clause: impl Into<String>) -> Self {
+        Self {
+            clause: clause.into(),
+            values: Vec::new(),
+        }
+    }
+}
+
+pub(crate) fn sort_clause_mentions_column(clause: &str, column: &str) -> bool {
+    let expected = column.trim_matches(|character| matches!(character, '"' | '[' | ']'));
+    clause
+        .split(|character: char| character.is_whitespace() || character == ',')
+        .any(|token| {
+            token
+                .rsplit('.')
+                .next()
+                .unwrap_or(token)
+                .trim_matches(|character| matches!(character, '"' | '[' | ']'))
+                == expected
+        })
+}
+
+/// Named bind values returned by an entity-owned computed-order provider.
+///
+/// GraphQL clients never construct this map. Generated resolvers call the
+/// configured server function with the request context, then bind only names
+/// declared in the compile-time SQL expression.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OrderExpressionParameters {
+    values: std::collections::BTreeMap<String, SqlValue>,
+}
+
+impl OrderExpressionParameters {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn bind(mut self, name: impl Into<String>, value: SqlValue) -> Self {
+        self.values.insert(name.into(), value);
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn require(&self, name: &str) -> async_graphql::Result<SqlValue> {
+        self.values.get(name).cloned().ok_or_else(|| {
+            async_graphql::Error::new(format!(
+                "computed order parameter provider did not supply `{name}`"
+            ))
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1682,7 +1749,12 @@ fn render_select_query_inner(
             &query
                 .sorts
                 .iter()
-                .map(|sort| sort.clause.clone())
+                .map(|sort| {
+                    let rendered = dialect.normalize_sql(&sort.clause, next_index);
+                    next_index += sort.values.len();
+                    values.extend(sort.values.iter().cloned());
+                    rendered
+                })
                 .collect::<Vec<_>>()
                 .join(", "),
         );
@@ -2580,22 +2652,23 @@ where
         let mut sorts = if self.order_clauses.is_empty() {
             vec![SortExpression {
                 clause: entity_default.to_string(),
+                values: Vec::new(),
             }]
         } else {
             self.order_clauses
                 .iter()
                 .cloned()
-                .map(|clause| SortExpression { clause })
+                .map(SortExpression::unbound)
                 .collect::<Vec<_>>()
         };
         for primary_key in <P::Entity as DatabaseEntity>::PRIMARY_KEYS {
-            if !sorts.iter().any(|sort| {
-                sort.clause
-                    .split_whitespace()
-                    .any(|part| part.trim_matches('"') == *primary_key)
-            }) {
+            if !sorts
+                .iter()
+                .any(|sort| sort_clause_mentions_column(&sort.clause, primary_key))
+            {
                 sorts.push(SortExpression {
                     clause: format!("{primary_key} ASC"),
+                    values: Vec::new(),
                 });
             }
         }
@@ -2883,6 +2956,7 @@ pub struct EntityQuery<T, B: OrmBackend = DefaultBackend> {
     pub where_clauses: Vec<String>,
     pub values: Vec<SqlValue>,
     pub order_clauses: Vec<String>,
+    order_values: Vec<Vec<SqlValue>>,
     pub page: Option<PageInput>,
     entity_matchers: Vec<EntityMatcher<T>>,
     _marker: PhantomData<(T, B)>,
@@ -2894,6 +2968,7 @@ impl<T, B: OrmBackend> Clone for EntityQuery<T, B> {
             where_clauses: self.where_clauses.clone(),
             values: self.values.clone(),
             order_clauses: self.order_clauses.clone(),
+            order_values: self.order_values.clone(),
             page: self.page.clone(),
             entity_matchers: self.entity_matchers.clone(),
             _marker: PhantomData,
@@ -2911,6 +2986,7 @@ where
             where_clauses: Vec::new(),
             values: Vec::new(),
             order_clauses: Vec::new(),
+            order_values: Vec::new(),
             page: None,
             entity_matchers: Vec::new(),
             _marker: PhantomData,
@@ -2964,12 +3040,31 @@ where
     {
         if let Some(sort) = order.to_sort_expression() {
             self.order_clauses.push(sort.clause);
+            self.order_values.push(sort.values);
         }
         self
     }
 
+    /// Apply an order input while resolving any entity-owned bind parameters
+    /// from the trusted GraphQL server context.
+    pub fn order_by_with_context<O>(
+        mut self,
+        order: &O,
+        ctx: &async_graphql::Context<'_>,
+    ) -> async_graphql::Result<Self>
+    where
+        O: DatabaseOrderBy,
+    {
+        if let Some(sort) = order.to_sort_expression_with_context(ctx)? {
+            self.order_clauses.push(sort.clause);
+            self.order_values.push(sort.values);
+        }
+        Ok(self)
+    }
+
     pub fn default_order(mut self) -> Self {
         self.order_clauses.push(T::DEFAULT_SORT.to_string());
+        self.order_values.push(Vec::new());
         self
     }
 
@@ -2984,6 +3079,23 @@ where
         apply_default_limit: bool,
     ) -> SelectQuery {
         let page = pagination_config.resolve_page(self.page.as_ref(), apply_default_limit);
+        let mut sorts = self
+            .order_clauses
+            .iter()
+            .enumerate()
+            .map(|(index, clause)| SortExpression {
+                clause: clause.clone(),
+                values: self.order_values.get(index).cloned().unwrap_or_default(),
+            })
+            .collect::<Vec<_>>();
+        for primary_key in T::PRIMARY_KEYS {
+            if !sorts
+                .iter()
+                .any(|sort| sort_clause_mentions_column(&sort.clause, primary_key))
+            {
+                sorts.push(SortExpression::unbound(format!("{primary_key} ASC")));
+            }
+        }
         SelectQuery {
             table: T::TABLE_NAME,
             columns: T::column_names()
@@ -2991,12 +3103,7 @@ where
                 .map(|column| (*column).to_string())
                 .collect(),
             filter: filter_expression_from_raw_parts(&self.where_clauses, &self.values),
-            sorts: self
-                .order_clauses
-                .iter()
-                .cloned()
-                .map(|clause| SortExpression { clause })
-                .collect(),
+            sorts,
             pagination: if self.requires_in_memory_filtering() {
                 None
             } else if page.limit.is_some() || page.offset > 0 {
@@ -4036,6 +4143,7 @@ mod grouped_aggregate_tests {
             filter: None,
             sorts: vec![SortExpression {
                 clause: "id ASC".to_string(),
+                values: Vec::new(),
             }],
             pagination: Some(PaginationRequest {
                 limit: Some(10),

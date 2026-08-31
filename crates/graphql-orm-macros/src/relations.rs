@@ -823,7 +823,10 @@ pub(crate) fn generate_graphql_relations(
                     // Use DataLoader whenever the relation key can be batched.
                     #source_binding_multiple
 
-                    let use_dataloader = #source_supports_dataloader;
+                    let use_dataloader = #source_supports_dataloader
+                        && order_by
+                            .as_ref()
+                            .is_none_or(|order| !order.requires_context());
 
                     let loaded = if use_dataloader {
                         use ::graphql_orm::graphql::loaders::RelationLoader;
@@ -855,7 +858,7 @@ pub(crate) fn generate_graphql_relations(
                         }
 
                         if let Some(ref order) = order_by {
-                            query = query.order_by(order);
+                            query = query.order_by_with_context(order, ctx)?;
                         }
 
                         if query.order_clauses.is_empty() {

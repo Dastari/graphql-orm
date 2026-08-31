@@ -36,7 +36,7 @@ Default local filesystem support:
 graphql-orm-storage = {
     git = "https://github.com/Dastari/graphql-orm.git",
     rev = "<reviewed-full-40-character-commit-sha>",
-    version = "0.6.1",
+    version = "0.6.2",
 }
 ```
 
@@ -47,7 +47,7 @@ Provider-specific builds:
 graphql-orm-storage = {
     git = "https://github.com/Dastari/graphql-orm.git",
     rev = "<reviewed-full-40-character-commit-sha>",
-    version = "0.6.1",
+    version = "0.6.2",
     default-features = false,
     features = ["s3", "azure"],
 }

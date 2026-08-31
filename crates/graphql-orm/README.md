@@ -29,7 +29,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.28.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.29.0", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the
@@ -132,9 +132,11 @@ README remains project-neutral.
   resolver and batching path enforces the same bound-value predicate, and the
   declaration must disable physical foreign-key emission.
 - **Server-defined ordering:** computed expressions and opt-in relation counts
-  add direction-only fields to generated order inputs. Relation counts use the
-  declared key mapping and target entity table, so clients never provide SQL,
-  identifiers, or aggregate functions.
+  add direction-only fields to generated order inputs. Named expression binds
+  can be supplied by an entity-owned function reading GraphQL server context;
+  clients never provide SQL, identifiers, values, or aggregate functions.
+  Missing primary-key columns are appended as deterministic pagination
+  tie-breakers.
 
 ## Errors and security boundaries
 

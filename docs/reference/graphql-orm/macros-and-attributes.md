@@ -76,7 +76,7 @@ schema/search metadata.
 | Option | Accepted shape | Defaults and limits |
 | --- | --- | --- |
 | `search` | `(index = bool, language = "…", tokenizer = "…", min_token_len = integer, fallback = "enabled" | "disabled")` | defaults are supplied by the runtime; only these keys are accepted |
-| `order_expression` | `(name = "GraphQLField", expression = "trusted SQL expression")` | repeatable; the server-fixed expression is parenthesized and the client supplies only `ASC` or `DESC`; comments and statement separators are rejected |
+| `order_expression` | `(name = "GraphQLField", expression = "trusted SQL expression", parameters = "server_function_path")` | repeatable; `parameters` is required only when the expression contains `:named` binds; the client supplies only `ASC` or `DESC`; raw placeholders, comments, and statement separators are rejected |
 | `compose_complex_object` | marker | use with `GraphQLRelations`, `#[graphql(complex)]`, and `#[graphql_complex_object]` on the handwritten inherent impl |
 | `conditional_index` | `(name = "…", columns = ["…"], unique = bool, predicate_field = "…", predicate_values = ["…"])` | `columns`, `predicate_field`, and nonempty `predicate_values` are required |
 | `projection` | `(name = "TypeName", fields = [field, …], private = true)` | all three facts are required; public projections are rejected |
@@ -129,14 +129,34 @@ owned by the server declaration rather than accepted from a GraphQL request:
 ```rust,ignore
 #[graphql_orm(order_expression(
     name = "Duration",
-    expression = "finished_at - started_at"
+    expression = "COALESCE(finished_at, :as_of) - started_at",
+    parameters = "duration_order_parameters"
 ))]
 ```
 
 This adds `Duration: OrderDirection` to the generated order input and lowers it
-to `(finished_at - started_at) ASC|DESC`. Expressions are backend-specific and
-trusted like `default_sort`; the public input never accepts an expression,
-identifier, fragment, or other client-provided SQL.
+to a parameterized `(COALESCE(finished_at, ?) - started_at) ASC|DESC`. The
+named bind is resolved by an entity-owned synchronous function:
+
+```rust,ignore
+fn duration_order_parameters(
+    ctx: &async_graphql::Context<'_>,
+) -> async_graphql::Result<OrderExpressionParameters> {
+    let as_of = ctx.data::<RequestClock>()?.unix_seconds;
+    Ok(OrderExpressionParameters::new().bind("as_of", SqlValue::Int(as_of)))
+}
+```
+
+Expressions are backend-specific and trusted like `default_sort`; the public
+input never accepts an expression, identifier, fragment, bind value, or other
+client-provided SQL. The macro rewrites only declared `:name` tokens outside
+SQL literals and identifiers, rejects raw backend placeholders, and fails the
+request if the provider omits a declared value. Generated GraphQL resolvers
+resolve providers from their server context. Programmatic callers with such an
+order use `EntityQuery::order_by_with_context`; parameter-free orders retain
+`order_by`. Entity and relation pagination append any missing primary-key
+columns as ascending tie-breakers so equal computed values have stable
+limit/offset windows.
 
 ### Relations and foreign keys
 

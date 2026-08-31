@@ -3,7 +3,7 @@ title: "graphql-orm-storage"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-08-31
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -29,13 +29,13 @@ resolved dependency graph.
 
 ```toml
 [dependencies]
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.1" }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.2" }
 ```
 
 For S3-compatible storage without the default local backend:
 
 ```toml
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.1", default-features = false, features = ["s3"] }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.2", default-features = false, features = ["s3"] }
 ```
 
 ## Five-minute local start

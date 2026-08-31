@@ -10,6 +10,15 @@ supersedes: []
 
 # Migration Guide
 
+## 0.7.1 to 0.7.2
+
+Version 0.7.2 refreshes maintained workspace guidance and establishes a new
+immutable package tag for the changed package source tree. The public API,
+snapshot manifest, repository-key layout, restore preflight, persisted data,
+and feature defaults are unchanged. No schema or data migration is required.
+Git consumers should move every selected monorepo package to the same reviewed
+full revision and regenerate `Cargo.lock`.
+
 ## 0.7.0 to 0.7.1
 
 Version 0.7.1 publishes the maintained documentation and examples and aligns

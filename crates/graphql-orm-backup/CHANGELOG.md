@@ -10,6 +10,15 @@ supersedes: []
 
 # Changelog
 
+## 0.7.2 - 2026-08-31
+
+- Refreshed the package's maintained workspace handoff to the current ORM,
+  storage, and authorization revisions. Backup APIs, snapshot manifests,
+  repository layout, restore behavior, and feature defaults are unchanged.
+- This patch establishes a new immutable package tag because maintained files
+  under the package source tree changed after 0.7.1. No schema or data
+  migration is required.
+
 ## 0.7.1 - 2026-08-13
 
 - Published the maintained backup configuration catalogue, provider-neutral

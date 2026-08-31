@@ -50,6 +50,8 @@ pub(crate) struct EntityMetadata {
 pub(crate) struct OrderExpressionMetadata {
     pub(crate) name: String,
     pub(crate) expression: String,
+    pub(crate) parameter_provider: Option<syn::Path>,
+    pub(crate) parameter_names: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -455,6 +457,7 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                 } else if meta.path.is_ident("order_expression") {
                     let mut name = None;
                     let mut expression = None;
+                    let mut parameter_provider = None;
                     meta.parse_nested_meta(|option| {
                         if option.path.is_ident("name") {
                             let value = option.value()?;
@@ -466,27 +469,56 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                             let lit: syn::LitStr = value.parse()?;
                             validate_order_expression(&lit.value(), lit.span())?;
                             expression = Some(lit.value());
+                        } else if option.path.is_ident("parameters") {
+                            let value = option.value()?;
+                            let lit: syn::LitStr = value.parse()?;
+                            parameter_provider = Some(syn::parse_str::<syn::Path>(&lit.value()).map_err(
+                                |_| {
+                                    syn::Error::new(
+                                        lit.span(),
+                                        "order_expression parameters must be a Rust function path",
+                                    )
+                                },
+                            )?);
                         } else {
                             return Err(syn::Error::new(
                                 option.path.span(),
-                                "unsupported order_expression option; expected name or expression",
+                                "unsupported order_expression option; expected name, expression, or parameters",
                             ));
                         }
                         Ok(())
                     })?;
-                    metadata.order_expressions.push(OrderExpressionMetadata {
-                        name: name.ok_or_else(|| {
+                    let name = name.ok_or_else(|| {
                             syn::Error::new(
                                 meta.path.span(),
                                 "order_expression requires name = \"GraphQLField\"",
                             )
-                        })?,
-                        expression: expression.ok_or_else(|| {
+                        })?;
+                    let expression = expression.ok_or_else(|| {
                             syn::Error::new(
                                 meta.path.span(),
                                 "order_expression requires expression = \"trusted SQL expression\"",
                             )
-                        })?,
+                        })?;
+                    let (expression, parameter_names) =
+                        rewrite_named_order_parameters(&expression, meta.path.span())?;
+                    if !parameter_names.is_empty() && parameter_provider.is_none() {
+                        return Err(syn::Error::new(
+                            meta.path.span(),
+                            "order_expression named parameters require parameters = \"server_function_path\"",
+                        ));
+                    }
+                    if parameter_names.is_empty() && parameter_provider.is_some() {
+                        return Err(syn::Error::new(
+                            meta.path.span(),
+                            "order_expression parameters requires at least one :named_parameter in expression",
+                        ));
+                    }
+                    metadata.order_expressions.push(OrderExpressionMetadata {
+                        name,
+                        expression,
+                        parameter_provider,
+                        parameter_names,
                     });
                 } else if meta.path.is_ident("conditional_index") {
                     let mut index = ConditionalIndexMetadata::default();
@@ -674,9 +706,81 @@ fn validate_order_expression(value: &str, span: proc_macro2::Span) -> syn::Resul
     Ok(())
 }
 
+fn rewrite_named_order_parameters(
+    value: &str,
+    span: proc_macro2::Span,
+) -> syn::Result<(String, Vec<String>)> {
+    let chars = value.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(value.len());
+    let mut names = Vec::new();
+    let mut index = 0usize;
+    let mut quote = None;
+    while index < chars.len() {
+        let character = chars[index];
+        if let Some(terminator) = quote {
+            output.push(character);
+            if character == terminator {
+                if index + 1 < chars.len() && chars[index + 1] == terminator {
+                    output.push(chars[index + 1]);
+                    index += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            quote = Some(character);
+            output.push(character);
+            index += 1;
+            continue;
+        }
+        if character == '[' {
+            quote = Some(']');
+            output.push(character);
+            index += 1;
+            continue;
+        }
+        if matches!(character, '?' | '$' | '@') {
+            return Err(syn::Error::new(
+                span,
+                "order_expression bind placeholders must use :name and a server parameter provider",
+            ));
+        }
+        if character == ':' {
+            if index + 1 < chars.len() && chars[index + 1] == ':' {
+                output.push(':');
+                output.push(':');
+                index += 2;
+                continue;
+            }
+            if index + 1 < chars.len()
+                && (chars[index + 1] == '_' || chars[index + 1].is_ascii_alphabetic())
+            {
+                let start = index + 1;
+                let mut end = start + 1;
+                while end < chars.len() && (chars[end] == '_' || chars[end].is_ascii_alphanumeric())
+                {
+                    end += 1;
+                }
+                names.push(chars[start..end].iter().collect());
+                output.push('?');
+                index = end;
+                continue;
+            }
+        }
+        output.push(character);
+        index += 1;
+    }
+    Ok((output, names))
+}
+
 #[cfg(test)]
 mod order_expression_tests {
-    use super::{validate_graphql_order_name, validate_order_expression};
+    use super::{
+        rewrite_named_order_parameters, validate_graphql_order_name, validate_order_expression,
+    };
 
     #[test]
     fn accepts_one_server_defined_expression() {
@@ -704,6 +808,29 @@ mod order_expression_tests {
                 proc_macro2::Span::call_site()
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn rewrites_only_named_server_parameters() {
+        let (sql, names) = rewrite_named_order_parameters(
+            "COALESCE(exit_time, :as_of) - entry_time + :offset",
+            proc_macro2::Span::call_site(),
+        )
+        .unwrap();
+        assert_eq!(sql, "COALESCE(exit_time, ?) - entry_time + ?");
+        assert_eq!(names, ["as_of", "offset"]);
+
+        let (sql, names) = rewrite_named_order_parameters(
+            "payload::text || ':literal'",
+            proc_macro2::Span::call_site(),
+        )
+        .unwrap();
+        assert_eq!(sql, "payload::text || ':literal'");
+        assert!(names.is_empty());
+        assert!(
+            rewrite_named_order_parameters("exit_time - ?", proc_macro2::Span::call_site())
+                .is_err()
         );
     }
 }
@@ -2916,6 +3043,8 @@ fn generate_entity_impl(
     let mut search_relation_defs = Vec::new();
     let mut search_document_chunks = Vec::new();
     let mut sortable_columns: Vec<(syn::Ident, String)> = Vec::new();
+    let mut order_expression_parameter_arms = Vec::new();
+    let mut order_expression_context_checks = Vec::new();
     let mut relation_order_match_arms = Vec::new();
     let mut order_by_graphql_names = std::collections::BTreeSet::new();
     let mut order_by_rust_names = std::collections::BTreeSet::new();
@@ -4149,6 +4278,22 @@ fn generate_entity_impl(
         }
         let expression = format!("({})", order_expression.expression);
         sortable_columns.push((order_field_name.clone(), expression));
+        if let Some(provider) = &order_expression.parameter_provider {
+            order_expression_context_checks.push(quote! { self.#order_field_name.is_some() });
+            let parameter_names = order_expression
+                .parameter_names
+                .iter()
+                .map(|name| syn::LitStr::new(name, struct_name.span()))
+                .collect::<Vec<_>>();
+            order_expression_parameter_arms.push(quote! {
+                if self.#order_field_name.is_some() {
+                    let __graphql_orm_parameters = #provider(ctx)?;
+                    #(
+                        values.push(__graphql_orm_parameters.require(#parameter_names)?);
+                    )*
+                }
+            });
+        }
         order_by_fields.push(quote! {
             #[graphql(name = #graphql_name)]
             pub #order_field_name: Option<::graphql_orm::graphql::orm::OrderDirection>,
@@ -4532,6 +4677,27 @@ fn generate_entity_impl(
                 } else {
                     Some(parts.join(", "))
                 }
+            }
+
+            fn requires_context(&self) -> bool {
+                false #(|| #order_expression_context_checks)*
+            }
+
+            fn to_sort_expression_with_context(
+                &self,
+                ctx: &::graphql_orm::async_graphql::Context<'_>,
+            ) -> ::graphql_orm::async_graphql::Result<
+                Option<::graphql_orm::graphql::orm::SortExpression>
+            > {
+                let Some(clause) = self.to_sql_order() else {
+                    return Ok(None);
+                };
+                let mut values = Vec::new();
+                #(#order_expression_parameter_arms)*
+                Ok(Some(::graphql_orm::graphql::orm::SortExpression {
+                    clause,
+                    values,
+                }))
             }
         }
 

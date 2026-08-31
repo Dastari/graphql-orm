@@ -13,20 +13,33 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
-## 0.27.0 to 0.28.0: computed/relation ordering and complex relation composition
+## 0.27.0 to 0.29.0: computed/relation ordering and complex relation composition
 
 Computed fields can join generated ordering without a handwritten query:
 
 ```rust
 #[graphql_orm(order_expression(
     name = "Duration",
-    expression = "finished_at - started_at"
+    expression = "COALESCE(finished_at, :as_of) - started_at",
+    parameters = "duration_order_parameters"
 ))]
 ```
 
 The expression is trusted, backend-specific server configuration. Requests
-continue to supply only `ASC` or `DESC`. Review the resulting query plan and
-add an expression/index strategy where the selected backend supports one.
+continue to supply only `ASC` or `DESC`. For `:named` binds, the configured
+synchronous function receives `&async_graphql::Context` and returns
+`async_graphql::Result<OrderExpressionParameters>`; use `SqlValue` variants for
+the values. Raw `?`, `$n`, and `@Pn` placeholders are rejected. Programmatic
+queries using a contextual expression call `EntityQuery::order_by_with_context`.
+Generated pagination now adds missing primary-key columns as ascending
+tie-breakers. Review the resulting query plan and add an expression/index
+strategy where the selected backend supports one.
+
+`SortExpression` now carries bound `values` so query rendering can number
+order-expression placeholders after filter placeholders on every backend.
+Handwritten parameter-free sort construction should use
+`SortExpression::unbound("column ASC")`; handwritten struct literals must add
+`values: Vec::new()`.
 
 A readable relation can expose a server-generated count order without a
 projection:

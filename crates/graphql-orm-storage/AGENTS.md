@@ -31,13 +31,13 @@ This crate is a reusable storage companion for applications that use `graphql-or
 
 ## Current Agent Handoff
 
-- Current crate version is `0.6.1`.
-- The workspace resolves `graphql-orm` 0.24.0 and `graphql-orm-backup` 0.7.1
+- Current crate version is `0.6.2`.
+- The workspace resolves `graphql-orm` 0.29.0 and `graphql-orm-backup` 0.7.2
   through workspace path dependencies and one root `Cargo.lock`. Keep
   downstream companion packages on one reviewed monorepo revision.
 - `graphql-orm` owns the optional `agql-auth` integration, pinned at
-  `agql-auth` 0.16.0 revision
-  `3bc38cd94794f1e868a9cc3a5551047b95a32105`; this crate does not depend on
+  `agql-auth` 0.19.0 revision
+  `1d2e9fe2e1576105212a7b340a11abf8cad0382d`; this crate does not depend on
   application authorization.
 - The storage provider boundary is now the streaming `BlobStore` trait.
 - `ObjectStorage` extends `BlobStore`; custom providers must implement `BlobStore` first.

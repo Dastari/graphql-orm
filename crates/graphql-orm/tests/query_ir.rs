@@ -21,6 +21,7 @@ fn sample_select() -> SelectQuery {
         ])),
         sorts: vec![SortExpression {
             clause: "name ASC".to_string(),
+            values: Vec::new(),
         }],
         pagination: Some(PaginationRequest {
             limit: Some(10),
@@ -46,6 +47,38 @@ fn postgres_renderer_numbers_placeholders() {
     assert!(rendered.sql.contains("active = $1"));
     assert!(rendered.sql.contains("name LIKE $2"));
     assert_eq!(rendered.values.len(), 2);
+}
+
+#[test]
+fn sort_bind_values_follow_filter_values_and_are_backend_normalized() {
+    let mut query = sample_select();
+    query.sorts = vec![SortExpression {
+        clause: "COALESCE(exit_time, ?) - entry_time DESC".to_string(),
+        values: vec![SqlValue::Int(1_800)],
+    }];
+
+    let sqlite = render_select_query(DatabaseBackend::Sqlite, &query);
+    assert!(
+        sqlite
+            .sql
+            .contains("ORDER BY COALESCE(exit_time, ?) - entry_time DESC")
+    );
+    assert_eq!(
+        sqlite.values,
+        [
+            SqlValue::Bool(true),
+            SqlValue::String("%Al%".to_string()),
+            SqlValue::Int(1_800),
+        ]
+    );
+
+    let postgres = render_select_query(DatabaseBackend::Postgres, &query);
+    assert!(
+        postgres
+            .sql
+            .contains("ORDER BY COALESCE(exit_time, $3) - entry_time DESC")
+    );
+    assert_eq!(postgres.values, sqlite.values);
 }
 
 #[test]
@@ -207,6 +240,7 @@ fn mssql_renderer_numbers_placeholders_orders_and_paginates() {
             ])),
             sorts: vec![SortExpression {
                 clause: "[JobName] DESC".to_string(),
+                values: Vec::new(),
             }],
             pagination: Some(PaginationRequest {
                 limit: Some(10),

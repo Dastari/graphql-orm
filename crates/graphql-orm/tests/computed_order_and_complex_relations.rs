@@ -4,6 +4,16 @@ use graphql_orm::async_graphql::SimpleObject;
 use graphql_orm::prelude::*;
 use graphql_orm::sqlx::Row;
 
+#[derive(Clone, Copy)]
+struct DurationAsOf(i64);
+
+fn duration_order_parameters(
+    ctx: &graphql_orm::async_graphql::Context<'_>,
+) -> graphql_orm::async_graphql::Result<OrderExpressionParameters> {
+    let as_of = ctx.data::<DurationAsOf>()?.0;
+    Ok(OrderExpressionParameters::new().bind("as_of", SqlValue::Int(as_of)))
+}
+
 #[derive(
     GraphQLEntity,
     GraphQLRelations,
@@ -24,14 +34,18 @@ use graphql_orm::sqlx::Row;
 )]
 #[graphql_orm(
     compose_complex_object,
-    order_expression(name = "Duration", expression = "finished_at - started_at")
+    order_expression(
+        name = "Duration",
+        expression = "COALESCE(finished_at, :as_of) - started_at",
+        parameters = "duration_order_parameters"
+    )
 )]
 pub struct ComposedParent {
     #[primary_key]
     #[sortable]
     id: String,
     started_at: i64,
-    finished_at: i64,
+    finished_at: Option<i64>,
     #[graphql(skip)]
     #[relation(
         target = "ComposedChild",
@@ -47,8 +61,11 @@ pub struct ComposedParent {
 #[graphql_complex_object]
 impl ComposedParent {
     #[graphql(name = "Duration")]
-    async fn duration(&self) -> i64 {
-        self.finished_at - self.started_at
+    async fn duration(
+        &self,
+        ctx: &graphql_orm::async_graphql::Context<'_>,
+    ) -> graphql_orm::async_graphql::Result<i64> {
+        Ok(self.finished_at.unwrap_or(ctx.data::<DurationAsOf>()?.0) - self.started_at)
     }
 }
 
@@ -87,16 +104,16 @@ schema_roots! {
 }
 
 #[tokio::test]
-async fn fixed_expression_ordering_executes_without_client_supplied_sql() -> graphql_orm::Result<()>
-{
+async fn contextual_expression_ordering_is_bound_and_paginates_deterministically()
+-> graphql_orm::Result<()> {
     let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:").await?;
     graphql_orm::sqlx::query(
-        "CREATE TABLE composed_parents (id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, finished_at INTEGER NOT NULL)",
+        "CREATE TABLE composed_parents (id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, finished_at INTEGER)",
     )
     .execute(database.pool())
     .await?;
     graphql_orm::sqlx::query(
-        "INSERT INTO composed_parents (id, started_at, finished_at) VALUES ('short', 10, 15), ('long', 10, 30)",
+        "INSERT INTO composed_parents (id, started_at, finished_at) VALUES ('b-tied-open', 30, NULL), ('long', 10, 30), ('a-tied', 10, 20)",
     )
     .execute(database.pool())
     .await?;
@@ -107,26 +124,18 @@ async fn fixed_expression_ordering_executes_without_client_supplied_sql() -> gra
     };
     assert_eq!(
         order.to_sql_order().as_deref(),
-        Some("(finished_at - started_at) DESC")
+        Some("(COALESCE(finished_at, ?) - started_at) DESC")
     );
+    assert!(order.requires_context());
 
-    let loaded = EntityQuery::<ComposedParent, SqliteBackend>::new()
-        .order_by(&order)
-        .fetch_all(&database)
-        .await?;
-    assert_eq!(
-        loaded
-            .iter()
-            .map(|parent| parent.id.clone())
-            .collect::<Vec<_>>(),
-        vec!["long", "short"]
-    );
-
-    let schema = schema_builder(database).finish();
+    let schema = schema_builder(database).data(DurationAsOf(40)).finish();
     let response = schema
         .execute(
             "query {
-                composedParents(orderBy: [{ Duration: DESC }]) {
+                composedParents(
+                    orderBy: [{ Duration: DESC }]
+                    page: { limit: 1, offset: 1 }
+                ) {
                     edges { node { id Duration } }
                 }
             }",
@@ -137,8 +146,28 @@ async fn fixed_expression_ordering_executes_without_client_supplied_sql() -> gra
     let edges = data["composedParents"]["edges"]
         .as_array()
         .expect("computed-order edges");
-    assert_eq!(edges[0]["node"]["id"].as_str(), Some("long"));
-    assert_eq!(edges[0]["node"]["Duration"].as_i64(), Some(20));
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0]["node"]["id"].as_str(), Some("a-tied"));
+    assert_eq!(edges[0]["node"]["Duration"].as_i64(), Some(10));
+
+    let ascending = schema
+        .execute(
+            "query {
+                composedParents(orderBy: [{ Duration: ASC }]) {
+                    edges { node { id } }
+                }
+            }",
+        )
+        .await;
+    assert!(ascending.errors.is_empty(), "{:?}", ascending.errors);
+    let ascending = ascending.data.into_json().expect("GraphQL response JSON");
+    let ids = ascending["composedParents"]["edges"]
+        .as_array()
+        .expect("ascending computed-order edges")
+        .iter()
+        .map(|edge| edge["node"]["id"].as_str().expect("node id"))
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["a-tied", "b-tied-open", "long"]);
     Ok(())
 }
 
@@ -160,7 +189,7 @@ async fn relation_count_ordering_executes_as_a_correlated_server_expression()
 -> graphql_orm::Result<()> {
     let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:").await?;
     graphql_orm::sqlx::query(
-        "CREATE TABLE composed_parents (id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, finished_at INTEGER NOT NULL)",
+        "CREATE TABLE composed_parents (id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, finished_at INTEGER)",
     )
     .execute(database.pool())
     .await?;
