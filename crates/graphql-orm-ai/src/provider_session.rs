@@ -492,7 +492,9 @@ pub struct AiProviderSessionBindingView {
 /// cursor and grants no provider egress, tool, GraphQL, or application
 /// authority. [`AiProviderSessionService::rebind_for_run`] rehydrates the
 /// current principal and atomically revalidates every field before replacing
-/// the tombstone.
+/// the tombstone under the current server-authored descriptor. Exact provider
+/// absence severs the deleted generation from its historical descriptor; that
+/// descriptor grants no authority over the replacement generation.
 #[derive(Clone, PartialEq, Eq)]
 pub struct AiProviderSessionRebindAuthorization {
     pub(crate) binding_id: Uuid,
@@ -553,7 +555,7 @@ pub enum AiProviderSessionRunDisposition {
     /// A confirmed wait was already reclaimed for this exact run fence.
     Reclaimed(Box<AiProviderSessionClaim>),
     /// Exact provider absence was proven and this run may replace the
-    /// tombstone once.
+    /// tombstone once under its current server-authored descriptor.
     RebindAllowed(Box<AiProviderSessionRebindAuthorization>),
     /// A binding exists but cannot safely serve the planned run.
     Unavailable(AiProviderSessionState),
@@ -1398,8 +1400,9 @@ pub trait AiProviderSessionService: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when current authority, the run fence, the
-    /// crate-issued authorization, deleted generation, provider descriptor,
-    /// transcript prefix, or protected replacement cursor is not exact.
+    /// crate-issued authorization, deleted generation, current replacement
+    /// descriptor, transcript prefix, or protected replacement cursor is not
+    /// exact.
     async fn rebind_for_run(
         &self,
         _lease: &AiRunLease,

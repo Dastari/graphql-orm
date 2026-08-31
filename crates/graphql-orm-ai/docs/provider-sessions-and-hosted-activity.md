@@ -3,7 +3,7 @@ title: "Provider Sessions, Hosted Search, and Visible Activity"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-15
+last_reviewed: 2026-09-01
 review_by: 2027-02-11
 supersedes: []
 ---
@@ -538,10 +538,15 @@ eligibility from raw state fields. `RebindAllowed` is a crate-issued,
 short-lived authorization available only after cleanup persisted exact
 provider absence in a `Deleted` tombstone. `rebind_for_run` rehydrates current
 authority and atomically compares the exact owner/session/scope, run/attempt/
-lease fence, deleted row and cleanup generations, provider descriptor, and
-host-authored canonical transcript fingerprint. It protects a fresh cursor in
-the same row, so the unique session binding remains intact and concurrent
-replacement has one winner. Cleared cursor material is never reopened.
+lease fence, deleted row and cleanup generations, current server-authored
+replacement descriptor, and host-authored canonical transcript fingerprint.
+Exact provider absence severs the deleted generation from its historical
+descriptor, so an approved provider, registration, model, protocol, policy, or
+capability change cannot strand the durable application session. The current
+descriptor is bound into the short-lived authorization and persisted with a
+fresh cursor in the same row, so the unique session binding remains intact and
+concurrent replacement has one winner. Cleared cursor material is never
+reopened.
 
 A managed cleanup loop performs:
 
@@ -556,7 +561,8 @@ An ordinary later run may replace only that exact absence-proven tombstone.
 Expiry, process death, transport failure, cleanup backoff, and restore
 quarantine remain unavailable. If creation of the replacement empty thread
 succeeds but its rebind CAS loses, `AiProviderCallExecutor` invokes the exact
-registered provider discard boundary.
+registered provider discard boundary and safely defers the run. No business
+input or tool request crosses the provider boundary before the rebind commits.
 
 ### Parking across approval and subscription waits
 

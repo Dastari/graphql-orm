@@ -839,30 +839,20 @@ async fn exact_absence_authorizes_one_fenced_rebind_with_a_fresh_cursor() {
         .await
         .expect("uncertain run should finish recovery-required");
     let second_run = next_active_run(&fixture, &owner, first_run.session_id()).await;
-    let second_plan = AiProviderSessionTurnPlan::new(descriptor.clone(), "d".repeat(64))
-        .expect("rebind plan should validate");
     let changed_descriptor = AiProviderSessionDescriptor::new(
-        ProviderKind::LocalHarness,
-        "reviewed-local-profile",
-        "changed-model",
-        "a".repeat(64),
-        "codex-app-server/v2",
-        "b".repeat(64),
+        ProviderKind::OpenAiCompatible,
+        "replacement-profile",
+        "replacement-model",
+        "e".repeat(64),
+        "replacement-protocol/v3",
+        "f".repeat(64),
     )
     .expect("changed descriptor should validate");
-    let changed_plan = AiProviderSessionTurnPlan::new(changed_descriptor, "d".repeat(64))
+    let changed_plan = AiProviderSessionTurnPlan::new(changed_descriptor.clone(), "d".repeat(64))
         .expect("changed plan should validate");
-    assert!(matches!(
-        fixture
-            .provider_sessions
-            .disposition_for_run(&second_run, &changed_plan)
-            .await
-            .expect("changed descriptor disposition should resolve"),
-        AiProviderSessionRunDisposition::Unavailable(AiProviderSessionState::Deleted)
-    ));
     let authorization = match fixture
         .provider_sessions
-        .disposition_for_run(&second_run, &second_plan)
+        .disposition_for_run(&second_run, &changed_plan)
         .await
         .expect("deleted binding should be classified")
     {
@@ -878,8 +868,8 @@ async fn exact_absence_authorizes_one_fenced_rebind_with_a_fresh_cursor() {
                 &other_run,
                 authorization.clone(),
                 AiProviderSessionBindRequest::new(
-                    descriptor.clone(),
-                    AiProviderSessionCursor::new("codex.thread", "swapped-owner-thread")
+                    changed_descriptor.clone(),
+                    AiProviderSessionCursor::new("replacement.thread", "swapped-owner-thread")
                         .expect("swapped cursor should validate"),
                     "d".repeat(64),
                     None,
@@ -896,8 +886,8 @@ async fn exact_absence_authorizes_one_fenced_rebind_with_a_fresh_cursor() {
                 &second_run,
                 authorization.clone(),
                 AiProviderSessionBindRequest::new(
-                    descriptor.clone(),
-                    AiProviderSessionCursor::new("codex.thread", "swapped-transcript-thread")
+                    changed_descriptor.clone(),
+                    AiProviderSessionCursor::new("replacement.thread", "swapped-transcript-thread")
                         .expect("swapped cursor should validate"),
                     "e".repeat(64),
                     None,
@@ -910,8 +900,8 @@ async fn exact_absence_authorizes_one_fenced_rebind_with_a_fresh_cursor() {
     let stale_authorization = authorization.clone();
     let request = || {
         AiProviderSessionBindRequest::new(
-            descriptor.clone(),
-            AiProviderSessionCursor::new("codex.thread", "fresh-thread")
+            changed_descriptor.clone(),
+            AiProviderSessionCursor::new("replacement.thread", "fresh-thread")
                 .expect("fresh cursor should validate"),
             "d".repeat(64),
             None,
@@ -930,6 +920,7 @@ async fn exact_absence_authorizes_one_fenced_rebind_with_a_fresh_cursor() {
         (Ok(claim), Err(AiError::Conflict)) | (Err(AiError::Conflict), Ok(claim)) => claim,
         outcomes => panic!("exactly one rebind should win: {outcomes:?}"),
     };
+    assert_eq!(rebound.descriptor(), &changed_descriptor);
     let opened = fixture
         .provider_sessions
         .open_for_run(&second_run, &rebound)

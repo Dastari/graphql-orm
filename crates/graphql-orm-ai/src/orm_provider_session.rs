@@ -572,9 +572,15 @@ mod service {
                         }
                         if state == AiProviderSessionState::Deleted
                             && binding.last_run_id != Some(lease.run_id().0)
-                            && descriptor_from_record(binding).map_err(ai_error_to_orm)?
-                                == *planned.descriptor()
                         {
+                            // Exact provider absence severs the old cursor from
+                            // the next generation. The tombstone's historical
+                            // descriptor must therefore not strand the durable
+                            // application session after a reviewed provider,
+                            // registration, policy, or capability change. The
+                            // current server-authored descriptor is instead
+                            // bound into this short-lived run authorization and
+                            // atomically persisted with the fresh empty cursor.
                             let provider_absence_observed_at = binding
                                 .provider_absence_observed_at
                                 .and_then(|value| OffsetDateTime::from_unix_timestamp(value).ok())
