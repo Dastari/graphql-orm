@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-28
+last_reviewed: 2026-09-01
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -17,6 +17,32 @@ Historical development entries below retain their original dependency and
 checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## [0.95.11] - 2026-09-01
+
+Persistent schema module: **0.64.0** (unchanged from 0.95.10).
+
+### Fixed
+
+- An absence-proven deleted provider-session generation can now rebind under
+  the current server-authored provider, registration, policy, model, protocol,
+  and capability descriptor. A reviewed runtime change no longer strands the
+  durable application session behind its historical descriptor.
+- Losing the replacement compare-and-swap discards the fresh empty provider
+  session and safely defers the run instead of reporting an uncertain provider
+  turn. A residual deleted tombstone is likewise treated as a safe deferral.
+
+### Security
+
+- Live cursor resume still requires the complete descriptor to match exactly.
+  Replacement remains available only after exact provider absence is persisted
+  and the protected cursor is cleared. Rebind atomically revalidates the owner,
+  session, scope, run, attempt, lease, row, claim, cleanup generation, absence
+  evidence, canonical transcript, and current descriptor before any business
+  input or tool request crosses the provider boundary.
+
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, GraphQL SDL, backup, or restore migration.
 
 ## [0.95.10] - 2026-08-28
 

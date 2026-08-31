@@ -2940,7 +2940,14 @@ impl AiProviderCallExecutor {
                                 &cursor,
                             )
                             .await;
-                        return Err(error);
+                        return Err(match error {
+                            // No business input is sent before the empty
+                            // provider session is durably rebound. Losing that
+                            // persistence fence is therefore a safe deferral,
+                            // not an uncertain provider turn.
+                            AiError::Conflict => AiError::ProviderSessionDeferred,
+                            other => other,
+                        });
                     }
                 }
             }
@@ -2961,7 +2968,8 @@ impl AiProviderCallExecutor {
             crate::AiProviderSessionRunDisposition::Unavailable(
                 crate::AiProviderSessionState::CleanupRequired
                 | crate::AiProviderSessionState::CleanupInProgress
-                | crate::AiProviderSessionState::CleanupBackoff,
+                | crate::AiProviderSessionState::CleanupBackoff
+                | crate::AiProviderSessionState::Deleted,
             ) => {
                 return Err(AiError::ProviderSessionDeferred);
             }
@@ -9702,7 +9710,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rebind_fence_loss_discards_the_exact_new_empty_provider_session() {
+    async fn rebind_fence_loss_discards_the_empty_session_and_defers_safely() {
         let cursor = AiProviderSessionCursor::new("mock.thread", "losing-rebind-thread")
             .expect("test cursor should validate");
         let fixture = fixture_with_provider(
@@ -9760,7 +9768,7 @@ mod tests {
                     None,
                 )
                 .await,
-            Err(AiError::Conflict)
+            Err(AiError::ProviderSessionDeferred)
         ));
         assert_eq!(fixture.mock.discarded_provider_session_count(), 1);
         assert_eq!(fixture.mock.request_count(), 0);

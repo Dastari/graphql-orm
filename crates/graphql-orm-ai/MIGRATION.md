@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-28
+last_reviewed: 2026-09-01
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -18,6 +18,25 @@ Migration entries preserve the dependency and schema facts for the checkpoint
 they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## 0.95.10 to 0.95.11: absence-proven descriptor replacement
+
+Adopt `graphql-orm-ai` 0.95.11 from one reviewed full monorepo revision. No
+host API or configuration change is required. After cleanup has persisted
+exact provider absence and cleared the protected cursor, a later run may
+replace the deleted generation under its current server-authored provider,
+registration, policy, model, protocol, and capability descriptor. The
+historical descriptor does not authorize or fence the replacement generation.
+
+Live cursor resume still requires an exact complete descriptor match. Rebind
+continues to revalidate every owner, session, scope, run, attempt, lease, row,
+claim, cleanup-generation, absence, transcript, and current-descriptor fence.
+If concurrent replacement wins first, the losing fresh empty provider session
+is discarded and the run is safely deferred before business input or a tool
+request is sent.
+
+The AI schema module remains **0.64.0**. There is no database, data, GraphQL
+SDL, protected-payload, backup, restore, or data backfill migration.
 
 ## 0.95.9 to 0.95.10: stable Codex cleanup namespace
 

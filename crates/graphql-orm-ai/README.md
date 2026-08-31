@@ -3,7 +3,7 @@ title: "graphql-orm-ai"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-28
+last_reviewed: 2026-09-01
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.95.10", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.95.11", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -154,7 +154,11 @@ message under current policy where re-execution is provably safe;
 `acknowledgeAiRunFailure` dismisses a failure without deleting audit history.
 Invalidating a retained provider thread emits `provider_session_reset` or
 `provider_session_rebound` so a host can tell the user the model's context was
-reset even though the durable transcript reads as continuous.
+reset even though the durable transcript reads as continuous. Once exact
+provider absence is persisted, a later run may replace the deleted generation
+under its current server-authored descriptor; the historical descriptor grants
+no replacement authority. A lost rebind fence discards the fresh empty
+provider session and defers safely before any business input or tool request.
 
 Codex cleanup treats a successful empty `thread/delete` result as authoritative.
 The provider profile ID and versioned cursor kind form its stable provider-state
