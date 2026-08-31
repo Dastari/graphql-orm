@@ -13,6 +13,44 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.29.0 to 0.30.0: checked calendar-date filters
+
+Adopt `graphql-orm` and `graphql-orm-macros` 0.30.0 together from one reviewed
+full Git revision. Backend-neutral semantic consumers must adopt
+`graphql-orm-operation-catalog` 0.4.0 from that revision. The AI tool-profile
+package remains 0.10.2; rebuild its generated capabilities against the new
+semantic catalogue.
+
+Generated calendar predicates now use half-open ranges over the persisted
+column: today is `[today, tomorrow)`, future begins at tomorrow, the past ends
+at today, `RecentDays(N)` includes exactly today plus `N - 1` preceding dates,
+and `WithinDays(N)` includes exactly `N` dates beginning today. `LteRelative`
+is inclusive through its selected calendar date by rendering an exclusive
+next-date upper bound. Ordinary `Eq`, `Ne`, `Lt`, `Lte`, `Gt`, and `Gte`
+continue binding the supplied value without normalization.
+
+`DateRangeInput.start` and `DateRangeInput.end` are now required `String`
+fields. Update Rust struct literals that supplied `Option<String>`. Both bounds
+must be parseable date/timestamp values and start must not follow end.
+`RecentDays` and `WithinDays` accept 1 through 36,600; signed relative offsets
+accept -36,600 through 36,600. Generated query execution validates recursively
+and returns `INVALID_INPUT` before database work. Handwritten `DatabaseFilter`
+implementations remain source compatible because `validate` has a permissive
+default; implement it when a custom filter has structured invariants.
+
+The meaning of today remains backend-owned and is now internally consistent:
+PostgreSQL uses session `CURRENT_DATE`, SQL Server uses the server-local date
+from `GETDATE()`, and SQLite uses UTC `date('now')`. SQLite's in-memory spatial
+fallback captures one UTC date per filtering pass and does not push
+clock-dependent predicates into its SQL prefilter. This release does not add a
+cross-backend application-timezone setting or normalize exact input strings.
+A future typed date/time input and context-bound calendar-clock design requires
+separate compatibility review.
+
+Date semantic metadata and catalogue fingerprints change. Rebuild reviewed
+catalogues, automatic query capabilities, and retained bindings. There is no
+database schema, stored-data, backup, or migration-history change.
+
 ## 0.27.0 to 0.29.0: computed/relation ordering and complex relation composition
 
 Computed fields can join generated ordering without a handwritten query:

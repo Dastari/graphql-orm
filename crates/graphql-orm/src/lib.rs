@@ -305,6 +305,8 @@
 //! backend notes, relation batching, schema policies, and migration guidance.
 
 pub use async_graphql;
+#[doc(hidden)]
+pub use chrono;
 pub use futures;
 pub use graphql_orm_macros::*;
 pub use rust_decimal;

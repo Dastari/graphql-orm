@@ -800,6 +800,12 @@ pub(crate) fn generate_graphql_relations(
                         ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlRelation,
                     ).await?;
 
+                    if let Some(filter) = &where_input {
+                        filter
+                            .validate()
+                            .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                    }
+
                     if where_input.is_none() && order_by.is_none() && page.is_none() && !self.#field_name.is_empty() {
                         #preloaded_entities
                         let edges: Vec<#edge_type> = entities

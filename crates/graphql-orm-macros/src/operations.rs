@@ -4150,7 +4150,7 @@ pub(crate) fn generate_graphql_operations(
                         None
                     } else {
                         let query = EntityQuery::<Self, #backend_marker>::new().filter(&expected);
-                        let (delete_sql, expected_values) = query.build_delete_sql();
+                        let (delete_sql, expected_values) = query.try_build_delete_sql()?;
                         let clause = delete_sql.split_once(" WHERE ")
                             .map(|(_, clause)| clause.to_string())
                             .ok_or_else(|| Self::__gom_runtime_error("expected predicates produced empty SQL"))?;
@@ -5708,7 +5708,7 @@ pub(crate) fn generate_graphql_operations(
                         return Err(Self::__gom_runtime_error("No fields to update"));
                     }
                     let expected_query = EntityQuery::<Self, #backend_marker>::new().filter(&expected);
-                    let (delete_sql, expected_values) = expected_query.build_delete_sql();
+                    let (delete_sql, expected_values) = expected_query.try_build_delete_sql()?;
                     let expected_clause = delete_sql.split_once(" WHERE ")
                         .map(|(_, clause)| clause)
                         .ok_or_else(|| Self::__gom_runtime_error("conditional predicate rendered empty SQL"))?;

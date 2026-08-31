@@ -123,6 +123,36 @@ Validation metadata accepted inside `graphql_orm` is `min`, `max`,
 `max_length`, `one_of = ["…"]`, and `gte_field`, `gt_field`, `lte_field`,
 `lt_field` (field-name strings).
 
+### Generated date-filter contract
+
+`#[filterable(type = "date")]` generates exact `Eq`, `Ne`, `Lt`, `Lte`, `Gt`,
+and `Gte` value comparisons plus structured date predicates. Exact values are
+bound unchanged. Calendar predicates are sargable half-open ranges and never
+wrap the persisted column in a cast or date function:
+
+| Predicate | Calendar range |
+| --- | --- |
+| `IsToday` | `[today, tomorrow)` |
+| `InPast` | before today |
+| `InFuture` | at or after tomorrow |
+| `RecentDays(N)` | `[today - (N - 1 days), tomorrow)` |
+| `WithinDays(N)` | `[today, today + N days)` |
+| `GteRelative(days: d)` | at or after the start of today plus `d` days |
+| `LteRelative(days: d)` | before the start of today plus `d + 1` days |
+
+`DateRangeInput.start` and `.end` are required and inclusive. Both must be
+parseable date/timestamp values and the range cannot be reversed.
+`RecentDays` and `WithinDays` accept 1 through 36,600. Relative offsets accept
+-36,600 through 36,600. Generated filters validate recursively before database
+work, including filters constructed directly in Rust; invalid direct SQL
+rendering produces a false predicate and execution returns `INVALID_INPUT`.
+
+PostgreSQL obtains today from session `CURRENT_DATE`, SQL Server from the
+server-local date of `GETDATE()`, and SQLite from UTC `date('now')`. SQLite
+spatial fallback uses one UTC anchor for its complete in-memory boolean tree
+and preserves SQL NULL/unknown behavior. The runtime does not normalize exact
+comparison strings or choose an application timezone.
+
 Entity-level expression ordering is intended for computed fields whose SQL is
 owned by the server declaration rather than accepted from a GraphQL request:
 

@@ -14,6 +14,35 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.30.0 - 2026-08-31
+
+Companion macros crate: `graphql-orm-macros` **0.30.0**. Backend-neutral
+semantic owner: `graphql-orm-operation-catalog` **0.4.0**.
+
+- Corrected generated calendar filters to use sargable half-open timestamp
+  ranges. `IsToday`, `InFuture`, `RecentDays`, `WithinDays`, and relative upper
+  bounds now include or exclude complete calendar dates as documented without
+  applying a function to the persisted column.
+- Added one recursive `DatabaseFilter::validate` execution seam. Generated
+  filters reject zero, negative, or excessive calendar spans, excessive signed
+  offsets, malformed or reversed ranges, and GraphQL `Between` inputs missing
+  either required bound. Invalid direct rendering produces a false predicate;
+  query execution returns `INVALID_INPUT` before database work.
+- Made SQLite spatial fallback evaluate every date operator with one
+  deterministic UTC calendar anchor and SQL three-valued NULL semantics across
+  direct, `And`, `Or`, and `Not` expressions.
+- Corrected semantic date-field detection to take precedence over the Rust
+  backing type. Date fields now advertise the exact generated `DateFilter`
+  grammar, including calendar and relative operators and excluding unsupported
+  membership and string operators.
+
+PostgreSQL derives today from the connection session's `CURRENT_DATE`; SQL
+Server uses the server-local date from `GETDATE()`; SQLite uses UTC through
+`date('now')`, with the same UTC basis in spatial fallback. Exact comparison
+values remain unchanged and unnormalized. No table, column, constraint, or
+stored-data migration is required. Regenerate SDL, semantic catalogues, and
+dependent fingerprints.
+
 ## 0.29.0 - 2026-08-31
 
 Companion macros crate: `graphql-orm-macros` **0.29.0**.

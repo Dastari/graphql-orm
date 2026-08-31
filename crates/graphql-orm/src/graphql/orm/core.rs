@@ -1953,7 +1953,7 @@ where
         B::set_retention_context(&mut self.mutation.tx, T::TABLE_NAME).await?;
         let (sql, values) = EntityQuery::<T, B>::new()
             .filter(&filter)
-            .build_delete_sql();
+            .try_build_delete_sql()?;
         let execution = self.mutation.execute(&sql, &values).await;
         let cleared = B::clear_retention_context(&mut self.mutation.tx).await;
         let result = execution?;

@@ -25,7 +25,7 @@ row, field, resolver, provider-egress, or database policy.
 
 ```toml
 [dependencies]
-graphql-orm-operation-catalog = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.3.0" }
+graphql-orm-operation-catalog = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.4.0" }
 serde_json = "1"
 ```
 
@@ -84,6 +84,7 @@ read-only policy.
 | `GraphqlSemanticClassification` / `GraphqlSemanticExport` | inherited classification and structural provider-export eligibility; neither authorizes disclosure |
 | `GraphqlSemanticResultDisclosure` | explicit classification/export disposition for a custom scalar or enum result, plus a positive bound for an exportable scalar list; unclassified leaves fail safe as `Secret`/`NeverExport` |
 | `GraphqlAggregateOperator` / `GraphqlAggregateValueKind` | canonical portable aggregate capabilities used by field and generated-operation metadata |
+| `GraphqlSemanticFilterOperator` | closed public filter capabilities, including exact date comparison, range, null, calendar, and relative-date operators |
 | `GraphqlSubscriptionObservationDescriptor` | truthful best-effort or replay-then-live subscription semantics plus bounded wait and closed condition capabilities; metadata alone does not register a runtime replay source |
 | `AiMutationExecutionPolicy` | closed `Automatic`, `ApprovalRequired`, or default `Prohibited` classification for public mutations; metadata never grants execution or resolver authority |
 | discovery fingerprint | algorithm `graphql-orm-sha256-len-v1`; detects generated declaration/exposure drift, not authorization or disclosure |

@@ -415,19 +415,42 @@ pub fn date_filter_matches(
     value: Option<&str>,
     filter: &crate::graphql::filters::DateFilter,
 ) -> bool {
+    date_filter_matches_at(value, filter, sqlite_calendar_today())
+}
+
+/// Evaluate a date filter at one deterministic calendar anchor.
+///
+/// This is public only for generated SQLite spatial-fallback code and tests.
+#[doc(hidden)]
+pub fn date_filter_matches_at(
+    value: Option<&str>,
+    filter: &crate::graphql::filters::DateFilter,
+    today: chrono::NaiveDate,
+) -> bool {
+    date_filter_truth_at(value, filter, today) == Some(true)
+}
+
+/// Evaluate a date filter with SQL's true/false/unknown semantics.
+#[doc(hidden)]
+pub fn date_filter_truth_at(
+    value: Option<&str>,
+    filter: &crate::graphql::filters::DateFilter,
+    today: chrono::NaiveDate,
+) -> Option<bool> {
+    if filter.validate().is_err() {
+        return Some(false);
+    }
     if let Some(is_null) = filter.is_null {
         if value.is_none() != is_null {
-            return false;
+            return Some(false);
         }
     }
     let Some(value) = value else {
-        return filter.eq.is_none()
-            && filter.ne.is_none()
-            && filter.lt.is_none()
-            && filter.lte.is_none()
-            && filter.gt.is_none()
-            && filter.gte.is_none()
-            && filter.between.is_none();
+        return if date_filter_has_value_predicate(filter) {
+            None
+        } else {
+            Some(true)
+        };
     };
 
     if filter
@@ -435,50 +458,154 @@ pub fn date_filter_matches(
         .as_deref()
         .is_some_and(|expected| value != expected)
     {
-        return false;
+        return Some(false);
     }
     if filter
         .ne
         .as_deref()
         .is_some_and(|expected| value == expected)
     {
-        return false;
+        return Some(false);
     }
     if filter
         .lt
         .as_deref()
         .is_some_and(|expected| value >= expected)
     {
-        return false;
+        return Some(false);
     }
     if filter
         .lte
         .as_deref()
         .is_some_and(|expected| value > expected)
     {
-        return false;
+        return Some(false);
     }
     if filter
         .gt
         .as_deref()
         .is_some_and(|expected| value <= expected)
     {
-        return false;
+        return Some(false);
     }
     if filter
         .gte
         .as_deref()
         .is_some_and(|expected| value < expected)
     {
-        return false;
+        return Some(false);
     }
     if let Some(range) = &filter.between {
-        if let (Some(start), Some(end)) = (&range.start, &range.end) {
-            if value < start.as_str() || value > end.as_str() {
-                return false;
+        if value < range.start.as_str() || value > range.end.as_str() {
+            return Some(false);
+        }
+    }
+
+    if date_filter_has_calendar_predicate(filter) {
+        let Some(value) = parse_calendar_value(value) else {
+            return Some(false);
+        };
+        let Some(today_start) = today.and_hms_opt(0, 0, 0) else {
+            return Some(false);
+        };
+        let Some(tomorrow_start) = today_start.checked_add_days(chrono::Days::new(1)) else {
+            return Some(false);
+        };
+
+        if filter.in_past == Some(true) && value >= today_start {
+            return Some(false);
+        }
+        if filter.in_future == Some(true) && value < tomorrow_start {
+            return Some(false);
+        }
+        if filter.is_today == Some(true) && !(today_start..tomorrow_start).contains(&value) {
+            return Some(false);
+        }
+        if let Some(days) = filter.recent_days {
+            let Some(lower) = today_start.checked_sub_days(chrono::Days::new((days - 1) as u64))
+            else {
+                return Some(false);
+            };
+            if value < lower || value >= tomorrow_start {
+                return Some(false);
+            }
+        }
+        if let Some(days) = filter.within_days {
+            let Some(upper) = today_start.checked_add_days(chrono::Days::new(days as u64)) else {
+                return Some(false);
+            };
+            if value < today_start || value >= upper {
+                return Some(false);
+            }
+        }
+        if let Some(relative) = &filter.gte_relative {
+            let Some(lower) = checked_relative_date(today_start, relative.days) else {
+                return Some(false);
+            };
+            if value < lower {
+                return Some(false);
+            }
+        }
+        if let Some(relative) = &filter.lte_relative {
+            let Some(upper) = checked_relative_date(today_start, relative.days.saturating_add(1))
+            else {
+                return Some(false);
+            };
+            if value >= upper {
+                return Some(false);
             }
         }
     }
 
-    true
+    Some(true)
+}
+
+fn date_filter_has_value_predicate(filter: &crate::graphql::filters::DateFilter) -> bool {
+    filter.eq.is_some()
+        || filter.ne.is_some()
+        || filter.lt.is_some()
+        || filter.lte.is_some()
+        || filter.gt.is_some()
+        || filter.gte.is_some()
+        || filter.between.is_some()
+        || date_filter_has_calendar_predicate(filter)
+}
+
+fn date_filter_has_calendar_predicate(filter: &crate::graphql::filters::DateFilter) -> bool {
+    filter.in_past == Some(true)
+        || filter.in_future == Some(true)
+        || filter.is_today == Some(true)
+        || filter.recent_days.is_some()
+        || filter.within_days.is_some()
+        || filter.gte_relative.is_some()
+        || filter.lte_relative.is_some()
+}
+
+fn parse_calendar_value(value: &str) -> Option<chrono::NaiveDateTime> {
+    if let Ok(value) = chrono::DateTime::parse_from_rfc3339(value) {
+        return Some(value.naive_utc());
+    }
+    for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"] {
+        if let Ok(value) = chrono::NaiveDateTime::parse_from_str(value, format) {
+            return Some(value);
+        }
+    }
+    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .ok()
+        .and_then(|value| value.and_hms_opt(0, 0, 0))
+}
+
+fn checked_relative_date(
+    today_start: chrono::NaiveDateTime,
+    days: i32,
+) -> Option<chrono::NaiveDateTime> {
+    if days < 0 {
+        today_start.checked_sub_days(chrono::Days::new(i64::from(days).unsigned_abs()))
+    } else {
+        today_start.checked_add_days(chrono::Days::new(days as u64))
+    }
+}
+
+fn sqlite_calendar_today() -> chrono::NaiveDate {
+    chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).date_naive()
 }

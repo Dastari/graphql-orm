@@ -233,9 +233,20 @@ pub struct BoolFilter {
 #[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
 #[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
 pub struct DateRangeInput {
-    pub start: Option<String>,
-    pub end: Option<String>,
+    /// Inclusive ISO-8601 lower bound.
+    pub start: String,
+    /// Inclusive ISO-8601 upper bound.
+    pub end: String,
 }
+
+/// Maximum positive calendar span accepted by `recentDays` and `withinDays`.
+///
+/// The 100-year ceiling is backend-neutral and remains within the supported
+/// date range of SQLite, PostgreSQL, and SQL Server for contemporary clocks.
+pub const MAX_CALENDAR_DAY_SPAN: i32 = 36_600;
+
+/// Maximum absolute calendar offset accepted by relative-date predicates.
+pub const MAX_RELATIVE_DAY_OFFSET: i32 = 36_600;
 
 #[derive(async_graphql::InputObject, Clone, Debug, Default)]
 #[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
@@ -247,6 +258,8 @@ pub struct DateRangeInput {
 #[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
 #[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
 pub struct RelativeDateInput {
+    /// Signed calendar-day offset from the start of today. The accepted range
+    /// is -36,600 through 36,600 days.
     pub days: i32,
 }
 
@@ -292,9 +305,13 @@ pub struct DateFilter {
     pub is_today: Option<bool>,
     #[cfg_attr(feature = "field-case-lower", graphql(name = "recentdays"))]
     #[cfg_attr(feature = "field-case-upper", graphql(name = "RECENTDAYS"))]
+    /// Positive number of calendar dates ending with today (maximum 36,600).
+    #[graphql(validator(minimum = 1, maximum = 36600))]
     pub recent_days: Option<i32>,
     #[cfg_attr(feature = "field-case-lower", graphql(name = "withindays"))]
     #[cfg_attr(feature = "field-case-upper", graphql(name = "WITHINDAYS"))]
+    /// Positive number of calendar dates beginning with today (maximum 36,600).
+    #[graphql(validator(minimum = 1, maximum = 36600))]
     pub within_days: Option<i32>,
     #[cfg_attr(feature = "field-case-lower", graphql(name = "gterelative"))]
     #[cfg_attr(feature = "field-case-upper", graphql(name = "GTERELATIVE"))]
@@ -302,4 +319,190 @@ pub struct DateFilter {
     #[cfg_attr(feature = "field-case-lower", graphql(name = "lterelative"))]
     #[cfg_attr(feature = "field-case-upper", graphql(name = "LTERELATIVE"))]
     pub lte_relative: Option<RelativeDateInput>,
+}
+
+impl DateFilter {
+    /// Validate bounds shared by GraphQL-decoded and programmatically built filters.
+    pub fn validate(&self) -> crate::Result<()> {
+        if let Some(days) = self.recent_days {
+            validate_positive_calendar_span("recentDays", days)?;
+        }
+        if let Some(days) = self.within_days {
+            validate_positive_calendar_span("withinDays", days)?;
+        }
+        if let Some(relative) = &self.gte_relative {
+            validate_relative_offset("gteRelative", relative.days)?;
+        }
+        if let Some(relative) = &self.lte_relative {
+            validate_relative_offset("lteRelative", relative.days)?;
+        }
+        if let Some(range) = &self.between {
+            let start = parse_comparable_date_value(&range.start).ok_or_else(|| {
+                invalid_date_filter("between.start must be an ISO-8601 date or timestamp")
+            })?;
+            let end = parse_comparable_date_value(&range.end).ok_or_else(|| {
+                invalid_date_filter("between.end must be an ISO-8601 date or timestamp")
+            })?;
+            if start > end {
+                return Err(invalid_date_filter(
+                    "between.start must not be after between.end",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Render this filter for macro-generated SQL.
+    ///
+    /// This method is public only because procedural-macro expansion occurs in
+    /// the consuming crate. The column expression is fixed generated metadata;
+    /// GraphQL clients cannot supply SQL or identifiers.
+    #[doc(hidden)]
+    pub fn render_sql(
+        &self,
+        backend: crate::graphql::orm::DatabaseBackend,
+        column: &str,
+        start_index: usize,
+    ) -> crate::Result<(Vec<String>, Vec<crate::graphql::orm::SqlValue>)> {
+        self.render_sql_with_calendar(backend, column, start_index, true)
+    }
+
+    /// Render only clock-independent predicates for a residual in-memory path.
+    #[doc(hidden)]
+    pub fn render_sql_prefilter(
+        &self,
+        backend: crate::graphql::orm::DatabaseBackend,
+        column: &str,
+        start_index: usize,
+    ) -> crate::Result<(Vec<String>, Vec<crate::graphql::orm::SqlValue>)> {
+        self.render_sql_with_calendar(backend, column, start_index, false)
+    }
+
+    fn render_sql_with_calendar(
+        &self,
+        backend: crate::graphql::orm::DatabaseBackend,
+        column: &str,
+        start_index: usize,
+        include_calendar: bool,
+    ) -> crate::Result<(Vec<String>, Vec<crate::graphql::orm::SqlValue>)> {
+        use crate::graphql::orm::{SqlDialect, SqlValue};
+
+        self.validate()?;
+        let mut conditions = Vec::new();
+        let mut values = Vec::new();
+        for (value, operator) in [
+            (&self.eq, "="),
+            (&self.ne, "!="),
+            (&self.lt, "<"),
+            (&self.lte, "<="),
+            (&self.gt, ">"),
+            (&self.gte, ">="),
+        ] {
+            if let Some(value) = value {
+                let placeholder = backend.placeholder(start_index + values.len());
+                conditions.push(format!("{column} {operator} {placeholder}"));
+                values.push(SqlValue::String(value.clone()));
+            }
+        }
+        if let Some(range) = &self.between {
+            let start_placeholder = backend.placeholder(start_index + values.len());
+            let end_placeholder = backend.placeholder(start_index + values.len() + 1);
+            conditions.push(format!(
+                "{column} BETWEEN {start_placeholder} AND {end_placeholder}"
+            ));
+            values.push(SqlValue::String(range.start.clone()));
+            values.push(SqlValue::String(range.end.clone()));
+        }
+        if let Some(is_null) = self.is_null {
+            conditions.push(format!(
+                "{column} IS {}NULL",
+                if is_null { "" } else { "NOT " }
+            ));
+        }
+
+        if include_calendar {
+            let today = backend.current_date_expr();
+            let tomorrow = backend.days_ahead_expr(1);
+            if self.in_past == Some(true) {
+                conditions.push(format!("{column} < {today}"));
+            }
+            if self.in_future == Some(true) {
+                conditions.push(format!("{column} >= {tomorrow}"));
+            }
+            if self.is_today == Some(true) {
+                conditions.push(format!("{column} >= {today} AND {column} < {tomorrow}"));
+            }
+            if let Some(days) = self.recent_days {
+                let lower = backend.days_ago_expr(i64::from(days - 1));
+                conditions.push(format!("{column} >= {lower} AND {column} < {tomorrow}"));
+            }
+            if let Some(days) = self.within_days {
+                let upper = backend.days_ahead_expr(i64::from(days));
+                conditions.push(format!("{column} >= {today} AND {column} < {upper}"));
+            }
+            if let Some(relative) = &self.gte_relative {
+                conditions.push(format!("{column} >= {}", relative.to_sql_expr(backend)));
+            }
+            if let Some(relative) = &self.lte_relative {
+                let exclusive_offset = i64::from(relative.days) + 1;
+                conditions.push(format!(
+                    "{column} < {}",
+                    relative_day_expr(backend, exclusive_offset)
+                ));
+            }
+        }
+
+        Ok((conditions, values))
+    }
+}
+
+fn validate_positive_calendar_span(name: &str, days: i32) -> crate::Result<()> {
+    if !(1..=MAX_CALENDAR_DAY_SPAN).contains(&days) {
+        return Err(invalid_date_filter(format!(
+            "{name} must be between 1 and {MAX_CALENDAR_DAY_SPAN} days"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_relative_offset(name: &str, days: i32) -> crate::Result<()> {
+    if !(-MAX_RELATIVE_DAY_OFFSET..=MAX_RELATIVE_DAY_OFFSET).contains(&days) {
+        return Err(invalid_date_filter(format!(
+            "{name}.days must be between -{MAX_RELATIVE_DAY_OFFSET} and {MAX_RELATIVE_DAY_OFFSET}"
+        )));
+    }
+    Ok(())
+}
+
+fn invalid_date_filter(message: impl Into<String>) -> sqlx::Error {
+    crate::graphql::errors::sqlx_error_from_public(
+        crate::graphql::errors::OrmPublicError::new(
+            crate::graphql::errors::OrmErrorCode::InvalidInput,
+        )
+        .with_internal(message.into()),
+    )
+}
+
+fn relative_day_expr(backend: crate::graphql::orm::DatabaseBackend, days: i64) -> String {
+    use crate::graphql::orm::SqlDialect;
+
+    if days < 0 {
+        backend.days_ago_expr(days.unsigned_abs() as i64)
+    } else {
+        backend.days_ahead_expr(days)
+    }
+}
+
+fn parse_comparable_date_value(value: &str) -> Option<chrono::NaiveDateTime> {
+    if let Ok(value) = chrono::DateTime::parse_from_rfc3339(value) {
+        return Some(value.naive_utc());
+    }
+    for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"] {
+        if let Ok(value) = chrono::NaiveDateTime::parse_from_str(value, format) {
+            return Some(value);
+        }
+    }
+    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .ok()
+        .and_then(|value| value.and_hms_opt(0, 0, 0))
 }
