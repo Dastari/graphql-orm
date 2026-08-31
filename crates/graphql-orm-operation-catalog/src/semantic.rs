@@ -105,6 +105,24 @@ pub enum GraphqlSemanticFilterOperator {
     StartsWith,
     /// Suffix match.
     EndsWith,
+    /// Inclusive two-value range.
+    Between,
+    /// Null-state predicate.
+    IsNull,
+    /// Timestamp is before the start of today.
+    InPast,
+    /// Timestamp is at or after the start of tomorrow.
+    InFuture,
+    /// Timestamp is within today's half-open calendar range.
+    IsToday,
+    /// Positive bounded calendar span ending with today.
+    RecentDays,
+    /// Positive bounded calendar span beginning with today.
+    WithinDays,
+    /// Inclusive lower bound at a signed day offset from today.
+    GteRelative,
+    /// Inclusive calendar-date upper bound at a signed day offset from today.
+    LteRelative,
 }
 
 /// Model-neutral classification inherited by a public semantic field.

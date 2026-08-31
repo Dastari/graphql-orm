@@ -16,13 +16,13 @@ macro/runtime versions aligned:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.29.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.30.0", default-features = false, features = ["sqlite"] }
 ```
 
 Direct use is supported for tooling that needs the macro package:
 
 ```toml
-graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.29.0", default-features = false, features = ["sqlite"] }
+graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.30.0", default-features = false, features = ["sqlite"] }
 ```
 
 The direct dependency still requires a compatible `graphql-orm` runtime in the
@@ -134,6 +134,12 @@ mapping and target entity table. Entities that also have handwritten complex fie
 `graphql_orm(compose_complex_object)` and apply `graphql_complex_object` to the
 handwritten impl so generated relations are flattened into the same
 `ComplexObject` surface.
+
+Generated `DateFilter` fields use sargable half-open calendar ranges and a
+recursive validation path shared by GraphQL and programmatic queries. Between
+bounds are required; calendar spans and signed relative offsets are bounded.
+The generated semantic operator set follows the date grammar rather than the
+field's Rust backing type.
 
 See [core runtime documentation](../graphql-orm/README.md),
 and the [macro and attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md).

@@ -146,6 +146,14 @@ pub trait ReadProjection<B: OrmBackend = DefaultBackend>:
 }
 
 pub trait DatabaseFilter {
+    /// Validate a filter before any database work.
+    ///
+    /// Generated filters use this checked seam for constraints that cannot be
+    /// represented by the historical infallible SQL-rendering interface.
+    fn validate(&self) -> crate::Result<()> {
+        Ok(())
+    }
+
     fn to_sql_conditions(&self) -> (Vec<String>, Vec<SqlValue>);
     fn is_empty(&self) -> bool;
 
@@ -186,10 +194,35 @@ pub trait DatabaseFilter {
         Ok(true)
     }
 
+    /// Evaluate an in-memory predicate using one query-scoped calendar date.
+    #[doc(hidden)]
+    fn matches_entity_at(
+        &self,
+        entity: &(dyn Any + Send + Sync),
+        _calendar_today: chrono::NaiveDate,
+    ) -> crate::Result<bool> {
+        self.matches_entity(entity)
+    }
+
     fn to_filter_expression(&self) -> Option<FilterExpression> {
         let (conditions, values) = self.to_sql_conditions();
         filter_expression_from_raw_parts(&conditions, &values)
     }
+
+    /// Validate and convert this filter to the backend-neutral query IR.
+    fn to_filter_expression_checked(&self) -> crate::Result<Option<FilterExpression>> {
+        self.validate()?;
+        Ok(self.to_filter_expression())
+    }
+}
+
+fn invalid_filter_input() -> sqlx::Error {
+    crate::graphql::errors::sqlx_error_from_public(
+        crate::graphql::errors::OrmPublicError::new(
+            crate::graphql::errors::OrmErrorCode::InvalidInput,
+        )
+        .with_internal("generated filter validation failed"),
+    )
 }
 
 pub trait DatabaseOrderBy {
@@ -2185,6 +2218,9 @@ where
                 "at least one aggregate expression is required",
             ));
         }
+        if let Some(filter) = &self.filter {
+            filter.validate()?;
+        }
         self.authorize(context).await?;
         let filter = self
             .filter
@@ -2565,7 +2601,7 @@ pub fn build_upsert_sql(
         update_updated_at,
     )
 }
-type EntityMatcher<T> = Arc<dyn Fn(&T) -> crate::Result<bool> + Send + Sync>;
+type EntityMatcher<T> = Arc<dyn Fn(&T, chrono::NaiveDate) -> crate::Result<bool> + Send + Sync>;
 
 struct PoolRef<'a, B: OrmBackend> {
     pool: &'a B::Pool,
@@ -2587,6 +2623,7 @@ where
     order_clauses: Vec<String>,
     limit: Option<i64>,
     requires_in_memory_filtering: bool,
+    filter_is_valid: bool,
     _marker: PhantomData<(P, B)>,
 }
 
@@ -2602,11 +2639,13 @@ where
             order_clauses: Vec::new(),
             limit: None,
             requires_in_memory_filtering: false,
+            filter_is_valid: true,
             _marker: PhantomData,
         }
     }
 
     fn filter(mut self, filter: P::Filter) -> Self {
+        self.filter_is_valid &= filter.validate().is_ok();
         if filter.requires_in_memory_filtering(B::DIALECT) {
             self.requires_in_memory_filtering = true;
         } else {
@@ -2693,6 +2732,9 @@ where
     }
 
     fn validate(&self) -> crate::Result<()> {
+        if !self.filter_is_valid {
+            return Err(invalid_filter_input());
+        }
         if self.requires_in_memory_filtering {
             return Err(sqlx::Error::Protocol(
                 "projection filter requires full-entity in-memory evaluation and was rejected"
@@ -2959,6 +3001,7 @@ pub struct EntityQuery<T, B: OrmBackend = DefaultBackend> {
     order_values: Vec<Vec<SqlValue>>,
     pub page: Option<PageInput>,
     entity_matchers: Vec<EntityMatcher<T>>,
+    filter_is_valid: bool,
     _marker: PhantomData<(T, B)>,
 }
 
@@ -2971,6 +3014,7 @@ impl<T, B: OrmBackend> Clone for EntityQuery<T, B> {
             order_values: self.order_values.clone(),
             page: self.page.clone(),
             entity_matchers: self.entity_matchers.clone(),
+            filter_is_valid: self.filter_is_valid,
             _marker: PhantomData,
         }
     }
@@ -2989,6 +3033,7 @@ where
             order_values: Vec::new(),
             page: None,
             entity_matchers: Vec::new(),
+            filter_is_valid: true,
             _marker: PhantomData,
         }
     }
@@ -3009,6 +3054,7 @@ where
     where
         F: DatabaseFilter,
     {
+        self.filter_is_valid &= filter.validate().is_ok();
         let (conds, values) = filter.to_sql_conditions();
         self.where_clauses.extend(conds);
         self.values.extend(values);
@@ -3019,13 +3065,16 @@ where
     where
         F: DatabaseFilter + Clone + Send + Sync + 'static,
     {
+        self.filter_is_valid &= filter.validate().is_ok();
         if filter.requires_in_memory_filtering(B::DIALECT) {
             let (conds, values) = filter.to_sql_prefilter_conditions(B::DIALECT);
             self.where_clauses.extend(conds);
             self.values.extend(values);
             let filter = filter.clone();
             self.entity_matchers
-                .push(Arc::new(move |entity| filter.matches_entity(entity)));
+                .push(Arc::new(move |entity, calendar_today| {
+                    filter.matches_entity_at(entity, calendar_today)
+                }));
         } else {
             let (conds, values) = filter.to_sql_conditions();
             self.where_clauses.extend(conds);
@@ -3077,7 +3126,8 @@ where
         &self,
         pagination_config: PaginationConfig,
         apply_default_limit: bool,
-    ) -> SelectQuery {
+    ) -> crate::Result<SelectQuery> {
+        self.ensure_filter_valid()?;
         let page = pagination_config.resolve_page(self.page.as_ref(), apply_default_limit);
         let mut sorts = self
             .order_clauses
@@ -3096,7 +3146,7 @@ where
                 sorts.push(SortExpression::unbound(format!("{primary_key} ASC")));
             }
         }
-        SelectQuery {
+        Ok(SelectQuery {
             table: T::TABLE_NAME,
             columns: T::column_names()
                 .iter()
@@ -3112,11 +3162,19 @@ where
                 None
             },
             count_only: false,
-        }
+        })
     }
 
-    fn build_select_query(&self) -> SelectQuery {
+    fn build_select_query(&self) -> crate::Result<SelectQuery> {
         self.build_select_query_with_config(PaginationConfig::default(), false)
+    }
+
+    fn ensure_filter_valid(&self) -> crate::Result<()> {
+        if self.filter_is_valid {
+            Ok(())
+        } else {
+            Err(invalid_filter_input())
+        }
     }
 
     fn aggregate_column_sql(column: &str) -> crate::Result<String>
@@ -3138,6 +3196,7 @@ where
     where
         T: DatabaseSchema,
     {
+        self.ensure_filter_valid()?;
         if self.requires_in_memory_filtering() {
             return Err(sqlx::Error::Protocol(
                 "aggregate queries require filters that can be rendered to SQL".to_string(),
@@ -3156,15 +3215,16 @@ where
         !self.entity_matchers.is_empty()
     }
 
-    fn matches_entity(&self, entity: &T) -> crate::Result<bool> {
+    fn matches_entity(&self, entity: &T, calendar_today: chrono::NaiveDate) -> crate::Result<bool> {
         self.entity_matchers
             .iter()
-            .try_fold(
-                true,
-                |matches, matcher| {
-                    if matches { matcher(entity) } else { Ok(false) }
-                },
-            )
+            .try_fold(true, |matches, matcher| {
+                if matches {
+                    matcher(entity, calendar_today)
+                } else {
+                    Ok(false)
+                }
+            })
     }
 
     fn apply_in_memory_filtering(
@@ -3179,13 +3239,17 @@ where
             .collect::<Result<Vec<_>, _>>()?;
 
         if self.requires_in_memory_filtering() {
+            let calendar_today =
+                chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).date_naive();
             entities = entities
                 .into_iter()
-                .filter_map(|entity| match self.matches_entity(&entity) {
-                    Ok(true) => Some(Ok(entity)),
-                    Ok(false) => None,
-                    Err(error) => Some(Err(error)),
-                })
+                .filter_map(
+                    |entity| match self.matches_entity(&entity, calendar_today) {
+                        Ok(true) => Some(Ok(entity)),
+                        Ok(false) => None,
+                        Err(error) => Some(Err(error)),
+                    },
+                )
                 .collect::<Result<Vec<_>, _>>()?;
 
             let page = pagination_config.resolve_page(self.page.as_ref(), apply_default_limit);
@@ -3232,7 +3296,7 @@ where
         let pagination_config = provider.pagination_config();
         let rendered = render_select_query(
             B::DIALECT,
-            &self.build_select_query_with_config(pagination_config, false),
+            &self.build_select_query_with_config(pagination_config, false)?,
         );
         let rows = B::fetch_rows(provider.pool(), &rendered.sql, &rendered.values).await?;
         self.apply_in_memory_filtering(rows, pagination_config, false)
@@ -3249,7 +3313,7 @@ where
         let pagination_config = provider.pagination_config();
         let rendered = render_select_query(
             B::DIALECT,
-            &self.build_select_query_with_config(pagination_config, false),
+            &self.build_select_query_with_config(pagination_config, false)?,
         );
         let rows =
             B::fetch_rows_with_auth(provider.pool(), &rendered.sql, &rendered.values, auth).await?;
@@ -3267,7 +3331,7 @@ where
     {
         let rendered = render_select_query(
             B::DIALECT,
-            &self.build_select_query_with_config(pagination_config, false),
+            &self.build_select_query_with_config(pagination_config, false)?,
         );
         let rows =
             B::fetch_rows_with_auth(provider.pool(), &rendered.sql, &rendered.values, auth).await?;
@@ -3279,7 +3343,7 @@ where
         B: SqlxBackend,
         E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
     {
-        let rendered = render_select_query(B::DIALECT, &self.build_select_query());
+        let rendered = render_select_query(B::DIALECT, &self.build_select_query()?);
         let rows = B::fetch_rows_on(executor, rendered.sql, rendered.values).await?;
         self.apply_in_memory_filtering(rows, PaginationConfig::default(), false)
     }
@@ -3293,7 +3357,7 @@ where
     where
         B: WriteBackend,
     {
-        let rendered = render_select_query(B::DIALECT, &self.build_select_query());
+        let rendered = render_select_query(B::DIALECT, &self.build_select_query()?);
         let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
         self.apply_in_memory_filtering(rows, PaginationConfig::default(), false)
     }
@@ -3309,7 +3373,7 @@ where
     where
         B: WriteBackend,
     {
-        let rendered = render_write_decision_select_query(B::DIALECT, &self.build_select_query());
+        let rendered = render_write_decision_select_query(B::DIALECT, &self.build_select_query()?);
         let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
         self.apply_in_memory_filtering(rows, PaginationConfig::default(), false)
     }
@@ -3375,7 +3439,7 @@ where
         let pagination = PaginationConfig::unbounded();
         let rendered = render_write_decision_select_query(
             B::DIALECT,
-            &query.build_select_query_with_config(pagination, false),
+            &query.build_select_query_with_config(pagination, false)?,
         );
         let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
         query.apply_in_memory_filtering(rows, pagination, false)
@@ -3434,7 +3498,7 @@ where
         if self.requires_in_memory_filtering() {
             return Ok(self.fetch_unpaged_filtered(provider).await?.len() as i64);
         }
-        let mut query = self.build_select_query();
+        let mut query = self.build_select_query()?;
         query.count_only = true;
         query.pagination = None;
         query.sorts.clear();
@@ -3546,7 +3610,7 @@ where
                 .await?
                 .len() as i64);
         }
-        let mut query = self.build_select_query();
+        let mut query = self.build_select_query()?;
         query.count_only = true;
         query.pagination = None;
         query.sorts.clear();
@@ -3636,7 +3700,7 @@ where
             query.page = None;
             return Ok(query.fetch_all_on(executor).await?.len() as i64);
         }
-        let mut query = self.build_select_query();
+        let mut query = self.build_select_query()?;
         query.count_only = true;
         query.pagination = None;
         query.sorts.clear();
@@ -3660,7 +3724,7 @@ where
             query.page = None;
             return Ok(query.fetch_all_in_transaction(context).await?.len() as i64);
         }
-        let mut query = self.build_select_query();
+        let mut query = self.build_select_query()?;
         query.count_only = true;
         query.pagination = None;
         query.sorts.clear();
@@ -3670,7 +3734,24 @@ where
         B::try_get_i64(row, "count")
     }
 
+    /// Build a delete statement, rendering an invalid filter as a predicate
+    /// that cannot match any row.
     pub fn build_delete_sql(&self) -> (String, Vec<SqlValue>) {
+        self.try_build_delete_sql().unwrap_or_else(|_| {
+            let rendered = render_delete_query(
+                B::DIALECT,
+                &DeleteQuery {
+                    table: T::TABLE_NAME,
+                    filter: Some(FilterExpression::trusted_fragment("1 = 0", Vec::new())),
+                },
+            );
+            (rendered.sql, rendered.values)
+        })
+    }
+
+    /// Validate the accumulated filter and build a delete statement.
+    pub fn try_build_delete_sql(&self) -> crate::Result<(String, Vec<SqlValue>)> {
+        self.ensure_filter_valid()?;
         let rendered = render_delete_query(
             B::DIALECT,
             &DeleteQuery {
@@ -3678,7 +3759,7 @@ where
                 filter: filter_expression_from_raw_parts(&self.where_clauses, &self.values),
             },
         );
-        (rendered.sql, rendered.values)
+        Ok((rendered.sql, rendered.values))
     }
 
     pub async fn fetch_connection<P>(&self, provider: &P) -> crate::Result<Connection<T>>
@@ -3725,14 +3806,14 @@ where
         let pagination_config = provider.pagination_config();
         let page = pagination_config.resolve_page(self.page.as_ref(), true);
         let offset = page.offset.max(0) as usize;
-        let mut count_query = self.build_select_query();
+        let mut count_query = self.build_select_query()?;
         count_query.count_only = true;
         count_query.pagination = None;
         count_query.sorts.clear();
         let count_rendered = render_select_query(B::DIALECT, &count_query);
         let row_rendered = render_select_query(
             B::DIALECT,
-            &self.build_select_query_with_config(pagination_config, true),
+            &self.build_select_query_with_config(pagination_config, true)?,
         );
         let (count_rows, rows) = B::fetch_rows_pair_with_auth(
             provider.pool(),
@@ -3817,7 +3898,7 @@ where
                 edges,
             });
         }
-        let mut count_query = self.build_select_query();
+        let mut count_query = self.build_select_query()?;
         count_query.count_only = true;
         count_query.pagination = None;
         count_query.sorts.clear();
@@ -3825,7 +3906,7 @@ where
         let pagination_config = provider.pagination_config();
         let row_rendered = render_select_query(
             B::DIALECT,
-            &self.build_select_query_with_config(pagination_config, true),
+            &self.build_select_query_with_config(pagination_config, true)?,
         );
         let (count_rows, rows) = B::fetch_rows_pair_with_auth(
             provider.pool(),
@@ -4056,6 +4137,7 @@ pub struct CountQuery<'a, W, B: OrmBackend = DefaultBackend> {
     table: &'static str,
     filters: Vec<String>,
     values: Vec<SqlValue>,
+    filter_is_valid: bool,
     _marker: PhantomData<(W, B)>,
 }
 
@@ -4070,11 +4152,13 @@ where
             table,
             filters: Vec::new(),
             values: Vec::new(),
+            filter_is_valid: true,
             _marker: PhantomData,
         }
     }
 
     pub fn filter(mut self, filter: &W) -> Self {
+        self.filter_is_valid &= filter.validate().is_ok();
         let (conds, values) = filter.to_sql_conditions();
         self.filters.extend(conds);
         self.values.extend(values);
@@ -4082,6 +4166,9 @@ where
     }
 
     pub async fn count(self) -> crate::Result<i64> {
+        if !self.filter_is_valid {
+            return Err(invalid_filter_input());
+        }
         let rendered = render_select_query(
             B::DIALECT,
             &SelectQuery {
@@ -4103,6 +4190,9 @@ where
         B: SqlxBackend,
         E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
     {
+        if !self.filter_is_valid {
+            return Err(invalid_filter_input());
+        }
         let rendered = render_select_query(
             B::DIALECT,
             &SelectQuery {

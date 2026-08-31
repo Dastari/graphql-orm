@@ -17,7 +17,7 @@ database schema. Schema ownership and migration behavior are controlled by runti
 ## Features
 
 ```toml
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.26.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.30.0", default-features = false, features = ["sqlite"] }
 ```
 
 Available backend features:
@@ -49,6 +49,14 @@ Optional non-backend features:
 
 The `mssql` feature activates optional `tiberius`, `tokio-util`, and Tokio TCP support. Projects that
 do not select `mssql` do not build the SQL Server driver path.
+
+Generated calendar-date filters use the selected database's date clock:
+PostgreSQL session `CURRENT_DATE`, SQL Server's server-local `GETDATE()`, and
+SQLite UTC `date('now')`. These clocks are not silently unified. Configure the
+PostgreSQL session or SQL Server deployment clock according to application
+policy; the ORM does not hard-code an application timezone. SQLite spatial
+fallback evaluates its residual predicates with one UTC date anchor matching
+SQLite's date basis.
 
 Normal application setup can stay on `graphql-orm` types:
 

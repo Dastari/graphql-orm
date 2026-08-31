@@ -2692,27 +2692,6 @@ fn generate_entity_impl(
         let lit = syn::LitStr::new(current_epoch_expr, proc_macro2::Span::call_site());
         quote! { #lit }
     };
-    let current_date_runtime = if backend == BackendKind::Postgres {
-        quote! { "CURRENT_DATE" }
-    } else if backend == BackendKind::Mssql {
-        quote! { "CAST(GETDATE() AS date)" }
-    } else {
-        quote! { "date('now')" }
-    };
-    let days_ago_runtime = if backend == BackendKind::Postgres {
-        quote! { format!("(CURRENT_DATE - INTERVAL '{} days')::date", days) }
-    } else if backend == BackendKind::Mssql {
-        quote! { format!("DATEADD(day, -{}, CAST(GETDATE() AS date))", days) }
-    } else {
-        quote! { format!("date('now', '-{} days')", days) }
-    };
-    let days_ahead_runtime = if backend == BackendKind::Postgres {
-        quote! { format!("(CURRENT_DATE + INTERVAL '{} days')::date", days) }
-    } else if backend == BackendKind::Mssql {
-        quote! { format!("DATEADD(day, {}, CAST(GETDATE() AS date))", days) }
-    } else {
-        quote! { format!("date('now', '+{} days')", days) }
-    };
     let spatial_sql_value_body = if backend == BackendKind::Sqlite {
         quote! {
             ::graphql_orm::graphql::orm::spatial::canonical_geojson_sql_value(value, spatial)
@@ -3035,6 +3014,7 @@ fn generate_entity_impl(
     let mut filter_to_entity_match = Vec::new();
     let mut filter_is_empty_checks = Vec::new();
     let mut filter_contains_spatial_checks = Vec::new();
+    let mut filter_validation_checks = Vec::new();
     let mut filter_referenced_field_checks = Vec::new();
     let mut from_row_fields = Vec::new();
     let mut relation_metadata_defs = Vec::new();
@@ -3463,7 +3443,25 @@ fn generate_entity_impl(
             let is_decimal = type_name == "Decimal";
             let is_string = type_name == "String";
             let filter_operators = if field_meta.filter && field_meta.filterable.is_some() {
-                if is_string {
+                if field_meta.is_date_field {
+                    quote! { vec![
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::Equal,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::NotEqual,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::LessThan,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::LessThanOrEqual,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::GreaterThan,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::GreaterThanOrEqual,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::Between,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::IsNull,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::InPast,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::InFuture,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::IsToday,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::RecentDays,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::WithinDays,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::GteRelative,
+                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::LteRelative,
+                    ] }
+                } else if is_string {
                     quote! { vec![
                         ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::Equal,
                         ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::NotEqual,
@@ -3472,7 +3470,7 @@ fn generate_entity_impl(
                         ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::StartsWith,
                         ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::EndsWith,
                     ] }
-                } else if is_numeric || field_meta.is_date_field {
+                } else if is_numeric {
                     quote! { vec![
                         ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::Equal,
                         ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::NotEqual,
@@ -4156,6 +4154,13 @@ fn generate_entity_impl(
                 filter_to_entity_match.push(entity_match_gen);
                 filter_is_empty_checks.push(is_empty_check);
                 filter_contains_spatial_checks.push(contains_spatial_check);
+                if filter_type == "date" {
+                    filter_validation_checks.push(quote! {
+                        if let Some(filter) = &self.#filter_field_name {
+                            filter.validate()?;
+                        }
+                    });
+                }
             }
         }
 
@@ -4702,9 +4707,28 @@ fn generate_entity_impl(
         }
 
         impl ::graphql_orm::graphql::orm::DatabaseFilter for #where_input_name {
+            fn validate(&self) -> ::graphql_orm::Result<()> {
+                #(#filter_validation_checks)*
+                if let Some(filters) = &self.and {
+                    for filter in filters {
+                        ::graphql_orm::graphql::orm::DatabaseFilter::validate(filter)?;
+                    }
+                }
+                if let Some(filters) = &self.or {
+                    for filter in filters {
+                        ::graphql_orm::graphql::orm::DatabaseFilter::validate(filter)?;
+                    }
+                }
+                if let Some(filter) = &self.not {
+                    ::graphql_orm::graphql::orm::DatabaseFilter::validate(filter.as_ref())?;
+                }
+                Ok(())
+            }
+
             fn to_sql_conditions(&self) -> (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>) {
                 let mut conditions = Vec::new();
                 let mut values = Vec::new();
+                let _gom_spatial_prefilter = false;
 
                 #(#filter_to_sql)*
 
@@ -4796,13 +4820,24 @@ fn generate_entity_impl(
                 &self,
                 entity: &(dyn ::std::any::Any + Send + Sync),
             ) -> ::graphql_orm::Result<bool> {
+                let calendar_today = ::graphql_orm::chrono::DateTime::<::graphql_orm::chrono::Utc>::from(
+                    ::std::time::SystemTime::now()
+                ).date_naive();
+                self.matches_entity_at(entity, calendar_today)
+            }
+
+            fn matches_entity_at(
+                &self,
+                entity: &(dyn ::std::any::Any + Send + Sync),
+                calendar_today: ::graphql_orm::chrono::NaiveDate,
+            ) -> ::graphql_orm::Result<bool> {
                 let entity = entity.downcast_ref::<#struct_name>().ok_or_else(|| {
                     ::graphql_orm::sqlx::Error::Decode(Box::new(::std::io::Error::new(
                         ::std::io::ErrorKind::InvalidData,
                         concat!("in-memory filter entity type mismatch for ", stringify!(#struct_name)),
                     )))
                 })?;
-                self.__gom_matches_entity(entity)
+                Ok(self.__gom_matches_entity(entity, calendar_today)? == Some(true))
             }
         }
 
@@ -4810,6 +4845,7 @@ fn generate_entity_impl(
             fn __gom_to_sql_prefilter_conditions(&self) -> (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>) {
                 let mut conditions = Vec::new();
                 let mut values = Vec::new();
+                let _gom_spatial_prefilter = true;
 
                 #(#filter_to_sql)*
 
@@ -4872,37 +4908,55 @@ fn generate_entity_impl(
                 false
             }
 
-            fn __gom_matches_entity(&self, entity: &#struct_name) -> ::graphql_orm::Result<bool> {
+            fn __gom_matches_entity(
+                &self,
+                entity: &#struct_name,
+                calendar_today: ::graphql_orm::chrono::NaiveDate,
+            ) -> ::graphql_orm::Result<Option<bool>> {
+                let mut _gom_unknown = false;
                 #(#filter_to_entity_match)*
 
                 if let Some(ref and_filters) = self.and {
                     for filter in and_filters {
-                        if !filter.__gom_matches_entity(entity)? {
-                            return Ok(false);
+                        match filter.__gom_matches_entity(entity, calendar_today)? {
+                            Some(true) => {}
+                            Some(false) => return Ok(Some(false)),
+                            None => _gom_unknown = true,
                         }
                     }
                 }
 
                 if let Some(ref or_filters) = self.or {
                     let mut matched = false;
+                    let mut unknown = false;
                     for filter in or_filters {
-                        if filter.__gom_matches_entity(entity)? {
-                            matched = true;
-                            break;
+                        match filter.__gom_matches_entity(entity, calendar_today)? {
+                            Some(true) => {
+                                matched = true;
+                                break;
+                            }
+                            Some(false) => {}
+                            None => unknown = true,
                         }
                     }
                     if !matched {
-                        return Ok(false);
+                        if unknown {
+                            _gom_unknown = true;
+                        } else {
+                            return Ok(Some(false));
+                        }
                     }
                 }
 
                 if let Some(ref not_filter) = self.not {
-                    if not_filter.__gom_matches_entity(entity)? {
-                        return Ok(false);
+                    match not_filter.__gom_matches_entity(entity, calendar_today)? {
+                        Some(true) => return Ok(Some(false)),
+                        Some(false) => {}
+                        None => _gom_unknown = true,
                     }
                 }
 
-                Ok(true)
+                Ok(if _gom_unknown { None } else { Some(true) })
             }
         }
 
@@ -4980,17 +5034,6 @@ fn generate_entity_impl(
                 #current_epoch_runtime
             }
 
-            pub(crate) fn __gom_current_date_expr() -> &'static str {
-                #current_date_runtime
-            }
-
-            pub(crate) fn __gom_days_ago_expr(days: i64) -> String {
-                #days_ago_runtime
-            }
-
-            pub(crate) fn __gom_days_ahead_expr(days: i64) -> String {
-                #days_ahead_runtime
-            }
         }
 
         impl ::graphql_orm::graphql::orm::DatabaseSchema for #struct_name {
@@ -5665,7 +5708,7 @@ fn generate_filter_field(
                             f,
                             ::graphql_orm::graphql::orm::SpatialColumnDef::geometry(#geometry_type, #srid),
                         )? {
-                            return Ok(false);
+                            return Ok(Some(false));
                         }
                     }
                 }
@@ -5740,7 +5783,7 @@ fn generate_filter_field(
                             || filter.not_in.as_ref().is_some_and(|list| value.is_some_and(|value| list.contains(value)))
                             || filter.is_null.is_some_and(|expected| expected != value.is_none())
                         {
-                            return Ok(false);
+                            return Ok(Some(false));
                         }
                     }
                 }
@@ -5754,7 +5797,7 @@ fn generate_filter_field(
                             || filter.not_in.as_ref().is_some_and(|list| list.contains(value))
                             || filter.is_null == Some(true)
                         {
-                            return Ok(false);
+                            return Ok(Some(false));
                         }
                     }
                 }
@@ -5852,7 +5895,7 @@ fn generate_filter_field(
                 quote! {
                     if let Some(ref f) = self.#filter_field_name {
                         if !::graphql_orm::graphql::orm::spatial::string_filter_matches(#value_expr, f) {
-                            return Ok(false);
+                            return Ok(Some(false));
                         }
                     }
                 }
@@ -5941,7 +5984,7 @@ fn generate_filter_field(
                 quote! {
                     if let Some(ref f) = self.#filter_field_name {
                         if !::graphql_orm::graphql::orm::spatial::int_filter_matches(#value_expr, f) {
-                            return Ok(false);
+                            return Ok(Some(false));
                         }
                     }
                 }
@@ -6009,7 +6052,7 @@ fn generate_filter_field(
                 quote! {
                     if let Some(ref f) = self.#filter_field_name {
                         if !::graphql_orm::graphql::orm::spatial::uuid_filter_matches(#value_expr, f) {
-                            return Ok(false);
+                            return Ok(Some(false));
                         }
                     }
                 }
@@ -6054,7 +6097,7 @@ fn generate_filter_field(
                 quote! {
                     if let Some(ref f) = self.#filter_field_name {
                         if !::graphql_orm::graphql::orm::spatial::bool_filter_matches(#value_expr, f) {
-                            return Ok(false);
+                            return Ok(Some(false));
                         }
                     }
                 }
@@ -6070,90 +6113,21 @@ fn generate_filter_field(
             };
             let sql = quote! {
                 if let Some(ref f) = self.#filter_field_name {
-                    if let Some(ref v) = f.eq {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        conditions.push(format!("{} = {}", #db_col, placeholder));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::String(v.clone()));
-                    }
-                    if let Some(ref v) = f.ne {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        conditions.push(format!("{} != {}", #db_col, placeholder));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::String(v.clone()));
-                    }
-                    if let Some(ref v) = f.lt {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        conditions.push(format!("{} < {}", #db_col, placeholder));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::String(v.clone()));
-                    }
-                    if let Some(ref v) = f.lte {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        conditions.push(format!("{} <= {}", #db_col, placeholder));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::String(v.clone()));
-                    }
-                    if let Some(ref v) = f.gt {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        conditions.push(format!("{} > {}", #db_col, placeholder));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::String(v.clone()));
-                    }
-                    if let Some(ref v) = f.gte {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        conditions.push(format!("{} >= {}", #db_col, placeholder));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::String(v.clone()));
-                    }
-                    if let Some(ref range) = f.between {
-                        if let (Some(start), Some(end)) = (&range.start, &range.end) {
-                            let start_placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                            let end_placeholder = #struct_name::__gom_placeholder(values.len() + 2);
-                            conditions.push(format!("{} BETWEEN {} AND {}", #db_col, start_placeholder, end_placeholder));
-                            values.push(::graphql_orm::graphql::orm::SqlValue::String(start.clone()));
-                            values.push(::graphql_orm::graphql::orm::SqlValue::String(end.clone()));
+                    let rendered = if _gom_spatial_prefilter {
+                        f.render_sql_prefilter(#backend_expr, #db_col, values.len() + 1)
+                    } else {
+                        f.render_sql(#backend_expr, #db_col, values.len() + 1)
+                    };
+                    match rendered {
+                        Ok((date_conditions, date_values)) => {
+                            conditions.extend(date_conditions);
+                            values.extend(date_values);
                         }
-                    }
-                    // IsNull / IsNotNull
-                    if let Some(is_null) = f.is_null {
-                        if is_null {
-                            conditions.push(format!("{} IS NULL", #db_col));
-                        } else {
-                            conditions.push(format!("{} IS NOT NULL", #db_col));
+                        Err(_) => {
+                            // Direct rendering remains fail-closed. Query execution
+                            // reports the validation error through DatabaseFilter::validate.
+                            conditions.push("1 = 0".to_owned());
                         }
-                    }
-                    // Date arithmetic operators
-                    if f.in_past == Some(true) {
-                        conditions.push(format!("{} < {}", #db_col, #struct_name::__gom_current_date_expr()));
-                    }
-                    if f.in_future == Some(true) {
-                        conditions.push(format!("{} > {}", #db_col, #struct_name::__gom_current_date_expr()));
-                    }
-                    if f.is_today == Some(true) {
-                        conditions.push(format!("{} = {}", #db_col, #struct_name::__gom_current_date_expr()));
-                    }
-                    if let Some(days) = f.recent_days {
-                        // Within the last N days (inclusive of today)
-                        conditions.push(format!(
-                            "{} >= {} AND {} <= {}",
-                            #db_col,
-                            #struct_name::__gom_days_ago_expr(days.into()),
-                            #db_col,
-                            #struct_name::__gom_current_date_expr()
-                        ));
-                    }
-                    if let Some(days) = f.within_days {
-                        // Within the next N days (inclusive of today)
-                        conditions.push(format!(
-                            "{} >= {} AND {} <= {}",
-                            #db_col,
-                            #struct_name::__gom_current_date_expr(),
-                            #db_col,
-                            #struct_name::__gom_days_ahead_expr(days.into())
-                        ));
-                    }
-                    if let Some(ref rel) = f.gte_relative {
-                        let expr = rel.to_sql_expr(#backend_expr);
-                        conditions.push(format!("{} >= {}", #db_col, expr));
-                    }
-                    if let Some(ref rel) = f.lte_relative {
-                        let expr = rel.to_sql_expr(#backend_expr);
-                        conditions.push(format!("{} <= {}", #db_col, expr));
                     }
                 }
             };
@@ -6162,8 +6136,14 @@ fn generate_filter_field(
                     quote! {
                         if let Some(ref f) = self.#filter_field_name {
                             let __gom_date_value = entity.#field_name.as_ref().map(|value| value.to_string());
-                            if !::graphql_orm::graphql::orm::spatial::date_filter_matches(__gom_date_value.as_deref(), f) {
-                                return Ok(false);
+                            match ::graphql_orm::graphql::orm::spatial::date_filter_truth_at(
+                                __gom_date_value.as_deref(),
+                                f,
+                                calendar_today,
+                            ) {
+                                Some(true) => {}
+                                Some(false) => return Ok(Some(false)),
+                                None => _gom_unknown = true,
                             }
                         }
                     }
@@ -6171,8 +6151,14 @@ fn generate_filter_field(
                     quote! {
                         if let Some(ref f) = self.#filter_field_name {
                             let __gom_date_value = entity.#field_name.to_string();
-                            if !::graphql_orm::graphql::orm::spatial::date_filter_matches(Some(__gom_date_value.as_str()), f) {
-                                return Ok(false);
+                            match ::graphql_orm::graphql::orm::spatial::date_filter_truth_at(
+                                Some(__gom_date_value.as_str()),
+                                f,
+                                calendar_today,
+                            ) {
+                                Some(true) => {}
+                                Some(false) => return Ok(Some(false)),
+                                None => _gom_unknown = true,
                             }
                         }
                     }
