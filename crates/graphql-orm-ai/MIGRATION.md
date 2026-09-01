@@ -19,6 +19,27 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.95.11 to 0.95.12: retained-resume readiness and pre-dispatch proof
+
+Adopt `graphql-orm-ai` 0.95.12 and `graphql-orm-ai-tool-profiles` 0.10.3 from
+one reviewed full monorepo revision. A Codex process host must keep accepting
+strict actor frames after `thread/resume` until
+`AiCodexAppServerProtocolActor::retained_resume_ready` returns true. A
+correlated response alone is not readiness: the matching `thread/started`
+notification must also arrive in either order, unless the reviewed
+content-free retained-usage snapshot completes the lifecycle.
+
+Hosts may return `ProviderError::RetainedTurnRejected` only before writing the
+business `turn/start` request. The Codex adapter converts that typed proof, and
+the existing typed newly-bound rejection, into `RejectedBeforeDispatch`.
+Reservations are released and retained cursors are fenced for cleanup. The run
+closes as retryable `Failed/provider_pre_transport_failed`. Do not wrap a
+write, timeout, protocol error, or other failure during or after `turn/start`;
+those outcomes remain uncertain and recovery-required.
+
+The AI schema module remains **0.64.0**. There is no database, data, GraphQL
+SDL, protected-payload, backup, restore, or data backfill migration.
+
 ## 0.95.10 to 0.95.11: absence-proven descriptor replacement
 
 Adopt `graphql-orm-ai` 0.95.11 from one reviewed full monorepo revision. No

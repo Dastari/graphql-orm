@@ -24,13 +24,13 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 use crate::{
-    AiProvider, AiProviderCapabilitySessionBinding, AiProviderFailureCategory,
-    AiProviderRunBinding, AiProviderRunCloseOutcome, AiProviderRunCloseReason,
-    AiProviderRunInterruptOutcome, ModelBuiltinTool, ModelContinuationMode, ModelInputBlock,
-    ModelReasoningEffort, ModelReasoningEffortProfile, ModelReasoningSummaryRequest, ModelRequest,
-    ModelToolDefinition, ModelWebSearchDomainPolicy, ProviderCapabilities, ProviderDynamicToolCall,
-    ProviderDynamicToolResponder, ProviderError, ProviderEventStream, ProviderKind,
-    ProviderRequestContext,
+    AiProvider, AiProviderCapabilitySessionBinding, AiProviderDispatchOutcome,
+    AiProviderFailureCategory, AiProviderRunBinding, AiProviderRunCloseOutcome,
+    AiProviderRunCloseReason, AiProviderRunInterruptOutcome, ModelBuiltinTool,
+    ModelContinuationMode, ModelInputBlock, ModelReasoningEffort, ModelReasoningEffortProfile,
+    ModelReasoningSummaryRequest, ModelRequest, ModelToolDefinition, ModelWebSearchDomainPolicy,
+    ProviderCapabilities, ProviderDynamicToolCall, ProviderDynamicToolResponder, ProviderError,
+    ProviderEventStream, ProviderKind, ProviderRequestContext,
 };
 
 const MAXIMUM_PROCESSES: usize = 4_096;
@@ -70,6 +70,19 @@ const ALL_THREAD_SOURCE_KINDS: [&str; 10] = [
 
 fn provider_timeout_error() -> ProviderError {
     ProviderError::Classified(AiProviderFailureCategory::Timeout)
+}
+
+fn codex_dispatch_outcome(
+    result: Result<ProviderEventStream, ProviderError>,
+) -> AiProviderDispatchOutcome {
+    match result {
+        Ok(stream) => AiProviderDispatchOutcome::Dispatched(stream),
+        Err(
+            error @ (ProviderError::NewlyBoundTurnRejected(_)
+            | ProviderError::RetainedTurnRejected(_)),
+        ) => AiProviderDispatchOutcome::RejectedBeforeDispatch(error),
+        Err(error) => AiProviderDispatchOutcome::FailedAfterPossibleDispatch(error),
+    }
 }
 
 const OPTED_OUT_NOTIFICATION_METHODS: [&str; 5] = [
@@ -1386,6 +1399,17 @@ impl AiProvider for AiCodexAppServerProvider {
         }
     }
 
+    async fn dispatch(
+        &self,
+        request: ModelRequest,
+        context: ProviderRequestContext,
+    ) -> AiProviderDispatchOutcome {
+        if let Err(error) = self.prepare_dispatch(&request, &context).await {
+            return AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
+        }
+        codex_dispatch_outcome(self.stream(request, context).await)
+    }
+
     async fn stream_with_dynamic_tools(
         &self,
         request: ModelRequest,
@@ -1453,6 +1477,21 @@ impl AiProvider for AiCodexAppServerProvider {
                 .start_dynamic_turn(binding, self.registration.clone(), input, responder)
                 .await
         }
+    }
+
+    async fn dispatch_with_dynamic_tools(
+        &self,
+        request: ModelRequest,
+        context: ProviderRequestContext,
+        responder: Arc<dyn ProviderDynamicToolResponder>,
+    ) -> AiProviderDispatchOutcome {
+        if let Err(error) = self.prepare_dispatch(&request, &context).await {
+            return AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
+        }
+        codex_dispatch_outcome(
+            self.stream_with_dynamic_tools(request, context, responder)
+                .await,
+        )
     }
 
     async fn interrupt_run(
@@ -4194,6 +4233,29 @@ impl AiCodexAppServerProtocolActor {
         Ok(frame)
     }
 
+    /// Reports whether an exact retained cursor completed its resume
+    /// lifecycle and may proceed to local turn preparation.
+    ///
+    /// A correlated `thread/resume` response alone is insufficient: the
+    /// matching `thread/started` notification must also have arrived, unless
+    /// the reviewed content-free retained-usage snapshot fallback completed
+    /// the lifecycle. Hosts should keep reading strict actor input until this
+    /// predicate becomes true before calling [`Self::start_turn`].
+    #[must_use]
+    pub fn retained_resume_ready(&self, cursor: &crate::AiProviderSessionCursor) -> bool {
+        cursor.kind() == "codex.app_server.thread.v2"
+            && self.active_thread_id.as_deref() == Some(cursor.expose_to_provider_adapter())
+            && self.thread_lifecycle_phase == ThreadLifecyclePhase::Complete
+            && (self.thread_lifecycle_operation.is_none()
+                || (self.thread_lifecycle_operation == Some(ThreadLifecycleOperation::Resume)
+                    && self.retained_usage_snapshot_observed))
+            && self.pending_turn_thread_id.is_none()
+            && self.active_turn_id.is_none()
+            && self.deleting_thread_id.is_none()
+            && !self.turn_response_observed
+            && !self.turn_started_observed
+    }
+
     /// Encodes text-only user input for one exact lifecycle-complete thread.
     ///
     /// Trusted instructions are deliberately not copied into the user input
@@ -6423,6 +6485,32 @@ pub(crate) mod tests {
         ProviderEvent,
     };
     use uuid::Uuid;
+
+    #[test]
+    fn dispatch_classifier_proves_only_typed_pre_turn_rejections() {
+        assert!(matches!(
+            codex_dispatch_outcome(Err(ProviderError::RetainedTurnRejected(
+                crate::AiCodexRetainedTurnRejection::ResumeLifecycle,
+            ))),
+            AiProviderDispatchOutcome::RejectedBeforeDispatch(ProviderError::RetainedTurnRejected(
+                crate::AiCodexRetainedTurnRejection::ResumeLifecycle
+            ))
+        ));
+        assert!(matches!(
+            codex_dispatch_outcome(Err(ProviderError::NewlyBoundTurnRejected(
+                crate::AiCodexBoundTurnRejection::ActivationUnavailable,
+            ))),
+            AiProviderDispatchOutcome::RejectedBeforeDispatch(
+                ProviderError::NewlyBoundTurnRejected(
+                    crate::AiCodexBoundTurnRejection::ActivationUnavailable
+                )
+            )
+        ));
+        assert!(matches!(
+            codex_dispatch_outcome(Err(ProviderError::Rejected)),
+            AiProviderDispatchOutcome::FailedAfterPossibleDispatch(ProviderError::Rejected)
+        ));
+    }
 
     mod canonical_tool_surface {
         use graphql_orm::prelude::*;
@@ -12480,12 +12568,15 @@ pub(crate) mod tests {
         actor
             .resume_thread(&cursor, &turn())
             .expect("the same actor should begin a new resume lifecycle");
+        assert!(!actor.retained_resume_ready(&cursor));
         actor
             .accept(br#"{"id":3,"result":{"thread":{"id":"thread-retained-1"}}}"#)
             .expect("resume response should belong to the new lifecycle");
+        assert!(!actor.retained_resume_ready(&cursor));
         actor
             .accept(&thread_started_notification("thread-retained-1"))
             .expect("resume notification should complete the new lifecycle");
+        assert!(actor.retained_resume_ready(&cursor));
         actor
             .start_turn("thread-retained-1", &turn())
             .expect("turn should start only after both resume observations");
@@ -12519,15 +12610,86 @@ pub(crate) mod tests {
         actor
             .resume_thread(&cursor, &turn())
             .expect("resume should begin a fresh observation phase");
+        assert!(!actor.retained_resume_ready(&cursor));
         actor
             .accept(&thread_started_notification("thread-retained-1"))
             .expect("resume notification may arrive first");
+        assert!(!actor.retained_resume_ready(&cursor));
         actor
             .accept(br#"{"id":3,"result":{"thread":{"id":"thread-retained-1"}}}"#)
             .expect("resume response should complete the lifecycle");
+        assert!(actor.retained_resume_ready(&cursor));
         actor
             .start_turn("thread-retained-1", &turn())
             .expect("turn should start after notification-first correlation");
+    }
+
+    #[test]
+    fn retained_actor_completes_three_consecutive_turns_on_one_cursor() {
+        let mut actor = initialized_protocol_actor();
+        actor
+            .start_persistent_empty_thread(
+                "model-1",
+                ModelReasoningEffort::Unspecified,
+                &trusted_bootstrap(),
+                &[],
+            )
+            .expect("persistent create should encode");
+        actor
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("create response should bind");
+        actor
+            .accept(&thread_started_notification("thread-retained-1"))
+            .expect("create notification should complete the lifecycle");
+        let cursor =
+            crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", "thread-retained-1")
+                .expect("retained cursor should validate");
+
+        for cycle in 0_u64..3 {
+            actor
+                .resume_thread(&cursor, &turn())
+                .expect("each terminal turn should admit another exact resume");
+            assert!(!actor.retained_resume_ready(&cursor));
+            let resume_id = 3 + cycle * 2;
+            let resume_response = format!(
+                r#"{{"id":{resume_id},"result":{{"thread":{{"id":"thread-retained-1"}}}}}}"#
+            );
+            if cycle % 2 == 0 {
+                actor
+                    .accept(resume_response.as_bytes())
+                    .expect("response-first resume should bind");
+                assert!(!actor.retained_resume_ready(&cursor));
+                actor
+                    .accept(&thread_started_notification("thread-retained-1"))
+                    .expect("response-first notification should complete resume");
+            } else {
+                actor
+                    .accept(&thread_started_notification("thread-retained-1"))
+                    .expect("notification-first resume should bind");
+                assert!(!actor.retained_resume_ready(&cursor));
+                actor
+                    .accept(resume_response.as_bytes())
+                    .expect("notification-first response should complete resume");
+            }
+            assert!(actor.retained_resume_ready(&cursor));
+
+            actor
+                .start_turn("thread-retained-1", &turn())
+                .expect("ready retained lifecycle should admit a turn");
+            let turn_id = format!("turn-retained-{cycle}");
+            let turn_response_id = resume_id + 1;
+            let turn_response =
+                format!(r#"{{"id":{turn_response_id},"result":{{"turn":{{"id":"{turn_id}"}}}}}}"#);
+            actor
+                .accept(turn_response.as_bytes())
+                .expect("turn response should bind");
+            actor
+                .accept(&turn_started_notification("thread-retained-1", &turn_id))
+                .expect("turn notification should bind");
+            actor
+                .accept(&turn_completed_notification("thread-retained-1", &turn_id))
+                .expect("tool-free terminal turn should complete");
+        }
     }
 
     #[test]

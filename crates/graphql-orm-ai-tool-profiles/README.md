@@ -3,7 +3,7 @@ title: "graphql-orm-ai-tool-profiles"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-16
+last_reviewed: 2026-09-01
 review_by: 2027-02-11
 supersedes: []
 ---
@@ -24,7 +24,7 @@ are separate runtime decisions and must remain default-deny.
 
 ```toml
 [dependencies]
-graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.10.2" }
+graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.10.3" }
 serde_json = "1"
 ```
 

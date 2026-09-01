@@ -2686,6 +2686,12 @@ impl AiProviderCallExecutor {
             sink.record_newly_bound_turn_rejection(*reason);
             return;
         }
+        if let ProviderError::RetainedTurnRejected(reason) = error
+            && let Some(sink) = &self.failure_diagnostic_sink
+        {
+            sink.record_retained_turn_rejection(*reason);
+            return;
+        }
         self.record_provider_failure(error.safe_category());
     }
 
@@ -3059,6 +3065,12 @@ impl AiProviderCallExecutor {
                 Ok(result)
             }
             Err(error @ AiError::PreTransportBudgetDenied) => Err(error),
+            Err(AiError::PreTransportProviderFailed) => {
+                session_service
+                    .require_cleanup(&current_claim, "provider_session_pre_transport_failure")
+                    .await?;
+                Err(AiError::ProviderSessionDeferred)
+            }
             Err(error) => {
                 let _ = session_service
                     .require_cleanup(&current_claim, "provider_session_turn_ambiguous")
@@ -3380,7 +3392,7 @@ impl AiProviderCallExecutor {
             crate::AiProviderDispatchOutcome::RejectedBeforeDispatch(error) => {
                 self.record_provider_error(&error);
                 self.release_unstarted(&lease, &reservation).await?;
-                return Err(AiError::ProviderFailed);
+                return Err(AiError::PreTransportProviderFailed);
             }
             crate::AiProviderDispatchOutcome::FailedAfterPossibleDispatch(error) => {
                 self.record_provider_error(&error);
@@ -9455,7 +9467,7 @@ mod tests {
 
         assert!(matches!(
             executor.execute(&fixture.lease, plan(&fixture)).await,
-            Err(AiError::ProviderFailed)
+            Err(AiError::PreTransportProviderFailed)
         ));
         assert_eq!(fixture.mock.request_count(), 0);
         assert_eq!(reservation_state(&fixture.database).await, "released");
@@ -9707,6 +9719,128 @@ mod tests {
         assert_eq!(bindings.len(), 1);
         assert_eq!(bindings[0].state, AiProviderSessionState::Claimed.as_str());
         assert!(bindings[0].cleanup_reason_code.is_none());
+    }
+
+    #[tokio::test]
+    async fn retained_pre_transport_provider_failure_requires_cleanup_and_defers_safely() {
+        let cursor = AiProviderSessionCursor::new("mock.thread", "rejected-empty-thread")
+            .expect("test cursor should validate");
+        let fixture = fixture_with_provider(
+            MockProvider::new(Vec::new())
+                .with_provider_session_cursor(cursor)
+                .with_prepare_failure(AiProviderFailureCategory::ProviderRejection),
+        )
+        .await;
+        let session = AiSessionRecord::find_by_id(&fixture.database, &fixture.lease.session_id().0)
+            .await
+            .expect("session lookup should succeed")
+            .expect("session should exist");
+        let update = AiSessionRecord::compare_and_swap(
+            &fixture.database,
+            &session.id,
+            session.row_version,
+            AiSessionRecordWhereInput::default(),
+            UpdateAiSessionRecordInput {
+                message_head: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("session watermark update should succeed");
+        assert!(matches!(update, ConditionalUpdateOutcome::Updated(_)));
+        AiMessageRecord::insert(
+            &fixture.database,
+            CreateAiMessageRecordInput {
+                id: fixture.lease.input_message_id(),
+                session_id: fixture.lease.session_id().0,
+                sequence: 1,
+                message_role: "user".to_owned(),
+                author_principal_kind: Some("user".to_owned()),
+                author_subject: Some(fixture.principal.subject().to_owned()),
+                client_message_id: Some(Uuid::new_v4()),
+                content_hash: Some("c".repeat(64)),
+                run_id: Some(fixture.lease.run_id().0),
+                provider_kind: None,
+                provider_model: None,
+                protected_preview: None,
+                block_count: 1,
+                completion_state: "complete".to_owned(),
+                finalized_at: Some(OffsetDateTime::now_utc().unix_timestamp()),
+                content_purged_at: None,
+            },
+        )
+        .await
+        .expect("input message should insert");
+
+        let provider_sessions = Arc::new(
+            OrmAiProviderSessionService::new(
+                fixture.database.clone(),
+                Arc::new(AllowAccess),
+                Arc::new(ProtectionPolicy),
+                Arc::new(DatabaseManagedContentProtector),
+                Arc::new(Resolver(fixture.principal.clone())),
+                Arc::new(SystemClock),
+                AiProviderSessionLimits::default(),
+                Duration::minutes(5),
+            )
+            .expect("provider-session service should validate"),
+        );
+        let descriptor = AiProviderSessionDescriptor::new(
+            ProviderKind::OpenAiCompatible,
+            "mock-profile",
+            "mock-model",
+            "a".repeat(64),
+            "mock-retained/v1",
+            "b".repeat(64),
+        )
+        .expect("descriptor should validate");
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("provider limits should validate"),
+        );
+
+        let error = executor
+            .execute_with_provider_session(
+                Arc::new(Mutex::new(fixture.lease.clone())),
+                plan(&fixture),
+                AiProviderSessionTurnPlan::new(descriptor, "d".repeat(64))
+                    .expect("session plan should validate"),
+                provider_sessions,
+                None,
+            )
+            .await
+            .expect_err("a proven pre-transport rejection should defer after cleanup fencing");
+
+        assert!(matches!(error, AiError::ProviderSessionDeferred));
+        assert_eq!(fixture.mock.request_count(), 0);
+        assert_eq!(reservation_state(&fixture.database).await, "released");
+        let bindings = fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<crate::orm_provider_session::AiProviderSessionBindingRecord>()
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("provider-session binding query should succeed");
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(
+            bindings[0].state,
+            AiProviderSessionState::CleanupRequired.as_str()
+        );
+        assert_eq!(
+            bindings[0].cleanup_reason_code.as_deref(),
+            Some("provider_session_pre_transport_failure")
+        );
     }
 
     #[tokio::test]

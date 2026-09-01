@@ -3,12 +3,25 @@ title: "graphql-orm-ai-tool-profiles migration guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-22
+last_reviewed: 2026-09-01
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.10.2 to 0.10.3: proof-bearing pre-dispatch provider failure
+
+Adopt `graphql-orm-ai-tool-profiles` 0.10.3 with `graphql-orm-ai` 0.95.12 from
+one reviewed full monorepo revision. Deliberately exhaustive internal matches
+must handle `AiError::PreTransportProviderFailed` separately from generic
+`ProviderFailed`. Only the provider-call executor may return it after the
+adapter reports `RejectedBeforeDispatch` and the unstarted budget reservation
+is durably released.
+
+The new variant keeps the stable `AI_PROVIDER_FAILED` public code. There is no
+schema, database, data, GraphQL SDL, manifest, capability, fingerprint,
+protected-content, credential, or persistent AI schema-module migration.
 
 ## 0.10.1 to 0.10.2: bounded relationship-argument projection
 

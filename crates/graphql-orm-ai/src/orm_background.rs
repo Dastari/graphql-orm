@@ -4039,6 +4039,7 @@ fn classify_background_retrieval_error(
         | ProviderError::Rejected
         | ProviderError::StatelessNativeItemRejected
         | ProviderError::NewlyBoundTurnRejected(_)
+        | ProviderError::RetainedTurnRejected(_)
         | ProviderError::Cancelled
         | ProviderError::Classified(_) => {
             AiOpenAiBackgroundRetrievalAttempt::RecoveryRequired(background_retrieval_failure(

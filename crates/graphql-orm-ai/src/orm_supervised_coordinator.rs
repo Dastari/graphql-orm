@@ -1099,6 +1099,20 @@ impl AiSupervisedAgentCoordinator {
                     .finish_failed(&lease, &guard, "provider_budget_denied")
                     .await;
             }
+            Err(SupervisedProviderTurnFailure::PreTransportProvider) => {
+                if let Some((service, claim)) = &reclaimed {
+                    let _ = service
+                        .require_cleanup(claim, "provider_session_reclaimed_handoff_failed")
+                        .await;
+                }
+                // The adapter proved that no business turn crossed the
+                // provider boundary. The reservation has already been
+                // released and retained-session cleanup, when applicable,
+                // has been durably fenced by the call executor.
+                return self
+                    .finish_failed(&lease, &guard, "provider_pre_transport_failed")
+                    .await;
+            }
             Err(SupervisedProviderTurnFailure::StatelessNativeItemRejected) => {
                 if let Some((service, claim)) = &reclaimed {
                     let _ = service
@@ -1723,18 +1737,22 @@ impl AiSupervisedAgentCoordinator {
 enum SupervisedProviderTurnFailure {
     Provider,
     BudgetDenied,
+    PreTransportProvider,
     StatelessNativeItemRejected,
     LeaseLost(AiError),
 }
 
 /// Separates proof-bearing refusals from an uncertain turn.
 ///
-/// See the read-only coordinator for the full argument: the atomic budget
-/// reservation happens before the transport boundary, so a denial proves no
-/// bytes crossed it and no reservation was left held.
+/// See the read-only coordinator for the full argument. Budget denial, typed
+/// pre-dispatch rejection, and a provider-session cleanup deferral all prove
+/// that no business turn crossed the provider boundary.
 const fn classify_supervised_turn_failure(error: &AiError) -> SupervisedProviderTurnFailure {
     match error {
         AiError::PreTransportBudgetDenied => SupervisedProviderTurnFailure::BudgetDenied,
+        AiError::PreTransportProviderFailed | AiError::ProviderSessionDeferred => {
+            SupervisedProviderTurnFailure::PreTransportProvider
+        }
         AiError::StatelessNativeItemRejected => {
             SupervisedProviderTurnFailure::StatelessNativeItemRejected
         }
@@ -3040,6 +3058,77 @@ mod tests {
             ),
             crate::AiRunRetryAdmission::Allowed
         );
+    }
+
+    #[tokio::test]
+    async fn pre_transport_provider_rejection_is_a_certain_supervised_failure() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        let provider = Arc::new(TestProviderExecutor {
+            responses: Mutex::new(VecDeque::from([Err(AiError::PreTransportProviderFailed)])),
+            require_checkpoint_cleared: false,
+            calls: AtomicUsize::new(0),
+        });
+        let coordinator = AiSupervisedAgentCoordinator::new(
+            run.clone(),
+            provider.clone(),
+            Arc::new(TestOutputWriter),
+            Arc::new(TestCheckpointWriter {
+                provider_checkpoints: AtomicUsize::new(0),
+            }),
+            Arc::new(TestCheckpointControl {
+                adopted: Mutex::new(None),
+                consumed: AtomicBool::new(false),
+            }),
+            Arc::new(TestApprovalStager {
+                calls: AtomicUsize::new(0),
+                saw_checkpoint: AtomicBool::new(false),
+            }),
+            unused_automatic(),
+            unused_resume(),
+            Arc::new(TestRuleResolver),
+            Arc::new(TestPlanner {
+                scope: test_scope(),
+                route: test_route(),
+                continuation_count: AtomicUsize::new(0),
+            }),
+            Arc::new(FixedClock::new(time::OffsetDateTime::now_utc())),
+            limits(),
+        );
+
+        let outcome = coordinator
+            .execute_claimed(&lease)
+            .await
+            .expect("a proven supervised pre-transport rejection should fail cleanly");
+
+        assert_eq!(
+            outcome,
+            AiSupervisedAgentRunOutcome::Failed {
+                provider_turns: 0,
+                total_tool_calls: 0,
+            }
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.remaining_responses(), 0);
+        assert_eq!(run.final_states(), vec![AiRunState::Failed]);
+        assert_eq!(
+            crate::classify_run_retry(
+                crate::AiRunRetryEvidence {
+                    terminal: crate::AiRunTerminalEvent::Failed,
+                    produced_assistant_output: false,
+                },
+                Some("provider_pre_transport_failed"),
+            ),
+            crate::AiRunRetryAdmission::Allowed
+        );
+    }
+
+    #[test]
+    fn retained_cleanup_deferral_keeps_the_supervised_turn_out_of_recovery() {
+        assert!(matches!(
+            classify_supervised_turn_failure(&AiError::ProviderSessionDeferred),
+            SupervisedProviderTurnFailure::PreTransportProvider
+        ));
     }
 
     #[tokio::test]

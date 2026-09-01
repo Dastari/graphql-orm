@@ -1866,6 +1866,9 @@ pub enum ProviderError {
     /// A newly bound empty retained thread failed a closed activation check.
     #[error("provider newly-bound turn rejected: {0}")]
     NewlyBoundTurnRejected(AiCodexBoundTurnRejection),
+    /// A retained thread failed before business input crossed the turn boundary.
+    #[error("provider retained turn rejected before dispatch: {0}")]
+    RetainedTurnRejected(AiCodexRetainedTurnRejection),
     /// Stream was cancelled.
     #[error("provider stream cancelled")]
     Cancelled,
@@ -1891,6 +1894,7 @@ impl ProviderError {
             | Self::Rejected
             | Self::StatelessNativeItemRejected
             | Self::NewlyBoundTurnRejected(_) => AiProviderFailureCategory::ProviderRejection,
+            Self::RetainedTurnRejected(_) => AiProviderFailureCategory::RetainedResumeRejection,
             Self::RateLimited => AiProviderFailureCategory::RateLimit,
             Self::Unavailable => AiProviderFailureCategory::TransportUnavailable,
             Self::Cancelled => AiProviderFailureCategory::Cancellation,
@@ -2009,6 +2013,44 @@ impl fmt::Display for AiCodexBoundTurnRejection {
     }
 }
 
+/// Content-free phase that rejected a retained Codex turn before business input.
+///
+/// A process adapter may emit this proof only before it writes the `turn/start`
+/// request containing user input. Loading a protected thread with
+/// `thread/resume` is included because that request contains no user input or
+/// application-tool request. Failures during or after `turn/start` must remain
+/// ordinary uncertain provider errors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AiCodexRetainedTurnRejection {
+    /// The opened session, model, or frozen registration did not match locally.
+    RequestValidation,
+    /// A bounded local process or concurrency admission failed before resume.
+    ProcessAdmission,
+    /// The exact protected cursor did not complete its correlated resume lifecycle.
+    ResumeLifecycle,
+    /// The actor could not prepare the exact turn frame before it was written.
+    TurnPreparation,
+}
+
+impl AiCodexRetainedTurnRejection {
+    /// Stable bounded machine code.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RequestValidation => "codex_retained_turn_request_validation",
+            Self::ProcessAdmission => "codex_retained_turn_process_admission",
+            Self::ResumeLifecycle => "codex_retained_turn_resume_lifecycle",
+            Self::TurnPreparation => "codex_retained_turn_preparation",
+        }
+    }
+}
+
+impl fmt::Display for AiCodexRetainedTurnRejection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 impl fmt::Display for AiProviderFailureCategory {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
@@ -2034,6 +2076,17 @@ pub trait AiProviderFailureDiagnosticSink: Send + Sync {
     fn record_newly_bound_turn_rejection(&self, reason: AiCodexBoundTurnRejection) {
         let _ = reason;
         self.record(AiProviderFailureCategory::ProviderRejection);
+    }
+
+    /// Records the closed pre-dispatch phase that rejected a retained Codex turn.
+    ///
+    /// The default records only
+    /// [`AiProviderFailureCategory::RetainedResumeRejection`]. Hosts may
+    /// override this method to retain the closed phase without observing
+    /// cursors, prompts, tools, arguments, results, or provider payloads.
+    fn record_retained_turn_rejection(&self, reason: AiCodexRetainedTurnRejection) {
+        let _ = reason;
+        self.record(AiProviderFailureCategory::RetainedResumeRejection);
     }
 }
 
@@ -3247,6 +3300,15 @@ mod safe_failure_tests {
         let bound_text = format!("{bound:?} {bound}");
         assert!(bound_text.contains("codex_bound_turn_frozen_definition_mismatch"));
         assert!(!bound_text.contains(sensitive));
+        let retained =
+            ProviderError::RetainedTurnRejected(AiCodexRetainedTurnRejection::ResumeLifecycle);
+        assert_eq!(
+            retained.safe_category(),
+            AiProviderFailureCategory::RetainedResumeRejection
+        );
+        let retained_text = format!("{retained:?} {retained}");
+        assert!(retained_text.contains("codex_retained_turn_resume_lifecycle"));
+        assert!(!retained_text.contains(sensitive));
 
         struct DefaultBoundTurnSink(std::sync::Mutex<Vec<AiProviderFailureCategory>>);
         impl AiProviderFailureDiagnosticSink for DefaultBoundTurnSink {
@@ -3261,12 +3323,16 @@ mod safe_failure_tests {
         sink.record_newly_bound_turn_rejection(
             AiCodexBoundTurnRejection::BootstrapFingerprintMismatch,
         );
+        sink.record_retained_turn_rejection(AiCodexRetainedTurnRejection::TurnPreparation);
         assert_eq!(
             sink.0
                 .lock()
                 .expect("bound-turn diagnostic lock should remain available")
                 .as_slice(),
-            &[AiProviderFailureCategory::ProviderRejection]
+            &[
+                AiProviderFailureCategory::ProviderRejection,
+                AiProviderFailureCategory::RetainedResumeRejection,
+            ]
         );
 
         let denied = classify_safe_application_tool_error(&AiError::Forbidden)

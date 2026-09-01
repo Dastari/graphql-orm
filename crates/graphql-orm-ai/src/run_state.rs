@@ -401,6 +401,7 @@ const fn is_retryable_failure_code(code: &str) -> bool {
         code.as_bytes(),
         b"provider_session_cleanup_unavailable"
             | b"provider_budget_denied"
+            | b"provider_pre_transport_failed"
             | b"agent_rule_budget_exceeded"
             | b"agent_rule_changed_after_provider"
             | b"agent_turn_limit_reached"
