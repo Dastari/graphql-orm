@@ -18,6 +18,20 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.95.13] - 2026-09-01
+
+Persistent schema module: **0.64.0** (unchanged from 0.95.12).
+
+### Fixed
+
+- A freshly initialized Codex process actor can now adopt the exact frozen
+  web-search policy carried by a retained session while encoding
+  `thread/resume`. An actor that already owns retained state continues to
+  reject any domain-policy or call-ceiling change.
+
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, GraphQL SDL, backup, or restore migration.
+
 ## [0.95.12] - 2026-09-01
 
 Persistent schema module: **0.64.0** (unchanged from 0.95.11).

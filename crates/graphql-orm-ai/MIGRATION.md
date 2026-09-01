@@ -19,6 +19,17 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.95.12 to 0.95.13: retained web-search adoption on a fresh process
+
+Adopt `graphql-orm-ai` 0.95.13 from one reviewed full monorepo revision. No
+host API or configuration change is required. A newly initialized process
+actor now adopts the retained session's exact web-search domain policy and
+call ceiling when it encodes `thread/resume`; an actor with existing retained
+state still requires exact equality.
+
+The AI schema module remains **0.64.0**. There is no database, data, GraphQL
+SDL, protected-payload, backup, restore, or data backfill migration.
+
 ## 0.95.11 to 0.95.12: retained-resume readiness and pre-dispatch proof
 
 Adopt `graphql-orm-ai` 0.95.12 and `graphql-orm-ai-tool-profiles` 0.10.3 from
