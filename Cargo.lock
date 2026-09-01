@@ -3104,7 +3104,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai"
-version = "0.95.11"
+version = "0.95.12"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -3136,7 +3136,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai-tool-profiles"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "async-graphql",
  "async-graphql-parser",

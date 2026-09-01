@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.95.11", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.95.12", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -159,6 +159,16 @@ provider absence is persisted, a later run may replace the deleted generation
 under its current server-authored descriptor; the historical descriptor grants
 no replacement authority. A lost rebind fence discards the fresh empty
 provider session and defers safely before any business input or tool request.
+
+A retained Codex host must not treat the `thread/resume` response as sufficient
+readiness. Continue feeding the strict protocol actor until
+`retained_resume_ready` proves both that response and the matching
+`thread/started` notification in either order, or the reviewed content-free
+usage-snapshot fallback. Only a typed rejection raised before writing
+`turn/start` is safely pre-dispatch: it releases the unstarted reservation,
+requires retained-cursor cleanup, and closes with the retryable
+`provider_pre_transport_failed` code. Every failure during or after
+`turn/start` remains uncertain.
 
 Codex cleanup treats a successful empty `thread/delete` result as authoritative.
 The provider profile ID and versioned cursor kind form its stable provider-state

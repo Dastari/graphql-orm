@@ -3,12 +3,26 @@ title: "graphql-orm-ai-tool-profiles changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-22
+last_reviewed: 2026-09-01
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # Changelog
+
+## [0.10.3] - 2026-09-01
+
+### Added
+
+- `AiError::PreTransportProviderFailed` represents a provider failure whose
+  adapter and call executor proved occurred before dispatch. It retains the
+  stable `AI_PROVIDER_FAILED` public code.
+
+### Security
+
+- The variant is proof-bearing and must not classify a generic provider error.
+  Failures after possible dispatch remain `ProviderFailed` and preserve the
+  uncertain-effect recovery boundary.
 
 ## [0.10.2] - 2026-08-26
 

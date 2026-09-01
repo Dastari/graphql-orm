@@ -18,6 +18,32 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.95.12] - 2026-09-01
+
+Persistent schema module: **0.64.0** (unchanged from 0.95.11).
+
+### Fixed
+
+- The strict Codex actor now exposes an exact retained-resume readiness proof.
+  A host can wait for both the correlated `thread/resume` response and matching
+  `thread/started` notification, in either order, before preparing a turn. The
+  existing content-free retained-usage snapshot remains the only reviewed
+  fallback.
+- Typed Codex failures proven to occur before `turn/start` are now classified
+  before dispatch. Their budget reservation is released, a retained cursor is
+  fenced for cleanup, and the run closes as retryable `Failed` instead of
+  incorrectly requiring uncertain-effect recovery.
+
+### Security
+
+- Only the typed newly-bound and retained pre-turn rejection variants can cross
+  the proof-bearing pre-dispatch path. Ordinary adapter failures and every
+  failure during or after `turn/start` remain possibly dispatched and continue
+  to require recovery.
+
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, GraphQL SDL, backup, or restore migration.
+
 ## [0.95.11] - 2026-09-01
 
 Persistent schema module: **0.64.0** (unchanged from 0.95.10).

@@ -39,6 +39,15 @@ pub enum AiError {
     /// provider/tool loop must use [`Self::BudgetDenied`] instead.
     #[error("AI budget denied")]
     PreTransportBudgetDenied,
+    /// Provider execution failed before the request crossed its dispatch boundary.
+    ///
+    /// This is a proof-bearing execution classification, not a generic provider
+    /// error. It may be returned only after the adapter reports
+    /// `RejectedBeforeDispatch` and the executor durably releases the unstarted
+    /// budget reservation. A failure after possible dispatch must use
+    /// [`Self::ProviderFailed`] and remain recovery-required.
+    #[error("AI provider operation failed before dispatch")]
+    PreTransportProviderFailed,
     /// Input failed a public schema contract.
     #[error("invalid AI input: {0}")]
     InvalidInput(String),
@@ -86,6 +95,7 @@ impl AiError {
             Self::EgressDenied => "AI_EGRESS_DENIED",
             Self::BudgetDenied => "AI_BUDGET_DENIED",
             Self::PreTransportBudgetDenied => "AI_BUDGET_DENIED",
+            Self::PreTransportProviderFailed => "AI_PROVIDER_FAILED",
             Self::InvalidInput(_) => "AI_INVALID_INPUT",
             Self::ReauthorizationFailed => "AI_REAUTHORIZATION_FAILED",
             Self::ToolExecutionFailed => "AI_TOOL_EXECUTION_FAILED",
@@ -114,6 +124,14 @@ mod tests {
     fn stateless_native_item_rejection_keeps_the_provider_failure_public_code() {
         assert_eq!(
             AiError::StatelessNativeItemRejected.public_code(),
+            "AI_PROVIDER_FAILED"
+        );
+    }
+
+    #[test]
+    fn pre_transport_provider_failure_keeps_the_provider_failure_public_code() {
+        assert_eq!(
+            AiError::PreTransportProviderFailed.public_code(),
             "AI_PROVIDER_FAILED"
         );
     }

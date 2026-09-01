@@ -1722,6 +1722,11 @@ impl AiReadOnlyAgentCoordinator {
                         .finish_failed(&lease, &guard, "provider_budget_denied")
                         .await;
                 }
+                Err(ProviderTurnFailure::PreTransportProvider) => {
+                    return self
+                        .finish_failed(&lease, &guard, "provider_pre_transport_failed")
+                        .await;
+                }
                 Err(ProviderTurnFailure::StatelessNativeItemRejected) => {
                     return self
                         .finish_failed(&lease, &guard, "provider_native_item_rejected")
@@ -2514,6 +2519,7 @@ impl AiReadOnlyAgentCoordinator {
 enum ProviderTurnFailure {
     Provider,
     BudgetDenied,
+    PreTransportProvider,
     StatelessNativeItemRejected,
     Deferred,
     LeaseLost(AiError),
@@ -2525,9 +2531,10 @@ enum ProviderTurnFailure {
 /// Separates proof-bearing refusals from an uncertain provider turn.
 ///
 /// The budget reservation is taken before the transport boundary and inside
-/// the same call that later dispatches. A denial therefore proves that no
-/// bytes crossed the provider boundary, that no provider turn was consumed,
-/// and that the atomic reservation transaction left nothing held. A stateless
+/// the same call that later dispatches. A budget denial or a typed adapter
+/// pre-dispatch rejection therefore proves that no bytes crossed the provider
+/// boundary, that no provider turn was consumed, and that the atomic
+/// reservation transaction left nothing held. A stateless
 /// native-item refusal is separately proof-bearing only after the
 /// executor has committed authoritative usage and proven that no answer or
 /// admitted host tool effect exists. Every other executor error keeps the
@@ -2535,6 +2542,7 @@ enum ProviderTurnFailure {
 const fn classify_provider_turn_failure(error: &AiError) -> ProviderTurnFailure {
     match error {
         AiError::PreTransportBudgetDenied => ProviderTurnFailure::BudgetDenied,
+        AiError::PreTransportProviderFailed => ProviderTurnFailure::PreTransportProvider,
         AiError::StatelessNativeItemRejected => ProviderTurnFailure::StatelessNativeItemRejected,
         _ => ProviderTurnFailure::Provider,
     }
@@ -3908,6 +3916,64 @@ mod tests {
                     produced_assistant_output: false,
                 },
                 Some("provider_budget_denied"),
+            ),
+            crate::AiRunRetryAdmission::Allowed
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_transport_provider_rejection_fails_cleanly_and_is_retryable() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        let provider = Arc::new(TestProviderExecutor {
+            responses: Mutex::new(VecDeque::from([Err(AiError::PreTransportProviderFailed)])),
+            delay: None,
+        });
+        let planner = Arc::new(TestChatPlanner {
+            scope: test_scope(),
+            continuation_count: AtomicUsize::new(0),
+        });
+        let forbidden = Arc::new(ChatForbiddenBoundaries::default());
+        let coordinator = AiReadOnlyAgentCoordinator::new(
+            run.clone(),
+            provider.clone(),
+            forbidden.clone(),
+            Arc::new(TestOutputWriter),
+            forbidden.clone(),
+            Arc::new(TestCheckpointWriter),
+            Arc::new(TestRuleResolver),
+            planner,
+            limits(50),
+        );
+
+        let outcome = coordinator
+            .execute_claimed(&lease)
+            .await
+            .expect("a proven pre-transport rejection is a clean terminal failure");
+
+        assert_eq!(
+            outcome,
+            Failed {
+                provider_turns: 0,
+                total_tool_calls: 0,
+            }
+        );
+        assert_eq!(run.final_states(), vec![AiRunState::Failed]);
+        assert_eq!(
+            run.final_codes(),
+            vec!["provider_pre_transport_failed".to_owned()]
+        );
+        assert!(run.scheduled_retry_codes().is_empty());
+        assert_eq!(provider.remaining_responses(), 0);
+        assert_eq!(forbidden.tool_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(forbidden.provider_checkpoints.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            crate::classify_run_retry(
+                crate::AiRunRetryEvidence {
+                    terminal: crate::AiRunTerminalEvent::Failed,
+                    produced_assistant_output: false,
+                },
+                Some("provider_pre_transport_failed"),
             ),
             crate::AiRunRetryAdmission::Allowed
         );
