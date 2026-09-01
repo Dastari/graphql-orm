@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.95.13", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.95.14", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -223,6 +223,13 @@ metadata. The host-authored per-turn call ceiling is frozen into retained
 thread state, supplied as a trusted model instruction, and independently
 enforced by the actor. Reverify both direct delivery and the negative native-
 item matrix before upgrading Codex.
+
+Codex may emit its documented generic `warning` notification while a retained
+thread is resuming. The actor accepts it only inside the exact protected
+resume window or a correlated turn, discards its message, and enforces strict
+per-window count and byte limits. It does not satisfy resume readiness; hosts
+must continue reading until the correlated response and started notification,
+or the reviewed content-free usage fallback, complete the lifecycle.
 
 The Codex schema projector preserves bounded nullable scalar `type` arrays in
 the crate-authored FixedBroker definitions. It does not pass through arbitrary

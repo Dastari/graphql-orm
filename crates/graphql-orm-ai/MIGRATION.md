@@ -19,6 +19,23 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.95.13 to 0.95.14: retained-resume warning interleaving
+
+Adopt `graphql-orm-ai` 0.95.14 from one reviewed full monorepo revision. A host
+waiting for `retained_resume_ready` may receive
+`AiCodexAppServerInbound::RuntimeWarning` while the exact `thread/resume`
+handshake is pending. Treat it as a content-free diagnostic and continue
+reading; it is not resume evidence and does not replace the response, matching
+started notification, or reviewed usage fallback.
+
+The actor discards warning text, applies independent count and byte ceilings
+to each resume or turn window, and rejects mismatched-thread, malformed,
+new-thread, deletion, state-index, and idle warnings. No host configuration or
+public data model changes.
+
+The AI schema module remains **0.64.0**. There is no database, data, GraphQL
+SDL, protected-payload, backup, restore, or data backfill migration.
+
 ## 0.95.12 to 0.95.13: retained web-search adoption on a fresh process
 
 Adopt `graphql-orm-ai` 0.95.13 from one reviewed full monorepo revision. No
