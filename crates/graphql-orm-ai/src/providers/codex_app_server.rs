@@ -43,8 +43,8 @@ const MAXIMUM_BOOTSTRAP_INSTRUCTION_BYTES: usize = 64 * 1024;
 const MAXIMUM_IDENTIFIER_BYTES: usize = 200;
 const MAXIMUM_VERSION_BYTES: usize = 200;
 const MAXIMUM_RUNTIME_WARNING_MESSAGE_BYTES: usize = 4 * 1024;
-const MAXIMUM_RUNTIME_WARNING_BYTES_PER_TURN: usize = 16 * 1024;
-const MAXIMUM_RUNTIME_WARNINGS_PER_TURN: usize = 8;
+const MAXIMUM_RUNTIME_WARNING_BYTES_PER_WINDOW: usize = 16 * 1024;
+const MAXIMUM_RUNTIME_WARNINGS_PER_WINDOW: usize = 8;
 const MAXIMUM_CAPABILITY_SESSION_BINDINGS: usize = 256;
 const MAXIMUM_WEB_SEARCH_RESULTS_PER_CALL: usize = 100;
 const MAXIMUM_WEB_SEARCH_RESULT_BYTES_PER_CALL: usize = 1024 * 1024;
@@ -3530,7 +3530,8 @@ enum ThreadLifecycleOperation {
 /// failure may be followed in a separate fresh actor by the exact bounded,
 /// content-discarding active-and-archived state-index absence scan. A
 /// documented generic `warning` is admitted only as a content-free,
-/// turn-correlated, flood-bounded control event. Empty reasoning-item
+/// exact-resume- or turn-correlated, flood-bounded control event. A warning
+/// never advances resume readiness. Empty reasoning-item
 /// lifecycles are admitted only as content-free signals while turn-level
 /// reasoning summaries remain explicitly disabled. All other server-initiated
 /// requests and non-allowlisted notifications fail closed.
@@ -3738,6 +3739,8 @@ impl AiCodexAppServerProtocolActor {
         self.thread_lifecycle_phase = ThreadLifecyclePhase::AwaitingResponseAndStarted;
         self.thread_lifecycle_operation = Some(ThreadLifecycleOperation::Start);
         self.retained_usage_snapshot_observed = false;
+        self.runtime_warning_count = 0;
+        self.runtime_warning_bytes = 0;
     }
 
     fn begin_resume_lifecycle(&mut self, thread_id: &str) {
@@ -3745,6 +3748,8 @@ impl AiCodexAppServerProtocolActor {
         self.thread_lifecycle_phase = ThreadLifecyclePhase::AwaitingResponseAndStarted;
         self.thread_lifecycle_operation = Some(ThreadLifecycleOperation::Resume);
         self.retained_usage_snapshot_observed = false;
+        self.runtime_warning_count = 0;
+        self.runtime_warning_bytes = 0;
     }
 
     /// Encodes an ephemeral thread start with trusted instructions kept in the
@@ -5099,17 +5104,38 @@ impl AiCodexAppServerProtocolActor {
             .runtime_warning_bytes
             .checked_add(message_bytes)
             .ok_or(ProviderError::Rejected)?;
-        if notification.method != RUNTIME_WARNING
-            || !self.initialization_complete
-            || self.thread_lifecycle_phase != ThreadLifecyclePhase::Complete
-            || self.pending_turn_thread_id.as_deref() != Some(active_thread_id)
-            || self.deleting_thread_id.is_some()
-            || (!self
+        let pending_resume_response = self
+            .pending
+            .values()
+            .any(|method| *method == ClientMethod::ThreadResume);
+        let resume_correlated = self.thread_lifecycle_operation
+            == Some(ThreadLifecycleOperation::Resume)
+            && self.pending_turn_thread_id.is_none()
+            && self.active_turn_id.is_none()
+            && match self.thread_lifecycle_phase {
+                ThreadLifecyclePhase::AwaitingResponseAndStarted
+                | ThreadLifecyclePhase::AwaitingResponse => {
+                    pending_resume_response && self.pending.len() == 1
+                }
+                ThreadLifecyclePhase::AwaitingStarted => self.pending.is_empty(),
+                ThreadLifecyclePhase::Complete => {
+                    self.retained_usage_snapshot_observed && self.pending.is_empty()
+                }
+                ThreadLifecyclePhase::Ready | ThreadLifecyclePhase::Deleted => false,
+            };
+        let turn_correlated = self.thread_lifecycle_phase == ThreadLifecyclePhase::Complete
+            && self.pending_turn_thread_id.as_deref() == Some(active_thread_id)
+            && (self
                 .pending
                 .values()
                 .any(|method| *method == ClientMethod::TurnStart)
-                && !self.turn_response_observed
-                && !self.turn_started_observed)
+                || self.turn_response_observed
+                || self.turn_started_observed);
+        if notification.method != RUNTIME_WARNING
+            || !self.initialization_complete
+            || self.deleting_thread_id.is_some()
+            || self.thread_absence_scan.is_some()
+            || (!resume_correlated && !turn_correlated)
             || params
                 .thread_id
                 .as_deref()
@@ -5117,8 +5143,8 @@ impl AiCodexAppServerProtocolActor {
             || params.message.trim().is_empty()
             || message_bytes > MAXIMUM_RUNTIME_WARNING_MESSAGE_BYTES
             || params.message.chars().any(char::is_control)
-            || self.runtime_warning_count >= MAXIMUM_RUNTIME_WARNINGS_PER_TURN
-            || next_bytes > MAXIMUM_RUNTIME_WARNING_BYTES_PER_TURN
+            || self.runtime_warning_count >= MAXIMUM_RUNTIME_WARNINGS_PER_WINDOW
+            || next_bytes > MAXIMUM_RUNTIME_WARNING_BYTES_PER_WINDOW
         {
             return Err(ProviderError::Rejected);
         }
@@ -11613,7 +11639,7 @@ pub(crate) mod tests {
         ));
 
         let mut count_limited = active_protocol_actor();
-        for _ in 0..MAXIMUM_RUNTIME_WARNINGS_PER_TURN {
+        for _ in 0..MAXIMUM_RUNTIME_WARNINGS_PER_WINDOW {
             assert!(matches!(
                 count_limited.accept(&runtime_warning_notification(None, "bounded")),
                 Ok(AiCodexAppServerInbound::RuntimeWarning)
@@ -11626,7 +11652,8 @@ pub(crate) mod tests {
 
         let mut byte_limited = active_protocol_actor();
         let maximum_message = "x".repeat(MAXIMUM_RUNTIME_WARNING_MESSAGE_BYTES);
-        for _ in 0..(MAXIMUM_RUNTIME_WARNING_BYTES_PER_TURN / MAXIMUM_RUNTIME_WARNING_MESSAGE_BYTES)
+        for _ in
+            0..(MAXIMUM_RUNTIME_WARNING_BYTES_PER_WINDOW / MAXIMUM_RUNTIME_WARNING_MESSAGE_BYTES)
         {
             assert!(matches!(
                 byte_limited.accept(&runtime_warning_notification(None, &maximum_message)),
@@ -12570,6 +12597,128 @@ pub(crate) mod tests {
                 "Code Mode remains unavailable after resume.",
             )),
             Ok(AiCodexAppServerInbound::RuntimeWarning)
+        ));
+    }
+
+    #[test]
+    fn protocol_admits_bounded_runtime_warning_in_every_exact_resume_interleaving() {
+        let cursor =
+            crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", "thread-retained-1")
+                .expect("cursor should validate");
+        let warning = runtime_warning_notification(
+            Some("thread-retained-1"),
+            "A bounded runtime feature remains unavailable.",
+        );
+
+        let mut warning_first = initialized_protocol_actor();
+        warning_first
+            .resume_thread(&cursor, &turn())
+            .expect("warning-first resume should begin");
+        assert!(matches!(
+            warning_first.accept(&warning),
+            Ok(AiCodexAppServerInbound::RuntimeWarning)
+        ));
+        assert!(!warning_first.retained_resume_ready(&cursor));
+        warning_first
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("response should remain required after warning");
+        assert!(!warning_first.retained_resume_ready(&cursor));
+        warning_first
+            .accept(&thread_started_notification("thread-retained-1"))
+            .expect("started notification should complete warning-first resume");
+        assert!(warning_first.retained_resume_ready(&cursor));
+
+        let mut response_first = initialized_protocol_actor();
+        response_first
+            .resume_thread(&cursor, &turn())
+            .expect("response-first resume should begin");
+        response_first
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("response should bind");
+        assert!(matches!(
+            response_first.accept(&runtime_warning_without_timestamp(
+                None,
+                "The schema permits this warning timestamp to be absent.",
+            )),
+            Ok(AiCodexAppServerInbound::RuntimeWarning)
+        ));
+        assert!(!response_first.retained_resume_ready(&cursor));
+        response_first
+            .accept(&thread_started_notification("thread-retained-1"))
+            .expect("started notification should remain required");
+        assert!(response_first.retained_resume_ready(&cursor));
+
+        let mut started_first = initialized_protocol_actor();
+        started_first
+            .resume_thread(&cursor, &turn())
+            .expect("started-first resume should begin");
+        started_first
+            .accept(&thread_started_notification("thread-retained-1"))
+            .expect("started notification should bind first");
+        assert!(matches!(
+            started_first.accept(&warning),
+            Ok(AiCodexAppServerInbound::RuntimeWarning)
+        ));
+        assert!(!started_first.retained_resume_ready(&cursor));
+        started_first
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("response should remain required after warning");
+        assert!(started_first.retained_resume_ready(&cursor));
+    }
+
+    #[test]
+    fn protocol_keeps_resume_warnings_closed_outside_the_exact_resume_window() {
+        let cursor =
+            crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", "thread-retained-1")
+                .expect("cursor should validate");
+        let warning = runtime_warning_notification(
+            Some("thread-retained-1"),
+            "A bounded runtime feature remains unavailable.",
+        );
+
+        let mut mismatched = initialized_protocol_actor();
+        mismatched
+            .resume_thread(&cursor, &turn())
+            .expect("mismatch fixture should begin resume");
+        assert!(matches!(
+            mismatched.accept(&runtime_warning_notification(
+                Some("thread-other"),
+                "A warning for another thread must not cross this window.",
+            )),
+            Err(ProviderError::Rejected)
+        ));
+        assert!(!mismatched.retained_resume_ready(&cursor));
+
+        let mut new_thread = initialized_protocol_actor();
+        new_thread
+            .start_persistent_empty_thread(
+                "model-1",
+                ModelReasoningEffort::Unspecified,
+                &trusted_bootstrap(),
+                &[],
+            )
+            .expect("new-thread fixture should begin");
+        assert!(matches!(
+            new_thread.accept(&runtime_warning_notification(None, "Not a resume window.")),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut deleting = initialized_protocol_actor();
+        deleting
+            .resume_thread(&cursor, &turn())
+            .expect("delete fixture resume should begin");
+        deleting
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+            .expect("delete fixture response should bind");
+        deleting
+            .accept(&thread_started_notification("thread-retained-1"))
+            .expect("delete fixture started should bind");
+        deleting
+            .delete_thread(&cursor)
+            .expect("delete fixture should enter deletion window");
+        assert!(matches!(
+            deleting.accept(&warning),
+            Err(ProviderError::Rejected)
         ));
     }
 

@@ -18,6 +18,28 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.95.14] - 2026-09-01
+
+Persistent schema module: **0.64.0** (unchanged from 0.95.13).
+
+### Fixed
+
+- The strict Codex actor now admits the documented generic `warning`
+  notification during an exact retained `thread/resume` handshake as well as
+  during a correlated turn. Warning content is discarded, count and bytes are
+  bounded independently for each resume or turn window, an optional thread ID
+  must match, and the notification never advances resume readiness.
+
+### Security
+
+- Warnings remain rejected during new-thread creation, deletion, state-index
+  scans, and idle periods. A retained turn still requires the correlated
+  resume response plus matching started notification, or the reviewed
+  content-free usage fallback.
+
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, GraphQL SDL, backup, or restore migration.
+
 ## [0.95.13] - 2026-09-01
 
 Persistent schema module: **0.64.0** (unchanged from 0.95.12).
