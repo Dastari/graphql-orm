@@ -10,7 +10,7 @@ supersedes: []
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.95.12` with AI schema module
+`graphql-orm-ai` is at crate version `0.95.13` with AI schema module
 `0.64.0`. It uses workspace `graphql-orm` `0.30.0`, backend-neutral
 `graphql-orm-ai-tool-profiles` `0.10.3`, and external `agql-auth`
 `0.19.0` at `1d2e9fe2e1576105212a7b340a11abf8cad0382d`.
@@ -58,9 +58,11 @@ verification evidence belongs in the focused guides.
   controls that cannot become model output or current-run usage. Retained
   resume readiness requires its correlated response and matching started
   notification in either order, or the reviewed content-free usage-snapshot
-  fallback. A typed failure proven before business `turn/start` releases its
-  reservation, fences cleanup, and remains safely retryable; later failures
-  retain uncertain-effect recovery. Retained
+  fallback. A fresh process actor adopts the exact retained web-search policy
+  while encoding `thread/resume`; an actor with existing retained state still
+  requires exact policy equality. A typed failure proven before business
+  `turn/start` releases its reservation, fences cleanup, and remains safely
+  retryable; later failures retain uncertain-effect recovery. Retained
   developer instructions are compile-time static, registration-fingerprinted,
   and distinct from request input. Reasoning effort is a separately typed,
   model-profile-validated turn field frozen into each retained-session

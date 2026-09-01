@@ -3898,6 +3898,7 @@ impl AiCodexAppServerProtocolActor {
         input.validate()?;
         self.validate_thread_lifecycle_boundary()?;
         let input_instruction_fingerprint = input.instruction_fingerprint()?;
+        let has_bound_retained_state = self.retained_model.is_some();
         if cursor.kind() != "codex.app_server.thread.v2"
             || !valid_reference(cursor.expose_to_provider_adapter())
             || match self.thread_lifecycle_phase {
@@ -3923,12 +3924,13 @@ impl AiCodexAppServerProtocolActor {
             || !self.pending_dynamic_requests.is_empty()
             || !self.started_dynamic_calls.is_empty()
             || !self.responded_dynamic_calls.is_empty()
-            || self.thread_web_search_domain_policy
-                != input
-                    .web_search()
-                    .map(|search| search.domain_policy().clone())
-            || self.thread_web_search_maximum_calls
-                != input.web_search().map(|search| search.maximum_calls())
+            || (has_bound_retained_state
+                && (self.thread_web_search_domain_policy
+                    != input
+                        .web_search()
+                        .map(|search| search.domain_policy().clone())
+                    || self.thread_web_search_maximum_calls
+                        != input.web_search().map(|search| search.maximum_calls())))
         {
             return Err(ProviderError::Rejected);
         }
@@ -11957,6 +11959,81 @@ pub(crate) mod tests {
                 2,
             )),
             Err(ProviderError::Unsupported)
+        ));
+    }
+
+    #[test]
+    fn fresh_actor_adopts_retained_web_search_state_but_bound_actor_rejects_changes() {
+        let bootstrap = bootstrap_instructions();
+        let domains = ModelWebSearchDomainPolicy::allowed_domains(vec!["example.com".to_owned()])
+            .expect("allow-domain policy should validate");
+        let request = ModelRequest {
+            instructions: Vec::new(),
+            continuation_mode: ModelContinuationMode::ProviderRetained,
+            tools: vec![dynamic_tool()],
+            builtin_tools: vec![ModelBuiltinTool::WebSearch {
+                domains: domains.clone(),
+            }],
+            maximum_builtin_tool_calls: Some(2),
+            ..model_request()
+        };
+        let input = AiCodexAppServerTurnInput::try_from_retained_dynamic_request(
+            request.clone(),
+            &bootstrap,
+        )
+        .expect("retained web-search input should validate");
+        let cursor = crate::AiProviderSessionCursor::new(
+            "codex.app_server.thread.v2",
+            "thread-retained-web-search",
+        )
+        .expect("retained cursor should validate");
+
+        let mut fresh_actor = initialized_protocol_actor();
+        let resume: Value = serde_json::from_slice(
+            &fresh_actor
+                .resume_thread(&cursor, &input)
+                .expect("a fresh process actor should adopt the retained web-search state"),
+        )
+        .expect("resume frame should decode");
+        assert_eq!(
+            resume.pointer("/params/config/tools.web_search.allowed_domains"),
+            Some(&json!(["example.com"]))
+        );
+        fresh_actor
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-web-search"}}}"#)
+            .expect("resume response should bind");
+        fresh_actor
+            .accept(&thread_started_notification("thread-retained-web-search"))
+            .expect("resume notification should bind");
+        assert!(fresh_actor.retained_resume_ready(&cursor));
+        fresh_actor
+            .start_turn("thread-retained-web-search", &input)
+            .expect("the adopted web-search state should admit the retained turn");
+
+        let mut changed = request;
+        changed.maximum_builtin_tool_calls = Some(3);
+        let changed_input =
+            AiCodexAppServerTurnInput::try_from_retained_dynamic_request(changed, &bootstrap)
+                .expect("changed web-search input remains structurally valid");
+        let mut bound_actor = initialized_protocol_actor();
+        bound_actor
+            .start_persistent_empty_thread_with_web_search(
+                input.model(),
+                input.reasoning_effort(),
+                &bootstrap,
+                input.tools(),
+                input.web_search(),
+            )
+            .expect("retained web-search thread should encode");
+        bound_actor
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-web-search"}}}"#)
+            .expect("thread response should bind");
+        bound_actor
+            .accept(&thread_started_notification("thread-retained-web-search"))
+            .expect("thread notification should bind");
+        assert!(matches!(
+            bound_actor.resume_thread(&cursor, &changed_input),
+            Err(ProviderError::Rejected)
         ));
     }
 
