@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.96.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.96.1", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -236,6 +236,13 @@ resume window or a correlated turn, discards its message, and enforces strict
 per-window count and byte limits. It does not satisfy resume readiness; hosts
 must continue reading until the correlated response and started notification,
 or the reviewed content-free usage fallback, complete the lifecycle.
+
+Within one correlated turn, Codex may reopen a completed `agentMessage`
+identifier for a later streamed assistant segment. The actor admits only that
+same-type, side-effect-free transition and keeps a separate hard ceiling on
+tracked item starts. Duplicate-active identifiers, type changes, tool and
+web-search identifier reuse, malformed correlation, and over-limit lifecycles
+remain rejected.
 
 The Codex schema projector preserves bounded nullable scalar `type` arrays in
 the crate-authored FixedBroker definitions. It does not pass through arbitrary

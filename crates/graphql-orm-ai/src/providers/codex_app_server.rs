@@ -3556,7 +3556,8 @@ pub struct AiCodexAppServerProtocolActor {
     responded_dynamic_calls: BTreeMap<String, String>,
     readiness_probe_tool_id: Option<String>,
     started_items: BTreeMap<String, String>,
-    completed_items: BTreeSet<String>,
+    completed_items: BTreeMap<String, String>,
+    accepted_item_lifecycle_starts: usize,
     initialization_complete: bool,
     thread_lifecycle_phase: ThreadLifecyclePhase,
     thread_lifecycle_operation: Option<ThreadLifecycleOperation>,
@@ -3605,7 +3606,8 @@ impl AiCodexAppServerProtocolActor {
             responded_dynamic_calls: BTreeMap::new(),
             readiness_probe_tool_id: None,
             started_items: BTreeMap::new(),
-            completed_items: BTreeSet::new(),
+            completed_items: BTreeMap::new(),
+            accepted_item_lifecycle_starts: 0,
             initialization_complete: false,
             thread_lifecycle_phase: ThreadLifecyclePhase::Ready,
             thread_lifecycle_operation: None,
@@ -3726,6 +3728,7 @@ impl AiCodexAppServerProtocolActor {
             || !self.responded_dynamic_calls.is_empty()
             || !self.started_items.is_empty()
             || !self.completed_items.is_empty()
+            || self.accepted_item_lifecycle_starts != 0
             || self.active_web_search_maximum_calls.is_some()
             || self.started_web_search_calls != 0
         {
@@ -4308,6 +4311,7 @@ impl AiCodexAppServerProtocolActor {
             || self.turn_started_observed
             || !self.started_items.is_empty()
             || !self.completed_items.is_empty()
+            || self.accepted_item_lifecycle_starts != 0
             || self.readiness_probe_tool_id.is_some()
             || self.thread_web_search_domain_policy
                 != input
@@ -4594,6 +4598,7 @@ impl AiCodexAppServerProtocolActor {
             self.started_web_search_calls = 0;
             self.started_items.clear();
             self.completed_items.clear();
+            self.accepted_item_lifecycle_starts = 0;
         }
         Ok(AiCodexAppServerInbound::Notification {
             method: method.to_owned(),
@@ -4754,19 +4759,23 @@ impl AiCodexAppServerProtocolActor {
         let completed = method == "item/completed";
         if completed {
             if self.started_items.remove(item_id).as_deref() != Some("reasoning")
-                || !self.completed_items.insert(item_id.to_owned())
-                || self.completed_items.len() > MAXIMUM_TEXT_BLOCKS
+                || self
+                    .completed_items
+                    .insert(item_id.to_owned(), "reasoning".to_owned())
+                    .is_some()
             {
                 return Err(ProviderError::Rejected);
             }
-        } else if self.completed_items.contains(item_id)
+        } else if self.completed_items.contains_key(item_id)
+            || self.accepted_item_lifecycle_starts >= MAXIMUM_TEXT_BLOCKS
             || self
                 .started_items
                 .insert(item_id.to_owned(), "reasoning".to_owned())
                 .is_some()
-            || self.started_items.len() > MAXIMUM_TEXT_BLOCKS
         {
             return Err(ProviderError::Rejected);
+        } else {
+            self.accepted_item_lifecycle_starts += 1;
         }
         Ok(AiCodexAppServerInbound::ReasoningLifecycle { completed })
     }
@@ -4822,7 +4831,8 @@ impl AiCodexAppServerProtocolActor {
                 || item.get("query").and_then(Value::as_str) != Some("")
                 || item.get("results").is_some_and(|value| !value.is_null())
                 || self.started_web_search_calls >= maximum_calls
-                || self.completed_items.contains(&call_id)
+                || self.completed_items.contains_key(&call_id)
+                || self.accepted_item_lifecycle_starts >= MAXIMUM_TEXT_BLOCKS
                 || self
                     .started_items
                     .insert(call_id.clone(), "webSearch".to_owned())
@@ -4831,6 +4841,7 @@ impl AiCodexAppServerProtocolActor {
                 return Err(ProviderError::Rejected);
             }
             self.started_web_search_calls += 1;
+            self.accepted_item_lifecycle_starts += 1;
             return Ok(AiCodexAppServerInbound::WebSearchLifecycle {
                 turn_id,
                 call_id,
@@ -4841,8 +4852,10 @@ impl AiCodexAppServerProtocolActor {
             });
         }
         if self.started_items.remove(&call_id).as_deref() != Some("webSearch")
-            || !self.completed_items.insert(call_id.clone())
-            || self.completed_items.len() > MAXIMUM_TEXT_BLOCKS
+            || self
+                .completed_items
+                .insert(call_id.clone(), "webSearch".to_owned())
+                .is_some()
         {
             return Err(ProviderError::Rejected);
         }
@@ -5258,22 +5271,30 @@ impl AiCodexAppServerProtocolActor {
                     .and_then(Value::as_str)
                     .ok_or(ProviderError::Rejected)?;
                 if method == "item/started" {
-                    if self.completed_items.contains(item_id)
-                        || self.started_items.contains_key(item_id)
-                        || self.started_items.len() >= MAXIMUM_TEXT_BLOCKS
+                    let reopens_completed_agent_message = item_type == "agentMessage"
+                        && self.completed_items.get(item_id).map(String::as_str)
+                            == Some("agentMessage");
+                    if self.started_items.contains_key(item_id)
+                        || self.accepted_item_lifecycle_starts >= MAXIMUM_TEXT_BLOCKS
+                        || (self.completed_items.contains_key(item_id)
+                            && !reopens_completed_agent_message)
                     {
                         return Err(ProviderError::Rejected);
+                    }
+                    if reopens_completed_agent_message {
+                        self.completed_items.remove(item_id);
                     }
                     self.started_items
                         .insert(item_id.to_owned(), item_type.to_owned());
+                    self.accepted_item_lifecycle_starts += 1;
                 } else {
                     if self.started_items.get(item_id).map(String::as_str) != Some(item_type)
-                        || self.completed_items.contains(item_id)
-                        || self.completed_items.len() >= MAXIMUM_TEXT_BLOCKS
+                        || self.completed_items.contains_key(item_id)
                     {
                         return Err(ProviderError::Rejected);
                     }
-                    self.completed_items.insert(item_id.to_owned());
+                    self.completed_items
+                        .insert(item_id.to_owned(), item_type.to_owned());
                     self.started_items.remove(item_id);
                 }
             }
@@ -13444,6 +13465,81 @@ pub(crate) mod tests {
                     "tokenUsage": {},
                 }),
             )),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[test]
+    fn protocol_reopens_only_completed_agent_message_identifiers_within_the_turn_bound() {
+        let started = |timestamp: i64, item_type: &str| {
+            lifecycle_notification(
+                "item/started",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "startedAtMs": timestamp,
+                    "item": {"id": "message-reused", "type": item_type, "text": ""},
+                }),
+            )
+        };
+        let completed = |timestamp: i64| {
+            lifecycle_notification(
+                "item/completed",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "completedAtMs": timestamp,
+                    "item": {
+                        "id": "message-reused",
+                        "type": "agentMessage",
+                        "text": "complete",
+                    },
+                }),
+            )
+        };
+
+        let mut actor = active_protocol_actor();
+        actor
+            .accept(&started(1, "agentMessage"))
+            .expect("first agent-message lifecycle should start");
+        actor
+            .accept(&completed(2))
+            .expect("first agent-message lifecycle should complete");
+        actor
+            .accept(&started(3, "agentMessage"))
+            .expect("a later agent-message segment may reuse the completed identifier");
+        actor
+            .accept(&lifecycle_notification(
+                "item/agentMessage/delta",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "message-reused",
+                    "delta": "continued",
+                }),
+            ))
+            .expect("the reopened identifier should bind subsequent text deltas");
+        actor
+            .accept(&completed(4))
+            .expect("the reopened lifecycle should complete");
+        assert!(matches!(
+            actor.accept(&started(5, "userMessage")),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut bounded = active_protocol_actor();
+        for occurrence in 0..MAXIMUM_TEXT_BLOCKS {
+            let started_at = i64::try_from(occurrence * 2 + 1).expect("test timestamp should fit");
+            let completed_at = started_at + 1;
+            bounded
+                .accept(&started(started_at, "agentMessage"))
+                .expect("bounded reused lifecycle should start");
+            bounded
+                .accept(&completed(completed_at))
+                .expect("bounded reused lifecycle should complete");
+        }
+        assert!(matches!(
+            bounded.accept(&started(10_000, "agentMessage")),
             Err(ProviderError::Rejected)
         ));
     }

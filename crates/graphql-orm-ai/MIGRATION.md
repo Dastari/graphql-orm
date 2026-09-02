@@ -19,6 +19,22 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.96.0 to 0.96.1: bounded assistant-item lifecycle continuation
+
+Adopt `graphql-orm-ai` 0.96.1 from one reviewed full monorepo revision. No host
+API or configuration change is required. The Codex protocol actor now admits a
+later `agentMessage` start that reuses an identifier previously completed as
+the same side-effect-free item type inside the correlated turn. Hosts continue
+processing its ordinary bounded text deltas and completion.
+
+The actor separately counts tracked item starts, so identifier reuse cannot
+bypass the 256-item turn ceiling. Duplicate-active identifiers, type changes,
+reasoning, dynamic-tool and web-search reuse, malformed frames, and mismatched
+turns remain rejected.
+
+The AI schema module remains **0.64.0**. There is no database, data, GraphQL
+SDL, protected-payload, backup, restore, or data backfill migration.
+
 ## 0.95.14 to 0.96.0: retained-plan recovery and no-dispatch retry proof
 
 Adopt `graphql-orm-ai` 0.96.0 from one reviewed full monorepo revision. Hosts
