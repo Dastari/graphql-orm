@@ -2967,20 +2967,17 @@ impl AiProviderCallExecutor {
                     let _ = session_service
                         .require_cleanup(&claim, "provider_session_wait_plan_changed")
                         .await;
-                    return Err(AiError::Conflict);
+                    return Err(AiError::ProviderSessionDeferred);
                 }
                 (claim, None)
             }
-            crate::AiProviderSessionRunDisposition::Unavailable(
-                crate::AiProviderSessionState::CleanupRequired
-                | crate::AiProviderSessionState::CleanupInProgress
-                | crate::AiProviderSessionState::CleanupBackoff
-                | crate::AiProviderSessionState::Deleted,
-            ) => {
-                return Err(AiError::ProviderSessionDeferred);
-            }
             crate::AiProviderSessionRunDisposition::Unavailable(_) => {
-                return Err(AiError::Conflict);
+                // No provider request has been dispatched. Durable stores use
+                // the disposition transaction to fence an incompatible active
+                // binding into cleanup; transient claimed/parked states also
+                // converge through retry/expiry rather than manufacturing an
+                // uncertain provider turn.
+                return Err(AiError::ProviderSessionDeferred);
             }
         };
         let opened = match session_service.open_for_run(&lease, &claim).await {

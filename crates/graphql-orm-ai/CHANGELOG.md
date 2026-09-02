@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-01
+last_reviewed: 2026-09-02
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -17,6 +17,33 @@ Historical development entries below retain their original dependency and
 checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## [0.96.0] - 2026-09-02
+
+Persistent schema module: **0.64.0** (unchanged from 0.95.14).
+
+### Fixed
+
+- An active retained provider-session binding whose exact server-authored
+  descriptor, transcript fingerprint, watermark, or lifetime no longer
+  matches the current turn is now atomically fenced into cleanup. The run
+  defers before provider dispatch, exact absence is recorded, and a compatible
+  generation may rebind instead of leaving the application session stranded.
+- A `RecoveryRequired` run may now be retried when committed rows prove both
+  that no assistant output exists and that no provider dispatch was possible.
+  Missing reservations and exclusively released/expired reservations are the
+  only no-dispatch proofs.
+
+### Security
+
+- Reserved, committed, uncertain, and unknown reservation states continue to
+  refuse replay. Same-run replacement after cleanup is authorized only when
+  exact provider absence and committed no-dispatch evidence both exist; an
+  incompatible live cursor is never resumed or silently replaced.
+
+`AiRunRetryEvidence` adds the required `provider_dispatch_possible` field.
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, GraphQL SDL, backup, or restore migration.
 
 ## [0.95.14] - 2026-09-01
 

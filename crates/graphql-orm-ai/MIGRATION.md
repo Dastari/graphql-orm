@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-01
+last_reviewed: 2026-09-02
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -18,6 +18,25 @@ Migration entries preserve the dependency and schema facts for the checkpoint
 they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## 0.95.14 to 0.96.0: retained-plan recovery and no-dispatch retry proof
+
+Adopt `graphql-orm-ai` 0.96.0 from one reviewed full monorepo revision. Hosts
+that construct `AiRunRetryEvidence` must add `provider_dispatch_possible` from
+committed reservation rows. Set it to `false` only when the exact run has no
+reservation or every reservation is durably `released`/`expired`; use `true`
+for reserved, committed, uncertain, unrecognized, or unavailable evidence.
+
+The ORM provider-session service now atomically moves an incompatible active
+binding into cleanup during disposition. Provider execution treats unavailable
+bindings as a pre-dispatch deferral, allowing the ordinary cleanup worker to
+record exact absence and the retry scheduler to bind the current descriptor.
+Do not bypass deletion or copy an old cursor into a new descriptor. A deleted
+generation may authorize the same run only when its committed budget rows also
+prove that provider dispatch was impossible.
+
+The AI schema module remains **0.64.0**. There is no database, data, GraphQL
+SDL, protected-payload, backup, restore, or data backfill migration.
 
 ## 0.95.13 to 0.95.14: retained-resume warning interleaving
 

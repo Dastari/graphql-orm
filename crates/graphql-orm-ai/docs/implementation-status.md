@@ -10,7 +10,7 @@ supersedes: []
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.95.14` with AI schema module
+`graphql-orm-ai` is at crate version `0.96.0` with AI schema module
 `0.64.0`. It uses workspace `graphql-orm` `0.30.0`, backend-neutral
 `graphql-orm-ai-tool-profiles` `0.10.4`, and external `agql-auth`
 `0.19.0` at `1d2e9fe2e1576105212a7b340a11abf8cad0382d`.
@@ -75,10 +75,13 @@ verification evidence belongs in the focused guides.
 - The provider-neutral durable session service protects opaque retained-thread
   cursors under exact owner/scope/run/descriptor/transcript fencing and an
   exact deletion/absence lifecycle. An absence-proven deleted generation may
-  be replaced once through a crate-issued short-lived rebind authorization;
+  be replaced once through a crate-issued short-lived rebind authorization.
+  An incompatible active descriptor/transcript is atomically fenced into
+  cleanup before dispatch, and a recovery-required run is re-authored only
+  when committed output/reservation rows prove no provider dispatch occurred;
   exact cleanup may use a fresh initialized provider process without resuming
-  the retained thread. Cleanup/backoff, expiry, descriptor drift, and restore
-  quarantine remain unavailable. Cursor state is separate from warm processes,
+  the retained thread. Cleanup/backoff and restore quarantine remain
+  unavailable. Cursor state is separate from warm processes,
   private from GraphQL, backup-redacted, and readiness-blocking on portable
   restore until drained. Provider failures may additionally emit only a closed
   content-free operational category without changing conservative run

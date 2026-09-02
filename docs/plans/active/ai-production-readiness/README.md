@@ -59,7 +59,7 @@ retention, or restore proofs remain closed.
 
 ## Current checkpoint
 
-Package 0.95.14 and AI schema module 0.64.0 provide the protected runtime,
+Package 0.96.0 and AI schema module 0.64.0 provide the protected runtime,
 provider adapters, exact completed-batch adoption, retention foundations,
 restore planning, and readiness observation contracts. Database-derived
 collection covers bounded conservative run classification, approval and
