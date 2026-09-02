@@ -306,27 +306,42 @@ fn fixed_broker_definitions(index_fingerprint: &str) -> Vec<ModelToolDefinition>
     let execute = broker_definition(
         AI_CAPABILITY_EXECUTE_TOOL_ID,
         "graphql_capabilities_execute",
-        "Execute one previously loaded exact capability using a closed public-name query plan.",
+        "Execute one previously loaded exact capability. Copy only fields admitted by the returned planSchema: flatten argument leaves into name/value entries, and omit optional wrapper fields that the planSchema does not expose.",
         index_fingerprint,
         json!({
             "type": "object",
             "properties": {
-                "loadedReference": {"type": "string", "minLength": 64, "maxLength": 64},
+                "loadedReference": {
+                    "type": "string", "minLength": 64, "maxLength": 64,
+                    "description": "Exact loadedReference returned by the matching describe call."
+                },
                 "arguments": {
                     "type": "array", "maxItems": 64,
+                    "description": "Optional root arguments admitted by planSchema.arguments. Flatten each supplied scalar leaf into one name/value entry using its dotted public path; omit this array when no root argument is needed.",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "name": {"type": "string", "minLength": 1, "maxLength": 256},
-                            "value": {"type": ["string", "integer", "number", "boolean", "null"]}
+                            "name": {
+                                "type": "string", "minLength": 1, "maxLength": 256,
+                                "description": "Exact dotted public argument path admitted by planSchema.arguments."
+                            },
+                            "value": {
+                                "type": ["string", "integer", "number", "boolean", "null"],
+                                "description": "Scalar value for the exact argument path."
+                            }
                         },
                         "required": ["name", "value"],
                         "additionalProperties": false
                     }
                 },
-                "selections": {"type": "array", "maxItems": 256, "uniqueItems": true, "items": {"type": "string", "maxLength": 512}},
+                "selections": {
+                    "type": "array", "maxItems": 256, "uniqueItems": true,
+                    "description": "One or more exact scalar paths copied from planSchema.selections.items.enum.",
+                    "items": {"type": "string", "maxLength": 512}
+                },
                 "relationshipArguments": {
                     "type": "array", "maxItems": 64,
+                    "description": "Optional relationship arguments admitted by planSchema.relationshipArguments. Omit when that schema has no applicable relationship argument.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -350,6 +365,7 @@ fn fixed_broker_definitions(index_fingerprint: &str) -> Vec<ModelToolDefinition>
                 },
                 "relationshipMaximumItems": {
                     "type": "array", "maxItems": 64,
+                    "description": "Optional relationship bounds admitted by planSchema.relationshipMaximumItems. Omit when the exact relationship path is not present there.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -360,9 +376,12 @@ fn fixed_broker_definitions(index_fingerprint: &str) -> Vec<ModelToolDefinition>
                         "additionalProperties": false
                     }
                 },
-                "maximumItems": {"type": ["integer", "null"], "minimum": 1, "maximum": 10000}
+                "maximumItems": {
+                    "type": ["integer", "null"], "minimum": 1, "maximum": 10000,
+                    "description": "Optional root result bound. Supply a positive value only when planSchema exposes maximumItems; otherwise omit it."
+                }
             },
-            "required": ["loadedReference", "arguments", "selections", "relationshipArguments", "relationshipMaximumItems", "maximumItems"],
+            "required": ["loadedReference", "selections"],
             "additionalProperties": false
         }),
     );
@@ -3072,6 +3091,39 @@ mod tests {
             insert_broker_argument(&mut value, "filter.raw", json!({"sql": "never"}), &mut seen,),
             Err(AiError::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn fixed_broker_execute_admits_the_minimal_schema_aligned_wrapper() {
+        let definitions = fixed_broker_definitions(&"a".repeat(64));
+        let execute = definitions
+            .iter()
+            .find(|definition| definition.tool_id == AI_CAPABILITY_EXECUTE_TOOL_ID)
+            .expect("fixed execute definition");
+        let validator = jsonschema::validator_for(&execute.parameters)
+            .expect("fixed execute parameters should be valid JSON Schema");
+        let minimal = json!({
+            "loadedReference": "b".repeat(64),
+            "selections": ["records.id"]
+        });
+        assert!(validator.is_valid(&minimal));
+        let parsed: BrokerExecuteArguments =
+            serde_json::from_value(minimal).expect("minimal execute wrapper should decode");
+        assert!(parsed.arguments.is_empty());
+        assert!(parsed.relationship_arguments.is_empty());
+        assert!(parsed.relationship_maximum_items.is_empty());
+        assert_eq!(parsed.maximum_items, None);
+
+        assert_eq!(
+            execute.parameters["required"],
+            json!(["loadedReference", "selections"])
+        );
+        assert!(execute.description.contains("returned planSchema"));
+        assert!(
+            execute.parameters["properties"]["maximumItems"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("only when planSchema exposes"))
+        );
     }
 
     #[tokio::test]

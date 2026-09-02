@@ -19,6 +19,23 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.96.1 to 0.96.2: schema-aligned fixed-broker execution wrappers
+
+Adopt `graphql-orm-ai` 0.96.2 from one reviewed full monorepo revision. No host
+API or configuration change is required. Fixed-broker providers may now omit
+empty `arguments`, `relationshipArguments`, `relationshipMaximumItems` and
+`maximumItems` wrapper fields. `loadedReference` and at least one exact public
+selection remain required.
+
+Providers should copy only fields admitted by the exact `planSchema` returned
+by describe. Flatten supplied scalar argument leaves into the broker's
+name/value entries, and supply `maximumItems` only when the loaded plan schema
+exposes that property. The final schema-derived compiler and fresh resolver
+authorization remain authoritative.
+
+The AI schema module remains **0.64.0**. There is no database, data, GraphQL
+SDL, protected-payload, backup, restore, or data backfill migration.
+
 ## 0.96.0 to 0.96.1: bounded assistant-item lifecycle continuation
 
 Adopt `graphql-orm-ai` 0.96.1 from one reviewed full monorepo revision. No host

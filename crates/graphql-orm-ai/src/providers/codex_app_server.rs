@@ -8109,6 +8109,18 @@ pub(crate) mod tests {
             execute.pointer("/inputSchema/properties/maximumItems/type"),
             Some(&json!(["integer", "null"]))
         );
+        assert_eq!(
+            execute.pointer("/inputSchema/required"),
+            Some(&json!(["loadedReference", "selections"]))
+        );
+        assert!(
+            jsonschema::validator_for(&execute["inputSchema"])
+                .expect("projected execute schema")
+                .is_valid(&json!({
+                    "loadedReference": "b".repeat(64),
+                    "selections": ["records.id"]
+                }))
+        );
         assert!(
             execute
                 .pointer("/inputSchema/properties/maximumItems/description")

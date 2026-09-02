@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.96.1", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.96.2", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
