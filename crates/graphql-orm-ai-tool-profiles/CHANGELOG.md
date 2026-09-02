@@ -3,12 +3,28 @@ title: "graphql-orm-ai-tool-profiles changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-01
+last_reviewed: 2026-09-02
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # Changelog
+
+## [0.10.4] - 2026-09-02
+
+### Fixed
+
+- Capability discovery now ranks public resolver descriptions and root
+  operation identity ahead of incidental nested-field vocabulary, splits
+  PascalCase public names into searchable terms, and uses explicit mechanical
+  result shape only to break semantic ties.
+
+### Security
+
+- A weak shape match can no longer displace a resolver-authored semantic match.
+  Shape metadata alone still cannot admit an otherwise unrelated capability,
+  and exact namespace, kind, entity/operation, authority and execution checks
+  remain unchanged.
 
 ## [0.10.3] - 2026-09-01
 

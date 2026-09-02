@@ -3,8 +3,8 @@ title: GraphQL ORM AI production-readiness plan
 kind: plan
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-16
-review_by: 2026-09-01
+last_reviewed: 2026-09-02
+review_by: 2026-10-01
 supersedes:
   - crates/graphql-orm-ai/docs/completion-plan.md
 ---
@@ -59,7 +59,7 @@ retention, or restore proofs remain closed.
 
 ## Current checkpoint
 
-Package 0.81.0 and AI schema module 0.60.0 provide the protected runtime,
+Package 0.95.14 and AI schema module 0.64.0 provide the protected runtime,
 provider adapters, exact completed-batch adoption, retention foundations,
 restore planning, and readiness observation contracts. Database-derived
 collection covers bounded conservative run classification, approval and

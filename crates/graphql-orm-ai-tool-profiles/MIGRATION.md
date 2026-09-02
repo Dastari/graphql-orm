@@ -3,12 +3,21 @@ title: "graphql-orm-ai-tool-profiles migration guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-01
+last_reviewed: 2026-09-02
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.10.3 to 0.10.4: resolver-first semantic discovery ranking
+
+Adopt `graphql-orm-ai-tool-profiles` 0.10.4 from one reviewed full monorepo
+revision. No capability-index wire shape or execution contract changes.
+Discovery now tokenizes PascalCase public names, ranks public resolver/root
+semantics ahead of nested field vocabulary, and uses explicit result shape only
+as a semantic tie-breaker. Hosts should retain exact namespace, kind and
+entity/operation filters whenever they know those canonical values.
 
 ## 0.10.2 to 0.10.3: proof-bearing pre-dispatch provider failure
 
