@@ -832,11 +832,15 @@ fn entry_matches_query(entry: &AiCapabilityIndexEntry, query: &AiCapabilitySearc
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct SearchRank {
+    root_semantics: u64,
+    nested_semantics: u64,
     shape: u8,
-    entity: u16,
-    target: u16,
-    namespace: u16,
-    lexical: u64,
+}
+
+impl SearchRank {
+    fn has_semantic_match(self) -> bool {
+        self.root_semantics > 0 || self.nested_semantics > 0
+    }
 }
 
 fn rank_entries<'a>(
@@ -851,7 +855,7 @@ fn rank_entries<'a>(
         .filter(|(_, entry)| entry_matches_query(entry, query))
         .filter_map(|(target_id, entry)| {
             let rank = search_rank(target_id, entry, &terms, shape_intent);
-            (rank.lexical > 0).then_some((rank, entry))
+            rank.has_semantic_match().then_some((rank, entry))
         })
         .collect::<Vec<_>>();
     ranked.sort_by(|left, right| {
@@ -1356,7 +1360,8 @@ fn search_rank(
     terms: &BTreeSet<String>,
     shape_intent: Option<AiCapabilityOperationShape>,
 ) -> SearchRank {
-    let mut score = 0_u64;
+    let mut root_semantics = 0_u64;
+    let mut nested_semantics = 0_u64;
     let id = search_terms(entry.id.as_str());
     let name = search_terms(&entry.name);
     let operation = search_terms(&entry.operation_name);
@@ -1366,6 +1371,7 @@ fn search_rank(
         .map(search_terms)
         .unwrap_or_default();
     let target = search_terms(target_id.as_str());
+    let namespace = search_terms(&entry.namespace);
     let description = search_terms(&entry.description);
     let relationships = entry
         .relationships
@@ -1383,24 +1389,23 @@ fn search_rank(
         .flat_map(|field| search_terms(&format!("{} {}", field.name, field.description)))
         .collect::<BTreeSet<_>>();
     for term in terms {
-        if search_shape_term(term) && entry.operation_shape != AiCapabilityOperationShape::Custom {
+        if search_shape_term(term) {
             continue;
         }
-        score += u64::from(id.contains(term)) * 10;
-        score += u64::from(name.contains(term)) * 9;
-        score += u64::from(operation.contains(term)) * 8;
-        score += u64::from(entity.contains(term)) * 8;
-        score += u64::from(relationships.contains(term)) * 7;
-        score += u64::from(fields.contains(term)) * 4;
-        score += u64::from(description.contains(term)) * 3;
+        root_semantics += u64::from(id.contains(term)) * 12;
+        root_semantics += u64::from(name.contains(term)) * 11;
+        root_semantics += u64::from(operation.contains(term)) * 10;
+        root_semantics += u64::from(entity.contains(term)) * 9;
+        root_semantics += u64::from(target.contains(term)) * 8;
+        root_semantics += u64::from(namespace.contains(term)) * 8;
+        root_semantics += u64::from(description.contains(term)) * 7;
+        nested_semantics += u64::from(relationships.contains(term)) * 3;
+        nested_semantics += u64::from(fields.contains(term)) * 2;
     }
     SearchRank {
+        root_semantics,
+        nested_semantics,
         shape: u8::from(shape_intent == Some(entry.operation_shape)),
-        entity: u16::try_from(terms.intersection(&entity).count()).unwrap_or(u16::MAX),
-        target: u16::try_from(terms.intersection(&target).count()).unwrap_or(u16::MAX),
-        namespace: u16::try_from(terms.intersection(&search_terms(&entry.namespace)).count())
-            .unwrap_or(u16::MAX),
-        lexical: score,
     }
 }
 
@@ -1447,13 +1452,43 @@ fn search_terms(value: &str) -> BTreeSet<String> {
 }
 
 fn search_tokens(value: &str) -> Vec<String> {
-    value
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter_map(|term| {
-            let term = semantic_key(term);
-            (!term.is_empty()).then_some(term)
-        })
-        .collect()
+    let bytes = value.as_bytes();
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if !byte.is_ascii_alphanumeric() {
+            push_search_token(&mut tokens, &mut token);
+            continue;
+        }
+        let previous = index
+            .checked_sub(1)
+            .and_then(|previous| bytes.get(previous));
+        let next = bytes.get(index + 1);
+        let camel_boundary = !token.is_empty()
+            && byte.is_ascii_uppercase()
+            && previous.is_some_and(|previous| {
+                previous.is_ascii_lowercase()
+                    || previous.is_ascii_digit()
+                    || (previous.is_ascii_uppercase() && next.is_some_and(u8::is_ascii_lowercase))
+            });
+        if camel_boundary {
+            push_search_token(&mut tokens, &mut token);
+        }
+        token.push(char::from(byte));
+    }
+    push_search_token(&mut tokens, &mut token);
+    tokens
+}
+
+fn push_search_token(tokens: &mut Vec<String>, token: &mut String) {
+    if token.is_empty() {
+        return;
+    }
+    let semantic = semantic_key(token);
+    token.clear();
+    if !semantic.is_empty() {
+        tokens.push(semantic);
+    }
 }
 
 fn semantic_key(value: &str) -> String {
@@ -1680,6 +1715,120 @@ mod tests {
                 AiCapabilityOperationShape::Search,
                 AiCapabilityOperationShape::KeysetList,
             ])
+        );
+    }
+
+    #[test]
+    fn resolver_description_semantics_outrank_incidental_nested_list_matches() {
+        let semantic = semantic_catalogue();
+        let target_id = GraphqlExecutionTargetId::parse("communications-service").expect("target");
+        let mut mailbox = static_entry(
+            descriptor(
+                "communications.query.activity",
+                "Returns messages from the monitored support mailbox for operator triage.",
+                0,
+            ),
+            &target_id,
+            "schema-v1",
+            &semantic.fingerprint,
+            "policy-v1",
+        )
+        .expect("mailbox entry");
+        mailbox.kind = AiCapabilityKind::GeneratedQuery;
+        mailbox.name = "CurrentActivity".to_owned();
+        mailbox.operation_name = "CurrentActivity".to_owned();
+        mailbox.operation_shape = AiCapabilityOperationShape::Custom;
+        mailbox.fingerprint = entry_fingerprint(&mailbox);
+
+        let mut records = static_entry(
+            descriptor("records.query.customer_cards", "List customer records.", 0),
+            &target_id,
+            "schema-v1",
+            &semantic.fingerprint,
+            "policy-v1",
+        )
+        .expect("record entry");
+        records.kind = AiCapabilityKind::GeneratedQuery;
+        records.name = "List CustomerRecord".to_owned();
+        records.entity_name = Some("CustomerRecord".to_owned());
+        records.operation_name = "CustomerRecords".to_owned();
+        records.operation_shape = AiCapabilityOperationShape::List;
+        records.relationships = vec![AiCapabilityRelationshipSummary {
+            name: "Assignments".to_owned(),
+            description: "Recent support activity associated with the customer.".to_owned(),
+            target_entity: "Assignment".to_owned(),
+            to_many: true,
+            arguments: BTreeSet::new(),
+        }];
+        records.fingerprint = entry_fingerprint(&records);
+
+        let entries =
+            BTreeMap::from([(mailbox.id.clone(), mailbox), (records.id.clone(), records)]);
+        let index = AiCapabilityIndex {
+            version: AI_CAPABILITY_INDEX_VERSION,
+            target_id,
+            schema_fingerprint: "schema-v1".to_owned(),
+            semantic_catalogue_fingerprint: semantic.fingerprint,
+            target_policy_fingerprint: "policy-v1".to_owned(),
+            entries,
+            fingerprint: "a".repeat(64),
+            limits: AiCapabilityIndexLimits::default(),
+        };
+        let result = index
+            .search(&AiCapabilitySearchQuery {
+                text: "list recent messages from the support mailbox".to_owned(),
+                namespace: None,
+                kind: Some(AiCapabilityKind::GeneratedQuery),
+                entity_or_operation: None,
+                maximum_results: 1,
+            })
+            .expect("resolver-hint search");
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(
+            result.candidates[0].id.as_str(),
+            "communications.query.activity"
+        );
+    }
+
+    #[test]
+    fn camel_case_operation_names_supply_searchable_semantic_terms() {
+        let semantic = semantic_catalogue();
+        let target_id = GraphqlExecutionTargetId::parse("application").expect("target");
+        let mut entry = static_entry(
+            descriptor("application.query.activity", "Returns bounded records.", 0),
+            &target_id,
+            "schema-v1",
+            &semantic.fingerprint,
+            "policy-v1",
+        )
+        .expect("entry");
+        entry.kind = AiCapabilityKind::GeneratedQuery;
+        entry.name = "MonitoredMailboxMessages".to_owned();
+        entry.operation_name = "MonitoredMailboxMessages".to_owned();
+        entry.fingerprint = entry_fingerprint(&entry);
+        let index = AiCapabilityIndex {
+            version: AI_CAPABILITY_INDEX_VERSION,
+            target_id,
+            schema_fingerprint: "schema-v1".to_owned(),
+            semantic_catalogue_fingerprint: semantic.fingerprint,
+            target_policy_fingerprint: "policy-v1".to_owned(),
+            entries: BTreeMap::from([(entry.id.clone(), entry)]),
+            fingerprint: "b".repeat(64),
+            limits: AiCapabilityIndexLimits::default(),
+        };
+        let result = index
+            .search(&AiCapabilitySearchQuery {
+                text: "mailbox messages".to_owned(),
+                namespace: None,
+                kind: Some(AiCapabilityKind::GeneratedQuery),
+                entity_or_operation: None,
+                maximum_results: 1,
+            })
+            .expect("camel-case search");
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(
+            result.candidates[0].operation_name,
+            "MonitoredMailboxMessages"
         );
     }
 

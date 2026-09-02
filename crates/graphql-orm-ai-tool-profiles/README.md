@@ -3,7 +3,7 @@ title: "graphql-orm-ai-tool-profiles"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-01
+last_reviewed: 2026-09-02
 review_by: 2027-02-11
 supersedes: []
 ---
@@ -24,7 +24,7 @@ are separate runtime decisions and must remain default-deny.
 
 ```toml
 [dependencies]
-graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.10.3" }
+graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.10.4" }
 serde_json = "1"
 ```
 
@@ -134,12 +134,15 @@ semantic summaries and exact fingerprints. It intentionally contains no JSON
 Schema, GraphQL document/SDL, database name, resolver URL, policy expression,
 credential, authority or secret/hidden field.
 
-`AiCapabilityIndex::search` provides bounded deterministic discovery with
-exact namespace/kind/entity filters and stable ID tie-breaking. Explicit list,
-details, search, keyset, or aggregate intent ranks the matching compiler-owned
-operation shape first; public entity, execution-target, and namespace relevance
-rank next. Every candidate still requires positive lexical relevance, and
-non-matching shapes remain eligible. Search
+`AiCapabilityIndex::search` provides bounded deterministic semantic discovery
+with exact namespace/kind/entity filters and stable ID tie-breaking. Public
+resolver descriptions, operation/name/entity identity, execution target and
+namespace rank ahead of nested field or relationship vocabulary. Explicit
+mechanical result-shape intent is only a tie-breaker among otherwise relevant
+candidates, so a weak list-shaped match cannot displace a resolver whose
+description names the requested business result. PascalCase operation and
+entity names contribute their component terms. Every candidate still requires
+positive semantic relevance, and non-matching shapes remain eligible. Search
 returns exact candidate/index/schema/semantic/target-policy fingerprints but
 grants no authority. Each entry also carries conservative compiler-owned root
 and total result-record bounds for later planning. The runtime package owns

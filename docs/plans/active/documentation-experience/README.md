@@ -3,8 +3,8 @@ title: Documentation experience plan
 kind: plan
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-12
-review_by: 2026-09-01
+last_reviewed: 2026-09-02
+review_by: 2026-10-01
 supersedes: []
 ---
 
