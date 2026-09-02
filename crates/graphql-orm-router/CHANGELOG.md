@@ -10,6 +10,19 @@ supersedes: []
 
 # Changelog
 
+## 0.5.1 - 2026-09-02
+
+- Replaced the full duplicate of WebSocket subscription variables with a
+  bounded scalar-only authorization projection. Large data variables remain
+  single-copy, so operations such as chunked uploads stay within the private
+  transport's message limit.
+- Preserved variable-dependent subscription authorization before subgraph work.
+  Client-supplied reserved metadata is replaced, and any authorization value
+  omitted by the projection or remaining-frame budget fails closed.
+
+No router configuration, GraphQL schema, descriptor, token, or stored-data
+migration is required.
+
 ## 0.5.0 - 2026-08-24
 
 - Aligned the optional adapter to generic `agql-auth` 0.19.0 at reviewed merged

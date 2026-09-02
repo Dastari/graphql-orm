@@ -26,7 +26,7 @@ This unpublished package is Git-only:
 
 ```toml
 [dependencies]
-graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.5.0" }
+graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.5.1" }
 ```
 
 Enable `auth-agql` only when adapting a separately configured
@@ -89,6 +89,13 @@ Sensitive headers, arbitrary endpoint overrides, proxy bypass, private network
 access, and stale JWKS cache use explicit deny-by-default policy. Static source
 configuration is deployment-owned; dynamic destinations are additionally
 subject to DNS, host, port, CIDR, redirect, and peer validation.
+
+Authenticated subscriptions forward the ordinary variables object once. A
+separate private authorization extension contains only a bounded projection of
+small scalar variables; client-supplied values for that reserved extension are
+always replaced. Large data variables are not duplicated across the private
+transport, and a variable-dependent authorization decision fails closed if its
+value cannot fit the projection or remaining frame budget.
 
 ## Errors and operations
 

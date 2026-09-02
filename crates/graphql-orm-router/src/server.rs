@@ -625,9 +625,11 @@ impl RouterPlugin for StaticGraphPlugin {
         let principal = payload.context.get_ref::<AuthenticatedPrincipal>();
         // Hive has already moved supplied values into its coerced-variable
         // payload at this hook. The public WebSocket gateway therefore copies
-        // each operation's raw values into a reserved extension before it
-        // enters Hive. Only the authenticated private endpoint may activate
-        // that extension; ordinary HTTP clients cannot spoof it.
+        // a bounded projection of authorization-capable scalar values into a
+        // reserved extension before it enters Hive. Only the authenticated
+        // private endpoint may activate that extension; ordinary HTTP clients
+        // cannot spoof it. Values omitted by the bound fail closed under
+        // complete variable resolution.
         let trusted_subscription = payload
             .context
             .get_ref::<TrustedInternalSubscription>()

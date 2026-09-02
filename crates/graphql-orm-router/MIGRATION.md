@@ -10,6 +10,16 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.5.0 to 0.5.1
+
+No configuration, schema, token, descriptor, or stored-data migration is
+required. Rebuild consumers at the reviewed 0.5.1 monorepo revision and run
+their authenticated WebSocket acceptance tests. The router now sends only a
+bounded scalar authorization projection beside the ordinary variables object;
+large data variables are no longer duplicated on the private subscription
+transport. Variable-dependent authorization still runs before subgraph work
+and fails closed when a required value cannot fit that projection.
+
 ## 0.4.0 to 0.5.0
 
 Align direct `agql-auth` consumers to 0.19.0 at reviewed merged revision

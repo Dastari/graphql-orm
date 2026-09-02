@@ -24,7 +24,7 @@ changes.
 | `graphql-orm-backup` | `0.7.2` | `crates/graphql-orm-backup` | `local` | `graphql-orm` (optional), `graphql-orm-storage` |
 | `graphql-orm-macros` | `0.30.0` | `crates/graphql-orm-macros` | `sqlite` | none |
 | `graphql-orm-operation-catalog` | `0.4.0` | `crates/graphql-orm-operation-catalog` | none | `graphql-orm-router-protocol` (optional) |
-| `graphql-orm-router` | `0.5.0` | `crates/graphql-orm-router` | none | `graphql-orm-router-protocol` |
+| `graphql-orm-router` | `0.5.1` | `crates/graphql-orm-router` | none | `graphql-orm-router-protocol` |
 | `graphql-orm-router-protocol` | `0.2.1` | `crates/graphql-orm-router-protocol` | none | none |
 | `graphql-orm-storage` | `0.6.2` | `crates/graphql-orm-storage` | `local` | none |
 
