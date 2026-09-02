@@ -26,6 +26,8 @@ use crate::{
 pub(crate) const INTERNAL_SUBSCRIPTION_HEADER: &str = "x-graphql-orm-router-internal";
 pub(crate) const INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION: &str = "graphqlOrmRouterVariables";
 const GRAPHQL_TRANSPORT_WS: &str = "graphql-transport-ws";
+const MAX_AUTHORIZATION_VARIABLE_BYTES: usize = 4 * 1024;
+const MAX_AUTHORIZATION_VARIABLE_VALUE_BYTES: usize = 1024;
 
 #[derive(Clone)]
 pub(crate) struct InternalSubscriptionEndpoint {
@@ -731,7 +733,8 @@ async fn forward_subscribe(
         state.operations.insert(id.clone());
         state.gateway.add_operation();
     }
-    inject_operation_variables(&mut message);
+    let internal_max_bytes = state.borrow().gateway.config.max_client_message_bytes;
+    inject_operation_variables(&mut message, internal_max_bytes);
     let internal = state.borrow().internal_sink.clone();
     if let Some(internal) = internal
         && internal
@@ -747,24 +750,71 @@ async fn forward_subscribe(
         .terminate_with_public_close(1011, "Subscription transport unavailable")
 }
 
-fn inject_operation_variables(message: &mut Value) {
+fn inject_operation_variables(message: &mut Value, internal_max_bytes: usize) {
     let Some(payload) = message.get_mut("payload").and_then(Value::as_object_mut) else {
         return;
     };
-    let variables = payload
+    let mut candidates = payload
         .get("variables")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|variables| variables.iter())
+        .filter(|(_, value)| {
+            value.is_null() || value.is_boolean() || value.is_number() || value.is_string()
+        })
+        .filter_map(|(name, value)| {
+            let encoded = value.to_string();
+            (encoded.len() <= MAX_AUTHORIZATION_VARIABLE_VALUE_BYTES)
+                .then(|| (name.to_owned(), value.clone(), name.len() + encoded.len()))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut projected = serde_json::Map::new();
+    let mut projected_bytes = 0_usize;
+    for (name, value, encoded_bytes) in candidates {
+        if projected_bytes.saturating_add(encoded_bytes) > MAX_AUTHORIZATION_VARIABLE_BYTES {
+            break;
+        }
+        projected_bytes += encoded_bytes;
+        projected.insert(name, value);
+    }
+
     let extensions = payload.entry("extensions").or_insert_with(|| json!({}));
     let Some(extensions) = extensions.as_object_mut() else {
         return;
     };
     // The public gateway is the only writer trusted by the private Hive
-    // endpoint. Always replace a client-supplied value for this reserved key.
+    // endpoint. Replace client-supplied reserved metadata with a small scalar
+    // projection. Large data variables remain only in the standard variables
+    // object, while missing authorization values fail closed at analysis.
     extensions.insert(
         INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION.to_owned(),
-        variables,
+        Value::Object(projected),
     );
+
+    while message.to_string().len() > internal_max_bytes {
+        let Some(projected) = message
+            .get_mut("payload")
+            .and_then(Value::as_object_mut)
+            .and_then(|payload| payload.get_mut("extensions"))
+            .and_then(Value::as_object_mut)
+            .and_then(|extensions| extensions.get_mut(INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION))
+            .and_then(Value::as_object_mut)
+        else {
+            break;
+        };
+        let Some(name) = projected.keys().next_back().cloned() else {
+            message
+                .get_mut("payload")
+                .and_then(Value::as_object_mut)
+                .and_then(|payload| payload.get_mut("extensions"))
+                .and_then(Value::as_object_mut)
+                .map(|extensions| extensions.remove(INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION));
+            break;
+        };
+        projected.remove(&name);
+    }
 }
 
 async fn forward_complete(
@@ -871,7 +921,7 @@ mod tests {
     }
 
     #[test]
-    fn subscription_gateway_overwrites_reserved_variable_metadata() {
+    fn subscription_gateway_replaces_reserved_metadata_with_bounded_scalars() {
         let mut message = json!({
             "id": "operation",
             "type": "subscribe",
@@ -885,13 +935,48 @@ mod tests {
             }
         });
 
-        inject_operation_variables(&mut message);
+        inject_operation_variables(&mut message, 64 * 1024);
 
+        assert_eq!(message["payload"]["variables"], json!({"Id": "actual"}));
         assert_eq!(
             message["payload"]["extensions"][INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION],
             json!({"Id": "actual"})
         );
         assert_eq!(message["payload"]["extensions"]["client"], true);
+    }
+
+    #[test]
+    fn subscription_gateway_keeps_large_variable_payload_below_the_public_limit() {
+        let mut message = json!({
+            "id": "operation",
+            "type": "subscribe",
+            "payload": {
+                "query": "subscription ($Content: String!) { event(content: $Content) }",
+                "variables": {"Content": "x".repeat(48 * 1024)},
+                "extensions": {
+                    INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION: {"Content": "spoofed"}
+                }
+            }
+        });
+        let public_size = message.to_string().len();
+
+        inject_operation_variables(&mut message, 64 * 1024);
+
+        let internal_size = message.to_string().len();
+        assert!(public_size < 64 * 1024);
+        assert_eq!(
+            message["payload"]["variables"]["Content"]
+                .as_str()
+                .unwrap()
+                .len(),
+            48 * 1024
+        );
+        assert!(
+            message["payload"]["extensions"][INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION]
+                .as_object()
+                .is_some_and(serde_json::Map::is_empty)
+        );
+        assert!(internal_size < 64 * 1024);
     }
 
     #[test]
