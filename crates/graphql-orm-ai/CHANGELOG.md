@@ -18,6 +18,27 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.96.1] - 2026-09-02
+
+Persistent schema module: **0.64.0** (unchanged from 0.96.0).
+
+### Fixed
+
+- A correlated Codex turn may now continue streaming when a later assistant
+  segment reopens an already completed `agentMessage` identifier. Multi-step
+  tool turns no longer require provider-session recovery solely because this
+  side-effect-free lifecycle identifier was reused.
+
+### Security
+
+- Reopening is restricted to a completed identifier whose stored type and new
+  type are both exactly `agentMessage`. Duplicate-active identifiers, type
+  changes, reasoning, tool and web-search reuse, malformed correlation, and
+  more than 256 tracked item starts in one turn remain fail-closed.
+
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, GraphQL SDL, backup, or restore migration.
+
 ## [0.96.0] - 2026-09-02
 
 Persistent schema module: **0.64.0** (unchanged from 0.95.14).
