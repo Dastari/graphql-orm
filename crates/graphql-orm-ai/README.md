@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.95.14", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.96.0", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -150,15 +150,21 @@ depend solely on the process-local wakeup channel.
 Terminal `run_failed` and `run_recovery_required` events carry a bounded,
 content-free failure record with a stable code and a retryable flag computed
 from committed rows. `retryAiRun` authors a new run over the same durable user
-message under current policy where re-execution is provably safe;
+message under current policy where re-execution is provably safe. A
+recovery-required run is retryable only when committed rows prove no assistant
+output and no possible provider dispatch: no reservation, or exclusively
+released/expired reservations. Reserved, committed, uncertain, and unknown
+states remain non-retryable;
 `acknowledgeAiRunFailure` dismisses a failure without deleting audit history.
 Invalidating a retained provider thread emits `provider_session_reset` or
 `provider_session_rebound` so a host can tell the user the model's context was
 reset even though the durable transcript reads as continuous. Once exact
-provider absence is persisted, a later run may replace the deleted generation
-under its current server-authored descriptor; the historical descriptor grants
-no replacement authority. A lost rebind fence discards the fresh empty
-provider session and defers safely before any business input or tool request.
+provider absence is persisted, a later run—or the same provably pre-dispatch
+run—may replace the deleted generation under its current server-authored
+descriptor; the historical descriptor grants no replacement authority. An
+incompatible active descriptor/transcript is atomically fenced into that
+cleanup path. A lost rebind fence discards the fresh empty provider session and
+defers safely before any business input or tool request.
 
 A retained Codex host must not treat the `thread/resume` response as sufficient
 readiness. Continue feeding the strict protocol actor until

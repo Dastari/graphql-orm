@@ -570,8 +570,74 @@ mod service {
                                 .map(AiProviderSessionRunDisposition::Resume)
                                 .map_err(ai_error_to_orm);
                         }
+                        if state == AiProviderSessionState::Active {
+                            // An active cursor that cannot resume the exact
+                            // server-authored descriptor/transcript must not
+                            // strand the durable application session. Fence it
+                            // into deletion before returning to the caller;
+                            // only exact provider-absence proof may authorize a
+                            // fresh binding generation.
+                            let descriptor_matches = descriptor_from_record(binding)
+                                .map_err(ai_error_to_orm)?
+                                == *planned.descriptor();
+                            let reason_code = if !descriptor_matches {
+                                "provider_session_descriptor_changed"
+                            } else if binding.transcript_fingerprint
+                                != planned.transcript_fingerprint()
+                                || binding.through_message_sequence.checked_add(1)
+                                    != Some(input.sequence)
+                            {
+                                "provider_session_transcript_changed"
+                            } else {
+                                "provider_session_expired"
+                            }
+                            .to_owned();
+                            let outcome = tx
+                                .compare_and_swap::<AiProviderSessionBindingRecord>(
+                                    &binding.id,
+                                    binding.row_version,
+                                    AiProviderSessionBindingRecordWhereInput::default(),
+                                    cleanup_required_update(reason_code.clone(), lease.run_id().0),
+                                )
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                            append_audit(
+                                tx,
+                                "ai.provider_session.cleanup_required",
+                                binding.id,
+                                &reason_code,
+                                lease.run_id().0,
+                                now,
+                            )
+                            .await?;
+                            append_provider_session_disclosure(
+                                tx,
+                                crate::orm_runs::PROVIDER_SESSION_RESET_EVENT,
+                                binding.session_id,
+                                binding.id,
+                                &reason_code,
+                                Some(lease.run_id().0),
+                                now,
+                            )
+                            .await?;
+                            return Ok(AiProviderSessionRunDisposition::Unavailable(
+                                AiProviderSessionState::CleanupRequired,
+                            ));
+                        }
                         if state == AiProviderSessionState::Deleted
-                            && binding.last_run_id != Some(lease.run_id().0)
+                            && (binding.last_run_id != Some(lease.run_id().0)
+                                || binding
+                                    .cleanup_reason_code
+                                    .as_deref()
+                                    .is_some_and(is_pre_dispatch_rebind_cleanup_reason)
+                                    && !crate::orm_runs::run_provider_dispatch_possible(
+                                        tx,
+                                        lease.run_id().0,
+                                    )
+                                    .await?)
                         {
                             // Exact provider absence severs the old cursor from
                             // the next generation. The tombstone's historical
@@ -2542,14 +2608,21 @@ mod service {
                                     cleanup_next_attempt_at: Some(Some(
                                         next_attempt_at.unix_timestamp(),
                                     )),
-                                    cleanup_reason_code: Some(Some(reason_code)),
                                     ..Default::default()
                                 },
                             )
                             .await
                             .map_err(OrmPublicError::from)?;
                         if matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
-                            Ok(())
+                            append_audit(
+                                tx,
+                                "ai.provider_session.cleanup_retry_scheduled",
+                                record.id,
+                                &reason_code,
+                                record.last_run_id.unwrap_or(record.session_id),
+                                now,
+                            )
+                            .await
                         } else {
                             Err(OrmPublicError::new(OrmErrorCode::Conflict))
                         }
@@ -2578,6 +2651,15 @@ mod service {
             cleanup_reason_code: Some(Some(reason_code)),
             ..Default::default()
         }
+    }
+
+    fn is_pre_dispatch_rebind_cleanup_reason(reason_code: &str) -> bool {
+        matches!(
+            reason_code,
+            "provider_session_descriptor_changed"
+                | "provider_session_transcript_changed"
+                | "provider_session_expired"
+        )
     }
 
     async fn load_and_validate_completed_run(

@@ -623,6 +623,155 @@ async fn settled_interrupt_advances_the_durable_watermark_and_reuses_the_thread(
 }
 
 #[tokio::test]
+async fn changed_active_plan_is_cleaned_and_rebound_without_stranding_the_run() {
+    let fixture = provider_session_fixture().await;
+    let owner = fixture.owner.clone();
+    let first = active_run(&fixture, &owner, "changed-plan-workspace").await;
+    let original_descriptor = AiProviderSessionDescriptor::new(
+        ProviderKind::LocalHarness,
+        "reviewed-local-profile",
+        "reviewed-model",
+        "a".repeat(64),
+        "retained-runtime/v2",
+        "b".repeat(64),
+    )
+    .expect("original descriptor should validate");
+    fixture
+        .provider_sessions
+        .bind_for_run(
+            &first,
+            AiProviderSessionBindRequest::new(
+                original_descriptor,
+                AiProviderSessionCursor::new("retained.thread", "original-thread")
+                    .expect("original cursor should validate"),
+                "c".repeat(64),
+                None,
+            )
+            .expect("original bind request should validate"),
+        )
+        .await
+        .expect("original retained thread should bind");
+    fixture
+        .cancellation
+        .request_cancellation(
+            &owner,
+            CancelAiRunInput {
+                session_id: first.session_id().0,
+                run_id: first.run_id().0,
+                client_request_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("owner cancellation should become durable");
+    fixture
+        .provider_sessions
+        .settle_interrupted_turn(&first, AiRunInterruptSettlement::Settled)
+        .await
+        .expect("settled empty turn should release the original thread");
+
+    let next = next_active_run(&fixture, &owner, first.session_id()).await;
+    let changed_descriptor = AiProviderSessionDescriptor::new(
+        ProviderKind::LocalHarness,
+        "reviewed-local-profile",
+        "reviewed-model",
+        "d".repeat(64),
+        "retained-runtime/v2",
+        "e".repeat(64),
+    )
+    .expect("changed descriptor should validate");
+    let changed_plan = AiProviderSessionTurnPlan::new(changed_descriptor.clone(), "f".repeat(64))
+        .expect("changed plan should validate");
+    assert!(matches!(
+        fixture
+            .provider_sessions
+            .disposition_for_run(&next, &changed_plan)
+            .await
+            .expect("changed active plan should converge into cleanup"),
+        AiProviderSessionRunDisposition::Unavailable(AiProviderSessionState::CleanupRequired)
+    ));
+
+    let cleanup = fixture
+        .provider_sessions
+        .claim_cleanup("changed-plan-cleanup-worker")
+        .await
+        .expect("cleanup claim should succeed")
+        .expect("changed active plan should require deletion");
+    let deletion = fixture
+        .provider_sessions
+        .open_for_cleanup(&cleanup, &protection_policy(cleanup.scope().clone()))
+        .await
+        .expect("old cursor should open only for deletion");
+    assert_eq!(
+        deletion.cursor().expose_to_provider_adapter(),
+        "original-thread"
+    );
+    fixture
+        .provider_sessions
+        .schedule_cleanup_retry(
+            &cleanup,
+            Duration::seconds(1),
+            "provider_delete_unavailable",
+        )
+        .await
+        .expect("transient deletion failure should retain the cleanup origin");
+    fixture.clock.advance_seconds(2);
+    let cleanup = fixture
+        .provider_sessions
+        .claim_cleanup("changed-plan-cleanup-worker")
+        .await
+        .expect("cleanup retry claim should succeed")
+        .expect("backoff expiry should expose the same deletion");
+    let deletion = fixture
+        .provider_sessions
+        .open_for_cleanup(&cleanup, &protection_policy(cleanup.scope().clone()))
+        .await
+        .expect("retried cleanup cursor should open");
+    fixture
+        .provider_sessions
+        .complete_cleanup(
+            &cleanup,
+            AiProviderSessionAbsenceProof::for_request(&deletion, fixture.clock.now()),
+        )
+        .await
+        .expect("exact absence should tombstone the old cursor");
+
+    let authorization = match fixture
+        .provider_sessions
+        .disposition_for_run(&next, &changed_plan)
+        .await
+        .expect("the same pre-dispatch run should receive rebind authority")
+    {
+        AiProviderSessionRunDisposition::RebindAllowed(authorization) => *authorization,
+        other => panic!("expected same-run rebind authority, got {other:?}"),
+    };
+    let rebound = fixture
+        .provider_sessions
+        .rebind_for_run(
+            &next,
+            authorization,
+            AiProviderSessionBindRequest::new(
+                changed_descriptor,
+                AiProviderSessionCursor::new("retained.thread", "replacement-thread")
+                    .expect("replacement cursor should validate"),
+                "f".repeat(64),
+                None,
+            )
+            .expect("replacement bind request should validate"),
+        )
+        .await
+        .expect("the current plan should bind after old-provider absence");
+    let opened = fixture
+        .provider_sessions
+        .open_for_run(&next, &rebound)
+        .await
+        .expect("replacement cursor should open under the same run fence");
+    assert_eq!(
+        opened.cursor().expose_to_provider_adapter(),
+        "replacement-thread"
+    );
+}
+
+#[tokio::test]
 async fn provider_session_resume_atomically_rotates_a_fresh_current_principal() {
     let fixture = provider_session_fixture().await;
     let owner = fixture.owner.clone();

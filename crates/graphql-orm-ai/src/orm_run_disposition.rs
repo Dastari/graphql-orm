@@ -17,7 +17,7 @@ use time::Duration;
 use uuid::Uuid;
 
 use crate::orm_inbox::{PreparedAiInboxEvent, append_inbox_event};
-use crate::orm_runs::run_produced_assistant_output;
+use crate::orm_runs::{run_produced_assistant_output, run_provider_dispatch_possible};
 use crate::orm_sessions::{
     content_context, map_orm, map_protection, map_transaction, principal_identity, record_scope,
 };
@@ -339,6 +339,8 @@ impl OrmAiRunDispositionService {
                                 tx, session_id, run_id,
                             )
                             .await?,
+                            provider_dispatch_possible: run_provider_dispatch_possible(tx, run_id)
+                                .await?,
                         };
                         if classify_run_retry(evidence, run.error_code.as_deref())
                             != AiRunRetryAdmission::Allowed

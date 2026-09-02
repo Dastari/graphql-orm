@@ -146,12 +146,12 @@ async fn fixture_on(database: Database<SqliteBackend>, migrate: bool) -> Fixture
             .expect("run limits should validate"),
     );
     let dispositions = OrmAiRunDispositionService::new(
-        database,
+        database.clone(),
         access_policy,
         protection_policy,
         content_protector,
         principal_resolver,
-        clock,
+        clock.clone(),
         AiRunDispositionLimits::default(),
     );
     Fixture {
@@ -329,7 +329,7 @@ async fn retry_authors_a_new_run_over_the_same_message_and_is_idempotent() {
 }
 
 #[tokio::test]
-async fn recovery_required_refuses_retry_but_still_admits_acknowledgement() {
+async fn recovery_required_without_possible_provider_dispatch_admits_retry() {
     let fixture = fixture().await;
     let session = session(&fixture).await;
     let sent = failed_run(
@@ -341,23 +341,56 @@ async fn recovery_required_refuses_retry_but_still_admits_acknowledgement() {
     )
     .await;
 
-    assert!(
-        matches!(
-            fixture
-                .dispositions
-                .retry_run(
-                    &fixture.owner,
-                    RetryAiRunInput {
-                        session_id: session.id,
-                        run_id: sent.run_id,
-                        client_request_id: Uuid::new_v4(),
-                    },
-                )
-                .await,
-            Err(AiError::Conflict)
+    let page = fixture
+        .sessions
+        .session_event_page(&fixture.owner, AiSessionId(session.id), 0, 500)
+        .await
+        .expect("events should replay");
+    let failure = failure_record(&page, "run_recovery_required");
+    assert_eq!(failure["retryable"], serde_json::json!(true));
+    assert_eq!(failure["admission"], serde_json::json!("allowed"));
+
+    fixture
+        .dispositions
+        .retry_run(
+            &fixture.owner,
+            RetryAiRunInput {
+                session_id: session.id,
+                run_id: sent.run_id,
+                client_request_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("committed absence of provider dispatch should admit retry");
+}
+
+#[test]
+fn recovery_required_with_possible_provider_dispatch_remains_non_retryable() {
+    assert_eq!(
+        classify_run_retry(
+            AiRunRetryEvidence {
+                terminal: AiRunTerminalEvent::RecoveryRequired,
+                produced_assistant_output: false,
+                provider_dispatch_possible: true,
+            },
+            Some("provider_turn_uncertain"),
         ),
-        "an unproven external effect must never be re-executed"
+        AiRunRetryAdmission::RefusedUncertain,
     );
+}
+
+#[tokio::test]
+async fn recovery_required_still_admits_acknowledgement() {
+    let fixture = fixture().await;
+    let session = session(&fixture).await;
+    let sent = failed_run(
+        &fixture,
+        session.id,
+        AiRunState::RecoveryRequired,
+        "provider_turn_uncertain",
+        Some("provider_turn_uncertain"),
+    )
+    .await;
 
     let acknowledged = fixture
         .dispositions

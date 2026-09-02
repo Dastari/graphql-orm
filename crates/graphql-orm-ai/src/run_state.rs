@@ -349,15 +349,24 @@ pub struct AiRunRetryEvidence {
     pub terminal: AiRunTerminalEvent,
     /// Whether a durable assistant message exists for this run.
     pub produced_assistant_output: bool,
+    /// Whether committed reservation rows leave any provider dispatch
+    /// possible for this run.
+    ///
+    /// `false` is a positive absence proof: no reservation exists, or every
+    /// reservation is durably `released`/`expired`. `true` is deliberately
+    /// conservative and includes reserved, committed, uncertain, or unknown
+    /// states.
+    pub provider_dispatch_possible: bool,
 }
 
 /// Classifies whether a terminal run may be retried as a new run.
 ///
 /// The rules are deliberately conservative:
 ///
-/// - `RecoveryRequired` is never retryable. It exists precisely because an
-///   external effect could not be proven safe, and re-execution is what the
-///   safe-failure guardrail forbids.
+/// - `RecoveryRequired` is retryable only when committed rows prove that no
+///   assistant output exists and no provider dispatch was possible. This
+///   repairs conservative pre-transport classifications without weakening the
+///   fail-closed boundary for an actually possible external effect.
 /// - `Completed` is never retryable; the message already has its answer.
 /// - `Cancelled` is retryable only when the run produced no durable assistant
 ///   output. Cancellation observed *after* a provider turn was persisted
@@ -371,7 +380,15 @@ pub fn classify_run_retry(
     outcome_code: Option<&str>,
 ) -> AiRunRetryAdmission {
     match evidence.terminal {
-        AiRunTerminalEvent::RecoveryRequired => AiRunRetryAdmission::RefusedUncertain,
+        AiRunTerminalEvent::RecoveryRequired => {
+            if evidence.produced_assistant_output {
+                AiRunRetryAdmission::RefusedAlreadyAnswered
+            } else if evidence.provider_dispatch_possible {
+                AiRunRetryAdmission::RefusedUncertain
+            } else {
+                AiRunRetryAdmission::Allowed
+            }
+        }
         AiRunTerminalEvent::Completed => AiRunRetryAdmission::RefusedAlreadyAnswered,
         AiRunTerminalEvent::Cancelled => {
             if evidence.produced_assistant_output {

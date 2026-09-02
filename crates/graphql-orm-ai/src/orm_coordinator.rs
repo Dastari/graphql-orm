@@ -3914,6 +3914,7 @@ mod tests {
                 crate::AiRunRetryEvidence {
                     terminal: crate::AiRunTerminalEvent::Failed,
                     produced_assistant_output: false,
+                    provider_dispatch_possible: false,
                 },
                 Some("provider_budget_denied"),
             ),
@@ -3972,6 +3973,7 @@ mod tests {
                 crate::AiRunRetryEvidence {
                     terminal: crate::AiRunTerminalEvent::Failed,
                     produced_assistant_output: false,
+                    provider_dispatch_possible: false,
                 },
                 Some("provider_pre_transport_failed"),
             ),
@@ -4029,6 +4031,7 @@ mod tests {
                 crate::AiRunRetryEvidence {
                     terminal: crate::AiRunTerminalEvent::Failed,
                     produced_assistant_output: false,
+                    provider_dispatch_possible: false,
                 },
                 Some("provider_native_item_rejected"),
             ),
@@ -4604,6 +4607,7 @@ mod tests {
                 crate::AiRunRetryEvidence {
                     terminal: crate::AiRunTerminalEvent::Failed,
                     produced_assistant_output: false,
+                    provider_dispatch_possible: false,
                 },
                 Some("provider_session_cleanup_unavailable"),
             ),

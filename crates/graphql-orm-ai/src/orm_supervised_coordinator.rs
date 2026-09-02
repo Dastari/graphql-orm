@@ -3053,6 +3053,7 @@ mod tests {
                 crate::AiRunRetryEvidence {
                     terminal: crate::AiRunTerminalEvent::Failed,
                     produced_assistant_output: false,
+                    provider_dispatch_possible: false,
                 },
                 Some("provider_budget_denied"),
             ),
@@ -3116,6 +3117,7 @@ mod tests {
                 crate::AiRunRetryEvidence {
                     terminal: crate::AiRunTerminalEvent::Failed,
                     produced_assistant_output: false,
+                    provider_dispatch_possible: false,
                 },
                 Some("provider_pre_transport_failed"),
             ),

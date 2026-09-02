@@ -5016,6 +5016,7 @@ pub(crate) async fn append_terminal_run_event(
                     run.id,
                 )
                 .await?,
+                provider_dispatch_possible: run_provider_dispatch_possible(tx, run.id).await?,
             };
             Some(AiRunFailure::new(
                 classify_run_retry(evidence, outcome_code),
@@ -5361,6 +5362,79 @@ mod tests {
             })
             .await
             .expect("inbox events should query")
+    }
+
+    async fn provider_dispatch_possible(fixture: &Fixture, run_id: AiRunId) -> bool {
+        fixture
+            .database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move { run_provider_dispatch_possible(tx, run_id.0).await })
+            })
+            .await
+            .expect("provider-dispatch evidence should query")
+    }
+
+    #[tokio::test]
+    async fn retry_evidence_treats_only_absent_or_released_reservations_as_no_dispatch() {
+        let empty = fixture().await;
+        let empty_run = seed_queued(&empty).await;
+        assert!(!provider_dispatch_possible(&empty, empty_run).await);
+
+        for (state, expected) in [
+            ("released", false),
+            ("expired", false),
+            ("reserved", true),
+            ("committed", true),
+            ("uncertain", true),
+            ("future_state", true),
+        ] {
+            let fixture = fixture().await;
+            let run_id = seed_queued(&fixture).await;
+            let run = run_record(&fixture, run_id).await;
+            AiBudgetReservationRecord::insert(
+                &fixture.database,
+                CreateAiBudgetReservationRecordInput {
+                    budget_counter_ids: serde_json::json!([]),
+                    scope_kind: "tenant".to_owned(),
+                    scope_id: "tenant-run".to_owned(),
+                    tenant_id: Some("tenant-run".to_owned()),
+                    principal_kind: "user".to_owned(),
+                    principal_subject: "run-user".to_owned(),
+                    session_id: run.session_id,
+                    run_id: run.id,
+                    attempt_id: Uuid::new_v4(),
+                    lease_generation: 1,
+                    provider_kind: "openai".to_owned(),
+                    provider_model: "reviewed-model".to_owned(),
+                    reasoning_effort: "unspecified".to_owned(),
+                    pricing_policy_version: "pricing-v1".to_owned(),
+                    reserved_input_tokens: 1,
+                    reserved_output_tokens: 1,
+                    reserved_tool_units: 0,
+                    reserved_image_units: 0,
+                    reserved_cost_microunits: 1,
+                    reserved_runs: 1,
+                    actual_input_tokens: None,
+                    actual_cached_input_tokens: None,
+                    actual_output_tokens: None,
+                    actual_tool_units: None,
+                    actual_image_units: None,
+                    actual_cost_microunits: None,
+                    actual_runs: None,
+                    idempotency_key: format!("retry-evidence-{state}"),
+                    state: state.to_owned(),
+                    expires_at: (fixture.clock.now() + Duration::minutes(1)).unix_timestamp(),
+                    reconciled_at: None,
+                },
+            )
+            .await
+            .expect("test reservation should insert");
+            assert_eq!(
+                provider_dispatch_possible(&fixture, run_id).await,
+                expected,
+                "unexpected dispatch evidence for {state}",
+            );
+        }
     }
 
     #[tokio::test]
@@ -6060,6 +6134,35 @@ pub(crate) async fn run_produced_assistant_output(
             }),
             message_role: Some(StringFilter {
                 eq: Some("assistant".to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .limit(1)
+        .fetch_all()
+        .await
+        .map_err(OrmPublicError::from)?;
+    Ok(!rows.is_empty())
+}
+
+/// Returns whether committed budget rows leave any provider dispatch possible.
+///
+/// Absence is proof-bearing only when no reservation exists or every exact-run
+/// reservation is durably `released`/`expired`. Any other value, including a
+/// malformed future state, remains fail-closed as possible dispatch.
+pub(crate) async fn run_provider_dispatch_possible(
+    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    run_id: Uuid,
+) -> Result<bool, OrmPublicError> {
+    let rows = tx
+        .query::<AiBudgetReservationRecord>()
+        .filter(AiBudgetReservationRecordWhereInput {
+            run_id: Some(UuidFilter {
+                eq: Some(run_id),
+                ..Default::default()
+            }),
+            state: Some(StringFilter {
+                not_in: Some(vec!["released".to_owned(), "expired".to_owned()]),
                 ..Default::default()
             }),
             ..Default::default()

@@ -1358,6 +1358,12 @@ pub trait AiProviderSessionService: Send + Sync {
     /// [`AiProviderSessionRebindAuthorization`] only after validating exact
     /// provider absence and the current run fence.
     ///
+    /// Durable implementations may atomically transition an incompatible
+    /// active binding into cleanup while classifying it. That transition must
+    /// validate the current run, owner, scope, descriptor/transcript plan, and
+    /// retained cursor generation; it grants no replacement authority until
+    /// exact provider absence is later recorded.
+    ///
     /// # Errors
     ///
     /// Returns an error when the run fence, current principal/session access,
