@@ -18,6 +18,31 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.96.2] - 2026-09-02
+
+Persistent schema module: **0.64.0** (unchanged from 0.96.1).
+
+### Fixed
+
+- The fixed capability broker now makes its empty argument, relationship and
+  root-bound wrapper fields genuinely optional. Its execute definition tells
+  providers to copy only paths admitted by the loaded `planSchema`, flatten
+  scalar argument leaves, and omit `maximumItems` unless that exact schema
+  exposes a root result bound.
+- A scalar or custom object result no longer fails solely because a provider
+  was forced to invent an inapplicable root bound or send empty placeholder
+  collections around an otherwise valid closed query plan.
+
+### Security
+
+- The authoritative schema-derived compiler, exact loaded reference,
+  capability fingerprint, public selection allow-list, argument validation,
+  resolver authorization and result budgets remain unchanged. Optional broker
+  transport fields grant no additional query field or argument.
+
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, GraphQL SDL, backup, or restore migration.
+
 ## [0.96.1] - 2026-09-02
 
 Persistent schema module: **0.64.0** (unchanged from 0.96.0).
