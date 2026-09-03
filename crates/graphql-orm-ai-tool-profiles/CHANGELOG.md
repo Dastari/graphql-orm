@@ -10,6 +10,22 @@ supersedes: []
 
 # Changelog
 
+## [0.11.0] - 2026-09-03
+
+### Added
+
+- `ToolExecutionError::ResultBudgetExceeded` lets a bounded host transport
+  distinguish an oversized GraphQL response from a resolver or transport
+  failure.
+- `AiError::ResultBudgetExceeded` carries the stable
+  `AI_RESULT_BUDGET_EXCEEDED` public code.
+
+### Security
+
+- The new variants carry no response content, transport destination, schema,
+  policy, credential, or resolver detail. They are size proofs only and do
+  not weaken the descriptor's result-byte or disclosure checks.
+
 ## [0.10.4] - 2026-09-02
 
 ### Fixed

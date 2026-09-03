@@ -18,6 +18,26 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.97.0] - 2026-09-03
+
+Persistent schema module: **0.64.0** (unchanged from 0.96.2).
+
+### Fixed
+
+- A host transport's typed oversized-response refusal and the runtime's own
+  descriptor byte-bound rejection now remain a distinct
+  `result_budget_exceeded` application-tool failure instead of being reported
+  as resolver validation failure.
+
+### Security
+
+- Oversized response bodies remain undisclosed. The typed result is
+  content-free and retryable, allowing a provider to narrow or paginate the
+  request without treating the resolver contract as invalid.
+
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, GraphQL SDL, backup, or restore migration.
+
 ## [0.96.2] - 2026-09-02
 
 Persistent schema module: **0.64.0** (unchanged from 0.96.1).

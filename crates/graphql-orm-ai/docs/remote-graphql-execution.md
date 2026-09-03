@@ -82,6 +82,9 @@ It must:
 - propagate correlation, causation, actor/mechanism, and ordinary application
   audit metadata;
 - apply bounded response size/time limits before returning; and
+- return `ToolExecutionError::ResultBudgetExceeded` only when the response is
+  refused for crossing that byte ceiling, without retaining or disclosing its
+  content; and
 - ensure `PrivateDirect` authorization is never broader than the equivalent
   `PrivateRouted` path.
 

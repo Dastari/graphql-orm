@@ -51,6 +51,9 @@ pub enum AiError {
     /// Input failed a public schema contract.
     #[error("invalid AI input: {0}")]
     InvalidInput(String),
+    /// A tool result exceeded its reviewed byte or record budget.
+    #[error("AI tool result exceeded its reviewed budget")]
+    ResultBudgetExceeded,
     /// Authentication dependency failed closed.
     #[error("AI principal reauthorization failed")]
     ReauthorizationFailed,
@@ -97,6 +100,7 @@ impl AiError {
             Self::PreTransportBudgetDenied => "AI_BUDGET_DENIED",
             Self::PreTransportProviderFailed => "AI_PROVIDER_FAILED",
             Self::InvalidInput(_) => "AI_INVALID_INPUT",
+            Self::ResultBudgetExceeded => "AI_RESULT_BUDGET_EXCEEDED",
             Self::ReauthorizationFailed => "AI_REAUTHORIZATION_FAILED",
             Self::ToolExecutionFailed => "AI_TOOL_EXECUTION_FAILED",
             Self::ProviderFailed => "AI_PROVIDER_FAILED",
@@ -133,6 +137,14 @@ mod tests {
         assert_eq!(
             AiError::PreTransportProviderFailed.public_code(),
             "AI_PROVIDER_FAILED"
+        );
+    }
+
+    #[test]
+    fn result_budget_exceeded_has_a_distinct_public_code() {
+        assert_eq!(
+            AiError::ResultBudgetExceeded.public_code(),
+            "AI_RESULT_BUDGET_EXCEEDED"
         );
     }
 }

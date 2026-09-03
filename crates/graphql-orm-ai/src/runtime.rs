@@ -17,8 +17,8 @@ use crate::{
     GraphqlInvocationContext, GraphqlRequestContextFactory, ModelRequest,
     ProviderBackgroundBinding, ProviderBackgroundObservation, ProviderBackgroundRetrievalBinding,
     ProviderBackgroundRetrievalContext, ProviderBackgroundSubmission, ProviderError,
-    ProviderEventStream, ProviderKind, ProviderRequestContext, ToolGraphqlRequest,
-    ToolGraphqlResponse, ToolMaturity,
+    ProviderEventStream, ProviderKind, ProviderRequestContext, ToolExecutionError,
+    ToolGraphqlRequest, ToolGraphqlResponse, ToolMaturity,
 };
 use graphql_orm::graphql::orm::{AiMutationExecutionPolicy, OrmSchemaModule, SchemaModuleCatalog};
 
@@ -365,7 +365,7 @@ impl AiRuntime {
             .tool_bridge
             .execute(principal_reference, descriptor, request)
             .await
-            .map_err(|_| AiError::ToolExecutionFailed)?;
+            .map_err(Self::map_tool_execution_error)?;
         self.finish_tool_execution(descriptor, disclosure_schema, response, authorization)
     }
 
@@ -431,7 +431,7 @@ impl AiRuntime {
                 request,
             )
             .await
-            .map_err(|_| AiError::ToolExecutionFailed)?;
+            .map_err(Self::map_tool_execution_error)?;
         self.finish_tool_execution(&descriptor, &disclosure_schema, response, authorization)
     }
 
@@ -585,7 +585,7 @@ impl AiRuntime {
             .map_err(|_| AiError::ToolExecutionFailed)?
             .len() as u64;
         if response_bytes > descriptor.maximum_result_bytes {
-            return Err(AiError::ToolExecutionFailed);
+            return Err(AiError::ResultBudgetExceeded);
         }
         let disclosure = disclosure_schema
             .evaluate_graphql_with_record_limit(&response.data, descriptor.maximum_result_records)
@@ -629,7 +629,7 @@ impl AiRuntime {
                 prepared.request,
             )
             .await
-            .map_err(|_| AiError::ToolExecutionFailed)?;
+            .map_err(Self::map_tool_execution_error)?;
         self.finish_tool_execution(
             &prepared.descriptor,
             &prepared.disclosure_schema,
@@ -674,7 +674,7 @@ impl AiRuntime {
                 &binding.authorization_state_digest,
             )
             .await
-            .map_err(|_| AiError::ToolExecutionFailed)?;
+            .map_err(Self::map_tool_execution_error)?;
         self.finish_tool_execution(
             &prepared.descriptor,
             &prepared.disclosure_schema,
@@ -786,7 +786,7 @@ impl AiRuntime {
                 &binding.authorization_state_digest,
             )
             .await
-            .map_err(|_| AiError::ToolExecutionFailed)?;
+            .map_err(Self::map_tool_execution_error)?;
         self.finish_tool_execution(descriptor, disclosure_schema, response, authorization)
     }
 
@@ -820,7 +820,7 @@ impl AiRuntime {
             .map_err(|_| AiError::ToolExecutionFailed)?
             .len() as u64;
         if response_bytes > descriptor.maximum_result_bytes {
-            return Err(AiError::ToolExecutionFailed);
+            return Err(AiError::ResultBudgetExceeded);
         }
         let disclosure = disclosure_schema
             .evaluate_graphql_with_record_limit(&response.data, descriptor.maximum_result_records)
@@ -832,6 +832,13 @@ impl AiRuntime {
             policy_version: authorization.policy_version,
             authorization_state_digest: authorization.authorization_state_digest,
         })
+    }
+
+    fn map_tool_execution_error(error: ToolExecutionError) -> AiError {
+        match error {
+            ToolExecutionError::ResultBudgetExceeded => AiError::ResultBudgetExceeded,
+            _ => AiError::ToolExecutionFailed,
+        }
     }
 
     /// Calls a registered provider only after start readiness and exact egress
