@@ -68,6 +68,14 @@ impl AuthenticatedGraphqlExecutor for Executor {
         context: GraphqlRequestContext,
         request: ToolGraphqlRequest,
     ) -> Result<ToolGraphqlResponse, ToolExecutionError> {
+        if request
+            .variables
+            .get("rejectOversizedResult")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err(ToolExecutionError::ResultBudgetExceeded);
+        }
         let scopes = context
             .downcast_ref::<Vec<String>>()
             .ok_or(ToolExecutionError::RequestContext)?;
@@ -78,6 +86,13 @@ impl AuthenticatedGraphqlExecutor for Executor {
             .unwrap_or(false)
         {
             json!({"scopes": scopes, "credential": "must-not-escape"})
+        } else if request
+            .variables
+            .get("emitOversizedResult")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            json!({"scopes": ["x".repeat(65 * 1024)]})
         } else {
             json!({"scopes": scopes})
         };
@@ -208,6 +223,8 @@ fn runtime() -> AiRuntime {
             "type": "object",
             "properties": {
                 "emitUnknown": { "type": "boolean" },
+                "emitOversizedResult": { "type": "boolean" },
+                "rejectOversizedResult": { "type": "boolean" },
                 "incompleteAuthorization": { "type": "boolean" }
             },
             "additionalProperties": false
@@ -403,6 +420,30 @@ async fn runtime_rejects_invalid_arguments_and_non_disclosed_resolver_fields() {
             .await,
         Err(AiError::Forbidden)
     ));
+}
+
+#[tokio::test]
+async fn runtime_preserves_result_budget_failures_from_transport_and_descriptor_limits() {
+    let runtime = runtime();
+    open_runtime(&runtime);
+    let principal_reference = principal(&["records:read"]).reference();
+    let tool_id = AiToolId::parse("records.current").expect("tool ID");
+
+    for variables in [
+        json!({"rejectOversizedResult": true}),
+        json!({"emitOversizedResult": true}),
+    ] {
+        assert!(matches!(
+            runtime
+                .execute_tool(
+                    &principal_reference,
+                    &tool_id,
+                    current_request(&runtime, variables),
+                )
+                .await,
+            Err(AiError::ResultBudgetExceeded)
+        ));
+    }
 }
 
 #[test]

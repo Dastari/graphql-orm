@@ -562,4 +562,7 @@ pub enum ToolExecutionError {
     /// Host execution failed safely.
     #[error("tool GraphQL execution failed")]
     Execution,
+    /// The host transport refused a response above its reviewed byte ceiling.
+    #[error("tool GraphQL result exceeded its reviewed budget")]
+    ResultBudgetExceeded,
 }

@@ -10,6 +10,20 @@ supersedes: []
 
 # Migration Guide
 
+## 0.10.4 to 0.11.0: typed result-budget failures
+
+Adopt `graphql-orm-ai-tool-profiles` 0.11.0 with `graphql-orm-ai` 0.97.0 from
+one reviewed full monorepo revision. Host transports should return
+`ToolExecutionError::ResultBudgetExceeded` only when a bounded response is
+refused because its byte ceiling was exceeded. Deliberately exhaustive
+in-crate matches must handle the new non-exhaustive error variants.
+
+The runtime converts that proof, and its own descriptor result-byte overflow,
+to `AiError::ResultBudgetExceeded`. The stable public code is
+`AI_RESULT_BUDGET_EXCEEDED`. There is no schema, database, data, GraphQL SDL,
+manifest, capability, fingerprint, protected-content, credential, backup,
+restore, or persistent AI schema-module migration.
+
 ## 0.10.3 to 0.10.4: resolver-first semantic discovery ranking
 
 Adopt `graphql-orm-ai-tool-profiles` 0.10.4 from one reviewed full monorepo

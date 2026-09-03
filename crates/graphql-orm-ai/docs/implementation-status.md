@@ -10,9 +10,9 @@ supersedes: []
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.96.2` with AI schema module
+`graphql-orm-ai` is at crate version `0.97.0` with AI schema module
 `0.64.0`. It uses workspace `graphql-orm` `0.30.0`, backend-neutral
-`graphql-orm-ai-tool-profiles` `0.10.4`, and external `agql-auth`
+`graphql-orm-ai-tool-profiles` `0.11.0`, and external `agql-auth`
 `0.19.0` at `1d2e9fe2e1576105212a7b340a11abf8cad0382d`.
 
 Completed stateless local-provider turns can carry a proof-bearing contained

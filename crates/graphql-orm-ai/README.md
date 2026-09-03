@@ -28,7 +28,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.96.2", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.97.0", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -117,6 +117,13 @@ Registration alone remains default-deny. The runtime enforces descriptor byte
 and total-record bounds and rejects response fields outside the selected
 disclosure shape. Total records include sibling and nested relationship
 expansion, not merely the largest returned list.
+
+A bounded host transport may reject an oversized response before decoding it
+with `ToolExecutionError::ResultBudgetExceeded`. The runtime preserves that
+proof, and its own descriptor-byte rejection, as the content-free retryable
+`result_budget_exceeded` application-tool outcome. Providers can then narrow
+or paginate the request without receiving response content or mistaking a
+size limit for resolver validation failure.
 
 Private remote execution carries a crate-authored
 `AiRemoteGraphqlCapabilityBinding` to the deployment issuer. Static reads bind

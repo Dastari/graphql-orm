@@ -19,6 +19,23 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.96.2 to 0.97.0: recoverable application-tool result budgets
+
+Adopt `graphql-orm-ai` 0.97.0 and `graphql-orm-ai-tool-profiles` 0.11.0 from
+one reviewed full monorepo revision. Bounded host transports should return
+`ToolExecutionError::ResultBudgetExceeded` when they refuse an oversized
+GraphQL response. The runtime preserves that proof as
+`AiError::ResultBudgetExceeded`; application-tool execution emits the
+content-free, retryable `result_budget_exceeded` failure envelope so the
+provider can narrow or paginate its next request.
+
+The same typed failure is returned when a successfully decoded result exceeds
+the registered descriptor's `maximum_result_bytes`. Other transport,
+resolver, disclosure, and authorization failures retain their prior
+classification. The AI schema module remains **0.64.0**. There is no database,
+data, GraphQL SDL, protected-payload, backup, restore, or data backfill
+migration.
+
 ## 0.96.1 to 0.96.2: schema-aligned fixed-broker execution wrappers
 
 Adopt `graphql-orm-ai` 0.96.2 from one reviewed full monorepo revision. No host

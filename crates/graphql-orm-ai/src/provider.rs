@@ -2309,7 +2309,7 @@ pub enum AiApplicationToolFailureCode {
     SelectionTooLarge,
     /// A selected relationship path exceeds the configured depth.
     RelationshipDepthExceeded,
-    /// The complete selected result exceeds the aggregate record budget.
+    /// The complete selected result exceeds its byte or aggregate record budget.
     ResultBudgetExceeded,
     /// The loaded schema/catalogue/target/capability binding is stale.
     CapabilityStale,
@@ -2412,6 +2412,7 @@ pub fn classify_safe_application_tool_error(
             Some(AiApplicationToolFailureCode::CapabilityStale)
         }
         AiError::InvalidInput(_) => Some(AiApplicationToolFailureCode::InvalidArguments),
+        AiError::ResultBudgetExceeded => Some(AiApplicationToolFailureCode::ResultBudgetExceeded),
         AiError::Forbidden => Some(AiApplicationToolFailureCode::AuthorizationDenied),
         AiError::InvalidConfiguration(_) => Some(AiApplicationToolFailureCode::ToolUnavailable),
         AiError::NotFound => Some(AiApplicationToolFailureCode::NotFound),
@@ -3343,6 +3344,10 @@ mod safe_failure_tests {
         assert_eq!(encoded["code"], "authorization_denied");
         assert_eq!(encoded["retryable"], false);
         assert!(!format!("{encoded}").contains("policy"));
+        assert_eq!(
+            classify_safe_application_tool_error(&AiError::ResultBudgetExceeded),
+            Some(AiApplicationToolFailureCode::ResultBudgetExceeded)
+        );
         assert!(classify_safe_application_tool_error(&AiError::Conflict).is_none());
         assert!(classify_safe_application_tool_error(&AiError::PersistenceFailed).is_none());
     }
