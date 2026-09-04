@@ -18,6 +18,22 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.97.1] - 2026-09-04
+
+Persistent schema module: **0.64.0** (unchanged from 0.97.0).
+
+### Fixed
+
+- Remote GraphQL tool authorization failures now remain `Forbidden`, allowing
+  the existing safe application-tool boundary to report the non-retryable
+  `authorization_denied` result instead of mislabelling the failure as resolver
+  validation.
+- Principal reauthorization failures now remain `ReauthorizationFailed`
+  rather than being collapsed into a resolver failure.
+
+There is no database, data, table, column, index, constraint, backfill,
+protected-payload, GraphQL SDL, backup, or restore migration.
+
 ## [0.97.0] - 2026-09-03
 
 Persistent schema module: **0.64.0** (unchanged from 0.96.2).
