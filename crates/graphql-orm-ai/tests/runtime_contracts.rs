@@ -70,6 +70,22 @@ impl AuthenticatedGraphqlExecutor for Executor {
     ) -> Result<ToolGraphqlResponse, ToolExecutionError> {
         if request
             .variables
+            .get("rejectAuthorization")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err(ToolExecutionError::Authorization);
+        }
+        if request
+            .variables
+            .get("rejectReauthorization")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err(ToolExecutionError::Reauthorization);
+        }
+        if request
+            .variables
             .get("rejectOversizedResult")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
@@ -224,7 +240,9 @@ fn runtime() -> AiRuntime {
             "properties": {
                 "emitUnknown": { "type": "boolean" },
                 "emitOversizedResult": { "type": "boolean" },
+                "rejectAuthorization": { "type": "boolean" },
                 "rejectOversizedResult": { "type": "boolean" },
+                "rejectReauthorization": { "type": "boolean" },
                 "incompleteAuthorization": { "type": "boolean" }
             },
             "additionalProperties": false
@@ -409,7 +427,7 @@ async fn runtime_rejects_invalid_arguments_and_non_disclosed_resolver_fields() {
                 current_request(&runtime, json!({"incompleteAuthorization": true})),
             )
             .await,
-        Err(AiError::ToolExecutionFailed)
+        Err(AiError::Forbidden)
     ));
 
     let mut stale_schema = current_request(&runtime, json!({}));
@@ -444,6 +462,35 @@ async fn runtime_preserves_result_budget_failures_from_transport_and_descriptor_
             Err(AiError::ResultBudgetExceeded)
         ));
     }
+}
+
+#[tokio::test]
+async fn runtime_preserves_authorization_and_reauthorization_failures() {
+    let runtime = runtime();
+    open_runtime(&runtime);
+    let principal_reference = principal(&["records:read"]).reference();
+    let tool_id = AiToolId::parse("records.current").expect("tool ID");
+
+    assert!(matches!(
+        runtime
+            .execute_tool(
+                &principal_reference,
+                &tool_id,
+                current_request(&runtime, json!({"rejectAuthorization": true})),
+            )
+            .await,
+        Err(AiError::Forbidden)
+    ));
+    assert!(matches!(
+        runtime
+            .execute_tool(
+                &principal_reference,
+                &tool_id,
+                current_request(&runtime, json!({"rejectReauthorization": true})),
+            )
+            .await,
+        Err(AiError::ReauthorizationFailed)
+    ));
 }
 
 #[test]

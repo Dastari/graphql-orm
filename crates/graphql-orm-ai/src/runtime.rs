@@ -836,6 +836,8 @@ impl AiRuntime {
 
     fn map_tool_execution_error(error: ToolExecutionError) -> AiError {
         match error {
+            ToolExecutionError::Reauthorization => AiError::ReauthorizationFailed,
+            ToolExecutionError::Authorization => AiError::Forbidden,
             ToolExecutionError::ResultBudgetExceeded => AiError::ResultBudgetExceeded,
             _ => AiError::ToolExecutionFailed,
         }

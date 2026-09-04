@@ -19,6 +19,21 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.97.0 to 0.97.1: preserve remote tool authorization failures
+
+Adopt `graphql-orm-ai` 0.97.1 from one reviewed full monorepo revision. Hosts
+do not need to change their trait implementations. A
+`ToolExecutionError::Authorization` now becomes `AiError::Forbidden`, and
+`ToolExecutionError::Reauthorization` becomes
+`AiError::ReauthorizationFailed`. The existing application-tool failure
+classifier therefore exposes an authorization denial as the content-free,
+non-retryable `authorization_denied` envelope instead of
+`resolver_validation_failed`. Reauthorization failures remain outside that
+safe retry envelope.
+
+The AI schema module remains **0.64.0**. There is no database, data, GraphQL
+SDL, protected-payload, backup, restore, or data backfill migration.
+
 ## 0.96.2 to 0.97.0: recoverable application-tool result budgets
 
 Adopt `graphql-orm-ai` 0.97.0 and `graphql-orm-ai-tool-profiles` 0.11.0 from
