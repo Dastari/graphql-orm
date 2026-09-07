@@ -59,7 +59,9 @@ pub struct MssqlQueryNotificationMessage {
 
 /// Dedicated connection explicitly authorized to register and consume notifications.
 ///
-/// It exposes no DDL or DML API and cannot be converted into an entity pool.
+/// It exposes no entity write methods and cannot be converted into an entity pool.
+/// Registration executes trusted application SQL; prefix validation is not a SQL
+/// sandbox. The database principal must be denied business DML and DDL.
 /// Connecting does not create Broker objects or enable Broker. RECEIVE and END
 /// CONVERSATION mutate Broker state and require external owner authorization.
 /// After cancellation or a protocol error, discard and reconnect this connection.
@@ -101,8 +103,10 @@ impl MssqlQueryNotificationConnection {
     /// does not prove eligibility: SQL Server reports invalid registrations through
     /// the queue. Applications must receive and handle `Invalid` immediately.
     ///
-    /// The query is trusted application SQL, never user input. Only a single SELECT
-    /// is accepted. Database permissions must deny business writes and DDL.
+    /// The query must be one trusted application SELECT, never user input. The
+    /// lexical guard requires a SELECT prefix and rejects statement separators;
+    /// it is not a complete SQL parser and cannot prove absence of side effects.
+    /// Database permissions must deny business writes and DDL.
     pub async fn register(
         &mut self,
         select_sql: &str,
@@ -110,6 +114,12 @@ impl MssqlQueryNotificationConnection {
         service: &str,
         timeout_seconds: u32,
     ) -> crate::Result<Vec<MssqlRow>> {
+        if notification_id.is_empty()
+            || notification_id.len() > 4096
+            || notification_id.chars().any(char::is_control)
+        {
+            return Err(protocol("invalid notification correlation identifier"));
+        }
         let sql = select_sql.trim().trim_end_matches(';').trim();
         if !sql
             .get(..6)
@@ -211,70 +221,103 @@ fn parse_notification(xml: &str) -> Option<MssqlQueryNotificationMessage> {
     if xml.len() > 16384 {
         return None;
     }
-    let mut reader = Reader::from_str(xml);
+    let mut reader = Reader::from_str(xml.strip_prefix('\u{feff}').unwrap_or(xml));
     let mut result = other();
     let mut notification_type = None;
-    let mut root = false;
-    let mut in_message = false;
+    // Before root, inside root, inside Message, after Message, after root.
+    let mut state = 0;
+    let mut declaration = false;
     loop {
         match reader.read_event().ok()? {
-            Event::Start(element) | Event::Empty(element) => match element.local_name().as_ref() {
-                b"QueryNotification" if !root => {
-                    root = true;
-                    for attr in element.attributes() {
-                        let attr = attr.ok()?;
-                        let value = attr
-                            .decode_and_unescape_value(reader.decoder())
-                            .ok()?
-                            .into_owned();
-                        if value.len() > 128 || value.chars().any(char::is_control) {
-                            return None;
-                        }
-                        match attr.key.as_ref() {
-                            b"type" => notification_type = Some(value),
-                            b"source" => result.source = Some(value),
-                            b"info" => result.info = Some(value),
-                            _ => {}
-                        }
+            Event::Decl(_) if state == 0 && !declaration => declaration = true,
+            Event::Start(element)
+                if state == 0 && element.local_name().as_ref() == b"QueryNotification" =>
+            {
+                state = 1;
+                for attr in element.attributes() {
+                    let attr = attr.ok()?;
+                    let value = attr
+                        .decode_and_unescape_value(reader.decoder())
+                        .ok()?
+                        .into_owned();
+                    if value.len() > 128 || value.chars().any(char::is_control) {
+                        return None;
+                    }
+                    let target = match attr.key.as_ref() {
+                        b"type" => &mut notification_type,
+                        b"source" => &mut result.source,
+                        b"info" => &mut result.info,
+                        b"id" | b"database_id" | b"sid" => continue,
+                        key if key == b"xmlns" || key.starts_with(b"xmlns:") => continue,
+                        _ => return None,
+                    };
+                    if target.replace(value).is_some() {
+                        return None;
                     }
                 }
-                b"Message" => in_message = true,
-                _ => {}
-            },
-            Event::Text(text) if in_message => {
-                let value = text.decode().ok()?.into_owned();
-                if value.len() > 4096 || value.chars().any(char::is_control) {
+            }
+            Event::Start(element) if state == 1 && element.local_name().as_ref() == b"Message" => {
+                if element.attributes().next().is_some() {
                     return None;
                 }
-                result
-                    .notification_id
-                    .get_or_insert_with(String::new)
-                    .push_str(&value);
+                state = 2;
+                result.notification_id = Some(String::new());
             }
-            Event::End(_) => in_message = false,
-            Event::DocType(_) => return None,
-            Event::Eof => break,
-            _ => {}
+            Event::Text(text) => {
+                let value = text.decode().ok()?;
+                if state == 2 {
+                    append_id(&mut result.notification_id, &value)?;
+                } else if !value.trim().is_empty() {
+                    return None;
+                }
+            }
+            Event::CData(text) if state == 2 => {
+                append_id(&mut result.notification_id, &text.decode().ok()?)?;
+            }
+            Event::GeneralRef(reference) if state == 2 => {
+                let encoded = format!("&{};", reference.decode().ok()?);
+                let value = quick_xml::escape::unescape(&encoded).ok()?;
+                append_id(&mut result.notification_id, &value)?;
+            }
+            Event::End(element) if state == 2 && element.local_name().as_ref() == b"Message" => {
+                state = 3
+            }
+            Event::End(element)
+                if state == 3 && element.local_name().as_ref() == b"QueryNotification" =>
+            {
+                state = 4
+            }
+            Event::Eof if state == 4 => break,
+            _ => return None,
         }
     }
-    if !root {
+    if result.notification_id.as_ref().is_none_or(String::is_empty) {
         return None;
     }
     result.kind = match (
-        notification_type.as_deref(),
-        result.info.as_deref(),
-        result.source.as_deref(),
+        notification_type.as_deref()?,
+        result.info.as_deref()?,
+        result.source.as_deref()?,
     ) {
-        (_, Some("expired"), _) | (_, _, Some("timeout")) => MssqlQueryNotificationKind::Expired,
-        (Some("change"), Some("insert" | "update" | "delete" | "truncate"), _) => {
+        (_, "expired", _) | (_, _, "timeout") => MssqlQueryNotificationKind::Expired,
+        ("change", "insert" | "update" | "delete" | "truncate", _) => {
             MssqlQueryNotificationKind::Change
         }
-        (Some("subscribe"), _, _) | (_, Some("invalid" | "options" | "isolation" | "query"), _) => {
+        ("subscribe", _, _) | (_, "invalid" | "options" | "isolation" | "query", _) => {
             MssqlQueryNotificationKind::Invalid
         }
         _ => MssqlQueryNotificationKind::Other,
     };
     Some(result)
+}
+
+fn append_id(id: &mut Option<String>, value: &str) -> Option<()> {
+    let id = id.as_mut()?;
+    if id.len() + value.len() > 4096 || value.chars().any(char::is_control) {
+        return None;
+    }
+    id.push_str(value);
+    Some(())
 }
 
 #[cfg(test)]
@@ -288,11 +331,11 @@ mod tests {
                 MssqlQueryNotificationKind::Change,
             ),
             (
-                r#"<QueryNotification type="change" source="timeout" info="expired"/>"#,
+                r#"<QueryNotification type="change" source="timeout" info="expired"><Message>id</Message></QueryNotification>"#,
                 MssqlQueryNotificationKind::Expired,
             ),
             (
-                r#"<QueryNotification type="subscribe" source="statement" info="invalid"/>"#,
+                r#"<QueryNotification type="subscribe" source="statement" info="invalid"><Message>id</Message></QueryNotification>"#,
                 MssqlQueryNotificationKind::Invalid,
             ),
         ] {
@@ -301,6 +344,38 @@ mod tests {
         assert!(parse_notification("<!DOCTYPE x><QueryNotification/>").is_none());
         assert!(parse_notification(&"x".repeat(16385)).is_none());
     }
+    #[test]
+    fn requires_one_complete_root_and_one_bounded_correlation() {
+        let sql_server = "\u{feff}<qn:QueryNotification xmlns:qn=\"http://schemas.microsoft.com/SQL/Notifications/QueryNotification\" id=\"1\" type=\"change\" source=\"data\" info=\"insert\" database_id=\"5\" sid=\"0x01\"><qn:Message>first</qn:Message></qn:QueryNotification>";
+        assert_eq!(
+            parse_notification(sql_server).unwrap().kind,
+            MssqlQueryNotificationKind::Change
+        );
+        let valid = r#"<QueryNotification type="change" source="data" info="insert"><Message>A&amp;B&#x21;</Message></QueryNotification>"#;
+        assert_eq!(
+            parse_notification(valid)
+                .unwrap()
+                .notification_id
+                .as_deref(),
+            Some("A&B!")
+        );
+        for invalid in [
+            valid.replace("</QueryNotification>", ""),
+            format!("{valid}{valid}"),
+            valid.replace("<Message>", "<Message><Unexpected>"),
+            valid.replace("</Message>", "</Message><Message>second</Message>"),
+            valid.replace("A&amp;B&#x21;", ""),
+            valid.replace("A&amp;B&#x21;", "&unknown;"),
+            valid.replace("A&amp;B&#x21;", &"a".repeat(4097)),
+            valid.replace("<Message>A&amp;B&#x21;</Message>", ""),
+        ] {
+            assert!(
+                parse_notification(&invalid).is_none(),
+                "accepted malformed notification"
+            );
+        }
+    }
+
     #[test]
     fn queue_identifiers_are_quoted() {
         assert_eq!(
