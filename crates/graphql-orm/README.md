@@ -29,7 +29,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.30.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.31.0", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the
@@ -161,3 +161,5 @@ enforce row/field/database limits appropriate to the application.
 - [Schema management](../../docs/reference/graphql-orm/schema-management.md)
 - [Strict authorization](../../docs/reference/graphql-orm/strict-authorization.md)
 - [SQL Server integration](../../docs/reference/graphql-orm/mssql.md)
+
+SQL Server supports optional [native query notifications](../../docs/reference/graphql-orm/mssql.md#query-notifications) through an explicitly authorized, externally provisioned Broker connection.

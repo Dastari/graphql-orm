@@ -37,7 +37,7 @@ cynic-parser = { version = "=0.11.2", features = ["pretty"] }
 futures = "0.3"
 getrandom = "0.3"
 graphql-composition = "=0.12.2"
-graphql-orm = { path = "crates/graphql-orm", version = "0.30.0", default-features = false }
+graphql-orm = { path = "crates/graphql-orm", version = "0.31.0", default-features = false }
 graphql-orm-ai-tool-profiles = { path = "crates/graphql-orm-ai-tool-profiles", version = "0.10.3" }
 graphql-orm-backup = { path = "crates/graphql-orm-backup", version = "0.7.2", default-features = false }
 graphql-orm-operation-catalog = { path = "crates/graphql-orm-operation-catalog", version = "0.4.0" }
@@ -57,7 +57,7 @@ sha1 = "0.10"
 signal-hook = "0.4"
 sqlx = { version = "0.8", default-features = false }
 syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
-tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "rustls", "tokio", "tokio-util", "chrono", "rust_decimal"] }
+tiberius = { git = "https://github.com/first-assist/tiberius.git", rev = "4d67cd1ad873dba0f42a838925f15fcfd40c2c67", version = "0.12.4", default-features = false, features = ["tds73", "rustls", "tokio", "tokio-util", "chrono", "rust_decimal"] }
 thiserror = "2"
 tokio = { version = "1" }
 tokio-stream = { version = "0.1", features = ["sync"] }

@@ -1,3 +1,9 @@
+mod notifications;
+pub use notifications::{
+    MssqlBrokerQueue, MssqlQueryNotificationConnection, MssqlQueryNotificationKind,
+    MssqlQueryNotificationMessage,
+};
+
 use crate::graphql::orm::SqlValue;
 use std::borrow::Cow;
 use std::sync::Arc;
