@@ -156,6 +156,20 @@ row or an event, so the source run, its immutable attempt outcomes, and its
 durable session and inbox events all survive. `run_retry_queued` and
 `run_failure_acknowledged` are appended to the ordinary session stream.
 
+Bootstrap retains those terminal source rows and projects their existing
+`failure_disposition` as nullable `AiRunDisposition` (`FailureDisposition` with
+Pascal naming). Null means no recorded disposition; `Acknowledged` or `Retried`
+means the source failure no longer needs an action. The bounded projection
+queries only the selected terminal IDs in the authorized session. It requires
+no data migration.
+
+Both disposition events carry `sessionId`, `sourceRunId`, nullable `retryRunId`,
+`clientRequestId`, and the durable `disposition` string (`acknowledged` or
+`retried`). Clients must apply these by `sourceRunId`, suppress failure actions,
+and preserve that decision across duplicate failure events or older snapshots.
+A bootstrap disposition can lead its resume floor, so replay must be idempotent.
+
+
 ## Retained provider sessions
 
 **Every invalidation is now disclosed.** Each funnel that marks a retained

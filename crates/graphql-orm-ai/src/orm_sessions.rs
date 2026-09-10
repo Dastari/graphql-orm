@@ -328,6 +328,47 @@ impl AiSessionService for OrmAiSessionService {
                 .await
                 .map_err(map_transaction)?;
             terminal_runs.reverse();
+            // Project dispositions only for this bounded terminal window. Read
+            // after the resume floor so a concurrent later decision is either
+            // visible here or delivered by replay after that floor.
+            let terminal_ids = terminal_runs.iter().map(|run| run.id).collect::<Vec<_>>();
+            let dispositions = if terminal_ids.is_empty() {
+                Vec::new()
+            } else {
+                self.database
+                    .transaction(TransactionMode::Default, move |tx| {
+                        Box::pin(async move {
+                            tx.query::<AiRunFailureDispositionRecord>()
+                                .filter(AiRunFailureDispositionRecordWhereInput {
+                                    session_id: Some(UuidFilter {
+                                        eq: Some(session_id.0),
+                                        ..Default::default()
+                                    }),
+                                    source_run_id: Some(UuidFilter {
+                                        in_list: Some(terminal_ids),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                })
+                                .default_order()
+                                .limit(terminal_run_limit)
+                                .fetch_all()
+                                .await
+                                .map_err(OrmPublicError::from)
+                        })
+                    })
+                    .await
+                    .map_err(map_transaction)?
+            };
+            let dispositions = dispositions
+                .into_iter()
+                .map(|record| {
+                    crate::AiRunDisposition::from_persisted(&record.disposition)
+                        .map(|disposition| (record.source_run_id, disposition))
+                        .ok_or(AiError::PersistenceFailed)
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
+
             let selected_run_ids = active_runs
                 .iter()
                 .chain(terminal_runs.iter())
@@ -376,7 +417,14 @@ impl AiSessionService for OrmAiSessionService {
                 first.message_head > 0 && messages.edges.is_empty() || tool_calls_truncated;
             let message_views = messages.edges.into_iter().map(|edge| edge.node).collect();
             let active_views = active_runs.iter().map(run_summary).collect::<Vec<_>>();
-            let terminal_views = terminal_runs.iter().map(run_summary).collect::<Vec<_>>();
+            let terminal_views = terminal_runs
+                .iter()
+                .map(|record| {
+                    let mut summary = run_summary(record);
+                    summary.failure_disposition = dispositions.get(&record.id).copied();
+                    summary
+                })
+                .collect::<Vec<_>>();
             let tool_calls = tool_rows.iter().map(tool_call_summary).collect::<Vec<_>>();
             let mut provider_activity = BTreeMap::new();
             for row in &tool_rows {
@@ -1674,6 +1722,7 @@ fn run_summary(record: &AiRunRecord) -> AiConversationRunSummary {
         attempt_id: record.attempt_id,
         lease_generation: record.lease_generation,
         outcome_code: record.error_code.clone(),
+        failure_disposition: None,
         created_at: record.created_at,
     }
 }

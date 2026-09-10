@@ -163,6 +163,11 @@ output and no possible provider dispatch: no reservation, or exclusively
 released/expired reservations. Reserved, committed, uncertain, and unknown
 states remain non-retryable;
 `acknowledgeAiRunFailure` dismisses a failure without deleting audit history.
+Bootstrap run summaries include the nullable typed `failure_disposition` so
+acknowledged and retried failures remain durably dismissed after reload. Their
+original terminal rows remain available for audit. Apply `run_failure_acknowledged`
+and `run_retry_queued` replay events by `sourceRunId` as monotonic dispositions.
+
 Invalidating a retained provider thread emits `provider_session_reset` or
 `provider_session_rebound` so a host can tell the user the model's context was
 reset even though the durable transcript reads as continuous. Once exact

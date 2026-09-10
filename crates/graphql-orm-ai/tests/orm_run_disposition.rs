@@ -326,6 +326,8 @@ async fn retry_authors_a_new_run_over_the_same_message_and_is_idempotent() {
         .find(|run| run.id == sent.run_id)
         .expect("the source run should stay terminal");
     assert_eq!(source.state, "failed");
+    assert_eq!(source.failure_disposition, Some(AiRunDisposition::Retried));
+    assert_eq!(queued.failure_disposition, None);
 }
 
 #[tokio::test]
@@ -392,6 +394,13 @@ async fn recovery_required_still_admits_acknowledgement() {
     )
     .await;
 
+    let before = fixture
+        .sessions
+        .conversation_bootstrap(&fixture.owner, AiSessionId(session.id), 20, 20, 100)
+        .await
+        .unwrap();
+    assert_eq!(before.terminal_runs[0].failure_disposition, None);
+
     let acknowledged = fixture
         .dispositions
         .acknowledge_run_failure(
@@ -406,6 +415,42 @@ async fn recovery_required_still_admits_acknowledgement() {
         .expect("dismissing a failure asserts nothing about re-execution safety");
     assert_eq!(acknowledged.disposition, AiRunDisposition::Acknowledged);
     assert!(acknowledged.retry_run_id.is_none());
+    let after = fixture
+        .sessions
+        .conversation_bootstrap(&fixture.owner, AiSessionId(session.id), 20, 20, 100)
+        .await
+        .unwrap();
+    let source = after
+        .terminal_runs
+        .iter()
+        .find(|run| run.id == sent.run_id)
+        .unwrap();
+    assert_eq!(source.state, "recovery_required");
+    assert_eq!(
+        source.failure_disposition,
+        Some(AiRunDisposition::Acknowledged)
+    );
+    let replay = fixture
+        .sessions
+        .session_event_page(
+            &fixture.owner,
+            AiSessionId(session.id),
+            before.watermark,
+            100,
+        )
+        .await
+        .unwrap();
+    let decision = replay
+        .events
+        .iter()
+        .find(|event| event.event_type == "run_failure_acknowledged")
+        .unwrap();
+    assert_eq!(
+        decision.payload.0["sourceRunId"],
+        serde_json::json!(sent.run_id)
+    );
+    assert_eq!(decision.payload.0["disposition"], "acknowledged");
+    assert!(decision.sequence <= after.watermark);
 
     // Audit history survives the dismissal.
     let page = fixture
