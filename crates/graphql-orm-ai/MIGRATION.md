@@ -19,6 +19,14 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.97.2
+
+Codex 0.154 `deprecationNotice` notifications are admitted only while the
+exact retained `thread/resume` response is pending. Summary and optional
+details are bounded and discarded as a content-free runtime warning, sharing
+the existing warning count and byte ceilings. They never establish resume
+readiness or grant capabilities. No public API or data migration is required.
+
 ## 0.97.0 to 0.97.1: preserve remote tool authorization failures
 
 Adopt `graphql-orm-ai` 0.97.1 from one reviewed full monorepo revision. Hosts

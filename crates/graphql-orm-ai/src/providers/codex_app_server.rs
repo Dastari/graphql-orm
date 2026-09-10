@@ -94,6 +94,7 @@ const OPTED_OUT_NOTIFICATION_METHODS: [&str; 5] = [
 ];
 const REMOTE_CONTROL_STATUS_CHANGED: &str = "remoteControl/status/changed";
 const RUNTIME_WARNING: &str = "warning";
+const DEPRECATION_NOTICE: &str = "deprecationNotice";
 const THREAD_TOKEN_USAGE_UPDATED: &str = "thread/tokenUsage/updated";
 const CODE_MODE_HOST_FEATURE: &str = "code_mode_host";
 
@@ -3350,7 +3351,8 @@ pub enum AiCodexAppServerInbound {
     /// method or capability.
     RemoteControlDisabled,
     /// Content-free notice that app-server emitted one bounded non-fatal
-    /// warning during the current correlated turn.
+    /// warning during the current correlated turn or retained resume, including
+    /// a deprecation notice while the exact resume response is pending.
     ///
     /// The timestamp, optional thread reference, and warning text are
     /// validated and discarded inside the actor. No warning content or
@@ -4527,6 +4529,9 @@ impl AiCodexAppServerProtocolActor {
         if notification.method == REMOTE_CONTROL_STATUS_CHANGED {
             return self.accept_disabled_remote_control_status(notification);
         }
+        if notification.method == DEPRECATION_NOTICE {
+            return self.accept_deprecation_notice(notification);
+        }
         if notification.method == RUNTIME_WARNING {
             return self.accept_runtime_warning(notification);
         }
@@ -5102,6 +5107,59 @@ impl AiCodexAppServerProtocolActor {
         Ok(AiCodexAppServerInbound::RemoteControlDisabled)
     }
 
+    fn accept_deprecation_notice(
+        &mut self,
+        notification: CodexAppServerNotificationEnvelope,
+    ) -> Result<AiCodexAppServerInbound, ProviderError> {
+        // Codex 0.154 emits this unthreaded schema-defined notice before the
+        // thread/resume response. Correlate it to that sole outstanding RPC;
+        // it is never evidence that resume succeeded or any capability exists.
+        let params: DeprecationNoticeParams =
+            serde_json::from_value(notification.params).map_err(|_| ProviderError::Rejected)?;
+        let details = params.details.as_deref().unwrap_or_default();
+        let message_bytes = params
+            .summary
+            .len()
+            .checked_add(details.len())
+            .ok_or(ProviderError::Rejected)?;
+        let next_bytes = self
+            .runtime_warning_bytes
+            .checked_add(message_bytes)
+            .ok_or(ProviderError::Rejected)?;
+        if notification.method != DEPRECATION_NOTICE
+            || !self.initialization_complete
+            || self.thread_lifecycle_operation != Some(ThreadLifecycleOperation::Resume)
+            || !matches!(
+                self.thread_lifecycle_phase,
+                ThreadLifecyclePhase::AwaitingResponseAndStarted
+                    | ThreadLifecyclePhase::AwaitingResponse
+            )
+            || self.pending.len() != 1
+            || !self
+                .pending
+                .values()
+                .any(|method| *method == ClientMethod::ThreadResume)
+            || self.active_thread_id.is_none()
+            || self.pending_turn_thread_id.is_some()
+            || self.active_turn_id.is_some()
+            || self.deleting_thread_id.is_some()
+            || self.thread_absence_scan.is_some()
+            || params.summary.trim().is_empty()
+            || params.summary.chars().any(char::is_control)
+            || details
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+            || message_bytes > MAXIMUM_RUNTIME_WARNING_MESSAGE_BYTES
+            || self.runtime_warning_count >= MAXIMUM_RUNTIME_WARNINGS_PER_WINDOW
+            || next_bytes > MAXIMUM_RUNTIME_WARNING_BYTES_PER_WINDOW
+        {
+            return Err(ProviderError::Rejected);
+        }
+        self.runtime_warning_count += 1;
+        self.runtime_warning_bytes = next_bytes;
+        Ok(AiCodexAppServerInbound::RuntimeWarning)
+    }
+
     fn accept_runtime_warning(
         &mut self,
         notification: CodexAppServerNotificationEnvelope,
@@ -5373,6 +5431,13 @@ struct DisabledRemoteControlStatusParams {
     installation_id: String,
     #[serde(rename = "environmentId")]
     _environment_id: (),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeprecationNoticeParams {
+    summary: String,
+    details: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -12631,6 +12696,95 @@ pub(crate) mod tests {
             )),
             Ok(AiCodexAppServerInbound::RuntimeWarning)
         ));
+    }
+
+    #[test]
+    fn protocol_deprecation_notice_is_bounded_content_free_and_resume_correlated() {
+        let cursor =
+            crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", "thread-retained-1")
+                .unwrap();
+        let resume = || {
+            let mut actor = initialized_protocol_actor();
+            actor.resume_thread(&cursor, &turn()).unwrap();
+            actor
+        };
+        let notice = |params| lifecycle_notification(DEPRECATION_NOTICE, params);
+        let frame = notice(
+            json!({"summary":"Deprecated resume option", "details":"Use its replacement.\nNo action required."}),
+        );
+        for started_first in [false, true] {
+            let mut actor = resume();
+            if started_first {
+                actor
+                    .accept(&thread_started_notification("thread-retained-1"))
+                    .unwrap();
+            }
+            let inbound = actor.accept(&frame).unwrap();
+            assert!(matches!(inbound, AiCodexAppServerInbound::RuntimeWarning));
+            assert_eq!(
+                format!("{inbound:?}"),
+                "AiCodexAppServerInbound::RuntimeWarning"
+            );
+            assert!(!actor.retained_resume_ready(&cursor));
+            actor
+                .accept(br#"{"id":2,"result":{"thread":{"id":"thread-retained-1"}}}"#)
+                .unwrap();
+            assert!(actor.accept(&frame).is_err());
+            if !started_first {
+                actor
+                    .accept(&thread_started_notification("thread-retained-1"))
+                    .unwrap();
+            }
+            assert!(actor.retained_resume_ready(&cursor));
+        }
+        assert!(initialized_protocol_actor().accept(&frame).is_err());
+        let mut uninitialized = AiCodexAppServerProtocolActor::new(64 * 1024).unwrap();
+        assert!(uninitialized.accept(&frame).is_err());
+        let mut fresh = initialized_protocol_actor();
+        fresh.start_fresh_thread(&turn()).unwrap();
+        assert!(fresh.accept(&frame).is_err());
+        fresh
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#)
+            .unwrap();
+        fresh
+            .accept(&thread_started_notification("thread-1"))
+            .unwrap();
+        fresh.start_turn("thread-1", &turn()).unwrap();
+        assert!(fresh.accept(&frame).is_err());
+
+        for params in [
+            json!({"summary":"valid"}),
+            json!({"summary":"valid", "details":null}),
+        ] {
+            assert!(resume().accept(&notice(params)).is_ok());
+        }
+        for params in [
+            json!({}),
+            json!({"summary":null}),
+            json!({"summary":" "}),
+            json!({"summary":"bad\ntext"}),
+            json!({"summary":"valid", "details":4}),
+            json!({"summary":"valid", "details":"bad\u{0000}text"}),
+            json!({"summary":"valid", "threadId":"thread-retained-1"}),
+            json!({"summary":"valid", "details":"x".repeat(MAXIMUM_RUNTIME_WARNING_MESSAGE_BYTES)}),
+        ] {
+            assert!(resume().accept(&notice(params)).is_err());
+        }
+        let mut count = resume();
+        count
+            .accept(&runtime_warning_notification(None, "shared budget"))
+            .unwrap();
+        for _ in 1..MAXIMUM_RUNTIME_WARNINGS_PER_WINDOW {
+            count.accept(&frame).unwrap();
+        }
+        assert!(count.accept(&frame).is_err());
+        let mut bytes = resume();
+        let large = notice(json!({"summary":"x".repeat(MAXIMUM_RUNTIME_WARNING_MESSAGE_BYTES)}));
+        for _ in 0..MAXIMUM_RUNTIME_WARNING_BYTES_PER_WINDOW / MAXIMUM_RUNTIME_WARNING_MESSAGE_BYTES
+        {
+            bytes.accept(&large).unwrap();
+        }
+        assert!(bytes.accept(&frame).is_err());
     }
 
     #[test]

@@ -211,6 +211,10 @@ message, tool call, or checkpoint. This discard guarantee is version-observed
 for `codex-cli 0.148.0` with `gpt-5.4`; reverify it before upgrading Codex. Any
 missing proof continues through the disclosed cleanup-and-rebind path.
 
+Codex 0.154 deprecation notices are accepted only while a retained resume
+response is pending. The actor validates and discards their bounded text,
+sharing the existing runtime-warning limits; notices cannot establish readiness.
+
 The retained dynamic-tool launch profile is version-observed on Codex 0.148.0.
 It disables Code Mode, Code Mode-only routing, shell, files, MCP, browser, and
 every other native item surface by default. Native web search has a separate

@@ -18,6 +18,16 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased
+
+### Fixed
+
+Codex 0.154 `deprecationNotice` notifications are admitted only while the
+exact retained `thread/resume` response is pending. Summary and optional
+details are bounded and discarded as a content-free runtime warning, sharing
+the existing warning count and byte ceilings. They never establish resume
+readiness or grant capabilities. No public API or data migration is required.
+
 ## [0.97.1] - 2026-09-04
 
 Persistent schema module: **0.64.0** (unchanged from 0.97.0).
