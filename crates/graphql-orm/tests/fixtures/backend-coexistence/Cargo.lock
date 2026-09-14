@@ -1304,7 +1304,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -1315,6 +1315,7 @@ dependencies = [
  "geojson",
  "graphql-orm-macros",
  "graphql-orm-operation-catalog",
+ "quick-xml",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -1329,7 +1330,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -1372,7 +1373,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "convert_case",
  "proc-macro2",
@@ -2395,6 +2396,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "quick-xml"
+version = "0.39.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdcc8dd4e2f670d309a5f0e83fe36dfdc05af317008fea29144da1a2ac858e5e"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3411,9 +3421,8 @@ dependencies = [
 
 [[package]]
 name = "tiberius"
-version = "0.12.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1446cb4198848d1562301a3340424b4f425ef79f35ef9ee034769a9dd92c10d"
+version = "0.12.4"
+source = "git+https://github.com/first-assist/tiberius.git?rev=4d67cd1ad873dba0f42a838925f15fcfd40c2c67#4d67cd1ad873dba0f42a838925f15fcfd40c2c67"
 dependencies = [
  "async-trait",
  "asynchronous-codec",
