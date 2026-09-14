@@ -582,9 +582,7 @@ pub mod generated_api_absence_probes {}
 ///     pub job_name: String,
 /// }
 ///
-/// fn main() {
-///     let _ = LegacyJob::create;
-/// }
+/// let _ = LegacyJob::create;
 /// ```
 #[cfg(all(feature = "mssql", not(any(feature = "sqlite", feature = "postgres"))))]
 pub mod mssql_generated_api_absence_probes {}
