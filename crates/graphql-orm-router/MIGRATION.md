@@ -16,7 +16,9 @@ For workspace releases selecting `agql-auth` v0.19.0, direct consumers must use
 `tag = "v0.19.0"`, locked to `51f33bfa151f7471a7cedee7e89d688041f7ae05`.
 A tag and a revision selector produce different Cargo sources even at the same
 commit. The library source is unchanged from the historical revision below;
-no configuration or stored-data migration is needed.
+no configuration or stored-data migration is needed. The workspace lockfile
+also updates h2 and rustls to their compatible security fixes; rebuild router
+binaries from the reviewed lockfile.
 
 ## 0.5.0 to 0.5.1
 

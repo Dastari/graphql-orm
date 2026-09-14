@@ -3,7 +3,7 @@ title: graphql-orm-router changelog
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-09-15
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -11,6 +11,12 @@ supersedes: []
 # Changelog
 
 ## 0.5.1 - 2026-09-02
+
+- Updated the reviewed workspace lockfile to h2 0.4.16 and rustls 0.23.45,
+  including rustls-webpki 0.103.15 and AWS-LC 1.18.1 / sys 0.45.0 required by
+  rustls. These address RUSTSEC-2026-0258 and RUSTSEC-2026-0285 before the
+  workspace release. The existing ADR-0008 restrictions on Hive storage and
+  private-key operations remain in force for the quick-xml and rsa findings.
 
 - Replaced the full duplicate of WebSocket subscription variables with a
   bounded scalar-only authorization projection. Large data variables remain
