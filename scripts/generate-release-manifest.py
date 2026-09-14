@@ -186,9 +186,14 @@ def manifest_packages(
     return result
 
 
-def external_git_dependencies(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+def external_git_dependencies(
+    metadata: dict[str, Any], lock: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
+    if lock is None:
+        with (ROOT / "Cargo.lock").open("rb") as handle:
+            lock = tomllib.load(handle)
     workspace_members = set(metadata["workspace_members"])
-    aggregated: dict[tuple[str, str, str], set[str]] = {}
+    aggregated: dict[tuple[str, str, str, str], set[str]] = {}
     for package in metadata["packages"]:
         if package["id"] not in workspace_members:
             continue
@@ -197,14 +202,40 @@ def external_git_dependencies(metadata: dict[str, Any]) -> list[dict[str, Any]]:
             if not source.startswith("git+"):
                 continue
             parsed = urlsplit(source.removeprefix("git+"))
-            revisions = parse_qs(parsed.query).get("rev", [])
-            revision = revisions[0] if len(revisions) == 1 else ""
-            if not FULL_SHA_RE.fullmatch(revision):
-                raise SystemExit(
-                    f"{package['name']}: Git dependency {dependency['name']} is not exact-revision resolved"
-                )
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            revisions = query.get("rev", [])
+            tags = query.get("tag", [])
             url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-            key = (dependency["name"], url, revision)
+            exact_revision = (
+                set(query) == {"rev"}
+                and len(revisions) == 1
+                and FULL_SHA_RE.fullmatch(revisions[0])
+            )
+            auth_release = (
+                set(query) == {"tag"}
+                and len(tags) == 1
+                and dependency["name"] == "agql-auth"
+                and url == "https://github.com/Dastari/agql-auth.git"
+                and re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tags[0])
+            )
+            if not (exact_revision or auth_release):
+                raise SystemExit(
+                    f"{package['name']}: Git dependency {dependency['name']} requires "
+                    "a full revision or an agql-auth version release tag"
+                )
+            resolved = {
+                entry["source"].partition("#")[2]
+                for entry in lock.get("package", [])
+                if entry.get("name") == dependency["name"]
+                and entry.get("source", "").partition("#")[0] == source
+            }
+            if len(resolved) != 1 or not FULL_SHA_RE.fullmatch(next(iter(resolved), "")):
+                raise SystemExit(f"{dependency['name']}: expected exactly one full locked Git commit")
+            revision = resolved.pop()
+            if exact_revision and revision != revisions[0]:
+                raise SystemExit(f"{dependency['name']}: locked commit does not match the full revision")
+            tag = tags[0] if auth_release else ""
+            key = (dependency["name"], url, revision, tag)
             aggregated.setdefault(key, set()).add(package["name"])
     return [
         {
@@ -212,8 +243,9 @@ def external_git_dependencies(metadata: dict[str, Any]) -> list[dict[str, Any]]:
             "name": name,
             "revision": revision,
             "url": url,
+            **({"tag": tag} if tag else {}),
         }
-        for (name, url, revision), consumers in sorted(aggregated.items())
+        for (name, url, revision, tag), consumers in sorted(aggregated.items())
     ]
 
 

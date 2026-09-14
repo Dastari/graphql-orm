@@ -160,6 +160,14 @@ CycloneDX inventory, and approval reference, and includes the archive in the
 release checksums and provenance attestation. A later target or feature set
 requires its own approval.
 
+External `agql-auth` dependencies may select a published `v<version>` release tag.
+The manifest keeps its full locked commit in `externalGitDependencies[].revision`
+and additionally records `tag`; all other external Git dependencies still require
+full revision pins. Generation fails if the lockfile has no unique matching source
+or disagrees with an explicit revision. Verify the auth release's attested manifest
+and peeled tag before adopting it. Consumers seeking one Cargo source must use the
+same tag selector: a `rev` and a tag remain different sources even at the same SHA.
+
 Pure Rust libraries do not receive optimized binary artifacts. Downstream
 Cargo builds compile them from the pinned Git source.
 
