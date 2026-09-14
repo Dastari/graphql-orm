@@ -28,9 +28,9 @@ changes.
 | `graphql-orm-router-protocol` | `0.2.1` | `crates/graphql-orm-router-protocol` | none | none |
 | `graphql-orm-storage` | `0.6.2` | `crates/graphql-orm-storage` | `local` | none |
 
-External exact-revision dependency:
+External Git dependency:
 
-- `agql-auth` requirement `^0.19.0`, source `git+https://github.com/Dastari/agql-auth.git?rev=1d2e9fe2e1576105212a7b340a11abf8cad0382d`, consumed by `graphql-orm`, `graphql-orm-ai`, `graphql-orm-router`.
+- `agql-auth` requirement `^0.19.0`, source `git+https://github.com/Dastari/agql-auth.git?tag=v0.19.0`, consumed by `graphql-orm`, `graphql-orm-ai`, `graphql-orm-router`.
 
 <!-- END GENERATED WORKSPACE PACKAGES -->
 

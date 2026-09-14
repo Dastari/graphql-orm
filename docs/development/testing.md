@@ -132,8 +132,8 @@ acceptance evidence until migrated to the owned harness.
 
 ## Authentication bridge lane
 
-Changes involving `auth-agql` must retain the external exact revision and test
-the bridge feature explicitly:
+Changes involving `auth-agql` must retain one external Git selector and its
+reviewed locked commit, and test the bridge feature explicitly:
 
 ```sh
 cargo check -p graphql-orm --no-default-features --features "sqlite auth-agql"

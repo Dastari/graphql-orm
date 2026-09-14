@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-02
+last_reviewed: 2026-09-15
 review_by: 2027-02-01
 supersedes: []
 ---
