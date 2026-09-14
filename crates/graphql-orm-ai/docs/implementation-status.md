@@ -13,7 +13,7 @@ supersedes: []
 Current package versions and dependency selectors are generated in the
 [workspace inventory](../../../docs/reference/workspace-packages.md).
 The AI schema module remains `0.64.0`. External `agql-auth` uses the published
-`v0.19.0` tag with its full resolved commit retained in `Cargo.lock`.
+`v0.19.1` tag with its full resolved commit retained in `Cargo.lock`.
 
 Completed stateless local-provider turns can carry a proof-bearing contained
 native-item refusal after authoritative usage settlement. Those runs close as

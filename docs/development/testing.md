@@ -3,7 +3,7 @@ title: "Testing and verification"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-09-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,12 @@ supersedes: []
 Run the narrowest package and backend lane that covers a change. Database
 backends are alternative configurations, so never use workspace
 `--all-features`.
+
+Full release validation follows the stable compiler used by CI (Rust 1.98.1
+at the current release preparation). Compile-failure snapshots track that
+compiler's diagnostics, and the locked S3/Azure SDK lane requires Rust 1.94.1
+or newer. Rust 1.90.0 is the separate router minimum-version lane; it is not
+a workspace-wide compiler requirement.
 
 ## Baseline ORM lane
 
