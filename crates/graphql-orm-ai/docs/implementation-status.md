@@ -11,7 +11,7 @@ supersedes: []
 # Implementation Status
 
 Current package versions and dependency selectors are generated in the
-[workspace inventory](../../../docs/reference/workspace-inventory.md).
+[workspace inventory](../../../docs/reference/workspace-packages.md).
 The AI schema module remains `0.64.0`. External `agql-auth` uses the published
 `v0.19.0` tag with its full resolved commit retained in `Cargo.lock`.
 
