@@ -14,6 +14,17 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.31.0 - 2026-09-07
+
+Companion macros crate: `graphql-orm-macros` **0.31.0** (version alignment only).
+
+- Added native SQL Server Query Notification registration and a dedicated,
+  explicitly authorized Service Broker connection. Existing entity pools and
+  external schema ownership remain unchanged; no Broker objects are created.
+- Added bounded parsed invalidation, expiry, and invalid-registration messages,
+  plus disposable SQL Server integration coverage for aggregate subscriptions.
+- Pinned the Tiberius notification feature to an immutable Git revision.
+
 ## 0.30.0 - 2026-08-31
 
 Companion macros crate: `graphql-orm-macros` **0.30.0**. Backend-neutral

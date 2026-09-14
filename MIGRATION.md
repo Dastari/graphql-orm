@@ -13,6 +13,17 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.30.0 to 0.31.0: native SQL Server query notifications
+
+Adopt the runtime and macros 0.31.0 together from one reviewed full Git revision.
+The optional MSSQL notification API uses a separately authorized connection;
+existing read-only pools do not acquire queue-consumption or write capability.
+External database owners must provision Broker and its dedicated queue/service.
+See [SQL Server notification setup](docs/reference/graphql-orm/mssql.md#query-notifications).
+No managed schema migration is required or performed. Notifications are one-shot
+invalidation hints, not durable row-change events; applications own re-registration,
+catch-up, permissions, and reconnect/resynchronization behavior.
+
 ## 0.29.0 to 0.30.0: checked calendar-date filters
 
 Adopt `graphql-orm` and `graphql-orm-macros` 0.30.0 together from one reviewed
