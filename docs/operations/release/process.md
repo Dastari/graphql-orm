@@ -125,6 +125,9 @@ Run **Workspace release** manually and supply:
 - `include_router_artifact`: normally false for source-only releases; and
 - `router_distribution_approval`: required when a router binary is attached.
 
+Configure `Dastari` as a required human reviewer on the `release` environment
+and restrict it to `main` before dispatch. The guard rejects an environment
+without that reviewer; naming an environment in YAML does not create protection.
 The protected `release` environment is the human authorization boundary and
 gates the workflow's entry job, so no release lane runs before approval. The
 workflow then:
