@@ -19,6 +19,26 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.98.0
+
+Conversation bootstrap now includes nullable `AiConversationRunSummary::failure_disposition`
+(`FailureDisposition` with Pascal naming), using the existing `AiRunDisposition`
+enum. Acknowledged or retried failures retain their source terminal row for
+audit, but clients must suppress failure actions when this field is present.
+Rust struct initializers must supply the new field. No data migration is required;
+the projection reads existing disposition records and does not change the schema.
+Replay `run_failure_acknowledged` and `run_retry_queued` by `sourceRunId` and
+retain the terminal disposition across older or duplicate failure events.
+The bootstrap watermark remains a resume floor: projected state may lead it.
+
+## 0.97.2
+
+Codex 0.154 `deprecationNotice` notifications are admitted only while the
+exact retained `thread/resume` response is pending. Summary and optional
+details are bounded and discarded as a content-free runtime warning, sharing
+the existing warning count and byte ceilings. They never establish resume
+readiness or grant capabilities. No public API or data migration is required.
+
 ## 0.97.0 to 0.97.1: preserve remote tool authorization failures
 
 Adopt `graphql-orm-ai` 0.97.1 from one reviewed full monorepo revision. Hosts

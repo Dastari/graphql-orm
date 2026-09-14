@@ -200,6 +200,11 @@ pub struct AiConversationRunSummary {
     pub lease_generation: i64,
     /// Bounded public terminal code, never an error body.
     pub outcome_code: Option<String>,
+    /// Durable failure disposition, when this terminal outcome was acknowledged
+    /// or superseded by a retry. The source state remains intact for audit.
+    /// Clients must not surface an actionable failure when this is present;
+    /// replayed disposition events are monotonic even across older snapshots.
+    pub failure_disposition: Option<crate::AiRunDisposition>,
     /// Creation timestamp.
     pub created_at: i64,
 }

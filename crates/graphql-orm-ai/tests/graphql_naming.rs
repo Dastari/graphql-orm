@@ -26,6 +26,7 @@ fn configured_graphql_case_is_coherent_without_aliases() {
     #[cfg(not(feature = "graphql-case-pascal"))]
     {
         assert!(sdl.contains("aiSessions("));
+        assert!(sdl.contains("failureDisposition: AiRunDisposition\n"));
         assert!(sdl.contains("aiMessages(sessionId:"));
         assert!(sdl.contains("aiToolCallResultPreview(input:"));
         assert!(sdl.contains("contentPurged: Boolean!"));
@@ -55,6 +56,7 @@ fn configured_graphql_case_is_coherent_without_aliases() {
     #[cfg(feature = "graphql-case-pascal")]
     {
         assert!(sdl.contains("AiSessions("));
+        assert!(sdl.contains("FailureDisposition: AiRunDisposition\n"));
         assert!(sdl.contains("AiMessages(SessionId:"));
         assert!(sdl.contains("AiToolCallResultPreview(Input:"));
         assert!(sdl.contains("ContentPurged: Boolean!"));
