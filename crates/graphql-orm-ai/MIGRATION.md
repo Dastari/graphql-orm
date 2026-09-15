@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-02
+last_reviewed: 2026-09-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -18,6 +18,17 @@ Migration entries preserve the dependency and schema facts for the checkpoint
 they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## 0.98.1
+
+Hosts may opt into `AiCapabilityDiscoveryBroker::with_discovery_cache(ttl, maximum_searches)`
+to reuse discovery candidates across runs of the same principal and AI session. Keep the broker
+(or its clones) for the desired cache lifetime. The TTL is one second through seven days and
+capacity is one through 1,024 bounded searches, with oldest-first eviction. The default remains
+disabled. Each new run still creates a fresh `AiCapabilityBrokerSession` and describes a cached
+candidate before execution; old loaded references do not become reusable. Describe revalidates
+current metadata and authority, and execution retains all existing fences and resolver checks.
+No data migration is needed; no durable schema, GraphQL SDL, backup or restore format changes.
 
 ## 0.98.0
 

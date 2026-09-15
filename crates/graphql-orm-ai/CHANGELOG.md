@@ -20,6 +20,15 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [0.98.0] - 2026-09-15
 
+### Added
+
+Optional `AiCapabilityDiscoveryBroker::with_discovery_cache` retains bounded
+principal/session-specific discovery metadata across fenced runs for up to seven days.
+A cached candidate can be described without repeating discovery. Current index fingerprints,
+principal rehydration and host policy are checked before a fresh run-bound execution handle
+is issued. Cache expiry, eviction or process restart requires discovery again. No data migration
+or GraphQL contract change is required; the cache is disabled by default.
+
 ### Fixed
 
 Conversation bootstrap now includes nullable `AiConversationRunSummary::failure_disposition`
