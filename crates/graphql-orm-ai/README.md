@@ -369,7 +369,7 @@ contracts, and security checks.
 ### Discovery reuse across runs
 
 A long-lived `AiCapabilityDiscoveryBroker` may enable `with_discovery_cache(ttl, maximum_searches)`
-to retain discovery metadata for the same principal and AI session across runs. This avoids
+to retain `dispatch_discover` results for the same principal and AI session across fixed-broker runs. This avoids
 repeating model-driven discovery when catalogue fingerprints are unchanged. Cached descriptions
 still rehydrate current principals and issue fresh run-bound execution handles. Permissions,
 loaded handles and application results are not cache entries. The cache is bounded, process-local,
