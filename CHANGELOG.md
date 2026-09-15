@@ -14,6 +14,16 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.31.1 - 2026-09-15
+
+Companion macros crate: `graphql-orm-macros` **0.31.1** (version alignment only).
+
+- Upgrade the optional SQL Server notification parser to quick-xml 0.41, which
+  fixes RUSTSEC-2026-0194 and RUSTSEC-2026-0195. The existing 16 KiB notification
+  bound, plain-reader parsing and explicit Broker authority remain unchanged.
+- No public API, generated GraphQL, persisted schema or data migration changes.
+  The independently distributed router retains its separate dependency review.
+
 ## 0.31.0 - 2026-09-07
 
 Companion macros crate: `graphql-orm-macros` **0.31.0** (version alignment only).
