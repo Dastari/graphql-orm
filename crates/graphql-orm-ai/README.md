@@ -3,7 +3,7 @@ title: "graphql-orm-ai"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-01
+last_reviewed: 2026-09-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -141,6 +141,17 @@ rehydrates current authority at open, event and adoption boundaries. See
 [durable bounded subscription waits](docs/durable-subscription-waits.md).
 
 ## Session reliability
+
+Hosts can opt into `AiRunAuthorization` on session submission and explicit retry.
+Its trusted `AiRunAuthorizationIssuer` checks authoritative active-session state and
+issues a bounded new-run deadline without changing the browser credential. The runtime
+requires a still-live submitting user credential, unchanged identity/resource bindings,
+and a deadline within 24 hours; the host must impose its tighter policy and session
+expiry. This never refreshes existing runs, caches permissions, or replaces current
+principal checks. Discovery metadata ignores only the reference deadline in its cache
+key, so fresh run admission can reuse it; loaded execution handles still bind the full
+reference and deadline. The default retains the original credential deadline. See
+[MIGRATION.md](MIGRATION.md#0982) for the admission and persistence contract.
 
 One bounded `aiConversationBootstrap` snapshot plus durable event replay is the
 supported way to open a conversation. Its watermark is a **resume floor**:

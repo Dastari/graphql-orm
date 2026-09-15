@@ -816,7 +816,7 @@ impl AiCapabilityDiscoveryBroker {
         let mut entries = cache.entries.lock().unwrap_or_else(PoisonError::into_inner);
         entries.retain(|entry| entry.expires_at > now);
         entries.push_back(CachedCapabilityDiscovery {
-            principal_fingerprint: principal_reference_fingerprint(principal_reference),
+            principal_fingerprint: discovery_reference_fingerprint(principal_reference),
             session_id: run.session_id,
             search: search.clone(),
             expires_at: now + cache.ttl,
@@ -835,7 +835,7 @@ impl AiCapabilityDiscoveryBroker {
     ) -> Option<AiCapabilityIndexSetSearchResult> {
         let cache = self.discovery_cache.as_ref()?;
         let now = self.clock.now();
-        let fingerprint = principal_reference_fingerprint(principal_reference);
+        let fingerprint = discovery_reference_fingerprint(principal_reference);
         let mut entries = cache.entries.lock().unwrap_or_else(PoisonError::into_inner);
         entries.retain(|entry| entry.expires_at > now);
         entries
@@ -1016,6 +1016,15 @@ fn verify_search_binding(
 
 fn valid_binding_value(value: &str) -> bool {
     !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
+}
+
+// Discovery metadata is reusable across freshly admitted work deadlines. Every
+// other principal binding remains part of the cache key. Loaded execution handles
+// deliberately retain the complete reference fingerprint, including its deadline.
+fn discovery_reference_fingerprint(reference: &PrincipalReference) -> String {
+    let mut identity = reference.clone();
+    identity.expires_at = None;
+    principal_reference_fingerprint(&identity)
 }
 
 fn principal_reference_fingerprint(reference: &PrincipalReference) -> String {
@@ -3298,7 +3307,8 @@ mod tests {
 
     #[tokio::test]
     async fn discovery_cache_reuses_metadata_across_runs_with_fresh_execution_fences() {
-        let fixture = DiscoveryCacheFixture::new(4);
+        let mut fixture = DiscoveryCacheFixture::new(4);
+        fixture.principal.expires_at = Some(fixture.clock.now() + Duration::minutes(75));
         let candidate = fixture.discover(&fixture.run).await;
         let first_session = DiscoveryCacheFixture::session();
         let first = fixture
@@ -3306,7 +3316,14 @@ mod tests {
             .dispatch_describe(&fixture.principal, &fixture.run, &first_session, &candidate)
             .await
             .expect("cached candidate describes in first run");
+        let mut changed_deadline = fixture.principal.clone();
+        changed_deadline.expires_at = Some(fixture.clock.now() + Duration::minutes(90));
+        assert!(matches!(fixture.broker.authorize_broker_execution(
+            &changed_deadline, &fixture.run, &first_session,
+            &json!({"loadedReference": first.loaded_reference(), "selections": ["records.id"]}),
+        ).await, Err(AiError::Forbidden)));
         fixture.clock.advance_seconds(3_600);
+        fixture.principal.expires_at = Some(fixture.clock.now() + Duration::minutes(75));
         let mut next_run = fixture.run.clone();
         next_run.run_id = AiRunId(Uuid::from_u128(200));
         next_run.attempt_id = Uuid::from_u128(201);

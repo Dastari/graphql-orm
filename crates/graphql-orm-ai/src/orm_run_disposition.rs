@@ -72,6 +72,7 @@ pub struct OrmAiRunDispositionService {
     principal_resolver: Arc<dyn CurrentPrincipalResolver>,
     clock: Arc<dyn Clock>,
     limits: AiRunDispositionLimits,
+    run_authorization: Option<Arc<crate::AiRunAuthorization>>,
 }
 
 impl OrmAiRunDispositionService {
@@ -93,7 +94,16 @@ impl OrmAiRunDispositionService {
             principal_resolver,
             clock,
             limits,
+            run_authorization: None,
         }
+    }
+
+    /// Opts explicit retries into the host's bounded run-authorization policy.
+    /// Acknowledgement never issues a new authorization or refreshes the source run.
+    #[must_use]
+    pub fn with_run_authorization(mut self, authorization: Arc<crate::AiRunAuthorization>) -> Self {
+        self.run_authorization = Some(authorization);
+        self
     }
 
     async fn resolve_current(
@@ -230,14 +240,20 @@ impl OrmAiRunDispositionService {
         }
         // The retry runs under the current principal, not the one the source
         // run captured. A stale reference must never be resurrected.
+        let retry_run_id = matches!(disposition, AiRunDisposition::Retried).then(Uuid::new_v4);
+        let reference = match (&self.run_authorization, retry_run_id) {
+            (Some(authorization), Some(retry_id)) => {
+                authorization.issue(principal, session_id, retry_id).await?
+            }
+            _ => current.reference().clone(),
+        };
         let principal_reference =
-            serde_json::to_value(current.reference()).map_err(|_| AiError::PersistenceFailed)?;
+            serde_json::to_value(reference).map_err(|_| AiError::PersistenceFailed)?;
         let (principal_kind, principal_subject) = principal_identity(current.principal());
         let principal_subject = principal_subject.to_owned();
 
         let event_id = Uuid::new_v4();
         let inbox_event_id = Uuid::new_v4();
-        let retry_run_id = matches!(disposition, AiRunDisposition::Retried).then(Uuid::new_v4);
         let event_type = match disposition {
             AiRunDisposition::Retried => "run_retry_queued",
             AiRunDisposition::Acknowledged => "run_failure_acknowledged",

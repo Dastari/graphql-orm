@@ -67,6 +67,7 @@ pub struct OrmAiSessionService {
     protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
     content_protector: Arc<dyn AiContentProtector>,
     limits: AiSessionServiceLimits,
+    run_authorization: Option<Arc<crate::AiRunAuthorization>>,
 }
 
 impl OrmAiSessionService {
@@ -83,6 +84,7 @@ impl OrmAiSessionService {
             protection_policy,
             content_protector,
             limits: AiSessionServiceLimits::default(),
+            run_authorization: None,
         }
     }
 
@@ -90,6 +92,14 @@ impl OrmAiSessionService {
     #[must_use]
     pub fn with_limits(mut self, limits: AiSessionServiceLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Opts new runs into the host's explicit, bounded run-authorization policy.
+    /// Existing runs and ordinary session reads retain their original authority.
+    #[must_use]
+    pub fn with_run_authorization(mut self, authorization: Arc<crate::AiRunAuthorization>) -> Self {
+        self.run_authorization = Some(authorization);
         self
     }
 
@@ -1282,8 +1292,16 @@ impl AiSessionService for OrmAiSessionService {
                 json!({"sessionId": input.session_id, "messageId": message_id, "runId": run_id}),
             )
             .await?;
+        let reference = match &self.run_authorization {
+            Some(authorization) => {
+                authorization
+                    .issue(principal, input.session_id, run_id)
+                    .await?
+            }
+            None => principal.reference(),
+        };
         let principal_reference =
-            serde_json::to_value(principal.reference()).map_err(|_| AiError::PersistenceFailed)?;
+            serde_json::to_value(reference).map_err(|_| AiError::PersistenceFailed)?;
         let (principal_kind, principal_subject) = principal_identity(principal);
         let principal_subject = principal_subject.to_owned();
         let line_count = input.text.lines().count().max(1) as i64;
