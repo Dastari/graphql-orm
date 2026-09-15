@@ -18,7 +18,7 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
-## [0.98.0] - 2026-09-15
+## [0.98.1] - 2026-09-15
 
 ### Added
 
@@ -28,6 +28,8 @@ A cached candidate can be described without repeating discovery. Current index f
 principal rehydration and host policy are checked before a fresh run-bound execution handle
 is issued. Cache expiry, eviction or process restart requires discovery again. No data migration
 or GraphQL contract change is required; the cache is disabled by default.
+
+## [0.98.0] - 2026-09-15
 
 ### Fixed
 
