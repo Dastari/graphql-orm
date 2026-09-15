@@ -314,8 +314,14 @@ def render_notes(manifest: dict[str, Any]) -> str:
         f"# {manifest['releaseId']}",
         "",
         "This is an immutable, Git-only release of the tested workspace package set.",
-        f"Consumers must pin the full commit `{manifest['source']['commit']}`.",
-        "Package tags are identity aids and do not replace the commit pin.",
+        "Consumers pin the annotated workspace tag "
+        f"(`tag = \"{manifest['releaseId']}\"`) as one Git reference for every "
+        "package in this workspace, and record the commit "
+        f"`{manifest['source']['commit']}` from the attached manifest in their own "
+        "reviewed pin record.",
+        "A published workspace tag is annotated and is never moved.",
+        "Package tags identify package versions within this release and are not "
+        "pinning selectors.",
         "",
         "## Packages",
         "",
