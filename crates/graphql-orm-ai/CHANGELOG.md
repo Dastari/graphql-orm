@@ -18,7 +18,7 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
-## [0.98.0] - 2026-09-15
+## [0.98.2] - 2026-09-15
 
 ### Added
 
@@ -28,6 +28,16 @@ of the submitting access credential. Session and disposition services remain opt
 all current-authority checks remain mandatory. Existing runs are never extended.
 The persistent semantic module advances to **0.64.1**, without DDL or data backfill.
 
+### Fixed
+
+Discovery-cache identity excludes the work deadline while preserving all other principal
+bindings. Freshly admitted runs can reuse metadata; loaded execution handles still bind
+the complete reference, and describe continues to check current expiry and authority.
+
+## [0.98.1] - 2026-09-15
+
+### Added
+
 Optional `AiCapabilityDiscoveryBroker::with_discovery_cache` retains bounded
 principal/session-specific discovery metadata across fenced runs for up to seven days.
 A cached candidate can be described without repeating discovery. Current index fingerprints,
@@ -35,11 +45,9 @@ principal rehydration and host policy are checked before a fresh run-bound execu
 is issued. Cache expiry, eviction or process restart requires discovery again. No data migration
 or GraphQL contract change is required; the cache is disabled by default.
 
-### Fixed
+## [0.98.0] - 2026-09-15
 
-Discovery-cache identity excludes the work deadline while preserving all other principal
-bindings. Freshly admitted runs can reuse metadata; loaded execution handles still bind
-the complete reference, and describe continues to check current expiry and authority.
+### Fixed
 
 Conversation bootstrap now includes nullable `AiConversationRunSummary::failure_disposition`
 (`FailureDisposition` with Pascal naming), using the existing `AiRunDisposition`
