@@ -18,6 +18,22 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.98.2] - 2026-09-15
+
+### Added
+
+Optional `AiRunAuthorization` and `AiRunAuthorizationIssuer` let a trusted host admit
+a new message or explicit retry with a bounded active-session deadline independent
+of the submitting access credential. Session and disposition services remain opt-in;
+all current-authority checks remain mandatory. Existing runs are never extended.
+The persistent semantic module advances to **0.64.1**, without DDL or data backfill.
+
+### Fixed
+
+Discovery-cache identity excludes the work deadline while preserving all other principal
+bindings. Freshly admitted runs can reuse metadata; loaded execution handles still bind
+the complete reference, and describe continues to check current expiry and authority.
+
 ## [0.98.1] - 2026-09-15
 
 ### Added

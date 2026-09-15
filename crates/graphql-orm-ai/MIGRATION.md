@@ -19,6 +19,31 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.98.2
+
+Hosts may install one `Arc<AiRunAuthorization>` with `with_run_authorization` on
+`OrmAiSessionService` and `OrmAiRunDispositionService`. Implement the issuer using
+a trusted authentication boundary that verifies the live authoritative user session,
+preserves every reference binding, caps the deadline by session expiry and host policy,
+and never extends interactive idle time. The wrapper admits only still-live user
+credentials and finite deadlines of at most 24 hours. Delegated and sessionless grants
+are rejected. No bearer or permission snapshot enters run storage.
+
+Issuance happens only for new submissions and explicit retries, never acknowledgement
+or automatic recovery of an old run. Per-tool, provider, checkpoint and current-principal
+checks are unchanged; logout and permission changes remain authoritative. Without an
+issuer, the original credential deadline is preserved as before.
+
+The optional discovery cache ignores only `expires_at` when matching a principal's
+metadata, allowing a new work deadline to reuse discovery. All other bindings remain
+in the cache key. Loaded execution references still include the exact expiry, and
+current-principal checks remain mandatory even on a cache hit.
+
+Schema module **0.64.1** records these optional persistent deadline semantics. There
+is no data migration, DDL, table, column, index, constraint, GraphQL SDL or protected
+payload format change. Existing rows retain their deadlines; backups and restores do
+not acquire new authority. Review the host issuer separately before opting in.
+
 ## 0.98.1
 
 Hosts may opt into `AiCapabilityDiscoveryBroker::with_discovery_cache(ttl, maximum_searches)`
