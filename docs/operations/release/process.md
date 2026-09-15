@@ -172,7 +172,7 @@ standalone notice files were unavailable. The archives must match Cargo.lock
 checksums. The generated inventory preserves original license expressions,
 source URLs, file hashes, and source-only notice dispositions; it contains no
 builder-local source paths. The bundle also retains the matching Rust standard-library
-copyright notices from the toolchain's `rust-docs` component.
+copyright notices shipped with the matching Rust compiler installation.
 
 `config/router-notice-review.v1.json` binds these notice-source exceptions to
 the lockfile hash, SBOM component set, target, and features. A dependency/profile

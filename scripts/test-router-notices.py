@@ -126,7 +126,7 @@ class RouterNoticeTests(unittest.TestCase):
         self.assertEqual((self.output / result['notices'][0]['path']).read_bytes(), source.read_bytes())
         self.assertEqual(result['compiler'], 'rustc fixture')
         source.unlink()
-        with self.assertRaisesRegex(ValueError, 'rust-docs'):
+        with self.assertRaisesRegex(ValueError, 'compiler installation'):
             notices.collect_rust_notices(sysroot, self.output, 'rustc fixture\n')
 
     def test_rejects_unsafe_names_and_unreviewed_profiles(self):

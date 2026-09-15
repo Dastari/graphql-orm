@@ -153,7 +153,7 @@ def generate(root, metadata, sbom, review, output, cargo_home):
 def collect_rust_notices(sysroot, output, version):
     source = sysroot / 'share/doc/rust/COPYRIGHT-library.html'
     if not source.is_file():
-        raise ValueError('Rust standard-library notices missing; install the matching rust-docs component')
+        raise ValueError('matching Rust compiler installation lacks standard-library notices')
     destination = output / 'toolchain/COPYRIGHT-library.html'
     destination.parent.mkdir(parents=True, exist_ok=True)
     data = source.read_bytes()

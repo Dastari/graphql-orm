@@ -394,7 +394,6 @@ jobs:
           SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
           export SOURCE_DATE_EPOCH
           cargo install cargo-cyclonedx --version 0.5.9 --locked
-          rustup component add rust-docs
           cargo build -p graphql-orm-router --release --features auth-agql --locked
           cargo cyclonedx \
             --manifest-path crates/graphql-orm-router/Cargo.toml \
