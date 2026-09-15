@@ -37,6 +37,10 @@ or GraphQL contract change is required; the cache is disabled by default.
 
 ### Fixed
 
+Discovery-cache identity excludes the work deadline while preserving all other principal
+bindings. Freshly admitted runs can reuse metadata; loaded execution handles still bind
+the complete reference, and describe continues to check current expiry and authority.
+
 Conversation bootstrap now includes nullable `AiConversationRunSummary::failure_disposition`
 (`FailureDisposition` with Pascal naming), using the existing `AiRunDisposition`
 enum. Acknowledged or retried failures retain their source terminal row for
