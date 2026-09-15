@@ -713,6 +713,21 @@ impl AiLoadedCapabilityBinding {
     }
 }
 
+#[derive(Clone)]
+struct CachedCapabilityDiscovery {
+    principal_fingerprint: String,
+    session_id: AiSessionId,
+    search: AiCapabilityIndexSetSearchResult,
+    expires_at: OffsetDateTime,
+}
+
+#[derive(Clone)]
+struct CapabilityDiscoveryCache {
+    entries: Arc<Mutex<VecDeque<CachedCapabilityDiscovery>>>,
+    ttl: Duration,
+    maximum_searches: usize,
+}
+
 /// Discovery and loaded-capability broker with fresh authority checks.
 #[derive(Clone)]
 pub struct AiCapabilityDiscoveryBroker {
@@ -721,6 +736,7 @@ pub struct AiCapabilityDiscoveryBroker {
     authority: Arc<dyn AiCapabilityAuthorityPolicy>,
     clock: Arc<dyn Clock>,
     loaded_ttl: Duration,
+    discovery_cache: Option<CapabilityDiscoveryCache>,
 }
 
 impl AiCapabilityDiscoveryBroker {
@@ -747,7 +763,93 @@ impl AiCapabilityDiscoveryBroker {
             authority,
             clock,
             loaded_ttl,
+            discovery_cache: None,
         })
+    }
+
+    /// Enables bounded process-local reuse of discovery candidates across runs.
+    ///
+    /// Cache entries belong to one principal reference and AI session. Only
+    /// authority-neutral discovery metadata is retained: describe still checks
+    /// the current index, rehydrates the principal and authorizes the candidate,
+    /// then issues a new short-lived binding for the current fenced run.
+    /// Execution bindings, permissions and tool results are never cached here.
+    /// Cloned brokers share this cache; replacing the broker starts it empty.
+    /// Entries expire after an absolute TTL and the oldest searches are evicted
+    /// at capacity. The cache is disabled unless this builder is called.
+    ///
+    /// # Errors
+    ///
+    /// Rejects TTLs outside one second through seven days or capacities outside
+    /// one through 1,024 searches. Each search retains the canonical search bounds.
+    pub fn with_discovery_cache(
+        mut self,
+        ttl: Duration,
+        maximum_searches: u16,
+    ) -> Result<Self, AiError> {
+        if ttl < Duration::seconds(1)
+            || ttl > Duration::days(7)
+            || !(1..=1_024).contains(&maximum_searches)
+        {
+            return Err(AiError::InvalidConfiguration(
+                "capability discovery cache bounds are invalid".to_owned(),
+            ));
+        }
+        self.discovery_cache = Some(CapabilityDiscoveryCache {
+            entries: Arc::new(Mutex::new(VecDeque::new())),
+            ttl,
+            maximum_searches: usize::from(maximum_searches),
+        });
+        Ok(self)
+    }
+
+    fn cache_discovery(
+        &self,
+        principal_reference: &PrincipalReference,
+        run: &AiCapabilityRunBinding,
+        search: &AiCapabilityIndexSetSearchResult,
+    ) {
+        let Some(cache) = &self.discovery_cache else {
+            return;
+        };
+        let now = self.clock.now();
+        let mut entries = cache.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        entries.retain(|entry| entry.expires_at > now);
+        entries.push_back(CachedCapabilityDiscovery {
+            principal_fingerprint: principal_reference_fingerprint(principal_reference),
+            session_id: run.session_id,
+            search: search.clone(),
+            expires_at: now + cache.ttl,
+        });
+        while entries.len() > cache.maximum_searches {
+            entries.pop_front();
+        }
+    }
+
+    fn cached_discovery(
+        &self,
+        principal_reference: &PrincipalReference,
+        run: &AiCapabilityRunBinding,
+        capability_id: &AiToolId,
+        candidate_fingerprint: &str,
+    ) -> Option<AiCapabilityIndexSetSearchResult> {
+        let cache = self.discovery_cache.as_ref()?;
+        let now = self.clock.now();
+        let fingerprint = principal_reference_fingerprint(principal_reference);
+        let mut entries = cache.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        entries.retain(|entry| entry.expires_at > now);
+        entries
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.principal_fingerprint == fingerprint
+                    && entry.session_id == run.session_id
+                    && entry.search.candidates.iter().any(|candidate| {
+                        &candidate.id == capability_id
+                            && candidate.entry_fingerprint == candidate_fingerprint
+                    })
+            })
+            .map(|entry| entry.search.clone())
     }
 
     /// Searches current model-safe metadata after rehydrating the principal
@@ -1114,7 +1216,7 @@ struct BrokerSessionState {
 /// candidate. It is never a durable authority and never substitutes for the
 /// published default-deny catalogue: losing it fails the next describe or
 /// execute closed with a bounded retryable stale-selection outcome and the
-/// model rediscovers.
+/// model rediscovers unless the broker has a matching unexpired discovery cache entry.
 #[derive(Clone, Debug)]
 pub struct AiCapabilityBrokerSession {
     inner: Arc<Mutex<BrokerSessionState>>,
@@ -1646,6 +1748,7 @@ impl AiCapabilityDiscoveryBroker {
                 .map(candidate_value)
                 .collect::<Vec<_>>(),
         });
+        self.cache_discovery(principal_reference, run, &result);
         session.record_search(result);
         Ok(value)
     }
@@ -1710,8 +1813,9 @@ impl AiCapabilityDiscoveryBroker {
 
     /// Dispatches one frozen `graphql.capabilities.describe` call.
     ///
-    /// The candidate must come from a discovery result retained for this run
-    /// and its fingerprint must still match. A drifted index, an unknown
+    /// The candidate must come from discovery retained for this run or, when
+    /// enabled, the unexpired cache for this principal and AI session. Its
+    /// fingerprint must still match. A drifted index, an unknown
     /// identifier, and an identifier never returned by discovery are all
     /// reported as one bounded retryable stale selection, so describe cannot be
     /// used to probe for capabilities the current principal cannot see.
@@ -1736,6 +1840,14 @@ impl AiCapabilityDiscoveryBroker {
         let capability_id = AiToolId::parse(parsed.capability_id).map_err(|_| stale_selection())?;
         let search = session
             .candidate_search(&capability_id, &parsed.candidate_fingerprint)
+            .or_else(|| {
+                self.cached_discovery(
+                    principal_reference,
+                    run,
+                    &capability_id,
+                    &parsed.candidate_fingerprint,
+                )
+            })
             .ok_or_else(stale_selection)?;
         let indexes = self.current_indexes.current_index_set(run)?;
         verify_search_binding(&indexes, &search).map_err(|_| stale_selection())?;
@@ -3124,6 +3236,277 @@ mod tests {
                 .as_str()
                 .is_some_and(|description| description.contains("only when planSchema exposes"))
         );
+    }
+
+    struct DiscoveryCacheFixture {
+        broker: AiCapabilityDiscoveryBroker,
+        principal: PrincipalReference,
+        run: AiCapabilityRunBinding,
+        clock: Arc<FixedClock>,
+        authority: Arc<Authority>,
+        index: Arc<CurrentIndex>,
+    }
+
+    impl DiscoveryCacheFixture {
+        fn new(capacity: u16) -> Self {
+            let principal = principal();
+            let reference = principal.reference();
+            let clock = Arc::new(FixedClock::new(OffsetDateTime::UNIX_EPOCH));
+            let authority = Arc::new(Authority {
+                allowed: AtomicBool::new(true),
+                policy_fingerprint: RwLock::new("current-policy-v1".to_owned()),
+            });
+            let index = Arc::new(CurrentIndex(RwLock::new(generated_index(
+                "target-policy-v1",
+            ))));
+            let broker = AiCapabilityDiscoveryBroker::new(
+                Arc::new(Resolver(principal)),
+                index.clone(),
+                authority.clone(),
+                clock.clone(),
+                Duration::seconds(30),
+            )
+            .expect("broker")
+            .with_discovery_cache(Duration::days(1), capacity)
+            .expect("cache");
+            Self {
+                broker,
+                principal: reference,
+                run: run_binding(),
+                clock,
+                authority,
+                index,
+            }
+        }
+
+        async fn discover(&self, run: &AiCapabilityRunBinding) -> serde_json::Value {
+            let result = self.broker.dispatch_discover(
+                &self.principal, run, &Self::session(),
+                &json!({"text": "reviewed application record", "kind": "generated_query", "maximumResults": 1}),
+            ).await.expect("discovery");
+            json!({
+                "capabilityId": result["candidates"][0]["capabilityId"],
+                "candidateFingerprint": result["candidates"][0]["candidateFingerprint"]
+            })
+        }
+
+        fn session() -> AiCapabilityBrokerSession {
+            AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default())
+                .expect("run state")
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_cache_reuses_metadata_across_runs_with_fresh_execution_fences() {
+        let fixture = DiscoveryCacheFixture::new(4);
+        let candidate = fixture.discover(&fixture.run).await;
+        let first_session = DiscoveryCacheFixture::session();
+        let first = fixture
+            .broker
+            .dispatch_describe(&fixture.principal, &fixture.run, &first_session, &candidate)
+            .await
+            .expect("cached candidate describes in first run");
+        fixture.clock.advance_seconds(3_600);
+        let mut next_run = fixture.run.clone();
+        next_run.run_id = AiRunId(Uuid::from_u128(200));
+        next_run.attempt_id = Uuid::from_u128(201);
+        let next_session = DiscoveryCacheFixture::session();
+        let next = fixture
+            .broker
+            .clone()
+            .dispatch_describe(&fixture.principal, &next_run, &next_session, &candidate)
+            .await
+            .expect("one-hour-old candidate describes without another discovery");
+        assert_eq!(next_session.amplification().discover_calls, 0);
+        assert_eq!(next_session.amplification().describe_calls, 1);
+        assert_ne!(first.loaded_reference(), next.loaded_reference());
+        let execute =
+            json!({"loadedReference": next.loaded_reference(), "selections": ["records.id"]});
+        fixture
+            .broker
+            .authorize_broker_execution(&fixture.principal, &next_run, &next_session, &execute)
+            .await
+            .expect("new run has fresh execution authority");
+        let old_execute =
+            json!({"loadedReference": first.loaded_reference(), "selections": ["records.id"]});
+        assert!(matches!(
+            fixture
+                .broker
+                .authorize_broker_execution(
+                    &fixture.principal,
+                    &next_run,
+                    &next_session,
+                    &old_execute,
+                )
+                .await,
+            Err(AiError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            fixture
+                .broker
+                .authorize_broker_execution(
+                    &fixture.principal,
+                    &fixture.run,
+                    &next_session,
+                    &execute,
+                )
+                .await,
+            Err(AiError::Forbidden)
+        ));
+        fixture.authority.allowed.store(false, Ordering::SeqCst);
+        assert!(matches!(
+            fixture
+                .broker
+                .authorize_broker_execution(&fixture.principal, &next_run, &next_session, &execute,)
+                .await,
+            Err(AiError::Forbidden)
+        ));
+        assert!(matches!(
+            fixture
+                .broker
+                .dispatch_describe(
+                    &fixture.principal,
+                    &next_run,
+                    &DiscoveryCacheFixture::session(),
+                    &candidate,
+                )
+                .await,
+            Err(AiError::Forbidden)
+        ));
+    }
+
+    #[tokio::test]
+    async fn discovery_cache_isolates_principals_sessions_and_rejects_index_drift() {
+        let fixture = DiscoveryCacheFixture::new(4);
+        let candidate = fixture.discover(&fixture.run).await;
+        let mut other_run = fixture.run.clone();
+        other_run.session_id = AiSessionId(Uuid::from_u128(999));
+        assert!(matches!(
+            fixture
+                .broker
+                .dispatch_describe(
+                    &fixture.principal,
+                    &other_run,
+                    &DiscoveryCacheFixture::session(),
+                    &candidate,
+                )
+                .await,
+            Err(AiError::InvalidInput(_))
+        ));
+        let mut other = principal();
+        if let AuthPrincipal::User(user) = &mut other {
+            user.user_id = "another-user".to_owned();
+        }
+        assert!(matches!(
+            fixture
+                .broker
+                .dispatch_describe(
+                    &other.reference(),
+                    &fixture.run,
+                    &DiscoveryCacheFixture::session(),
+                    &candidate,
+                )
+                .await,
+            Err(AiError::InvalidInput(_))
+        ));
+        let mut forged = candidate.clone();
+        forged["candidateFingerprint"] = json!("f".repeat(64));
+        assert!(matches!(
+            fixture
+                .broker
+                .dispatch_describe(
+                    &fixture.principal,
+                    &fixture.run,
+                    &DiscoveryCacheFixture::session(),
+                    &forged,
+                )
+                .await,
+            Err(AiError::InvalidInput(_))
+        ));
+        *fixture.index.0.write().expect("index") = generated_index("target-policy-v2");
+        assert!(matches!(
+            fixture
+                .broker
+                .dispatch_describe(
+                    &fixture.principal,
+                    &fixture.run,
+                    &DiscoveryCacheFixture::session(),
+                    &candidate,
+                )
+                .await,
+            Err(AiError::InvalidInput(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn discovery_cache_expires_evicts_and_stays_optional() {
+        let fixture = DiscoveryCacheFixture::new(1);
+        let candidate = fixture.discover(&fixture.run).await;
+        fixture.clock.advance_seconds(86_400);
+        assert!(matches!(
+            fixture
+                .broker
+                .dispatch_describe(
+                    &fixture.principal,
+                    &fixture.run,
+                    &DiscoveryCacheFixture::session(),
+                    &candidate,
+                )
+                .await,
+            Err(AiError::InvalidInput(_))
+        ));
+        fixture.discover(&fixture.run).await;
+        let mut other_run = fixture.run.clone();
+        other_run.session_id = AiSessionId(Uuid::from_u128(999));
+        fixture.discover(&other_run).await;
+        assert!(matches!(
+            fixture
+                .broker
+                .dispatch_describe(
+                    &fixture.principal,
+                    &fixture.run,
+                    &DiscoveryCacheFixture::session(),
+                    &candidate,
+                )
+                .await,
+            Err(AiError::InvalidInput(_))
+        ));
+        fixture
+            .broker
+            .dispatch_describe(
+                &fixture.principal,
+                &other_run,
+                &DiscoveryCacheFixture::session(),
+                &candidate,
+            )
+            .await
+            .expect("newest entry survives eviction");
+        let mut uncached = fixture.broker.clone();
+        uncached.discovery_cache = None;
+        assert!(matches!(
+            uncached
+                .dispatch_describe(
+                    &fixture.principal,
+                    &other_run,
+                    &DiscoveryCacheFixture::session(),
+                    &candidate,
+                )
+                .await,
+            Err(AiError::InvalidInput(_))
+        ));
+        for (ttl, capacity) in [
+            (Duration::ZERO, 1),
+            (Duration::days(8), 1),
+            (Duration::days(1), 0),
+            (Duration::days(1), 1_025),
+        ] {
+            assert!(
+                uncached
+                    .clone()
+                    .with_discovery_cache(ttl, capacity)
+                    .is_err()
+            );
+        }
     }
 
     #[tokio::test]

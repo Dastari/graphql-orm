@@ -365,3 +365,12 @@ contracts, and security checks.
 - [Read-only tools](docs/read-only-tool-loop.md), [supervised mutations](docs/supervised-tool-loop.md), and [provider turns](docs/worker-provider-turn.md)
 - [Recovery and restore](docs/recovery-and-restore.md)
 - [Migration guide](MIGRATION.md) and [changelog](CHANGELOG.md)
+
+### Discovery reuse across runs
+
+A long-lived `AiCapabilityDiscoveryBroker` may enable `with_discovery_cache(ttl, maximum_searches)`
+to retain discovery metadata for the same principal and AI session across runs. This avoids
+repeating model-driven discovery when catalogue fingerprints are unchanged. Cached descriptions
+still rehydrate current principals and issue fresh run-bound execution handles. Permissions,
+loaded handles and application results are not cache entries. The cache is bounded, process-local,
+disabled by default, and expires entries after at most seven days; see [MIGRATION.md](MIGRATION.md).
