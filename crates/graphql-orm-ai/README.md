@@ -3,7 +3,7 @@ title: "graphql-orm-ai"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-01
+last_reviewed: 2026-09-15
 review_by: 2027-02-01
 supersedes: []
 ---
