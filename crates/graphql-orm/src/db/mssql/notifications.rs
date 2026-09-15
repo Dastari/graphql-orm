@@ -236,10 +236,11 @@ fn parse_notification(xml: &str) -> Option<MssqlQueryNotificationMessage> {
                 state = 1;
                 for attr in element.attributes() {
                     let attr = attr.ok()?;
-                    let value = attr
-                        .decode_and_unescape_value(reader.decoder())
-                        .ok()?
-                        .into_owned();
+                    // Preserve the notification grammar's rejection of literal control
+                    // characters. XML attribute normalization would turn tabs/newlines
+                    // into spaces before the existing validation can reject them.
+                    let decoded = reader.decoder().decode(&attr.value).ok()?;
+                    let value = quick_xml::escape::unescape(&decoded).ok()?.into_owned();
                     if value.len() > 128 || value.chars().any(char::is_control) {
                         return None;
                     }
@@ -373,6 +374,21 @@ mod tests {
                 parse_notification(&invalid).is_none(),
                 "accepted malformed notification"
             );
+        }
+    }
+
+    #[test]
+    fn attribute_decoding_preserves_control_character_rejection() {
+        let valid = r#"<QueryNotification type="change" source="d&#97;ta" info="insert" id="safe"><Message>id</Message></QueryNotification>"#;
+        assert_eq!(
+            parse_notification(valid).unwrap().kind,
+            MssqlQueryNotificationKind::Change
+        );
+        // Even ignored SQL Server metadata attributes retain the same validation.
+        // Normalizing literal whitespace before validation would accept these.
+        for value in ["a\tb", "a\nb", "a\rb", "a&#9;b", "a&#xA;b", "a&#13;b"] {
+            let invalid = valid.replace("id=\"safe\"", &format!("id=\"{value}\""));
+            assert!(parse_notification(&invalid).is_none());
         }
     }
 

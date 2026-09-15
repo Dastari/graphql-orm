@@ -3075,7 +3075,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.31.0"
+version = "0.31.1"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -3088,7 +3088,7 @@ dependencies = [
  "graphql-orm-macros",
  "graphql-orm-operation-catalog",
  "graphql-orm-router-protocol",
- "quick-xml",
+ "quick-xml 0.41.0",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -3173,7 +3173,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.31.0"
+version = "0.31.1"
 dependencies = [
  "convert_case 0.7.1",
  "proc-macro2",
@@ -5722,7 +5722,7 @@ dependencies = [
  "md-5 0.10.6",
  "parking_lot",
  "percent-encoding",
- "quick-xml",
+ "quick-xml 0.39.4",
  "rand 0.10.1",
  "reqwest 0.12.28",
  "ring",
@@ -6724,6 +6724,15 @@ checksum = "cdcc8dd4e2f670d309a5f0e83fe36dfdc05af317008fea29144da1a2ac858e5e"
 dependencies = [
  "memchr",
  "serde",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

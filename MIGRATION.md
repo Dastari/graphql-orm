@@ -13,6 +13,15 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.31.0 to 0.31.1: patched SQL Server XML dependency
+
+Adopt runtime and macros 0.31.1 together from one reviewed workspace release.
+The MSSQL notification parser now uses quick-xml 0.41. Existing input-size,
+notification-shape and separately authorized Broker-connection requirements
+remain in place. No Rust call-site, GraphQL SDL, persisted-schema or database
+migration is required. This dependency update does not grant queue consumption,
+DML or schema-management authority to an existing read-only connection.
+
 ## 0.30.0 to 0.31.0: native SQL Server query notifications
 
 Adopt the runtime and macros 0.31.0 together from one reviewed full Git revision.
