@@ -58,7 +58,8 @@ cargo check -p graphql-orm --no-default-features --features "sqlite mssql"
 
 Use a checked-in workspace path dependency for another package in this
 repository. The root `Cargo.lock` is shared, and `agql-auth` remains an
-external exact-revision dependency.
+external Git dependency whose full resolved commit is retained in the release
+manifest, including when selected by its published version tag.
 
 For consumer dependency configuration and feature descriptions, see the
 [ORM reference](../reference/graphql-orm/backends.md).

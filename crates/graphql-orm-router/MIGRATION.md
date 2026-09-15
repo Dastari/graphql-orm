@@ -3,12 +3,22 @@ title: graphql-orm-router migration guide
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-09-15
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router migration guide
+
+## Workspace release dependency alignment
+
+For workspace releases selecting `agql-auth` v0.19.1, direct consumers must use
+`tag = "v0.19.1"`, locked to `96bafbf21adbc7ad963729e1e981feaba5debe90`.
+A tag and a revision selector produce different Cargo sources even at the same
+commit. The MIT-licensed library source is unchanged from the historical revision below;
+no configuration or stored-data migration is needed. The workspace lockfile
+also updates h2 and rustls to their compatible security fixes; rebuild router
+binaries from the reviewed lockfile.
 
 ## 0.5.0 to 0.5.1
 

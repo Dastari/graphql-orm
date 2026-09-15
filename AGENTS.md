@@ -19,8 +19,9 @@ under a crate add package-local invariants.
   `graphql-orm-operation-catalog`, `graphql-orm-storage`,
   `graphql-orm-backup`, `graphql-orm-ai-tool-profiles`, `graphql-orm-ai`,
   `graphql-orm-router-protocol`, and `graphql-orm-router`.
-- `agql-auth` remains an external exact-revision dependency. Do not modify its
-  repository unless the task explicitly includes it.
+- `agql-auth` remains external. Adopt a reviewed full revision or a published
+  version release tag whose full locked commit is retained in the release manifest.
+  Do not modify its repository unless the task explicitly includes it.
 - Keep the packages independently consumable. Do not turn AI, backup, or
   storage into features or optional dependencies of the core ORM crate.
 - Preserve this acyclic dependency direction:

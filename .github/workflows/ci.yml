@@ -36,6 +36,7 @@ jobs:
         run: |
           python3 scripts/check-release-state.py
           scripts/check-release-manifest.sh
+          python3 scripts/test-router-notices.py
       - name: Check PR documentation impact
         if: github.event_name == 'pull_request'
         env:
