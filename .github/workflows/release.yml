@@ -108,6 +108,7 @@ jobs:
           python3 scripts/generate-workspace-inventory.py --check
           python3 scripts/check-release-state.py
           scripts/check-release-manifest.sh
+          python3 scripts/test-router-notices.py
           scripts/check-workspace-dependencies.sh
           cargo fmt --all -- --check
 
@@ -393,22 +394,34 @@ jobs:
           SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
           export SOURCE_DATE_EPOCH
           cargo install cargo-cyclonedx --version 0.5.9 --locked
+          rustup component add rust-docs
           cargo build -p graphql-orm-router --release --features auth-agql --locked
           cargo cyclonedx \
             --manifest-path crates/graphql-orm-router/Cargo.toml \
             --format json \
             --spec-version 1.5 \
-            --features auth-agql
+            --features auth-agql \
+            --target x86_64-unknown-linux-gnu
           install -m 0755 target/release/graphql-orm-router release-dist/graphql-orm-router
           cp crates/graphql-orm-router/graphql-orm-router.cdx.json \
             release-dist/graphql-orm-router.cdx.json
+          cargo metadata --format-version 1 --locked \
+            --filter-platform x86_64-unknown-linux-gnu \
+            --features graphql-orm-router/auth-agql > release-dist/router-metadata.json
+          python3 scripts/generate-router-notices.py \
+            --metadata release-dist/router-metadata.json \
+            --sbom release-dist/graphql-orm-router.cdx.json \
+            --output release-dist/router-notices \
+            --rust-sysroot "$(rustc --print sysroot)"
+          rm release-dist/router-metadata.json
           cp LICENSE release-dist/LICENSE
           printf '%s\n' "${ROUTER_APPROVAL}" > release-dist/router-distribution-approval.txt
           tar -C release-dist --sort=name --mtime="@${SOURCE_DATE_EPOCH}" \
             --owner=0 --group=0 --numeric-owner \
             -czf "release-dist/${RELEASE_ID}-graphql-orm-router-x86_64-unknown-linux-gnu.tar.gz" \
             graphql-orm-router graphql-orm-router.cdx.json LICENSE \
-            router-distribution-approval.txt
+            router-distribution-approval.txt router-notices
+          rm -r -- release-dist/router-notices
           rm release-dist/graphql-orm-router release-dist/graphql-orm-router.cdx.json \
             release-dist/LICENSE release-dist/router-distribution-approval.txt
       - name: Create checksums

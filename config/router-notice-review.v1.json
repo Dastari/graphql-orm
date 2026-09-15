@@ -1,0 +1,393 @@
+{
+  "formatVersion": 1,
+  "cargoLockSha256": "57037f90a41b6a85def58b93c278959c60cc483d0a731d09cc636ea7f8391dd0",
+  "componentsSha256": "c27d4628abfb737a9a3c916e63cf12c174c57ef0cb2672403f06d05eb160a211",
+  "target": "x86_64-unknown-linux-gnu",
+  "features": [
+    "auth-agql"
+  ],
+  "supplements": [
+    {
+      "name": "Inflector",
+      "version": "0.11.4",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/whatisinternet/inflector/a4a95eac75043f4bffb127c7c8ec886b5b106053/LICENSE.md",
+          "sha256": "03d1bd5bfbee8d44651e7f57faf9e5b4eda4233f0d4eda36a716f2f0533d230b"
+        }
+      ]
+    },
+    {
+      "name": "alloc-stdlib",
+      "version": "0.2.4",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/ae42d22078b98549e987d2f03d12df7b984fde47/LICENSE",
+          "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"
+        }
+      ]
+    },
+    {
+      "name": "async-dropper-simple",
+      "version": "0.2.6",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/t3hmrman/async-dropper/a6ccaef55e3907dfc1376f70db517abeaf5c764f/LICENSE",
+          "sha256": "405a9a2b3ad77707786386959b65a8aaa41539b463eeaae28e8bdc971b15a82c"
+        }
+      ]
+    },
+    {
+      "name": "base64-simd",
+      "version": "0.8.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/Nugine/simd/d74c030d9dc4f3cae02146d1f497ff62726ef09a/LICENSE",
+          "sha256": "71674605ec4c087fe9eb534e3e4f9e26eb2e4aabcd76a29fd156c6a844d44b3d"
+        }
+      ]
+    },
+    {
+      "name": "cynic-parser",
+      "version": "0.11.2",
+      "notices": [
+        {
+          "url": "https://codeberg.org/obmarg/cynic/raw/commit/adc3685ebae599e713e49ee7fa39abebf8c9b676/LICENSE",
+          "sha256": "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5"
+        }
+      ]
+    },
+    {
+      "name": "cynic-parser-deser",
+      "version": "0.11.2",
+      "notices": [
+        {
+          "url": "https://codeberg.org/obmarg/cynic/raw/commit/adc3685ebae599e713e49ee7fa39abebf8c9b676/LICENSE",
+          "sha256": "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5"
+        }
+      ]
+    },
+    {
+      "name": "cynic-parser-deser-macros",
+      "version": "0.11.2",
+      "notices": [
+        {
+          "url": "https://codeberg.org/obmarg/cynic/raw/commit/adc3685ebae599e713e49ee7fa39abebf8c9b676/LICENSE",
+          "sha256": "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5"
+        }
+      ]
+    },
+    {
+      "name": "defmt-parser",
+      "version": "1.0.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-APACHE",
+          "sha256": "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-MIT",
+          "sha256": "2710a622a896bba67356913d4d0492cab5465f61b2ecce6d880aeb483834fb50"
+        }
+      ]
+    },
+    {
+      "name": "graphql-composition",
+      "version": "0.12.2",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/grafbase/grafbase/b6522774d6c2df4cda341c3e73e148ce0a00b86f/LICENSE",
+          "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/grafbase/grafbase/b6522774d6c2df4cda341c3e73e148ce0a00b86f/crates/LICENSE",
+          "sha256": "86cf9656479f1edb82245b985f4a2cc0d503b945766ebeda4269c60b307699ae"
+        }
+      ]
+    },
+    {
+      "name": "graphql-tools",
+      "version": "0.5.8",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/graphql-hive/router/5aaa579ddf1a6618097b1925293305f84dc562d9/LICENSE_MIT",
+          "sha256": "3cef4f573bae2133919c37f13739ba81e5a617ecab87b3d8a6494086f1ecb2ac"
+        }
+      ]
+    },
+    {
+      "name": "hive-console-sdk",
+      "version": "0.3.19",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/graphql-hive/router/5aaa579ddf1a6618097b1925293305f84dc562d9/LICENSE_MIT",
+          "sha256": "3cef4f573bae2133919c37f13739ba81e5a617ecab87b3d8a6494086f1ecb2ac"
+        }
+      ]
+    },
+    {
+      "name": "hive-router",
+      "version": "0.0.87",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/graphql-hive/router/56cf846f15e960babb12585855b613f85048796a/LICENSE_MIT",
+          "sha256": "3cef4f573bae2133919c37f13739ba81e5a617ecab87b3d8a6494086f1ecb2ac"
+        }
+      ]
+    },
+    {
+      "name": "hive-router-config",
+      "version": "0.1.10",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/graphql-hive/router/56cf846f15e960babb12585855b613f85048796a/LICENSE_MIT",
+          "sha256": "3cef4f573bae2133919c37f13739ba81e5a617ecab87b3d8a6494086f1ecb2ac"
+        }
+      ]
+    },
+    {
+      "name": "hive-router-internal",
+      "version": "0.0.40",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/graphql-hive/router/56cf846f15e960babb12585855b613f85048796a/LICENSE_MIT",
+          "sha256": "3cef4f573bae2133919c37f13739ba81e5a617ecab87b3d8a6494086f1ecb2ac"
+        }
+      ]
+    },
+    {
+      "name": "hive-router-plan-executor",
+      "version": "7.0.2",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/graphql-hive/router/56cf846f15e960babb12585855b613f85048796a/LICENSE_MIT",
+          "sha256": "3cef4f573bae2133919c37f13739ba81e5a617ecab87b3d8a6494086f1ecb2ac"
+        }
+      ]
+    },
+    {
+      "name": "hive-router-query-planner",
+      "version": "2.10.11",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/graphql-hive/router/5aaa579ddf1a6618097b1925293305f84dc562d9/LICENSE_MIT",
+          "sha256": "3cef4f573bae2133919c37f13739ba81e5a617ecab87b3d8a6494086f1ecb2ac"
+        }
+      ]
+    },
+    {
+      "name": "nom-language",
+      "version": "0.1.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/rust-bakery/nom/2cec1b3e4c9ccac62c902d60c00de6d1549ccbe1/LICENSE",
+          "sha256": "4dbda04344456f09a7a588140455413a9ac59b6b26a1ef7cdf9c800c012d87f0"
+        }
+      ]
+    },
+    {
+      "name": "opentelemetry",
+      "version": "0.32.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-rust/ec289cb3c6f8260951699c51df968560943c1451/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
+      "name": "opentelemetry-appender-tracing",
+      "version": "0.32.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-rust/ec289cb3c6f8260951699c51df968560943c1451/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
+      "name": "opentelemetry-http",
+      "version": "0.32.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-rust/ec289cb3c6f8260951699c51df968560943c1451/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
+      "name": "opentelemetry-jaeger-propagator",
+      "version": "0.32.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-rust/ec289cb3c6f8260951699c51df968560943c1451/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
+      "name": "opentelemetry-otlp",
+      "version": "0.32.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-rust/ec289cb3c6f8260951699c51df968560943c1451/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
+      "name": "opentelemetry-prometheus",
+      "version": "0.32.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-rust/ec289cb3c6f8260951699c51df968560943c1451/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
+      "name": "opentelemetry-proto",
+      "version": "0.32.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-rust/ec289cb3c6f8260951699c51df968560943c1451/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
+      "name": "opentelemetry-stdout",
+      "version": "0.32.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-rust/ec289cb3c6f8260951699c51df968560943c1451/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
+      "name": "opentelemetry-zipkin",
+      "version": "0.32.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-rust/ec289cb3c6f8260951699c51df968560943c1451/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
+      "name": "opentelemetry_sdk",
+      "version": "0.32.1",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-rust/284a37d93b3856e1975c2807ba3af1421ebd9b52/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
+      "name": "prost-reflect",
+      "version": "0.14.7",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/andrewhickman/prost-reflect/71c4c98d7565dfc30f76ebc7daaa139a443419e6/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/andrewhickman/prost-reflect/71c4c98d7565dfc30f76ebc7daaa139a443419e6/LICENSE-MIT",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        }
+      ]
+    },
+    {
+      "name": "tonic-prost",
+      "version": "0.14.6",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/hyperium/tonic/6cb6056b5a748bc5a29bd48f4602dbc4e552bb7d/LICENSE",
+          "sha256": "e24a56698aa6feaf3a02272b3624f9dc255d982970c5ed97ac4525a95056a5b3"
+        }
+      ]
+    },
+    {
+      "name": "typify",
+      "version": "0.7.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/oxidecomputer/typify/01153fa2fea45d660400e3060d91fa2e102976d8/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
+      "name": "typify-impl",
+      "version": "0.7.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/oxidecomputer/typify/01153fa2fea45d660400e3060d91fa2e102976d8/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
+      "name": "typify-macro",
+      "version": "0.7.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/oxidecomputer/typify/01153fa2fea45d660400e3060d91fa2e102976d8/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
+      "name": "uuid-simd",
+      "version": "0.8.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/Nugine/simd/d74c030d9dc4f3cae02146d1f497ff62726ef09a/LICENSE",
+          "sha256": "71674605ec4c087fe9eb534e3e4f9e26eb2e4aabcd76a29fd156c6a844d44b3d"
+        }
+      ]
+    },
+    {
+      "name": "vsimd",
+      "version": "0.8.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/Nugine/simd/d74c030d9dc4f3cae02146d1f497ff62726ef09a/LICENSE",
+          "sha256": "71674605ec4c087fe9eb534e3e4f9e26eb2e4aabcd76a29fd156c6a844d44b3d"
+        }
+      ]
+    }
+  ],
+  "sourceOnlyNoticePackages": [
+    {
+      "name": "async-scoped",
+      "version": "0.9.0"
+    },
+    {
+      "name": "community-id",
+      "version": "0.2.4"
+    },
+    {
+      "name": "grafbase-workspace-hack",
+      "version": "0.1.0"
+    },
+    {
+      "name": "graphql-wrapping-types",
+      "version": "0.4.0"
+    },
+    {
+      "name": "http-serde",
+      "version": "2.1.1"
+    },
+    {
+      "name": "influxdb-line-protocol",
+      "version": "2.0.0"
+    },
+    {
+      "name": "seahash",
+      "version": "4.1.0"
+    }
+  ]
+}
