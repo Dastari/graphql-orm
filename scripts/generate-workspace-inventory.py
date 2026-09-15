@@ -74,7 +74,7 @@ def render(metadata: dict[str, object]) -> str:
         lines.extend(
             [
                 "",
-                "External exact-revision dependency:",
+                "External Git dependency:",
                 "",
                 f"- `agql-auth` requirement `{req}`, source `{source}`, consumed by "
                 + ", ".join(f"`{consumer}`" for consumer in consumers)

@@ -80,6 +80,7 @@ a side effect of this process.
    scripts/check-package-release-policy.sh <merge-base-or-reviewed-base-sha>
    scripts/check-semver.sh <merge-base-or-reviewed-base-sha>
    scripts/check-release-manifest.sh
+   python3 scripts/test-router-notices.py
    cargo fmt --all -- --check
    ```
 
@@ -125,6 +126,9 @@ Run **Workspace release** manually and supply:
 - `include_router_artifact`: normally false for source-only releases; and
 - `router_distribution_approval`: required when a router binary is attached.
 
+Configure `Dastari` as a required human reviewer on the `release` environment
+and restrict it to `main` before dispatch. The guard rejects an environment
+without that reviewer; naming an environment in YAML does not create protection.
 The protected `release` environment is the human authorization boundary and
 gates the workflow's entry job, so no release lane runs before approval. The
 workflow then:
@@ -156,9 +160,37 @@ delivery channel have a designated approval under ADR-0008.
 The binary lane is therefore opt-in and requires an evidence reference. It
 builds the explicit `auth-agql` feature profile for
 `x86_64-unknown-linux-gnu`, packages the binary with the workspace license,
-CycloneDX inventory, and approval reference, and includes the archive in the
-release checksums and provenance attestation. A later target or feature set
-requires its own approval.
+CycloneDX inventory, third-party notice/source evidence, and approval reference,
+and includes the archive in the release checksums and provenance attestation.
+A later target or feature set requires its own approval.
+
+`scripts/generate-router-notices.py` collects packaged and nested/native notice
+files and supplemental upstream notices whose URLs and SHA-256 values were
+reviewed at recorded source commits. It also includes exact registry source
+archives for MPL components and the explicitly recorded packages whose
+standalone notice files were unavailable. The archives must match Cargo.lock
+checksums. The generated inventory preserves original license expressions,
+source URLs, file hashes, and source-only notice dispositions; it contains no
+builder-local source paths. The bundle also retains the matching Rust standard-library
+copyright notices shipped with the matching Rust compiler installation.
+
+`config/router-notice-review.v1.json` binds these notice-source exceptions to
+the lockfile hash, SBOM component set, target, and features. A dependency/profile
+change requires a fresh review of those bindings and supplemental sources;
+generation fails if the existing record does not match. This configuration is
+technical evidence, not distribution approval. The designated owner must
+review source-only notice dispositions, legacy license expressions, applicable
+source obligations, and the actual delivery contents before providing the
+workflow's `router_distribution_approval` reference. Do not treat a missing
+notice as an automatically approved exception.
+
+External `agql-auth` dependencies may select a published `v<version>` release tag.
+The manifest keeps its full locked commit in `externalGitDependencies[].revision`
+and additionally records `tag`; all other external Git dependencies still require
+full revision pins. Generation fails if the lockfile has no unique matching source
+or disagrees with an explicit revision. Verify the auth release's attested manifest
+and peeled tag before adopting it. Consumers seeking one Cargo source must use the
+same tag selector: a `rev` and a tag remain different sources even at the same SHA.
 
 Pure Rust libraries do not receive optimized binary artifacts. Downstream
 Cargo builds compile them from the pinned Git source.
