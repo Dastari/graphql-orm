@@ -148,7 +148,9 @@ issues a bounded new-run deadline without changing the browser credential. The r
 requires a still-live submitting user credential, unchanged identity/resource bindings,
 and a deadline within 24 hours; the host must impose its tighter policy and session
 expiry. This never refreshes existing runs, caches permissions, or replaces current
-principal checks. The default retains the original credential deadline. See
+principal checks. Discovery metadata ignores only the reference deadline in its cache
+key, so fresh run admission can reuse it; loaded execution handles still bind the full
+reference and deadline. The default retains the original credential deadline. See
 [MIGRATION.md](MIGRATION.md#0982) for the admission and persistence contract.
 
 One bounded `aiConversationBootstrap` snapshot plus durable event replay is the

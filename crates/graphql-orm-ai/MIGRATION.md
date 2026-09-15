@@ -34,6 +34,11 @@ or automatic recovery of an old run. Per-tool, provider, checkpoint and current-
 checks are unchanged; logout and permission changes remain authoritative. Without an
 issuer, the original credential deadline is preserved as before.
 
+The optional discovery cache ignores only `expires_at` when matching a principal's
+metadata, allowing a new work deadline to reuse discovery. All other bindings remain
+in the cache key. Loaded execution references still include the exact expiry, and
+current-principal checks remain mandatory even on a cache hit.
+
 Schema module **0.64.1** records these optional persistent deadline semantics. There
 is no data migration, DDL, table, column, index, constraint, GraphQL SDL or protected
 payload format change. Existing rows retain their deadlines; backups and restores do
