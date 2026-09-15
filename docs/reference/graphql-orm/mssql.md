@@ -465,3 +465,59 @@ Do not point the owned test or schema-management APIs at application databases. 
 `ExternalReadOnly`; enable `ExternalWritable` only after the externally managed table contract,
 database principal permissions, policies, concurrency semantics, and rollback behavior have been
 reviewed. Writable adoption changes application behavior but performs no ORM schema migration.
+
+## Query notifications
+
+`MssqlQueryNotificationConnection` is a dedicated capability, separate from
+`MssqlPool` and `ExternalWritable`. It registers trusted SELECT queries using
+native TDS headers, receives one Broker message at a time, ends the received
+conversation, and classifies bounded XML messages. It never creates or alters
+schemas, queues, services, triggers, or Broker configuration. Queue consumption
+and conversation completion change Broker state and require explicit authority.
+Database permissions remain authoritative; SELECT-prefix validation is not a SQL
+security sandbox. Deny this principal business DML and DDL.
+
+The external owner must enable Broker and provision a dedicated queue and service
+accepting `http://schemas.microsoft.com/SQL/Notifications/PostQueryNotification`.
+Grant the listener SELECT on the watched objects, SUBSCRIBE QUERY NOTIFICATIONS,
+RECEIVE on its queue and `dbo.QueryNotificationErrorsQueue`, and permission to
+end its conversations. Grant SEND on the
+destination service as required by the owner configuration. Use a dedicated queue
+per consuming application; receiving from a shared queue steals other consumers'
+messages. No activation procedure is required.
+
+```rust,ignore
+use graphql_orm::db::mssql::{MssqlBrokerQueue, MssqlQueryNotificationConnection};
+let queue = MssqlBrokerQueue::new("dbo", "ChangeQueue")?;
+let mut listener = MssqlQueryNotificationConnection::connect_ado(connection_string, queue).await?;
+listener.register("SELECT COUNT_BIG(*) AS Total FROM dbo.ChangeLog", "registration-id", "ChangeService", 300).await?;
+let notification = listener.receive(30_000).await?;
+```
+
+Registration drains and returns the query result. SQL Server can execute an
+ineligible query successfully and immediately enqueue an `Invalid` notification;
+applications must consume it and report degraded status instead of claiming an
+active subscription. `None` from receive means wait timeout, not expiry. Handle
+`Change`, `Expired`, `Invalid`, and `Other`, re-arm one-shot registrations, and
+reconcile data after reconnects or uncertain delivery. Discard the connection
+after cancellation or protocol errors. Reads should use a separate read-only
+pool while receive holds the notification connection.
+
+The included aggregate test uses `COUNT_BIG(*)` over a whole log table; it provides
+insert/delete invalidation without loading its entire history. It does not
+identify rows and does not detect updates that leave that aggregate unchanged.
+Applications must choose a query consistent with their source's append-only
+contract, and must not assume identity order equals transaction commit order.
+
+Run the explicitly opted-in integration test against its self-provisioned,
+loopback-only, two-CPU/3-GiB disposable Docker SQL Server (no application DSN):
+
+```bash
+cargo test -p graphql-orm --no-default-features --features mssql --test mssql_notifications -- --ignored
+```
+
+On shared hosts use the host-required bounded Cargo wrapper. The test uses an
+exact image digest, proves insert wakeup,
+re-registration after reconnect, invalid-query delivery, and expiry, then verifies
+container cleanup. The listener test principal is explicitly denied table writes
+and table creation. SQL Server requires sufficient available memory to start.

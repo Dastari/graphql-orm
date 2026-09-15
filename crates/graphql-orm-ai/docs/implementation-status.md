@@ -3,17 +3,17 @@ title: "Implementation Status"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-02
+last_reviewed: 2026-09-15
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Implementation Status
 
-`graphql-orm-ai` is at crate version `0.97.1` with AI schema module
-`0.64.0`. It uses workspace `graphql-orm` `0.30.0`, backend-neutral
-`graphql-orm-ai-tool-profiles` `0.11.0`, and external `agql-auth`
-`0.19.0` at `1d2e9fe2e1576105212a7b340a11abf8cad0382d`.
+Current package versions and dependency selectors are generated in the
+[workspace inventory](../../../docs/reference/workspace-packages.md).
+The AI schema module remains `0.64.0`. External `agql-auth` uses the published
+`v0.19.1` tag with its full resolved commit retained in `Cargo.lock`.
 
 Completed stateless local-provider turns can carry a proof-bearing contained
 native-item refusal after authoritative usage settlement. Those runs close as
