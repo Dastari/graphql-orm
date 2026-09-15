@@ -21,6 +21,8 @@ Companion macros crate: `graphql-orm-macros` **0.31.1** (version alignment only)
 - Upgrade the optional SQL Server notification parser to quick-xml 0.41, which
   fixes RUSTSEC-2026-0194 and RUSTSEC-2026-0195. The existing 16 KiB notification
   bound, plain-reader parsing and explicit Broker authority remain unchanged.
+  Explicit decode/unescape retains control-character rejection rather than
+  silently normalizing literal attribute whitespace with the newer XML API.
 - No public API, generated GraphQL, persisted schema or data migration changes.
   The independently distributed router retains its separate dependency review.
 
