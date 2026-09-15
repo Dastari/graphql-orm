@@ -96,9 +96,39 @@ struct Fixture {
     dispositions: OrmAiRunDispositionService,
     owner: AuthPrincipal,
     active: Arc<AtomicBool>,
+    clock: Arc<FixedClock>,
 }
 
 async fn fixture_on(database: Database<SqliteBackend>, migrate: bool) -> Fixture {
+    fixture_on_with_authorization(database, migrate, false).await
+}
+
+struct RunIssuer {
+    clock: Arc<FixedClock>,
+    active: Arc<AtomicBool>,
+}
+#[async_trait]
+impl AiRunAuthorizationIssuer for RunIssuer {
+    async fn issue(
+        &self,
+        principal: &AuthPrincipal,
+        _: Uuid,
+        _: Uuid,
+    ) -> Result<PrincipalReference, AiError> {
+        if !self.active.load(Ordering::SeqCst) {
+            return Err(AiError::ReauthorizationFailed);
+        }
+        let mut reference = principal.reference();
+        reference.expires_at = Some(self.clock.now() + Duration::minutes(75));
+        Ok(reference)
+    }
+}
+
+async fn fixture_on_with_authorization(
+    database: Database<SqliteBackend>,
+    migrate: bool,
+    extended: bool,
+) -> Fixture {
     if migrate {
         let module = AiSchemaModule;
         let plan = database
@@ -116,7 +146,13 @@ async fn fixture_on(database: Database<SqliteBackend>, migrate: bool) -> Fixture
             .await
             .expect("AI schema migration should apply");
     }
-    let owner = principal("disposition-owner");
+    let mut owner = principal("disposition-owner");
+    if extended {
+        let AuthPrincipal::User(user) = &mut owner else {
+            unreachable!()
+        };
+        user.token_claims.expires_at = Some(OffsetDateTime::now_utc() + Duration::minutes(5));
+    }
     // The session service stamps `next_attempt_at` from the real clock while
     // `claim_next` compares against this fixed one, so a fixture pinned to
     // "now" only claims when both land in the same second. Lead the real clock
@@ -128,17 +164,36 @@ async fn fixture_on(database: Database<SqliteBackend>, migrate: bool) -> Fixture
     let access_policy: Arc<dyn AiAccessPolicy> = Arc::new(AllowAll);
     let protection_policy: Arc<dyn AiContentProtectionPolicyResolver> = Arc::new(ProtectionPolicy);
     let content_protector: Arc<dyn AiContentProtector> = Arc::new(DatabaseManagedContentProtector);
+    let mut authoritative = owner.clone();
+    if extended {
+        let AuthPrincipal::User(user) = &mut authoritative else {
+            unreachable!()
+        };
+        user.token_claims.expires_at = Some(clock.now() + Duration::hours(24));
+    }
     let principal_resolver: Arc<dyn CurrentPrincipalResolver> = Arc::new(StaticResolver {
-        principal: owner.clone(),
+        principal: authoritative,
         active: active.clone(),
         clock: clock.clone(),
     });
-    let sessions = Arc::new(OrmAiSessionService::new(
+    let authorization = Arc::new(AiRunAuthorization::new(
+        Arc::new(RunIssuer {
+            clock: clock.clone(),
+            active: active.clone(),
+        }),
+        clock.clone(),
+    ));
+    let sessions = OrmAiSessionService::new(
         database.clone(),
         access_policy.clone(),
         protection_policy.clone(),
         content_protector.clone(),
-    ));
+    );
+    let sessions = Arc::new(if extended {
+        sessions.with_run_authorization(authorization.clone())
+    } else {
+        sessions
+    });
     let runs = OrmAiRunService::new(
         database.clone(),
         clock.clone(),
@@ -154,12 +209,18 @@ async fn fixture_on(database: Database<SqliteBackend>, migrate: bool) -> Fixture
         clock.clone(),
         AiRunDispositionLimits::default(),
     );
+    let dispositions = if extended {
+        dispositions.with_run_authorization(authorization)
+    } else {
+        dispositions
+    };
     Fixture {
         sessions,
         runs,
         dispositions,
         owner,
         active,
+        clock,
     }
 }
 
@@ -215,6 +276,12 @@ async fn failed_run(
         .await
         .expect("claim should succeed")
         .expect("queued run should exist");
+    if fixture.owner.reference().expires_at.is_some() {
+        assert_eq!(
+            claimed.principal_reference().expires_at,
+            Some(fixture.clock.now() + Duration::minutes(75))
+        );
+    }
     let running = fixture
         .runs
         .start(&claimed)
@@ -601,4 +668,67 @@ async fn failed_run_events_replay_with_their_failure_record_after_restart() {
         .await
         .expect("an advertised retryable failure must be retryable");
     assert_eq!(disposition.disposition, AiRunDisposition::Retried);
+}
+
+#[tokio::test]
+async fn run_authorization_is_persisted_and_explicit_retry_gets_a_fresh_deadline() {
+    let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+        .await
+        .unwrap();
+    let fixture = fixture_on_with_authorization(database, true, true).await;
+    let session = session(&fixture).await;
+    let sent = failed_run(
+        &fixture,
+        session.id,
+        AiRunState::Failed,
+        "agent_rule_budget_exceeded",
+        Some("agent_rule_budget_exceeded"),
+    )
+    .await;
+    // A new request an hour later has a fresh browser credential. Its retry must
+    // get a new host-issued run deadline rather than resurrecting the old one.
+    fixture.clock.advance_seconds(3600);
+    let mut fresh = fixture.owner.clone();
+    let AuthPrincipal::User(user) = &mut fresh else {
+        unreachable!()
+    };
+    user.token_claims.expires_at = Some(fixture.clock.now() + Duration::minutes(5));
+    let result = fixture
+        .dispositions
+        .retry_run(
+            &fresh,
+            RetryAiRunInput {
+                session_id: session.id,
+                run_id: sent.run_id,
+                client_request_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .unwrap();
+    let lease = fixture
+        .runs
+        .claim_next("retry-worker")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(lease.run_id().0, result.retry_run_id.unwrap());
+    assert_eq!(
+        lease.principal_reference().expires_at,
+        Some(fixture.clock.now() + Duration::minutes(75))
+    );
+    fixture.active.store(false, Ordering::SeqCst);
+    assert!(
+        fixture
+            .dispositions
+            .retry_run(
+                &fresh,
+                RetryAiRunInput {
+                    session_id: session.id,
+                    run_id: sent.run_id,
+                    client_request_id: Uuid::new_v4(),
+                }
+            )
+            .await
+            .is_err()
+    );
 }

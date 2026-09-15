@@ -22,6 +22,12 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ### Added
 
+Optional `AiRunAuthorization` and `AiRunAuthorizationIssuer` let a trusted host admit
+a new message or explicit retry with a bounded active-session deadline independent
+of the submitting access credential. Session and disposition services remain opt-in;
+all current-authority checks remain mandatory. Existing runs are never extended.
+The persistent semantic module advances to **0.64.1**, without DDL or data backfill.
+
 Optional `AiCapabilityDiscoveryBroker::with_discovery_cache` retains bounded
 principal/session-specific discovery metadata across fenced runs for up to seven days.
 A cached candidate can be described without repeating discovery. Current index fingerprints,
