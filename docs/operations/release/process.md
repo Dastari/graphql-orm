@@ -21,16 +21,21 @@ Three identities have different purposes:
 - A **development snapshot** is one full 40-character commit SHA on `main`.
   It is not a release merely because it is reachable.
 - A **package release** uses the package's own SemVer and a qualified tag such
-  as `graphql-orm-ai-v0.73.0`. A package tag never moves.
+  as `graphql-orm-ai-v0.73.0`. A package tag identifies a package version
+  within a workspace release and never moves. Package tags are not pinning
+  selectors.
 - A **workspace release** is a tested package set named
   `workspace-YYYY.MM.DD.N`, for example `workspace-2026.08.11.1`. Its attached
   manifest binds the source SHA, lockfile, every package source tree and
   version, package tags, external Git revisions, and durable wire/schema
   contract versions.
 
-Consumers must use the workspace release's full commit SHA in Cargo `rev`.
-Tags improve discovery, comparison, and support but are not authority for a
-dependency update.
+Consumers pin the workspace tag, for example
+`tag = "workspace-2026.08.11.1"`, as one Git reference for every package in
+the workspace, and record the commit from that release's attached manifest in
+their own reviewed pin record. A published workspace tag is annotated and is
+never moved, so the tag and the recorded commit stay one identity; a consumer
+lockfile that resolves the tag to a different commit is the detection point.
 
 ## Version policy
 
@@ -206,5 +211,5 @@ Cargo builds compile them from the pinned Git source.
 - If tag creation succeeds but GitHub Release publication fails, retain the
   immutable tags, inspect the failed run, and attach the already attested
   assets to a release for that exact tag. Do not regenerate from another SHA.
-- Consumers roll forward to a newly reviewed full SHA; published Git history
-  is never rewritten.
+- Consumers roll forward to a newly reviewed workspace tag and its recorded
+  commit; published Git history is never rewritten.
