@@ -295,6 +295,15 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                             ::graphql_orm::tokio::spawn,
                         )
                     );
+                    // Federation entity resolvers batch their representations
+                    // here. The loader is registered for every entity so that
+                    // adding a key never changes the schema wiring.
+                    let builder = builder.data(
+                        ::graphql_orm::async_graphql::dataloader::DataLoader::new(
+                            ::graphql_orm::graphql::loaders::FederationKeyLoader::<#entity, #backend_marker>::new(database.clone()),
+                            ::graphql_orm::tokio::spawn,
+                        )
+                    );
                 }
             })
             .collect();
@@ -440,6 +449,15 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 let builder = builder.data(
                     ::graphql_orm::async_graphql::dataloader::DataLoader::new(
                     ::graphql_orm::graphql::loaders::RelationLoader::<#entity, #backend_marker>::new(database.clone()),
+                        ::graphql_orm::tokio::spawn,
+                    )
+                );
+                // Federation entity resolvers batch their representations here.
+                // The loader is registered for every entity so that adding a
+                // key never changes the schema wiring.
+                let builder = builder.data(
+                    ::graphql_orm::async_graphql::dataloader::DataLoader::new(
+                        ::graphql_orm::graphql::loaders::FederationKeyLoader::<#entity, #backend_marker>::new(database.clone()),
                         ::graphql_orm::tokio::spawn,
                     )
                 );

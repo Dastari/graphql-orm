@@ -179,6 +179,7 @@ use syn::{
 mod backend;
 mod custom_operations;
 mod entity;
+mod federation;
 mod mutation_result;
 mod naming;
 mod operations;
@@ -342,7 +343,12 @@ pub fn derive_graphql_entity(input: TokenStream) -> TokenStream {
         .to_compile_error()
         .into();
     }
-    match entity::generate_graphql_entity(&input) {
+    let result = (|| {
+        let entity = entity::generate_graphql_entity(&input)?;
+        let federation_witness = entity::federation_key_witness_tokens(&input.attrs, &input.ident)?;
+        Ok::<_, syn::Error>(quote! { #entity #federation_witness })
+    })();
+    match result {
         Ok(tokens) => TokenStream::from(tokens),
         Err(err) => TokenStream::from(err.to_compile_error()),
     }

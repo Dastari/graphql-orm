@@ -44,6 +44,22 @@ pub(crate) struct EntityMetadata {
     pub(crate) graphql_rename_fields: Option<String>,
     pub(crate) rls: Option<RlsMetadata>,
     pub(crate) compose_complex_object: bool,
+    /// Declared Apollo Federation v2 entity keys, in declaration order.
+    pub(crate) federation_keys: Vec<FederationKeyMetadata>,
+}
+
+/// One declared `@key` for a resolvable Federation entity.
+///
+/// `fields` is `None` for the bare `federation_key` form, which means the
+/// entity's primary key in declaration order. Otherwise it holds GraphQL field
+/// names exactly as they appear in the exported schema.
+#[derive(Clone)]
+pub(crate) struct FederationKeyMetadata {
+    pub(crate) fields: Option<Vec<String>>,
+    /// Accept a key whose uniqueness the ORM cannot verify because the unique
+    /// constraint lives in an externally managed schema.
+    pub(crate) assume_unique: bool,
+    pub(crate) span: proc_macro2::Span,
 }
 
 #[derive(Clone)]
@@ -303,6 +319,53 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                         ));
                     }
                     metadata.upsert = Some(cols);
+                } else if meta.path.is_ident("federation_key") {
+                    if attribute_name == "repository_entity" {
+                        return Err(syn::Error::new(
+                            meta.path.span(),
+                            "federation_key requires a GraphQL entity; repository-only entities have no GraphQL object to resolve",
+                        ));
+                    }
+                    let mut key = FederationKeyMetadata {
+                        fields: None,
+                        assume_unique: false,
+                        span: meta.path.span(),
+                    };
+                    if meta.input.peek(syn::token::Paren) {
+                        meta.parse_nested_meta(|option| {
+                            if option.path.is_ident("fields") {
+                                if key.fields.is_some() {
+                                    return Err(syn::Error::new(
+                                        option.path.span(),
+                                        "federation_key accepts one fields list",
+                                    ));
+                                }
+                                let value = option.value()?;
+                                let fields = parse_string_array_expr(
+                                    value,
+                                    "federation_key fields must be an array of GraphQL field names",
+                                )?;
+                                if fields.is_empty() {
+                                    return Err(syn::Error::new(
+                                        option.path.span(),
+                                        "federation_key fields must name at least one GraphQL field",
+                                    ));
+                                }
+                                key.fields = Some(fields);
+                            } else if option.path.is_ident("assume_unique") {
+                                let value = option.value()?;
+                                let lit: syn::LitBool = value.parse()?;
+                                key.assume_unique = lit.value;
+                            } else {
+                                return Err(syn::Error::new(
+                                    option.path.span(),
+                                    "unsupported federation_key option; expected fields or assume_unique",
+                                ));
+                            }
+                            Ok(())
+                        })?;
+                    }
+                    metadata.federation_keys.push(key);
                 } else if meta.path.is_ident("unique_composite") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
@@ -2642,6 +2705,38 @@ pub(crate) fn generate_graphql_entity(
     generate_entity_impl(input, false)
 }
 
+/// Require the operations derive whenever a Federation key is declared.
+///
+/// `GraphQLEntity` cannot see the rest of the derive list, so it emits a
+/// compile-time bound against a trait that only `GraphQLOperations` implements.
+/// This turns "declared a key, generated nothing" into a diagnosed error.
+pub(crate) fn federation_key_witness_tokens(
+    attrs: &[syn::Attribute],
+    struct_name: &syn::Ident,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let metadata = parse_entity_metadata(attrs)?;
+    if metadata.federation_keys.is_empty() {
+        return Ok(quote! {});
+    }
+    let witness = syn::Ident::new(
+        &format!(
+            "__GOM_FEDERATION_KEY_WITNESS_{}",
+            struct_name.to_string().to_uppercase()
+        ),
+        struct_name.span(),
+    );
+    Ok(quote! {
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        const #witness: () = {
+            const fn assert_generated_federation_keys<
+                T: ::graphql_orm::graphql::federation::GeneratedFederationEntityKeys,
+            >() {}
+            assert_generated_federation_keys::<#struct_name>();
+        };
+    })
+}
+
 pub(crate) fn generate_graphql_schema_entity(
     input: &DeriveInput,
 ) -> syn::Result<proc_macro2::TokenStream> {
@@ -2729,6 +2824,12 @@ fn generate_entity_impl(
         return Err(syn::Error::new_spanned(
             input,
             "typed projections require GraphQLEntity; schema-only entities do not generate read APIs",
+        ));
+    }
+    if schema_only && !entity_meta.federation_keys.is_empty() {
+        return Err(syn::Error::new(
+            entity_meta.federation_keys[0].span,
+            "federation_key requires GraphQLEntity and GraphQLOperations; a schema-only entity has no GraphQL object to resolve",
         ));
     }
     if schema_only && entity_meta.retention_policy.is_some() {

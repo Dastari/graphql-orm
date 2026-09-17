@@ -28,3 +28,22 @@ pub fn federation_authenticated() {}
 /// authorization directive.
 #[async_graphql::TypeDirective(name = "federation__requiresScopes", location = "FieldDefinition")]
 pub fn federation_requires_scopes(scopes: Vec<Vec<String>>) {}
+
+/// Witness that generated Federation entity resolvers exist for an entity.
+///
+/// `#[graphql_entity(federation_key)]` is read by two derives. `GraphQLEntity`
+/// records the declaration, while `GraphQLOperations` is the derive that owns
+/// the `{Entity}Queries` object where an `#[graphql(entity)]` resolver — the
+/// only construct async-graphql turns into a resolvable `@key` — can be
+/// emitted. Without this witness, declaring a key on a type that lacks
+/// `GraphQLOperations` would silently export no key at all. `GraphQLEntity`
+/// therefore requires this trait, and only the operations derive implements it.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` declares `federation_key` but generates no Federation entity resolver",
+    label = "no entity resolver is generated for `{Self}`",
+    note = "add `GraphQLOperations` to this type's derive list; only that derive emits the generated queries object whose entity resolver async-graphql turns into a resolvable `@key`"
+)]
+pub trait GeneratedFederationEntityKeys {
+    /// Number of `@key` directives generated for this entity.
+    const FEDERATION_KEY_COUNT: usize;
+}

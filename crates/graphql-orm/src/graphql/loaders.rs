@@ -734,3 +734,200 @@ where
         async move { load_composite_relation_keys::<T, B>(db, keys).await }
     }
 }
+
+/// One Federation entity representation awaiting resolution.
+///
+/// `_entities` resolves every representation in a fetch concurrently, so the
+/// generated entity resolvers enqueue these keys on a shared `DataLoader` and
+/// the batch collapses into one statement per entity type and key shape.
+#[derive(Clone, Debug)]
+pub struct FederationEntityKey {
+    /// Stable identity of the declared `@key`, used only for grouping.
+    pub key: &'static str,
+    /// Backend-quoted key columns in declaration order.
+    pub columns: Vec<&'static str>,
+    pub key_part_kinds: Vec<RelationKeyPartKind>,
+    pub values: Vec<crate::graphql::orm::SqlValue>,
+    /// Canonical string form of `values`, matched against the projected row.
+    pub representation: RelationKey,
+    pub auth_context: Option<DbAuthContext>,
+}
+
+impl PartialEq for FederationEntityKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+            && self.columns == other.columns
+            && self.representation == other.representation
+            && self.auth_context.as_ref().map(DbAuthContext::canonical_key)
+                == other
+                    .auth_context
+                    .as_ref()
+                    .map(DbAuthContext::canonical_key)
+    }
+}
+
+impl Eq for FederationEntityKey {}
+
+impl Hash for FederationEntityKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.key.hash(state);
+        self.columns.hash(state);
+        self.representation.hash(state);
+        self.auth_context
+            .as_ref()
+            .map(DbAuthContext::canonical_key)
+            .hash(state);
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct FederationGroupKey {
+    key: &'static str,
+    columns: Vec<&'static str>,
+    key_part_kinds: Vec<RelationKeyPartKind>,
+    auth_context_key: Option<String>,
+}
+
+/// Batches Federation entity lookups for one entity type.
+///
+/// This loader deliberately does not require [`BatchLoadEntity`]. That trait is
+/// written by hand for relation batching and names a single batch column, while
+/// a `@key` may span several columns and is generated rather than declared. The
+/// bounds here are the ones the query actually needs.
+pub struct FederationKeyLoader<T, B: OrmBackend = DefaultBackend> {
+    db: crate::db::Database<B>,
+    _marker: PhantomData<(T, B)>,
+}
+
+impl<T, B: OrmBackend> FederationKeyLoader<T, B> {
+    pub fn new(db: crate::db::Database<B>) -> Self {
+        Self {
+            db,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T, B> Loader<FederationEntityKey> for FederationKeyLoader<T, B>
+where
+    B: OrmBackend,
+    T: crate::graphql::orm::DatabaseEntity
+        + crate::graphql::orm::FromSqlRow<B>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
+    type Value = Option<T>;
+    type Error = String;
+
+    fn load(
+        &self,
+        keys: &[FederationEntityKey],
+    ) -> impl std::future::Future<
+        Output = Result<HashMap<FederationEntityKey, Self::Value>, Self::Error>,
+    > + Send {
+        let keys = keys.to_vec();
+        let db = self.db.clone();
+
+        async move {
+            use crate::graphql::orm::{SelectQuery, render_select_query};
+
+            if keys.is_empty() {
+                return Ok(HashMap::new());
+            }
+
+            let mut grouped_keys: HashMap<FederationGroupKey, Vec<FederationEntityKey>> =
+                HashMap::new();
+            for key in keys {
+                let group_key = FederationGroupKey {
+                    key: key.key,
+                    columns: key.columns.clone(),
+                    key_part_kinds: key.key_part_kinds.clone(),
+                    auth_context_key: key.auth_context.as_ref().map(DbAuthContext::canonical_key),
+                };
+                grouped_keys.entry(group_key).or_default().push(key);
+            }
+
+            let mut results = HashMap::new();
+
+            for group in grouped_keys.into_values() {
+                let sample = group
+                    .first()
+                    .ok_or_else(|| "federation key batch group should not be empty".to_string())?;
+
+                let representation_values = group
+                    .iter()
+                    .map(|key| key.values.clone())
+                    .collect::<Vec<_>>();
+                let filter = relation_key_filter(&sample.columns, &representation_values);
+
+                let key_columns = sample
+                    .columns
+                    .iter()
+                    .zip(sample.key_part_kinds.iter())
+                    .enumerate()
+                    .map(|(index, (column, kind))| {
+                        format!(
+                            "{} AS {}",
+                            relation_key_projection(B::DIALECT, column, *kind),
+                            relation_key_alias(index)
+                        )
+                    })
+                    .collect::<Vec<_>>();
+
+                let rendered = render_select_query(
+                    B::DIALECT,
+                    &SelectQuery {
+                        table: T::TABLE_NAME,
+                        columns: T::column_names()
+                            .iter()
+                            .map(|column| (*column).to_string())
+                            .chain(key_columns)
+                            .collect(),
+                        filter: Some(filter),
+                        sorts: Vec::new(),
+                        pagination: None,
+                        count_only: false,
+                    },
+                );
+
+                // Routed through the counted helper rather than the backend
+                // method so the one-statement-per-batch guarantee is
+                // observable through `query_count`.
+                let rows = crate::graphql::orm::fetch_rows_with_auth::<B>(
+                    db.pool(),
+                    &rendered.sql,
+                    &rendered.values,
+                    sample.auth_context.as_ref(),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+
+                let mut resolved: HashMap<RelationKey, T> = HashMap::new();
+                for row in rows {
+                    let mut key_parts = Vec::with_capacity(sample.columns.len());
+                    for index in 0..sample.columns.len() {
+                        let alias = relation_key_alias(index);
+                        let part =
+                            B::try_get_string(&row, &alias).map_err(|error| error.to_string())?;
+                        key_parts.push(part);
+                    }
+                    let entity = T::from_row(&row).map_err(|error| error.to_string())?;
+                    // A `@key` is validated to be unique, so a second row for the
+                    // same representation cannot be distinguished; keep the first.
+                    resolved
+                        .entry(RelationKey::new(key_parts))
+                        .or_insert(entity);
+                }
+
+                for key in group {
+                    let entity = resolved.get(&key.representation).cloned();
+                    results.insert(key, entity);
+                }
+            }
+
+            Ok(results)
+        }
+    }
+}

@@ -6462,7 +6462,67 @@ pub(crate) fn generate_graphql_operations(
         operation_descriptors.push(subscription_descriptor());
     }
 
+    // Federation entity keys are resolved here because the generated
+    // `{Entity}Queries` object below is the only place an `#[graphql(entity)]`
+    // resolver — and therefore a resolvable `@key` — can be emitted.
+    let primary_key_rust_names = primary_key_fields
+        .iter()
+        .map(|field| field.rust_name.clone())
+        .collect::<Vec<_>>();
+    let federation_keys = crate::federation::resolve_federation_keys(
+        struct_name,
+        &entity_meta,
+        fields,
+        graphql_rename_fields,
+        serde_rename_all,
+        backend,
+        &primary_key_rust_names,
+    )?;
+    let single_read_argument_names = if has_composite_primary_key {
+        primary_key_fields
+            .iter()
+            .map(|field| {
+                (
+                    field.rust_name.clone(),
+                    apply_graphql_case(&field.graphql_name, argument_case),
+                )
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![(first_primary_key.rust_name.clone(), id_arg_name.clone())]
+    };
+    let federation_scope_enforcements = federation_keys
+        .iter()
+        .map(|key| {
+            let arguments =
+                crate::federation::scope_template_aliases(key, &single_read_argument_names)
+                    .into_iter()
+                    .map(|(graphql_name, rust_ident, rust_type)| {
+                        ScopeTemplateArgumentSpec::scalar(graphql_name, rust_ident, rust_type)
+                    })
+                    .collect::<Vec<_>>();
+            scope_enforcement_tokens(
+                "single_read",
+                operation_authorizations.get("single_read"),
+                &arguments,
+            )
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+    let federation_entity_resolvers = crate::federation::federation_entity_resolver_tokens(
+        struct_name,
+        &entity_name_lit,
+        &backend_marker,
+        &resolver_auth_mode,
+        &relation_preload_single,
+        &federation_keys,
+        &federation_scope_enforcements,
+    );
+    let federation_key_witness_impl =
+        crate::federation::federation_key_witness_impl(struct_name, &federation_keys);
+
     let operation_metadata_impl = quote! {
+        #federation_key_witness_impl
+
         impl ::graphql_orm::graphql::orm::GraphqlOperationMetadata for #struct_name {
             fn generated_graphql_operations(
             ) -> &'static [::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor] {
@@ -6728,6 +6788,8 @@ pub(crate) fn generate_graphql_operations(
 
                     Ok(entity)
                 }
+
+                #federation_entity_resolvers
             }
 
             impl #struct_name {
@@ -7120,6 +7182,8 @@ pub(crate) fn generate_graphql_operations(
 
                 Ok(entity)
             }
+
+            #federation_entity_resolvers
         }
 
         // ============================================================================
