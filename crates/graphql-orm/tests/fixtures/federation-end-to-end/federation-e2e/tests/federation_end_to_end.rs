@@ -24,6 +24,9 @@ const JOINED_QUERY: &str = "{ readings { edges { node { label zone { name } } } 
 /// own statement cost.
 const LOCAL_ONLY_QUERY: &str = "{ readings { edges { node { label } } } }";
 
+/// The same join through a nullable reference field.
+const NULLABLE_JOIN_QUERY: &str = "{ readings { edges { node { label optionalZone { name } } } } }";
+
 struct RunningRouter {
     address: SocketAddr,
     composition_warnings: Vec<String>,
@@ -243,17 +246,68 @@ async fn two_orm_subgraphs_compose_and_join_through_a_generated_entity_key() {
     );
 
     // (c) The denial. The router accepted the unscoped request and planned it;
-    // the entity fetch is what fails.
-    //
-    // Hive does not null just the joined field: an errored `_entities` fetch
-    // nulls the whole response, so the parent subgraph's own fields do not
-    // survive alongside the error. The parent's fields are still served when
-    // the same caller asks for them without the join, which is the assertion
-    // below.
+    // the entity fetch is what fails. What the caller keeps is decided by the
+    // referencing subgraph's nullability, not by the router: a failed fetch
+    // produces null for the reference, and ordinary GraphQL null propagation
+    // does the rest. Both shapes are pinned below.
+    // A nullable reference degrades to null and the parent's own data survives.
+    // This is the shape a referencing subgraph should choose: the caller keeps
+    // everything the referencing subgraph owns and learns the join failed.
+    let denied_nullable = post(&client, &router, None, NULLABLE_JOIN_QUERY).await;
+    let nullable_nodes = denied_nullable["data"]["readings"]["edges"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the parent's own data survives: {denied_nullable}"));
+    assert_eq!(nullable_nodes.len(), 3, "{denied_nullable}");
+    assert_eq!(
+        nullable_nodes[0]["node"]["label"], "inlet",
+        "the referencing subgraph's own field is still served: {denied_nullable}"
+    );
+    assert!(
+        nullable_nodes
+            .iter()
+            .all(|edge| edge["node"]["optionalZone"].is_null()),
+        "every refused reference is null: {denied_nullable}"
+    );
+    let nullable_error = &denied_nullable["errors"][0];
+    assert_eq!(
+        nullable_error["extensions"]["code"],
+        "DOWNSTREAM_SERVICE_ERROR"
+    );
+    assert_eq!(
+        nullable_error["extensions"]["service"], "zones",
+        "the denial is attributed to the owning subgraph: {denied_nullable}"
+    );
+    assert_eq!(
+        nullable_error["extensions"]["affectedPath"], "readings.edges.@.node.optionalZone",
+        "{denied_nullable}"
+    );
+    assert_eq!(nullable_error["path"][0], "_entities", "{denied_nullable}");
+
+    // The same nullable field resolves normally for a scoped caller, so the
+    // null above is the denial and not a permanently broken field.
+    let allowed_nullable = post(
+        &client,
+        &router,
+        Some(zones_subgraph::READ_SCOPE),
+        NULLABLE_JOIN_QUERY,
+    )
+    .await;
+    assert!(
+        allowed_nullable.get("errors").is_none(),
+        "the scoped nullable join succeeds: {allowed_nullable}"
+    );
+    assert_eq!(
+        allowed_nullable["data"]["readings"]["edges"][0]["node"]["optionalZone"]["name"], "north",
+        "{allowed_nullable}"
+    );
+
     let denied = post(&client, &router, None, JOINED_QUERY).await;
+    // Every ancestor of a generated connection field is non-null, so for a
+    // non-null reference on an ORM-generated list the nearest nullable ancestor
+    // is `data` itself and the caller loses the parent's own fields too.
     assert!(
         denied["data"].is_null(),
-        "PINNED BEHAVIOUR: a denied entity fetch nulls the whole response: {denied}"
+        "a non-null reference propagates the null to the root: {denied}"
     );
     let error = &denied["errors"][0];
     assert_eq!(error["extensions"]["code"], "DOWNSTREAM_SERVICE_ERROR");
@@ -262,16 +316,6 @@ async fn two_orm_subgraphs_compose_and_join_through_a_generated_entity_key() {
         "the denial is attributed to the owning subgraph: {denied}"
     );
     assert_eq!(error["path"][0], "_entities", "{denied}");
-
-    let unscoped_parent_only = post(&client, &router, None, LOCAL_ONLY_QUERY).await;
-    assert!(
-        unscoped_parent_only.get("errors").is_none(),
-        "the unscoped caller still reads the referencing subgraph: {unscoped_parent_only}"
-    );
-    assert_eq!(
-        unscoped_parent_only["data"]["readings"]["edges"][0]["node"]["label"], "inlet",
-        "{unscoped_parent_only}"
-    );
 
     // (e) The router granted nothing. It was configured with
     // `allow_anonymous_development(true)` and no scope matcher, so it took no

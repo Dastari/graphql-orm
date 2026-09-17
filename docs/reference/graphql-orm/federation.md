@@ -183,21 +183,53 @@ existence oracle.
 
 ### What a denial looks like through the router
 
-The end-to-end fixture pins the observed behaviour of the workspace's Hive
-router when the owning subgraph refuses an entity fetch:
+When the owning subgraph refuses an entity fetch, the router produces one error
+and a `null` for the reference. What the caller keeps from the rest of the
+response is then decided by ordinary GraphQL null propagation — that is, by
+**the referencing subgraph's choice of nullability**, not by the router.
 
-- the **whole response** is nulled, not just the joined field. The parent
-  subgraph's own fields do not survive alongside the error, even though the
-  same caller can read them in a query that omits the join;
+Declare a reference field nullable. The end-to-end fixture pins both shapes:
+
+```rust
+// Preferred: a refused join costs only the join.
+async fn zone(&self) -> Option<ZoneReference> { Some(ZoneReference { id: self.zone_id.clone() }) }
+```
+
+```json
+{ "data": { "readings": { "edges": [
+      { "node": { "label": "inlet", "zone": null } },
+      { "node": { "label": "outlet", "zone": null } } ] } },
+  "errors": [ { "message": "Unexpected error", "path": ["_entities"],
+      "extensions": { "code": "DOWNSTREAM_SERVICE_ERROR", "service": "zones",
+                      "affectedPath": "readings.edges.@.node.zone" } } ] }
+```
+
+A non-null reference (`zone: Zone!`) cannot hold that null, so it propagates to
+the nearest nullable ancestor. Every ancestor of a generated connection field —
+the connection, its `edges` list, its elements, and `node` — is non-null, so for
+a reference hung off an ORM-generated list **the nearest nullable ancestor is
+`data` itself** and the caller loses the referencing subgraph's own fields too:
+
+```json
+{ "data": null, "errors": [ { "message": "Unexpected error", "path": ["_entities"],
+      "extensions": { "code": "DOWNSTREAM_SERVICE_ERROR", "service": "zones",
+                      "affectedPath": "readings.edges.@.node.zone" } } ] }
+```
+
+This is the GraphQL specification's behaviour, not a router quirk, and it
+applies to any resolver failure — a policy denial, an unreachable subgraph, or
+a database error alike. A non-null reference asserts that the join can always
+be resolved, which a cross-subgraph join crossing an authorization boundary
+cannot guarantee.
+
+Two further details hold in both shapes:
+
 - the error carries `extensions.code = "DOWNSTREAM_SERVICE_ERROR"`,
-  `extensions.service = "<owning subgraph>"`, and a path beginning
-  `_entities`;
+  `extensions.service = "<owning subgraph>"`, an `extensions.affectedPath`
+  naming the reference field, and a path beginning `_entities`;
 - the subgraph's own error **message is replaced** with a generic one. A client
   cannot read the owning subgraph's wording through the router, so operational
   detail must come from the subgraph's own logs.
-
-Design a joined field on the assumption that refusing it costs the caller the
-whole query.
 
 ### The router does not authorize a joined field
 
@@ -229,12 +261,17 @@ pub struct ZoneReference {
 }
 ```
 
+Return the stub from a **nullable** field. The option expresses that the join
+may fail, not that the local column may be absent; see
+[what a denial looks like](#what-a-denial-looks-like-through-the-router) for
+what a non-null reference costs the caller.
+
 The Rust type name may differ from the GraphQL type name; `name = "Zone"` is
 what makes composition treat it as the same entity. The stub's fields must be
 exactly the key fields — it is a reference, not a partial copy.
 
-A field then returns the stub from a local column, and the planner resolves the
-rest through the owning subgraph's `_entities`.
+The planner resolves the rest of the type through the owning subgraph's
+`_entities`.
 
 ### Stub-only subgraphs must enable federation
 
@@ -330,8 +367,10 @@ An end-to-end fixture workspace serves two real ORM subgraphs over loopback —
 one owning a keyed entity, one holding only an `unresolvable` stub — composes
 them through `graphql-orm-router`, and proves that composition succeeds, that
 the joined field resolves through an `_entities` fetch, that three
-representations cost the owning subgraph one statement, and that an unscoped
-caller is refused by the owning subgraph while the router grants nothing.
+representations cost the owning subgraph one statement, that an unscoped caller
+is refused by the owning subgraph while the router grants nothing, and that a
+nullable reference degrades to `null` while a non-null one propagates to the
+root.
 
 For a connected external graph, validate regenerated provider SDL without
 publishing it, and review the resulting query root nodes before promotion. Do

@@ -41,6 +41,13 @@ should note that the generated `@key` is built from the generated resolver's
 argument names, so a hand-written `{Entity}Queries` replacement will not export
 a key.
 
+Declare reference fields that point at a foreign entity as **nullable**. A
+failed entity fetch produces `null` for the reference, and GraphQL null
+propagation decides the rest: a nullable reference degrades to `null` and the
+referencing subgraph's own fields still reach the caller, while a non-null
+reference hung off a generated connection has no nullable ancestor before
+`data` and costs the caller the whole response.
+
 Before adding a key, confirm the entity's rows are safe to expose to every
 subgraph that joins it. The router's authorization contract covers root fields
 only and deliberately skips `_entities`, so a joined field is authorized solely

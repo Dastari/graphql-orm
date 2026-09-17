@@ -48,11 +48,27 @@ pub struct Reading {
 
 #[ComplexObject]
 impl Reading {
-    /// The join the composed graph resolves through the owning subgraph.
+    /// A non-null reference to the foreign entity.
+    ///
+    /// Nullability here is the referencing subgraph's choice and it decides
+    /// what a refused or failed join costs the caller. A non-null field cannot
+    /// hold the null that a failed `_entities` fetch produces, so the null
+    /// propagates to the nearest nullable ancestor exactly as the GraphQL spec
+    /// requires. The fixture keeps both shapes so the difference is pinned.
     async fn zone(&self) -> ZoneReference {
         ZoneReference {
             id: self.zone_id.clone(),
         }
+    }
+
+    /// A nullable reference to the same foreign entity.
+    ///
+    /// The value is always `Some`; the option expresses that the *join* may
+    /// fail, not that the local column may be absent.
+    async fn optional_zone(&self) -> Option<ZoneReference> {
+        Some(ZoneReference {
+            id: self.zone_id.clone(),
+        })
     }
 }
 

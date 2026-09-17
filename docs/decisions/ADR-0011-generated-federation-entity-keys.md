@@ -84,7 +84,10 @@ workaround.
 **Reference stubs stay hand-written.** A subgraph that only refers to a foreign
 entity declares a plain async-graphql `SimpleObject` with
 `unresolvable = "..."`. There is no table behind it, so the ORM has nothing to
-generate or validate, and a macro would only obscure that. `schema_roots!`
+generate or validate, and a macro would only obscure that. Leaving the stub
+hand-written also leaves the reference field's nullability where it belongs:
+with the referencing subgraph, which is what decides the blast radius of a
+failed join. `schema_roots!`
 gains `federation: true` for the case where such stubs are a subgraph's only
 Federation participation and no resolvable key exists to enable federation.
 
@@ -112,6 +115,13 @@ trait only the operations derive implements.
   requirement, or `auth = "required"`. Router-level enforcement of nested
   authorization directives would be a separate router decision; it does not
   exist and this ADR does not create it.
+- **A cross-subgraph reference should be nullable.** A failed entity fetch —
+  a policy denial, an unreachable subgraph, a database error — produces `null`
+  for the reference, and ordinary GraphQL null propagation decides the rest. A
+  non-null reference hung off a generated connection has no nullable ancestor
+  before `data`, so refusing the join costs the caller the referencing
+  subgraph's own fields as well. A non-null reference asserts that a join
+  across an authorization boundary always succeeds, which it cannot.
 - Key uniqueness is enforced from ORM declarations, not from the database. An
   external schema can still violate it through `assume_unique`, in which case
   the resolver returns one arbitrary matching row. The escape hatch is named
