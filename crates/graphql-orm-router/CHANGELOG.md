@@ -3,12 +3,24 @@ title: graphql-orm-router changelog
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-09-15
+last_reviewed: 2026-09-17
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # Changelog
+
+## 0.5.2 - 2026-09-17
+
+- Added regression coverage for the root authorization contract against a
+  subgraph that owns a resolvable Federation entity. Such a subgraph gains
+  `_entities` and `_service`, which the query planner reaches rather than a
+  client root field, and the contract is an exact match against the advertised
+  operations. The test asserts both that the derived contract lists no
+  underscore-prefixed field and that a descriptor omitting them still validates.
+
+No router behaviour, configuration, GraphQL schema, descriptor, token, or
+stored-data change; test coverage only.
 
 ## 0.5.1 - 2026-09-02
 

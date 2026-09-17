@@ -29,7 +29,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.31.1", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.32.0", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the
@@ -137,6 +137,11 @@ README remains project-neutral.
   clients never provide SQL, identifiers, values, or aggregate functions.
   Missing primary-key columns are appended as deterministic pagination
   tie-breakers.
+- **Federation entities:** `federation_key` opts an entity into a resolvable
+  Apollo Federation v2 `@key`, generating a batched entity resolver that runs
+  the same authorization chain as the single-row read. A joined field is
+  authorized only by the subgraph that owns the entity; the router's contract
+  covers root fields.
 - **Checked calendar filters:** generated date predicates use half-open
   calendar ranges and recursively reject invalid spans, offsets, and ranges
   before database work. PostgreSQL uses session `CURRENT_DATE`, SQL Server uses
@@ -157,6 +162,7 @@ enforce row/field/database limits appropriate to the application.
 - [Backends and multi-backend workspaces](../../docs/reference/graphql-orm/backends.md)
 - [Entities and relations](../../docs/reference/graphql-orm/entities-and-relations.md)
 - [Typed grouped aggregates](../../docs/reference/graphql-orm/typed-aggregates.md)
+- [Federation entities, keys, and operation roots](../../docs/reference/graphql-orm/federation.md)
 - [Runtime writes and repository operations](../../docs/reference/graphql-orm/runtime-and-writes.md)
 - [Schema management](../../docs/reference/graphql-orm/schema-management.md)
 - [Strict authorization](../../docs/reference/graphql-orm/strict-authorization.md)

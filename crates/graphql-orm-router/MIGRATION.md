@@ -3,7 +3,7 @@ title: graphql-orm-router migration guide
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-09-15
+last_reviewed: 2026-09-17
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -19,6 +19,15 @@ commit. The MIT-licensed library source is unchanged from the historical revisio
 no configuration or stored-data migration is needed. The workspace lockfile
 also updates h2 and rustls to their compatible security fixes; rebuild router
 binaries from the reviewed lockfile.
+
+## 0.5.1 to 0.5.2
+
+No configuration, schema, token, descriptor, or stored-data migration is
+required. The release adds test coverage only. Subgraphs that newly advertise a
+resolvable Federation `@key` continue to need no descriptor entry for
+`_entities` or `_service`; those fields remain outside the router's root-field
+authorization contract, so a field reached by following a key is authorized
+solely by the subgraph that owns the entity.
 
 ## 0.5.0 to 0.5.1
 

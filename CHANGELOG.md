@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-31
+last_reviewed: 2026-09-17
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,38 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## 0.32.0 - 2026-09-17
+
+Companion macros crate: `graphql-orm-macros` **0.32.0**.
+
+- Added `#[graphql_entity(federation_key)]`, which opts an entity into being a
+  resolvable Apollo Federation v2 entity. The bare form keys on the primary
+  key; `federation_key(fields = ["A", "B"])` names exported GraphQL fields, and
+  the attribute repeats for several keys. `assume_unique = true` accepts a
+  unique constraint enforced by an externally managed schema the ORM does not
+  declare. Declarations are validated when the macro runs, and a key declared
+  without `GraphQLOperations` is now a compile error.
+- Generated one `#[graphql(entity)]` resolver per key. It reproduces the
+  generated single-row read authorization chain unchanged, so a missing row and
+  a row-policy denial both resolve to `null` while entity-policy, scope,
+  assurance, and authentication denials fail the `_entities` fetch. All
+  representations of one entity type in one fetch collapse into one statement.
+- **`PageInfo` is now `@shareable`.** Every subgraph's exported SDL changes
+  from `type PageInfo {` to `type PageInfo @shareable {`, whether or not it
+  uses Federation. Without it, two `graphql-orm` subgraphs could not compose.
+- **Declaring a key adds `_entities` and `_service` to introspection**, because
+  async-graphql enables federation as soon as a resolvable key exists. The
+  federation SDL export still omits them.
+- Added `federation: true` to `schema_roots!` for a subgraph whose only
+  Federation participation is an `unresolvable` reference stub and which
+  therefore has no resolvable key to enable federation by itself.
+- The operation catalogue and the router-protocol descriptor are unchanged by a
+  key declaration, and `_entities`/`_service` remain outside the router's
+  root-field authorization contract. A joined field is authorized only by the
+  subgraph that owns the entity; see
+  [ADR-0011](docs/decisions/ADR-0011-generated-federation-entity-keys.md).
+- No persisted schema or data migration.
 
 ## 0.31.1 - 2026-09-15
 
