@@ -1,0 +1,8 @@
+[workspace]
+members = [
+  "federation-e2e",
+  "readings-subgraph",
+  "subgraph-http",
+  "zones-subgraph",
+]
+resolver = "3"

@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-31
+last_reviewed: 2026-09-17
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -12,6 +12,47 @@ supersedes: []
 
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
+
+## 0.31.1 to 0.32.0: Federation entity keys and a shareable `PageInfo`
+
+Adopt runtime and macros 0.32.0 together from one reviewed workspace release.
+No Rust call site, persisted schema, or database migration changes.
+
+Two exported-SDL changes affect every consumer, including those that do not use
+Federation:
+
+1. `PageInfo` now carries `@shareable`. A host that post-processes, snapshots,
+   or fingerprints the SDL text must expect `type PageInfo @shareable {` in
+   place of `type PageInfo {`. This directive is what allows two `graphql-orm`
+   subgraphs to compose into one supergraph; without it, Federation v2
+   composition rejects the duplicate non-entity object field.
+2. The first entity that declares `federation_key` enables federation on that
+   schema, adding `_entities(representations: [_Any!]!): [_Entity]!` and
+   `_service: _Service!` to the *introspected* schema. The federation SDL export
+   continues to omit them. Update any fixed introspection snapshot, schema
+   fingerprint, or root-field count assertion accordingly. Schemas that declare
+   no key are unaffected.
+
+To opt an entity into the supergraph, add `federation_key` to its
+`#[graphql_entity(...)]` attribute. The entity must also derive
+`GraphQLOperations`; it now fails to compile otherwise rather than silently
+exporting no key. Consumers with hand-written resolver types for an entity
+should note that the generated `@key` is built from the generated resolver's
+argument names, so a hand-written `{Entity}Queries` replacement will not export
+a key.
+
+Declare reference fields that point at a foreign entity as **nullable**. A
+failed entity fetch produces `null` for the reference, and GraphQL null
+propagation decides the rest: a nullable reference degrades to `null` and the
+referencing subgraph's own fields still reach the caller, while a non-null
+reference hung off a generated connection has no nullable ancestor before
+`data` and costs the caller the whole response.
+
+Before adding a key, confirm the entity's rows are safe to expose to every
+subgraph that joins it. The router's authorization contract covers root fields
+only and deliberately skips `_entities`, so a joined field is authorized solely
+by the owning subgraph's entity policy, row policy, scope requirement, or
+`auth = "required"`.
 
 ## 0.31.0 to 0.31.1: patched SQL Server XML dependency
 

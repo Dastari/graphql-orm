@@ -1,0 +1,16 @@
+[package]
+name = "federation-e2e"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+graphql-orm-router = { path = "../../../../../graphql-orm-router" }
+ntex = "=3.10.0"
+readings-subgraph = { path = "../readings-subgraph" }
+reqwest = { version = "0.13", default-features = false, features = ["http2", "json", "rustls"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+zones-subgraph = { path = "../zones-subgraph" }

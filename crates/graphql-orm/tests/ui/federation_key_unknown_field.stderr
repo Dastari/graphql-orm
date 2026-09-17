@@ -1,0 +1,5 @@
+error: federation_key references unknown GraphQL field `slug` on `Zone`; use the exported field name
+ --> tests/ui/federation_key_unknown_field.rs:7:5
+  |
+7 |     federation_key(fields = ["slug"])
+  |     ^^^^^^^^^^^^^^

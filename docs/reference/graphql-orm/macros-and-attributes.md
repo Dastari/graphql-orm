@@ -3,7 +3,7 @@ title: GraphQL ORM macro and attribute reference
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-31
+last_reviewed: 2026-09-17
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -60,6 +60,15 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `upsert` | comma-separated columns | at least one column; may appear once |
 | `unique_composite` | comma-separated columns | at least two columns; repeatable |
 | `index`, `unique_index` | `"a,b"` or `(name = "…", columns = ["…"], directions = ["asc" | "desc"])` | at least one column; direction count must match columns |
+| `federation_key` | marker, or `(fields = ["GraphQLField", …], assume_unique = bool)` | repeatable; rejected on `repository_entity` and schema-only entities |
+
+The bare `federation_key` keys on the primary key in declaration order.
+`fields` names exported GraphQL fields, which must be readable, non-null,
+persisted scalars without a field-level read policy, and must form the primary
+key or a declared unique constraint. `assume_unique = true` accepts a unique
+constraint the ORM does not declare, and is rejected when one is declared.
+Declaring a key requires `GraphQLOperations`, which owns the generated entity
+resolver. See [federation](federation.md).
 
 `schema_policy = "external_read_only"` suppresses generated mutations and
 subscriptions on every backend. MSSQL requires `external_read_only` or
@@ -383,6 +392,7 @@ schema_roots! {
     auth: "required",
     generated_mutations: "allowlist",
     generated_mutation_allowlist: [Account],
+    federation: false,
     query_custom_ops: [],
     described_query_types: [ApplicationQueries],
     described_mutation_types: [ApplicationMutations],
@@ -402,6 +412,10 @@ result objects deriving `GraphQLSemanticObject`. The legacy
 `semantic_custom_operations`, and `semantic_types` lists remain available for
 incremental compatibility. A root in a `described_*` list cannot be repeated
 in a legacy composition/semantic list.
+`federation: true` calls `enable_federation()` on the schema builder. It is
+needed only by a subgraph that declares no resolvable `@key` of its own and
+participates in Federation purely through `unresolvable` reference stubs.
+
 `generated_mutations` defaults to `"all"`; it accepts
 `"all"`, `"none"`, `"allowlist"`, or `"denylist"`. An allowlist/denylist
 requires its matching nonempty list, and every listed entity must be in
@@ -536,4 +550,5 @@ Enable at most one in each group:
 - [Runtime writes and repository operations](runtime-and-writes.md)
 - [Schema management](schema-management.md)
 - [Strict authorization](strict-authorization.md)
+- [Federation entities, keys, and operation roots](federation.md)
 - [Macro crate README](../../../crates/graphql-orm-macros/README.md)

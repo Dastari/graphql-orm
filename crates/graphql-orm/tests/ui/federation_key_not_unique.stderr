@@ -1,0 +1,5 @@
+error: federation_key on `Zone` selects `region`, which is neither the primary key nor a declared unique constraint; a @key must identify at most one row. Declare `unique`, `unique_index`, or `unique_composite` for these columns, or set `assume_unique = true` when the uniqueness is enforced by an externally managed schema the ORM does not declare
+ --> tests/ui/federation_key_not_unique.rs:7:5
+  |
+7 |     federation_key(fields = ["region"])
+  |     ^^^^^^^^^^^^^^

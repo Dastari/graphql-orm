@@ -1,0 +1,5 @@
+error: unsupported federation_key option; expected fields or assume_unique
+ --> tests/ui/federation_key_unknown_option.rs:7:20
+  |
+7 |     federation_key(columns = ["id"])
+  |                    ^^^^^^^

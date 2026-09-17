@@ -824,6 +824,61 @@ mod tests {
         );
     }
 
+    /// A subgraph that owns a resolvable Federation entity, plus one
+    /// underscore-prefixed root field.
+    const ENTITY_SDL: &str = r#"
+        extend schema @link(url: "https://specs.apollo.dev/federation/v2.7", import: ["@key"])
+        type Zone @key(fields: "id") { id: ID!, name: String! }
+        type Query { zone(id: ID!): Zone, _diagnostics: String! }
+    "#;
+
+    #[test]
+    fn the_root_contract_excludes_underscore_prefixed_fields() {
+        // `_entities` and `_service` appear on an entity-owning subgraph the
+        // moment it declares a resolvable key, and they are reached by the
+        // query planner rather than by a client root field. The root contract
+        // is exact-match, so a descriptor that correctly omits them must still
+        // validate, and the planner-owned fields must never be demanded.
+        let graph =
+            crate::federation::GraphStore::new(&[crate::federation::CandidateSubgraph::new(
+                "catalog",
+                "http://catalog.test/graphql",
+                ENTITY_SDL,
+            )])
+            .unwrap()
+            .load();
+        let expected = graph_root_contract(&graph).unwrap();
+        let named = expected
+            .keys()
+            .map(|(_, field)| field.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !named.iter().any(|field| field.starts_with('_')),
+            "the contract skips planner-owned fields: {named:?}"
+        );
+        assert!(
+            named.contains(&"zone"),
+            "ordinary root fields remain: {named:?}"
+        );
+
+        let mut descriptor = descriptor(vec![OperationDescriptor {
+            root_type: RootOperationType::Query,
+            field_name: "zone".to_owned(),
+            arguments: vec![ArgumentDescriptor {
+                name: "id".to_owned(),
+                graphql_type: "ID!".to_owned(),
+                required: true,
+            }],
+            authorization: AuthorizationRequirement::Authenticated,
+        }]);
+        descriptor.fingerprints.schema = Fingerprint::sha256(ENTITY_SDL);
+        descriptor.fingerprints.combined = descriptor.combined_fingerprint();
+        assert!(
+            AuthorizationCatalog::build(&graph, &[descriptor]).is_ok(),
+            "an entity-owning subgraph needs no descriptor for _entities or _service"
+        );
+    }
+
     fn descriptor(operations: Vec<OperationDescriptor>) -> SubgraphDescriptor {
         let endpoint = |value: &str| AdvertisedEndpoint::try_from(value.to_owned()).unwrap();
         let mut descriptor = SubgraphDescriptor {

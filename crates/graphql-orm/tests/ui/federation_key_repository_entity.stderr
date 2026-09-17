@@ -1,0 +1,5 @@
+error: federation_key requires a GraphQL entity; repository-only entities have no GraphQL object to resolve
+ --> tests/ui/federation_key_repository_entity.rs:4:38
+  |
+4 | #[repository_entity(table = "zones", federation_key)]
+  |                                      ^^^^^^^^^^^^^^

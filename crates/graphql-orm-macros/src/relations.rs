@@ -39,7 +39,7 @@ struct ResolvedSourceCondition {
 }
 
 #[derive(Copy, Clone)]
-enum RelationValueKind {
+pub(crate) enum RelationValueKind {
     String,
     Uuid,
     Int,
@@ -90,7 +90,7 @@ fn relation_storage_kind(ty: &syn::Type, is_multiple: bool) -> RelationStorageKi
     }
 }
 
-fn classify_relation_value_type(ty: &syn::Type) -> Option<(RelationValueKind, bool)> {
+pub(crate) fn classify_relation_value_type(ty: &syn::Type) -> Option<(RelationValueKind, bool)> {
     let mut current = ty;
     let mut is_option = false;
 
@@ -126,7 +126,7 @@ fn classify_relation_value_type(ty: &syn::Type) -> Option<(RelationValueKind, bo
     }
 }
 
-fn relation_key_part_kind_tokens(kind: RelationValueKind) -> proc_macro2::TokenStream {
+pub(crate) fn relation_key_part_kind_tokens(kind: RelationValueKind) -> proc_macro2::TokenStream {
     match kind {
         RelationValueKind::String => {
             quote! { ::graphql_orm::graphql::loaders::RelationKeyPartKind::String }

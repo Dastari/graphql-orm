@@ -47,6 +47,15 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         },
         None => quote! {},
     };
+    // A subgraph whose only Federation participation is an unresolvable stub
+    // has no generated key, so async-graphql never enables federation by
+    // itself. This opt-in adds `_service` and the federation SDL export that
+    // composition needs.
+    let federation_enable = if args.federation {
+        quote! { let builder = builder.enable_federation(); }
+    } else {
+        quote! {}
+    };
     let schema_policy_read_only =
         matches!(args.schema_policy.as_deref(), Some("external_read_only"));
     let backend_writable =
@@ -295,6 +304,15 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                             ::graphql_orm::tokio::spawn,
                         )
                     );
+                    // Federation entity resolvers batch their representations
+                    // here. The loader is registered for every entity so that
+                    // adding a key never changes the schema wiring.
+                    let builder = builder.data(
+                        ::graphql_orm::async_graphql::dataloader::DataLoader::new(
+                            ::graphql_orm::graphql::loaders::FederationKeyLoader::<#entity, #backend_marker>::new(database.clone()),
+                            ::graphql_orm::tokio::spawn,
+                        )
+                    );
                 }
             })
             .collect();
@@ -345,6 +363,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 )
                 .data(database.clone());
                 let builder = limits.apply(builder);
+                #federation_enable
                 #schema_auth_data
                 #(#schema_loader_data)*
                 builder
@@ -443,6 +462,15 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                         ::graphql_orm::tokio::spawn,
                     )
                 );
+                // Federation entity resolvers batch their representations here.
+                // The loader is registered for every entity so that adding a
+                // key never changes the schema wiring.
+                let builder = builder.data(
+                    ::graphql_orm::async_graphql::dataloader::DataLoader::new(
+                        ::graphql_orm::graphql::loaders::FederationKeyLoader::<#entity, #backend_marker>::new(database.clone()),
+                        ::graphql_orm::tokio::spawn,
+                    )
+                );
             }
         })
         .collect();
@@ -493,6 +521,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             )
             .data(database.clone());
             let builder = limits.apply(builder);
+            #federation_enable
             #schema_auth_data
             #(#schema_loader_data)*
             builder
@@ -610,6 +639,8 @@ fn emit_chunked_merged_subscription(
 
 struct SchemaRootsArgs {
     backend: Option<String>,
+    /// Force `enable_federation()` for a subgraph with no resolvable key.
+    federation: bool,
     schema_policy: Option<String>,
     auth: Option<String>,
     generated_mutations: GeneratedMutationExposure,
@@ -669,6 +700,7 @@ impl Parse for SchemaRootsArgs {
         }
 
         let mut backend = None;
+        let mut federation = None;
         let mut schema_policy = None;
         let mut auth = None;
         let mut generated_mutations = None;
@@ -694,6 +726,10 @@ impl Parse for SchemaRootsArgs {
                 reject_duplicate(&backend, &label)?;
                 let lit: syn::LitStr = input.parse()?;
                 backend = Some(lit.value());
+            } else if label == "federation" {
+                reject_duplicate(&federation, &label)?;
+                let lit: syn::LitBool = input.parse()?;
+                federation = Some(lit.value);
             } else if label == "schema_policy" {
                 reject_duplicate(&schema_policy, &label)?;
                 let lit: syn::LitStr = input.parse()?;
@@ -919,6 +955,7 @@ impl Parse for SchemaRootsArgs {
 
         Ok(SchemaRootsArgs {
             backend,
+            federation: federation.unwrap_or(false),
             schema_policy,
             auth,
             generated_mutations,

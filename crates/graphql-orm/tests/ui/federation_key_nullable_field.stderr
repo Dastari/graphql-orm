@@ -1,0 +1,5 @@
+error: federation_key field `slug` is nullable; a @key field must be non-null so every row has exactly one representation
+  --> tests/ui/federation_key_nullable_field.rs:15:5
+   |
+15 |     #[unique]
+   |     ^

@@ -3,7 +3,7 @@ title: "Repository-only entities"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-09-17
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -166,6 +166,17 @@ page if any edge is not visible. An opt-in total count is rejected while an
 application `RowPolicy` is registered because counting rows outside the page
 cannot be proven policy-safe in memory; use a database-visible typed tenant
 predicate or PostgreSQL RLS for policy-safe counts.
+
+## Federation
+
+`federation_key` is rejected on `#[repository_entity(...)]` and on
+`GraphQLSchemaEntity`. A resolvable Federation `@key` is produced by an
+`#[graphql(entity)]` resolver on the generated queries object, and neither
+surface has a GraphQL object to resolve or a queries object to host the
+resolver. A repository-only entity that must also be a Federation entity has to
+become a `GraphQLEntity` + `GraphQLOperations` entity; there is no way to
+expose one through `_entities` without exposing its object type. See
+[federation](federation.md).
 
 ## Storage and migration compatibility
 

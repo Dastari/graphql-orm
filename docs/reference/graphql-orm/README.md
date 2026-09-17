@@ -23,7 +23,7 @@ guidance for the core ORM package.
 - [Schema management](schema-management.md)
 - [PostgreSQL](postgres.md)
 - [Microsoft SQL Server](mssql.md)
-- [Federation](federation.md)
+- [Federation entities, keys, and operation roots](federation.md)
 - [`agql-auth` bridge](agql-auth-bridge.md)
 - [Strict authorization](strict-authorization.md)
 - [Stable error codes](error-codes.md)

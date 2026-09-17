@@ -1,4 +1,13 @@
+/// Connection page metadata shared by every generated connection type.
+///
+/// Every `graphql-orm` subgraph exports an identical `PageInfo` object. Without
+/// `@shareable`, Federation v2 composition rejects a supergraph that contains
+/// two ORM subgraphs because a non-entity object field may otherwise be
+/// resolved by only one subgraph. The type carries no owned data, so declaring
+/// it shareable is the accurate description rather than a composition
+/// workaround.
 #[derive(async_graphql::SimpleObject, Clone, Debug, Default)]
+#[graphql(shareable)]
 #[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
 #[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
 #[cfg_attr(

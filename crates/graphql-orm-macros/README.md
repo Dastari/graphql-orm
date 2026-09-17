@@ -16,13 +16,13 @@ macro/runtime versions aligned:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.31.1", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.32.0", default-features = false, features = ["sqlite"] }
 ```
 
 Direct use is supported for tooling that needs the macro package:
 
 ```toml
-graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.31.1", default-features = false, features = ["sqlite"] }
+graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.32.0", default-features = false, features = ["sqlite"] }
 ```
 
 The direct dependency still requires a compatible `graphql-orm` runtime in the
@@ -52,6 +52,13 @@ root and automatically includes its operation descriptors and direct
 `GraphQLSemanticObject` result metadata. The older `extra_*` plus
 `semantic_custom_operations`/`semantic_types` lists remain compatible for
 incremental migration, but a described root cannot also appear in them.
+
+`GraphQLOperations` also owns Federation entity keys. An entity declaring
+`#[graphql_entity(federation_key)]` receives one `#[graphql(entity)]` resolver
+per key on its generated queries object, which is the only construct
+async-graphql turns into a resolvable `@key`. Declaring a key without this
+derive is a compile error. See
+[federation](../../docs/reference/graphql-orm/federation.md).
 
 Custom scalar and enum results are fail-safe by default. To make one eligible
 for provider disclosure, declare `result_classification` and `result_export`
