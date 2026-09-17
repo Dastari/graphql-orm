@@ -82,9 +82,9 @@ fn the_operation_catalogue_is_identical_with_and_without_a_key() {
             .collect::<Vec<_>>()
     };
 
-    assert_eq!(describe(&keyed), describe(&unkeyed));
+    assert_eq!(describe(keyed), describe(unkeyed));
     assert!(
-        !describe(&keyed)
+        !describe(keyed)
             .iter()
             .any(|entry| entry.contains("__gom_federation") || entry.contains("_entities")),
         "an entity resolver is not a catalogued root field"

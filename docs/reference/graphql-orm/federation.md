@@ -179,6 +179,24 @@ The null cases are deliberate: a row the caller may not see must be
 indistinguishable from a row that does not exist, or the key itself becomes an
 existence oracle.
 
+### What a denial looks like through the router
+
+The end-to-end fixture pins the observed behaviour of the workspace's Hive
+router when the owning subgraph refuses an entity fetch:
+
+- the **whole response** is nulled, not just the joined field. The parent
+  subgraph's own fields do not survive alongside the error, even though the
+  same caller can read them in a query that omits the join;
+- the error carries `extensions.code = "DOWNSTREAM_SERVICE_ERROR"`,
+  `extensions.service = "<owning subgraph>"`, and a path beginning
+  `_entities`;
+- the subgraph's own error **message is replaced** with a generic one. A client
+  cannot read the owning subgraph's wording through the router, so operational
+  detail must come from the subgraph's own logs.
+
+Design a joined field on the assumption that refusing it costs the caller the
+whole query.
+
 ### The router does not authorize a joined field
 
 `graphql-orm-router` enforces its authorization contract over **root fields
@@ -303,9 +321,15 @@ object.
 The repository tests parse the actual macro-generated federation SDL and
 resolve explicit or conventional operation roots independently of
 async-graphql. They assert that every declared root exists, that generated
-provider fields are direct members of `Query`, that each `@key` appears exactly
-once with its exact field list, and that two real ORM subgraphs compose and
-serve a cross-subgraph join through `graphql-orm-router`.
+provider fields are direct members of `Query`, and that each `@key` appears
+exactly once with its exact field list.
+
+An end-to-end fixture workspace serves two real ORM subgraphs over loopback —
+one owning a keyed entity, one holding only an `unresolvable` stub — composes
+them through `graphql-orm-router`, and proves that composition succeeds, that
+the joined field resolves through an `_entities` fetch, that three
+representations cost the owning subgraph one statement, and that an unscoped
+caller is refused by the owning subgraph while the router grants nothing.
 
 For a connected external graph, validate regenerated provider SDL without
 publishing it, and review the resulting query root nodes before promotion. Do
