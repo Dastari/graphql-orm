@@ -5,6 +5,11 @@
 //! subgraph must be able to resolve exactly one row from it. Every way that
 //! contract can be broken is diagnosed here rather than deferred to composition
 //! or to a runtime miss.
+//!
+//! Only macro-owned diagnostics, whose text this crate controls, are snapshot
+//! checked. The missing-`GraphQLOperations` case is a rustc trait-bound error
+//! whose prose varies by toolchain, so it is probed by a `compile_fail`
+//! doctest in the library's `generated_api_absence_probes` instead.
 
 #[test]
 fn invalid_federation_key_declarations_are_rejected() {
@@ -20,5 +25,4 @@ fn invalid_federation_key_declarations_are_rejected() {
     cases.compile_fail("tests/ui/federation_key_duplicate.rs");
     cases.compile_fail("tests/ui/federation_key_repository_entity.rs");
     cases.compile_fail("tests/ui/federation_key_schema_only_entity.rs");
-    cases.compile_fail("tests/ui/federation_key_without_operations.rs");
 }

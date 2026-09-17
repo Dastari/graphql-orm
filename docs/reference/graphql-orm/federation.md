@@ -261,17 +261,28 @@ pub struct ZoneReference {
 }
 ```
 
-Return the stub from a **nullable** field. The option expresses that the join
-may fail, not that the local column may be absent; see
-[what a denial looks like](#what-a-denial-looks-like-through-the-router) for
-what a non-null reference costs the caller.
-
 The Rust type name may differ from the GraphQL type name; `name = "Zone"` is
 what makes composition treat it as the same entity. The stub's fields must be
 exactly the key fields — it is a reference, not a partial copy.
 
+Return the stub from a **nullable** field built out of a local column. The
+option expresses that the *join* may fail, not that the column may be absent:
+
+```rust
+#[async_graphql::ComplexObject]
+impl Reading {
+    async fn zone(&self) -> Option<ZoneReference> {
+        Some(ZoneReference {
+            id: self.zone_id.clone(),
+        })
+    }
+}
+```
+
 The planner resolves the rest of the type through the owning subgraph's
-`_entities`.
+`_entities`. See
+[what a denial looks like](#what-a-denial-looks-like-through-the-router) for
+what a non-null reference costs the caller when that fetch fails.
 
 ### Stub-only subgraphs must enable federation
 

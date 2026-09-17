@@ -539,6 +539,43 @@ pub mod types;
 /// let _ = CompositeWriteRecord::create;
 /// let _ = CompositeWriteRecord::update_by_id;
 /// ```
+///
+/// A Federation key needs `GraphQLOperations`, which owns the generated
+/// queries object where the entity resolver — the only construct async-graphql
+/// turns into a resolvable `@key` — is emitted. Declaring a key without that
+/// derive does not compile, so it can never silently export nothing:
+///
+/// ```compile_fail
+/// use graphql_orm::prelude::*;
+///
+/// #[derive(GraphQLEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// #[graphql_entity(table = "probe_zones", plural = "ProbeZones", federation_key)]
+/// struct ProbeZone {
+///     #[primary_key]
+///     id: String,
+///     #[filterable(type = "string")]
+///     #[sortable]
+///     name: String,
+/// }
+/// ```
+///
+/// The same declaration, differing only by `GraphQLOperations`, compiles — so
+/// the failure above is attributable to the absent derive and not to anything
+/// else in the declaration:
+///
+/// ```
+/// use graphql_orm::prelude::*;
+///
+/// #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// #[graphql_entity(table = "probe_zones", plural = "ProbeZones", federation_key)]
+/// struct ProbeZone {
+///     #[primary_key]
+///     id: String,
+///     #[filterable(type = "string")]
+///     #[sortable]
+///     name: String,
+/// }
+/// ```
 #[cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
 pub mod generated_api_absence_probes {}
 
