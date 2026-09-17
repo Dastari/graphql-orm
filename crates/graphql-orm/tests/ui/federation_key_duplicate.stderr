@@ -1,0 +1,5 @@
+error: duplicate federation_key on `Zone`; each @key must select a distinct field set
+ --> tests/ui/federation_key_duplicate.rs:8:5
+  |
+8 |     federation_key(fields = ["id"])
+  |     ^^^^^^^^^^^^^^

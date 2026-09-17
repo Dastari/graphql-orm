@@ -6517,12 +6517,7 @@ pub(crate) fn generate_graphql_operations(
         &federation_keys,
         &federation_scope_enforcements,
     );
-    let federation_key_witness_impl =
-        crate::federation::federation_key_witness_impl(struct_name, &federation_keys);
-
     let operation_metadata_impl = quote! {
-        #federation_key_witness_impl
-
         impl ::graphql_orm::graphql::orm::GraphqlOperationMetadata for #struct_name {
             fn generated_graphql_operations(
             ) -> &'static [::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor] {

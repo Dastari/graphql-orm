@@ -1,0 +1,5 @@
+error: federation_key requires GraphQLEntity and GraphQLOperations; a schema-only entity has no GraphQL object to resolve
+ --> tests/ui/federation_key_schema_only_entity.rs:4:53
+  |
+4 | #[graphql_entity(table = "zones", plural = "Zones", federation_key)]
+  |                                                     ^^^^^^^^^^^^^^

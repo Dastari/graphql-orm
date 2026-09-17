@@ -475,18 +475,23 @@ pub(crate) fn federation_entity_resolver_tokens(
     quote! { #(#resolvers)* }
 }
 
-/// Record the generated key count so `GraphQLEntity` can require this derive.
+/// Record the declared key count so `GraphQLEntity` can require this derive.
+///
+/// This is emitted whether or not the rest of the operations derive succeeds.
+/// Otherwise a key that fails validation would report its own precise error
+/// *and* a second, misleading "add `GraphQLOperations`" error.
 pub(crate) fn federation_key_witness_impl(
+    attrs: &[syn::Attribute],
     struct_name: &syn::Ident,
-    keys: &[ResolvedFederationKey],
-) -> proc_macro2::TokenStream {
-    if keys.is_empty() {
-        return quote! {};
+) -> syn::Result<proc_macro2::TokenStream> {
+    let metadata = crate::entity::parse_entity_metadata(attrs)?;
+    if metadata.federation_keys.is_empty() {
+        return Ok(quote! {});
     }
-    let count = keys.len();
-    quote! {
+    let count = metadata.federation_keys.len();
+    Ok(quote! {
         impl ::graphql_orm::graphql::federation::GeneratedFederationEntityKeys for #struct_name {
             const FEDERATION_KEY_COUNT: usize = #count;
         }
-    }
+    })
 }

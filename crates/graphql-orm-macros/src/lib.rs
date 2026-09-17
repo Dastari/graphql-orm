@@ -565,9 +565,17 @@ pub fn derive_graphql_operations(input: TokenStream) -> TokenStream {
         .to_compile_error()
         .into();
     }
+    // The witness is emitted even when operations generation fails, so a key
+    // that is rejected for its own reason does not also report a misleading
+    // "add GraphQLOperations" error from the entity derive.
+    let witness = federation::federation_key_witness_impl(&input.attrs, &input.ident)
+        .unwrap_or_else(|_| quote! {});
     match operations::generate_graphql_operations(&input) {
-        Ok(tokens) => TokenStream::from(tokens),
-        Err(err) => TokenStream::from(err.to_compile_error()),
+        Ok(tokens) => TokenStream::from(quote! { #witness #tokens }),
+        Err(err) => {
+            let error = err.to_compile_error();
+            TokenStream::from(quote! { #witness #error })
+        }
     }
 }
 

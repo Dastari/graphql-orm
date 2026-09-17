@@ -1,0 +1,5 @@
+error: federation_key field `cachedLabel` must be a persisted scalar column; relations and skipped fields cannot form a key
+  --> tests/ui/federation_key_skipped_field.rs:15:5
+   |
+15 |     #[skip_db]
+   |     ^

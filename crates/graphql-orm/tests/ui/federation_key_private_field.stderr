@@ -1,0 +1,5 @@
+error: federation_key field `secret` is not exported in the GraphQL schema; a @key may only name readable fields
+  --> tests/ui/federation_key_private_field.rs:15:5
+   |
+15 |     #[unique]
+   |     ^

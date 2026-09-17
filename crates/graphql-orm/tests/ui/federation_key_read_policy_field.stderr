@@ -1,0 +1,5 @@
+error: federation_key field `slug` has a field-level read policy; a @key field is disclosed to every subgraph that joins this entity
+  --> tests/ui/federation_key_read_policy_field.rs:15:5
+   |
+15 |     #[unique]
+   |     ^

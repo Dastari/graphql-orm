@@ -1,0 +1,5 @@
+error: federation_key on `Zone` already selects a declared unique column set; remove `assume_unique = true`
+ --> tests/ui/federation_key_redundant_assume_unique.rs:7:5
+  |
+7 |     federation_key(fields = ["id"], assume_unique = true)
+  |     ^^^^^^^^^^^^^^
