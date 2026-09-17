@@ -60,7 +60,9 @@ jobs:
       - run: cargo test -p graphql-orm --no-default-features --features sqlite,router-protocol --test federation_entity_keys_contract
       - run: cargo test -p graphql-orm --no-default-features --features sqlite,field-case-pascal,argument-case-snake --test federation_entity_keys_case_features
       - run: cargo check -p graphql-orm --no-default-features --features postgres
+      - run: cargo test -p graphql-orm --no-default-features --features postgres --test federation_entity_keys_postgres
       - run: cargo check -p graphql-orm --no-default-features --features mssql
+      - run: cargo test -p graphql-orm --no-default-features --features mssql --test federation_entity_keys_mssql
       - run: cargo clippy -p graphql-orm --all-targets -- -D warnings
       - run: RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --no-deps
 

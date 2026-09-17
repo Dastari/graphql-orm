@@ -130,8 +130,10 @@ generated resolver enqueues its representation on a per-entity `DataLoader`
 that `schema_roots!` registers for every entity, so **N representations of one
 entity type in one `_entities` fetch issue one statement**: a single select
 with `column IN (...)` for a single-column key, or an OR-of-ANDs predicate for
-a composite key. The rendering is dialect-neutral and is exercised on SQLite,
-PostgreSQL, and SQL Server.
+a composite key. The rendering is dialect-neutral; it is executed and counted
+on SQLite and on a disposable PostgreSQL, and compiled and SDL-verified on SQL
+Server, whose execution lane is environment-gated like the rest of the SQL
+Server suite.
 
 Representations that match no row cost nothing extra; they are simply absent
 from the one result set.
