@@ -3,7 +3,7 @@ title: "Authorization pagination query evidence and benchmark"
 kind: investigation
 status: archived
 owner: graphql-orm-maintainers
-last_reviewed: 2026-09-20
+last_reviewed: 2026-09-21
 review_by: none
 supersedes: []
 ---
@@ -22,6 +22,9 @@ both generated ordinary list branches in `operations.rs` tested
 `db.row_policy().is_some()`, fetched all matching entities, authorized every
 row, and applied visible offset/limit in Rust. The generated GraphQL keyset
 resolver rejected any installed row policy. These match the reported mechanisms.
+The same branches were reconfirmed at the reported `f1db17a` and `8de4aea`
+revisions. The final change is rebased onto `8de4aea` (0.32.0) and targets
+0.33.0; measurements below were recorded before that rebase.
 
 The new default callback-only list path intentionally preserves that behavior
 and supplies the benchmark baseline. It does not simulate the old path by
@@ -161,8 +164,7 @@ per request but potentially substantial work over a complete traversal.
 - Regenerated the workspace inventory and updated runtime/macros versions,
   package READMEs, changelog, migration notes, and the canonical pagination
   guide. This is the documentation impact of the change.
-- The global documentation checker still reports four **pre-existing** expired
-  `review_by: 2026-09-01` dates: the `ai-production-readiness` and
-  `documentation-experience` active plans, and the investigation/plan templates.
-  All seven changed Markdown files passed the same metadata/link checks when
-  evaluated separately. Unrelated review dates were not silently extended.
+- After rebasing onto `8de4aea`, the global documentation checker passes all
+  189 governed Markdown files. Upstream independently refreshed the four stale
+  review dates encountered during the initial implementation. Release-state,
+  release-manifest, workspace-inventory, and package-release-policy checks pass.
