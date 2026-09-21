@@ -19,6 +19,17 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.98.3 (unreleased)
+
+`provider-grok-acp` is additive and disabled by default. Its draft provider requires
+an explicitly admitting host factory; Grok 1.0.40 must remain disabled until a
+hard aggregate output ceiling is verified. Do not replace existing providers or
+adopt an unpublished workspace revision to enable it. Registration requires
+explicit effort and exact model/usage aliases. Existing coordinator authorization,
+budget proofs and retained-session services remain authoritative. No DDL, data
+backfill or existing provider configuration migration is required. See the
+[admission contract](docs/local-harness.md#grok-acp-draft-adapter-and-admission-boundary).
+
 ## 0.98.2
 
 Hosts may install one `Arc<AiRunAuthorization>` with `with_run_authorization` on

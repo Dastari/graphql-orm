@@ -1484,6 +1484,21 @@ impl ProviderRequestContext {
         self.budget.reservation_id()
     }
 
+    /// Checks an adapter's conservative aggregate input ceiling against the
+    /// exact atomic reservation. This adds no authority: call `validate_request`
+    /// first to verify the run, model, effort, expiry and egress bindings.
+    ///
+    /// # Errors
+    /// Returns `BudgetDenied` when retained context or internal model rounds
+    /// need more input capacity than was atomically reserved.
+    pub fn validate_input_token_reservation(&self, required: u64) -> Result<(), ProviderError> {
+        if self.budget.covers_input_tokens(required) {
+            Ok(())
+        } else {
+            Err(ProviderError::BudgetDenied)
+        }
+    }
+
     /// Validates that each request capability has a matching exact transfer.
     ///
     /// # Errors
@@ -2170,7 +2185,7 @@ impl std::fmt::Debug for ProviderDynamicToolCall {
 }
 
 impl ProviderDynamicToolCall {
-    #[cfg(feature = "provider-codex-app-server")]
+    #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
     pub(crate) fn from_definition(
         response_id: impl Into<String>,
         call_id: impl Into<String>,

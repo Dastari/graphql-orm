@@ -21,6 +21,7 @@ providers=(
   provider-openai-compatible
   local-harness
   provider-codex-app-server
+  provider-grok-acp
 )
 
 # `--list` prints the provider lanes as a JSON array so a caller that fans the

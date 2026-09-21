@@ -71,3 +71,21 @@ pub use codex_app_server::{
     AiCodexAppServerRunProcess, AiCodexAppServerRunProcessFactory, AiCodexAppServerTurnInput,
     AiCodexAppServerWebSearchTurnConfig,
 };
+
+#[cfg(feature = "provider-grok-acp")]
+mod grok_acp;
+#[cfg(feature = "provider-grok-acp")]
+pub use grok_acp::{AiGrokAcpSdkBroker, AiGrokAcpSdkInbound, AiGrokAcpUsage};
+
+#[cfg(feature = "provider-grok-acp")]
+mod grok_acp_provider;
+#[cfg(feature = "provider-grok-acp")]
+pub use grok_acp_provider::{
+    AiGrokAcpDeletionService, AiGrokAcpLaunchedProcess, AiGrokAcpProcessFactory, AiGrokAcpProvider,
+    AiGrokAcpRegistration, AiGrokAcpRunProcess,
+};
+
+#[cfg(feature = "provider-grok-acp")]
+mod grok_acp_wire;
+#[cfg(feature = "provider-grok-acp")]
+pub use grok_acp_wire::{AiGrokAcpWireProcess, AiGrokAcpWireTransport};

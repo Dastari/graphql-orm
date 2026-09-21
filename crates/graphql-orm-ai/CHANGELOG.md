@@ -18,6 +18,21 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [Unreleased]
+
+### Added
+
+Opt-in `provider-grok-acp` SDK reverse-MCP broker binds exact registered tools
+to the existing coordinator dynamic-tool contracts, rejects replay and unknown
+methods, and bounds calls and wire bytes. Prompt-level usage decoding rejects
+missing, inconsistent or incomplete counters and model drift. These are protocol
+contracts accompany a draft ACP provider, bounded transport actor, frozen
+registration, fenced retained resume/deletion and uncertain cancellation. The
+factory defaults to denied admission: live Grok 1.0.40 exceeded configured output
+ceilings, so no runnable deployment or release readiness is claimed. Existing
+budget proofs now expose an aggregate input reservation check without a data
+migration.
+
 ## [0.98.2] - 2026-09-15
 
 ### Added
