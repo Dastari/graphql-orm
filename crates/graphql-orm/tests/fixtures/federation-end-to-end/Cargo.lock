@@ -2427,9 +2427,10 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "async-graphql",
+ "chacha20poly1305",
  "chrono",
  "futures",
  "geo",
@@ -2449,7 +2450,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "convert_case 0.7.1",
  "proc-macro2",
