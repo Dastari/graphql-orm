@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-09-17
+last_reviewed: 2026-09-21
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -12,6 +12,32 @@ supersedes: []
 
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
+
+## 0.32.0 to 0.33.0: authorization-aware pagination
+
+Existing `RowPolicy` implementations keep compiling; generated callback-based
+list offsets and totals retain their exact behavior. Implement the optional
+`read_visibility` method to opt into complete SQL authorization or partial
+prefiltering. Complete decisions must be sufficient without a row callback.
+
+Enable `AuthorizedScanConfig` for bounded callback scans on keyset-enabled
+entities, and teach clients to resume `continuation` after empty budget-limited
+pages. Scan status deliberately differs from connection `hasNextPage`. Exact
+callback totals remain on the legacy path. Store a random cursor encryption
+key securely and share it across accepting server instances.
+
+Standalone repository keyset helpers now use the authorized executor. Partial
+or callback-only policies use `authorized_scan` to advance through denials.
+Legacy repository keyset reads remain fail-closed; callback checks now cover
+lookahead/probes as well as returned rows. Transaction keyset helpers retain
+their existing behavior and do not yet consume the new predicates.
+
+Regenerate SDL/operation catalogues for the additive `*Scan` fields on
+keyset-enabled entities. Those fields inherit `keyset_list` scopes and
+assurance, and fail closed until enabled. No database migration is required.
+See the [canonical pagination guide](docs/reference/graphql-orm/pagination-migration.md)
+for examples, supported relation predicates, backend limits, and consistency.
+
 
 ## 0.31.1 to 0.32.0: Federation entity keys and a shareable `PageInfo`
 

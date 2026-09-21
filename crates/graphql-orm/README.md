@@ -3,7 +3,7 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-31
+last_reviewed: 2026-09-21
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -169,3 +169,11 @@ enforce row/field/database limits appropriate to the application.
 - [SQL Server integration](../../docs/reference/graphql-orm/mssql.md)
 
 SQL Server supports optional [native query notifications](../../docs/reference/graphql-orm/mssql.md#query-notifications) through an explicitly authorized, externally provisioned Broker connection.
+
+## Authorization-aware pagination
+
+Version 0.33 adds typed `RowPolicy::read_visibility` decisions, SQL-authorized
+list/keyset pagination, and opt-in bounded callback scans on keyset-enabled
+entities. Existing callback list offsets/counts remain exact. See the
+[pagination guide](../../docs/reference/graphql-orm/pagination-migration.md)
+for configuration, generic examples, continuation semantics, and limitations.

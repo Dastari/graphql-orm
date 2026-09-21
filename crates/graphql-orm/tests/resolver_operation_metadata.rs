@@ -376,7 +376,24 @@ fn derive_metadata_covers_every_rich_generated_category_and_exact_names() {
     use rich_surface::ResolverMetadataRecord;
 
     let operations = ResolverMetadataRecord::generated_graphql_operations();
-    assert_eq!(operations.len(), 11);
+    assert_eq!(operations.len(), 12);
+    let scan_name = resolver_name("resolverMetadataRecordsScan", "ResolverMetadataRecordsScan");
+    let scan = operations
+        .iter()
+        .find(|op| op.field_name() == scan_name)
+        .expect("scan descriptor");
+    assert_eq!(
+        scan.category(),
+        GeneratedGraphqlOperationCategory::KeysetList
+    );
+    assert_eq!(
+        scan.graphql_result_type(),
+        "ResolverMetadataRecordAuthorizedScanPage!"
+    );
+    assert_eq!(
+        scan.arguments().last().unwrap().graphql_type(),
+        "AuthorizedScanInput!"
+    );
     assert!(operations.iter().all(|operation| {
         operation.fingerprint().len() == 64
             && operation

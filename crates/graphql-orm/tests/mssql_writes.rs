@@ -977,3 +977,17 @@ async fn external_writable_mssql_dml_and_transactions_are_native_and_atomic()
     server.cleanup()?;
     Ok(())
 }
+
+#[path = "support/authorized_pagination_parity.rs"]
+mod pagination_parity;
+
+#[tokio::test]
+#[ignore = "starts a test-owned SQL Server container"]
+async fn mssql_authorized_pagination() -> Result<(), Box<dyn std::error::Error>> {
+    let mut server = OwnedSqlServer::start().await?;
+    execute_batch(&server.connection_string, &pagination_parity::seed_sql()).await?;
+    let database = writable_database(&server.connection_string, 2)?;
+    pagination_parity::verify(database).await;
+    server.cleanup()?;
+    Ok(())
+}

@@ -78,6 +78,8 @@ pub struct Database<B: OrmBackend = DefaultBackend> {
     pagination_config: PaginationConfig,
     authorization_mode: AuthorizationMode,
     event_senders: Arc<EventSenders>,
+    scan_config: Option<crate::graphql::orm::AuthorizedScanConfig>,
+    read_observer: Option<Arc<dyn crate::graphql::orm::ReadQueryObserver>>,
     _backend: PhantomData<B>,
 }
 
@@ -96,6 +98,8 @@ impl<B: OrmBackend> Clone for Database<B> {
             pagination_config: self.pagination_config,
             authorization_mode: self.authorization_mode,
             event_senders: self.event_senders.clone(),
+            scan_config: self.scan_config.clone(),
+            read_observer: self.read_observer.clone(),
             _backend: PhantomData,
         }
     }
@@ -138,6 +142,8 @@ impl<B: OrmBackend> Database<B> {
             pagination_config: PaginationConfig::default(),
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
+            scan_config: None,
+            read_observer: None,
             _backend: PhantomData,
         }
     }
@@ -162,6 +168,8 @@ impl<B: OrmBackend> Database<B> {
             pagination_config: PaginationConfig::default(),
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
+            scan_config: None,
+            read_observer: None,
             _backend: PhantomData,
         }
     }
@@ -183,6 +191,8 @@ impl<B: OrmBackend> Database<B> {
             pagination_config: PaginationConfig::default(),
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
+            scan_config: None,
+            read_observer: None,
             _backend: PhantomData,
         }
     }
@@ -204,6 +214,8 @@ impl<B: OrmBackend> Database<B> {
             pagination_config: PaginationConfig::default(),
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
+            scan_config: None,
+            read_observer: None,
             _backend: PhantomData,
         }
     }
@@ -225,6 +237,8 @@ impl<B: OrmBackend> Database<B> {
             pagination_config: PaginationConfig::default(),
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
+            scan_config: None,
+            read_observer: None,
             _backend: PhantomData,
         }
     }
@@ -249,6 +263,8 @@ impl<B: OrmBackend> Database<B> {
             pagination_config: PaginationConfig::default(),
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
+            scan_config: None,
+            read_observer: None,
             _backend: PhantomData,
         }
     }
@@ -280,6 +296,8 @@ impl<B: OrmBackend> Database<B> {
             pagination_config: PaginationConfig::default(),
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
+            scan_config: None,
+            read_observer: None,
             _backend: PhantomData,
         }
     }
@@ -940,6 +958,63 @@ impl<B: OrmBackend> Database<B> {
         } else {
             Err(OrmPublicError::forbidden())
         }
+    }
+
+    /// Enable bounded authorized scans. Keep the encryption key stable across
+    /// instances if continuation must survive restarts or load balancing.
+    pub fn with_authorized_scan_config(
+        mut self,
+        config: crate::graphql::orm::AuthorizedScanConfig,
+    ) -> Self {
+        self.scan_config = Some(config);
+        self
+    }
+
+    pub fn authorized_scan_config(&self) -> Option<&crate::graphql::orm::AuthorizedScanConfig> {
+        self.scan_config.as_ref()
+    }
+
+    /// Observe SQL text (without bind values) and database rows fetched by
+    /// EntityQuery reads. Intended for diagnostics and query-behavior tests.
+    pub fn with_read_query_observer(
+        mut self,
+        observer: impl crate::graphql::orm::ReadQueryObserver + 'static,
+    ) -> Self {
+        self.read_observer = Some(Arc::new(observer));
+        self
+    }
+
+    pub(crate) fn observe_read(&self, sql: &str, rows: usize) {
+        if let Some(observer) = &self.read_observer {
+            observer.on_read(sql, rows);
+        }
+    }
+
+    /// Resolve and validate request-local read visibility. This does not grant
+    /// entity, operation, scope, or field access.
+    pub async fn read_visibility<T: crate::graphql::orm::Entity + 'static>(
+        &self,
+        ctx: Option<&async_graphql::Context<'_>>,
+        surface: crate::graphql::orm::EntityAccessSurface,
+    ) -> async_graphql::Result<crate::graphql::orm::ReadVisibility> {
+        use crate::graphql::orm::ReadVisibility;
+        let metadata = T::metadata();
+        let visibility = if let Some(policy) = &self.row_policy {
+            policy
+                .read_visibility(
+                    ctx,
+                    self,
+                    metadata.entity_name,
+                    metadata.read_policy,
+                    surface,
+                )
+                .await?
+        } else {
+            // No RowPolicy is installed: retain the existing entity-policy-only contract.
+            ReadVisibility::Unrestricted
+        };
+        visibility.validate::<T, B>()?;
+        Ok(visibility)
     }
 
     pub async fn can_read_row(

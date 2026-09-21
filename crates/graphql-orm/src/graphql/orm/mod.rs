@@ -1,3 +1,5 @@
+mod authorized_pagination;
+pub use authorized_pagination::*;
 mod backend;
 #[cfg(any(
     all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
