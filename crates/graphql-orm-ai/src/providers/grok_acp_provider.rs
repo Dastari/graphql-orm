@@ -711,6 +711,10 @@ impl AiProvider for AiGrokAcpProvider {
             return Err(rejected());
         }
         let entry = self.entry(*binding).await?;
+        let mut guard = TurnGuard {
+            entry: entry.clone(),
+            complete: false,
+        };
         let mut cursor = entry.cursor.lock().await;
         if cursor.is_some() {
             return Err(rejected());
@@ -735,6 +739,7 @@ impl AiProvider for AiGrokAcpProvider {
         }
         *cursor = Some(created.clone());
         entry.newly_created.store(true, Ordering::Release);
+        guard.complete = true;
         Ok(created)
     }
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
