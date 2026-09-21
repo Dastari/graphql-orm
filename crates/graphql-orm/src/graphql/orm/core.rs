@@ -2509,6 +2509,21 @@ pub trait FieldPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
 }
 
 pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
+    /// Describe read visibility for this request, entity, and access surface.
+    /// The default preserves callback-only authorization. A complete predicate
+    /// (or `Unrestricted`) replaces row callbacks only on pagination paths that
+    /// explicitly support this contract. Errors fail the request closed.
+    fn read_visibility<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a crate::db::Database<B>,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<super::ReadVisibility>> {
+        Box::pin(async { Ok(super::ReadVisibility::CallbackOnly) })
+    }
+
     fn can_read_row<'a>(
         &'a self,
         ctx: Option<&'a async_graphql::Context<'_>>,

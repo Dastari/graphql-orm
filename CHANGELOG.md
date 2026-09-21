@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-09-17
+last_reviewed: 2026-09-21
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,29 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## 0.33.0 - 2026-09-21
+
+Companion macros crate: `graphql-orm-macros` **0.33.0**.
+
+- Added request-local `RowPolicy::read_visibility`, typed parameterized
+  predicates, explicit complete/partial/callback/unrestricted decisions, and
+  validated EXISTS relations. Existing policies default to callbacks.
+- Generated ordinary lists apply complete visibility before SQL pagination
+  and exact counts. Legacy callback-visible offsets and totals remain exact.
+- Added opt-in bounded authorization scans with encrypted continuation,
+  explicit budget/exhaustion states, and no implicit exact count work.
+- GraphQL and standalone repository keyset connections accept complete SQL
+  visibility and constrain counts/probes consistently. Residual authorization
+  uses the scan API; transaction keyset helpers retain their existing contract.
+- Added query observation, integration coverage, and a reproducible large-data
+  release benchmark. All callback-required columns remain loaded.
+
+See the [pagination guide](docs/reference/graphql-orm/pagination-migration.md)
+for backend/capability boundaries, consistency, and migration details. The new
+scan fields extend keyset-enabled GraphQL SDL and operation catalogues.
+No stored-data migration is required.
+
 
 ## 0.32.0 - 2026-09-17
 

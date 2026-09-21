@@ -347,6 +347,7 @@ pub(crate) fn strip_operations_graphql_surface(
     let removed = HashSet::from([
         format!("{entity_name}Edge"),
         format!("{entity_name}Connection"),
+        format!("{entity_name}AuthorizedScanPage"),
         format!("{entity_name}SearchEdge"),
         format!("{entity_name}SearchConnection"),
         format!("GraphQLCreate{entity_name}Input"),

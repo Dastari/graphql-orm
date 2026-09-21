@@ -4273,7 +4273,9 @@ pub(crate) fn generate_graphql_operations(
         (quote! {}, quote! {})
     };
 
-    let (keyset_repository_methods, keyset_trait_impl) = if let Some(parts) = &keyset_parts {
+    let scan_connection_type = quote::format_ident!("{}AuthorizedScanPage", struct_name);
+    let scan_query_name = apply_graphql_case(&format!("{}Scan", plural_name), resolver_case);
+    let keyset_generated = if let Some(parts) = &keyset_parts {
         let mut order_tokens = Vec::new();
         let mut cursor_tokens = Vec::new();
         let mut fingerprint_parts = Vec::new();
@@ -4337,17 +4339,48 @@ pub(crate) fn generate_graphql_operations(
             });
         }
         let fingerprint = format!("v1:{}", fingerprint_parts.join(","));
+        let definitions = quote! {
+                #[derive(::graphql_orm::async_graphql::SimpleObject, Clone, Debug)]
+                #[graphql(rename_fields = #field_case_rule)]
+                pub struct #scan_connection_type {
+                    pub nodes: Vec<#struct_name>,
+                    pub page_info: ::graphql_orm::graphql::orm::ScanPageInfo,
+                }
+
+                impl ::graphql_orm::graphql::orm::AuthorizedKeysetEntity for #struct_name {
+                    const KEYSET_ORDER: &'static [::graphql_orm::graphql::orm::KeysetOrderColumn] = &[#(#order_tokens),*];
+                    const KEYSET_FINGERPRINT: &'static str = #fingerprint;
+                    fn keyset_values(&self) -> Vec<::graphql_orm::graphql::pagination::KeysetValue> {
+                        let entity = self;
+                        vec![#(#cursor_tokens),*]
+                    }
+                }
+
+        };
         (
             quote! {
+                /// Scan bounded batches with request-independent repository policies.
+                /// Install AuthorizedScanConfig on the database to opt in.
+                pub async fn authorized_scan(
+                    db: &::graphql_orm::db::Database<#backend_marker>,
+                    filter: #where_input,
+                    page: ::graphql_orm::graphql::orm::AuthorizedScanInput,
+                ) -> ::graphql_orm::async_graphql::Result<::graphql_orm::graphql::orm::AuthorizedScanPage<Self>> {
+                    ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
+                        .filter_with_entity_matching(&filter)
+                        .fetch_authorized_scan(db, None, None, page).await
+                }
+
                 /// Fetch a bounded, stable keyset page using the entity's configured order.
                 pub async fn keyset_page(
                     db: &::graphql_orm::db::Database<#backend_marker>,
                     filter: #where_input,
                     page: ::graphql_orm::graphql::pagination::KeysetPageInput,
                 ) -> Result<::graphql_orm::graphql::pagination::Connection<Self>, ::graphql_orm::graphql::errors::OrmPublicError> {
-                    db.transaction(::graphql_orm::graphql::orm::TransactionMode::Default, move |tx| {
-                        Box::pin(async move { tx.keyset_page::<Self>(filter, page).await })
-                    }).await.map_err(|error| error.public_error().clone())
+                    ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
+                        .filter_with_entity_matching(&filter)
+                        .fetch_authorized_keyset(db, None, None, page).await
+                        .map_err(|error| ::graphql_orm::graphql::errors::OrmPublicError::from(::graphql_orm::graphql::errors::sqlx_error_from_graphql(error)))
                 }
 
                 /// Fetch a bounded forward or backward keyset connection using
@@ -4357,9 +4390,10 @@ pub(crate) fn generate_graphql_operations(
                     filter: #where_input,
                     page: ::graphql_orm::graphql::pagination::KeysetConnectionInput,
                 ) -> Result<::graphql_orm::graphql::pagination::Connection<Self>, ::graphql_orm::graphql::errors::OrmPublicError> {
-                    db.transaction(::graphql_orm::graphql::orm::TransactionMode::Default, move |tx| {
-                        Box::pin(async move { tx.keyset_connection_page::<Self>(filter, page).await })
-                    }).await.map_err(|error| error.public_error().clone())
+                    ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
+                        .filter_with_entity_matching(&filter)
+                        .fetch_authorized_keyset_connection(db, None, None, page).await
+                        .map_err(|error| ::graphql_orm::graphql::errors::OrmPublicError::from(::graphql_orm::graphql::errors::sqlx_error_from_graphql(error)))
                 }
             },
             quote! {
@@ -4540,10 +4574,13 @@ pub(crate) fn generate_graphql_operations(
                     }
                 }
             },
+            definitions,
         )
     } else {
-        (quote! {}, quote! {})
+        (quote! {}, quote! {}, quote! {})
     };
+    let (keyset_repository_methods, keyset_trait_impl, authorized_keyset_definitions) =
+        keyset_generated;
     let keyset_graphql_method = if keyset_parts.is_some() {
         quote! {
             #[doc = #keyset_operation_description]
@@ -4561,27 +4598,33 @@ pub(crate) fn generate_graphql_operations(
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
                 )?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
-                db.ensure_entity_access(
-                    Some(ctx),
-                    #entity_name_lit,
-                    <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-                    ::graphql_orm::graphql::orm::EntityAccessKind::Read,
-                    ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
-                ).await?;
-                if db.row_policy().is_some() {
-                    return Err(::graphql_orm::graphql::errors::OrmPublicError::with_message(
-                        ::graphql_orm::graphql::errors::OrmErrorCode::AuthorizationMisconfigured,
-                        "keyset pagination requires database-visible row policy predicates",
-                    ).into_graphql_error());
-                }
-                let auth = ctx.data_opt::<::graphql_orm::graphql::orm::DbAuthContext>().cloned();
+                let auth = ctx.data_opt::<::graphql_orm::graphql::orm::DbAuthContext>();
                 let filter = where_input.unwrap_or_default();
-                let connection = db.transaction_with_auth(
-                    ::graphql_orm::graphql::orm::TransactionMode::Default,
-                    auth.as_ref(),
-                    move |tx| Box::pin(async move { tx.keyset_page::<#struct_name>(filter, page).await }),
-                ).await.map_err(|error| error.public_error().clone().into_graphql_error())?;
+                let connection = ::graphql_orm::graphql::orm::EntityQuery::<#struct_name, #backend_marker>::new()
+                    .filter_with_entity_matching(&filter)
+                    .fetch_authorized_keyset(db, Some(ctx), auth, page).await?;
                 Ok(#connection_type::from_generic(connection))
+            }
+
+            /// Bounded forward authorization scan; continuation does not promise another visible row.
+            #[graphql(name = #scan_query_name, #keyset_list_requires_scopes #authenticated_directive)]
+            async fn authorized_scan(
+                &self,
+                ctx: &::graphql_orm::async_graphql::Context<'_>,
+                #[graphql(name = #where_arg_name)] where_input: Option<#where_input>,
+                #[graphql(name = #page_arg_name)] page: ::graphql_orm::graphql::orm::AuthorizedScanInput,
+            ) -> ::graphql_orm::async_graphql::Result<#scan_connection_type> {
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                #keyset_list_scope_enforcement
+                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                    ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                )?;
+                let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                let auth = ctx.data_opt::<::graphql_orm::graphql::orm::DbAuthContext>();
+                let result = ::graphql_orm::graphql::orm::EntityQuery::<#struct_name, #backend_marker>::new()
+                    .filter_with_entity_matching(&where_input.unwrap_or_default())
+                    .fetch_authorized_scan(db, Some(ctx), auth, page).await?;
+                Ok(#scan_connection_type { nodes: result.nodes, page_info: result.page_info })
             }
         }
     } else {
@@ -6349,6 +6392,22 @@ pub(crate) fn generate_graphql_operations(
             &keyset_list_operation_authorization,
         ));
     }
+    if keyset_parts.is_some() {
+        operation_descriptors.push(descriptor(
+            quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
+            quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::KeysetList },
+            &scan_query_name,
+            vec![
+                argument_descriptor(&where_arg_name, quote! { Option<#where_input> }),
+                argument_descriptor(
+                    &page_arg_name,
+                    quote! { ::graphql_orm::graphql::orm::AuthorizedScanInput },
+                ),
+            ],
+            quote! { #scan_connection_type },
+            &keyset_list_operation_authorization,
+        ));
+    }
     let single_metadata_arguments = single_query_argument_specs
         .iter()
         .map(|(_, field_type, graphql_name)| {
@@ -6595,6 +6654,7 @@ pub(crate) fn generate_graphql_operations(
 
             #search_connection_definitions
             #aggregate_definitions
+            #authorized_keyset_definitions
 
             // ============================================================================
             // Query Struct
@@ -6653,7 +6713,11 @@ pub(crate) fn generate_graphql_operations(
                         query = query.default_order();
                     }
 
-                    if db.row_policy().is_some() {
+                    let visibility = db.read_visibility::<#struct_name>(
+                        Some(ctx), ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
+                    ).await?;
+                    query = query.with_read_visibility(&visibility)?;
+                    if visibility.requires_residual_checks() {
                         let base_query = query.clone();
                         let requested_page = page.clone();
 
@@ -6992,6 +7056,7 @@ pub(crate) fn generate_graphql_operations(
         // ============================================================================
 
         #aggregate_definitions
+            #authorized_keyset_definitions
 
         /// Generated queries for #struct_name
         #[derive(Default)]
@@ -7047,7 +7112,11 @@ pub(crate) fn generate_graphql_operations(
                     query = query.default_order();
                 }
 
-                if db.row_policy().is_some() {
+                let visibility = db.read_visibility::<#struct_name>(
+                    Some(ctx), ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
+                ).await?;
+                query = query.with_read_visibility(&visibility)?;
+                if visibility.requires_residual_checks() {
                     let base_query = query.clone();
                     let requested_page = page.clone();
 

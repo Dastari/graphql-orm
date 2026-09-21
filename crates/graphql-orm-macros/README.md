@@ -3,7 +3,7 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-08-31
+last_reviewed: 2026-09-21
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -150,3 +150,11 @@ field's Rust backing type.
 
 See [core runtime documentation](../graphql-orm/README.md),
 and the [macro and attribute reference](../../docs/reference/graphql-orm/macros-and-attributes.md).
+
+## Authorization-aware pagination
+
+Version 0.33 adds typed `RowPolicy::read_visibility` decisions, SQL-authorized
+list/keyset pagination, and opt-in bounded callback scans on keyset-enabled
+entities. Existing callback list offsets/counts remain exact. See the
+[pagination guide](../../docs/reference/graphql-orm/pagination-migration.md)
+for configuration, generic examples, continuation semantics, and limitations.

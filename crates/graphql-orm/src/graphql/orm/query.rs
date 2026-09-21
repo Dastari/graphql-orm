@@ -1236,7 +1236,9 @@ impl KeysetOrderColumn {
     }
 }
 
-fn keyset_sql_value(value: &crate::graphql::pagination::KeysetValue) -> Option<SqlValue> {
+pub(crate) fn keyset_sql_value(
+    value: &crate::graphql::pagination::KeysetValue,
+) -> Option<SqlValue> {
     use crate::graphql::pagination::KeysetValue;
     match value {
         KeysetValue::Null => None,
@@ -1419,6 +1421,9 @@ pub trait PoolProvider<B: OrmBackend = DefaultBackend> {
     fn pagination_config(&self) -> PaginationConfig {
         PaginationConfig::default()
     }
+
+    /// Observe a completed read without disclosing parameter values.
+    fn observe_read(&self, _sql: &str, _rows: usize) {}
 }
 
 pub trait DatabaseExecutor<B: OrmBackend = DefaultBackend>: PoolProvider<B> {
@@ -1458,6 +1463,10 @@ impl PoolProvider<MssqlBackend> for crate::db::mssql::MssqlPool {
 impl DatabaseExecutor<MssqlBackend> for crate::db::mssql::MssqlPool {}
 
 impl<B: OrmBackend> PoolProvider<B> for crate::db::Database<B> {
+    fn observe_read(&self, sql: &str, rows: usize) {
+        crate::db::Database::observe_read(self, sql, rows);
+    }
+
     fn pool(&self) -> &B::Pool {
         self.pool()
     }
@@ -2998,7 +3007,7 @@ pub struct EntityQuery<T, B: OrmBackend = DefaultBackend> {
     pub where_clauses: Vec<String>,
     pub values: Vec<SqlValue>,
     pub order_clauses: Vec<String>,
-    order_values: Vec<Vec<SqlValue>>,
+    pub(crate) order_values: Vec<Vec<SqlValue>>,
     pub page: Option<PageInput>,
     entity_matchers: Vec<EntityMatcher<T>>,
     filter_is_valid: bool,
@@ -3299,6 +3308,7 @@ where
             &self.build_select_query_with_config(pagination_config, false)?,
         );
         let rows = B::fetch_rows(provider.pool(), &rendered.sql, &rendered.values).await?;
+        provider.observe_read(&rendered.sql, rows.len());
         self.apply_in_memory_filtering(rows, pagination_config, false)
     }
 
@@ -3317,6 +3327,7 @@ where
         );
         let rows =
             B::fetch_rows_with_auth(provider.pool(), &rendered.sql, &rendered.values, auth).await?;
+        provider.observe_read(&rendered.sql, rows.len());
         self.apply_in_memory_filtering(rows, pagination_config, false)
     }
 
@@ -3335,6 +3346,7 @@ where
         );
         let rows =
             B::fetch_rows_with_auth(provider.pool(), &rendered.sql, &rendered.values, auth).await?;
+        provider.observe_read(&rendered.sql, rows.len());
         self.apply_in_memory_filtering(rows, pagination_config, false)
     }
 
@@ -3617,6 +3629,7 @@ where
         let rendered = render_select_query(B::DIALECT, &query);
         let rows =
             B::fetch_rows_with_auth(provider.pool(), &rendered.sql, &rendered.values, auth).await?;
+        provider.observe_read(&rendered.sql, rows.len());
         let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
         B::try_get_i64(row, "count")
     }
@@ -3637,6 +3650,7 @@ where
         );
         let rows =
             B::fetch_rows_with_auth(provider.pool(), &rendered.sql, &rendered.values, auth).await?;
+        provider.observe_read(&rendered.sql, rows.len());
         let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
         B::try_get_i64(row, "__gom_aggregate")
     }
@@ -3686,6 +3700,7 @@ where
         );
         let rows =
             B::fetch_rows_with_auth(provider.pool(), &rendered.sql, &rendered.values, auth).await?;
+        provider.observe_read(&rendered.sql, rows.len());
         let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
         B::try_get_optional_i64(row, "__gom_aggregate")
     }
@@ -3824,6 +3839,8 @@ where
             None,
         )
         .await?;
+        provider.observe_read(&count_rendered.sql, count_rows.len());
+        provider.observe_read(&row_rendered.sql, rows.len());
         let count_row = count_rows.first().ok_or(sqlx::Error::RowNotFound)?;
         let total = B::try_get_i64(count_row, "count")?;
         let nodes = rows
@@ -3917,6 +3934,8 @@ where
             auth,
         )
         .await?;
+        provider.observe_read(&count_rendered.sql, count_rows.len());
+        provider.observe_read(&row_rendered.sql, rows.len());
         let count_row = count_rows.first().ok_or(sqlx::Error::RowNotFound)?;
         let total = B::try_get_i64(count_row, "count")?;
         let page = pagination_config.resolve_page(self.page.as_ref(), true);

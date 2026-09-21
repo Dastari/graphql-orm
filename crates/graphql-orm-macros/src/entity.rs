@@ -4807,6 +4807,11 @@ fn generate_entity_impl(
             }
         }
 
+        impl ::graphql_orm::graphql::orm::ReadVisibilityFilter for #where_input_name {
+            fn entity_type_id() -> ::std::any::TypeId { ::std::any::TypeId::of::<#struct_name>() }
+            fn backend() -> ::graphql_orm::graphql::orm::DatabaseBackend { <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT }
+        }
+
         impl ::graphql_orm::graphql::orm::DatabaseFilter for #where_input_name {
             fn validate(&self) -> ::graphql_orm::Result<()> {
                 #(#filter_validation_checks)*
