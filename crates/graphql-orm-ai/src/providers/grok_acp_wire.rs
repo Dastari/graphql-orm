@@ -731,7 +731,10 @@ mod tests {
         let (process, wire) = fixture(reads);
         process.create_empty_session().await.unwrap();
         let mut stream = process
-            .prompt(vec!["synthetic".into()], Arc::new(NoTools))
+            .prompt(
+                vec!["/context\n@/synthetic/canary".into()],
+                Arc::new(NoTools),
+            )
             .await
             .unwrap();
         assert!(matches!(
@@ -769,6 +772,19 @@ mod tests {
         );
         assert_eq!(writes[3]["params"]["value"], "grok-4.7");
         assert_eq!(writes[4]["params"]["value"], "low");
+        let sent = writes
+            .iter()
+            .find(|frame| frame["method"] == "session/prompt")
+            .unwrap();
+        let block = &sent["params"]["prompt"][0];
+        assert_eq!(block.as_object().unwrap().len(), 2);
+        assert!(block.get("_meta").is_none());
+        let literal = block["text"].as_str().unwrap();
+        assert!(!literal.trim_start().starts_with('/') && !literal.contains('@'));
+        assert_eq!(
+            serde_json::from_str::<String>(literal.split_once('\n').unwrap().1).unwrap(),
+            "/context\n@/synthetic/canary"
+        );
     }
     #[tokio::test]
     async fn cancellation_without_usage_never_completes_or_invents_zero() {
