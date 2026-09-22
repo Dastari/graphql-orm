@@ -283,7 +283,12 @@ one fixed host title, closes and resumes the session. This prevents the native
 first-content title sampler. Resume repeats the frozen curated profile and
 `yoloMode` setting. Only an exact manual-title notification is admitted; generated
 summaries, compaction, background tasks and unknown execution events fail closed.
-Internal thought chunks and signatures are discarded. No payloads or credentials
+Every message is transported inside a reversible JSON-string text envelope,
+with a fixed non-command prefix and literal at-signs encoded as JSON Unicode
+escapes. This prevents native slash-command dispatch and implicit file-reference
+expansion before tool admission, while preserving original message content for
+the model. Prompt blocks never carry native bash/control metadata. Encoded text
+still obeys the registration byte bound. Internal thought chunks and signatures are discarded. No payloads or credentials
 are logged. Exact bounded `skills-reload` internal acknowledgments are recognized
 without exposing any ambient skills or authorizing tools.
 

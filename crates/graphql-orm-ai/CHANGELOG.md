@@ -32,7 +32,9 @@ are handled without widening the tool surface. Factories own isolated process
 launch and must explicitly admit the reviewed profile. Budgets retain the existing
 estimate/reserve/actual semantics, including complete actual usage above estimates;
 no native hard token ceiling is claimed. Pending-launch and abandoned-session
-futures terminate safely. No schema or data migration is introduced.
+futures terminate safely. Literal JSON-string input envelopes prevent native
+slash-command dispatch and implicit file expansion before tool admission. No
+schema or data migration is introduced.
 
 ## [0.98.2] - 2026-09-15
 
