@@ -20,6 +20,14 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+## [0.98.4] - 2026-09-23
+
+### Fixed
+
+Keep inline provider tool futures polled while run heartbeats, retained-session
+heartbeats and live-output flush timers wait for their shared lease. This avoids
+self-deadlock and lease expiry without releasing the tool execution fence.
+
 ## [0.98.3] - 2026-09-22
 
 ### Added

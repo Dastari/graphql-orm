@@ -28,6 +28,33 @@ use crate::{
 
 const MAXIMUM_PROVIDER_TRANSFERS: usize = 288;
 
+// Await this inside select! alongside the provider, never in a selected branch.
+// The provider can own the lease while awaiting an inline tool. Selecting only
+// the timer and subsequently waiting for the lease would stop polling its owner.
+async fn lease_after_delay(
+    lease: &Mutex<AiRunLease>,
+    delay: std::time::Duration,
+) -> tokio::sync::MutexGuard<'_, AiRunLease> {
+    tokio::time::sleep(delay).await;
+    lease.lock().await
+}
+
+enum LiveProviderPoll {
+    Event(Option<Result<ProviderEvent, ProviderError>>),
+    Flush(Box<AiRunLease>),
+}
+
+async fn next_live_provider_event(
+    stream: &mut crate::ProviderEventStream,
+    lease: &Mutex<AiRunLease>,
+    delay: std::time::Duration,
+) -> LiveProviderPoll {
+    tokio::select! {
+        event = stream.next() => LiveProviderPoll::Event(event),
+        guard = lease_after_delay(lease, delay) => LiveProviderPoll::Flush(Box::new(guard.clone())),
+    }
+}
+
 /// Content-free exact conservative requirement for the final bound provider
 /// request after continuation and provider projections are installed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3034,8 +3061,7 @@ impl AiProviderCallExecutor {
             );
             tokio::select! {
                 result = &mut turn => break result,
-                () = tokio::time::sleep(delay) => {
-                    let current_lease = lease_state.lock().await;
+                current_lease = lease_after_delay(&lease_state, delay) => {
                     current_claim = match session_service
                         .heartbeat(&current_lease, &current_claim)
                         .await
@@ -3446,12 +3472,17 @@ impl AiProviderCallExecutor {
             .map(|_| AiProviderActivityCoalescer::new(self.live_delta_limits));
         loop {
             let item = if live_coalescer.is_some() || activity_coalescer.is_some() {
-                tokio::select! {
-                    item = stream.next() => item,
-                    () = tokio::time::sleep(self.live_delta_limits.maximum_delay()) => {
+                match next_live_provider_event(
+                    &mut stream,
+                    &lease_state,
+                    self.live_delta_limits.maximum_delay(),
+                )
+                .await
+                {
+                    LiveProviderPoll::Event(item) => item,
+                    LiveProviderPoll::Flush(active_lease) => {
                         if let Some(coalescer) = live_coalescer.as_mut() {
                             let batches = coalescer.flush_due(Instant::now())?;
-                            let active_lease = lease_state.lock().await.clone();
                             self.persist_live_batches(
                                 &active_lease,
                                 &live_scope,
@@ -3466,7 +3497,6 @@ impl AiProviderCallExecutor {
                         }
                         if let Some(coalescer) = activity_coalescer.as_mut() {
                             let activities = coalescer.flush_due(Instant::now())?;
-                            let active_lease = lease_state.lock().await.clone();
                             self.persist_provider_activities(
                                 &active_lease,
                                 &live_scope,
@@ -5005,6 +5035,76 @@ mod tests {
             AiGraphqlSubscriptionCapabilityLimits::default(),
         )
         .expect("test subscription capabilities should compile")
+    }
+
+    #[tokio::test]
+    async fn claim_heartbeat_wait_keeps_inline_turn_polled_and_holds_the_fence() {
+        let fixture = fixture(Vec::new()).await;
+        let lease = Arc::new(Mutex::new(fixture.lease.clone()));
+        let inline_lease = lease.clone();
+        let turn = async move {
+            let guard = inline_lease.lock().await;
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            drop(guard);
+            std::future::pending::<()>().await;
+        };
+        tokio::pin!(turn);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            tokio::select! {
+                () = &mut turn => panic!("provider must still be active at renewal"),
+                guard = lease_after_delay(&lease, std::time::Duration::from_millis(1)) => {
+                    assert_eq!(guard.run_id(), fixture.lease.run_id());
+                    assert!(lease.try_lock().is_err(), "renewal must retain the fence");
+                }
+            }
+        })
+        .await
+        .expect("claim heartbeat must keep polling the inline lease owner");
+        assert!(lease.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn live_flush_keeps_inline_lease_owner_polled_and_drops_waiter_on_completion() {
+        let fixture = fixture(Vec::new()).await;
+        let lease = Arc::new(Mutex::new(fixture.lease.clone()));
+        let inline_lease = lease.clone();
+        let mut stream: crate::ProviderEventStream = Box::pin(async_stream::stream! {
+            let guard = inline_lease.lock().await;
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            drop(guard);
+            yield Ok(ProviderEvent::ResponseCompleted { response_id: None });
+        });
+        let poll = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                match next_live_provider_event(
+                    &mut stream,
+                    &lease,
+                    std::time::Duration::from_millis(1),
+                )
+                .await
+                {
+                    LiveProviderPoll::Event(event) => break event,
+                    LiveProviderPoll::Flush(_) => {}
+                }
+            }
+        })
+        .await
+        .expect("flush timer must keep polling its inline lease owner");
+        assert!(matches!(
+            poll,
+            Some(Ok(ProviderEvent::ResponseCompleted { .. }))
+        ));
+        assert!(
+            lease.try_lock().is_ok(),
+            "losing maintenance waiter must be dropped"
+        );
+        // Once the provider is idle, maintenance must still run normally.
+        let mut pending: crate::ProviderEventStream = Box::pin(futures::stream::pending());
+        assert!(matches!(
+            next_live_provider_event(&mut pending, &lease, std::time::Duration::from_millis(1))
+                .await,
+            LiveProviderPoll::Flush(_)
+        ));
     }
 
     async fn fixture(events: Vec<ProviderEvent>) -> Fixture {

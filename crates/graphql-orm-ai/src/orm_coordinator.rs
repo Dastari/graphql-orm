@@ -2238,20 +2238,30 @@ impl AiReadOnlyAgentCoordinator {
         tokio::pin!(provider);
         let heartbeat_delay = self.limits.heartbeat_interval.unsigned_abs();
         loop {
-            let cancellation_lease = lease_state.lock().await.clone();
-            let cancellation = self
-                .run_control
-                .wait_for_cancellation(&cancellation_lease, heartbeat_delay);
-            tokio::pin!(cancellation);
+            // Lease acquisition must remain concurrently polled with the provider:
+            // an inline responder may hold this fence across awaited tool I/O.
+            // Move this future into select so its queued mutex waiter is dropped
+            // before the provider-result branch reacquires the lease.
+            let cancellation = async {
+                let snapshot = lease_state.lock().await.clone();
+                let result = self
+                    .run_control
+                    .wait_for_cancellation(&snapshot, heartbeat_delay)
+                    .await;
+                let guard = lease_state.lock().await;
+                (result, guard)
+            };
             tokio::select! {
                 result = &mut provider => {
                     *lease = lease_state.lock().await.clone();
                     return result.map_err(|error| classify_provider_turn_failure(&error));
                 }
-                result = &mut cancellation => {
+                (result, mut current) = cancellation => {
                     match result.map_err(ProviderTurnFailure::LeaseLost)? {
                         Some(_) => {
-                            let current = lease_state.lock().await.clone();
+                            let snapshot = current.clone();
+                            drop(current);
+                            let current = snapshot;
                             // A failed or unrecognized interrupt proves nothing,
                             // so it fails closed into invalidation.
                             let settlement = self
@@ -2263,7 +2273,6 @@ impl AiReadOnlyAgentCoordinator {
                             return Err(ProviderTurnFailure::Cancelled(settlement));
                         }
                         None => {
-                            let mut current = lease_state.lock().await;
                             match self.run_control.heartbeat(&current).await {
                                 Ok(renewed) => {
                                     *current = renewed.clone();
@@ -2303,11 +2312,19 @@ impl AiReadOnlyAgentCoordinator {
         tokio::pin!(provider);
         let heartbeat_delay = self.limits.heartbeat_interval.unsigned_abs();
         loop {
-            let cancellation_lease = lease_state.lock().await.clone();
-            let cancellation = self
-                .run_control
-                .wait_for_cancellation(&cancellation_lease, heartbeat_delay);
-            tokio::pin!(cancellation);
+            // Lease acquisition must remain concurrently polled with the provider:
+            // an inline responder may hold this fence across awaited tool I/O.
+            // Move this future into select so its queued mutex waiter is dropped
+            // before the provider-result branch reacquires the lease.
+            let cancellation = async {
+                let snapshot = lease_state.lock().await.clone();
+                let result = self
+                    .run_control
+                    .wait_for_cancellation(&snapshot, heartbeat_delay)
+                    .await;
+                let guard = lease_state.lock().await;
+                (result, guard)
+            };
             tokio::select! {
                 result = &mut provider => {
                     *lease = lease_state.lock().await.clone();
@@ -2319,10 +2336,12 @@ impl AiReadOnlyAgentCoordinator {
                         Err(error) => Err(classify_provider_turn_failure(&error)),
                     };
                 }
-                result = &mut cancellation => {
+                (result, mut current) = cancellation => {
                     match result.map_err(ProviderTurnFailure::LeaseLost)? {
                         Some(_) => {
-                            let current = lease_state.lock().await.clone();
+                            let snapshot = current.clone();
+                            drop(current);
+                            let current = snapshot;
                             // A failed or unrecognized interrupt proves nothing,
                             // so it fails closed into invalidation.
                             let settlement = self
@@ -2334,7 +2353,6 @@ impl AiReadOnlyAgentCoordinator {
                             return Err(ProviderTurnFailure::Cancelled(settlement));
                         }
                         None => {
-                            let mut current = lease_state.lock().await;
                             match self.run_control.heartbeat(&current).await {
                                 Ok(renewed) => {
                                     *current = renewed.clone();
@@ -2765,7 +2783,9 @@ mod tests {
             _plan: AiProviderCallPlan,
             execution: Arc<dyn AiProviderDynamicToolExecution>,
         ) -> Result<AiProviderCallResult, AiError> {
-            let current = lease.lock().await.clone();
+            let mut guard = lease.lock().await;
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            let current = guard.clone();
             let mut result = AiProviderCallResult::test_result(
                 &current,
                 None,
@@ -2777,7 +2797,7 @@ mod tests {
                 )],
             );
             let persisted = execution.execute_dynamic_tool(&current, &result, 0).await?;
-            *lease.lock().await = persisted.lease().clone();
+            *guard = persisted.lease().clone();
             result = result.test_with_interactive_tool_results(vec![persisted]);
             Ok(result)
         }
@@ -2800,12 +2820,16 @@ mod tests {
 
         async fn execute_retained_turn(
             &self,
-            _lease: Arc<tokio::sync::Mutex<AiRunLease>>,
+            lease: Arc<tokio::sync::Mutex<AiRunLease>>,
             _plan: AiProviderCallPlan,
             _session_plan: crate::AiProviderSessionTurnPlan,
             _session_service: Arc<dyn crate::AiProviderSessionService>,
             _execution: Option<Arc<dyn AiProviderDynamicToolExecution>>,
         ) -> Result<AiProviderCallResult, AiError> {
+            // Model an inline responder retaining the row-version fence during I/O.
+            let guard = lease.lock().await;
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            drop(guard);
             self.result
                 .lock()
                 .expect("retained result lock should not be poisoned")
@@ -4175,10 +4199,13 @@ mod tests {
             )
             .with_provider_session_service(session_service.clone());
 
-            let outcome = coordinator
-                .execute_claimed(&lease)
-                .await
-                .expect("retained terminal turn should preserve completed output");
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                coordinator.execute_claimed(&lease),
+            )
+            .await
+            .expect("heartbeat must keep polling the inline lease owner")
+            .expect("retained terminal turn should preserve completed output");
 
             assert!(matches!(outcome, Completed { .. }));
             assert_eq!(run.final_states(), vec![AiRunState::Completed]);
@@ -4269,13 +4296,16 @@ mod tests {
 
         async fn execute_retained_turn(
             &self,
-            _lease: Arc<tokio::sync::Mutex<AiRunLease>>,
+            lease: Arc<tokio::sync::Mutex<AiRunLease>>,
             _plan: AiProviderCallPlan,
             _session_plan: crate::AiProviderSessionTurnPlan,
             _session_service: Arc<dyn crate::AiProviderSessionService>,
             _execution: Option<Arc<dyn AiProviderDynamicToolExecution>>,
         ) -> Result<AiProviderCallResult, AiError> {
+            let guard = lease.lock().await;
             self.run.cancelled.store(true, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            drop(guard);
             std::future::pending().await
         }
 
@@ -4477,10 +4507,13 @@ mod tests {
         let (coordinator, session_service, provider) =
             interrupted_retained_coordinator(settlement, settlement_fails);
 
-        let outcome = coordinator
-            .execute_claimed(lease)
-            .await
-            .expect("an interrupted run should close as cancelled");
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            coordinator.execute_claimed(lease),
+        )
+        .await
+        .expect("cancellation must keep polling the inline lease owner")
+        .expect("an interrupted run should close as cancelled");
         assert!(matches!(outcome, Cancelled { .. }));
         assert_eq!(provider.interrupts.load(Ordering::SeqCst), 1);
         (session_service, provider)
@@ -4700,10 +4733,13 @@ mod tests {
             limits(50),
         );
 
-        let outcome = coordinator
-            .execute_claimed(&lease)
-            .await
-            .expect("experimental dynamic turn should complete");
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            coordinator.execute_claimed(&lease),
+        )
+        .await
+        .expect("dynamic heartbeat must keep polling the inline lease owner")
+        .expect("experimental dynamic turn should complete");
 
         assert!(matches!(
             outcome,
