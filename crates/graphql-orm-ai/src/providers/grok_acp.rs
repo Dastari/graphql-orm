@@ -13,7 +13,7 @@ use crate::{
     ModelToolDefinition, ProviderDynamicToolCall, ProviderDynamicToolResult, ProviderError,
 };
 
-const MAX_FRAME_BYTES: usize = 1024 * 1024;
+const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CALLS: usize = 64;
 
 fn rejected() -> ProviderError {
@@ -78,7 +78,7 @@ impl AiGrokAcpSdkBroker {
     ///
     /// # Errors
     /// Rejects malformed identities, duplicate or invalid definitions, more
-    /// than 64 tools/calls, frames over 1 MiB, or total bytes over 64 MiB.
+    /// than 64 tools/calls, frames over 16 MiB, or total bytes over 64 MiB.
     pub fn new(
         server_id: String,
         response_id: String,
@@ -94,7 +94,7 @@ impl AiGrokAcpSdkBroker {
             || !(1..=MAX_CALLS).contains(&maximum_calls)
             || !(256..=MAX_FRAME_BYTES).contains(&maximum_frame_bytes)
             || maximum_total_bytes < maximum_frame_bytes
-            || maximum_total_bytes > 64 * MAX_FRAME_BYTES
+            || maximum_total_bytes > 64 * 1024 * 1024
         {
             return Err(ProviderError::InvalidRequest);
         }
@@ -662,5 +662,69 @@ mod tests {
         let mut drift = valid;
         drift["modelUsage"]["reviewed-model"]["outputTokens"] = json!(19);
         assert!(AiGrokAcpUsage::decode(&drift, "reviewed-model", 100, 20, 2).is_err());
+    }
+    #[test]
+    fn compact_schema_batches_and_authorized_multimegabyte_results_fit_bounded_frames() {
+        let mut first = definition();
+        first.parameters["description"] = json!("s".repeat(600 * 1024));
+        let mut second = first.clone();
+        second.tool_id = "capabilities.describe".into();
+        second.provider_name = "describe".into();
+        let mut broker = AiGrokAcpSdkBroker::new(
+            "sdk-1".into(),
+            "prompt-1".into(),
+            vec![first, second],
+            4,
+            16 * 1024 * 1024,
+            64 * 1024 * 1024,
+        )
+        .unwrap();
+        initialize(&mut broker);
+        let AiGrokAcpSdkInbound::Response(list) =
+            broker.accept(&request(2, "tools/list", json!({}))).unwrap()
+        else {
+            panic!("list");
+        };
+        assert!(list.len() > 1024 * 1024 && list.len() < 16 * 1024 * 1024);
+        let AiGrokAcpSdkInbound::ToolCall(call) = broker
+            .accept(&request(
+                3,
+                "tools/call",
+                json!({"name":"discover","arguments":{"query":"fixture"}}),
+            ))
+            .unwrap()
+        else {
+            panic!("call");
+        };
+        let result =
+            ProviderDynamicToolResult::new(&call, json!({"value":"x".repeat(4*1024*1024)}))
+                .unwrap();
+        let frame = broker.tool_response(&result).unwrap();
+        assert!(frame.len() > 4 * 1024 * 1024 && frame.len() < 16 * 1024 * 1024);
+        let AiGrokAcpSdkInbound::ToolCall(call) = broker
+            .accept(&request(
+                4,
+                "tools/call",
+                json!({"name":"discover","arguments":{"query":"fixture"}}),
+            ))
+            .unwrap()
+        else {
+            panic!("call");
+        };
+        let result =
+            ProviderDynamicToolResult::new(&call, json!({"value":"x".repeat(16*1024*1024-20)}))
+                .unwrap();
+        assert!(broker.tool_response(&result).is_err());
+        assert!(
+            AiGrokAcpSdkBroker::new(
+                "sdk-1".into(),
+                "prompt-1".into(),
+                vec![definition()],
+                1,
+                16 * 1024 * 1024 + 1,
+                64 * 1024 * 1024
+            )
+            .is_err()
+        );
     }
 }

@@ -246,7 +246,8 @@ A tool conversation can consume more native rounds than broker callbacks. The
 host must not schedule additional hidden prompts or silently raise saved limits.
 Broker callbacks still pass through ordinary run/tool/result/authorization checks.
 The provider bounds process capacity, one active process per owner, startup and
-turn time (at most one hour), frames, bytes and callbacks. Dropped launch, empty
+turn time (at most one hour), 16 MiB frames, 64 MiB transport/broker byte budgets
+and callbacks. Dropped launch, empty
 session creation, activation and stream futures terminate their process trees.
 Cancellation/close races during launch cannot install a process after cancellation.
 
@@ -258,8 +259,11 @@ model, effort, usage alias, bootstrap, tool fingerprints and operational bounds.
 Capability overlays match the existing fixed-broker binding. The host must prove
 private home/cwd, existing managed cached authentication, absence of ambient
 instructions/plugins/hooks/MCP, native filesystem/shell/subagent exclusion, and
-policy-compliant web access. It must disable automatic title-refresh/turn-summary
-and other optional side work. No API-key fallback or billing-path switch occurs.
+policy-compliant web access. It must disable automatic title-refresh/turn-summary, memory and
+`GROK_TWO_PASS_COMPACTION` (`features.two_pass_compaction=false`) to prevent
+unobservable background compaction prefire. Ordinary compaction-start events
+fail closed and mark the turn uncertain; cancellation is not a precharge fence.
+Other optional side work must also be disabled. No API-key fallback or billing-path switch occurs.
 
 Before returning a new empty cursor, the actor selects the model/effort, assigns
 one fixed host title, closes and resumes the session. This prevents the native

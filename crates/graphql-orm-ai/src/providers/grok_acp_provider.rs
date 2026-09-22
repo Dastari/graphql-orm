@@ -108,7 +108,7 @@ impl AiGrokAcpRegistration {
             "validation".into(),
             tools.clone(),
             64,
-            1024 * 1024,
+            16 * 1024 * 1024,
             64 * 1024 * 1024,
         )?;
         let canonical = serde_json::to_vec(&serde_json::json!({

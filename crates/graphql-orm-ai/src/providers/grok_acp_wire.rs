@@ -14,8 +14,8 @@ use crate::{
     ProviderEventStream,
 };
 
-const FRAME: usize = 1024 * 1024;
-const TOTAL: usize = 64 * FRAME;
+const FRAME: usize = 16 * 1024 * 1024;
+const TOTAL: usize = 64 * 1024 * 1024;
 const SERVER: &str = "graphql-orm-ai-broker";
 const FIXED_TITLE: &str = "Authorized capability session";
 fn rejected() -> ProviderError {
@@ -32,7 +32,7 @@ pub trait AiGrokAcpWireTransport: Send + Sync {
     /// # Errors
     /// Returns a sanitized error for timeout, process exit or write failure.
     async fn write_frame(&self, frame: Vec<u8>) -> Result<(), ProviderError>;
-    /// Reads one newline-terminated frame, limiting allocation to 1 MiB before
+    /// Reads one newline-terminated frame, limiting allocation to 16 MiB before
     /// reading it. EOF, partial lines and discarded-stderr overflow fail closed.
     ///
     /// # Errors
