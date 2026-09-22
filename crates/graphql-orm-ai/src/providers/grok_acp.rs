@@ -14,7 +14,8 @@ use crate::{
 };
 
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
-const MAX_CALLS: usize = 64;
+const MAX_DEFINITIONS: usize = 64;
+pub(super) const MAX_SDK_CALLS: usize = 4096;
 
 fn rejected() -> ProviderError {
     ProviderError::Classified(crate::AiProviderFailureCategory::ProtocolViolation)
@@ -78,7 +79,8 @@ impl AiGrokAcpSdkBroker {
     ///
     /// # Errors
     /// Rejects malformed identities, duplicate or invalid definitions, more
-    /// than 64 tools/calls, frames over 16 MiB, or total bytes over 64 MiB.
+    /// than 64 definitions or 4096 callbacks, frames over 16 MiB, or total
+    /// bytes over 64 MiB.
     pub fn new(
         server_id: String,
         response_id: String,
@@ -90,8 +92,8 @@ impl AiGrokAcpSdkBroker {
         if !identifier(&server_id)
             || !identifier(&response_id)
             || tools.is_empty()
-            || tools.len() > MAX_CALLS
-            || !(1..=MAX_CALLS).contains(&maximum_calls)
+            || tools.len() > MAX_DEFINITIONS
+            || !(1..=MAX_SDK_CALLS).contains(&maximum_calls)
             || !(256..=MAX_FRAME_BYTES).contains(&maximum_frame_bytes)
             || maximum_total_bytes < maximum_frame_bytes
             || maximum_total_bytes > 64 * 1024 * 1024
@@ -443,6 +445,53 @@ mod tests {
             )),
             Ok(AiGrokAcpSdkInbound::Response(_))
         ));
+    }
+
+    #[test]
+    fn callback_capacity_is_independent_of_definition_count_and_remains_bounded() {
+        let mut broker = AiGrokAcpSdkBroker::new(
+            "sdk-1".into(),
+            "prompt-1".into(),
+            vec![definition()],
+            MAX_SDK_CALLS,
+            4096,
+            64 * 1024 * 1024,
+        )
+        .unwrap();
+        initialize(&mut broker);
+        broker.accept(&request(2, "tools/list", json!({}))).unwrap();
+        for ordinal in 1..=MAX_SDK_CALLS {
+            let frame = request(
+                ordinal as u64 + 2,
+                "tools/call",
+                json!({"name":"discover","arguments":{"query":"fixture"}}),
+            );
+            let AiGrokAcpSdkInbound::ToolCall(call) = broker.accept(&frame).unwrap() else {
+                panic!("callback {ordinal} must be admitted, including 65 and 1024");
+            };
+            let result = ProviderDynamicToolResult::new(&call, json!({"items":[]})).unwrap();
+            broker.tool_response(&result).unwrap();
+        }
+        assert!(
+            broker
+                .accept(&request(
+                    MAX_SDK_CALLS as u64 + 3,
+                    "tools/call",
+                    json!({"name":"discover","arguments":{"query":"fixture"}})
+                ))
+                .is_err()
+        );
+        assert!(
+            AiGrokAcpSdkBroker::new(
+                "sdk-1".into(),
+                "prompt-1".into(),
+                vec![definition()],
+                MAX_SDK_CALLS + 1,
+                4096,
+                64 * 1024 * 1024
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -72,7 +72,8 @@ impl AiGrokAcpWireProcess {
         transport: Arc<dyn AiGrokAcpWireTransport>,
         cwd: String,
     ) -> Result<Self, ProviderError> {
-        if !std::path::Path::new(&cwd).is_absolute()
+        if registration.retained_namespace().is_none()
+            || !std::path::Path::new(&cwd).is_absolute()
             || cwd.len() > 4096
             || cwd.chars().any(char::is_control)
         {
@@ -82,7 +83,7 @@ impl AiGrokAcpWireProcess {
             SERVER.into(),
             "bootstrap".into(),
             registration.tools().to_vec(),
-            64,
+            super::grok_acp::MAX_SDK_CALLS,
             FRAME,
             TOTAL,
         )?;
@@ -136,7 +137,7 @@ impl AiGrokAcpWireProcess {
         state.frames += 1;
         if bytes.len() > FRAME
             || state.bytes > TOTAL
-            || state.frames > 8192
+            || state.frames > 65_536
             || !bytes.ends_with(b"\n")
         {
             return Err(rejected());
@@ -318,7 +319,7 @@ impl AiGrokAcpWireProcess {
                             .ok_or_else(rejected)?;
                         if !matches!(name, "search_tool" | "use_tool")
                             || update["_meta"]["x.ai/tool"]["namespace"] != "grok_build"
-                            || tool_ids.len() >= 256
+                            || tool_ids.len() >= 8192
                         {
                             return Err(rejected());
                         }
@@ -447,7 +448,7 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
             SERVER.into(),
             "bootstrap".into(),
             self.registration.tools().to_vec(),
-            64,
+            super::grok_acp::MAX_SDK_CALLS,
             FRAME,
             TOTAL,
         )?;
@@ -455,10 +456,11 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
         params["sessionId"] = json!(session);
         let resumed = self.rpc(&mut state, "session/resume", params).await?;
         self.validate_resumed(&resumed)?;
-        AiProviderSessionCursor::new("grok.acp.session.v1", session).map_err(|_| rejected())
+        AiProviderSessionCursor::new(self.registration.cursor_kind(), session)
+            .map_err(|_| rejected())
     }
     async fn resume_session(&self, cursor: &AiProviderSessionCursor) -> Result<(), ProviderError> {
-        if cursor.kind() != "grok.acp.session.v1" {
+        if cursor.kind() != self.registration.cursor_kind() {
             return Err(rejected());
         }
         let mut state = self.state.lock().await;
@@ -559,7 +561,7 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
         .await
     }
     async fn delete_session(&self, cursor: &AiProviderSessionCursor) -> Result<(), ProviderError> {
-        if cursor.kind() != "grok.acp.session.v1" {
+        if cursor.kind() != self.registration.cursor_kind() {
             return Err(rejected());
         }
         let mut state = self.state.lock().await;
@@ -750,11 +752,26 @@ mod tests {
             response(5, json!({"success":false})),
         ]);
         let (process, wire) = fixture(reads);
-        let cursor = AiProviderSessionCursor::new("grok.acp.session.v1", "session-1").unwrap();
+        let cursor =
+            AiProviderSessionCursor::new(process.registration.cursor_kind(), "session-1").unwrap();
         process.resume_session(&cursor).await.unwrap();
         process.delete_session(&cursor).await.unwrap();
         assert!(process.delete_session(&cursor).await.is_err());
         assert_eq!(wire.writes.lock().unwrap()[2]["method"], "session/resume");
+    }
+    #[tokio::test]
+    async fn moved_retained_namespace_rejects_resume_and_delete_before_transport() {
+        let (process, wire) = fixture(vec![]);
+        let moved = process
+            .registration
+            .as_ref()
+            .clone()
+            .with_retained_namespace("e".repeat(64))
+            .unwrap();
+        let cursor = AiProviderSessionCursor::new(moved.cursor_kind(), "session-1").unwrap();
+        assert!(process.resume_session(&cursor).await.is_err());
+        assert!(process.delete_session(&cursor).await.is_err());
+        assert!(wire.writes.lock().unwrap().is_empty());
     }
     #[tokio::test]
     async fn missing_usage_wrong_correlation_and_resume_callback_fail_closed() {
@@ -781,7 +798,8 @@ mod tests {
             json!({"jsonrpc":"2.0","id":100,"method":"session/request_permission","params":{}}),
         );
         let (process, _) = fixture(reads);
-        let cursor = AiProviderSessionCursor::new("grok.acp.session.v1", "session-1").unwrap();
+        let cursor =
+            AiProviderSessionCursor::new(process.registration.cursor_kind(), "session-1").unwrap();
         assert!(process.resume_session(&cursor).await.is_err());
     }
     #[test]
@@ -976,7 +994,7 @@ mod tests {
             tool_id:format!("capabilities.{name}"),provider_name:format!("graphql_capabilities_{name}"),fingerprint:hex::encode(sha2::Sha256::digest(name.as_bytes())),description:format!("{name} synthetic probe capability"),parameters:json!({"type":"object","properties":{key:{"type":"string"}},"required":[key],"additionalProperties":false}),strict:true,defer_loading:false,
         }).collect();
         use sha2::Digest;
-        Arc::new(AiGrokAcpRegistration::new("grok-live-synthetic".into(),"grok-4.7".into(),"92c997dfd109c0672d40d5ae6fbd15835d53ffaf12cf9ea124d22aaef3ff23fc".into(),"1.0.40".into(),"explicit-isolated-test-socket".into(),ModelReasoningEffortProfile::new("grok-4.7",[ModelReasoningEffort::Low],ModelReasoningEffort::Low).unwrap(),ModelReasoningEffort::Low,"Use only the provided authorized synthetic capability tools. Never use other tools.".into(),tools,16_384,2_048,8).unwrap().with_usage_model("grok-4.7-build".into()).unwrap())
+        Arc::new(AiGrokAcpRegistration::new("grok-live-synthetic".into(),"grok-4.7".into(),"92c997dfd109c0672d40d5ae6fbd15835d53ffaf12cf9ea124d22aaef3ff23fc".into(),"1.0.40".into(),"explicit-isolated-test-socket".into(),ModelReasoningEffortProfile::new("grok-4.7",[ModelReasoningEffort::Low],ModelReasoningEffort::Low).unwrap(),ModelReasoningEffort::Low,"Use only the provided authorized synthetic capability tools. Never use other tools.".into(),tools,16_384,2_048,8).unwrap().with_usage_model("grok-4.7-build".into()).unwrap().with_retained_namespace("d".repeat(64)).unwrap())
     }
     /// Requires an explicitly supplied, isolated, authenticated host pipe proxy.
     /// Uses only synthetic tool data; emits counts/status, never native payloads.

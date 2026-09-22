@@ -21,7 +21,6 @@ use crate::{
     ProviderRequestContext,
 };
 
-const CURSOR_KIND: &str = "grok.acp.session.v1";
 const PROTOCOL: &str = "grok-acp-sdk-v1";
 
 fn rejected() -> ProviderError {
@@ -50,6 +49,7 @@ pub struct AiGrokAcpRegistration {
     maximum_output_tokens: u64,
     maximum_model_calls: u32,
     identity: String,
+    retained_namespace: Option<String>,
     base_identity: String,
     capability_binding: Option<AiProviderCapabilitySessionBinding>,
 }
@@ -133,6 +133,7 @@ impl AiGrokAcpRegistration {
             maximum_input_bytes,
             maximum_output_tokens,
             maximum_model_calls,
+            retained_namespace: None,
             base_identity: identity.clone(),
             identity,
             capability_binding: None,
@@ -152,8 +153,34 @@ impl AiGrokAcpRegistration {
             || binding.model() != self.model
             || binding.reasoning_effort() != self.effort
             || binding.registration_identity() != self.identity
-            || binding.static_bootstrap_tool_fingerprints()
-                != &self.tools.iter().map(|t| t.fingerprint.clone()).collect()
+        {
+            return Err(rejected());
+        }
+        let canonical_broker =
+            crate::capability_broker_definitions(binding.capability_index_fingerprint())
+                .map_err(|_| rejected())?;
+        if !canonical_broker
+            .iter()
+            .all(|tool| self.tools.contains(tool))
+        {
+            return Err(rejected());
+        }
+        let static_tools = self
+            .tools
+            .iter()
+            .filter(|tool| {
+                !canonical_broker
+                    .iter()
+                    .any(|broker| broker.tool_id == tool.tool_id)
+            })
+            .collect::<Vec<_>>();
+        if self.tools.len() != canonical_broker.len() + static_tools.len()
+            || static_tools.len() != binding.static_bootstrap_tool_fingerprints().len()
+            || static_tools
+                .iter()
+                .map(|tool| tool.fingerprint.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                != *binding.static_bootstrap_tool_fingerprints()
         {
             return Err(rejected());
         }
@@ -172,14 +199,46 @@ impl AiGrokAcpRegistration {
         if model == self.usage_model {
             return Ok(self);
         }
-        self.identity = if model == self.model {
-            self.base_identity.clone()
-        } else {
-            hex::encode(Sha256::digest(format!("{}\0{}", self.base_identity, model)))
-        };
         self.usage_model = model;
+        self.refresh_identity();
         self.capability_binding = None;
         Ok(self)
+    }
+    /// Binds retained storage to a host-verified stable path/account namespace.
+    /// Changing models or effort must not change this value; changing storage or
+    /// login identity must. Admission is disabled until a namespace is supplied.
+    ///
+    /// # Errors
+    /// Rejects values other than a canonical SHA-256 digest.
+    pub fn with_retained_namespace(mut self, namespace: String) -> Result<Self, ProviderError> {
+        if !crate::valid_sha256(&namespace) {
+            return Err(ProviderError::InvalidRequest);
+        }
+        if self.retained_namespace.as_ref() != Some(&namespace) {
+            self.retained_namespace = Some(namespace);
+            self.refresh_identity();
+            self.capability_binding = None;
+        }
+        Ok(self)
+    }
+    fn refresh_identity(&mut self) {
+        self.identity = hex::encode(Sha256::digest(format!(
+            "{}\0{}\0{}",
+            self.base_identity,
+            self.usage_model,
+            self.retained_namespace.as_deref().unwrap_or_default()
+        )));
+    }
+    /// Host-verified stable retained storage/account namespace, if admitted.
+    pub fn retained_namespace(&self) -> Option<&str> {
+        self.retained_namespace.as_deref()
+    }
+    /// Cursor kind binding opaque native IDs to their retained storage namespace.
+    pub fn cursor_kind(&self) -> String {
+        format!(
+            "grok.acp.session.v1.{}",
+            self.retained_namespace.as_deref().unwrap_or("unbound")
+        )
     }
     /// Exact provider-reported model usage alias frozen by registration.
     pub fn usage_model(&self) -> &str {
@@ -472,7 +531,7 @@ impl AiGrokAcpProvider {
     }
     /// Whether exact-version launcher and protocol acceptance is proven.
     pub fn is_admitted(&self) -> bool {
-        self.factory.admits(&self.registration)
+        self.registration.retained_namespace.is_some() && self.factory.admits(&self.registration)
     }
     async fn entry(&self, binding: AiProviderRunBinding) -> Result<Arc<Entry>, ProviderError> {
         if !self.is_admitted() {
@@ -579,7 +638,7 @@ impl AiGrokAcpProvider {
         let session = context.provider_session().ok_or_else(rejected)?;
         let claim = session.claim();
         if !self.registration.matches(claim.descriptor())
-            || session.cursor().kind() != CURSOR_KIND
+            || session.cursor().kind() != self.registration.cursor_kind()
             || claim.session_id() != binding.session_id()
             || claim.run_id() != binding.run_id()
             || claim.attempt_id() != binding.attempt_id()
@@ -799,7 +858,7 @@ impl AiProvider for AiGrokAcpProvider {
                 return Err(error);
             }
         };
-        if created.kind() != CURSOR_KIND {
+        if created.kind() != self.registration.cursor_kind() {
             entry.process.terminate();
             return Err(rejected());
         }
@@ -858,7 +917,7 @@ impl crate::AiProviderSessionDeletionService for AiGrokAcpDeletionService {
         if !self.provider.is_admitted()
             || descriptor.provider_kind() != &ProviderKind::LocalHarness
             || descriptor.provider_profile_id() != registration.profile_id
-            || request.cursor().kind() != CURSOR_KIND
+            || request.cursor().kind() != registration.cursor_kind()
         {
             return Err(rejected());
         }
@@ -925,6 +984,8 @@ pub(super) mod tests {
         .unwrap()
         .with_usage_model("grok-4.7-build".into())
         .unwrap()
+        .with_retained_namespace("d".repeat(64))
+        .unwrap()
     }
     struct UnreviewedFactory(AtomicUsize);
     #[async_trait]
@@ -965,7 +1026,8 @@ pub(super) mod tests {
     }
     #[test]
     fn registration_fences_alias_effort_and_capability_overlay() {
-        let registration = registration();
+        let mut registration = registration();
+        registration.tools = crate::capability_broker_definitions(&"b".repeat(64)).unwrap();
         assert!(
             registration
                 .provider_session_fingerprint(ModelReasoningEffort::High)
@@ -974,17 +1036,20 @@ pub(super) mod tests {
         let binding = AiProviderCapabilitySessionBinding::new(
             AiCapabilityDeliveryMode::FixedBroker,
             "b".repeat(64),
-            registration
-                .tools
-                .iter()
-                .map(|t| t.fingerprint.clone())
-                .collect(),
+            Default::default(),
             "grok-acp-v1",
             registration.model(),
             registration.reasoning_effort(),
             registration.identity(),
         )
         .unwrap();
+        let mut altered_broker = registration.clone();
+        altered_broker.tools[0].parameters = json!({"type":"object"});
+        assert!(
+            altered_broker
+                .with_capability_binding(binding.clone())
+                .is_err()
+        );
         let registered = registration
             .clone()
             .with_capability_binding(binding.clone())
@@ -996,6 +1061,27 @@ pub(super) mod tests {
         assert_ne!(changed.identity(), registration.identity());
         assert_eq!(changed.session_fingerprint(), changed.identity());
         assert!(changed.with_capability_binding(binding).is_err());
+    }
+    #[test]
+    fn retained_namespace_survives_model_alias_changes_but_fences_storage_moves() {
+        let registration = registration();
+        let moved = registration
+            .clone()
+            .with_retained_namespace("e".repeat(64))
+            .unwrap();
+        assert_ne!(registration.cursor_kind(), moved.cursor_kind());
+        assert_ne!(registration.identity(), moved.identity());
+        let alias = registration
+            .clone()
+            .with_usage_model("other-billing-alias".into())
+            .unwrap();
+        assert_eq!(registration.cursor_kind(), alias.cursor_kind());
+        assert_ne!(registration.identity(), alias.identity());
+        assert!(
+            registration
+                .with_retained_namespace("not-a-digest".into())
+                .is_err()
+        );
     }
     #[test]
     fn request_cannot_widen_native_surface_or_output_estimate_admission() {

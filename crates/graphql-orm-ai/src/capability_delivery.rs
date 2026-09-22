@@ -2669,6 +2669,72 @@ mod tests {
         assert_eq!(surface.mode(), AiCapabilityDeliveryMode::FixedBroker);
         assert_eq!(surface.tools().len(), 4);
         assert!(surface.tools().contains(&static_tool));
+        #[cfg(feature = "provider-grok-acp")]
+        {
+            let registration = crate::providers::AiGrokAcpRegistration::new(
+                "grok-binding-test".into(),
+                "grok-4.7".into(),
+                "a".repeat(64),
+                "1.0.40".into(),
+                "isolated-test".into(),
+                crate::ModelReasoningEffortProfile::new(
+                    "grok-4.7",
+                    [ModelReasoningEffort::Low],
+                    ModelReasoningEffort::Low,
+                )
+                .unwrap(),
+                ModelReasoningEffort::Low,
+                "Authorized reads only.".into(),
+                delivery.current_tools(),
+                16_384,
+                2_048,
+                8,
+            )
+            .unwrap();
+            let binding = AiProviderCapabilitySessionBinding::new(
+                AiCapabilityDeliveryMode::FixedBroker,
+                index_set.fingerprint(),
+                BTreeSet::from([static_tool.fingerprint.clone()]),
+                "grok-acp-v1",
+                registration.model(),
+                registration.reasoning_effort(),
+                registration.identity(),
+            )
+            .unwrap();
+            assert!(
+                registration
+                    .clone()
+                    .with_capability_binding(binding.clone())
+                    .is_ok()
+            );
+            let wrong_static = AiProviderCapabilitySessionBinding::new(
+                AiCapabilityDeliveryMode::FixedBroker,
+                index_set.fingerprint(),
+                BTreeSet::new(),
+                "grok-acp-v1",
+                registration.model(),
+                registration.reasoning_effort(),
+                registration.identity(),
+            )
+            .unwrap();
+            assert!(
+                registration
+                    .clone()
+                    .with_capability_binding(wrong_static)
+                    .is_err()
+            );
+            let wrong_index = AiProviderCapabilitySessionBinding::new(
+                AiCapabilityDeliveryMode::FixedBroker,
+                "d".repeat(64),
+                BTreeSet::from([static_tool.fingerprint.clone()]),
+                "grok-acp-v1",
+                registration.model(),
+                registration.reasoning_effort(),
+                registration.identity(),
+            )
+            .unwrap();
+            assert!(registration.with_capability_binding(wrong_index).is_err());
+        }
         assert!(
             surface
                 .tools()

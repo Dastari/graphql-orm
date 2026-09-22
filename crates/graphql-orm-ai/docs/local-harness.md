@@ -247,8 +247,14 @@ host must not schedule additional hidden prompts or silently raise saved limits.
 Broker callbacks still pass through ordinary run/tool/result/authorization checks.
 The provider bounds process capacity, one active process per owner, startup and
 turn time (at most one hour), 16 MiB frames, 64 MiB transport/broker byte budgets
-and callbacks. Dropped launch, empty
-session creation, activation and stream futures terminate their process trees.
+and up to 4096 SDK callbacks independently of the 64-definition limit. Native
+tool identifiers are capped at 8192 and incoming frames at 65,536; host tool/run
+budgets remain authoritative. The existing coordinator additionally admits at
+most 64 dynamic callbacks per dispatch (or fewer under configured host limits).
+One ACP prompt is one dispatch; the transport allowance does not authorize 1024
+application calls from a larger run limit or invent native subround admissions.
+Dropped launch, empty-session creation, activation
+and stream futures terminate their process trees.
 Cancellation/close races during launch cannot install a process after cancellation.
 
 ### Native isolation and retained state
@@ -256,7 +262,14 @@ Cancellation/close races during launch cannot install a process after cancellati
 `AiGrokAcpProcessFactory::admits` defaults to false until the trusted host verifies
 its exact executable/profile. Registration hashes executable/version, sandbox,
 model, effort, usage alias, bootstrap, tool fingerprints and operational bounds.
-Capability overlays match the existing fixed-broker binding. The host must prove
+Before admission, `with_retained_namespace` must bind a SHA-256 digest of the
+canonical retained runtime path and stable login identity. It must remain stable
+across model/effort changes and change when storage or account changes. Cursor
+kinds carry that namespace; cleanup rejects a moved namespace before launching,
+so native idempotent deletion cannot falsely prove absence in a different home.
+Capability overlays require the three canonical broker definitions for the exact
+index plus the binding's exact static bootstrap fingerprint set. Generated broker
+definitions are not counted as static catalogue entries. The host must prove
 private home/cwd, existing managed cached authentication, absence of ambient
 instructions/plugins/hooks/MCP, native filesystem/shell/subagent exclusion, and
 policy-compliant web access. It must disable automatic title-refresh/turn-summary, memory and

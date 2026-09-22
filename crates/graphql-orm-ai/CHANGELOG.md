@@ -20,6 +20,8 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+## [0.98.3] - 2026-09-22
+
 ### Added
 
 Opt-in `provider-grok-acp` provides a bounded ACP provider, frozen registration,

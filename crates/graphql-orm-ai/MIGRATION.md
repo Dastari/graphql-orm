@@ -19,9 +19,9 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
-## 0.98.3 (unreleased)
+## 0.98.3
 
-`provider-grok-acp` is additive and disabled by default. Its draft provider requires
+`provider-grok-acp` is additive and disabled by default. Its provider requires
 an explicitly admitting host factory with verified isolation and bounded native
 rounds. Complete actual usage can exceed its reservation estimate and is settled
 in full, matching the existing Codex/ORM contract. Input admission is measured in
