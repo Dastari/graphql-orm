@@ -10065,6 +10065,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn complete_provider_actual_usage_above_estimate_is_committed_in_full() {
+        let fixture = fixture(vec![
+            ProviderEvent::ResponseStarted {
+                response_id: Some("actual-over-estimate".into()),
+            },
+            ProviderEvent::Usage {
+                input_tokens: 29390,
+                output_tokens: 3000,
+                cached_input_tokens: 17152,
+            },
+            ProviderEvent::ResponseCompleted {
+                response_id: Some("actual-over-estimate".into()),
+            },
+        ])
+        .await;
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8192, 65536).unwrap(),
+        );
+        let result = executor
+            .execute(&fixture.lease, plan(&fixture))
+            .await
+            .unwrap();
+        assert_eq!(result.usage().input_tokens, 29390);
+        assert_eq!(result.usage().output_tokens, 3000);
+        assert_eq!(result.cached_input_tokens(), 17152);
+        assert_eq!(reservation_state(&fixture.database).await, "committed");
+    }
+    #[tokio::test]
+    async fn metered_incomplete_provider_turn_still_requires_uncertain_recovery() {
+        let fixture = fixture(vec![
+            ProviderEvent::ResponseStarted {
+                response_id: Some("metered-incomplete".into()),
+            },
+            ProviderEvent::Usage {
+                input_tokens: 29390,
+                output_tokens: 3000,
+                cached_input_tokens: 17152,
+            },
+        ])
+        .await;
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8192, 65536).unwrap(),
+        );
+        assert!(matches!(
+            executor.execute(&fixture.lease, plan(&fixture)).await,
+            Err(AiError::ProviderFailed)
+        ));
+        assert_eq!(reservation_state(&fixture.database).await, "uncertain");
+    }
+    #[tokio::test]
     async fn incomplete_provider_stream_leaves_budget_uncertain_for_recovery() {
         let fixture = fixture(vec![
             ProviderEvent::ResponseStarted {

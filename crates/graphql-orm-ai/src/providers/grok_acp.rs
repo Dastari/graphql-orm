@@ -175,7 +175,8 @@ impl AiGrokAcpSdkBroker {
             || inner.get("error").is_some()
             || self.seen_outer.len() >= self.maximum_calls + 3
             || !self.seen_outer.insert(outer["id"].to_string())
-            || !self.seen_inner.insert(inner["id"].to_string())
+            || (inner["method"] != "server/discover"
+                && !self.seen_inner.insert(inner["id"].to_string()))
         {
             return Err(rejected());
         }
@@ -327,9 +328,13 @@ pub struct AiGrokAcpUsage {
     pub model_calls: u64,
 }
 
+/// Protocol/storage sanity bound, deliberately independent of request estimates.
+pub(super) const MAX_USAGE_TOKENS: u64 = 1_000_000_000_000;
+
 impl AiGrokAcpUsage {
     /// Decodes exact prompt usage, rejecting missing/incomplete counters,
-    /// model drift, inconsistent sums and registered token/round overruns.
+    /// model drift, inconsistent sums and protocol token/round sanity overruns.
+    /// Token bounds are protocol validation bounds, never reservation estimates.
     /// The caller must pass the nested `usage`, never last-call `_meta` fields.
     ///
     /// # Errors
@@ -451,12 +456,17 @@ mod tests {
         };
         let response: Value = serde_json::from_slice(&response).unwrap();
         assert_eq!(response["result"]["error"]["code"], -32601);
+        // The legacy MCP fallback restarts its inner ID counter after the
+        // server/discover probe, while ACP outer correlation remains unique.
+        let mut legacy: Value = serde_json::from_slice(&request(
+            1,
+            "initialize",
+            json!({"protocolVersion":"2025-11-25"}),
+        ))
+        .unwrap();
+        legacy["params"]["message"]["id"] = json!(100);
         assert!(matches!(
-            broker.accept(&request(
-                1,
-                "initialize",
-                json!({"protocolVersion":"2025-11-25"})
-            )),
+            broker.accept(&serde_json::to_vec(&legacy).unwrap()),
             Ok(AiGrokAcpSdkInbound::Response(_))
         ));
         assert!(matches!(

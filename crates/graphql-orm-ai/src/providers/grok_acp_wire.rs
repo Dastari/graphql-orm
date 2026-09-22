@@ -17,6 +17,7 @@ use crate::{
 const FRAME: usize = 1024 * 1024;
 const TOTAL: usize = 64 * FRAME;
 const SERVER: &str = "graphql-orm-ai-broker";
+const FIXED_TITLE: &str = "Authorized capability session";
 fn rejected() -> ProviderError {
     ProviderError::Classified(crate::AiProviderFailureCategory::ProtocolViolation)
 }
@@ -45,6 +46,7 @@ struct State {
     prompted: bool,
     bytes: usize,
     frames: usize,
+    skills_reloads: u8,
     broker: AiGrokAcpSdkBroker,
 }
 
@@ -94,6 +96,7 @@ impl AiGrokAcpWireProcess {
                 prompted: false,
                 bytes: 0,
                 frames: 0,
+                skills_reloads: 0,
                 broker,
             })),
             session: Arc::new(SyncMutex::new(None)),
@@ -164,6 +167,38 @@ impl AiGrokAcpWireProcess {
         }
         Ok(id.into())
     }
+    fn internal_reload(value: &Value, state: &mut State) -> Result<bool, ProviderError> {
+        if value["id"] != "skills-reload" {
+            return Ok(false);
+        }
+        if value.as_object().is_none_or(|v| v.len() != 3)
+            || value["result"].as_object().is_none_or(|v| v.len() != 1)
+            || value["result"]["result"]
+                .as_object()
+                .is_none_or(|v| v.len() != 1)
+            || value["result"]["result"]["reloaded"]
+                .as_u64()
+                .is_none_or(|n| n > 1)
+            || state.skills_reloads >= 16
+        {
+            return Err(rejected());
+        }
+        state.skills_reloads += 1;
+        Ok(true)
+    }
+    fn validate_resumed(&self, response: &Value) -> Result<(), ProviderError> {
+        if response["models"]["currentModelId"] != self.registration.model()
+            || !Self::option_matches(response, "model", self.registration.model())
+            || !Self::option_matches(
+                response,
+                "reasoning_effort",
+                self.registration.reasoning_effort().as_str(),
+            )
+        {
+            return Err(rejected());
+        }
+        Ok(())
+    }
     async fn rpc(
         &self,
         state: &mut State,
@@ -179,6 +214,9 @@ impl AiGrokAcpWireProcess {
         loop {
             let (bytes, value) = Self::read(self.transport.as_ref(), state).await?;
             if value.get("method").is_none() {
+                if Self::internal_reload(&value, state)? {
+                    continue;
+                }
                 if value["id"] != id || value.get("error").is_some() || !value["result"].is_object()
                 {
                     return Err(rejected());
@@ -304,6 +342,14 @@ impl AiGrokAcpWireProcess {
             }
             "_x.ai/session_notification" => {
                 match value["params"]["update"]["sessionUpdate"].as_str() {
+                    Some("session_summary_generated") => {
+                        if value["params"]["_meta"]["x.ai/titleIsManual"] != true
+                            || value["params"]["update"]["session_summary"] != FIXED_TITLE
+                        {
+                            return Err(rejected());
+                        }
+                        Ok(None)
+                    }
                     Some("background_tasks") => {
                         let update = &value["params"]["update"];
                         if !update["tasks"].as_array().is_some_and(Vec::is_empty)
@@ -377,6 +423,38 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
                 return Err(rejected());
             }
         }
+        let renamed = self
+            .rpc(
+                &mut state,
+                "_x.ai/session/rename",
+                json!({"sessionId":session,"cwd":self.cwd,"title":FIXED_TITLE}),
+            )
+            .await?;
+        if renamed != json!({"success":true}) {
+            return Err(rejected());
+        }
+        let closed = self
+            .rpc(&mut state, "session/close", json!({"sessionId":session}))
+            .await?;
+        if closed
+            .as_object()
+            .is_none_or(|object| object.keys().any(|key| key != "_meta"))
+            || closed.get("_meta").is_some_and(|meta| !meta.is_object())
+        {
+            return Err(rejected());
+        }
+        state.broker = AiGrokAcpSdkBroker::new(
+            SERVER.into(),
+            "bootstrap".into(),
+            self.registration.tools().to_vec(),
+            64,
+            FRAME,
+            TOTAL,
+        )?;
+        let mut params = self.session_params();
+        params["sessionId"] = json!(session);
+        let resumed = self.rpc(&mut state, "session/resume", params).await?;
+        self.validate_resumed(&resumed)?;
         AiProviderSessionCursor::new("grok.acp.session.v1", session).map_err(|_| rejected())
     }
     async fn resume_session(&self, cursor: &AiProviderSessionCursor) -> Result<(), ProviderError> {
@@ -391,17 +469,7 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
         let mut params = self.session_params();
         params["sessionId"] = json!(cursor.expose_to_provider_adapter());
         let response = self.rpc(&mut state, "session/resume", params).await?;
-        if response["models"]["currentModelId"] != self.registration.model()
-            || !Self::option_matches(&response, "model", self.registration.model())
-            || (self.registration.reasoning_effort() != crate::ModelReasoningEffort::Unspecified
-                && !Self::option_matches(
-                    &response,
-                    "reasoning_effort",
-                    self.registration.reasoning_effort().as_str(),
-                ))
-        {
-            return Err(rejected());
-        }
+        self.validate_resumed(&response)?;
         *self.session.lock().map_err(|_| rejected())? =
             Some(cursor.expose_to_provider_adapter().into());
         Ok(())
@@ -438,6 +506,7 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
             loop {
                 let (bytes,value)=Self::read(transport.as_ref(),&mut state).await?;
                 if value.get("method").is_none(){
+                    if Self::internal_reload(&value,&mut state)? {continue;}
                     if value["id"]!=id||value.get("error").is_some(){Err(rejected())?;}
                     let result=&value["result"];
                     if state.broker.has_pending_calls(){Err(rejected())?;}
@@ -445,7 +514,7 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
                     if result["stopReason"]=="cancelled" && result["_meta"].get("usage").is_none() {
                         if category==Some("max_turns_reached") {Err(ProviderError::BudgetDenied)?;} else {Err(ProviderError::Cancelled)?;}
                     }
-                    let usage=AiGrokAcpUsage::decode(&result["_meta"]["usage"],registration.usage_model(),registration.maximum_input_tokens(),registration.maximum_output_tokens(),u64::from(registration.maximum_model_calls()))?;
+                    let usage=AiGrokAcpUsage::decode(&result["_meta"]["usage"],registration.usage_model(),super::grok_acp::MAX_USAGE_TOKENS,super::grok_acp::MAX_USAGE_TOKENS,u64::from(registration.maximum_model_calls()))?;
                     yield ProviderEvent::Usage{input_tokens:usage.input_tokens,output_tokens:usage.output_tokens,cached_input_tokens:usage.cached_input_tokens};
                     if category==Some("max_turns_reached") {Err(ProviderError::BudgetDenied)?;}
                     if result["stopReason"]=="cancelled" {Err(ProviderError::Cancelled)?;}
@@ -462,6 +531,11 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
                     };
                     transport.write_frame(response).await?;
                 } else {
+                    if value["method"]=="session/update" && value["params"]["update"]["sessionUpdate"]=="config_option_update" {
+                        let update=&value["params"]["update"];
+                        if value["params"]["sessionId"]!=session || value.get("id").is_some() || !Self::option_matches(update,"model",registration.model()) || !Self::option_matches(update,"reasoning_effort",registration.reasoning_effort().as_str()) {Err(rejected())?;}
+                        continue;
+                    }
                     if value["method"]=="_x.ai/session_notification" && value["params"]["update"]["sessionUpdate"]=="model_changed" {
                         let update=&value["params"]["update"];
                         if update["model_id"]!=registration.model() || update["reasoning_effort"]!=registration.reasoning_effort().as_str() {Err(rejected())?;}
@@ -585,6 +659,9 @@ mod tests {
             response(3, json!({"sessionId":"session-1"})),
             response(4, config()),
             response(5, config()),
+            response(6, json!({"success":true})),
+            response(7, json!({})),
+            response(8, config()),
         ]);
         reads
     }
@@ -595,7 +672,7 @@ mod tests {
             update("agent_thought_chunk", "private reasoning"),
             update("agent_message_chunk", "hello"),
             response(
-                6,
+                9,
                 json!({"stopReason":"end_turn","_meta":{"usage":usage()}}),
             ),
         ]);
@@ -644,7 +721,7 @@ mod tests {
     #[tokio::test]
     async fn cancellation_without_usage_never_completes_or_invents_zero() {
         let mut reads = new_session_reads();
-        reads.push(response(6, json!({"stopReason":"cancelled"})));
+        reads.push(response(9, json!({"stopReason":"cancelled"})));
         let (process, wire) = fixture(reads);
         process.create_empty_session().await.unwrap();
         let mut stream = process
@@ -682,7 +759,7 @@ mod tests {
     #[tokio::test]
     async fn missing_usage_wrong_correlation_and_resume_callback_fail_closed() {
         for terminal in [
-            response(6, json!({"stopReason":"end_turn"})),
+            response(9, json!({"stopReason":"end_turn"})),
             response(
                 99,
                 json!({"stopReason":"end_turn","_meta":{"usage":usage()}}),
@@ -719,5 +796,307 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn complete_usage_above_reservation_estimate_is_retained() {
+        let mut actual = usage();
+        actual["inputTokens"] = json!(29390);
+        actual["outputTokens"] = json!(3000);
+        actual["totalTokens"] = json!(32390);
+        actual["modelUsage"]["grok-4.7-build"]["inputTokens"] = json!(29390);
+        actual["modelUsage"]["grok-4.7-build"]["outputTokens"] = json!(3000);
+        actual["modelUsage"]["grok-4.7-build"]["totalTokens"] = json!(32390);
+        let mut reads = new_session_reads();
+        reads.push(response(
+            9,
+            json!({"stopReason":"end_turn","_meta":{"usage":actual}}),
+        ));
+        let (process, _) = fixture(reads);
+        process.create_empty_session().await.unwrap();
+        let mut stream = process
+            .prompt(vec!["synthetic".into()], Arc::new(NoTools))
+            .await
+            .unwrap();
+        stream.next().await.unwrap().unwrap();
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap(),
+            ProviderEvent::Usage {
+                input_tokens: 29390,
+                output_tokens: 3000,
+                ..
+            }
+        ));
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap(),
+            ProviderEvent::ResponseCompleted { .. }
+        ));
+    }
+    #[tokio::test]
+    async fn only_exact_internal_reload_and_manual_fixed_title_are_accepted() {
+        let (process, _) = fixture(vec![]);
+        let mut state = process.state.lock().await;
+        assert!(
+            AiGrokAcpWireProcess::internal_reload(
+                &json!({"jsonrpc":"2.0","id":"skills-reload","result":{"result":{"reloaded":1}}}),
+                &mut state
+            )
+            .unwrap()
+        );
+        assert!(
+            AiGrokAcpWireProcess::internal_reload(
+                &json!({"jsonrpc":"2.0","id":"skills-reload","result":{"result":{"reloaded":2}}}),
+                &mut state
+            )
+            .is_err()
+        );
+        let mut manual = json!({"jsonrpc":"2.0","method":"_x.ai/session_notification","params":{"sessionId":"session-1","update":{"sessionUpdate":"session_summary_generated","session_summary":FIXED_TITLE},"_meta":{"x.ai/titleIsManual":true}}});
+        assert!(
+            AiGrokAcpWireProcess::notification(
+                &manual,
+                Some("session-1"),
+                true,
+                &mut BTreeSet::new()
+            )
+            .is_ok()
+        );
+        manual["params"]["_meta"]["x.ai/titleIsManual"] = json!(false);
+        assert!(
+            AiGrokAcpWireProcess::notification(
+                &manual,
+                Some("session-1"),
+                true,
+                &mut BTreeSet::new()
+            )
+            .is_err()
+        );
+    }
+    #[cfg(unix)]
+    struct LiveWire {
+        read: Mutex<(
+            tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+            Vec<u8>,
+        )>,
+        write: Mutex<tokio::net::unix::OwnedWriteHalf>,
+    }
+    #[cfg(unix)]
+    #[async_trait]
+    impl AiGrokAcpWireTransport for LiveWire {
+        async fn write_frame(&self, frame: Vec<u8>) -> Result<(), ProviderError> {
+            use tokio::io::AsyncWriteExt;
+            self.write
+                .lock()
+                .await
+                .write_all(&frame)
+                .await
+                .map_err(|_| rejected())
+        }
+        async fn read_frame(&self) -> Result<Vec<u8>, ProviderError> {
+            use tokio::io::AsyncBufReadExt;
+            let mut read = self.read.lock().await;
+            loop {
+                let (reader, pending) = &mut *read;
+                let available = reader.fill_buf().await.map_err(|_| rejected())?;
+                if available.is_empty() {
+                    return Err(rejected());
+                }
+                let count = available
+                    .iter()
+                    .position(|b| *b == b'\n')
+                    .map_or(available.len(), |n| n + 1);
+                if pending.len() + count > FRAME {
+                    return Err(rejected());
+                }
+                pending.extend_from_slice(&available[..count]);
+                reader.consume(count);
+                if pending.ends_with(b"\n") {
+                    return Ok(std::mem::take(pending));
+                }
+            }
+        }
+    }
+    #[cfg(unix)]
+    async fn live_process(registration: Arc<AiGrokAcpRegistration>) -> AiGrokAcpWireProcess {
+        let socket =
+            std::env::var("GROK_ACP_TEST_SOCKET").expect("explicit isolated host socket required");
+        let cwd = std::env::var("GROK_ACP_TEST_CWD").expect("explicit isolated cwd required");
+        let stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+        let (read, write) = stream.into_split();
+        AiGrokAcpWireProcess::new(
+            registration,
+            Arc::new(LiveWire {
+                read: Mutex::new((tokio::io::BufReader::new(read), vec![])),
+                write: Mutex::new(write),
+            }),
+            cwd,
+        )
+        .unwrap()
+    }
+    #[cfg(unix)]
+    struct SyntheticBroker(SyncMutex<Vec<String>>);
+    #[cfg(unix)]
+    #[async_trait]
+    impl ProviderDynamicToolResponder for SyntheticBroker {
+        async fn respond(
+            &self,
+            call: crate::ProviderDynamicToolCall,
+        ) -> Result<crate::ProviderDynamicToolResult, ProviderError> {
+            let mut calls = self.0.lock().unwrap();
+            let expected = [
+                "graphql_capabilities_discover",
+                "graphql_capabilities_describe",
+                "graphql_capabilities_execute",
+            ];
+            if calls.len() >= expected.len() || call.provider_name() != expected[calls.len()] {
+                return Err(rejected());
+            }
+            let result = match calls.len() {
+                0 => json!({"capability":"probe.sample","description":"Synthetic count only"}),
+                1 => {
+                    if call.arguments() != &json!({"capability":"probe.sample"}) {
+                        return Err(rejected());
+                    }
+                    json!({"reference":"probe-run-1","description":"Returns synthetic count"})
+                }
+                _ => {
+                    if call.arguments() != &json!({"reference":"probe-run-1"}) {
+                        return Err(rejected());
+                    }
+                    json!({"count":7})
+                }
+            };
+            calls.push(call.provider_name().into());
+            crate::ProviderDynamicToolResult::new(&call, result)
+        }
+    }
+    #[cfg(unix)]
+    fn live_registration() -> Arc<AiGrokAcpRegistration> {
+        use crate::{ModelReasoningEffort, ModelReasoningEffortProfile, ModelToolDefinition};
+        let tools=[("discover","query"),("describe","capability"),("execute","reference")].into_iter().map(|(name,key)|ModelToolDefinition{
+            tool_id:format!("capabilities.{name}"),provider_name:format!("graphql_capabilities_{name}"),fingerprint:hex::encode(sha2::Sha256::digest(name.as_bytes())),description:format!("{name} synthetic probe capability"),parameters:json!({"type":"object","properties":{key:{"type":"string"}},"required":[key],"additionalProperties":false}),strict:true,defer_loading:false,
+        }).collect();
+        use sha2::Digest;
+        Arc::new(AiGrokAcpRegistration::new("grok-live-synthetic".into(),"grok-4.7".into(),"92c997dfd109c0672d40d5ae6fbd15835d53ffaf12cf9ea124d22aaef3ff23fc".into(),"1.0.40".into(),"explicit-isolated-test-socket".into(),ModelReasoningEffortProfile::new("grok-4.7",[ModelReasoningEffort::Low],ModelReasoningEffort::Low).unwrap(),ModelReasoningEffort::Low,"Use only the provided authorized synthetic capability tools. Never use other tools.".into(),tools,16_384,2_048,8).unwrap().with_usage_model("grok-4.7-build".into()).unwrap())
+    }
+    /// Requires an explicitly supplied, isolated, authenticated host pipe proxy.
+    /// Uses only synthetic tool data; emits counts/status, never native payloads.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "requires explicit isolated Grok ACP host socket and existing managed login"]
+    async fn live_grok_acp_synthetic_broker_restart_resume_and_delete() {
+        let registration = live_registration();
+        let process = live_process(registration.clone()).await;
+        let cursor = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            process.create_empty_session(),
+        )
+        .await
+        .unwrap()
+        .expect("empty-session preflight");
+        let responder = Arc::new(SyntheticBroker(SyncMutex::new(vec![])));
+        let mut stream=process.prompt(vec!["Use graphql_capabilities_discover with query synthetic, then graphql_capabilities_describe with its returned capability, then graphql_capabilities_execute with its returned reference, each exactly once. Report only the resulting count.".into()],responder.clone()).await.expect("prompt dispatch");
+        let mut complete = false;
+        let mut metered = false;
+        let mut text = false;
+        while let Some(event) =
+            tokio::time::timeout(std::time::Duration::from_secs(120), stream.next())
+                .await
+                .unwrap()
+        {
+            match event.expect("synthetic streaming protocol") {
+                ProviderEvent::TextDelta { text: delta } => text |= !delta.is_empty(),
+                ProviderEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                    ..
+                } => {
+                    assert!(input_tokens > 0 && output_tokens > 0);
+                    metered = true;
+                }
+                ProviderEvent::ResponseCompleted { .. } => complete = true,
+                _ => {}
+            }
+        }
+        assert!(complete && metered && text);
+        assert_eq!(responder.0.lock().unwrap().len(), 3);
+        drop(stream);
+        drop(process);
+        let resumed = live_process(registration.clone()).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            resumed.resume_session(&cursor),
+        )
+        .await
+        .unwrap()
+        .expect("restart retained resume");
+        assert_eq!(responder.0.lock().unwrap().len(), 3);
+        let mut followup=resumed.prompt(vec!["Without calling any tools, report only the synthetic count returned in our previous turn.".into()],Arc::new(NoTools)).await.unwrap();
+        let mut answer = String::new();
+        let mut completed = false;
+        while let Some(event) =
+            tokio::time::timeout(std::time::Duration::from_secs(60), followup.next())
+                .await
+                .unwrap()
+        {
+            match event.unwrap() {
+                ProviderEvent::TextDelta { text } => answer.push_str(&text),
+                ProviderEvent::ResponseCompleted { .. } => completed = true,
+                _ => {}
+            }
+        }
+        assert!(completed && answer.contains('7'));
+        assert_eq!(responder.0.lock().unwrap().len(), 3);
+        drop(followup);
+        resumed
+            .delete_session(&cursor)
+            .await
+            .expect("delete retained session");
+        resumed
+            .delete_session(&cursor)
+            .await
+            .expect("idempotent absence");
+        drop(resumed);
+        let absent = live_process(registration).await;
+        assert!(absent.resume_session(&cursor).await.is_err());
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "requires explicit isolated Grok ACP host socket and existing managed login"]
+    async fn live_grok_acp_stop_after_visible_text_is_uncertain_and_deletable() {
+        let process = live_process(live_registration()).await;
+        let cursor = process.create_empty_session().await.unwrap();
+        let mut stream=process.prompt(vec!["Do not call tools. Write all integers from 1 to 100000 in order, separated by spaces. Continue until complete.".into()],Arc::new(NoTools)).await.unwrap();
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(60), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+            {
+                ProviderEvent::TextDelta { .. } => break,
+                ProviderEvent::ResponseCompleted { .. } => panic!("finished before Stop"),
+                _ => {}
+            }
+        }
+        process.cancel().await.unwrap();
+        let mut cancelled = false;
+        while let Some(event) =
+            tokio::time::timeout(std::time::Duration::from_secs(15), stream.next())
+                .await
+                .unwrap()
+        {
+            match event {
+                Err(ProviderError::Cancelled) => {
+                    cancelled = true;
+                    break;
+                }
+                Ok(ProviderEvent::ResponseCompleted { .. }) => panic!("Stop reported completed"),
+                Ok(_) => {}
+                Err(_) => panic!("Stop protocol failure"),
+            }
+        }
+        assert!(cancelled);
+        drop(stream);
+        process.delete_session(&cursor).await.unwrap();
     }
 }

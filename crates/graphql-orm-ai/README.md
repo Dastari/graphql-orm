@@ -21,9 +21,9 @@ substitute. Application work always runs through the host's authenticated
 GraphQL resolvers; a provider, tool registration, or approval never grants
 resolver authority.
 
-The opt-in `provider-grok-acp` feature provides a draft bounded ACP provider and
-retained-session actor. Factory admission defaults to false; Grok 1.0.40 has no
-verified hard output ceiling and must remain disabled. See the
+The opt-in `provider-grok-acp` feature provides a bounded ACP provider and
+retained-session actor. Factory admission defaults to false until exact host
+isolation is verified; usage follows the existing estimate/actual budget contract. See the
 [local harness boundary](docs/local-harness.md).
 
 ## Install

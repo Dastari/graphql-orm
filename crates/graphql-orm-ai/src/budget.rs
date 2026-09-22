@@ -333,7 +333,6 @@ impl AiBudgetReservation {
             provider_kind: self.provider_kind.clone(),
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort,
-            maximum_input_tokens: self.reserved.input_tokens,
             maximum_output_tokens: self.reserved.output_tokens,
             maximum_tool_units: self.reserved.tool_units,
             expires_at: self.expires_at,
@@ -349,17 +348,12 @@ pub struct AuthorizedBudgetReservation {
     provider_kind: ProviderKind,
     model: String,
     reasoning_effort: ModelReasoningEffort,
-    maximum_input_tokens: u64,
     maximum_output_tokens: u64,
     maximum_tool_units: u64,
     expires_at: OffsetDateTime,
 }
 
 impl AuthorizedBudgetReservation {
-    pub(crate) fn covers_input_tokens(&self, required: u64) -> bool {
-        required <= self.maximum_input_tokens
-    }
-
     /// Returns the reservation identifier for usage/audit linkage.
     pub const fn reservation_id(&self) -> AiBudgetReservationId {
         self.reservation_id
@@ -463,46 +457,6 @@ pub trait AiBudgetService: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn aggregate_input_proof_cannot_exceed_atomic_reservation() {
-        let run_id = AiRunId::new();
-        let attempt_id = Uuid::new_v4();
-        let now = OffsetDateTime::now_utc();
-        let reservation = AiBudgetReservation::new_reserved_with_reasoning_effort(
-            AiBudgetReservationId::new(),
-            run_id,
-            attempt_id,
-            1,
-            ProviderKind::LocalHarness,
-            "reviewed-model",
-            ModelReasoningEffort::Low,
-            "pricing-v1",
-            AiBudgetAmounts {
-                input_tokens: 100,
-                output_tokens: 20,
-                runs: 1,
-                ..Default::default()
-            },
-            now + time::Duration::minutes(1),
-        )
-        .unwrap();
-        let proof = reservation
-            .authorize_provider_call_with_reasoning_effort(
-                run_id,
-                attempt_id,
-                1,
-                &ProviderKind::LocalHarness,
-                "reviewed-model",
-                ModelReasoningEffort::Low,
-                20,
-                0,
-                now,
-            )
-            .unwrap();
-        assert!(proof.covers_input_tokens(100));
-        assert!(!proof.covers_input_tokens(101));
-    }
 
     #[test]
     fn budget_authorization_is_fenced_to_exact_reasoning_effort() {

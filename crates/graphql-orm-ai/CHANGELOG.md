@@ -22,16 +22,15 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ### Added
 
-Opt-in `provider-grok-acp` SDK reverse-MCP broker binds exact registered tools
-to the existing coordinator dynamic-tool contracts, rejects replay and unknown
-methods, and bounds calls and wire bytes. Prompt-level usage decoding rejects
-missing, inconsistent or incomplete counters and model drift. These are protocol
-contracts accompany a draft ACP provider, bounded transport actor, frozen
-registration, fenced retained resume/deletion and uncertain cancellation. The
-factory defaults to denied admission: live Grok 1.0.40 exceeded configured output
-ceilings, so no runnable deployment or release readiness is claimed. Existing
-budget proofs now expose an aggregate input reservation check without a data
-migration.
+Opt-in `provider-grok-acp` provides a bounded ACP provider, frozen registration,
+SDK reverse-MCP broker, retained resume/deletion and uncertain cancellation using
+existing coordinator contracts. Fixed-title empty-session preflight suppresses
+native title inference; exact protocol generations and internal acknowledgments
+are handled without widening the tool surface. Factories own isolated process
+launch and must explicitly admit the reviewed profile. Budgets retain the existing
+estimate/reserve/actual semantics, including complete actual usage above estimates;
+no native hard token ceiling is claimed. Pending-launch and abandoned-session
+futures terminate safely. No schema or data migration is introduced.
 
 ## [0.98.2] - 2026-09-15
 

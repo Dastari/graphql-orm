@@ -1,8 +1,8 @@
 //! Exact Grok ACP launch, provider-run and retained-session boundary.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as SyncMutex};
 use std::time::Duration;
 
 use agql_auth::Clock;
@@ -44,12 +44,13 @@ pub struct AiGrokAcpRegistration {
     sandbox_profile: String,
     effort_profile: ModelReasoningEffortProfile,
     effort: ModelReasoningEffort,
-    bootstrap: &'static str,
+    bootstrap: String,
     tools: Vec<ModelToolDefinition>,
-    maximum_input_tokens: u64,
+    maximum_input_bytes: u64,
     maximum_output_tokens: u64,
     maximum_model_calls: u32,
     identity: String,
+    base_identity: String,
     capability_binding: Option<AiProviderCapabilitySessionBinding>,
 }
 
@@ -63,15 +64,15 @@ impl std::fmt::Debug for AiGrokAcpRegistration {
 
 impl AiGrokAcpRegistration {
     /// Freezes the executable, sandbox, model, effort, static bootstrap, broker
-    /// definitions and aggregate prompt ceilings into one registration identity.
+    /// definitions, request admission bounds and native model-round limit.
     ///
-    /// `maximum_output_tokens` is an aggregate provider-enforced ceiling across
-    /// every sampler round, not a post-hoc measurement. The factory must refuse
-    /// admission if it cannot enforce this or exclude unmetered side calls.
+    /// Output tokens bound the requested reservation estimate, not the native
+    /// sampler or final usage. Full metered actual usage is reconciled by the
+    /// existing budget service, including amounts exceeding the reservation.
     ///
     /// # Errors
     /// Rejects malformed identities, unsupported effort, unbounded token/round
-    /// ceilings, non-static bootstrap and invalid/duplicate tool definitions.
+    /// ceilings, oversized bootstrap and invalid/duplicate tool definitions.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         profile_id: String,
@@ -81,9 +82,9 @@ impl AiGrokAcpRegistration {
         sandbox_profile: String,
         effort_profile: ModelReasoningEffortProfile,
         effort: ModelReasoningEffort,
-        bootstrap: &'static str,
+        bootstrap: String,
         tools: Vec<ModelToolDefinition>,
-        maximum_input_tokens: u64,
+        maximum_input_bytes: u64,
         maximum_output_tokens: u64,
         maximum_model_calls: u32,
     ) -> Result<Self, ProviderError> {
@@ -96,7 +97,7 @@ impl AiGrokAcpRegistration {
             || !effort_profile.supports(effort)
             || bootstrap.is_empty()
             || bootstrap.len() > 64 * 1024
-            || !(1..=16_000_000).contains(&maximum_input_tokens)
+            || !(1..=16 * 1024 * 1024).contains(&maximum_input_bytes)
             || !(1..=1_000_000).contains(&maximum_output_tokens)
             || !(1..=64).contains(&maximum_model_calls)
         {
@@ -113,7 +114,7 @@ impl AiGrokAcpRegistration {
         let canonical = serde_json::to_vec(&serde_json::json!({
             "protocol":PROTOCOL,"profile":profile_id,"model":model,"executable":executable_sha256,
             "version":executable_version,"sandbox":sandbox_profile,"effort":effort,"effort_profile":effort_profile,
-            "bootstrap":bootstrap,"tools":tools,"input":maximum_input_tokens,
+            "bootstrap":bootstrap,"tools":tools,"input":maximum_input_bytes,
             "output":maximum_output_tokens,"rounds":maximum_model_calls,
         }))
         .map_err(|_| ProviderError::InvalidRequest)?;
@@ -129,9 +130,10 @@ impl AiGrokAcpRegistration {
             effort,
             bootstrap,
             tools,
-            maximum_input_tokens,
+            maximum_input_bytes,
             maximum_output_tokens,
             maximum_model_calls,
+            base_identity: identity.clone(),
             identity,
             capability_binding: None,
         })
@@ -167,7 +169,14 @@ impl AiGrokAcpRegistration {
         if model.is_empty() || model.len() > 200 || model.chars().any(char::is_control) {
             return Err(ProviderError::InvalidRequest);
         }
-        self.identity = hex::encode(Sha256::digest(format!("{}\0{}", self.identity, model)));
+        if model == self.usage_model {
+            return Ok(self);
+        }
+        self.identity = if model == self.model {
+            self.base_identity.clone()
+        } else {
+            hex::encode(Sha256::digest(format!("{}\0{}", self.base_identity, model)))
+        };
         self.usage_model = model;
         self.capability_binding = None;
         Ok(self)
@@ -224,18 +233,18 @@ impl AiGrokAcpRegistration {
         self.effort
     }
     /// Static host policy; never populated from model or user content.
-    pub fn bootstrap(&self) -> &'static str {
-        self.bootstrap
+    pub fn bootstrap(&self) -> &str {
+        &self.bootstrap
     }
     /// Exact frozen broker definitions.
     pub fn tools(&self) -> &[ModelToolDefinition] {
         &self.tools
     }
-    /// Aggregate input ceiling including retained provider context.
-    pub fn maximum_input_tokens(&self) -> u64 {
-        self.maximum_input_tokens
+    /// Protocol request byte bound; not a token estimate or billed-usage ceiling.
+    pub fn maximum_input_bytes(&self) -> u64 {
+        self.maximum_input_bytes
     }
-    /// Aggregate output ceiling across every model round.
+    /// Maximum admitted requested output estimate; not a native sampler limit.
     pub fn maximum_output_tokens(&self) -> u64 {
         self.maximum_output_tokens
     }
@@ -269,7 +278,7 @@ impl AiGrokAcpRegistration {
             || request.reasoning_summary != crate::ModelReasoningSummaryRequest::Disabled
             || request
                 .maximum_output_tokens
-                .is_none_or(|n| n < self.maximum_output_tokens)
+                .is_none_or(|n| n == 0 || n > self.maximum_output_tokens)
             || request.input.is_empty()
             || request.input.iter().any(|b| {
                 !matches!(
@@ -277,7 +286,7 @@ impl AiGrokAcpRegistration {
                     ModelInputBlock::Text { .. } | ModelInputBlock::Json { .. }
                 )
             })
-            || request.conservative_egress_bytes() > self.maximum_input_tokens
+            || request.conservative_egress_bytes() > self.maximum_input_bytes
         {
             return Err(ProviderError::Unsupported);
         }
@@ -303,7 +312,7 @@ pub trait AiGrokAcpRunProcess: Send + Sync {
     /// Rejects missing sessions, replay callbacks or frozen-profile drift.
     async fn resume_session(&self, cursor: &AiProviderSessionCursor) -> Result<(), ProviderError>;
     /// Starts one exact admitted prompt; custom calls go only to `responder`.
-    /// Must enforce the immutable aggregate sampler limits before execution.
+    /// Must enforce the immutable model-round limit before execution.
     ///
     /// # Errors
     /// Rejects unsupported state, transport failures and uncertain terminals.
@@ -362,7 +371,7 @@ impl Drop for AiGrokAcpLaunchedProcess {
 /// home/cwd; expose only the explicitly authorized existing managed login;
 /// disable API-key fallback, hooks/plugins/instructions/other MCP/native tools,
 /// web search, subagents, telemetry payloads and unmetered side-model work.
-/// Enforce the registration's aggregate sampler/token ceilings plus process,
+/// Enforce the registration's model-round limit plus process,
 /// memory, CPU, output and wall time. Never mutate authentication or billing.
 #[async_trait]
 pub trait AiGrokAcpProcessFactory: Send + Sync {
@@ -403,6 +412,22 @@ impl Drop for TurnGuard {
     }
 }
 
+struct PendingLaunch {
+    cancelled: AtomicBool,
+    wake: tokio::sync::Notify,
+}
+struct PendingGuard<'a> {
+    pending: &'a SyncMutex<BTreeMap<AiProviderRunBinding, Arc<PendingLaunch>>>,
+    binding: AiProviderRunBinding,
+}
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&self.binding);
+        }
+    }
+}
+
 /// Grok ACP provider using the existing fenced coordinator and session service.
 /// No process is admitted until its factory proves the exact closed registration.
 pub struct AiGrokAcpProvider {
@@ -410,6 +435,7 @@ pub struct AiGrokAcpProvider {
     factory: Arc<dyn AiGrokAcpProcessFactory>,
     entries: Mutex<BTreeMap<AiProviderRunBinding, Arc<Entry>>>,
     launches: Mutex<()>,
+    pending: SyncMutex<BTreeMap<AiProviderRunBinding, Arc<PendingLaunch>>>,
     maximum_processes: usize,
     slots: Arc<tokio::sync::Semaphore>,
     turn_timeout: Duration,
@@ -437,6 +463,7 @@ impl AiGrokAcpProvider {
             factory,
             entries: Mutex::new(BTreeMap::new()),
             launches: Mutex::new(()),
+            pending: SyncMutex::new(BTreeMap::new()),
             maximum_processes,
             slots: Arc::new(tokio::sync::Semaphore::new(maximum_processes)),
             turn_timeout,
@@ -460,6 +487,21 @@ impl AiGrokAcpProvider {
                 return Ok(entry.clone());
             }
         }
+        let pending = Arc::new(PendingLaunch {
+            cancelled: AtomicBool::new(false),
+            wake: tokio::sync::Notify::new(),
+        });
+        {
+            let mut all = self.pending.lock().map_err(|_| rejected())?;
+            if all.contains_key(&binding) {
+                return Err(rejected());
+            }
+            all.insert(binding, pending.clone());
+        }
+        let _pending_guard = PendingGuard {
+            pending: &self.pending,
+            binding,
+        };
         // Serialize admission without blocking cancellation/close of existing runs.
         let _launch = tokio::time::timeout(self.startup_timeout, self.launches.lock())
             .await
@@ -486,12 +528,13 @@ impl AiGrokAcpProvider {
             .clone()
             .try_acquire_owned()
             .map_err(|_| ProviderError::RateLimited)?;
-        let process = tokio::time::timeout(
-            self.startup_timeout,
-            self.factory.launch(self.registration.clone()),
-        )
-        .await
-        .map_err(|_| timeout())??;
+        if pending.cancelled.load(Ordering::Acquire) {
+            return Err(ProviderError::Cancelled);
+        }
+        let process = tokio::select! {
+            _ = pending.wake.notified() => return Err(ProviderError::Cancelled),
+            result = tokio::time::timeout(self.startup_timeout, self.factory.launch(self.registration.clone())) => result.map_err(|_| timeout())??,
+        };
         let entry = Arc::new(Entry {
             _slot: slot,
             process: Arc::new(process),
@@ -499,8 +542,23 @@ impl AiGrokAcpProvider {
             newly_created: AtomicBool::new(false),
             active: AtomicBool::new(false),
         });
-        self.entries.lock().await.insert(binding, entry.clone());
+        let mut entries = self.entries.lock().await;
+        if pending.cancelled.load(Ordering::Acquire) {
+            entry.process.terminate();
+            return Err(ProviderError::Cancelled);
+        }
+        entries.insert(binding, entry.clone());
         Ok(entry)
+    }
+    fn cancel_pending(&self, binding: &AiProviderRunBinding) -> Result<bool, ProviderError> {
+        let pending = self.pending.lock().map_err(|_| rejected())?;
+        if let Some(launch) = pending.get(binding) {
+            launch.cancelled.store(true, Ordering::Release);
+            launch.wake.notify_one();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
     fn validate_context(
         &self,
@@ -512,7 +570,6 @@ impl AiGrokAcpProvider {
         }
         self.registration.validate_request(request)?;
         context.validate_request(&ProviderKind::LocalHarness, request)?;
-        context.validate_input_token_reservation(self.registration.maximum_input_tokens)?;
         context.validate_provider_profile(
             &ProviderKind::LocalHarness,
             request,
@@ -608,7 +665,7 @@ impl AiProvider for AiGrokAcpProvider {
             parallel_tool_calls: true,
             provider_retained_continuation: true,
             local: true,
-            maximum_context_tokens: Some(self.registration.maximum_input_tokens),
+            maximum_context_tokens: None,
             maximum_output_tokens: Some(self.registration.maximum_output_tokens),
             reasoning_effort_profiles: vec![self.registration.effort_profile.clone()],
             ..Default::default()
@@ -652,7 +709,6 @@ impl AiProvider for AiGrokAcpProvider {
             tokio::time::timeout_at(deadline, entry.process.process.prompt(input, responder))
                 .await
                 .map_err(|_| timeout())??;
-        let limits = self.registration.clone();
         Ok(Box::pin(async_stream::try_stream! {
             let mut guard=guard;
             let mut started=false; let mut usage=false; let mut completed=false; let mut bytes=0usize;
@@ -662,7 +718,7 @@ impl AiProvider for AiGrokAcpProvider {
                 match &event {
                     ProviderEvent::ResponseStarted{..} if !started=>started=true,
                     ProviderEvent::TextDelta{text} if started&&!usage=>{bytes=bytes.checked_add(text.len()).ok_or_else(rejected)?;if bytes>16*1024*1024{Err(rejected())?;}},
-                    ProviderEvent::Usage{input_tokens,output_tokens,cached_input_tokens} if started&&!usage=>{if *input_tokens>limits.maximum_input_tokens||*output_tokens>limits.maximum_output_tokens||cached_input_tokens>input_tokens{Err(rejected())?;}usage=true;},
+                    ProviderEvent::Usage{input_tokens,output_tokens,cached_input_tokens} if started&&!usage=>{if *input_tokens>super::grok_acp::MAX_USAGE_TOKENS||*output_tokens>super::grok_acp::MAX_USAGE_TOKENS||cached_input_tokens>input_tokens{Err(rejected())?;}usage=true;},
                     ProviderEvent::ResponseCompleted{..} if usage=>completed=true,
                     _=>Err(rejected())?,
                 }
@@ -676,9 +732,14 @@ impl AiProvider for AiGrokAcpProvider {
         &self,
         binding: &AiProviderRunBinding,
     ) -> Result<AiProviderRunInterruptOutcome, ProviderError> {
+        let pending = self.cancel_pending(binding)?;
         let entry = self.entries.lock().await.get(binding).cloned();
         let Some(entry) = entry else {
-            return Ok(AiProviderRunInterruptOutcome::NotActive);
+            return Ok(if pending {
+                AiProviderRunInterruptOutcome::Requested
+            } else {
+                AiProviderRunInterruptOutcome::NotActive
+            });
         };
         let result =
             tokio::time::timeout(Duration::from_secs(5), entry.process.process.cancel()).await;
@@ -691,12 +752,17 @@ impl AiProvider for AiGrokAcpProvider {
         binding: &AiProviderRunBinding,
         _reason: AiProviderRunCloseReason,
     ) -> Result<AiProviderRunCloseOutcome, ProviderError> {
+        let pending = self.cancel_pending(binding)?;
         match self.entries.lock().await.remove(binding) {
             Some(entry) => {
                 entry.process.terminate();
                 Ok(AiProviderRunCloseOutcome::Closed)
             }
-            None => Ok(AiProviderRunCloseOutcome::NotActive),
+            None => Ok(if pending {
+                AiProviderRunCloseOutcome::Closed
+            } else {
+                AiProviderRunCloseOutcome::NotActive
+            }),
         }
     }
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -842,7 +908,7 @@ pub(super) mod tests {
             )
             .unwrap(),
             ModelReasoningEffort::Low,
-            "Use only authorized read capabilities.",
+            "Use only authorized read capabilities.".into(),
             vec![ModelToolDefinition {
                 tool_id: "capabilities.discover".into(),
                 provider_name: "discover".into(),
@@ -932,7 +998,7 @@ pub(super) mod tests {
         assert!(changed.with_capability_binding(binding).is_err());
     }
     #[test]
-    fn request_cannot_widen_native_surface_or_reduce_aggregate_output_ceiling() {
+    fn request_cannot_widen_native_surface_or_output_estimate_admission() {
         let reg = registration();
         let mut request = ModelRequest {
             model: reg.model.clone(),
@@ -951,7 +1017,7 @@ pub(super) mod tests {
             maximum_output_tokens: Some(2048),
         };
         assert!(reg.validate_request(&request).is_ok());
-        request.maximum_output_tokens = Some(2047);
+        request.maximum_output_tokens = Some(2049);
         assert!(reg.validate_request(&request).is_err());
         request.maximum_output_tokens = Some(2048);
         request.instructions.push("untrusted override".into());
@@ -959,5 +1025,157 @@ pub(super) mod tests {
         request.instructions.clear();
         request.tools[0].fingerprint = "substitute".into();
         assert!(reg.validate_request(&request).is_err());
+    }
+    struct BlockingProcess {
+        started: Arc<tokio::sync::Notify>,
+    }
+    #[async_trait]
+    impl AiGrokAcpRunProcess for BlockingProcess {
+        async fn create_empty_session(&self) -> Result<AiProviderSessionCursor, ProviderError> {
+            self.started.notify_one();
+            std::future::pending().await
+        }
+        async fn resume_session(&self, _: &AiProviderSessionCursor) -> Result<(), ProviderError> {
+            self.started.notify_one();
+            std::future::pending().await
+        }
+        async fn prompt(
+            &self,
+            _: Vec<String>,
+            _: Arc<dyn ProviderDynamicToolResponder>,
+        ) -> Result<ProviderEventStream, ProviderError> {
+            Err(rejected())
+        }
+        async fn cancel(&self) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        async fn delete_session(&self, _: &AiProviderSessionCursor) -> Result<(), ProviderError> {
+            Ok(())
+        }
+    }
+    struct TestFactory {
+        killed: Arc<AtomicUsize>,
+        launch_started: Arc<tokio::sync::Notify>,
+        process_started: Arc<tokio::sync::Notify>,
+        block_launch: bool,
+    }
+    #[async_trait]
+    impl AiGrokAcpProcessFactory for TestFactory {
+        fn admits(&self, _: &AiGrokAcpRegistration) -> bool {
+            true
+        }
+        async fn launch(
+            &self,
+            _: Arc<AiGrokAcpRegistration>,
+        ) -> Result<AiGrokAcpLaunchedProcess, ProviderError> {
+            let killed = self.killed.clone();
+            let process = AiGrokAcpLaunchedProcess::new(
+                Arc::new(BlockingProcess {
+                    started: self.process_started.clone(),
+                }),
+                move || {
+                    killed.fetch_add(1, Ordering::AcqRel);
+                },
+            );
+            self.launch_started.notify_one();
+            if self.block_launch {
+                std::future::pending::<()>().await;
+            }
+            Ok(process)
+        }
+    }
+    fn binding() -> AiProviderRunBinding {
+        AiProviderRunBinding::new(
+            crate::AiSessionId::new(),
+            crate::AiRunId::new(),
+            uuid::Uuid::new_v4(),
+            1,
+            [0; 32],
+        )
+        .unwrap()
+    }
+    fn test_factory(block_launch: bool) -> Arc<TestFactory> {
+        Arc::new(TestFactory {
+            killed: Arc::new(AtomicUsize::new(0)),
+            launch_started: Arc::new(tokio::sync::Notify::new()),
+            process_started: Arc::new(tokio::sync::Notify::new()),
+            block_launch,
+        })
+    }
+    #[tokio::test]
+    async fn interrupt_during_launch_drops_factory_and_never_installs_process() {
+        let factory = test_factory(true);
+        let provider = Arc::new(
+            AiGrokAcpProvider::new(
+                Arc::new(registration()),
+                factory.clone(),
+                1,
+                Duration::from_secs(5),
+            )
+            .unwrap(),
+        );
+        let binding = binding();
+        let task = tokio::spawn({
+            let provider = provider.clone();
+            async move { provider.entry(binding).await.map(|_| ()) }
+        });
+        factory.launch_started.notified().await;
+        assert_eq!(
+            provider.interrupt_run(&binding).await.unwrap(),
+            AiProviderRunInterruptOutcome::Requested
+        );
+        assert!(matches!(task.await.unwrap(), Err(ProviderError::Cancelled)));
+        assert_eq!(factory.killed.load(Ordering::Acquire), 1);
+        assert!(provider.entries.lock().await.is_empty());
+        assert!(provider.pending.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn dropped_empty_session_creation_kills_process_and_releases_active_guard() {
+        let factory = test_factory(false);
+        let reg = registration();
+        let descriptor = AiProviderSessionDescriptor::new(
+            ProviderKind::LocalHarness,
+            reg.provider_profile_id(),
+            reg.model(),
+            reg.session_fingerprint(),
+            reg.protocol_version(),
+            "e".repeat(64),
+        )
+        .unwrap();
+        let request = ModelRequest {
+            model: reg.model.clone(),
+            instructions: vec![],
+            input: vec![ModelInputBlock::Text {
+                text: "fixture".into(),
+            }],
+            continuation: None,
+            continuation_mode: ModelContinuationMode::ProviderRetained,
+            tools: reg.tools.clone(),
+            builtin_tools: vec![],
+            maximum_builtin_tool_calls: None,
+            reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: reg.effort,
+            output_schema: None,
+            maximum_output_tokens: Some(2048),
+        };
+        let provider = Arc::new(
+            AiGrokAcpProvider::new(Arc::new(reg), factory.clone(), 1, Duration::from_secs(5))
+                .unwrap(),
+        );
+        let binding = binding();
+        let task = tokio::spawn({
+            let provider = provider.clone();
+            async move {
+                provider
+                    .create_empty_session(&binding, &descriptor, &request)
+                    .await
+            }
+        });
+        factory.process_started.notified().await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(factory.killed.load(Ordering::Acquire), 1);
+        let entries = provider.entries.lock().await;
+        assert!(!entries[&binding].active.load(Ordering::Acquire));
     }
 }

@@ -206,75 +206,97 @@ adoption; this revalidates stored history and never resumes or reconstructs a
 process session. Future adapters must not widen this safe registration
 implicitly.
 
-## Grok ACP draft adapter and admission boundary
+## Grok ACP adapter and admission boundary
 
 The opt-in `provider-grok-acp` feature supplies `AiGrokAcpProvider`, immutable
-`AiGrokAcpRegistration`, and `AiGrokAcpWireProcess`. The deployment supplies only a
+`AiGrokAcpRegistration`, and `AiGrokAcpWireProcess`. The deployment supplies a
 bounded `AiGrokAcpWireTransport`, isolated process factory and whole-tree kill
-closure. The upstream actor owns initialization, existing cached-login
-selection, scalar model/effort configuration, streaming, SDK MCP, cancellation,
-resume and authoritative deletion. No credentials or subprocess are discovered
-by this crate. Explicit effort is required; unknown defaults cannot drift.
+closure. The actor owns initialization, existing cached-login selection, scalar
+model/effort configuration, streaming, SDK MCP, cancellation, resume and deletion.
+No credentials or subprocess are discovered by this crate. Explicit effort is
+required; unknown provider defaults cannot drift. Bootstrap is an owned, validated
+host-policy string frozen into the registration, never a per-request override.
 
-`AiGrokAcpProcessFactory::admits` defaults to false. **Grok 1.0.40 must remain
-unadmitted:** an isolated live probe configured per-model `max_completion_tokens`
-to 1 but received 57 output tokens (39 visible, 18 reasoning). A cap of 64 also
-returned 92 output tokens. Post-response usage checks cannot enforce a prepaid
-hard budget. Neither native `maxTurns` nor host cancellation establishes a hard
-output ceiling. Three synthetic broker calls consumed five model calls and
-29,390 aggregate input tokens, so reserving only one ordinary request is unsafe.
-No published runnable registration or enabled deployment is claimed here.
-Additional live inventory exposed an unsolicited `skills-reload` response and
-`session_summary_generated` side inference. The strict actor currently rejects
-both. The first title sampler may run despite title-refresh flags. A separate live
-probe avoided it by assigning a fixed host title before closing/restarting and
-resuming, with title-refresh/turn-summary features disabled; that mitigation is
-not implemented in this actor. These protocol/side-call
-gaps also block admission and full live actor acceptance.
+### Budgets and terminal accounting
 
-Before admission, an exact executable/profile must establish a native aggregate
-output ceiling, conservative aggregate input reservation, bounded model rounds,
-and exclusion/accounting of compaction, title/summary and other side inference.
-The host must also prove managed cached authentication, private home/cwd, absence
-of ambient instructions/plugins/hooks/MCP, native filesystem/shell/subagent
-exclusion, and policy-compliant web access. A returned usage total or an accepting
-configuration setter is not such proof. These are trusted factory obligations;
-`admits=true` is a security-sensitive deployment assertion, never a user setting.
+Grok uses the existing estimate/reserve/actual reconciliation contract, as does
+the Codex app-server adapter. `maximum_output_tokens` bounds the admitted request
+estimate, not native sampler output. Complete aggregate usage can exceed that
+estimate and is committed in full; it is never truncated to reserved amounts.
+The ORM budget service then applies committed usage to future admission. Tests
+exercise actual input 29,390/output 3,000 against estimates of 100 each. Missing,
+incomplete or inconsistent usage is uncertain, never zero. Provider prices and
+cost ticks do not replace host usage accounting. A failed/cancelled terminal
+remains uncertain even if a usage event preceded it; existing reconciliation owns
+recovery. It is not reported as a successful settled response.
 
-Registration fingerprints bind executable hash/version, sandbox, model, explicit
-effort, usage alias, bootstrap, exact tool fingerprints and aggregate ceilings.
-The capability overlay must match the existing fixed-broker binding. The provider
-requires the existing durable retained claim and request budget proof, including
-an input reservation covering its aggregate input ceiling. Process capacity is
-shared by runs and detached cleanup. Time, bytes, frames and callback limits are
-bounded; stream abandonment/error kills the process. Interrupted cancellation
-remains uncertain and requires the existing reconciliation/cleanup workflow.
+An earlier draft incorrectly required a native hard output ceiling and rejected
+actual tokens above the estimate. Grok 1.0.40 does exceed configured native output
+settings (cap 1 returned 57 tokens; cap 64 returned 92), but the pinned Codex wire
+also does not forward its requested output estimate as a native token cap. Those
+observations are a limitation of token-budget precision, not a different Grok
+admission contract. No token/spend guarantee or saved-setting increase is implied.
 
-`AiGrokAcpSdkBroker` admits one frozen namespace over `_x.ai/mcp/sdk_call`. It
-answers the observed initial `server/discover` probe with method-not-found, then
-accepts MCP initialization, exact `tools/list` and offered `tools/call` only.
-Schema-validated calls use `ProviderDynamicToolCall`; only opaque durable
-`ProviderDynamicToolResult` values may return results. The existing coordinator
-retains authorization, tool budgets, result egress and persistence. Duplicate
-IDs/results, unknown methods, schema errors and wire overruns poison the broker.
-The frozen native profile contains only `GrokBuild:search_tool` and
-`GrokBuild:use_tool`, not an empty inherited tool allowlist. Tool execution during
-resume is rejected; replayed history is not emitted or executed.
+The registration separately bounds input **bytes**, native model rounds and
+requested output estimates. Usage counters have independent protocol/storage
+sanity bounds; token counts are not compared to byte bounds. The host selects a
+native `maxTurns` no larger than its authorized remaining provider-turn allowance;
+this adapter admits at most 64 native rounds and one prompt per process/binding.
+A tool conversation can consume more native rounds than broker callbacks. The
+host must not schedule additional hidden prompts or silently raise saved limits.
+Broker callbacks still pass through ordinary run/tool/result/authorization checks.
+The provider bounds process capacity, one active process per owner, startup and
+turn time (at most one hour), frames, bytes and callbacks. Dropped launch, empty
+session creation, activation and stream futures terminate their process trees.
+Cancellation/close races during launch cannot install a process after cancellation.
 
-`AiGrokAcpUsage` requires complete `_meta.usage` aggregates and the registered
-usage model alias, retaining cached input within full input totals. Missing or
-inconsistent counters never become zero. Internal thought chunks are discarded.
-Unknown execution/compaction notifications, native tools and background tasks
-fail closed. No provider payload, signature, credential or reasoning is logged.
-Normal completion requires authoritative metering; cancellation without usage
-is uncertain. Cleanup requires `_x.ai/session/delete` success, not transport exit.
+### Native isolation and retained state
+
+`AiGrokAcpProcessFactory::admits` defaults to false until the trusted host verifies
+its exact executable/profile. Registration hashes executable/version, sandbox,
+model, effort, usage alias, bootstrap, tool fingerprints and operational bounds.
+Capability overlays match the existing fixed-broker binding. The host must prove
+private home/cwd, existing managed cached authentication, absence of ambient
+instructions/plugins/hooks/MCP, native filesystem/shell/subagent exclusion, and
+policy-compliant web access. It must disable automatic title-refresh/turn-summary
+and other optional side work. No API-key fallback or billing-path switch occurs.
+
+Before returning a new empty cursor, the actor selects the model/effort, assigns
+one fixed host title, closes and resumes the session. This prevents the native
+first-content title sampler. Resume repeats the frozen curated profile and
+`yoloMode` setting. Only an exact manual-title notification is admitted; generated
+summaries, compaction, background tasks and unknown execution events fail closed.
+Internal thought chunks and signatures are discarded. No payloads or credentials
+are logged. Exact bounded `skills-reload` internal acknowledgments are recognized
+without exposing any ambient skills or authorizing tools.
+
+The native profile includes only `GrokBuild:search_tool` and
+`GrokBuild:use_tool`; an empty inherited allowlist is not safe. The SDK bridge
+answers the initial `server/discover` probe with method-not-found, then handles
+MCP initialization, exact `tools/list` and offered `tools/call`. Legacy fallback
+has its own inner correlation generation; ACP outer IDs remain unique. Broker
+state resets only after confirmed empty-session close before resume. Tools during
+resume are rejected, and historical messages are never re-emitted or executed.
+Only opaque durable `ProviderDynamicToolResult` values can return tool results.
+The coordinator remains authoritative for resolver access, budgets and disclosure.
+
+Retained cursors remain opaque and fenced by the existing session service.
+Interruptions require cleanup/recovery, never blind continuation. Detached cleanup
+shares process capacity and requires `_x.ai/session/delete` success; process death
+alone never proves absence. Live probes verified idempotent deletion and a later
+resume failure, using only synthetic data and the existing managed login.
+
+### Verification
 
 The official source audit used
 [xai-org/grok-build commit 4247f66](https://github.com/xai-org/grok-build/tree/4247f661689354b831191f11eeeac8424993fe3d).
-Separate isolated live Grok 1.0.40 observations established cached authentication,
-4.7 selection, text/usage, three synthetic broker calls, process-restart resume
-without callback replay and idempotent deletion. Synthetic deterministic fixtures
-cover framing/correlation, schema/replay boundaries, profile/model selection,
-streaming/usage, uncertain Stop, resume history and deletion. They do not prove a
-native budget contract or replace deployment acceptance. No database schema or
-data migration is introduced. Release/adoption remains blocked on safe admission.
+Ignored opt-in live tests run the actual upstream actor over an explicitly supplied
+isolated Unix socket; the external host owns process isolation and existing login.
+They exercise synthetic discover/describe/execute, streamed text and complete
+usage, process-restart resume without repeated callbacks, retained follow-up,
+Stop uncertainty and exact deletion. No provider is enabled by running a test.
+Deterministic tests cover correlation/replay/schema boundaries, registration,
+unknown/native execution, title preflight, actual-over-estimate accounting,
+uncertain terminals and cancellation lifecycle races. No database schema or data
+migration is introduced. Consumer deployment still requires its own authorization,
+isolation, runtime/restart workflow and end-to-end acceptance.

@@ -22,13 +22,14 @@ use [implementation status](docs/implementation-status.md) and the central
 ## 0.98.3 (unreleased)
 
 `provider-grok-acp` is additive and disabled by default. Its draft provider requires
-an explicitly admitting host factory; Grok 1.0.40 must remain disabled until a
-hard aggregate output ceiling is verified. Do not replace existing providers or
-adopt an unpublished workspace revision to enable it. Registration requires
+an explicitly admitting host factory with verified isolation and bounded native
+rounds. Complete actual usage can exceed its reservation estimate and is settled
+in full, matching the existing Codex/ORM contract. Input admission is measured in
+bytes, not tokens. Do not adopt an unpublished workspace revision to enable it. Registration requires
 explicit effort and exact model/usage aliases. Existing coordinator authorization,
 budget proofs and retained-session services remain authoritative. No DDL, data
 backfill or existing provider configuration migration is required. See the
-[admission contract](docs/local-harness.md#grok-acp-draft-adapter-and-admission-boundary).
+[admission contract](docs/local-harness.md#grok-acp-adapter-and-admission-boundary).
 
 ## 0.98.2
 
