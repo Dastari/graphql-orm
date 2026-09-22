@@ -19,6 +19,14 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.98.4
+
+Inline dynamic and retained providers no longer stall when a heartbeat or live
+output timer encounters a tool holding the shared run lease. Tool execution and
+heartbeat row-version fencing remain serialized; cancellation and uncertain
+recovery retain their existing semantics. No public API, GraphQL SDL, schema
+module, configuration or data migration is required.
+
 ## 0.98.3
 
 `provider-grok-acp` is additive and disabled by default. Its provider requires
