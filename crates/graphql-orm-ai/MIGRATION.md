@@ -19,6 +19,14 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.98.5
+
+A durably persisted dynamic-tool result with no model-visible input now advances
+the responder's lease proof before rejecting disclosure. Egress denial and audit
+failure remain fail-closed; the coordinator can record uncertain recovery with
+the renewed fence. No public Rust API, GraphQL SDL, schema module, configuration
+or data migration is required.
+
 ## 0.98.4
 
 Inline dynamic and retained providers no longer stall when a heartbeat or live

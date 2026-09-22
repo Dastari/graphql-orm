@@ -1980,6 +1980,9 @@ impl ProviderDynamicToolResponder for DynamicToolResponder {
                     .map_err(|_| ProviderError::Rejected)?
             }
         };
+        // Persistence may advance the run even when egress denies the result.
+        // Retain that fence before rejecting disclosure so recovery can finish.
+        *lease = persisted.lease().clone();
         let output = match persisted.model_input() {
             Some(ModelInputBlock::ToolResult {
                 call_id,
@@ -1988,7 +1991,6 @@ impl ProviderDynamicToolResponder for DynamicToolResponder {
             }) if call_id == call.call_id() && tool_id == call.tool_id() => output.clone(),
             _ => return Err(ProviderError::Rejected),
         };
-        *lease = persisted.lease().clone();
         drop(lease);
         self.results.lock().await.push(persisted);
         ProviderDynamicToolResult::new(&call, output)
@@ -10963,6 +10965,161 @@ mod tests {
             "each invocation must rehydrate before and after ordinary resolver execution"
         );
         assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
+    struct DeniedDynamicToolExecution {
+        service: OrmAiApplicationToolCallService,
+        scope: AiScope,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
+    #[async_trait]
+    impl AiProviderDynamicToolExecution for DeniedDynamicToolExecution {
+        async fn execute_dynamic_tool(
+            &self,
+            lease: &AiRunLease,
+            result: &AiProviderCallResult,
+            index: usize,
+        ) -> Result<AiPersistedApplicationToolCall, AiError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.service
+                .execute_read_only(
+                    lease,
+                    result,
+                    AiApplicationToolCallContext::new(
+                        0,
+                        index,
+                        self.scope.clone(),
+                        "dynamic-denial-test",
+                        "provider-turn-1",
+                    )?,
+                    AiToolResultEgressRoute::new(
+                        "mock-profile",
+                        "local-mock",
+                        AiDestinationTrust::Local,
+                        "continue_authorized_tool_result",
+                        "none",
+                        "egress-v1",
+                    )?,
+                )
+                .await
+        }
+    }
+
+    #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
+    #[tokio::test]
+    async fn durably_denied_dynamic_result_keeps_current_lease_without_disclosure() {
+        let fixture = fixture(vec![
+            ProviderEvent::ResponseStarted {
+                response_id: Some("denied-response".into()),
+            },
+            ProviderEvent::Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cached_input_tokens: 0,
+            },
+            ProviderEvent::ResponseCompleted {
+                response_id: Some("denied-response".into()),
+            },
+        ])
+        .await;
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8192, 65536).unwrap(),
+        );
+        let result = executor
+            .execute(&fixture.lease, tool_plan(&fixture))
+            .await
+            .unwrap();
+        let call = ProviderDynamicToolCall::from_definition(
+            "denied-response",
+            "denied-call",
+            &result.request_snapshot.tools[0],
+            json!({"recordId":"54"}),
+        )
+        .unwrap();
+        let lease = Arc::new(Mutex::new(fixture.lease.clone()));
+        let executions = Arc::new(AtomicUsize::new(0));
+        let responder = DynamicToolResponder {
+            lease: lease.clone(),
+            execution: Arc::new(DeniedDynamicToolExecution {
+                service: automatic_mutation_service(&fixture, Arc::new(FailAudit)),
+                scope: fixture.scope.clone(),
+                calls: executions.clone(),
+            }),
+            session_id: fixture.lease.session_id(),
+            run_id: fixture.lease.run_id(),
+            attempt_id: fixture.lease.attempt_id(),
+            lease_generation: fixture.lease.lease_generation(),
+            provider_kind: result.provider_kind.clone(),
+            provider_model: result.provider_model.clone(),
+            budget_reservation_id: result.budget_reservation_id,
+            previous_response_id: None,
+            previous_continuation_reference: None,
+            request_snapshot: result.request_snapshot.clone(),
+            model_inference_manifest: result.model_inference_manifest.clone(),
+            calls: Mutex::new(Vec::new()),
+            results: Mutex::new(Vec::new()),
+        };
+        assert!(matches!(
+            responder.respond(call.clone()).await,
+            Err(ProviderError::Rejected)
+        ));
+        assert!(
+            responder.results().await.is_empty(),
+            "denied data must not enter provider results"
+        );
+        let calls = AiToolCallRecord::query(fixture.database.pool())
+            .filter(AiToolCallRecordWhereInput {
+                run_id: Some(UuidFilter {
+                    eq: Some(fixture.lease.run_id().0),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .limit(2)
+            .fetch_all()
+            .await
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].state, "egress_audit_failed");
+        assert!(calls[0].completed_at.is_some());
+        assert!(calls[0].protected_result.is_some());
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            responder.respond(call).await,
+            Err(ProviderError::Rejected)
+        ));
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            1,
+            "denial must not replay execution"
+        );
+        fixture
+            .run_service
+            .finish(
+                &lease.lock().await.clone(),
+                crate::AiRunCompletion::new(
+                    AiRunState::RecoveryRequired,
+                    "provider_turn_uncertain",
+                    Some("provider_turn_uncertain".into()),
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .expect("denied result must preserve the renewed fence for terminal recovery");
+        let run = AiRunRecord::find_by_id(&fixture.database, &fixture.lease.run_id().0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state, "recovery_required");
     }
 
     #[tokio::test]

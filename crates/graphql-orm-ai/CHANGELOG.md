@@ -20,6 +20,15 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+## [0.98.5] - 2026-09-23
+
+### Fixed
+
+Dynamic provider responders retain the renewed run lease when a tool result was
+durably persisted but denied model disclosure. The provider still receives a
+rejection, while terminal recovery can use the current fence instead of failing
+with a stale-row conflict. Completed tool execution is not replayed.
+
 ## [0.98.4] - 2026-09-23
 
 ### Fixed
