@@ -2268,4 +2268,29 @@ mod tests {
             .await
             .expect("only authoritative unused capacity should be reusable");
     }
+    #[test]
+    fn complete_actual_usage_can_exceed_reserved_estimate_without_truncation() {
+        let reserved = AiBudgetAmounts {
+            input_tokens: 16_384,
+            output_tokens: 2_048,
+            runs: 1,
+            ..Default::default()
+        };
+        let actual = AiBudgetAmounts {
+            input_tokens: 29_390,
+            output_tokens: 3_000,
+            runs: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_reconciliation_actual(
+                reserved,
+                Some(actual),
+                Some(17_152),
+                AiBudgetReconciliationOutcome::Commit
+            )
+            .unwrap(),
+            Some(actual)
+        );
+    }
 }

@@ -14,10 +14,10 @@ supersedes: []
 
 ```bash
 cargo fmt -p graphql-orm-ai --check
-cargo test -p graphql-orm-ai --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness,provider-codex-app-server
-cargo clippy -p graphql-orm-ai --all-targets --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness,provider-codex-app-server -- -D warnings
+cargo test -p graphql-orm-ai --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness,provider-codex-app-server,provider-grok-acp
+cargo clippy -p graphql-orm-ai --all-targets --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness,provider-codex-app-server,provider-grok-acp -- -D warnings
 RUSTDOCFLAGS="-D warnings -D missing_docs" \
-  cargo doc -p graphql-orm-ai --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness,provider-codex-app-server --no-deps
+  cargo doc -p graphql-orm-ai --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness,provider-codex-app-server,provider-grok-acp --no-deps
 ```
 
 Check the optional naming contract independently:

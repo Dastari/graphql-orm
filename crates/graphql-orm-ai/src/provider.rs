@@ -2170,7 +2170,7 @@ impl std::fmt::Debug for ProviderDynamicToolCall {
 }
 
 impl ProviderDynamicToolCall {
-    #[cfg(feature = "provider-codex-app-server")]
+    #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
     pub(crate) fn from_definition(
         response_id: impl Into<String>,
         call_id: impl Into<String>,

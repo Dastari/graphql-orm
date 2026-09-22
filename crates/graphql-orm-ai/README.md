@@ -21,6 +21,11 @@ substitute. Application work always runs through the host's authenticated
 GraphQL resolvers; a provider, tool registration, or approval never grants
 resolver authority.
 
+The opt-in `provider-grok-acp` feature provides a bounded ACP provider and
+retained-session actor. Factory admission defaults to false until exact host
+isolation is verified; usage follows the existing estimate/actual budget contract. See the
+[local harness boundary](docs/local-harness.md).
+
 ## Install
 
 This active pre-release is Git-only. Pin one reviewed full monorepo revision
@@ -28,7 +33,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.97.1", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.98.3", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,

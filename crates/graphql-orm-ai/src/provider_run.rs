@@ -108,7 +108,7 @@ impl AiProviderRunBinding {
         self.lease_generation
     }
 
-    #[cfg(feature = "provider-codex-app-server")]
+    #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
     pub(crate) const fn owner_fingerprint(self) -> [u8; 32] {
         self.owner_fingerprint
     }
