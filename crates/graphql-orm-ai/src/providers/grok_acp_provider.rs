@@ -768,7 +768,9 @@ impl AiProvider for AiGrokAcpProvider {
             tokio::time::timeout_at(deadline, entry.process.process.prompt(input, responder))
                 .await
                 .map_err(|_| timeout())??;
+        let tools = self.registration.tools().to_vec();
         Ok(Box::pin(async_stream::try_stream! {
+            let mut calls=BTreeMap::new();
             let mut guard=guard;
             let mut started=false; let mut usage=false; let mut completed=false; let mut bytes=0usize;
             while let Some(event)=tokio::time::timeout_at(deadline,stream.next()).await.map_err(|_|timeout())? {
@@ -777,7 +779,28 @@ impl AiProvider for AiGrokAcpProvider {
                 match &event {
                     ProviderEvent::ResponseStarted{..} if !started=>started=true,
                     ProviderEvent::TextDelta{text} if started&&!usage=>{bytes=bytes.checked_add(text.len()).ok_or_else(rejected)?;if bytes>16*1024*1024{Err(rejected())?;}},
-                    ProviderEvent::Usage{input_tokens,output_tokens,cached_input_tokens} if started&&!usage=>{if *input_tokens>super::grok_acp::MAX_USAGE_TOKENS||*output_tokens>super::grok_acp::MAX_USAGE_TOKENS||cached_input_tokens>input_tokens{Err(rejected())?;}usage=true;},
+                    ProviderEvent::ToolCallStarted { call_id, tool_id } if started && !usage => {
+                        if call_id.is_empty()
+                            || call_id.len() > 1024
+                            || !call_id.bytes().all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'"' | b'\\'))
+                            || calls.len() >= super::grok_acp::MAX_SDK_CALLS
+                            || calls.contains_key(call_id)
+                            || !tools.iter().any(|tool| tool.tool_id == *tool_id)
+                        {
+                            Err(rejected())?;
+                        }
+                        calls.insert(call_id.clone(), (tool_id.clone(), false));
+                    },
+                    ProviderEvent::ToolCallCompleted { call_id, arguments } if started && !usage => {
+                        let (tool_id, complete) = calls.get_mut(call_id).ok_or_else(rejected)?;
+                        if *complete { Err(rejected())?; }
+                        let definition = tools.iter().find(|tool| tool.tool_id == *tool_id).ok_or_else(rejected)?;
+                        crate::ProviderDynamicToolCall::from_definition(
+                            "validated-turn", call_id.clone(), definition, arguments.clone()
+                        )?;
+                        *complete = true;
+                    },
+                    ProviderEvent::Usage{input_tokens,output_tokens,cached_input_tokens} if started&&!usage&&calls.values().all(|(_,complete)|*complete)=>{if *input_tokens>super::grok_acp::MAX_USAGE_TOKENS||*output_tokens>super::grok_acp::MAX_USAGE_TOKENS||cached_input_tokens>input_tokens{Err(rejected())?;}usage=true;},
                     ProviderEvent::ResponseCompleted{..} if usage=>completed=true,
                     _=>Err(rejected())?,
                 }

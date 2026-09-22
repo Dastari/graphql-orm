@@ -24,8 +24,11 @@ resolver authority.
 The opt-in `provider-grok-acp` feature provides a bounded ACP provider and
 retained-session actor. Inline tool execution remains polled while heartbeat and
 live-output maintenance wait for its fenced lease. Persisted disclosure-denied
-tool results retain the renewed recovery fence without entering model output. Factory admission defaults to false until exact host
-isolation is verified; usage follows the existing estimate/actual budget contract. See the
+tool results retain the renewed recovery fence without entering model output.
+Grok SDK callbacks report normalized tool lifecycles so the retained executor can
+match persisted results and settle successful turns. Factory admission defaults
+to false until exact host isolation is verified; usage follows the existing
+estimate/actual budget contract. See the
 [local harness boundary](docs/local-harness.md).
 
 ## Install

@@ -29,6 +29,10 @@ durably persisted but denied model disclosure. The provider still receives a
 rejection, while terminal recovery can use the current fence instead of failing
 with a stale-row conflict. Completed tool execution is not replayed.
 
+Grok SDK callbacks now emit validated normalized tool start/completion events.
+The retained executor can match durable results to those calls and settle a
+successful turn instead of rejecting it as an incomplete tool lifecycle.
+
 ## [0.98.4] - 2026-09-23
 
 ### Fixed

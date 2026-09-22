@@ -551,8 +551,13 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
                     let response=match state.broker.accept(&bytes)? {
                         AiGrokAcpSdkInbound::Response(response)=>response,
                         AiGrokAcpSdkInbound::ToolCall(call)=>{
+                            let call_id=call.call_id().to_owned();
+                            let arguments=call.arguments().clone();
+                            yield ProviderEvent::ToolCallStarted{call_id:call_id.clone(),tool_id:call.tool_id().to_owned()};
                             let result=responder.respond(call).await?;
-                            state.broker.tool_response(&result)?
+                            let response=state.broker.tool_response(&result)?;
+                            yield ProviderEvent::ToolCallCompleted{call_id,arguments};
+                            response
                         }
                     };
                     transport.write_frame(response).await?;
@@ -606,7 +611,7 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
 }
 
 #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use futures::StreamExt;
     use std::collections::VecDeque;
@@ -633,6 +638,46 @@ mod tests {
             let mut bytes = serde_json::to_vec(&value).unwrap();
             bytes.push(b'\n');
             Ok(bytes)
+        }
+    }
+    pub(crate) struct ExecutorWireFactory;
+    #[async_trait]
+    impl super::super::grok_acp_provider::AiGrokAcpProcessFactory for ExecutorWireFactory {
+        fn admits(&self, _: &AiGrokAcpRegistration) -> bool {
+            true
+        }
+        async fn launch(
+            &self,
+            registration: Arc<AiGrokAcpRegistration>,
+        ) -> Result<super::super::grok_acp_provider::AiGrokAcpLaunchedProcess, ProviderError>
+        {
+            let mut reads = new_session_reads();
+            let sdk = |id, method, params| json!({"jsonrpc":"2.0","id":id,"method":"_x.ai/mcp/sdk_call","params":{"serverId":SERVER,"message":{"jsonrpc":"2.0","id":id,"method":method,"params":params}}});
+            reads.push(sdk(
+                100,
+                "initialize",
+                json!({"protocolVersion":"2025-11-25"}),
+            ));
+            reads.push(sdk(101, "tools/list", json!({})));
+            for id in 102..105 {
+                reads.push(sdk(id,"tools/call",json!({"name":registration.tools()[0].provider_name,"arguments":{"recordId":"54"}})));
+            }
+            let aggregate = json!({"inputTokens":29390,"outputTokens":3000,"totalTokens":32390,"cachedReadTokens":17152,"cacheCreationTokens":0,"reasoningTokens":25,"modelCalls":5,"numTurns":5,"modelUsage":{"grok-4.7-build":{"inputTokens":29390,"outputTokens":3000,"totalTokens":32390,"cachedReadTokens":17152,"cacheCreationTokens":0,"reasoningTokens":25,"modelCalls":5}}});
+            reads.push(response(
+                9,
+                json!({"stopReason":"end_turn","_meta":{"usage":aggregate}}),
+            ));
+            let wire = Arc::new(Wire {
+                reads: SyncMutex::new(reads.into()),
+                writes: SyncMutex::new(vec![]),
+            });
+            let process = AiGrokAcpWireProcess::new(registration, wire, "/private/empty".into())?;
+            Ok(
+                super::super::grok_acp_provider::AiGrokAcpLaunchedProcess::new(
+                    Arc::new(process),
+                    || {},
+                ),
+            )
         }
     }
     struct NoTools;

@@ -25,7 +25,9 @@ A durably persisted dynamic-tool result with no model-visible input now advances
 the responder's lease proof before rejecting disclosure. Egress denial and audit
 failure remain fail-closed; the coordinator can record uncertain recovery with
 the renewed fence. No public Rust API, GraphQL SDL, schema module, configuration
-or data migration is required.
+or data migration is required. Grok SDK tool calls also report their normalized
+lifecycle to the retained executor, preserving exact registered identities and
+allowing successful durable tool results to finish and settle normally.
 
 ## 0.98.4
 
