@@ -2240,6 +2240,8 @@ impl AiReadOnlyAgentCoordinator {
         loop {
             // Lease acquisition must remain concurrently polled with the provider:
             // an inline responder may hold this fence across awaited tool I/O.
+            // Move this future into select so its queued mutex waiter is dropped
+            // before the provider-result branch reacquires the lease.
             let cancellation = async {
                 let snapshot = lease_state.lock().await.clone();
                 let result = self
@@ -2312,6 +2314,8 @@ impl AiReadOnlyAgentCoordinator {
         loop {
             // Lease acquisition must remain concurrently polled with the provider:
             // an inline responder may hold this fence across awaited tool I/O.
+            // Move this future into select so its queued mutex waiter is dropped
+            // before the provider-result branch reacquires the lease.
             let cancellation = async {
                 let snapshot = lease_state.lock().await.clone();
                 let result = self
