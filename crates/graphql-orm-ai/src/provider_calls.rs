@@ -41,7 +41,7 @@ async fn lease_after_delay(
 
 enum LiveProviderPoll {
     Event(Option<Result<ProviderEvent, ProviderError>>),
-    Flush(AiRunLease),
+    Flush(Box<AiRunLease>),
 }
 
 async fn next_live_provider_event(
@@ -51,7 +51,7 @@ async fn next_live_provider_event(
 ) -> LiveProviderPoll {
     tokio::select! {
         event = stream.next() => LiveProviderPoll::Event(event),
-        guard = lease_after_delay(lease, delay) => LiveProviderPoll::Flush(guard.clone()),
+        guard = lease_after_delay(lease, delay) => LiveProviderPoll::Flush(Box::new(guard.clone())),
     }
 }
 
