@@ -10,6 +10,14 @@ supersedes: []
 
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `AiError::SessionExecutionUnbound` and `SessionExecutionUnavailable` expose
+  distinct safe recovery codes for immutable session routing. No payload or
+  provider/account details are included.
+
 ## [0.11.0] - 2026-09-03
 
 ### Added

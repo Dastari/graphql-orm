@@ -196,6 +196,7 @@ async fn create_session(
         .create_session(
             principal,
             CreateAiSessionInput {
+                execution_selection: None,
                 scope: AiScopeInput {
                     kind: "collection".to_owned(),
                     id: "54".to_owned(),

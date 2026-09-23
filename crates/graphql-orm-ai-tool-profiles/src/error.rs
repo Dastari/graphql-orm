@@ -74,6 +74,12 @@ pub enum AiError {
     /// incomplete streams must use [`Self::ProviderFailed`] instead.
     #[error("AI provider-native item was rejected")]
     StatelessNativeItemRejected,
+    /// A legacy session has no proven immutable execution selection.
+    #[error("AI session execution selection is unbound")]
+    SessionExecutionUnbound,
+    /// The exact session selection is unavailable or cannot be safely admitted.
+    #[error("AI session execution selection is unavailable")]
+    SessionExecutionUnavailable,
     /// Runtime has not passed startup/restore readiness checks.
     #[error("AI runtime is not ready")]
     RuntimeNotReady,
@@ -106,6 +112,8 @@ impl AiError {
             Self::ProviderFailed => "AI_PROVIDER_FAILED",
             Self::StatelessNativeItemRejected => "AI_PROVIDER_FAILED",
             Self::RuntimeNotReady => "AI_RUNTIME_NOT_READY",
+            Self::SessionExecutionUnbound => "AI_SESSION_EXECUTION_UNBOUND",
+            Self::SessionExecutionUnavailable => "AI_SESSION_EXECUTION_UNAVAILABLE",
             Self::PersistenceFailed => "AI_PERSISTENCE_FAILED",
             Self::ProviderSessionDeferred => "AI_PROVIDER_SESSION_DEFERRED",
         }
@@ -137,6 +145,22 @@ mod tests {
         assert_eq!(
             AiError::PreTransportProviderFailed.public_code(),
             "AI_PROVIDER_FAILED"
+        );
+    }
+
+    #[test]
+    fn session_selection_recovery_codes_are_distinct_and_redacted() {
+        assert_eq!(
+            AiError::SessionExecutionUnbound.public_code(),
+            "AI_SESSION_EXECUTION_UNBOUND"
+        );
+        assert_eq!(
+            AiError::SessionExecutionUnavailable.public_code(),
+            "AI_SESSION_EXECUTION_UNAVAILABLE"
+        );
+        assert_ne!(
+            AiError::SessionExecutionUnbound.to_string(),
+            AiError::SessionExecutionUnavailable.to_string()
         );
     }
 

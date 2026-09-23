@@ -3021,6 +3021,7 @@ mod tests {
                 crate::ModelReasoningEffort::High,
                 crate::ModelReasoningEffort::XHigh,
                 crate::ModelReasoningEffort::Max,
+                crate::ModelReasoningEffort::Ultra,
             ],
             crate::ModelReasoningEffort::Medium,
         )
@@ -3062,6 +3063,7 @@ mod tests {
             crate::ModelReasoningEffort::High,
             crate::ModelReasoningEffort::XHigh,
             crate::ModelReasoningEffort::Max,
+            crate::ModelReasoningEffort::Ultra,
         ] {
             request.reasoning_effort = effort;
             let body = provider

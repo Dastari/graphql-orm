@@ -1687,6 +1687,7 @@ mod tests {
         AiRunRecord::insert(
             database,
             crate::persistence::CreateAiRunRecordInput {
+                execution_selection: None,
                 id,
                 session_id: Uuid::new_v4(),
                 input_message_id: Uuid::new_v4(),
@@ -1914,6 +1915,7 @@ mod tests {
         AiSessionRecord::insert(
             database,
             crate::persistence::CreateAiSessionRecordInput {
+                execution_selection: None,
                 id: session_id,
                 owner_principal_kind: "user".to_owned(),
                 owner_subject: "restore-attachment-user".to_owned(),

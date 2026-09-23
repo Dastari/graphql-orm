@@ -68,6 +68,7 @@ pub struct OrmAiSessionService {
     content_protector: Arc<dyn AiContentProtector>,
     limits: AiSessionServiceLimits,
     run_authorization: Option<Arc<crate::AiRunAuthorization>>,
+    execution_selection_resolver: Option<Arc<dyn crate::AiSessionExecutionSelectionResolver>>,
 }
 
 impl OrmAiSessionService {
@@ -85,7 +86,20 @@ impl OrmAiSessionService {
             content_protector,
             limits: AiSessionServiceLimits::default(),
             run_authorization: None,
+            execution_selection_resolver: None,
         }
+    }
+
+    /// Installs the single host admission boundary for generic and host session creation.
+    /// Explicit selections are refused without it. Legacy unbound sessions are
+    /// never assigned the current default during message submission.
+    #[must_use]
+    pub fn with_execution_selection_resolver(
+        mut self,
+        resolver: Arc<dyn crate::AiSessionExecutionSelectionResolver>,
+    ) -> Self {
+        self.execution_selection_resolver = Some(resolver);
+        self
     }
 
     /// Overrides bounded service limits.
@@ -452,7 +466,7 @@ impl AiSessionService for OrmAiSessionService {
                 }
             }
             return Ok(AiConversationBootstrap {
-                session: session_view(&first),
+                session: session_view(&first)?,
                 messages: message_views,
                 backward_cursor,
                 has_older_messages,
@@ -506,7 +520,7 @@ impl AiSessionService for OrmAiSessionService {
                 continue;
             }
             edges.push(AiSessionEdge {
-                node: session_view(&edge.node),
+                node: session_view(&edge.node)?,
                 cursor: edge.cursor,
             });
         }
@@ -520,11 +534,11 @@ impl AiSessionService for OrmAiSessionService {
         principal: &AuthPrincipal,
         session_id: AiSessionId,
     ) -> Result<Option<AiSessionView>, AiError> {
-        Ok(self
-            .visible_session(principal, session_id, AiSessionAction::Read)
+        self.visible_session(principal, session_id, AiSessionAction::Read)
             .await?
             .as_ref()
-            .map(session_view))
+            .map(session_view)
+            .transpose()
     }
 
     async fn messages(
@@ -806,6 +820,22 @@ impl AiSessionService for OrmAiSessionService {
         validate_scope(&scope)?;
         self.require_scope(principal, &scope, AiSessionAction::Create)
             .await?;
+        let execution_selection = match &self.execution_selection_resolver {
+            Some(resolver) => Some(
+                crate::session_execution::resolve_exact(
+                    resolver.as_ref(),
+                    principal,
+                    &scope,
+                    input.execution_selection.as_ref(),
+                )
+                .await?
+                .encode()?,
+            ),
+            None if input.execution_selection.is_some() => {
+                return Err(AiError::SessionExecutionUnavailable);
+            }
+            None => None,
+        };
         let (title, title_source) = match input.title {
             Some(title) => (
                 normalize_title(title, self.limits.maximum_title_bytes)?,
@@ -839,6 +869,7 @@ impl AiSessionService for OrmAiSessionService {
                 Box::pin(async move {
                     let session = tx
                         .insert::<AiSessionRecord>(CreateAiSessionRecordInput {
+                            execution_selection,
                             id: session_id,
                             owner_principal_kind: owner_principal_kind.clone(),
                             owner_subject: owner_subject.clone(),
@@ -887,7 +918,176 @@ impl AiSessionService for OrmAiSessionService {
             })
             .await
             .map_err(map_transaction)?;
-        Ok(session_view(&session))
+        session_view(&session)
+    }
+
+    async fn pin_execution_selection(
+        &self,
+        principal: &AuthPrincipal,
+        input: crate::PinAiSessionExecutionSelectionInput,
+    ) -> Result<AiSessionView, AiError> {
+        let session = self
+            .visible_session(
+                principal,
+                AiSessionId(input.session_id),
+                AiSessionAction::Write,
+            )
+            .await?
+            .ok_or(AiError::NotFound)?;
+        if session.state != "active" {
+            return Err(AiError::Conflict);
+        }
+        let resolver = self
+            .execution_selection_resolver
+            .as_ref()
+            .ok_or(AiError::SessionExecutionUnavailable)?;
+        let scope = record_scope(&session);
+        let selection = crate::session_execution::resolve_exact(
+            resolver.as_ref(),
+            principal,
+            &scope,
+            Some(&input.execution_selection),
+        )
+        .await?;
+        let encoded = selection.encode()?;
+        if let Some(current) = &session.execution_selection {
+            return if current == &encoded {
+                session_view(&session)
+            } else {
+                Err(AiError::Conflict)
+            };
+        }
+        let observed_binding =
+            crate::orm_session_execution::legacy_binding(&self.database, session.id).await?;
+        let observed_descriptor =
+            crate::orm_session_execution::legacy_descriptor(&observed_binding)?;
+        let descriptor = resolver
+            .legacy_descriptor(
+                principal,
+                &scope,
+                &selection,
+                AiSessionId(session.id),
+                &observed_descriptor,
+            )
+            .await?;
+        if descriptor != observed_descriptor {
+            return Err(AiError::SessionExecutionUnavailable);
+        }
+        let binding_version = observed_binding.row_version;
+        let now = unix_seconds();
+        let event_id = Uuid::new_v4();
+        let inbox_id = Uuid::new_v4();
+        let policy = self.protection_policy(principal, &scope).await?;
+        let payload =
+            json!({"sessionId":session.id,"selectionFingerprint":selection.fingerprint()});
+        let protected_event = self
+            .protect_value(
+                &policy,
+                content_context(
+                    "graphql_orm_ai_session_events",
+                    event_id,
+                    "protected_payload",
+                    &scope,
+                ),
+                payload.clone(),
+            )
+            .await?;
+        let protected_inbox = self
+            .protect_value(
+                &policy,
+                content_context(
+                    "graphql_orm_ai_inbox_events",
+                    inbox_id,
+                    "protected_payload",
+                    &scope,
+                ),
+                payload,
+            )
+            .await?;
+        let record = self
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let current = tx
+                        .find_by_id::<AiSessionRecord>(&session.id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    if current.row_version != session.row_version
+                        || current.execution_selection.is_some()
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    if !crate::orm_session_execution::prove_legacy_selection(
+                        tx,
+                        &current,
+                        &selection,
+                        &descriptor,
+                        binding_version,
+                        now,
+                    )
+                    .await?
+                    {
+                        return Ok(None);
+                    }
+                    let sequence = current
+                        .stream_head
+                        .checked_add(1)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                    let result = tx
+                        .compare_and_swap::<AiSessionRecord>(
+                            &current.id,
+                            current.row_version,
+                            AiSessionRecordWhereInput::default(),
+                            UpdateAiSessionRecordInput {
+                                execution_selection: Some(Some(encoded)),
+                                stream_head: Some(sequence),
+                                last_activity_at: Some(now),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let ConditionalUpdateOutcome::Updated(updated) = result else {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    };
+                    tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                        id: event_id,
+                        session_id: current.id,
+                        sequence,
+                        event_type: "session_execution_pinned".to_owned(),
+                        run_id: None,
+                        causation_id: None,
+                        correlation_id: event_id.to_string(),
+                        protected_payload: protected_event,
+                    })
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    tx.queue_event(AiSessionWakeup {
+                        session_id: current.id,
+                        sequence,
+                    });
+                    append_inbox_event(
+                        tx,
+                        PreparedAiInboxEvent {
+                            id: inbox_id,
+                            principal_kind: current.owner_principal_kind,
+                            principal_subject: current.owner_subject,
+                            scope,
+                            session_id: current.id,
+                            event_type: "session_execution_pinned".to_owned(),
+                            protected_payload: protected_inbox,
+                            created_at: now,
+                        },
+                    )
+                    .await?;
+                    Ok(Some(updated))
+                })
+            })
+            .await
+            .map_err(map_transaction)?
+            .ok_or(AiError::SessionExecutionUnavailable)?;
+        session_view(&record)
     }
 
     async fn rename_session(
@@ -1082,7 +1282,7 @@ impl AiSessionService for OrmAiSessionService {
             })
             .await
             .map_err(map_transaction)?;
-        Ok(session_view(&record))
+        session_view(&record)
     }
 
     async fn archive_session(
@@ -1236,6 +1436,26 @@ impl AiSessionService for OrmAiSessionService {
             return Err(AiError::Conflict);
         }
         let scope = record_scope(&session);
+        let execution_selection = session.execution_selection.clone();
+        match (
+            &self.execution_selection_resolver,
+            execution_selection.as_deref(),
+        ) {
+            (Some(resolver), Some(encoded)) => {
+                let selection = crate::AiSessionExecutionSelection::decode(encoded)?;
+                if resolver
+                    .resolve(principal, &scope, Some(&selection.as_input()))
+                    .await?
+                    != selection
+                {
+                    return Err(AiError::SessionExecutionUnavailable);
+                }
+            }
+            (Some(_), None) => return Err(AiError::SessionExecutionUnbound),
+            (None, Some(_)) => return Err(AiError::SessionExecutionUnavailable),
+            (None, None) => {}
+        }
+
         let policy = self.protection_policy(principal, &scope).await?;
         let message_id = Uuid::new_v4();
         let block_id = Uuid::new_v4();
@@ -1354,7 +1574,9 @@ impl AiSessionService for OrmAiSessionService {
                     {
                         return Err(OrmPublicError::not_found());
                     }
-                    if current.state != "active" {
+                    if current.state != "active"
+                        || current.execution_selection != execution_selection
+                    {
                         return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                     }
                     for attachment_id in &attachments {
@@ -1426,6 +1648,7 @@ impl AiSessionService for OrmAiSessionService {
                     .await
                     .map_err(OrmPublicError::from)?;
                     tx.insert::<AiRunRecord>(CreateAiRunRecordInput {
+                        execution_selection: current.execution_selection.clone(),
                         id: run_id,
                         session_id,
                         input_message_id: message_id,
@@ -1616,7 +1839,7 @@ impl OrmAiSessionService {
             })
             .await
             .map_err(map_transaction)?;
-        Ok(session_view(&record))
+        session_view(&record)
     }
 }
 
@@ -1672,7 +1895,8 @@ fn validate_scope(scope: &AiScope) -> Result<(), AiError> {
 /// the returned message window, so an unstable value means the assembled
 /// snapshot could not have existed at one instant.
 fn bootstrap_snapshot_is_stable(first: &AiSessionRecord, second: &AiSessionRecord) -> bool {
-    first.id == second.id
+    first.execution_selection == second.execution_selection
+        && first.id == second.id
         && first.message_head == second.message_head
         && first.state == second.state
         && first.archived_at == second.archived_at
@@ -1686,8 +1910,13 @@ fn bootstrap_snapshot_is_stable(first: &AiSessionRecord, second: &AiSessionRecor
         && first.scope_id == second.scope_id
 }
 
-pub(crate) fn session_view(record: &AiSessionRecord) -> AiSessionView {
-    AiSessionView {
+pub(crate) fn session_view(record: &AiSessionRecord) -> Result<AiSessionView, AiError> {
+    Ok(AiSessionView {
+        execution_selection: record
+            .execution_selection
+            .as_deref()
+            .map(crate::AiSessionExecutionSelection::decode)
+            .transpose()?,
         id: record.id,
         scope_kind: record.scope_kind.clone(),
         scope_id: record.scope_id.clone(),
@@ -1697,7 +1926,7 @@ pub(crate) fn session_view(record: &AiSessionRecord) -> AiSessionView {
         stream_head: record.stream_head,
         last_activity_at: record.last_activity_at,
         archived_at: record.archived_at,
-    }
+    })
 }
 
 pub(crate) fn normalize_title(title: String, maximum_bytes: usize) -> Result<String, AiError> {
@@ -1850,6 +2079,7 @@ mod bootstrap_snapshot_tests {
 
     fn record() -> AiSessionRecord {
         AiSessionRecord {
+            execution_selection: None,
             id: uuid::Uuid::from_u128(1),
             owner_principal_kind: "user".to_owned(),
             owner_subject: "bootstrap-owner".to_owned(),

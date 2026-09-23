@@ -533,6 +533,8 @@ pub(crate) struct AiBudgetReservationRecord {
 )]
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiSessionRecord {
+    /// Canonical versioned immutable execution selection; NULL is legacy unbound.
+    pub execution_selection: Option<String>,
     /// Session ID.
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
@@ -1096,6 +1098,8 @@ pub(crate) struct AiAttachmentArtifactRecord {
 )]
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiRunRecord {
+    /// Canonical versioned immutable execution selection; NULL is legacy unbound.
+    pub execution_selection: Option<String>,
     /// Run ID.
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
@@ -2433,7 +2437,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.64.1";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.65.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

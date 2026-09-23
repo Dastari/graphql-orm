@@ -38,7 +38,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.98.5", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.99.0", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -395,3 +395,6 @@ repeating model-driven discovery when catalogue fingerprints are unchanged. Cach
 still rehydrate current principals and issue fresh run-bound execution handles. Permissions,
 loaded handles and application results are not cache entries. The cache is bounded, process-local,
 disabled by default, and expires entries after at most seven days; see [MIGRATION.md](MIGRATION.md).
+
+For concurrent chats with immutable provider/model/effort choices, use the
+[session execution selection contract](docs/session-execution-selection.md).

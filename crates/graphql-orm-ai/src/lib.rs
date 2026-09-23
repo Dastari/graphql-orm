@@ -81,6 +81,8 @@ mod orm_run_disposition;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_runs;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_session_execution;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_session_retention;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_session_title_work;
@@ -128,6 +130,7 @@ mod run_disposition;
 mod run_state;
 mod runtime;
 mod secrets;
+mod session_execution;
 mod session_retention;
 mod session_title_work;
 mod sessions;
@@ -201,6 +204,8 @@ pub use orm_run_disposition::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_runs::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_session_execution::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_session_retention::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_session_title_work::*;
@@ -251,6 +256,7 @@ pub use run_disposition::*;
 pub use run_state::*;
 pub use runtime::*;
 pub use secrets::*;
+pub use session_execution::*;
 pub use session_retention::*;
 pub use session_title_work::*;
 pub use sessions::*;

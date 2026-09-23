@@ -7695,6 +7695,7 @@ pub(crate) mod tests {
             ModelReasoningEffort::High,
             ModelReasoningEffort::XHigh,
             ModelReasoningEffort::Max,
+            ModelReasoningEffort::Ultra,
         ];
         for effort in efforts {
             let bootstrap = AiCodexAppServerBootstrapInstructions::disabled();

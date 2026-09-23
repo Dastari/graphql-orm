@@ -154,6 +154,7 @@ impl AiSessionService for RecordingSessionService {
         ));
         Ok(AiConversationBootstrap {
             session: AiSessionView {
+                execution_selection: None,
                 id: session_id.0,
                 scope_kind: "collection".to_owned(),
                 scope_id: "54".to_owned(),
@@ -250,6 +251,7 @@ impl AiSessionService for RecordingSessionService {
         input: CreateAiSessionInput,
     ) -> Result<AiSessionView, AiError> {
         Ok(AiSessionView {
+            execution_selection: None,
             id: Uuid::new_v4(),
             scope_kind: input.scope.kind,
             scope_id: input.scope.id,
@@ -282,6 +284,7 @@ impl AiSessionService for RecordingSessionService {
             .lock()
             .expect("test mutex should not be poisoned") = Some(input.clone());
         Ok(AiSessionView {
+            execution_selection: None,
             id: input.session_id,
             scope_kind: "collection".to_owned(),
             scope_id: "54".to_owned(),

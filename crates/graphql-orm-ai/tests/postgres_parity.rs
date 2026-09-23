@@ -815,6 +815,7 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
         .create_session(
             &principal,
             CreateAiSessionInput {
+                execution_selection: None,
                 scope: AiScopeInput {
                     kind: "postgres-parity".to_owned(),
                     id: "scope-1".to_owned(),
@@ -872,6 +873,7 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
         .create_session(
             &principal,
             CreateAiSessionInput {
+                execution_selection: None,
                 scope: AiScopeInput {
                     kind: "postgres-parity".to_owned(),
                     id: "scope-1".to_owned(),
