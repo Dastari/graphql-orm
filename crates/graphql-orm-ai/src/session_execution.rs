@@ -72,8 +72,8 @@ pub struct AiSessionExecutionSelectionInput {
 #[serde(deny_unknown_fields)]
 pub struct AiSessionExecutionSelection {
     provider: AiSessionProviderKind,
-    profile_id: String,
-    model: String,
+    profile_id: Box<str>,
+    model: Box<str>,
     reasoning_effort: ModelReasoningEffort,
 }
 
@@ -133,8 +133,8 @@ impl AiSessionExecutionSelection {
     ) -> Result<Self, AiError> {
         let value = Self {
             provider: provider.into(),
-            profile_id: profile_id.into(),
-            model: model.into(),
+            profile_id: String::into_boxed_str(profile_id.into()),
+            model: String::into_boxed_str(model.into()),
             reasoning_effort,
         };
         value.validate()?;
@@ -142,9 +142,12 @@ impl AiSessionExecutionSelection {
     }
 
     fn validate(&self) -> Result<(), AiError> {
-        if [&self.profile_id, &self.model].into_iter().any(|v| {
-            v.is_empty() || v.len() > 200 || v.trim() != v || v.chars().any(char::is_control)
-        }) || self.reasoning_effort == ModelReasoningEffort::Unspecified
+        if [self.profile_id.as_ref(), self.model.as_ref()]
+            .into_iter()
+            .any(|v| {
+                v.is_empty() || v.len() > 200 || v.trim() != v || v.chars().any(char::is_control)
+            })
+            || self.reasoning_effort == ModelReasoningEffort::Unspecified
         {
             return Err(AiError::InvalidInput(
                 "invalid session execution selection".to_owned(),
@@ -183,8 +186,8 @@ impl AiSessionExecutionSelection {
     pub fn as_input(&self) -> AiSessionExecutionSelectionInput {
         AiSessionExecutionSelectionInput {
             provider: self.provider,
-            profile_id: self.profile_id.clone(),
-            model: self.model.clone(),
+            profile_id: self.profile_id.to_string(),
+            model: self.model.to_string(),
             reasoning_effort: self.reasoning_effort,
         }
     }
@@ -303,6 +306,10 @@ mod tests {
         assert_eq!(
             AiSessionExecutionSelection::decode(&baseline.encode().unwrap()).unwrap(),
             baseline
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&baseline.encode().unwrap()).unwrap(),
+            serde_json::json!([1,{"provider":"local_harness","profile_id":"grok_acp","model":"newly-discovered-model","reasoning_effort":"ultra"}])
         );
         for other in [
             AiSessionExecutionSelection::new(
