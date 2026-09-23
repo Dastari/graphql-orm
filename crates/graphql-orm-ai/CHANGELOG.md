@@ -20,6 +20,13 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+### Fixed
+
+- Egress audit check-and-insert now uses a state-machine transaction, avoiding
+  SQLite deferred read-to-write races between concurrent disclosures. Retryable
+  transaction conflicts receive at most three retries; exact decision replays
+  remain idempotent and changed evidence still fails closed.
+
 ### Added
 
 - Immutable owner-admitted provider/profile/model/effort selections on sessions
