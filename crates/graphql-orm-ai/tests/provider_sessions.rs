@@ -225,6 +225,7 @@ async fn active_run(
         .create_session(
             principal,
             CreateAiSessionInput {
+                execution_selection: None,
                 scope: AiScopeInput {
                     kind: "workspace".to_owned(),
                     id: scope_id.to_owned(),

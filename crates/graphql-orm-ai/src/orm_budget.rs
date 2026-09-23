@@ -1405,6 +1405,7 @@ fn parse_reasoning_effort(value: &str) -> Result<ModelReasoningEffort, AiError> 
         "high" => Ok(ModelReasoningEffort::High),
         "xhigh" => Ok(ModelReasoningEffort::XHigh),
         "max" => Ok(ModelReasoningEffort::Max),
+        "ultra" => Ok(ModelReasoningEffort::Ultra),
         _ => Err(AiError::PersistenceFailed),
     }
 }
@@ -1829,6 +1830,7 @@ mod tests {
         AiSessionRecord::insert(
             database,
             CreateAiSessionRecordInput {
+                execution_selection: None,
                 id: session_id.0,
                 owner_principal_kind,
                 owner_subject: owner_subject.to_owned(),
@@ -1851,6 +1853,7 @@ mod tests {
         AiRunRecord::insert(
             database,
             CreateAiRunRecordInput {
+                execution_selection: None,
                 id: run_id.0,
                 session_id: session_id.0,
                 input_message_id: Uuid::new_v4(),

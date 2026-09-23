@@ -4898,6 +4898,7 @@ mod tests {
         AiSessionRecord::insert(
             database,
             CreateAiSessionRecordInput {
+                execution_selection: None,
                 id,
                 owner_principal_kind: "user".to_owned(),
                 owner_subject: "retention-user".to_owned(),
@@ -4925,6 +4926,7 @@ mod tests {
         AiSessionRecord::insert(
             database,
             CreateAiSessionRecordInput {
+                execution_selection: None,
                 id,
                 owner_principal_kind: "user".to_owned(),
                 owner_subject: "retention-user".to_owned(),
@@ -4956,6 +4958,7 @@ mod tests {
         AiRunRecord::insert(
             database,
             CreateAiRunRecordInput {
+                execution_selection: None,
                 id: run_id,
                 session_id,
                 input_message_id: Uuid::new_v4(),
@@ -5133,6 +5136,7 @@ mod tests {
         AiRunRecord::insert(
             database,
             CreateAiRunRecordInput {
+                execution_selection: None,
                 id: run_id,
                 session_id,
                 input_message_id: message_id,
@@ -6755,6 +6759,7 @@ mod tests {
         AiRunRecord::insert(
             &database,
             CreateAiRunRecordInput {
+                execution_selection: None,
                 id: current_run_id,
                 session_id,
                 input_message_id: message_id,
@@ -6779,6 +6784,7 @@ mod tests {
         AiRunRecord::insert(
             &database,
             CreateAiRunRecordInput {
+                execution_selection: None,
                 id: final_run_id,
                 session_id,
                 input_message_id: message_id,
@@ -6921,6 +6927,7 @@ mod tests {
         AiRunRecord::insert(
             &database,
             CreateAiRunRecordInput {
+                execution_selection: None,
                 id: active_run_id,
                 session_id,
                 input_message_id: message_id,
@@ -7736,6 +7743,7 @@ mod tests {
         AiRunRecord::insert(
             &database,
             CreateAiRunRecordInput {
+                execution_selection: None,
                 id: run_id,
                 session_id,
                 input_message_id: Uuid::new_v4(),

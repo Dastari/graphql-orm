@@ -180,6 +180,7 @@ async fn active_run(fixture: &Fixture) -> (AiSessionView, AiRunLease) {
         .create_session(
             &fixture.owner,
             CreateAiSessionInput {
+                execution_selection: None,
                 scope: AiScopeInput {
                     kind: "workspace".to_owned(),
                     id: "workspace-cancel".to_owned(),
@@ -279,6 +280,7 @@ async fn terminal_run_event_after_a_maximum_sized_page_is_replayed() {
         .create_session(
             &fixture.owner,
             CreateAiSessionInput {
+                execution_selection: None,
                 scope: AiScopeInput {
                     kind: "workspace".to_owned(),
                     id: "workspace-cancel".to_owned(),

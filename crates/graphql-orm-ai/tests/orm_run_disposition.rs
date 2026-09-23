@@ -237,6 +237,7 @@ async fn session(fixture: &Fixture) -> AiSessionView {
         .create_session(
             &fixture.owner,
             CreateAiSessionInput {
+                execution_selection: None,
                 scope: AiScopeInput {
                     kind: "workspace".to_owned(),
                     id: "workspace-disposition".to_owned(),
@@ -730,5 +731,79 @@ async fn run_authorization_is_persisted_and_explicit_retry_gets_a_fresh_deadline
             )
             .await
             .is_err()
+    );
+}
+
+struct FrozenSelection;
+#[async_trait]
+impl AiSessionExecutionSelectionResolver for FrozenSelection {
+    async fn resolve(
+        &self,
+        _: &AuthPrincipal,
+        _: &AiScope,
+        _: Option<&AiSessionExecutionSelectionInput>,
+    ) -> Result<AiSessionExecutionSelection, AiError> {
+        AiSessionExecutionSelection::new(
+            ProviderKind::LocalHarness,
+            "grok_acp",
+            "historical-model",
+            ModelReasoningEffort::Ultra,
+        )
+    }
+}
+
+#[tokio::test]
+async fn owner_retry_preserves_the_original_execution_selection_snapshot() {
+    let mut fixture = fixture().await;
+    fixture.sessions = Arc::new(
+        OrmAiSessionService::new(
+            fixture.sessions.database().clone(),
+            Arc::new(AllowAll),
+            Arc::new(ProtectionPolicy),
+            Arc::new(DatabaseManagedContentProtector),
+        )
+        .with_execution_selection_resolver(Arc::new(FrozenSelection)),
+    );
+    let session = session(&fixture).await;
+    let sent = failed_run(
+        &fixture,
+        session.id,
+        AiRunState::Failed,
+        "agent_rule_budget_exceeded",
+        Some("agent_rule_budget_exceeded"),
+    )
+    .await;
+    let retried = fixture
+        .dispositions
+        .retry_run(
+            &fixture.owner,
+            RetryAiRunInput {
+                session_id: session.id,
+                run_id: sent.run_id,
+                client_request_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .unwrap();
+    let lease = fixture
+        .runs
+        .claim_next("selected-retry")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(Some(lease.run_id().0), retried.retry_run_id);
+    let reader = OrmAiRunExecutionSelectionReader::new(
+        fixture.sessions.database().clone(),
+        Arc::new(StaticResolver {
+            principal: fixture.owner.clone(),
+            active: fixture.active.clone(),
+            clock: fixture.clock.clone(),
+        }),
+        Arc::new(AllowAll),
+        fixture.clock.clone(),
+    );
+    assert_eq!(
+        reader.selection_for_run(&lease).await.unwrap(),
+        session.execution_selection.unwrap()
     );
 }

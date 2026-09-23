@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.11.0 to 0.12.0
+
+Handle the two additional non-exhaustive `AiError` variants with public codes
+`AI_SESSION_EXECUTION_UNBOUND` and `AI_SESSION_EXECUTION_UNAVAILABLE`. They
+carry no provider payload or credentials. This package has no data or schema
+migration; AI `0.99.0` owns the corresponding session persistence migration.
+
 ## 0.10.4 to 0.11.0: typed result-budget failures
 
 Adopt `graphql-orm-ai-tool-profiles` 0.11.0 with `graphql-orm-ai` 0.97.0 from

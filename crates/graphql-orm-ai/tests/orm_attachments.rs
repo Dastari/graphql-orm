@@ -446,6 +446,7 @@ async fn create_session(fixture: &Fixture, owner: &AuthPrincipal) -> AiSessionVi
         .create_session(
             owner,
             CreateAiSessionInput {
+                execution_selection: None,
                 scope: AiScopeInput {
                     kind: "collection".to_owned(),
                     id: "54".to_owned(),

@@ -189,9 +189,21 @@ impl ProviderCapabilities {
 /// authorizes hidden chain-of-thought, and it does not enable visible
 /// reasoning summaries or any tool/capability.
 #[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    async_graphql::Enum,
 )]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
 pub enum ModelReasoningEffort {
     /// Use the provider or reviewed registration default and omit a wire
     /// override.
@@ -211,6 +223,8 @@ pub enum ModelReasoningEffort {
     XHigh,
     /// Maximum reasoning effort.
     Max,
+    /// Ultra reasoning effort, only for profiles explicitly admitting it.
+    Ultra,
 }
 
 impl ModelReasoningEffort {
@@ -224,6 +238,7 @@ impl ModelReasoningEffort {
             Self::High => "high",
             Self::XHigh => "xhigh",
             Self::Max => "max",
+            Self::Ultra => "ultra",
         }
     }
 
@@ -277,7 +292,7 @@ impl ModelReasoningEffortProfile {
             || self.model.len() > 200
             || self.model.chars().any(char::is_control)
             || self.supported.is_empty()
-            || self.supported.len() > 6
+            || self.supported.len() > 7
             || self.supported.contains(&ModelReasoningEffort::Unspecified)
             || self.default == ModelReasoningEffort::Unspecified
             || !self.supported.contains(&self.default)
@@ -3166,6 +3181,7 @@ mod safe_failure_tests {
             (ModelReasoningEffort::High, "high"),
             (ModelReasoningEffort::XHigh, "xhigh"),
             (ModelReasoningEffort::Max, "max"),
+            (ModelReasoningEffort::Ultra, "ultra"),
         ];
         for (effort, encoded) in values {
             assert_eq!(effort.as_str(), encoded);

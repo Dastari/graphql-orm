@@ -353,6 +353,7 @@ async fn create_session(
         .create_session(
             principal,
             CreateAiSessionInput {
+                execution_selection: None,
                 scope: AiScopeInput {
                     kind: "collection".to_owned(),
                     id: "54".to_owned(),
@@ -709,6 +710,7 @@ async fn pruning_fails_closed_for_an_unconfigured_scope() {
         .create_session(
             &owner,
             CreateAiSessionInput {
+                execution_selection: None,
                 scope: AiScopeInput {
                     kind: "collection".to_owned(),
                     id: "unconfigured".to_owned(),

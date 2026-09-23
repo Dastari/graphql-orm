@@ -20,6 +20,23 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+### Added
+
+- Immutable owner-admitted provider/profile/model/effort selections on sessions
+  and atomic queued-run snapshots; retries retain their source selection.
+- A lease-fenced current-owner routing reader and a shared generic/host creation
+  admission resolver. Explicit legacy pinning requires exact idle retained
+  descriptor and historical effort evidence; ambiguous history stays readable.
+- Title workers receive the session choice for host account/billing isolation.
+- Explicit `Ultra` reasoning effort through reviewed model profiles, with no
+  fallback mapping. AI schema module advances to `0.65.0`.
+
+### Fixed
+
+- Checkpoint argument hashing explicitly sorts nested object keys to match
+  durable tool hashing when another package enables `serde_json/preserve_order`.
+  Combined AI/tool-profile tests now exercise that feature-unification path.
+
 ## [0.98.5] - 2026-09-23
 
 ### Fixed

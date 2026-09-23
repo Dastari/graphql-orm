@@ -5261,6 +5261,7 @@ mod tests {
         AiSessionRecord::insert(
             &fixture.database,
             CreateAiSessionRecordInput {
+                execution_selection: None,
                 id: session_id.0,
                 owner_principal_kind: "user".to_owned(),
                 owner_subject: "run-user".to_owned(),
@@ -5283,6 +5284,7 @@ mod tests {
         AiRunRecord::insert(
             &fixture.database,
             CreateAiRunRecordInput {
+                execution_selection: None,
                 id: run_id.0,
                 session_id: session_id.0,
                 input_message_id: Uuid::new_v4(),

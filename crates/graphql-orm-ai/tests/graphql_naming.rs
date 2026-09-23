@@ -31,6 +31,10 @@ fn configured_graphql_case_is_coherent_without_aliases() {
         assert!(sdl.contains("aiToolCallResultPreview(input:"));
         assert!(sdl.contains("contentPurged: Boolean!"));
         assert!(sdl.contains("createAiSession(input:"));
+        assert!(sdl.contains("executionSelection: AiSessionExecutionSelection"));
+        assert!(sdl.contains("pinAiSessionExecutionSelection(input:"));
+        assert!(sdl.contains("reasoningEffort: ModelReasoningEffort!"));
+        assert!(sdl.contains("ULTRA"));
         assert!(sdl.contains("cancelAiRun(input:"));
         assert!(sdl.contains("aiSessionEvents(sessionId:"));
         assert!(sdl.contains("aiInboxEventPage("));
@@ -61,6 +65,10 @@ fn configured_graphql_case_is_coherent_without_aliases() {
         assert!(sdl.contains("AiToolCallResultPreview(Input:"));
         assert!(sdl.contains("ContentPurged: Boolean!"));
         assert!(sdl.contains("CreateAiSession(Input:"));
+        assert!(sdl.contains("ExecutionSelection: AiSessionExecutionSelection"));
+        assert!(sdl.contains("PinAiSessionExecutionSelection(Input:"));
+        assert!(sdl.contains("ReasoningEffort: ModelReasoningEffort!"));
+        assert!(sdl.contains("Ultra"));
         assert!(sdl.contains("RenameAiSession(Input:"));
         assert!(sdl.contains("CancelAiRun(Input:"));
         assert!(sdl.contains("AiSessionEvents(SessionId:"));

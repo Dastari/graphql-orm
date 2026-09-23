@@ -4352,6 +4352,7 @@ mod tests {
             AiSessionRecord::insert(
                 &self.database,
                 CreateAiSessionRecordInput {
+                    execution_selection: None,
                     id: session_id.0,
                     owner_principal_kind: "user".to_owned(),
                     owner_subject: self.principal.subject().to_owned(),
@@ -4374,6 +4375,7 @@ mod tests {
             AiRunRecord::insert(
                 &self.database,
                 CreateAiRunRecordInput {
+                    execution_selection: None,
                     id: run_id.0,
                     session_id: session_id.0,
                     input_message_id,

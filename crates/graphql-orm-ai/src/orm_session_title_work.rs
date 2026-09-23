@@ -604,7 +604,15 @@ impl AiSessionTitleWorkService for OrmAiSessionTitleWorkService {
             .map_err(map_transaction)?;
         self.current_claim_record(claim, canonical_second(self.clock.now()))
             .await?;
-        Ok(AiSessionTitleWorkInput::new(claim.session_id, text))
+        Ok(AiSessionTitleWorkInput::new(
+            claim.session_id,
+            text,
+            current
+                .execution_selection
+                .as_deref()
+                .map(crate::AiSessionExecutionSelection::decode)
+                .transpose()?,
+        ))
     }
 
     async fn heartbeat(
@@ -851,7 +859,7 @@ impl AiSessionTitleWorkService for OrmAiSessionTitleWorkService {
             .map_err(map_transaction)?;
         Ok(match outcome {
             TitleCompletion::Applied(session) => {
-                AiSessionTitleCommitOutcome::Applied(session_view(&session))
+                AiSessionTitleCommitOutcome::Applied(session_view(&session)?)
             }
             TitleCompletion::Superseded => AiSessionTitleCommitOutcome::Superseded,
         })

@@ -42,6 +42,8 @@ impl From<AiScopeInput> for AiScope {
 #[derive(Clone, Debug, SimpleObject)]
 #[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
 pub struct AiSessionView {
+    /// Immutable admitted execution choice; absent for legacy unbound sessions.
+    pub execution_selection: Option<crate::AiSessionExecutionSelection>,
     /// Session ID.
     pub id: Uuid,
     /// Scope kind.
@@ -283,6 +285,8 @@ pub struct AiConversationBootstrap {
 #[derive(Clone, Debug, InputObject)]
 #[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
 pub struct CreateAiSessionInput {
+    /// Requested immutable choice, admitted by the host resolver.
+    pub execution_selection: Option<crate::AiSessionExecutionSelectionInput>,
     /// Application scope.
     pub scope: AiScopeInput,
     /// Optional initial title.
@@ -420,6 +424,15 @@ pub trait AiSessionService: Send + Sync {
         principal: &AuthPrincipal,
         input: CreateAiSessionInput,
     ) -> Result<AiSessionView, AiError>;
+
+    /// Pins a proven idle legacy session. Existing bound selections are immutable.
+    async fn pin_execution_selection(
+        &self,
+        _principal: &AuthPrincipal,
+        _input: crate::PinAiSessionExecutionSelectionInput,
+    ) -> Result<AiSessionView, AiError> {
+        Err(AiError::SessionExecutionUnavailable)
+    }
 
     /// Renames an owner-visible session and appends its durable event and
     /// principal-inbox notification atomically.
@@ -695,6 +708,19 @@ impl AiMutationRoot {
         let principal = agql_auth::principal_from_ctx(context)?;
         service(context)?
             .create_session(&principal, input)
+            .await
+            .map_err(extend)
+    }
+
+    /// Explicitly pins an owned legacy session when exact durable evidence proves its selection.
+    async fn pin_ai_session_execution_selection(
+        &self,
+        context: &Context<'_>,
+        input: crate::PinAiSessionExecutionSelectionInput,
+    ) -> async_graphql::Result<AiSessionView> {
+        let principal = agql_auth::principal_from_ctx(context)?;
+        service(context)?
+            .pin_execution_selection(&principal, input)
             .await
             .map_err(extend)
     }

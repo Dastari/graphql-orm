@@ -254,6 +254,7 @@ async fn default_session_with_message(fixture: &Fixture, text: &str) -> AiSessio
         .create_session(
             &fixture.owner,
             CreateAiSessionInput {
+                execution_selection: None,
                 scope: scope_input(),
                 title: None,
             },

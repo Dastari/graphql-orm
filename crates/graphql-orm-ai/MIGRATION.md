@@ -19,6 +19,35 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.98.5 to 0.99.0
+
+Adopt AI `0.99.0` and AI tool profiles `0.12.0` from one reviewed workspace
+release. Apply schema module `0.65.0` before workers resume: it adds nullable
+versioned selection columns to session/run rows. Existing rows remain unbound;
+there is no automatic default migration. Portable snapshots retain routing
+metadata but do not bypass ordinary restore quarantine or reauthorization.
+
+Add `execution_selection` to Rust `CreateAiSessionInput` and `AiSessionView`
+literals. GraphQL creation adds optional `executionSelection`; the session view
+adds the immutable value and a separate explicit legacy pin mutation. Pascal
+hosts receive the corresponding PascalCase fields and enum values. Install the
+host resolver and lease-fenced reader for routed execution. An older service
+without a resolver retains unbound behavior but rejects explicit choices.
+
+Owner-authorized legacy pinning is possible only with exact descriptor and
+settled explicit effort proof. Otherwise report typed unbound/unavailable state
+and retain readable history; do not assign a default or reroute an existing
+provider thread. Title workers should inspect the new selection getter before
+choosing a provider. Handle the new `ModelReasoningEffort::Ultra` enum variant
+without mapping unsupported providers to another effort. See the complete
+[selection contract](docs/session-execution-selection.md).
+
+Checkpoint argument hashing also explicitly sorts object keys under
+`serde_json/preserve_order`, matching existing durable tool argument hashes.
+This avoids rejecting completed broker results when dependency feature
+unification preserves insertion order. Array order and all checkpoint fences
+remain unchanged; completed tools are not replayed.
+
 ## 0.98.5
 
 A durably persisted dynamic-tool result with no model-visible input now advances

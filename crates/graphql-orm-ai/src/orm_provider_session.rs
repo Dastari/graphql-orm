@@ -3820,6 +3820,285 @@ mod service {
             }
         }
 
+        struct ExpiringPinProtector {
+            expires_at: i64,
+        }
+        #[async_trait]
+        impl AiContentProtector for ExpiringPinProtector {
+            async fn protect(
+                &self,
+                policy: &AiContentProtectionPolicy,
+                context: &crate::ContentProtectionContext,
+                value: serde_json::Value,
+            ) -> Result<ProtectedContentEnvelope, crate::ContentProtectionError> {
+                // Wait for the exact real-clock expiry used by OrmAiSessionService.
+                // No database state changes while admission is suspended.
+                while OffsetDateTime::now_utc().unix_timestamp() < self.expires_at {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                crate::DatabaseManagedContentProtector
+                    .protect(policy, context, value)
+                    .await
+            }
+            async fn open(
+                &self,
+                policy: &AiContentProtectionPolicy,
+                context: &crate::ContentProtectionContext,
+                envelope: &ProtectedContentEnvelope,
+            ) -> Result<serde_json::Value, crate::ContentProtectionError> {
+                crate::DatabaseManagedContentProtector
+                    .open(policy, context, envelope)
+                    .await
+            }
+        }
+
+        struct LegacySelectionResolver;
+        #[async_trait]
+        impl crate::AiSessionExecutionSelectionResolver for LegacySelectionResolver {
+            async fn resolve(
+                &self,
+                _: &AuthPrincipal,
+                _: &AiScope,
+                requested: Option<&crate::AiSessionExecutionSelectionInput>,
+            ) -> Result<crate::AiSessionExecutionSelection, AiError> {
+                let input = requested.ok_or(AiError::SessionExecutionUnavailable)?;
+                crate::AiSessionExecutionSelection::new(
+                    input.provider.into(),
+                    input.profile_id.clone(),
+                    input.model.clone(),
+                    input.reasoning_effort,
+                )
+            }
+            async fn legacy_descriptor(
+                &self,
+                _: &AuthPrincipal,
+                _: &AiScope,
+                _: &crate::AiSessionExecutionSelection,
+                _: AiSessionId,
+                observed: &AiProviderSessionDescriptor,
+            ) -> Result<AiProviderSessionDescriptor, AiError> {
+                // Test host admits exactly the independently known registration.
+                if observed.registration_fingerprint() != "a".repeat(64) {
+                    return Err(AiError::SessionExecutionUnavailable);
+                }
+                Ok(observed.clone())
+            }
+        }
+
+        #[tokio::test]
+        async fn legacy_execution_selection_pin_requires_idle_exact_descriptor_and_explicit_effort()
+        {
+            use crate::persistence::*;
+            use crate::{
+                AiSessionExecutionSelectionInput, AiSessionProviderKind, AiSessionService,
+                ModelReasoningEffort, PinAiSessionExecutionSelectionInput,
+            };
+            let fixture = parked_wait_fixture().await;
+            let current = fixture
+                .service
+                .resolve_current(fixture.lease.principal_reference())
+                .await
+                .unwrap();
+            let sessions = crate::OrmAiSessionService::new(
+                fixture.database.clone(),
+                Arc::new(TestAccess),
+                Arc::new(TestProtection),
+                Arc::new(crate::DatabaseManagedContentProtector),
+            )
+            .with_execution_selection_resolver(Arc::new(LegacySelectionResolver));
+            let input = |effort| PinAiSessionExecutionSelectionInput {
+                session_id: fixture.lease.session_id().0,
+                execution_selection: AiSessionExecutionSelectionInput {
+                    provider: AiSessionProviderKind::OpenAi,
+                    profile_id: "host-routing-profile".to_owned(),
+                    model: "coordinator-test-model".to_owned(),
+                    reasoning_effort: effort,
+                },
+            };
+            assert!(matches!(
+                sessions
+                    .pin_execution_selection(current.principal(), input(ModelReasoningEffort::Low))
+                    .await,
+                Err(AiError::Conflict)
+            ));
+            let run = AiRunRecord::find_by_id(&fixture.database, &fixture.lease.run_id().0)
+                .await
+                .unwrap()
+                .unwrap();
+            AiRunRecord::compare_and_swap(
+                &fixture.database,
+                &run.id,
+                run.row_version,
+                AiRunRecordWhereInput::default(),
+                UpdateAiRunRecordInput {
+                    state: Some("completed".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let binding =
+                AiProviderSessionBindingRecord::find_by_id(&fixture.database, &fixture.binding_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            AiProviderSessionBindingRecord::compare_and_swap(
+                &fixture.database,
+                &binding.id,
+                binding.row_version,
+                AiProviderSessionBindingRecordWhereInput::default(),
+                UpdateAiProviderSessionBindingRecordInput {
+                    state: Some("active".to_owned()),
+                    claimed_run_id: Some(None),
+                    claimed_attempt_id: Some(None),
+                    claimed_run_lease_generation: Some(None),
+                    claim_owner: Some(None),
+                    claim_expires_at: Some(None),
+                    through_message_sequence: Some(1),
+                    last_run_id: Some(Some(run.id)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert!(
+                matches!(
+                    sessions
+                        .pin_execution_selection(
+                            current.principal(),
+                            input(ModelReasoningEffort::Low)
+                        )
+                        .await,
+                    Err(AiError::SessionExecutionUnavailable)
+                ),
+                "unspecified historical effort cannot be guessed"
+            );
+            let budget = AiBudgetReservationRecord::find_by_id(
+                &fixture.database,
+                &fixture.source_checkpoint.budget_reservation_id.unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            AiBudgetReservationRecord::compare_and_swap(
+                &fixture.database,
+                &budget.id,
+                budget.row_version,
+                AiBudgetReservationRecordWhereInput::default(),
+                UpdateAiBudgetReservationRecordInput {
+                    reasoning_effort: Some("low".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert!(
+                matches!(
+                    sessions
+                        .pin_execution_selection(
+                            current.principal(),
+                            input(ModelReasoningEffort::High)
+                        )
+                        .await,
+                    Err(AiError::SessionExecutionUnavailable)
+                ),
+                "explicit mismatch cannot pin"
+            );
+            let expiring =
+                AiProviderSessionBindingRecord::find_by_id(&fixture.database, &binding.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let expires_at = OffsetDateTime::now_utc().unix_timestamp() + 2;
+            AiProviderSessionBindingRecord::compare_and_swap(
+                &fixture.database,
+                &binding.id,
+                expiring.row_version,
+                AiProviderSessionBindingRecordWhereInput::default(),
+                UpdateAiProviderSessionBindingRecordInput {
+                    idle_expires_at: Some(expires_at),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let delayed = crate::OrmAiSessionService::new(
+                fixture.database.clone(),
+                Arc::new(TestAccess),
+                Arc::new(TestProtection),
+                Arc::new(ExpiringPinProtector { expires_at }),
+            )
+            .with_execution_selection_resolver(Arc::new(LegacySelectionResolver));
+            assert!(
+                matches!(
+                    delayed
+                        .pin_execution_selection(
+                            current.principal(),
+                            input(ModelReasoningEffort::Low)
+                        )
+                        .await,
+                    Err(AiError::SessionExecutionUnavailable)
+                ),
+                "binding expiry during protection must be evaluated at commit"
+            );
+            let expired =
+                AiProviderSessionBindingRecord::find_by_id(&fixture.database, &binding.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            AiProviderSessionBindingRecord::compare_and_swap(
+                &fixture.database,
+                &binding.id,
+                expired.row_version,
+                AiProviderSessionBindingRecordWhereInput::default(),
+                UpdateAiProviderSessionBindingRecordInput {
+                    idle_expires_at: Some(OffsetDateTime::now_utc().unix_timestamp() + 100),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let pinned = sessions
+                .pin_execution_selection(current.principal(), input(ModelReasoningEffort::Low))
+                .await
+                .unwrap();
+            assert_eq!(
+                pinned.execution_selection.as_ref().unwrap().profile_id(),
+                "host-routing-profile",
+                "routing and retained descriptor profiles are independent"
+            );
+            assert_eq!(
+                pinned
+                    .execution_selection
+                    .as_ref()
+                    .unwrap()
+                    .reasoning_effort(),
+                ModelReasoningEffort::Low
+            );
+            let repeat = sessions
+                .pin_execution_selection(current.principal(), input(ModelReasoningEffort::Low))
+                .await
+                .unwrap();
+            assert_eq!(
+                repeat.stream_head, pinned.stream_head,
+                "exact repeat is idempotent"
+            );
+            assert!(matches!(
+                sessions
+                    .pin_execution_selection(current.principal(), input(ModelReasoningEffort::High))
+                    .await,
+                Err(AiError::Conflict)
+            ));
+            let after = AiProviderSessionBindingRecord::find_by_id(&fixture.database, &binding.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                after.protected_cursor, binding.protected_cursor,
+                "pin never rewrites or replays provider state"
+            );
+        }
+
         struct ParkFixture {
             service: Arc<OrmAiProviderSessionService>,
             database: Database<SqliteBackend>,
@@ -3889,6 +4168,7 @@ mod service {
             AiSessionRecord::insert(
                 &database,
                 crate::persistence::CreateAiSessionRecordInput {
+                    execution_selection: None,
                     id: session_id.0,
                     owner_principal_kind: "user".to_owned(),
                     owner_subject: principal.subject().to_owned(),
@@ -3934,6 +4214,7 @@ mod service {
             AiRunRecord::insert(
                 &database,
                 crate::persistence::CreateAiRunRecordInput {
+                    execution_selection: None,
                     id: run_id.0,
                     session_id: session_id.0,
                     input_message_id,

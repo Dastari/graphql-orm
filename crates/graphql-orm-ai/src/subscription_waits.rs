@@ -172,7 +172,8 @@ impl AiSubscriptionReplayPosition {
 pub struct AiReplayableSubscriptionEvent {
     event_id: String,
     position: AiSubscriptionReplayPosition,
-    data: serde_json::Value,
+    // Keep the source-item enum compact even with serde_json/preserve_order.
+    data: Box<serde_json::Value>,
 }
 
 impl AiReplayableSubscriptionEvent {
@@ -202,7 +203,7 @@ impl AiReplayableSubscriptionEvent {
         Ok(Self {
             event_id,
             position,
-            data,
+            data: Box::new(data),
         })
     }
 
@@ -535,6 +536,29 @@ mod tests {
         let tampered: AiSubscriptionReplayPosition =
             serde_json::from_value(encoded).expect("deserialize position");
         assert!(!tampered.has_valid_fingerprint());
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[test]
+    fn boxed_event_payload_preserves_checkpoint_shape_and_round_trip() {
+        let position = AiSubscriptionReplayPosition::new(
+            serde_json::json!({"sequence":12}),
+            serde_json::json!({"head":20}),
+        )
+        .unwrap();
+        let data = serde_json::json!({"value":"synthetic","items":[1,2]});
+        let event =
+            AiReplayableSubscriptionEvent::new("event-12", position.clone(), data.clone()).unwrap();
+        let encoded = event.checkpoint_value();
+        assert_eq!(
+            encoded,
+            serde_json::json!({"eventId":"event-12","position":position,"data":data})
+        );
+        assert_eq!(event.data(), &data);
+        assert_eq!(
+            AiReplayableSubscriptionEvent::from_checkpoint_value(encoded).unwrap(),
+            event
+        );
     }
 
     #[test]

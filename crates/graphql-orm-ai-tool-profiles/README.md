@@ -24,7 +24,7 @@ are separate runtime decisions and must remain default-deny.
 
 ```toml
 [dependencies]
-graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.11.0" }
+graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.12.0" }
 serde_json = "1"
 ```
 
@@ -227,3 +227,6 @@ See [the changelog](CHANGELOG.md) and [migration guide](MIGRATION.md) for the
 wire-version and fingerprint transition, [operation catalog](../graphql-orm-operation-catalog/README.md)
 for generated discovery metadata, and the [AI runtime documentation](../graphql-orm-ai/README.md)
 for execution, persistence, approval, and egress responsibilities.
+
+The shared error contract includes `AI_SESSION_EXECUTION_UNBOUND` and
+`AI_SESSION_EXECUTION_UNAVAILABLE` for safe session-routing recovery.

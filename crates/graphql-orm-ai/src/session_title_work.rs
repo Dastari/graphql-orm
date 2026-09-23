@@ -80,14 +80,28 @@ impl AiSessionTitleWorkClaim {
 /// GraphQL implementation. It grants no provider, application-tool, URL,
 /// file, shell, screenshot, remote-control, or arbitrary-GraphQL authority.
 pub struct AiSessionTitleWorkInput {
+    execution_selection: Option<crate::AiSessionExecutionSelection>,
     session_id: AiSessionId,
     text: String,
 }
 
 impl AiSessionTitleWorkInput {
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
-    pub(crate) fn new(session_id: AiSessionId, text: String) -> Self {
-        Self { session_id, text }
+    pub(crate) fn new(
+        session_id: AiSessionId,
+        text: String,
+        execution_selection: Option<crate::AiSessionExecutionSelection>,
+    ) -> Self {
+        Self {
+            session_id,
+            text,
+            execution_selection,
+        }
+    }
+
+    /// Immutable session route for host title-provider admission. None is legacy unbound.
+    pub fn execution_selection(&self) -> Option<&crate::AiSessionExecutionSelection> {
+        self.execution_selection.as_ref()
     }
 
     /// Exact session receiving the eventual conditional title.

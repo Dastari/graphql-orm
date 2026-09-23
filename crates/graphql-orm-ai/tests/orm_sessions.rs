@@ -250,6 +250,7 @@ async fn owner_isolation_atomic_send_idempotency_and_windowed_reads() {
         .create_session(
             &owner,
             CreateAiSessionInput {
+                execution_selection: None,
                 scope: scope_input(),
                 title: Some("Research".to_owned()),
             },
@@ -382,6 +383,7 @@ async fn session_event_pages_use_the_snapshotted_watermark_at_the_orm_limit() {
         .create_session(
             &owner,
             CreateAiSessionInput {
+                execution_selection: None,
                 scope: scope_input(),
                 title: Some("Initial".to_owned()),
             },
@@ -465,6 +467,7 @@ async fn session_event_pages_follow_a_smaller_orm_maximum() {
         .create_session(
             &owner,
             CreateAiSessionInput {
+                execution_selection: None,
                 scope: scope_input(),
                 title: Some("Initial".to_owned()),
             },
@@ -488,6 +491,7 @@ async fn terminal_event_at_sequence_101_replays_across_session_and_inbox_pages()
         .create_session(
             &owner,
             CreateAiSessionInput {
+                execution_selection: None,
                 scope: scope_input(),
                 title: Some("Initial".to_owned()),
             },
@@ -593,6 +597,7 @@ async fn reconnect_replays_terminal_then_switches_live_without_duplication() {
         .create_session(
             &owner,
             CreateAiSessionInput {
+                execution_selection: None,
                 scope: scope_input(),
                 title: Some("Reconnect".to_owned()),
             },
@@ -682,6 +687,7 @@ async fn messages_read_exact_legacy_object_previews() {
         .create_session(
             &owner,
             CreateAiSessionInput {
+                execution_selection: None,
                 scope: scope_input(),
                 title: Some("Legacy preview".to_owned()),
             },
@@ -727,6 +733,7 @@ async fn owner_rename_is_idempotent_revision_fenced_and_durably_replayed() {
         .create_session(
             &owner,
             CreateAiSessionInput {
+                execution_selection: None,
                 scope: scope_input(),
                 title: None,
             },
@@ -830,6 +837,7 @@ async fn rename_rejects_blank_control_and_oversized_titles() {
         .create_session(
             &owner,
             CreateAiSessionInput {
+                execution_selection: None,
                 scope: scope_input(),
                 title: None,
             },
@@ -876,6 +884,7 @@ async fn archive_restore_and_session_keyset_are_bounded() {
         .create_session(
             &owner,
             CreateAiSessionInput {
+                execution_selection: None,
                 scope: scope_input(),
                 title: Some("First".to_owned()),
             },
@@ -886,6 +895,7 @@ async fn archive_restore_and_session_keyset_are_bounded() {
         .create_session(
             &owner,
             CreateAiSessionInput {
+                execution_selection: None,
                 scope: scope_input(),
                 title: Some("Second".to_owned()),
             },
@@ -983,4 +993,296 @@ async fn archive_restore_and_session_keyset_are_bounded() {
     assert_eq!(visible_page.edges.len(), 1);
     assert_ne!(visible_page.edges[0].node.id, hidden_id);
     assert!(!visible_page.page_info.has_next_page);
+}
+
+struct SelectionResolver;
+
+#[async_trait]
+impl AiSessionExecutionSelectionResolver for SelectionResolver {
+    async fn resolve(
+        &self,
+        _principal: &AuthPrincipal,
+        _scope: &AiScope,
+        requested: Option<&AiSessionExecutionSelectionInput>,
+    ) -> Result<AiSessionExecutionSelection, AiError> {
+        let requested = requested.ok_or(AiError::SessionExecutionUnavailable)?;
+        if !matches!(
+            requested.profile_id.as_str(),
+            "codex_app_server" | "grok_acp"
+        ) || requested.model != "discovered-model"
+        {
+            return Err(AiError::SessionExecutionUnavailable);
+        }
+        AiSessionExecutionSelection::new(
+            requested.provider.into(),
+            requested.profile_id.clone(),
+            requested.model.clone(),
+            requested.reasoning_effort,
+        )
+    }
+}
+
+fn requested_selection(
+    profile: &str,
+    effort: ModelReasoningEffort,
+) -> AiSessionExecutionSelectionInput {
+    AiSessionExecutionSelectionInput {
+        provider: AiSessionProviderKind::LocalHarness,
+        profile_id: profile.to_owned(),
+        model: "discovered-model".to_owned(),
+        reasoning_effort: effort,
+    }
+}
+
+#[tokio::test]
+async fn immutable_selections_route_concurrent_owned_runs_and_reject_stale_leases() {
+    let sessions = service()
+        .await
+        .with_execution_selection_resolver(Arc::new(SelectionResolver));
+    let alice = principal("selection-alice");
+    let bob = principal("selection-bob");
+    let create = |profile, effort| CreateAiSessionInput {
+        scope: scope_input(),
+        title: None,
+        execution_selection: Some(requested_selection(profile, effort)),
+    };
+    let (first, second) = tokio::join!(
+        sessions.create_session(
+            &alice,
+            create("codex_app_server", ModelReasoningEffort::Ultra)
+        ),
+        sessions.create_session(&bob, create("grok_acp", ModelReasoningEffort::Low))
+    );
+    let first = first.expect("first selection");
+    let second = second.expect("second selection");
+    assert_eq!(
+        first
+            .execution_selection
+            .as_ref()
+            .unwrap()
+            .reasoning_effort(),
+        ModelReasoningEffort::Ultra
+    );
+    let send = |session_id| SendAiMessageInput {
+        session_id,
+        text: "Synthetic selection test".to_owned(),
+        attachment_ids: vec![],
+        client_message_id: Uuid::new_v4(),
+    };
+    assert!(matches!(
+        sessions.send_message(&bob, send(first.id)).await,
+        Err(AiError::NotFound)
+    ));
+    assert!(matches!(
+        sessions
+            .pin_execution_selection(
+                &alice,
+                PinAiSessionExecutionSelectionInput {
+                    session_id: first.id,
+                    execution_selection: requested_selection("grok_acp", ModelReasoningEffort::Low)
+                }
+            )
+            .await,
+        Err(AiError::Conflict)
+    ));
+    let (a, b) = tokio::join!(
+        sessions.send_message(&alice, send(first.id)),
+        sessions.send_message(&bob, send(second.id))
+    );
+    let a = a.expect("alice enqueue");
+    let b = b.expect("bob enqueue");
+    let runs = run_service(&sessions);
+    for _ in 0..2 {
+        let lease = runs.claim_next("selection-worker").await.unwrap().unwrap();
+        let (owner, expected) = if lease.run_id().0 == a.run_id {
+            (&alice, first.execution_selection.as_ref().unwrap())
+        } else {
+            assert_eq!(lease.run_id().0, b.run_id);
+            (&bob, second.execution_selection.as_ref().unwrap())
+        };
+        let reader = OrmAiRunExecutionSelectionReader::new(
+            sessions.database().clone(),
+            Arc::new(StaticPrincipalResolver {
+                principal: owner.clone(),
+            }),
+            Arc::new(AllowAll),
+            Arc::new(SystemClock),
+        );
+        assert_eq!(&reader.selection_for_run(&lease).await.unwrap(), expected);
+        let renewed = runs.start(&lease).await.unwrap();
+        assert!(matches!(
+            reader.selection_for_run(&lease).await,
+            Err(AiError::Conflict)
+        ));
+        assert_eq!(&reader.selection_for_run(&renewed).await.unwrap(), expected);
+        let wrong = OrmAiRunExecutionSelectionReader::new(
+            sessions.database().clone(),
+            Arc::new(StaticPrincipalResolver {
+                principal: principal("different-owner"),
+            }),
+            Arc::new(AllowAll),
+            Arc::new(SystemClock),
+        );
+        assert!(wrong.selection_for_run(&renewed).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn selection_admission_cannot_be_bypassed_and_legacy_history_remains_readable() {
+    let sessions = service().await;
+    let owner = principal("selection-owner");
+    let make = |selection| CreateAiSessionInput {
+        scope: scope_input(),
+        title: None,
+        execution_selection: selection,
+    };
+    assert!(matches!(
+        sessions
+            .create_session(
+                &owner,
+                make(Some(requested_selection(
+                    "grok_acp",
+                    ModelReasoningEffort::Low
+                )))
+            )
+            .await,
+        Err(AiError::SessionExecutionUnavailable)
+    ));
+    let legacy = sessions.create_session(&owner, make(None)).await.unwrap();
+    let sessions = sessions.with_execution_selection_resolver(Arc::new(SelectionResolver));
+    assert!(
+        sessions
+            .session(&owner, AiSessionId(legacy.id))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(matches!(
+        sessions
+            .send_message(
+                &owner,
+                SendAiMessageInput {
+                    session_id: legacy.id,
+                    text: "Synthetic".to_owned(),
+                    attachment_ids: vec![],
+                    client_message_id: Uuid::new_v4()
+                }
+            )
+            .await,
+        Err(AiError::SessionExecutionUnbound)
+    ));
+    assert!(matches!(
+        sessions
+            .pin_execution_selection(
+                &owner,
+                PinAiSessionExecutionSelectionInput {
+                    session_id: legacy.id,
+                    execution_selection: requested_selection("grok_acp", ModelReasoningEffort::Low)
+                }
+            )
+            .await,
+        Err(AiError::SessionExecutionUnavailable)
+    ));
+    assert!(matches!(
+        sessions.create_session(&owner, make(None)).await,
+        Err(AiError::SessionExecutionUnavailable)
+    ));
+    assert!(matches!(
+        sessions
+            .create_session(
+                &owner,
+                make(Some(requested_selection(
+                    "unknown",
+                    ModelReasoningEffort::Low
+                )))
+            )
+            .await,
+        Err(AiError::SessionExecutionUnavailable)
+    ));
+    assert!(matches!(
+        sessions
+            .create_session(
+                &owner,
+                make(Some(requested_selection(
+                    "grok_acp",
+                    ModelReasoningEffort::Unspecified
+                )))
+            )
+            .await,
+        Err(AiError::InvalidInput(_))
+    ));
+}
+
+struct FallbackSelectionResolver;
+#[async_trait]
+impl AiSessionExecutionSelectionResolver for FallbackSelectionResolver {
+    async fn resolve(
+        &self,
+        _: &AuthPrincipal,
+        _: &AiScope,
+        _: Option<&AiSessionExecutionSelectionInput>,
+    ) -> Result<AiSessionExecutionSelection, AiError> {
+        AiSessionExecutionSelection::new(
+            ProviderKind::LocalHarness,
+            "codex_app_server",
+            "different-model",
+            ModelReasoningEffort::High,
+        )
+    }
+}
+#[tokio::test]
+async fn host_resolver_cannot_silently_replace_an_explicit_selection() {
+    let sessions = service()
+        .await
+        .with_execution_selection_resolver(Arc::new(FallbackSelectionResolver));
+    assert!(matches!(
+        sessions
+            .create_session(
+                &principal("owner"),
+                CreateAiSessionInput {
+                    scope: scope_input(),
+                    title: None,
+                    execution_selection: Some(requested_selection(
+                        "grok_acp",
+                        ModelReasoningEffort::Low
+                    ))
+                }
+            )
+            .await,
+        Err(AiError::SessionExecutionUnavailable)
+    ));
+}
+
+#[tokio::test]
+async fn generic_graphql_mutation_uses_the_same_selection_admission() {
+    use async_graphql::{EmptySubscription, Request, Schema};
+    let sessions: Arc<dyn AiSessionService> = Arc::new(
+        service()
+            .await
+            .with_execution_selection_resolver(Arc::new(SelectionResolver)),
+    );
+    let schema = Schema::build(AiQueryRoot, AiMutationRoot, EmptySubscription)
+        .data(sessions)
+        .finish();
+    #[cfg(not(feature = "graphql-case-pascal"))]
+    let query = r#"mutation { createAiSession(input:{scope:{kind:"workspace",id:"54",tenantId:"tenant-1"},executionSelection:{provider:LOCAL_HARNESS,profileId:"grok_acp",model:"discovered-model",reasoningEffort:ULTRA}}){executionSelection{provider profileId model reasoningEffort}} }"#;
+    #[cfg(feature = "graphql-case-pascal")]
+    let query = r#"mutation { CreateAiSession(Input:{Scope:{Kind:"workspace",Id:"54",TenantId:"tenant-1"},ExecutionSelection:{Provider:LocalHarness,ProfileId:"grok_acp",Model:"discovered-model",ReasoningEffort:Ultra}}){ExecutionSelection{Provider ProfileId Model ReasoningEffort}} }"#;
+    let response = schema
+        .execute(Request::new(query).data(principal("graphql-owner")))
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let response = schema
+        .execute(
+            Request::new(query.replace("discovered-model", "unadmitted-model"))
+                .data(principal("graphql-owner")),
+        )
+        .await;
+    assert_eq!(response.errors.len(), 1);
+    assert_eq!(
+        response.errors[0].extensions.as_ref().unwrap().get("code"),
+        Some(&async_graphql::Value::from(
+            "AI_SESSION_EXECUTION_UNAVAILABLE"
+        ))
+    );
 }

@@ -2398,6 +2398,8 @@ fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
             values
                 .iter()
                 .map(|(key, value)| (key.clone(), canonical_json(value)))
+                .collect::<BTreeMap<_, _>>()
+                .into_iter()
                 .collect(),
         ),
         _ => value.clone(),
@@ -2525,5 +2527,35 @@ fn map_orm(error: OrmPublicError) -> AiError {
         OrmErrorCode::ServiceUnavailable
         | OrmErrorCode::InternalError
         | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
+    }
+}
+
+#[cfg(test)]
+mod canonical_argument_tests {
+    use super::*;
+
+    #[test]
+    fn checkpoint_argument_hash_matches_tool_hash_with_preserved_insertion_order() {
+        let mut nested = serde_json::Map::new();
+        nested.insert("z".to_owned(), json!(2));
+        nested.insert("a".to_owned(), json!(1));
+        let mut first = serde_json::Map::new();
+        first.insert("z".to_owned(), json!([3, 4]));
+        first.insert("a".to_owned(), serde_json::Value::Object(nested));
+        let first = serde_json::Value::Object(first);
+        let reordered = json!({"a": {"a": 1, "z": 2}, "z": [3, 4]});
+        assert_eq!(
+            canonical_json_hash(&first).unwrap(),
+            canonical_json_hash(&reordered).unwrap()
+        );
+        assert_eq!(
+            canonical_json_hash(&first).unwrap(),
+            crate::orm_tools::canonical_json_hash(&first).unwrap()
+        );
+        assert_ne!(
+            canonical_json_hash(&first).unwrap(),
+            canonical_json_hash(&json!({"a": {"a": 1, "z": 2}, "z": [4, 3]})).unwrap(),
+            "array order remains significant"
+        );
     }
 }
