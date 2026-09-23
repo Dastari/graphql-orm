@@ -89,3 +89,10 @@ pub use grok_acp_provider::{
 mod grok_acp_wire;
 #[cfg(feature = "provider-grok-acp")]
 pub use grok_acp_wire::{AiGrokAcpWireProcess, AiGrokAcpWireTransport};
+
+#[cfg(all(
+    test,
+    feature = "provider-grok-acp",
+    any(feature = "sqlite", feature = "postgres")
+))]
+pub(crate) use grok_acp_wire::tests::ExecutorWireFactory;
