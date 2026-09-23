@@ -191,10 +191,12 @@ impl AiSessionExecutionSelection {
             reasoning_effort: self.reasoning_effort,
         }
     }
+    #[cfg(any(feature = "sqlite", feature = "postgres", test))]
     pub(crate) fn encode(&self) -> Result<String, AiError> {
         self.validate()?;
         serde_json::to_string(&(1u8, self)).map_err(|_| AiError::PersistenceFailed)
     }
+    #[cfg(any(feature = "sqlite", feature = "postgres", test))]
     pub(crate) fn decode(value: &str) -> Result<Self, AiError> {
         if value.len() > 2_048 {
             return Err(AiError::PersistenceFailed);
@@ -267,6 +269,7 @@ pub trait AiRunExecutionSelectionReader: Send + Sync {
     ) -> Result<AiSessionExecutionSelection, AiError>;
 }
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub(crate) async fn resolve_exact(
     resolver: &dyn AiSessionExecutionSelectionResolver,
     principal: &AuthPrincipal,
