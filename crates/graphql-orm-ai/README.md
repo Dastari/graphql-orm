@@ -31,6 +31,10 @@ to false until exact host isolation is verified; usage follows the existing
 estimate/actual budget contract. See the
 [local harness boundary](docs/local-harness.md).
 
+Egress audit writes serialize check-and-insert through the ORM state-machine
+transaction contract. Bounded transaction retries preserve exact replay checks
+and fail closed without repeating application tools or provider requests.
+
 ## Install
 
 This active pre-release is Git-only. Pin one reviewed full monorepo revision

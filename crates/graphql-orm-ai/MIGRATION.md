@@ -19,6 +19,14 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.99.0 to 0.99.1
+
+Egress audit recording now acquires the backend state-machine transaction before
+checking existing evidence and retries only classified retryable transactions,
+up to three times. Retries repeat only audit persistence, never provider requests
+or application tools. Exhaustion still fails closed. Public APIs, stored record
+semantics, and schema module `0.65.0` are unchanged; no data migration is needed.
+
 ## 0.98.5 to 0.99.0
 
 Adopt AI `0.99.0` and AI tool profiles `0.12.0` from one reviewed workspace
