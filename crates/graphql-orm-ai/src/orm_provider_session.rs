@@ -3820,6 +3820,38 @@ mod service {
             }
         }
 
+        struct ExpiringPinProtector {
+            expires_at: i64,
+        }
+        #[async_trait]
+        impl AiContentProtector for ExpiringPinProtector {
+            async fn protect(
+                &self,
+                policy: &AiContentProtectionPolicy,
+                context: &crate::ContentProtectionContext,
+                value: serde_json::Value,
+            ) -> Result<ProtectedContentEnvelope, crate::ContentProtectionError> {
+                // Wait for the exact real-clock expiry used by OrmAiSessionService.
+                // No database state changes while admission is suspended.
+                while OffsetDateTime::now_utc().unix_timestamp() < self.expires_at {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                crate::DatabaseManagedContentProtector
+                    .protect(policy, context, value)
+                    .await
+            }
+            async fn open(
+                &self,
+                policy: &AiContentProtectionPolicy,
+                context: &crate::ContentProtectionContext,
+                envelope: &ProtectedContentEnvelope,
+            ) -> Result<serde_json::Value, crate::ContentProtectionError> {
+                crate::DatabaseManagedContentProtector
+                    .open(policy, context, envelope)
+                    .await
+            }
+        }
+
         struct LegacySelectionResolver;
         #[async_trait]
         impl crate::AiSessionExecutionSelectionResolver for LegacySelectionResolver {
@@ -3972,6 +4004,60 @@ mod service {
                 ),
                 "explicit mismatch cannot pin"
             );
+            let expiring =
+                AiProviderSessionBindingRecord::find_by_id(&fixture.database, &binding.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let expires_at = OffsetDateTime::now_utc().unix_timestamp() + 2;
+            AiProviderSessionBindingRecord::compare_and_swap(
+                &fixture.database,
+                &binding.id,
+                expiring.row_version,
+                AiProviderSessionBindingRecordWhereInput::default(),
+                UpdateAiProviderSessionBindingRecordInput {
+                    idle_expires_at: Some(expires_at),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let delayed = crate::OrmAiSessionService::new(
+                fixture.database.clone(),
+                Arc::new(TestAccess),
+                Arc::new(TestProtection),
+                Arc::new(ExpiringPinProtector { expires_at }),
+            )
+            .with_execution_selection_resolver(Arc::new(LegacySelectionResolver));
+            assert!(
+                matches!(
+                    delayed
+                        .pin_execution_selection(
+                            current.principal(),
+                            input(ModelReasoningEffort::Low)
+                        )
+                        .await,
+                    Err(AiError::SessionExecutionUnavailable)
+                ),
+                "binding expiry during protection must be evaluated at commit"
+            );
+            let expired =
+                AiProviderSessionBindingRecord::find_by_id(&fixture.database, &binding.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            AiProviderSessionBindingRecord::compare_and_swap(
+                &fixture.database,
+                &binding.id,
+                expired.row_version,
+                AiProviderSessionBindingRecordWhereInput::default(),
+                UpdateAiProviderSessionBindingRecordInput {
+                    idle_expires_at: Some(OffsetDateTime::now_utc().unix_timestamp() + 100),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
             let pinned = sessions
                 .pin_execution_selection(current.principal(), input(ModelReasoningEffort::Low))
                 .await

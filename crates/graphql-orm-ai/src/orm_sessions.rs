@@ -974,7 +974,6 @@ impl AiSessionService for OrmAiSessionService {
             return Err(AiError::SessionExecutionUnavailable);
         }
         let binding_version = observed_binding.row_version;
-        let now = unix_seconds();
         let event_id = Uuid::new_v4();
         let inbox_id = Uuid::new_v4();
         let policy = self.protection_policy(principal, &scope).await?;
@@ -1008,6 +1007,7 @@ impl AiSessionService for OrmAiSessionService {
             .database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    let now = unix_seconds();
                     let current = tx
                         .find_by_id::<AiSessionRecord>(&session.id)
                         .await
