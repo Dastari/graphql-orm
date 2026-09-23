@@ -42,6 +42,12 @@ choosing a provider. Handle the new `ModelReasoningEffort::Ultra` enum variant
 without mapping unsupported providers to another effort. See the complete
 [selection contract](docs/session-execution-selection.md).
 
+Checkpoint argument hashing also explicitly sorts object keys under
+`serde_json/preserve_order`, matching existing durable tool argument hashes.
+This avoids rejecting completed broker results when dependency feature
+unification preserves insertion order. Array order and all checkpoint fences
+remain unchanged; completed tools are not replayed.
+
 ## 0.98.5
 
 A durably persisted dynamic-tool result with no model-visible input now advances
