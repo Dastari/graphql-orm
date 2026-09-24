@@ -1936,12 +1936,6 @@ pub enum AiProviderFailureCategory {
     RateLimit,
     /// Provider rejected the reviewed request or capability.
     ProviderRejection,
-    /// The provider reached its configured execution-round ceiling.
-    ExecutionLimit,
-    /// The provider did not report complete authoritative usage.
-    UsageIncomplete,
-    /// Aggregate provider usage did not satisfy its accounting contract.
-    UsageInvalid,
     /// A strict provider protocol contract was violated.
     ProtocolViolation,
     /// A provider-issued dynamic-tool call or argument set was invalid.
@@ -1952,6 +1946,12 @@ pub enum AiProviderFailureCategory {
     Cancellation,
     /// Durable persistence or a run/provider-session fence was lost.
     PersistenceFenceLoss,
+    /// The provider reached its configured execution-round ceiling.
+    ExecutionLimit,
+    /// The provider did not report complete authoritative usage.
+    UsageIncomplete,
+    /// Aggregate provider usage did not satisfy its accounting contract.
+    UsageInvalid,
 }
 
 impl AiProviderFailureCategory {
@@ -2335,8 +2335,6 @@ pub enum AiApplicationToolFailureCode {
     RelationshipDepthExceeded,
     /// The complete selected result exceeds its byte or aggregate record budget.
     ResultBudgetExceeded,
-    /// No further tools may execute in this turn; summarize available evidence.
-    ToolCallLimitReached,
     /// The loaded schema/catalogue/target/capability binding is stale.
     CapabilityStale,
     /// Current authorization denied the call without disclosing why.
@@ -2349,6 +2347,8 @@ pub enum AiApplicationToolFailureCode {
     ResolverValidationFailed,
     /// No result exists and current disclosure policy permits that distinction.
     NotFound,
+    /// No further tools may execute in this turn; summarize available evidence.
+    ToolCallLimitReached,
 }
 
 impl AiApplicationToolFailureCode {
