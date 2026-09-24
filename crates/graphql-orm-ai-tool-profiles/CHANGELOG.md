@@ -12,6 +12,12 @@ supersedes: []
 
 ## [Unreleased]
 
+### Fixed
+
+- Allow an explicitly configured automatic query total of up to 100,000 records
+  instead of 10,000, so bounded nested lists can fit without removing their
+  individual bounds. Defaults, authorization and runtime disclosure checks remain unchanged.
+
 ### Added
 
 - Content-free `AiError::ProviderExecutionLimit`, `ProviderUsageIncomplete`
