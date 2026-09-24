@@ -20,6 +20,18 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+### Added
+
+- Reserve the final inline tool slot for a durable, non-retryable
+  `tool_call_limit_reached` result. The provider can summarize already-authorized
+  evidence instead of abruptly losing its response. No application tool runs in
+  that slot, and attempts beyond the hard ceiling still fail closed.
+- Host-selectable application-tool ceilings up to 1,024 per provider call and
+  Grok model-round ceilings up to 1,024, with unchanged defaults and accounting.
+- Closed diagnostics distinguish native execution limits, incomplete usage and
+  invalid usage from generic provider rejection; none contains provider content.
+
+
 ### Fixed
 
 - Egress audit check-and-insert now uses a state-machine transaction, avoiding

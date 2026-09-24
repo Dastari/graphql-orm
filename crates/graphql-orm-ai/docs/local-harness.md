@@ -241,7 +241,7 @@ The registration separately bounds input **bytes**, native model rounds and
 requested output estimates. Usage counters have independent protocol/storage
 sanity bounds; token counts are not compared to byte bounds. The host selects a
 native `maxTurns` no larger than its authorized remaining provider-turn allowance;
-this adapter admits at most 64 native rounds and one prompt per process/binding.
+this adapter admits at most 1,024 native rounds and one prompt per process/binding.
 A tool conversation can consume more native rounds than broker callbacks. The
 host must not schedule additional hidden prompts or silently raise saved limits.
 Broker callbacks still pass through ordinary run/tool/result/authorization checks.
@@ -250,9 +250,9 @@ turn time (at most one hour), 16 MiB frames, 64 MiB transport/broker byte budget
 and up to 4096 SDK callbacks independently of the 64-definition limit. Native
 tool identifiers are capped at 8192 and incoming frames at 65,536; host tool/run
 budgets remain authoritative. The existing coordinator additionally admits at
-most 64 dynamic callbacks per dispatch (or fewer under configured host limits).
-One ACP prompt is one dispatch; the transport allowance does not authorize 1024
-application calls from a larger run limit or invent native subround admissions.
+most 1,024 dynamic callbacks per dispatch (or fewer under configured host limits).
+One ACP prompt is one dispatch; the transport allowance does not increase the
+configured callback/run limit or invent native subround admissions.
 Dropped launch, empty-session creation, activation
 and stream futures terminate their process trees.
 Cancellation/close races during launch cannot install a process after cancellation.
@@ -322,3 +322,14 @@ unknown/native execution, title preflight, actual-over-estimate accounting,
 uncertain terminals and cancellation lifecycle races. No database schema or data
 migration is introduced. Consumer deployment still requires its own authorization,
 isolation, runtime/restart workflow and end-to-end acceptance.
+
+### Grok and inline execution limits
+
+Grok registrations accept up to 1,024 native model rounds. The host's provider
+call limit accepts up to 1,024 application callbacks; these remain separately
+bounded by the run policy, cancellation and budget ledger. The last admitted
+inline callback is a persisted `tool_call_limit_reached` failure, not an
+application execution. A compliant model can summarize its existing evidence.
+Further callbacks beyond the ceiling fail closed. Native model-limit exits and
+incomplete/invalid authoritative usage have distinct content-free diagnostics;
+none permits replay or synthesizes zero usage.

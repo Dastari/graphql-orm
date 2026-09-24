@@ -807,7 +807,7 @@ impl AiProviderDynamicToolExecution for ReadOnlyDynamicToolExecution {
         {
             return Err(AiError::Forbidden);
         }
-        {
+        let limit_reached = {
             let mut state = self.state.lock().await;
             state.accepted_calls = state
                 .accepted_calls
@@ -815,6 +815,19 @@ impl AiProviderDynamicToolExecution for ReadOnlyDynamicToolExecution {
                 .filter(|calls| *calls <= self.maximum_calls)
                 .ok_or(AiError::BudgetDenied)?;
             state.rule_usage = state.rule_usage.accept_tool_calls(1, &current_rules)?;
+            state.accepted_calls == self.maximum_calls
+        };
+        // Keep the last run-level slot available for an explanation rather
+        // than dispatching another read and abruptly losing the whole answer.
+        if limit_reached {
+            return self
+                .persist_dynamic_failure(
+                    lease,
+                    provider_result,
+                    tool_call_index,
+                    crate::AiApplicationToolFailureCode::ToolCallLimitReached,
+                )
+                .await;
         }
         let context = AiApplicationToolCallContext::new(
             self.provider_turn_index,

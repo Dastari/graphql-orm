@@ -19,6 +19,24 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.99.1 to 0.100.0
+
+Apply AI schema module `0.66.0` before resuming workers. The new durable
+`tool_call_limit_reached` failure code extends tool-result semantics; there is
+no table/column change or data backfill. Readers must use this version's closed
+failure-code parser. Existing run, budget and no-replay fences are unchanged.
+
+Inline providers reserve their final admitted tool slot for a persisted safe
+limit response rather than another application read. Hosts should instruct the
+model to summarize available evidence on this non-retryable response. The
+provider may finish inference; a further call past the ceiling still fails
+closed. This does not retry interrupted inference or completed tools.
+
+Hosts can explicitly configure up to 1,024 tool calls per provider turn and
+1,024 Grok native rounds. Defaults are unchanged. Budget and wall-clock admission
+remain independent. Handle the additional non-exhaustive diagnostic categories
+for execution limits and incomplete/invalid usage without changing retry rules.
+
 ## 0.99.0 to 0.99.1
 
 Egress audit recording now acquires the backend state-machine transaction before

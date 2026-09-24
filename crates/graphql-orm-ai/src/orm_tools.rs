@@ -42,7 +42,7 @@ impl AiApplicationToolCallLimits {
     /// # Errors
     ///
     /// Returns [`AiError::InvalidConfiguration`] for zero/oversized content,
-    /// turn limits outside `1..=1_024`, call limits outside `1..=64`, or a
+    /// turn limits outside `1..=1_024`, call limits outside `1..=1_024`, or a
     /// non-positive principal freshness/execution window.
     pub fn new(
         maximum_argument_bytes: usize,
@@ -58,7 +58,7 @@ impl AiApplicationToolCallLimits {
             || maximum_model_output_bytes == 0
             || maximum_model_output_bytes > MAXIMUM_BYTES
             || !(1..=1_024).contains(&maximum_provider_turns)
-            || !(1..=64).contains(&maximum_calls_per_turn)
+            || !(1..=1_024).contains(&maximum_calls_per_turn)
             || !maximum_principal_age.is_positive()
             || !maximum_execution_time.is_positive()
         {

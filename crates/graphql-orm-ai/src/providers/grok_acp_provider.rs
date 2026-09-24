@@ -99,7 +99,7 @@ impl AiGrokAcpRegistration {
             || bootstrap.len() > 64 * 1024
             || !(1..=16 * 1024 * 1024).contains(&maximum_input_bytes)
             || !(1..=1_000_000).contains(&maximum_output_tokens)
-            || !(1..=64).contains(&maximum_model_calls)
+            || !(1..=1_024).contains(&maximum_model_calls)
         {
             return Err(ProviderError::InvalidRequest);
         }

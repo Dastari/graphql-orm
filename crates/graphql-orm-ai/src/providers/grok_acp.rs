@@ -356,14 +356,23 @@ impl AiGrokAcpUsage {
                 .get("usageIsIncomplete")
                 .is_some_and(|v| v != &Value::Bool(false))
         {
-            return Err(rejected());
+            return Err(ProviderError::Classified(
+                crate::AiProviderFailureCategory::UsageIncomplete,
+            ));
         }
+        let rejected = || ProviderError::Classified(crate::AiProviderFailureCategory::UsageInvalid);
+        let counter = |value: &Value, key: &str| counter(value, key).map_err(|_| rejected());
         let input_tokens = counter(usage, "inputTokens")?;
         let output_tokens = counter(usage, "outputTokens")?;
         let cached_input_tokens = counter(usage, "cachedReadTokens")?;
         let creation = counter(usage, "cacheCreationTokens")?;
         let reasoning = counter(usage, "reasoningTokens")?;
         let model_calls = counter(usage, "modelCalls")?;
+        if model_calls > maximum_model_calls {
+            return Err(ProviderError::Classified(
+                crate::AiProviderFailureCategory::ExecutionLimit,
+            ));
+        }
         let models = usage["modelUsage"].as_object().ok_or_else(rejected)?;
         let row = models.get(model).ok_or_else(rejected)?;
         if models.len() != 1
@@ -685,6 +694,42 @@ mod tests {
         all["numTurns"] = json!(2);
         all["modelUsage"] = json!({"reviewed-model":row});
         all
+    }
+
+    #[test]
+    fn extended_rounds_account_fully_and_failures_have_closed_categories() {
+        use crate::AiProviderFailureCategory as Category;
+        let mut value = usage();
+        value["modelCalls"] = json!(256);
+        value["numTurns"] = json!(256);
+        value["modelUsage"]["reviewed-model"]["modelCalls"] = json!(256);
+        assert_eq!(
+            AiGrokAcpUsage::decode(&value, "reviewed-model", 100, 20, 256)
+                .unwrap()
+                .model_calls,
+            256
+        );
+        assert_eq!(
+            AiGrokAcpUsage::decode(&value, "reviewed-model", 100, 20, 16)
+                .unwrap_err()
+                .safe_category(),
+            Category::ExecutionLimit
+        );
+        value["usageIsIncomplete"] = json!(true);
+        assert_eq!(
+            AiGrokAcpUsage::decode(&value, "reviewed-model", 100, 20, 256)
+                .unwrap_err()
+                .safe_category(),
+            Category::UsageIncomplete
+        );
+        value["usageIsIncomplete"] = json!(false);
+        value["totalTokens"] = json!(0);
+        assert_eq!(
+            AiGrokAcpUsage::decode(&value, "reviewed-model", 100, 20, 256)
+                .unwrap_err()
+                .safe_category(),
+            Category::UsageInvalid
+        );
     }
 
     #[test]
