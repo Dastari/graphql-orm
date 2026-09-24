@@ -24,7 +24,7 @@ are separate runtime decisions and must remain default-deny.
 
 ```toml
 [dependencies]
-graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.13.0" }
+graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.13.1" }
 serde_json = "1"
 ```
 
@@ -195,6 +195,10 @@ or resume an agent.
 idempotency. Profile compilation replaces the result limits and binds a
 server-authored document, JSON Schema, result-projection fingerprint, finished
 SDL fingerprint, and disclosure fingerprint.
+
+Deployments may explicitly configure automatic query totals up to 100,000 records
+so independently bounded nested collections can fit. The default remains 100;
+per-list ceilings, response-byte limits and actual-result enforcement still apply.
 
 `maximum_result_records` is a total budget for the complete selected GraphQL
 result, not the largest individual list. The public root transport envelope is

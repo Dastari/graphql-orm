@@ -55,7 +55,7 @@ pub struct AiGraphqlQueryCapabilityLimits {
     pub maximum_string_bytes: u32,
     /// Maximum items in one input list or selected relationship collection.
     pub maximum_list_items: u32,
-    /// Maximum records disclosed by one compiled query.
+    /// Maximum total records disclosed by one compiled query (up to 100,000).
     pub maximum_result_records: u32,
     /// Maximum result bytes disclosed by one compiled query.
     pub maximum_result_bytes: u64,
@@ -174,7 +174,7 @@ impl AiGraphqlQueryCapabilityLimits {
             || maximum_list_items == 0
             || maximum_list_items > 10_000
             || maximum_result_records == 0
-            || maximum_result_records > 10_000
+            || maximum_result_records > 100_000
             || maximum_result_bytes == 0
             || maximum_result_bytes > 64 * 1024 * 1024
             || maximum_capabilities == 0
@@ -5306,6 +5306,104 @@ mod tests {
             .expect("closed selection allowlist");
         assert_eq!(paths.len(), 2_496);
         assert!(paths.contains(&json!("related4.related4.related4.value15")));
+    }
+
+    #[test]
+    fn larger_opt_in_total_budget_admits_bounded_nested_records() {
+        let mut semantics = semantic_catalog();
+        let parent = semantics
+            .entities
+            .iter_mut()
+            .find(|entity| entity.entity_name == "Parent")
+            .unwrap();
+        let children = parent
+            .fields
+            .iter_mut()
+            .find(|field| field.field_name == "children")
+            .unwrap();
+        children.type_ref = GraphqlSemanticTypeRef::list(
+            false,
+            Some(10_000),
+            GraphqlSemanticTypeRef::named("Child", GraphqlSemanticTypeKind::Object, false),
+        );
+        let semantics = GraphqlSemanticCatalog::compose_with_custom(
+            semantics.entities,
+            &GraphqlOperationCatalog::compose(std::iter::empty()),
+            semantics.operations,
+        )
+        .unwrap();
+        let plan = json!({
+            "arguments": {"id": "parent-1"},
+            "selections": ["id", "children.id"],
+            "relationshipArguments": {"children": {}},
+            "relationshipMaximumItems": {"children": 10_000}
+        });
+        for maximum_records in [10_000, 100_000] {
+            let limits = AiGraphqlQueryCapabilityLimits::new(
+                4,
+                64,
+                64,
+                8,
+                4096,
+                10_000,
+                maximum_records,
+                4 * 1024 * 1024,
+                1024,
+                16 * 1024 * 1024,
+            )
+            .unwrap();
+            let catalogue = AiGraphqlQueryCapabilityCatalog::compile(
+                "inventory",
+                GraphqlExecutionTargetId::parse("inventory.graphql").unwrap(),
+                &query_sdl(),
+                &semantics,
+                limits,
+            )
+            .unwrap();
+            let capability = catalogue.capabilities().next().unwrap();
+            let result = capability.compile_compact_correctable(plan.clone());
+            if maximum_records == 10_000 {
+                assert_eq!(
+                    result.unwrap_err().code,
+                    AiGraphqlQueryPlanFailureCode::ResultBudgetExceeded
+                );
+            } else {
+                let compiled = result.expect(
+                    "explicit larger total permits independently bounded nested collections",
+                );
+                assert!(
+                    compiled
+                        .disclosure_schema()
+                        .maximum_graphql_record_count()
+                        .unwrap()
+                        > 10_000
+                );
+                assert_eq!(
+                    compiled.descriptor().maximum_result_records,
+                    maximum_records
+                );
+                assert_eq!(compiled.descriptor().maximum_result_bytes, 4 * 1024 * 1024);
+            }
+        }
+        assert!(
+            AiGraphqlQueryCapabilityLimits::new(
+                4,
+                64,
+                64,
+                8,
+                4096,
+                10_000,
+                100_001,
+                4 * 1024 * 1024,
+                1024,
+                16 * 1024 * 1024
+            )
+            .is_err()
+        );
+        assert_eq!(
+            AiGraphqlQueryCapabilityLimits::default().maximum_result_records,
+            100
+        );
     }
 
     #[test]

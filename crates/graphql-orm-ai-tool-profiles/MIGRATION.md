@@ -10,6 +10,15 @@ supersedes: []
 
 # Migration Guide
 
+## 0.13.0 to 0.13.1
+
+The validated upper bound for `AiGraphqlQueryCapabilityLimits::maximum_result_records`
+is now 100,000. Existing settings and the 100-record default remain unchanged.
+Hosts can opt into larger totals for bounded nested collections; per-list,
+byte, depth and runtime disclosure limits remain enforced. A changed setting
+changes compiled fingerprints and requires refreshing capability bindings.
+No data, schema, GraphQL SDL or wire migration is needed.
+
 ## 0.12.0 to 0.13.0
 
 The non-exhaustive `AiError` adds `ProviderExecutionLimit`,
