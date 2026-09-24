@@ -1938,6 +1938,20 @@ pub enum AiProviderFailureCategory {
     ProviderRejection,
     /// A strict provider protocol contract was violated.
     ProtocolViolation,
+    /// A provider-issued dynamic-tool call or argument set was invalid.
+    InvalidDynamicToolCall,
+    /// A retained provider thread rejected exact resume.
+    RetainedResumeRejection,
+    /// Owner cancellation won the provider boundary.
+    Cancellation,
+    /// Durable persistence or a run/provider-session fence was lost.
+    PersistenceFenceLoss,
+    /// The provider reached its configured execution-round ceiling.
+    ExecutionLimit,
+    /// The provider did not report complete authoritative usage.
+    UsageIncomplete,
+    /// Aggregate provider usage did not satisfy its accounting contract.
+    UsageInvalid,
     /// A provider exceeded the bounded wire frame or cumulative byte limit.
     ProtocolFrameLimit,
     /// A provider notification did not belong to the active session.
@@ -1960,20 +1974,6 @@ pub enum AiProviderFailureCategory {
     ProtocolBackgroundActivity,
     /// A provider sent an unsupported notification; its text is never retained.
     ProtocolUnknownNotification,
-    /// A provider-issued dynamic-tool call or argument set was invalid.
-    InvalidDynamicToolCall,
-    /// A retained provider thread rejected exact resume.
-    RetainedResumeRejection,
-    /// Owner cancellation won the provider boundary.
-    Cancellation,
-    /// Durable persistence or a run/provider-session fence was lost.
-    PersistenceFenceLoss,
-    /// The provider reached its configured execution-round ceiling.
-    ExecutionLimit,
-    /// The provider did not report complete authoritative usage.
-    UsageIncomplete,
-    /// Aggregate provider usage did not satisfy its accounting contract.
-    UsageInvalid,
 }
 
 impl AiProviderFailureCategory {
