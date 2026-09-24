@@ -21,8 +21,21 @@ use [implementation status](docs/implementation-status.md) and the central
 
 ## 0.100.1 to 0.100.2
 
-No data migration is required. GraphQL SDL, stored recovery semantics and schema
-module are unchanged. The non-exhaustive `AiProviderFailureCategory` gains closed
+No data migration is required. GraphQL SDL, existing stored recovery outcomes and
+schema module are unchanged. Future Grok turns ending with the exact
+`end_turn` / `action_stationarity` terminal now complete with a static explanation
+that the response may be incomplete and a user follow-up can continue from the
+results already obtained. This admission requires correlated terminal identity,
+no pending broker callbacks and complete validated usage before completion.
+No new prompt or callback is issued, and already failed runs remain untouched.
+
+The [native completion contract](https://github.com/xai-org/grok-build/blob/f0e3be1100ef5252488e3be8bb0e91cf68d8c305/crates/codegen/xai-grok-shell/src/session/commands.rs)
+identifies stationarity as a silent EndTurn. The adapter supplies the explanation
+rather than claiming the user's task finished. Native repetition detection and
+host execution ceilings are unchanged; cancellation, unmetered/invalid usage,
+pending calls and unknown terminal categories retain their prior closed outcomes.
+
+The non-exhaustive `AiProviderFailureCategory` gains closed
 protocol categories for diagnostics; consumers matching this enum must retain
 an unknown-category fallback. These categories never authorize replay.
 
@@ -36,7 +49,7 @@ notification. No credential, account, billing or authentication flow is changed.
 
 Grok protocol rejection diagnostics distinguish the failed contract without
 retaining frame content, identifiers or unknown provider strings. They preserve
-all existing admission checks, limits, usage accounting and uncertain outcomes.
+all other admission checks, limits, usage accounting and uncertain outcomes.
 A historical `provider_protocol_violation` alone does not prove which check
 failed, and this change does not claim to repair an unobserved protocol event.
 

@@ -37,6 +37,11 @@ and bounded independently of successful model rounds; it sends no prompt and
 replays no application tools. Completion still requires authoritative usage.
 Exhausted retries retain uncertainty with a content-free provider category.
 
+Grok's fully metered `end_turn` / `action_stationarity` stop now produces a clear
+partial-work explanation and completes the provider turn, retaining settled
+results for an ordinary follow-up. This does not submit another prompt or replay
+a tool. Missing usage, pending callbacks and cancellation still fail closed.
+
 Grok protocol failures report closed categories for binding, broker/lifecycle,
 unsupported native activity, notification, completion and limit checks. They
 never retain provider content or grant replay. Codex initialization suppresses

@@ -24,6 +24,15 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ### Fixed
 
+- Treat Grok's fully metered `end_turn` / `action_stationarity` outcome as a
+  completed provider turn with an explicit partial-work explanation. The native
+  repeated-activity guard can stop a legitimate read-only loop without a model
+  answer; the adapter no longer misreports that terminal as an uncertain
+  protocol violation. Completed tool results and usage settle once, and an
+  ordinary user follow-up can continue. No automatic prompt or tool replay is
+  introduced; missing/invalid usage, pending callbacks, cancellation and other
+  terminal categories still fail closed.
+
 - Suppress Codex `account/updated` status broadcasts through the exact documented
   initialization opt-out. A startup account-status update no longer aborts
   `thread/start`. Authentication errors and failed turns remain authoritative;
@@ -32,8 +41,9 @@ checkpoint facts. For the current workspace baseline and active gates, use the
   broker and tool lifecycle, unsupported native tools or notifications, side
   inference/background activity, response completion and wire/reload limits.
   Diagnostics contain no provider strings and do not change recovery or replay
-  eligibility. This diagnoses future failures; it does not establish the cause
-  of a historical generic protocol rejection.
+  eligibility. The historical production frame
+  remains unavailable; the stationarity failure is proven in a fresh synthetic
+  installed-provider fixture, not reconstructed from protected production data.
 
 ## [0.100.1] - 2026-09-24
 

@@ -20,6 +20,7 @@ const TOTAL: usize = 64 * 1024 * 1024;
 const MAX_RETRY_NOTIFICATIONS: u32 = 1024;
 const SERVER: &str = "graphql-orm-ai-broker";
 const FIXED_TITLE: &str = "Authorized capability session";
+const STATIONARITY_EXPLANATION: &str = "\n\nGrok stopped because its repeated-activity limit was reached. This response may be incomplete. You can send a follow-up to continue from the results already obtained.";
 fn classified(category: Failure) -> ProviderError {
     ProviderError::Classified(category)
 }
@@ -617,10 +618,16 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
                         if category==Some("max_turns_reached") {Err(ProviderError::Classified(crate::AiProviderFailureCategory::ExecutionLimit))?;} else {Err(ProviderError::Cancelled)?;}
                     }
                     let usage=AiGrokAcpUsage::decode(&result["_meta"]["usage"],registration.usage_model(),super::grok_acp::MAX_USAGE_TOKENS,super::grok_acp::MAX_USAGE_TOKENS,u64::from(registration.maximum_model_calls()))?;
+                    // Native stationarity is a metered EndTurn. Decode usage first,
+                    // then preserve the provider stream's text-before-usage ordering.
+                    let stationary = result["stopReason"]=="end_turn" && category==Some("action_stationarity");
+                    if stationary && result["_meta"].get("completionKind").is_none() {
+                        yield ProviderEvent::TextDelta{text:STATIONARITY_EXPLANATION.to_owned()};
+                    }
                     yield ProviderEvent::Usage{input_tokens:usage.input_tokens,output_tokens:usage.output_tokens,cached_input_tokens:usage.cached_input_tokens};
                     if category==Some("max_turns_reached") {Err(ProviderError::Classified(crate::AiProviderFailureCategory::ExecutionLimit))?;}
                     if result["stopReason"]=="cancelled" {Err(ProviderError::Cancelled)?;}
-                    if result["stopReason"]!="end_turn"||result["_meta"].get("cancellationCategory").is_some()||result["_meta"].get("completionKind").is_some(){Err(classified(Failure::ProtocolResponse))?;}
+                    if result["stopReason"]!="end_turn"||(!stationary && result["_meta"].get("cancellationCategory").is_some())||result["_meta"].get("completionKind").is_some(){Err(classified(Failure::ProtocolResponse))?;}
                     yield ProviderEvent::ResponseCompleted{response_id:Some(response_id)};break;
                 }
                 if value["method"]=="_x.ai/mcp/sdk_call" {
@@ -720,7 +727,9 @@ pub(crate) mod tests {
             Ok(bytes)
         }
     }
-    pub(crate) struct ExecutorWireFactory;
+    pub(crate) struct ExecutorWireFactory {
+        pub stationarity: bool,
+    }
     #[async_trait]
     impl super::super::grok_acp_provider::AiGrokAcpProcessFactory for ExecutorWireFactory {
         fn admits(&self, _: &AiGrokAcpRegistration) -> bool {
@@ -744,10 +753,11 @@ pub(crate) mod tests {
                 reads.push(retrying(1));
             }
             let aggregate = json!({"inputTokens":29390,"outputTokens":3000,"totalTokens":32390,"cachedReadTokens":17152,"cacheCreationTokens":0,"reasoningTokens":25,"modelCalls":5,"numTurns":5,"modelUsage":{"grok-4.7-build":{"inputTokens":29390,"outputTokens":3000,"totalTokens":32390,"cachedReadTokens":17152,"cacheCreationTokens":0,"reasoningTokens":25,"modelCalls":5}}});
-            reads.push(response(
-                9,
-                json!({"stopReason":"end_turn","_meta":{"usage":aggregate}}),
-            ));
+            let mut terminal = json!({"stopReason":"end_turn","_meta":{"usage":aggregate}});
+            if self.stationarity {
+                terminal["_meta"]["cancellationCategory"] = json!("action_stationarity");
+            }
+            reads.push(response(9, terminal));
             let wire = Arc::new(Wire {
                 reads: SyncMutex::new(reads.into()),
                 writes: SyncMutex::new(vec![]),
@@ -1012,6 +1022,87 @@ pub(crate) mod tests {
     fn retrying(attempt: u32) -> Value {
         retry_update(json!({"type":"retrying","attempt":attempt,"max_retries":3,
             "reason":"synthetic private provider detail", "error_type":"api"}))
+    }
+
+    #[tokio::test]
+    async fn stationary_end_turn_explains_partial_work_only_with_complete_usage() {
+        for valid_usage in [true, false] {
+            let mut terminal = json!({"stopReason":"end_turn","_meta":{"cancellationCategory":"action_stationarity"}});
+            if valid_usage {
+                terminal["_meta"]["usage"] = usage();
+            }
+            let mut reads = new_session_reads();
+            reads.push(response(9, terminal));
+            let (process, wire) = fixture(reads);
+            process.create_empty_session().await.unwrap();
+            let events: Vec<_> = process
+                .prompt(vec!["synthetic".into()], Arc::new(NoTools))
+                .await
+                .unwrap()
+                .collect()
+                .await;
+            if valid_usage {
+                assert_eq!(events.len(), 4);
+                assert!(matches!(events[2], Ok(ProviderEvent::Usage { .. })));
+                assert!(
+                    matches!(&events[1], Ok(ProviderEvent::TextDelta{text}) if text == STATIONARITY_EXPLANATION)
+                );
+                assert!(matches!(
+                    events[3],
+                    Ok(ProviderEvent::ResponseCompleted { .. })
+                ));
+            } else {
+                assert!(events.last().unwrap().is_err());
+                assert!(!events.iter().any(|event| matches!(
+                    event,
+                    Ok(ProviderEvent::TextDelta { .. } | ProviderEvent::ResponseCompleted { .. })
+                )));
+            }
+            assert_eq!(
+                wire.writes
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|frame| frame["method"] == "session/prompt")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stationarity_does_not_turn_cancellation_unknown_categories_or_bad_usage_into_success()
+    {
+        for (stop, category, completion, broken_usage) in [
+            ("cancelled", "action_stationarity", false, false),
+            ("end_turn", "unknown-sensitive-category", false, false),
+            ("end_turn", "action_stationarity", true, false),
+            ("end_turn", "action_stationarity", false, true),
+        ] {
+            let mut terminal = json!({"stopReason":stop,"_meta":{"cancellationCategory":category,"usage":usage()}});
+            if completion {
+                terminal["_meta"]["completionKind"] = json!("removedFromQueue");
+            }
+            if broken_usage {
+                terminal["_meta"]["usage"]["totalTokens"] = json!(0);
+            }
+            let mut reads = new_session_reads();
+            reads.push(response(9, terminal));
+            let (process, _) = fixture(reads);
+            process.create_empty_session().await.unwrap();
+            let events: Vec<_> = process
+                .prompt(vec!["synthetic".into()], Arc::new(NoTools))
+                .await
+                .unwrap()
+                .collect()
+                .await;
+            assert!(events.last().unwrap().is_err());
+            assert!(!events.iter().any(|event| matches!(
+                event,
+                Ok(ProviderEvent::TextDelta { .. } | ProviderEvent::ResponseCompleted { .. })
+            )));
+            assert!(!format!("{:?}", events.last().unwrap()).contains("sensitive"));
+        }
     }
 
     #[tokio::test]
