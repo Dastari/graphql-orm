@@ -42,7 +42,7 @@ impl AiApplicationToolCallLimits {
     /// # Errors
     ///
     /// Returns [`AiError::InvalidConfiguration`] for zero/oversized content,
-    /// turn limits outside `1..=1_024`, call limits outside `1..=64`, or a
+    /// turn limits outside `1..=1_024`, call limits outside `1..=1_024`, or a
     /// non-positive principal freshness/execution window.
     pub fn new(
         maximum_argument_bytes: usize,
@@ -58,7 +58,7 @@ impl AiApplicationToolCallLimits {
             || maximum_model_output_bytes == 0
             || maximum_model_output_bytes > MAXIMUM_BYTES
             || !(1..=1_024).contains(&maximum_provider_turns)
-            || !(1..=64).contains(&maximum_calls_per_turn)
+            || !(1..=1_024).contains(&maximum_calls_per_turn)
             || !maximum_principal_age.is_positive()
             || !maximum_execution_time.is_positive()
         {
@@ -874,27 +874,37 @@ impl OrmAiApplicationToolCallService {
             .runtime
             .authorize_egress(active_lease.principal_reference(), &manifest)
             .await?;
-        self.egress_audit.record(&manifest, &decision).await?;
-        let (state, model_input, decision_id, manifest_hash) =
-            if decision.authorize(&manifest).is_ok() {
-                (
-                    AiApplicationToolCallState::ExecutionFailed,
-                    Some(ModelInputBlock::ToolResult {
-                        call_id: provider_call.call_id().to_owned(),
-                        tool_id: provider_call.tool_id().as_str().to_owned(),
-                        output: output.clone(),
-                    }),
-                    Some(decision.id.0),
-                    Some(decision.manifest_hash.clone()),
-                )
-            } else {
-                (
-                    AiApplicationToolCallState::EgressDenied,
-                    None,
-                    Some(decision.id.0),
-                    Some(decision.manifest_hash.clone()),
-                )
-            };
+        let audit_result = self.egress_audit.record(&manifest, &decision).await;
+        let (state, model_input, decision_id, manifest_hash) = if audit_result.is_err() {
+            // Retain the renewed fence and a terminal row even when the
+            // safe rejection cannot be audited for provider disclosure.
+            // Returning here would strand the row in `executing` and
+            // leave the caller holding the pre-start lease.
+            (
+                AiApplicationToolCallState::EgressAuditFailed,
+                None,
+                None,
+                None,
+            )
+        } else if decision.authorize(&manifest).is_ok() {
+            (
+                AiApplicationToolCallState::ExecutionFailed,
+                Some(ModelInputBlock::ToolResult {
+                    call_id: provider_call.call_id().to_owned(),
+                    tool_id: provider_call.tool_id().as_str().to_owned(),
+                    output: output.clone(),
+                }),
+                Some(decision.id.0),
+                Some(decision.manifest_hash.clone()),
+            )
+        } else {
+            (
+                AiApplicationToolCallState::EgressDenied,
+                None,
+                Some(decision.id.0),
+                Some(decision.manifest_hash.clone()),
+            )
+        };
         let protected_result = self
             .protect(
                 &policy,
@@ -948,7 +958,11 @@ impl OrmAiApplicationToolCallService {
                     id: id.0,
                     state: state.as_str().to_owned(),
                     protected_result,
-                    authorization_code: code.as_str().to_owned(),
+                    authorization_code: if state == AiApplicationToolCallState::EgressAuditFailed {
+                        "egress_audit_failed".to_owned()
+                    } else {
+                        code.as_str().to_owned()
+                    },
                     authorization_policy_version: None,
                     authorization_state_digest: None,
                     disclosure_schema_fingerprint: safe_failure_disclosure_fingerprint(),

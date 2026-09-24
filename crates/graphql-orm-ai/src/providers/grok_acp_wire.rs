@@ -538,11 +538,11 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
                     if state.broker.has_pending_calls(){Err(rejected())?;}
                     let category=result["_meta"]["cancellationCategory"].as_str();
                     if result["stopReason"]=="cancelled" && result["_meta"].get("usage").is_none() {
-                        if category==Some("max_turns_reached") {Err(ProviderError::BudgetDenied)?;} else {Err(ProviderError::Cancelled)?;}
+                        if category==Some("max_turns_reached") {Err(ProviderError::Classified(crate::AiProviderFailureCategory::ExecutionLimit))?;} else {Err(ProviderError::Cancelled)?;}
                     }
                     let usage=AiGrokAcpUsage::decode(&result["_meta"]["usage"],registration.usage_model(),super::grok_acp::MAX_USAGE_TOKENS,super::grok_acp::MAX_USAGE_TOKENS,u64::from(registration.maximum_model_calls()))?;
                     yield ProviderEvent::Usage{input_tokens:usage.input_tokens,output_tokens:usage.output_tokens,cached_input_tokens:usage.cached_input_tokens};
-                    if category==Some("max_turns_reached") {Err(ProviderError::BudgetDenied)?;}
+                    if category==Some("max_turns_reached") {Err(ProviderError::Classified(crate::AiProviderFailureCategory::ExecutionLimit))?;}
                     if result["stopReason"]=="cancelled" {Err(ProviderError::Cancelled)?;}
                     if result["stopReason"]!="end_turn"||result["_meta"].get("cancellationCategory").is_some()||result["_meta"].get("completionKind").is_some(){Err(rejected())?;}
                     yield ProviderEvent::ResponseCompleted{response_id:Some(response_id)};break;

@@ -1946,6 +1946,12 @@ pub enum AiProviderFailureCategory {
     Cancellation,
     /// Durable persistence or a run/provider-session fence was lost.
     PersistenceFenceLoss,
+    /// The provider reached its configured execution-round ceiling.
+    ExecutionLimit,
+    /// The provider did not report complete authoritative usage.
+    UsageIncomplete,
+    /// Aggregate provider usage did not satisfy its accounting contract.
+    UsageInvalid,
 }
 
 impl AiProviderFailureCategory {
@@ -1957,6 +1963,9 @@ impl AiProviderFailureCategory {
             Self::TransportUnavailable => "provider_transport_unavailable",
             Self::RateLimit => "provider_rate_limit",
             Self::ProviderRejection => "provider_rejection",
+            Self::ExecutionLimit => "provider_execution_limit",
+            Self::UsageIncomplete => "provider_usage_incomplete",
+            Self::UsageInvalid => "provider_usage_invalid",
             Self::ProtocolViolation => "provider_protocol_violation",
             Self::InvalidDynamicToolCall => "invalid_dynamic_tool_call",
             Self::RetainedResumeRejection => "retained_thread_resume_rejection",
@@ -2338,6 +2347,8 @@ pub enum AiApplicationToolFailureCode {
     ResolverValidationFailed,
     /// No result exists and current disclosure policy permits that distinction.
     NotFound,
+    /// No further tools may execute in this turn; summarize available evidence.
+    ToolCallLimitReached,
 }
 
 impl AiApplicationToolFailureCode {
@@ -2348,6 +2359,7 @@ impl AiApplicationToolFailureCode {
             Self::SelectionTooLarge => "selection_too_large",
             Self::RelationshipDepthExceeded => "relationship_depth_exceeded",
             Self::ResultBudgetExceeded => "result_budget_exceeded",
+            Self::ToolCallLimitReached => "tool_call_limit_reached",
             Self::CapabilityStale => "capability_stale",
             Self::AuthorizationDenied => "authorization_denied",
             Self::TemporarilyUnavailable => "temporarily_unavailable",

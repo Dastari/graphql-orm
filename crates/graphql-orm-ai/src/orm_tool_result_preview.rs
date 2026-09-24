@@ -374,6 +374,7 @@ fn application_tool_failure_code(value: &str) -> Option<crate::AiApplicationTool
         "selection_too_large" => Code::SelectionTooLarge,
         "relationship_depth_exceeded" => Code::RelationshipDepthExceeded,
         "result_budget_exceeded" => Code::ResultBudgetExceeded,
+        "tool_call_limit_reached" => Code::ToolCallLimitReached,
         "capability_stale" => Code::CapabilityStale,
         "authorization_denied" => Code::AuthorizationDenied,
         "temporarily_unavailable" => Code::TemporarilyUnavailable,
@@ -395,6 +396,7 @@ const fn exhaustive_browser_failure_code(
         | Code::SelectionTooLarge
         | Code::RelationshipDepthExceeded
         | Code::ResultBudgetExceeded
+        | Code::ToolCallLimitReached
         | Code::CapabilityStale
         | Code::AuthorizationDenied
         | Code::TemporarilyUnavailable

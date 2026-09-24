@@ -31,6 +31,11 @@ to false until exact host isolation is verified; usage follows the existing
 estimate/actual budget contract. See the
 [local harness boundary](docs/local-harness.md).
 
+Inline tools reserve their last admitted callback for a durable limit response,
+allowing the provider to summarize authorized results without another read. Host
+ceilings admit up to 1,024 callbacks and Grok rounds; budgets and no-replay
+fences remain independent. See the [local harness boundary](docs/local-harness.md).
+
 Egress audit writes serialize check-and-insert through the ORM state-machine
 transaction contract. Bounded transaction retries preserve exact replay checks
 and fail closed without repeating application tools or provider requests.
@@ -42,7 +47,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.99.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.100.0", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,

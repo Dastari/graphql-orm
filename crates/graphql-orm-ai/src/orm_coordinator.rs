@@ -807,7 +807,7 @@ impl AiProviderDynamicToolExecution for ReadOnlyDynamicToolExecution {
         {
             return Err(AiError::Forbidden);
         }
-        {
+        let limit_reached = {
             let mut state = self.state.lock().await;
             state.accepted_calls = state
                 .accepted_calls
@@ -815,6 +815,19 @@ impl AiProviderDynamicToolExecution for ReadOnlyDynamicToolExecution {
                 .filter(|calls| *calls <= self.maximum_calls)
                 .ok_or(AiError::BudgetDenied)?;
             state.rule_usage = state.rule_usage.accept_tool_calls(1, &current_rules)?;
+            state.accepted_calls == self.maximum_calls
+        };
+        // Keep the last run-level slot available for an explanation rather
+        // than dispatching another read and abruptly losing the whole answer.
+        if limit_reached {
+            return self
+                .persist_dynamic_failure(
+                    lease,
+                    provider_result,
+                    tool_call_index,
+                    crate::AiApplicationToolFailureCode::ToolCallLimitReached,
+                )
+                .await;
         }
         let context = AiApplicationToolCallContext::new(
             self.provider_turn_index,
@@ -1692,7 +1705,7 @@ impl AiReadOnlyAgentCoordinator {
                         Err(error) => return Err(error),
                     }
                 }
-                Err(ProviderTurnFailure::Provider) => {
+                Err(ProviderTurnFailure::Provider(code)) => {
                     if self.run_control.cancellation(&lease).await?.is_some() {
                         return Ok(Cancelled {
                             provider_turns: guard.provider_turns(),
@@ -1704,7 +1717,7 @@ impl AiReadOnlyAgentCoordinator {
                             &lease,
                             &guard,
                             AiAgentRecoveryPhase::ProviderTurn,
-                            "provider_turn_uncertain",
+                            code,
                             None,
                         )
                         .await;
@@ -2535,7 +2548,7 @@ impl AiReadOnlyAgentCoordinator {
 }
 
 enum ProviderTurnFailure {
-    Provider,
+    Provider(&'static str),
     BudgetDenied,
     PreTransportProvider,
     StatelessNativeItemRejected,
@@ -2562,7 +2575,14 @@ const fn classify_provider_turn_failure(error: &AiError) -> ProviderTurnFailure 
         AiError::PreTransportBudgetDenied => ProviderTurnFailure::BudgetDenied,
         AiError::PreTransportProviderFailed => ProviderTurnFailure::PreTransportProvider,
         AiError::StatelessNativeItemRejected => ProviderTurnFailure::StatelessNativeItemRejected,
-        _ => ProviderTurnFailure::Provider,
+        AiError::ProviderExecutionLimit => {
+            ProviderTurnFailure::Provider("provider_turn_limit_reached_uncertain")
+        }
+        AiError::ProviderUsageIncomplete => {
+            ProviderTurnFailure::Provider("provider_usage_incomplete")
+        }
+        AiError::ProviderUsageInvalid => ProviderTurnFailure::Provider("provider_usage_invalid"),
+        _ => ProviderTurnFailure::Provider("provider_turn_uncertain"),
     }
 }
 
@@ -5327,32 +5347,47 @@ mod tests {
 
     #[tokio::test]
     async fn provider_failure_is_closed_as_recovery_required() {
-        let lease = AiRunLease::test_running(principal_reference());
-        let run = Arc::new(TestRunControl::new());
-        let provider = Arc::new(TestProviderExecutor {
-            responses: Mutex::new(VecDeque::from([Err(AiError::ProviderFailed)])),
-            delay: None,
-        });
-        let planner = Arc::new(TestPlanner {
-            scope: test_scope(),
-            route: test_route(),
-            continuation_count: AtomicUsize::new(0),
-        });
+        for (error, expected_code) in [
+            (AiError::ProviderFailed, "provider_turn_uncertain"),
+            (
+                AiError::ProviderExecutionLimit,
+                "provider_turn_limit_reached_uncertain",
+            ),
+            (
+                AiError::ProviderUsageIncomplete,
+                "provider_usage_incomplete",
+            ),
+            (AiError::ProviderUsageInvalid, "provider_usage_invalid"),
+        ] {
+            let lease = AiRunLease::test_running(principal_reference());
+            let run = Arc::new(TestRunControl::new());
+            let provider = Arc::new(TestProviderExecutor {
+                responses: Mutex::new(VecDeque::from([Err(error)])),
+                delay: None,
+            });
+            let planner = Arc::new(TestPlanner {
+                scope: test_scope(),
+                route: test_route(),
+                continuation_count: AtomicUsize::new(0),
+            });
 
-        let outcome = coordinator(run.clone(), provider, planner, true, limits(50))
-            .execute_claimed(&lease)
-            .await
-            .expect("provider ambiguity should be durably classified");
+            let outcome = coordinator(run.clone(), provider, planner, true, limits(50))
+                .execute_claimed(&lease)
+                .await
+                .expect("provider ambiguity should be durably classified");
 
-        assert_eq!(
-            outcome,
-            RecoveryRequired {
-                phase: AiAgentRecoveryPhase::ProviderTurn,
-                provider_turns: 0,
-                total_tool_calls: 0,
-            }
-        );
-        assert_eq!(run.final_states(), vec![AiRunState::RecoveryRequired]);
+            assert_eq!(
+                outcome,
+                RecoveryRequired {
+                    phase: AiAgentRecoveryPhase::ProviderTurn,
+                    provider_turns: 0,
+                    total_tool_calls: 0,
+                }
+            );
+            assert_eq!(run.final_states(), vec![AiRunState::RecoveryRequired]);
+            assert_eq!(*run.finish_codes.lock().unwrap(), vec![expected_code]);
+            assert!(run.scheduled_retries.lock().unwrap().is_empty());
+        }
     }
 
     #[tokio::test]

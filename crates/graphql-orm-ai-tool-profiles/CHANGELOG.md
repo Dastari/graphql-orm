@@ -14,6 +14,10 @@ supersedes: []
 
 ### Added
 
+- Content-free `AiError::ProviderExecutionLimit`, `ProviderUsageIncomplete`
+  and `ProviderUsageInvalid` preserve distinct public failure codes after
+  possible provider dispatch. None proves settled usage or authorizes retry.
+
 - `AiError::SessionExecutionUnbound` and `SessionExecutionUnavailable` expose
   distinct safe recovery codes for immutable session routing. No payload or
   provider/account details are included.

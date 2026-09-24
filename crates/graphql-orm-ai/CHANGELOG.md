@@ -20,7 +20,25 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+### Added
+
+- Reserve the final inline tool slot for a durable, non-retryable
+  `tool_call_limit_reached` result. The provider can summarize already-authorized
+  evidence instead of abruptly losing its response. No application tool runs in
+  that slot, and attempts beyond the hard ceiling still fail closed.
+- Host-selectable application-tool ceilings up to 1,024 per provider call and
+  Grok model-round ceilings up to 1,024, with unchanged defaults and accounting.
+- Closed diagnostics distinguish native execution limits, incomplete usage and
+  invalid usage from generic provider rejection; none contains provider content.
+  These reasons survive the executor into durable recovery outcomes, without
+  changing uncertain accounting or admitting replay.
+
+
 ### Fixed
+
+- Safe read-failure responses now retain a terminal `egress_audit_failed` row
+  and renewed lease when their disclosure audit fails, matching successful
+  result handling instead of stranding the row as `executing`.
 
 - Egress audit check-and-insert now uses a state-machine transaction, avoiding
   SQLite deferred read-to-write races between concurrent disclosures. Retryable

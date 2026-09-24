@@ -118,9 +118,10 @@ impl AiProviderCallLimits {
     /// # Errors
     ///
     /// Returns [`AiError::InvalidConfiguration`] unless the limit is within
-    /// `1..=64`.
+    /// `1..=1_024`. The final slot is reserved for a persisted, model-visible
+    /// limit response so an inline provider can summarize without another tool.
     pub fn with_maximum_tool_calls(mut self, maximum_tool_calls: usize) -> Result<Self, AiError> {
-        if !(1..=64).contains(&maximum_tool_calls) {
+        if !(1..=1_024).contains(&maximum_tool_calls) {
             return Err(AiError::InvalidConfiguration(
                 "invalid provider-call tool limit".to_owned(),
             ));
@@ -1892,6 +1893,7 @@ struct DynamicToolResponder {
     previous_continuation_reference: Option<String>,
     request_snapshot: ModelRequest,
     model_inference_manifest: AiEgressManifest,
+    maximum_tool_calls: usize,
     calls: Mutex<Vec<AiProviderToolCall>>,
     results: Mutex<Vec<AiPersistedApplicationToolCall>>,
 }
@@ -1923,7 +1925,7 @@ impl ProviderDynamicToolResponder for DynamicToolResponder {
             if calls
                 .iter()
                 .any(|existing| existing.call_id() == call.call_id())
-                || calls.len() >= 64
+                || calls.len() >= self.maximum_tool_calls
             {
                 return Err(ProviderError::Rejected);
             }
@@ -1964,20 +1966,35 @@ impl ProviderDynamicToolResponder for DynamicToolResponder {
             interactive_tool_results: Vec::new(),
             provider_session_claim: None,
         };
-        let persisted = match self
-            .execution
-            .execute_dynamic_tool(&lease, &provisional, tool_call_index)
-            .await
-        {
-            Ok(persisted) => persisted,
-            Err(error) => {
-                let Some(code) = classify_safe_application_tool_error(&error) else {
-                    return Err(ProviderError::Rejected);
-                };
-                self.execution
-                    .persist_dynamic_failure(&lease, &provisional, tool_call_index, code)
-                    .await
-                    .map_err(|_| ProviderError::Rejected)?
+        // Reserve the final admitted callback for a durable no-execution
+        // response. Do not reinterpret a failed persistence attempt as a
+        // second failure result: its original outcome may be uncertain.
+        let persisted = if tool_call_index + 1 == self.maximum_tool_calls {
+            self.execution
+                .persist_dynamic_failure(
+                    &lease,
+                    &provisional,
+                    tool_call_index,
+                    crate::AiApplicationToolFailureCode::ToolCallLimitReached,
+                )
+                .await
+                .map_err(|_| ProviderError::Rejected)?
+        } else {
+            match self
+                .execution
+                .execute_dynamic_tool(&lease, &provisional, tool_call_index)
+                .await
+            {
+                Ok(persisted) => persisted,
+                Err(error) => {
+                    let Some(code) = classify_safe_application_tool_error(&error) else {
+                        return Err(ProviderError::Rejected);
+                    };
+                    self.execution
+                        .persist_dynamic_failure(&lease, &provisional, tool_call_index, code)
+                        .await
+                        .map_err(|_| ProviderError::Rejected)?
+                }
             }
         };
         // Persistence may advance the run even when egress denies the result.
@@ -2724,6 +2741,16 @@ impl AiProviderCallExecutor {
         self.record_provider_failure(error.safe_category());
     }
 
+    fn classify_dispatched_provider_error(&self, error: &ProviderError) -> AiError {
+        self.record_provider_error(error);
+        match error.safe_category() {
+            AiProviderFailureCategory::ExecutionLimit => AiError::ProviderExecutionLimit,
+            AiProviderFailureCategory::UsageIncomplete => AiError::ProviderUsageIncomplete,
+            AiProviderFailureCategory::UsageInvalid => AiError::ProviderUsageInvalid,
+            _ => AiError::ProviderFailed,
+        }
+    }
+
     /// Enables protected durable visible-delta persistence for this executor.
     ///
     /// Without a sink the provider result remains fully bounded and durable
@@ -3394,6 +3421,7 @@ impl AiProviderCallExecutor {
                 previous_continuation_reference: previous_continuation_reference.clone(),
                 request_snapshot: request_snapshot.clone(),
                 model_inference_manifest: model_inference_manifest.clone(),
+                maximum_tool_calls: self.limits.maximum_tool_calls,
                 calls: Mutex::new(Vec::new()),
                 results: Mutex::new(Vec::new()),
             })
@@ -3420,7 +3448,7 @@ impl AiProviderCallExecutor {
                 return Err(AiError::PreTransportProviderFailed);
             }
             crate::AiProviderDispatchOutcome::FailedAfterPossibleDispatch(error) => {
-                self.record_provider_error(&error);
+                let error = self.classify_dispatched_provider_error(&error);
                 self.budget_service
                     .reconcile(
                         &current,
@@ -3434,7 +3462,7 @@ impl AiProviderCallExecutor {
                         },
                     )
                     .await?;
-                return Err(AiError::ProviderFailed);
+                return Err(error);
             }
             crate::AiProviderDispatchOutcome::Dispatched(stream) => stream,
         };
@@ -3532,8 +3560,7 @@ impl AiProviderCallExecutor {
                     continue;
                 }
                 Err(error) => {
-                    self.record_provider_error(&error);
-                    return Err(AiError::ProviderFailed);
+                    return Err(self.classify_dispatched_provider_error(&error));
                 }
             };
             let event_bytes = serde_json::to_vec(&event)
@@ -10978,9 +11005,60 @@ mod tests {
         assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 1);
     }
 
+    #[test]
+    fn extended_tool_limits_are_admitted_by_stream_and_durable_executor() {
+        for limit in [256, 1_024] {
+            assert!(
+                AiProviderCallLimits::new(4_096, 65_536, 8_388_608)
+                    .unwrap()
+                    .with_maximum_tool_calls(limit)
+                    .is_ok()
+            );
+            assert!(
+                crate::AiApplicationToolCallLimits::new(
+                    65_536,
+                    16_777_216,
+                    256,
+                    limit,
+                    Duration::seconds(60),
+                    Duration::seconds(60)
+                )
+                .is_ok()
+            );
+        }
+        assert!(
+            AiProviderCallLimits::new(1, 1, 1)
+                .unwrap()
+                .with_maximum_tool_calls(1_025)
+                .is_err()
+        );
+        assert!(
+            crate::AiApplicationToolCallLimits::new(
+                1,
+                1,
+                256,
+                1_025,
+                Duration::seconds(1),
+                Duration::seconds(1)
+            )
+            .is_err()
+        );
+    }
+
     #[cfg(feature = "provider-grok-acp")]
     #[tokio::test]
     async fn grok_wire_dynamic_calls_complete_through_retained_executor() {
+        assert_grok_wire_dynamic_calls(8).await;
+    }
+
+    #[cfg(feature = "provider-grok-acp")]
+    #[tokio::test]
+    async fn grok_last_tool_slot_returns_durable_limit_and_still_finishes() {
+        assert_grok_wire_dynamic_calls(3).await;
+    }
+
+    #[cfg(feature = "provider-grok-acp")]
+    async fn assert_grok_wire_dynamic_calls(maximum_calls: usize) {
         use crate::providers::{AiGrokAcpProvider, AiGrokAcpRegistration, ExecutorWireFactory};
         let seed = fixture(vec![]).await;
         let tools = tool_plan(&seed).request.tools;
@@ -11115,7 +11193,10 @@ mod tests {
             fixture.audit.clone(),
             Arc::new(TestUsageAccounting),
             Arc::new(SystemClock),
-            AiProviderCallLimits::new(64, 8192, 65536).unwrap(),
+            AiProviderCallLimits::new(64, 8192, 65536)
+                .unwrap()
+                .with_maximum_tool_calls(maximum_calls)
+                .unwrap(),
         );
         let calls = Arc::new(AtomicUsize::new(0));
         let result = executor
@@ -11132,7 +11213,24 @@ mod tests {
             )
             .await
             .expect("real Grok wire callbacks must complete the retained executor");
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            if maximum_calls == 3 { 2 } else { 3 }
+        );
+        if maximum_calls == 3 {
+            let last = result.interactive_tool_results().last().unwrap();
+            let Some(ModelInputBlock::ToolResult { output, .. }) = last.model_input() else {
+                panic!("limit response must reach provider")
+            };
+            assert_eq!(
+                output,
+                &crate::AiApplicationToolFailureEnvelope::new(
+                    crate::AiApplicationToolFailureCode::ToolCallLimitReached
+                )
+                .to_json()
+            );
+            assert_eq!(output["retryable"], false);
+        }
         assert_eq!(result.tool_calls().len(), 3);
         assert_eq!(result.interactive_tool_results.len(), 3);
         for (call, persisted) in result
@@ -11188,11 +11286,52 @@ mod tests {
                 )
                 .await
         }
+        async fn persist_dynamic_failure(
+            &self,
+            lease: &AiRunLease,
+            result: &AiProviderCallResult,
+            index: usize,
+            code: crate::AiApplicationToolFailureCode,
+        ) -> Result<AiPersistedApplicationToolCall, AiError> {
+            self.service
+                .persist_safe_read_failure(
+                    lease,
+                    result,
+                    AiApplicationToolCallContext::new(
+                        0,
+                        index,
+                        self.scope.clone(),
+                        "dynamic-limit-test",
+                        "provider-turn-1",
+                    )?,
+                    AiToolResultEgressRoute::new(
+                        "mock-profile",
+                        "local-mock",
+                        AiDestinationTrust::Local,
+                        "continue_authorized_tool_result",
+                        "none",
+                        "egress-v1",
+                    )?,
+                    code,
+                )
+                .await
+        }
     }
 
     #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
     #[tokio::test]
     async fn durably_denied_dynamic_result_keeps_current_lease_without_disclosure() {
+        assert_denied_dynamic_result(8).await;
+    }
+
+    #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
+    #[tokio::test]
+    async fn limit_response_audit_denial_never_executes_or_discloses() {
+        assert_denied_dynamic_result(1).await;
+    }
+
+    #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
+    async fn assert_denied_dynamic_result(maximum_tool_calls: usize) {
         let fixture = fixture(vec![
             ProviderEvent::ResponseStarted {
                 response_id: Some("denied-response".into()),
@@ -11246,6 +11385,7 @@ mod tests {
             previous_continuation_reference: None,
             request_snapshot: result.request_snapshot.clone(),
             model_inference_manifest: result.model_inference_manifest.clone(),
+            maximum_tool_calls,
             calls: Mutex::new(Vec::new()),
             results: Mutex::new(Vec::new()),
         };
@@ -11273,14 +11413,17 @@ mod tests {
         assert_eq!(calls[0].state, "egress_audit_failed");
         assert!(calls[0].completed_at.is_some());
         assert!(calls[0].protected_result.is_some());
-        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            usize::from(maximum_tool_calls > 1)
+        );
         assert!(matches!(
             responder.respond(call).await,
             Err(ProviderError::Rejected)
         ));
         assert_eq!(
             executions.load(Ordering::SeqCst),
-            1,
+            usize::from(maximum_tool_calls > 1),
             "denial must not replay execution"
         );
         fixture
