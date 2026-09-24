@@ -21,6 +21,12 @@ use [implementation status](docs/implementation-status.md) and the central
 
 ## 0.99.1 to 0.100.0
 
+Adopt AI tool profiles `0.13.0` from the same workspace release. Its additional
+`AiError` limit/usage variants preserve closed reasons through the executor.
+The coordinator stores `provider_turn_limit_reached_uncertain`,
+`provider_usage_incomplete` or `provider_usage_invalid` in recovery outcomes.
+These codes explain a failure; none proves complete usage or permits retry.
+
 Apply AI schema module `0.66.0` before resuming workers. The new durable
 `tool_call_limit_reached` failure code extends tool-result semantics; there is
 no table/column change or data backfill. Readers must use this version's closed

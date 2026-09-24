@@ -63,6 +63,16 @@ pub enum AiError {
     /// Provider operation failed safely.
     #[error("AI provider operation failed")]
     ProviderFailed,
+    /// A provider execution ceiling ended the response after possible dispatch.
+    /// This explains the failure but proves neither complete usage nor safe replay.
+    #[error("AI provider execution limit reached")]
+    ProviderExecutionLimit,
+    /// The provider did not supply complete authoritative terminal usage.
+    #[error("AI provider terminal usage is incomplete")]
+    ProviderUsageIncomplete,
+    /// The provider supplied terminal usage outside its reviewed contract.
+    #[error("AI provider terminal usage is invalid")]
+    ProviderUsageInvalid,
     /// A stateless provider turn completed and was metered, but the adapter
     /// refused one provider-native item outside the admitted model surface.
     ///
@@ -110,6 +120,9 @@ impl AiError {
             Self::ReauthorizationFailed => "AI_REAUTHORIZATION_FAILED",
             Self::ToolExecutionFailed => "AI_TOOL_EXECUTION_FAILED",
             Self::ProviderFailed => "AI_PROVIDER_FAILED",
+            Self::ProviderExecutionLimit => "AI_PROVIDER_EXECUTION_LIMIT",
+            Self::ProviderUsageIncomplete => "AI_PROVIDER_USAGE_INCOMPLETE",
+            Self::ProviderUsageInvalid => "AI_PROVIDER_USAGE_INVALID",
             Self::StatelessNativeItemRejected => "AI_PROVIDER_FAILED",
             Self::RuntimeNotReady => "AI_RUNTIME_NOT_READY",
             Self::SessionExecutionUnbound => "AI_SESSION_EXECUTION_UNBOUND",
@@ -131,6 +144,24 @@ impl ErrorExtensions for AiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_limit_and_usage_codes_are_distinct_and_content_free() {
+        for (error, code) in [
+            (
+                AiError::ProviderExecutionLimit,
+                "AI_PROVIDER_EXECUTION_LIMIT",
+            ),
+            (
+                AiError::ProviderUsageIncomplete,
+                "AI_PROVIDER_USAGE_INCOMPLETE",
+            ),
+            (AiError::ProviderUsageInvalid, "AI_PROVIDER_USAGE_INVALID"),
+        ] {
+            assert_eq!(error.public_code(), code);
+            assert_ne!(error.public_code(), AiError::ProviderFailed.public_code());
+        }
+    }
 
     #[test]
     fn stateless_native_item_rejection_keeps_the_provider_failure_public_code() {

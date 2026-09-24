@@ -2741,6 +2741,16 @@ impl AiProviderCallExecutor {
         self.record_provider_failure(error.safe_category());
     }
 
+    fn classify_dispatched_provider_error(&self, error: &ProviderError) -> AiError {
+        self.record_provider_error(error);
+        match error.safe_category() {
+            AiProviderFailureCategory::ExecutionLimit => AiError::ProviderExecutionLimit,
+            AiProviderFailureCategory::UsageIncomplete => AiError::ProviderUsageIncomplete,
+            AiProviderFailureCategory::UsageInvalid => AiError::ProviderUsageInvalid,
+            _ => AiError::ProviderFailed,
+        }
+    }
+
     /// Enables protected durable visible-delta persistence for this executor.
     ///
     /// Without a sink the provider result remains fully bounded and durable
@@ -3438,7 +3448,7 @@ impl AiProviderCallExecutor {
                 return Err(AiError::PreTransportProviderFailed);
             }
             crate::AiProviderDispatchOutcome::FailedAfterPossibleDispatch(error) => {
-                self.record_provider_error(&error);
+                let error = self.classify_dispatched_provider_error(&error);
                 self.budget_service
                     .reconcile(
                         &current,
@@ -3452,7 +3462,7 @@ impl AiProviderCallExecutor {
                         },
                     )
                     .await?;
-                return Err(AiError::ProviderFailed);
+                return Err(error);
             }
             crate::AiProviderDispatchOutcome::Dispatched(stream) => stream,
         };
@@ -3550,8 +3560,7 @@ impl AiProviderCallExecutor {
                     continue;
                 }
                 Err(error) => {
-                    self.record_provider_error(&error);
-                    return Err(AiError::ProviderFailed);
+                    return Err(self.classify_dispatched_provider_error(&error));
                 }
             };
             let event_bytes = serde_json::to_vec(&event)
@@ -11414,7 +11423,7 @@ mod tests {
         ));
         assert_eq!(
             executions.load(Ordering::SeqCst),
-            1,
+            usize::from(maximum_tool_calls > 1),
             "denial must not replay execution"
         );
         fixture

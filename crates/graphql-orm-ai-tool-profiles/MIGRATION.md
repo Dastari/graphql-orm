@@ -10,6 +10,16 @@ supersedes: []
 
 # Migration Guide
 
+## 0.12.0 to 0.13.0
+
+The non-exhaustive `AiError` adds `ProviderExecutionLimit`,
+`ProviderUsageIncomplete` and `ProviderUsageInvalid`. Their public codes are
+`AI_PROVIDER_EXECUTION_LIMIT`, `AI_PROVIDER_USAGE_INCOMPLETE` and
+`AI_PROVIDER_USAGE_INVALID`. Treat these as failures after possible dispatch,
+not proof of complete accounting or permission to replay. The AI runtime
+preserves them in durable recovery outcomes. No data or schema migration is
+needed in this package; AI 0.100.0 versions its durable semantics separately.
+
 ## 0.11.0 to 0.12.0
 
 Handle the two additional non-exhaustive `AiError` variants with public codes
