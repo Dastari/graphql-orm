@@ -19,6 +19,40 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.100.1 to 0.100.2
+
+No data migration is required. GraphQL SDL, existing stored recovery outcomes and
+schema module are unchanged. Future Grok turns ending with the exact
+`end_turn` / `action_stationarity` terminal now complete with a static explanation
+that the response may be incomplete and a user follow-up can continue from the
+results already obtained. This admission requires correlated terminal identity,
+no pending broker callbacks and complete validated usage before completion.
+No new prompt or callback is issued, and already failed runs remain untouched.
+
+The [native completion contract](https://github.com/xai-org/grok-build/blob/f0e3be1100ef5252488e3be8bb0e91cf68d8c305/crates/codegen/xai-grok-shell/src/session/commands.rs)
+identifies stationarity as a silent EndTurn. The adapter supplies the explanation
+rather than claiming the user's task finished. Native repetition detection and
+host execution ceilings are unchanged; cancellation, unmetered/invalid usage,
+pending calls and unknown terminal categories retain their prior closed outcomes.
+
+The non-exhaustive `AiProviderFailureCategory` gains closed
+protocol categories for diagnostics; consumers matching this enum must retain
+an unknown-category fallback. These categories never authorize replay.
+
+Codex initialization now opts out of the exact `account/updated` notification,
+which this adapter does not use as execution or account-selection authority.
+The [official app-server notification contract](https://developers.openai.com/codex/app-server#notification-opt-out)
+keeps requests, responses and errors outside notification suppression.
+Authentication failures still reject the correlated request or turn. An app-server
+that ignores the negotiated opt-out still fails closed if it emits the unsupported
+notification. No credential, account, billing or authentication flow is changed.
+
+Grok protocol rejection diagnostics distinguish the failed contract without
+retaining frame content, identifiers or unknown provider strings. They preserve
+all other admission checks, limits, usage accounting and uncertain outcomes.
+A historical `provider_protocol_violation` alone does not prove which check
+failed, and this change does not claim to repair an unobserved protocol event.
+
 ## 0.100.0 to 0.100.1
 
 No data migration is required. Rust APIs, GraphQL SDL, schema module and stored

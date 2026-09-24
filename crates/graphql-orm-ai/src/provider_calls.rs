@@ -11048,17 +11048,23 @@ mod tests {
     #[cfg(feature = "provider-grok-acp")]
     #[tokio::test]
     async fn grok_wire_dynamic_calls_complete_through_retained_executor() {
-        assert_grok_wire_dynamic_calls(8).await;
+        assert_grok_wire_dynamic_calls(8, false).await;
     }
 
     #[cfg(feature = "provider-grok-acp")]
     #[tokio::test]
     async fn grok_last_tool_slot_returns_durable_limit_and_still_finishes() {
-        assert_grok_wire_dynamic_calls(3).await;
+        assert_grok_wire_dynamic_calls(3, false).await;
     }
 
     #[cfg(feature = "provider-grok-acp")]
-    async fn assert_grok_wire_dynamic_calls(maximum_calls: usize) {
+    #[tokio::test]
+    async fn grok_stationary_end_turn_settles_persisted_tools_once_and_explains_partial_work() {
+        assert_grok_wire_dynamic_calls(8, true).await;
+    }
+
+    #[cfg(feature = "provider-grok-acp")]
+    async fn assert_grok_wire_dynamic_calls(maximum_calls: usize, stationarity: bool) {
         use crate::providers::{AiGrokAcpProvider, AiGrokAcpRegistration, ExecutorWireFactory};
         let seed = fixture(vec![]).await;
         let tools = tool_plan(&seed).request.tools;
@@ -11091,7 +11097,7 @@ mod tests {
         let provider = Arc::new(
             AiGrokAcpProvider::new(
                 registration.clone(),
-                Arc::new(ExecutorWireFactory),
+                Arc::new(ExecutorWireFactory { stationarity }),
                 2,
                 std::time::Duration::from_secs(5),
             )
@@ -11230,6 +11236,9 @@ mod tests {
                 .to_json()
             );
             assert_eq!(output["retryable"], false);
+        }
+        if stationarity {
+            assert!(result.events().iter().any(|event| matches!(event, ProviderEvent::TextDelta { text } if text.contains("repeated-activity limit") && text.contains("incomplete"))));
         }
         assert_eq!(result.tool_calls().len(), 3);
         assert_eq!(result.interactive_tool_results.len(), 3);

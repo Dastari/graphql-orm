@@ -1952,6 +1952,28 @@ pub enum AiProviderFailureCategory {
     UsageIncomplete,
     /// Aggregate provider usage did not satisfy its accounting contract.
     UsageInvalid,
+    /// A provider exceeded the bounded wire frame or cumulative byte limit.
+    ProtocolFrameLimit,
+    /// A provider notification did not belong to the active session.
+    ProtocolSessionMismatch,
+    /// A provider changed the frozen model or reasoning effort.
+    ProtocolModelMismatch,
+    /// A provider response failed correlation or completion checks.
+    ProtocolResponse,
+    /// A native internal reload failed its bounded acknowledgement contract.
+    ProtocolInternalReload,
+    /// A native broker message failed the frozen SDK contract.
+    ProtocolSdk,
+    /// A native tool notification failed its correlated lifecycle contract.
+    ProtocolToolLifecycle,
+    /// A provider announced a native tool outside the admitted broker surface.
+    ProtocolNativeTool,
+    /// A provider announced unaccounted side inference or compaction.
+    ProtocolSideInference,
+    /// A provider announced unexpected background activity.
+    ProtocolBackgroundActivity,
+    /// A provider sent an unsupported notification; its text is never retained.
+    ProtocolUnknownNotification,
 }
 
 impl AiProviderFailureCategory {
@@ -1967,6 +1989,17 @@ impl AiProviderFailureCategory {
             Self::UsageIncomplete => "provider_usage_incomplete",
             Self::UsageInvalid => "provider_usage_invalid",
             Self::ProtocolViolation => "provider_protocol_violation",
+            Self::ProtocolFrameLimit => "provider_protocol_frame_limit",
+            Self::ProtocolSessionMismatch => "provider_protocol_session_mismatch",
+            Self::ProtocolModelMismatch => "provider_protocol_model_mismatch",
+            Self::ProtocolResponse => "provider_protocol_response",
+            Self::ProtocolInternalReload => "provider_protocol_internal_reload",
+            Self::ProtocolSdk => "provider_protocol_sdk",
+            Self::ProtocolToolLifecycle => "provider_protocol_tool_lifecycle",
+            Self::ProtocolNativeTool => "provider_protocol_native_tool",
+            Self::ProtocolSideInference => "provider_protocol_side_inference",
+            Self::ProtocolBackgroundActivity => "provider_protocol_background_activity",
+            Self::ProtocolUnknownNotification => "provider_protocol_unknown_notification",
             Self::InvalidDynamicToolCall => "invalid_dynamic_tool_call",
             Self::RetainedResumeRejection => "retained_thread_resume_rejection",
             Self::Cancellation => "provider_cancellation",
@@ -3300,6 +3333,17 @@ mod safe_failure_tests {
             AiProviderFailureCategory::RateLimit,
             AiProviderFailureCategory::ProviderRejection,
             AiProviderFailureCategory::ProtocolViolation,
+            AiProviderFailureCategory::ProtocolFrameLimit,
+            AiProviderFailureCategory::ProtocolSessionMismatch,
+            AiProviderFailureCategory::ProtocolModelMismatch,
+            AiProviderFailureCategory::ProtocolResponse,
+            AiProviderFailureCategory::ProtocolInternalReload,
+            AiProviderFailureCategory::ProtocolSdk,
+            AiProviderFailureCategory::ProtocolToolLifecycle,
+            AiProviderFailureCategory::ProtocolNativeTool,
+            AiProviderFailureCategory::ProtocolSideInference,
+            AiProviderFailureCategory::ProtocolBackgroundActivity,
+            AiProviderFailureCategory::ProtocolUnknownNotification,
             AiProviderFailureCategory::InvalidDynamicToolCall,
             AiProviderFailureCategory::RetainedResumeRejection,
             AiProviderFailureCategory::Cancellation,
