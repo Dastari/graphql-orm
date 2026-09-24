@@ -16,6 +16,8 @@ use crate::{
 
 const FRAME: usize = 16 * 1024 * 1024;
 const TOTAL: usize = 64 * 1024 * 1024;
+// Independent of successful model rounds; a one-round prompt may still retry.
+const MAX_RETRY_NOTIFICATIONS: u32 = 1024;
 const SERVER: &str = "graphql-orm-ai-broker";
 const FIXED_TITLE: &str = "Authorized capability session";
 fn rejected() -> ProviderError {
@@ -291,6 +293,61 @@ impl AiGrokAcpWireProcess {
         state.initialized = true;
         Ok(())
     }
+    // Native retries stay inside the already admitted prompt. This consumes
+    // status only: it never sends another prompt or repeats a broker callback.
+    // Provider text is deliberately neither surfaced nor logged.
+    fn retry_notification(
+        value: &Value,
+        session: &str,
+        notifications: &mut u32,
+        maximum: u32,
+    ) -> Result<(), ProviderError> {
+        if value.get("id").is_some() || value["params"]["sessionId"] != session {
+            return Err(rejected());
+        }
+        let update = &value["params"]["update"];
+        match update["type"].as_str() {
+            Some("retrying") => {
+                let attempt = update["attempt"].as_u64().ok_or_else(rejected)?;
+                let limit = update["max_retries"].as_u64().ok_or_else(rejected)?;
+                if attempt == 0
+                    || attempt > limit
+                    || limit > u64::from(maximum)
+                    || !update["reason"].is_string()
+                    || update.get("error_type").is_some_and(|kind| {
+                        !kind.is_null() && kind.as_str().is_none_or(|kind| kind.len() > 80)
+                    })
+                    || *notifications >= maximum
+                {
+                    return Err(rejected());
+                }
+                *notifications += 1;
+                Ok(())
+            }
+            Some("exhausted") => {
+                if update["attempts"].as_u64().is_none()
+                    || !update["reason"].is_string()
+                    || update
+                        .get("is_rate_limited")
+                        .is_some_and(|flag| !flag.is_boolean())
+                {
+                    return Err(rejected());
+                }
+                if update["is_rate_limited"] == true {
+                    Err(ProviderError::RateLimited)
+                } else {
+                    Err(ProviderError::Unavailable)
+                }
+            }
+            Some("failed") => {
+                if !update["error_type"].is_string() || !update["message"].is_string() {
+                    return Err(rejected());
+                }
+                Err(ProviderError::Rejected)
+            }
+            _ => Err(rejected()),
+        }
+    }
     fn notification(
         value: &Value,
         session: Option<&str>,
@@ -400,7 +457,7 @@ impl AiGrokAcpWireProcess {
                         | "token_usage"
                         | "tool_call_delta_chunk",
                     ) => Ok(None),
-                    // Retry, compaction, unaccounted side inference and unknown
+                    // Compaction, unaccounted side inference and unknown
                     // execution events cannot quietly extend a bounded prompt.
                     _ => Err(rejected()),
                 }
@@ -529,6 +586,7 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
         Ok(Box::pin(async_stream::try_stream! {
             yield ProviderEvent::ResponseStarted{response_id:Some(response_id.clone())};
             let mut tool_ids=BTreeSet::new();
+            let mut retry_notifications=0;
             loop {
                 let (bytes,value)=Self::read(transport.as_ref(),&mut state).await?;
                 if value.get("method").is_none(){
@@ -562,6 +620,10 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
                     };
                     transport.write_frame(response).await?;
                 } else {
+                    if value["method"]=="_x.ai/session_notification" && value["params"]["update"]["sessionUpdate"]=="retry_state" {
+                        Self::retry_notification(&value,&session,&mut retry_notifications,MAX_RETRY_NOTIFICATIONS)?;
+                        continue;
+                    }
                     if value["method"]=="session/update" && value["params"]["update"]["sessionUpdate"]=="config_option_update" {
                         let update=&value["params"]["update"];
                         if value["params"]["sessionId"]!=session || value.get("id").is_some() || !Self::option_matches(update,"model",registration.model()) || !Self::option_matches(update,"reasoning_effort",registration.reasoning_effort().as_str()) {Err(rejected())?;}
@@ -661,6 +723,7 @@ pub(crate) mod tests {
             reads.push(sdk(101, "tools/list", json!({})));
             for id in 102..105 {
                 reads.push(sdk(id,"tools/call",json!({"name":registration.tools()[0].provider_name,"arguments":{"recordId":"54"}})));
+                reads.push(retrying(1));
             }
             let aggregate = json!({"inputTokens":29390,"outputTokens":3000,"totalTokens":32390,"cachedReadTokens":17152,"cacheCreationTokens":0,"reasoningTokens":25,"modelCalls":5,"numTurns":5,"modelUsage":{"grok-4.7-build":{"inputTokens":29390,"outputTokens":3000,"totalTokens":32390,"cachedReadTokens":17152,"cacheCreationTokens":0,"reasoningTokens":25,"modelCalls":5}}});
             reads.push(response(
@@ -831,6 +894,196 @@ pub(crate) mod tests {
             "/context\n@/synthetic/canary"
         );
     }
+    fn retry_update(fields: Value) -> Value {
+        let mut update = fields;
+        update["sessionUpdate"] = json!("retry_state");
+        json!({"jsonrpc":"2.0","method":"_x.ai/session_notification",
+            "params":{"sessionId":"session-1","update":update}})
+    }
+
+    fn retrying(attempt: u32) -> Value {
+        retry_update(json!({"type":"retrying","attempt":attempt,"max_retries":3,
+            "reason":"synthetic private provider detail", "error_type":"api"}))
+    }
+
+    #[tokio::test]
+    async fn transient_retry_status_keeps_one_prompt_and_requires_metered_completion() {
+        for metered in [true, false] {
+            let mut reads = new_session_reads();
+            reads.extend([
+                retrying(1),
+                retrying(2),
+                update("agent_message_chunk", "recovered"),
+            ]);
+            let terminal = if metered {
+                json!({"stopReason":"end_turn","_meta":{"usage":usage()}})
+            } else {
+                json!({"stopReason":"end_turn"})
+            };
+            reads.push(response(9, terminal));
+            let (process, wire) = fixture(reads);
+            process.create_empty_session().await.unwrap();
+            let events: Vec<_> = process
+                .prompt(vec!["synthetic".into()], Arc::new(NoTools))
+                .await
+                .unwrap()
+                .collect()
+                .await;
+            assert!(matches!(
+                events[0],
+                Ok(ProviderEvent::ResponseStarted { .. })
+            ));
+            assert!(
+                matches!(&events[1], Ok(ProviderEvent::TextDelta { text }) if text == "recovered")
+            );
+            if metered {
+                assert_eq!(events.len(), 4);
+                assert!(matches!(
+                    events[2],
+                    Ok(ProviderEvent::Usage {
+                        input_tokens: 100,
+                        ..
+                    })
+                ));
+                assert!(matches!(
+                    events[3],
+                    Ok(ProviderEvent::ResponseCompleted { .. })
+                ));
+            } else {
+                assert_eq!(events.len(), 3);
+                assert!(events[2].is_err());
+            }
+            assert_eq!(
+                wire.writes
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|frame| frame["method"] == "session/prompt")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn retry_status_is_session_bound_bounded_and_never_accepts_control_requests() {
+        let valid = retrying(1);
+        let mut rejected_frames = Vec::new();
+        for (pointer, value) in [
+            ("/params/sessionId", json!("another-session")),
+            ("/id", json!(123)),
+            ("/params/update/attempt", json!(0)),
+            ("/params/update/attempt", json!(4)),
+            ("/params/update/attempt", json!(-1)),
+            ("/params/update/max_retries", json!(1025)),
+            ("/params/update/type", json!("auto_recovery_started")),
+            ("/params/update/reason", json!({"sensitive":"value"})),
+            ("/params/update/error_type", json!({"sensitive":"value"})),
+        ] {
+            let mut frame = valid.clone();
+            if pointer == "/id" {
+                frame["id"] = value;
+            } else {
+                *frame.pointer_mut(pointer).unwrap() = value;
+            }
+            rejected_frames.push(frame);
+        }
+        for frame in rejected_frames {
+            assert!(
+                AiGrokAcpWireProcess::retry_notification(&frame, "session-1", &mut 0, 1024)
+                    .is_err()
+            );
+        }
+        let mut count = 0;
+        for _ in 0..3 {
+            AiGrokAcpWireProcess::retry_notification(&valid, "session-1", &mut count, 3).unwrap();
+        }
+        assert!(
+            AiGrokAcpWireProcess::retry_notification(&valid, "session-1", &mut count, 3).is_err()
+        );
+        assert!(
+            AiGrokAcpWireProcess::notification(&valid, None, true, &mut BTreeSet::new()).is_err(),
+            "retry status cannot activate work during initialization or resume"
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_and_failed_retries_never_complete_or_expose_provider_text() {
+        for (status, expected) in [
+            (
+                json!({"type":"exhausted","attempts":3,"reason":"synthetic secret"}),
+                crate::AiProviderFailureCategory::TransportUnavailable,
+            ),
+            (
+                json!({"type":"exhausted","attempts":3,"reason":"synthetic secret","is_rate_limited":true}),
+                crate::AiProviderFailureCategory::RateLimit,
+            ),
+            (
+                json!({"type":"failed","error_type":"auth","message":"synthetic secret"}),
+                crate::AiProviderFailureCategory::ProviderRejection,
+            ),
+        ] {
+            let mut reads = new_session_reads();
+            reads.extend([
+                retrying(1),
+                retry_update(status),
+                response(
+                    9,
+                    json!({"stopReason":"end_turn","_meta":{"usage":usage()}}),
+                ),
+            ]);
+            let (process, wire) = fixture(reads);
+            process.create_empty_session().await.unwrap();
+            let events: Vec<_> = process
+                .prompt(vec!["synthetic".into()], Arc::new(NoTools))
+                .await
+                .unwrap()
+                .collect()
+                .await;
+            assert_eq!(events.len(), 2);
+            let error = events[1].as_ref().unwrap_err();
+            assert_eq!(error.safe_category(), expected);
+            assert!(!error.to_string().contains("synthetic secret"));
+            assert_eq!(
+                wire.writes
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|frame| frame["method"] == "session/prompt")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_native_retry_does_not_resubmit_the_prompt() {
+        let mut reads = new_session_reads();
+        reads.extend([retrying(1), response(9, json!({"stopReason":"cancelled"}))]);
+        let (process, wire) = fixture(reads);
+        process.create_empty_session().await.unwrap();
+        let mut stream = process
+            .prompt(vec!["synthetic".into()], Arc::new(NoTools))
+            .await
+            .unwrap();
+        stream.next().await.unwrap().unwrap();
+        process.cancel().await.unwrap();
+        assert!(matches!(
+            stream.next().await.unwrap(),
+            Err(ProviderError::Cancelled)
+        ));
+        assert!(stream.next().await.is_none());
+        let writes = wire.writes.lock().unwrap();
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|frame| frame["method"] == "session/prompt")
+                .count(),
+            1
+        );
+        assert_eq!(writes.last().unwrap()["method"], "session/cancel");
+    }
+
     #[tokio::test]
     async fn cancellation_without_usage_never_completes_or_invents_zero() {
         let mut reads = new_session_reads();

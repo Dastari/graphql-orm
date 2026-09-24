@@ -20,6 +20,16 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+### Fixed
+
+- Admit bounded, session-bound native Grok retry-status notifications during an
+  existing prompt. A transient provider failure can recover without the host
+  resubmitting the prompt or replaying completed application tools. Exhausted
+  retries and terminal provider failures remain uncertain; provider error text
+  is discarded and successful completion still requires complete usage.
+
+## [0.100.0] - 2026-09-24
+
 ### Added
 
 - Reserve the final inline tool slot for a durable, non-retryable

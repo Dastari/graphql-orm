@@ -31,6 +31,12 @@ to false until exact host isolation is verified; usage follows the existing
 estimate/actual budget contract. See the
 [local harness boundary](docs/local-harness.md).
 
+Grok transient `retry_state` notifications remain inside the admitted prompt
+instead of aborting as protocol violations. Status admission is session-bound
+and bounded independently of successful model rounds; it sends no prompt and
+replays no application tools. Completion still requires authoritative usage.
+Exhausted retries retain uncertainty with a content-free provider category.
+
 Inline tools reserve their last admitted callback for a durable limit response,
 allowing the provider to summarize authorized results without another read. Host
 ceilings admit up to 1,024 callbacks and Grok rounds; budgets and no-replay

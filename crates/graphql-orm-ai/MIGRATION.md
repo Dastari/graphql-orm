@@ -19,6 +19,23 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.100.0 to 0.100.1
+
+No data migration is required. Rust APIs, GraphQL SDL, schema module and stored
+failure semantics are unchanged. The Grok actor now consumes `retry_state`
+status notifications during the exact active prompt, allowing the native client
+to finish its bounded recovery from transient inference failures. It never
+submits a second prompt or calls an application tool because of a retry status.
+
+The actor admits at most 1,024 retry notifications per prompt, independently of
+the successful model-round ceiling, within existing frame, byte, timeout,
+cancellation, authorization and budget boundaries. Malformed, cross-session,
+request-bearing or unknown notifications still fail closed. Exhausted retry
+status maps to the existing transport/rate-limit category; terminal rejection
+maps to the existing rejection category. Provider error strings are never
+surfaced. Missing usage never becomes zero usage or a completed turn, and this
+change does not authorize replay of any previously failed run.
+
 ## 0.99.1 to 0.100.0
 
 Adopt AI tool profiles `0.13.0` from the same workspace release. Its additional
