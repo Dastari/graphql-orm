@@ -20,6 +20,21 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+## [0.100.2] - 2026-09-24
+
+### Fixed
+
+- Suppress Codex `account/updated` status broadcasts through the exact documented
+  initialization opt-out. A startup account-status update no longer aborts
+  `thread/start`. Authentication errors and failed turns remain authoritative;
+  no login, logout, token refresh or account mutation is introduced.
+- Preserve closed Grok protocol rejection categories for session/model binding,
+  broker and tool lifecycle, unsupported native tools or notifications, side
+  inference/background activity, response completion and wire/reload limits.
+  Diagnostics contain no provider strings and do not change recovery or replay
+  eligibility. This diagnoses future failures; it does not establish the cause
+  of a historical generic protocol rejection.
+
 ## [0.100.1] - 2026-09-24
 
 ### Fixed

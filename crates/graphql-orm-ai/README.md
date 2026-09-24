@@ -37,6 +37,12 @@ and bounded independently of successful model rounds; it sends no prompt and
 replays no application tools. Completion still requires authoritative usage.
 Exhausted retries retain uncertainty with a content-free provider category.
 
+Grok protocol failures report closed categories for binding, broker/lifecycle,
+unsupported native activity, notification, completion and limit checks. They
+never retain provider content or grant replay. Codex initialization suppresses
+`account/updated` status broadcasts through its exact notification opt-out;
+authentication request errors and failed turns remain authoritative.
+
 Inline tools reserve their last admitted callback for a durable limit response,
 allowing the provider to summarize authorized results without another read. Host
 ceilings admit up to 1,024 callbacks and Grok rounds; budgets and no-replay

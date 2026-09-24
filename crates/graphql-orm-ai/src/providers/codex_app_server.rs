@@ -85,12 +85,15 @@ fn codex_dispatch_outcome(
     }
 }
 
-const OPTED_OUT_NOTIFICATION_METHODS: [&str; 5] = [
+const OPTED_OUT_NOTIFICATION_METHODS: [&str; 6] = [
     "thread/status/changed",
     "thread/settings/updated",
     "thread/goal/cleared",
     "mcpServer/startupStatus/updated",
     "account/rateLimits/updated",
+    // Account-status broadcasts are not execution authority. Suppression leaves
+    // correlated authentication errors and failed turns authoritative.
+    "account/updated",
 ];
 const REMOTE_CONTROL_STATUS_CHANGED: &str = "remoteControl/status/changed";
 const RUNTIME_WARNING: &str = "warning";
@@ -11385,6 +11388,7 @@ pub(crate) mod tests {
             "thread/goal/cleared",
             "mcpServer/startupStatus/updated",
             "account/rateLimits/updated",
+            "account/updated",
         ]);
 
         let mut text_actor =
@@ -13190,6 +13194,37 @@ pub(crate) mod tests {
         actor
             .start_turn("thread-retained-1", &input)
             .expect("frozen definitions should remain usable");
+    }
+
+    #[test]
+    fn account_status_opt_out_never_accepts_auth_control_or_hides_errors() {
+        for auth_mode in [json!("chatgpt"), json!("apikey"), Value::Null] {
+            let mut actor = initialized_protocol_actor();
+            actor.start_fresh_thread(&turn()).unwrap();
+            assert!(
+                matches!(
+                    actor.accept(&lifecycle_notification(
+                        "account/updated",
+                        json!({"authMode": auth_mode, "planType": null}),
+                    )),
+                    Err(ProviderError::Rejected)
+                ),
+                "a server ignoring the negotiated opt-out still fails closed"
+            );
+        }
+        let mut actor = initialized_protocol_actor();
+        actor.start_fresh_thread(&turn()).unwrap();
+        assert!(matches!(
+            actor.accept(
+                br#"{"id":2,"error":{"code":401,"message":"synthetic authentication failure"}}"#
+            ),
+            Err(ProviderError::Rejected)
+        ));
+        let mut actor = initialized_protocol_actor();
+        assert!(matches!(
+            actor.accept(br#"{"id":40,"method":"account/chatgptAuthTokens/refresh","params":{}}"#),
+            Err(ProviderError::Rejected)
+        ));
     }
 
     #[test]

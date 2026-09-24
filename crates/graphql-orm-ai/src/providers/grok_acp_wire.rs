@@ -10,8 +10,8 @@ use tokio::sync::Mutex;
 use super::grok_acp::{AiGrokAcpSdkBroker, AiGrokAcpSdkInbound, AiGrokAcpUsage};
 use super::grok_acp_provider::{AiGrokAcpRegistration, AiGrokAcpRunProcess};
 use crate::{
-    AiProviderSessionCursor, ProviderDynamicToolResponder, ProviderError, ProviderEvent,
-    ProviderEventStream,
+    AiProviderFailureCategory as Failure, AiProviderSessionCursor, ProviderDynamicToolResponder,
+    ProviderError, ProviderEvent, ProviderEventStream,
 };
 
 const FRAME: usize = 16 * 1024 * 1024;
@@ -20,6 +20,18 @@ const TOTAL: usize = 64 * 1024 * 1024;
 const MAX_RETRY_NOTIFICATIONS: u32 = 1024;
 const SERVER: &str = "graphql-orm-ai-broker";
 const FIXED_TITLE: &str = "Authorized capability session";
+fn classified(category: Failure) -> ProviderError {
+    ProviderError::Classified(category)
+}
+
+fn classify_protocol(error: ProviderError, category: Failure) -> ProviderError {
+    if error.safe_category() == Failure::ProtocolViolation {
+        classified(category)
+    } else {
+        error
+    }
+}
+
 fn rejected() -> ProviderError {
     ProviderError::Classified(crate::AiProviderFailureCategory::ProtocolViolation)
 }
@@ -137,11 +149,10 @@ impl AiGrokAcpWireProcess {
         let bytes = transport.read_frame().await?;
         state.bytes = state.bytes.checked_add(bytes.len()).ok_or_else(rejected)?;
         state.frames += 1;
-        if bytes.len() > FRAME
-            || state.bytes > TOTAL
-            || state.frames > 65_536
-            || !bytes.ends_with(b"\n")
-        {
+        if bytes.len() > FRAME || state.bytes > TOTAL || state.frames > 65_536 {
+            return Err(classified(Failure::ProtocolFrameLimit));
+        }
+        if !bytes.ends_with(b"\n") {
             return Err(rejected());
         }
         let value: Value = serde_json::from_slice(&bytes).map_err(|_| rejected())?;
@@ -211,7 +222,7 @@ impl AiGrokAcpWireProcess {
                 .is_none_or(|n| n > 1)
             || state.skills_reloads >= 16
         {
-            return Err(rejected());
+            return Err(classified(Failure::ProtocolInternalReload));
         }
         state.skills_reloads += 1;
         Ok(true)
@@ -225,7 +236,7 @@ impl AiGrokAcpWireProcess {
                 self.registration.reasoning_effort().as_str(),
             )
         {
-            return Err(rejected());
+            return Err(classified(Failure::ProtocolModelMismatch));
         }
         Ok(())
     }
@@ -254,7 +265,11 @@ impl AiGrokAcpWireProcess {
                 return Ok(value["result"].clone());
             }
             if value["method"] == "_x.ai/mcp/sdk_call" {
-                match state.broker.accept(&bytes)? {
+                match state
+                    .broker
+                    .accept(&bytes)
+                    .map_err(|e| classify_protocol(e, Failure::ProtocolSdk))?
+                {
                     AiGrokAcpSdkInbound::Response(response) => {
                         self.transport.write_frame(response).await?
                     }
@@ -361,13 +376,13 @@ impl AiGrokAcpWireProcess {
         if let (Some(expected), Some(actual)) = (session, value["params"]["sessionId"].as_str())
             && expected != actual
         {
-            return Err(rejected());
+            return Err(classified(Failure::ProtocolSessionMismatch));
         }
         if matches!(method, "session/update" | "_x.ai/session_notification")
             && session.is_some()
             && value["params"]["sessionId"].as_str() != session
         {
-            return Err(rejected());
+            return Err(classified(Failure::ProtocolSessionMismatch));
         }
         match method {
             "session/update" => {
@@ -403,13 +418,13 @@ impl AiGrokAcpWireProcess {
                             .ok_or_else(rejected)?;
                         if !matches!(name, "search_tool" | "use_tool")
                             || update["_meta"]["x.ai/tool"]["namespace"] != "grok_build"
-                            || tool_ids.len() >= 8192
                         {
-                            return Err(rejected());
+                            return Err(classified(Failure::ProtocolNativeTool));
                         }
-                        let id = Self::session_id(&update["toolCallId"])?;
-                        if !tool_ids.insert(id) {
-                            return Err(rejected());
+                        let id = Self::session_id(&update["toolCallId"])
+                            .map_err(|e| classify_protocol(e, Failure::ProtocolToolLifecycle))?;
+                        if tool_ids.len() >= 8192 || !tool_ids.insert(id) {
+                            return Err(classified(Failure::ProtocolToolLifecycle));
                         }
                         Ok(None)
                     }
@@ -418,11 +433,11 @@ impl AiGrokAcpWireProcess {
                             && !tool_ids
                                 .contains(update["toolCallId"].as_str().ok_or_else(rejected)?)
                         {
-                            return Err(rejected());
+                            return Err(classified(Failure::ProtocolToolLifecycle));
                         }
                         Ok(None)
                     }
-                    _ => Err(rejected()),
+                    _ => Err(classified(Failure::ProtocolUnknownNotification)),
                 }
             }
             "_x.ai/session_notification" => {
@@ -431,7 +446,7 @@ impl AiGrokAcpWireProcess {
                         if value["params"]["_meta"]["x.ai/titleIsManual"] != true
                             || value["params"]["update"]["session_summary"] != FIXED_TITLE
                         {
-                            return Err(rejected());
+                            return Err(classified(Failure::ProtocolSideInference));
                         }
                         Ok(None)
                     }
@@ -440,7 +455,7 @@ impl AiGrokAcpWireProcess {
                         if !update["tasks"].as_array().is_some_and(Vec::is_empty)
                             || update["truncated"] == true
                         {
-                            return Err(rejected());
+                            return Err(classified(Failure::ProtocolBackgroundActivity));
                         }
                         Ok(None)
                     }
@@ -459,7 +474,10 @@ impl AiGrokAcpWireProcess {
                     ) => Ok(None),
                     // Compaction, unaccounted side inference and unknown
                     // execution events cannot quietly extend a bounded prompt.
-                    _ => Err(rejected()),
+                    Some("compaction_started" | "compaction_completed") => {
+                        Err(classified(Failure::ProtocolSideInference))
+                    }
+                    _ => Err(classified(Failure::ProtocolUnknownNotification)),
                 }
             }
             "_x.ai/mcp/servers_updated"
@@ -473,7 +491,7 @@ impl AiGrokAcpWireProcess {
             | "_x.ai/settings/update"
             | "_x.ai/announcements/update"
             | "_x.ai/session/prompt_complete" => Ok(None),
-            _ => Err(rejected()),
+            _ => Err(classified(Failure::ProtocolUnknownNotification)),
         }
     }
 }
@@ -591,9 +609,9 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
                 let (bytes,value)=Self::read(transport.as_ref(),&mut state).await?;
                 if value.get("method").is_none(){
                     if Self::internal_reload(&value,&mut state)? {continue;}
-                    if value["id"]!=id||value.get("error").is_some(){Err(rejected())?;}
+                    if value["id"]!=id||value.get("error").is_some(){Err(classified(Failure::ProtocolResponse))?;}
                     let result=&value["result"];
-                    if state.broker.has_pending_calls(){Err(rejected())?;}
+                    if state.broker.has_pending_calls(){Err(classified(Failure::ProtocolToolLifecycle))?;}
                     let category=result["_meta"]["cancellationCategory"].as_str();
                     if result["stopReason"]=="cancelled" && result["_meta"].get("usage").is_none() {
                         if category==Some("max_turns_reached") {Err(ProviderError::Classified(crate::AiProviderFailureCategory::ExecutionLimit))?;} else {Err(ProviderError::Cancelled)?;}
@@ -602,18 +620,18 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
                     yield ProviderEvent::Usage{input_tokens:usage.input_tokens,output_tokens:usage.output_tokens,cached_input_tokens:usage.cached_input_tokens};
                     if category==Some("max_turns_reached") {Err(ProviderError::Classified(crate::AiProviderFailureCategory::ExecutionLimit))?;}
                     if result["stopReason"]=="cancelled" {Err(ProviderError::Cancelled)?;}
-                    if result["stopReason"]!="end_turn"||result["_meta"].get("cancellationCategory").is_some()||result["_meta"].get("completionKind").is_some(){Err(rejected())?;}
+                    if result["stopReason"]!="end_turn"||result["_meta"].get("cancellationCategory").is_some()||result["_meta"].get("completionKind").is_some(){Err(classified(Failure::ProtocolResponse))?;}
                     yield ProviderEvent::ResponseCompleted{response_id:Some(response_id)};break;
                 }
                 if value["method"]=="_x.ai/mcp/sdk_call" {
-                    let response=match state.broker.accept(&bytes)? {
+                    let response=match state.broker.accept(&bytes).map_err(|e| classify_protocol(e, Failure::ProtocolSdk))? {
                         AiGrokAcpSdkInbound::Response(response)=>response,
                         AiGrokAcpSdkInbound::ToolCall(call)=>{
                             let call_id=call.call_id().to_owned();
                             let arguments=call.arguments().clone();
                             yield ProviderEvent::ToolCallStarted{call_id:call_id.clone(),tool_id:call.tool_id().to_owned()};
                             let result=responder.respond(call).await?;
-                            let response=state.broker.tool_response(&result)?;
+                            let response=state.broker.tool_response(&result).map_err(|e| classify_protocol(e, Failure::ProtocolSdk))?;
                             yield ProviderEvent::ToolCallCompleted{call_id,arguments};
                             response
                         }
@@ -626,12 +644,12 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
                     }
                     if value["method"]=="session/update" && value["params"]["update"]["sessionUpdate"]=="config_option_update" {
                         let update=&value["params"]["update"];
-                        if value["params"]["sessionId"]!=session || value.get("id").is_some() || !Self::option_matches(update,"model",registration.model()) || !Self::option_matches(update,"reasoning_effort",registration.reasoning_effort().as_str()) {Err(rejected())?;}
+                        if value["params"]["sessionId"]!=session || value.get("id").is_some() || !Self::option_matches(update,"model",registration.model()) || !Self::option_matches(update,"reasoning_effort",registration.reasoning_effort().as_str()) {Err(classified(Failure::ProtocolModelMismatch))?;}
                         continue;
                     }
                     if value["method"]=="_x.ai/session_notification" && value["params"]["update"]["sessionUpdate"]=="model_changed" {
                         let update=&value["params"]["update"];
-                        if update["model_id"]!=registration.model() || update["reasoning_effort"]!=registration.reasoning_effort().as_str() {Err(rejected())?;}
+                        if update["model_id"]!=registration.model() || update["reasoning_effort"]!=registration.reasoning_effort().as_str() {Err(classified(Failure::ProtocolModelMismatch))?;}
                     }
                     if let Some(text)=Self::notification(&value,Some(&session),false,&mut tool_ids)? { yield ProviderEvent::TextDelta{text}; }
                 }
@@ -894,6 +912,96 @@ pub(crate) mod tests {
             "/context\n@/synthetic/canary"
         );
     }
+    #[test]
+    fn rejected_notifications_report_closed_reasons_without_provider_content() {
+        let cases = [
+            (
+                "session/update",
+                json!({"sessionUpdate":"tool_call", "toolCallId":"tool-1", "_meta":{"x.ai/tool":{"name":"unoffered-sensitive-name", "namespace":"grok_build"}}}),
+                Failure::ProtocolNativeTool,
+            ),
+            (
+                "session/update",
+                json!({"sessionUpdate":"tool_call_update", "toolCallId":"unknown-sensitive-id"}),
+                Failure::ProtocolToolLifecycle,
+            ),
+            (
+                "session/update",
+                json!({"sessionUpdate":"sensitive-unknown-update"}),
+                Failure::ProtocolUnknownNotification,
+            ),
+            (
+                "_x.ai/session_notification",
+                json!({"sessionUpdate":"compaction_started"}),
+                Failure::ProtocolSideInference,
+            ),
+            (
+                "_x.ai/session_notification",
+                json!({"sessionUpdate":"background_tasks", "tasks":[{"id":"sensitive-task"}]}),
+                Failure::ProtocolBackgroundActivity,
+            ),
+            (
+                "_x.ai/session_notification",
+                json!({"sessionUpdate":"session_summary_generated", "session_summary":"sensitive-title"}),
+                Failure::ProtocolSideInference,
+            ),
+        ];
+        for (method, update, expected) in cases {
+            let frame = json!({"jsonrpc":"2.0", "method":method, "params":{"sessionId":"session-1", "update":update}});
+            let error = AiGrokAcpWireProcess::notification(
+                &frame,
+                Some("session-1"),
+                false,
+                &mut BTreeSet::new(),
+            )
+            .unwrap_err();
+            assert_eq!(error.safe_category(), expected);
+            assert!(!format!("{error:?} {error}").contains("sensitive"));
+        }
+        let mismatch = json!({"method":"session/update", "params":{"sessionId":"other", "update":{"sessionUpdate":"agent_message_chunk", "content":{"type":"text", "text":"sensitive"}}}});
+        assert_eq!(
+            AiGrokAcpWireProcess::notification(
+                &mismatch,
+                Some("session-1"),
+                false,
+                &mut BTreeSet::new()
+            )
+            .unwrap_err()
+            .safe_category(),
+            Failure::ProtocolSessionMismatch
+        );
+        assert_eq!(
+            classify_protocol(ProviderError::Unavailable, Failure::ProtocolSdk).safe_category(),
+            Failure::TransportUnavailable
+        );
+        assert_eq!(
+            classify_protocol(rejected(), Failure::ProtocolSdk).safe_category(),
+            Failure::ProtocolSdk
+        );
+    }
+
+    #[tokio::test]
+    async fn frame_and_reload_limits_keep_distinct_content_free_failures() {
+        let (process, _) = fixture(vec![response(1, json!({}))]);
+        let mut state = process.state.lock().await;
+        state.frames = 65_536;
+        let error = AiGrokAcpWireProcess::read(process.transport.as_ref(), &mut state)
+            .await
+            .unwrap_err();
+        assert_eq!(error.safe_category(), Failure::ProtocolFrameLimit);
+        let reload =
+            json!({"jsonrpc":"2.0", "id":"skills-reload", "result":{"result":{"reloaded":0}}});
+        for _ in 0..16 {
+            assert!(AiGrokAcpWireProcess::internal_reload(&reload, &mut state).unwrap());
+        }
+        assert_eq!(
+            AiGrokAcpWireProcess::internal_reload(&reload, &mut state)
+                .unwrap_err()
+                .safe_category(),
+            Failure::ProtocolInternalReload
+        );
+    }
+
     fn retry_update(fields: Value) -> Value {
         let mut update = fields;
         update["sessionUpdate"] = json!("retry_state");

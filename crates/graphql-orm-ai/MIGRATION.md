@@ -19,6 +19,27 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.100.1 to 0.100.2
+
+No data migration is required. GraphQL SDL, stored recovery semantics and schema
+module are unchanged. The non-exhaustive `AiProviderFailureCategory` gains closed
+protocol categories for diagnostics; consumers matching this enum must retain
+an unknown-category fallback. These categories never authorize replay.
+
+Codex initialization now opts out of the exact `account/updated` notification,
+which this adapter does not use as execution or account-selection authority.
+The [official app-server notification contract](https://developers.openai.com/codex/app-server#notification-opt-out)
+keeps requests, responses and errors outside notification suppression.
+Authentication failures still reject the correlated request or turn. An app-server
+that ignores the negotiated opt-out still fails closed if it emits the unsupported
+notification. No credential, account, billing or authentication flow is changed.
+
+Grok protocol rejection diagnostics distinguish the failed contract without
+retaining frame content, identifiers or unknown provider strings. They preserve
+all existing admission checks, limits, usage accounting and uncertain outcomes.
+A historical `provider_protocol_violation` alone does not prove which check
+failed, and this change does not claim to repair an unobserved protocol event.
+
 ## 0.100.0 to 0.100.1
 
 No data migration is required. Rust APIs, GraphQL SDL, schema module and stored
