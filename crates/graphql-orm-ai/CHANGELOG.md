@@ -20,6 +20,8 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+## [0.100.1] - 2026-09-24
+
 ### Fixed
 
 - Admit bounded, session-bound native Grok retry-status notifications during an
