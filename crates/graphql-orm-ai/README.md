@@ -41,7 +41,9 @@ Grok protocol failures report closed categories for binding, broker/lifecycle,
 unsupported native activity, notification, completion and limit checks. They
 never retain provider content or grant replay. Codex initialization suppresses
 `account/updated` status broadcasts through its exact notification opt-out;
-authentication request errors and failed turns remain authoritative.
+authentication request errors and failed turns remain authoritative. See the
+[app-server notification contract](https://developers.openai.com/codex/app-server#notification-opt-out)
+for the distinction between status notifications and correlated errors.
 
 Inline tools reserve their last admitted callback for a durable limit response,
 allowing the provider to summarize authorized results without another read. Host
