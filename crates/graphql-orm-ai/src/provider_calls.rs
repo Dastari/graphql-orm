@@ -26,6 +26,9 @@ use crate::{
     ProviderKind, ProviderRequestContext, ToolMaturity, classify_safe_application_tool_error,
 };
 
+#[path = "provider_maintenance.rs"]
+pub(crate) mod maintenance;
+
 const MAXIMUM_PROVIDER_TRANSFERS: usize = 288;
 
 // Await this inside select! alongside the provider, never in a selected branch.
@@ -70,6 +73,10 @@ pub struct AiProviderEgressRequirement {
 }
 
 /// Deployment-owned bounds for a single normalized provider stream.
+///
+/// Adjacent text, visible-summary, and same-call argument fragments share a
+/// retained event up to the individual byte bound. The event count bounds this
+/// retained representation; cumulative bytes still count every incoming frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AiProviderCallLimits {
     maximum_events: usize,
@@ -1864,6 +1871,23 @@ pub trait AiProviderDynamicToolExecution: Send + Sync {
         tool_call_index: usize,
     ) -> Result<AiPersistedApplicationToolCall, AiError>;
 
+    /// Accounts for an admitted callback that will not enter execution, then
+    /// persists its deterministic failure. Implementations must apply current
+    /// rules, cancellation and per-run tool accounting before persistence.
+    ///
+    /// # Errors
+    /// Returns a safe error for stale authority, budget, cancellation or failed persistence.
+    async fn persist_unexecuted_dynamic_failure(
+        &self,
+        lease: &AiRunLease,
+        result: &AiProviderCallResult,
+        index: usize,
+        code: crate::AiApplicationToolFailureCode,
+    ) -> Result<AiPersistedApplicationToolCall, AiError> {
+        self.persist_dynamic_failure(lease, result, index, code)
+            .await
+    }
+
     /// Persists a deterministic failure for the exact normalized call through
     /// the same durable broker used by ordinary completed-turn execution.
     async fn persist_dynamic_failure(
@@ -1896,11 +1920,28 @@ struct DynamicToolResponder {
     maximum_tool_calls: usize,
     calls: Mutex<Vec<AiProviderToolCall>>,
     results: Mutex<Vec<AiPersistedApplicationToolCall>>,
+    schema_rejections: Mutex<BTreeSet<String>>,
 }
 
 impl DynamicToolResponder {
     async fn results(&self) -> Vec<AiPersistedApplicationToolCall> {
         self.results.lock().await.clone()
+    }
+
+    async fn has_persisted_schema_rejection(
+        &self,
+        call_id: &str,
+        tool_id: &str,
+        arguments: &serde_json::Value,
+    ) -> bool {
+        if !self.schema_rejections.lock().await.contains(call_id) {
+            return false;
+        }
+        self.calls.lock().await.iter().any(|call| {
+            call.call_id() == call_id
+                && call.tool_id().as_str() == tool_id
+                && call.arguments() == arguments
+        })
     }
 }
 
@@ -1910,11 +1951,53 @@ impl ProviderDynamicToolResponder for DynamicToolResponder {
         &self,
         call: ProviderDynamicToolCall,
     ) -> Result<ProviderDynamicToolResult, ProviderError> {
+        self.respond_normalized(
+            call.response_id().to_owned(),
+            AiProviderToolCall {
+                call_id: call.call_id().to_owned(),
+                tool_id: crate::AiToolId::parse(call.tool_id().to_owned())
+                    .map_err(|_| ProviderError::Rejected)?,
+                provider_name: call.provider_name().to_owned(),
+                tool_fingerprint: call.tool_fingerprint().to_owned(),
+                arguments: call.arguments().clone(),
+            },
+            false,
+        )
+        .await
+    }
+
+    async fn reject_invalid_arguments(
+        &self,
+        call: crate::ProviderInvalidDynamicToolCall,
+    ) -> Result<ProviderDynamicToolResult, ProviderError> {
+        self.respond_normalized(
+            call.response_id().to_owned(),
+            AiProviderToolCall {
+                call_id: call.call_id().to_owned(),
+                tool_id: crate::AiToolId::parse(call.tool_id().to_owned())
+                    .map_err(|_| ProviderError::Rejected)?,
+                provider_name: call.provider_name().to_owned(),
+                tool_fingerprint: call.tool_fingerprint().to_owned(),
+                arguments: call.rejected_arguments().clone(),
+            },
+            true,
+        )
+        .await
+    }
+}
+
+impl DynamicToolResponder {
+    async fn respond_normalized(
+        &self,
+        response_id: String,
+        call: AiProviderToolCall,
+        rejected_arguments: bool,
+    ) -> Result<ProviderDynamicToolResult, ProviderError> {
         let _definition = self
             .request_snapshot
             .tools
             .iter()
-            .find(|definition| definition.tool_id == call.tool_id())
+            .find(|definition| definition.tool_id == call.tool_id().as_str())
             .filter(|definition| {
                 definition.provider_name == call.provider_name()
                     && definition.fingerprint == call.tool_fingerprint()
@@ -1929,14 +2012,7 @@ impl ProviderDynamicToolResponder for DynamicToolResponder {
             {
                 return Err(ProviderError::Rejected);
             }
-            calls.push(AiProviderToolCall {
-                call_id: call.call_id().to_owned(),
-                tool_id: crate::AiToolId::parse(call.tool_id().to_owned())
-                    .map_err(|_| ProviderError::Rejected)?,
-                provider_name: call.provider_name().to_owned(),
-                tool_fingerprint: call.tool_fingerprint().to_owned(),
-                arguments: call.arguments().clone(),
-            });
+            calls.push(call.clone());
             (calls.len() - 1, calls.clone())
         };
         // Keep the exact lease snapshot locked across execution. The
@@ -1955,7 +2031,7 @@ impl ProviderDynamicToolResponder for DynamicToolResponder {
             usage: AiBudgetAmounts::default(),
             cached_input_tokens: 0,
             builtin_usage: AiProviderBuiltinUsage::default(),
-            provider_response_id: Some(call.response_id().to_owned()),
+            provider_response_id: Some(response_id),
             budget_reservation_id: self.budget_reservation_id,
             previous_response_id: self.previous_response_id.clone(),
             previous_continuation_reference: self.previous_continuation_reference.clone(),
@@ -1969,14 +2045,14 @@ impl ProviderDynamicToolResponder for DynamicToolResponder {
         // Reserve the final admitted callback for a durable no-execution
         // response. Do not reinterpret a failed persistence attempt as a
         // second failure result: its original outcome may be uncertain.
-        let persisted = if tool_call_index + 1 == self.maximum_tool_calls {
+        let failure = if tool_call_index + 1 == self.maximum_tool_calls {
+            Some(crate::AiApplicationToolFailureCode::ToolCallLimitReached)
+        } else {
+            rejected_arguments.then_some(crate::AiApplicationToolFailureCode::InvalidArguments)
+        };
+        let persisted = if let Some(code) = failure {
             self.execution
-                .persist_dynamic_failure(
-                    &lease,
-                    &provisional,
-                    tool_call_index,
-                    crate::AiApplicationToolFailureCode::ToolCallLimitReached,
-                )
+                .persist_unexecuted_dynamic_failure(&lease, &provisional, tool_call_index, code)
                 .await
                 .map_err(|_| ProviderError::Rejected)?
         } else {
@@ -2005,12 +2081,18 @@ impl ProviderDynamicToolResponder for DynamicToolResponder {
                 call_id,
                 tool_id,
                 output,
-            }) if call_id == call.call_id() && tool_id == call.tool_id() => output.clone(),
+            }) if call_id == call.call_id() && tool_id == call.tool_id().as_str() => output.clone(),
             _ => return Err(ProviderError::Rejected),
         };
         drop(lease);
         self.results.lock().await.push(persisted);
-        ProviderDynamicToolResult::new(&call, output)
+        if rejected_arguments {
+            self.schema_rejections
+                .lock()
+                .await
+                .insert(call.call_id().to_owned());
+        }
+        ProviderDynamicToolResult::persisted(call.call_id, call.tool_id.as_str().to_owned(), output)
     }
 }
 
@@ -2679,6 +2761,60 @@ pub struct AiProviderCallExecutor {
     failure_diagnostic_sink: Option<Arc<dyn AiProviderFailureDiagnosticSink>>,
 }
 
+// Transport fragment boundaries carry no semantic identity. Compact only
+// adjacent matching deltas, never lifecycle events or distinct tool calls.
+// Track the last serialized size so appending tiny fragments stays linear in
+// incoming bytes instead of repeatedly serializing the growing retained text.
+fn retain_provider_event(
+    events: &mut Vec<ProviderEvent>,
+    last_event_bytes: &mut usize,
+    event: &ProviderEvent,
+    event_bytes: usize,
+    limits: AiProviderCallLimits,
+) -> Result<(), AiError> {
+    if event_bytes > limits.maximum_event_bytes {
+        return Err(AiError::ProviderFailed);
+    }
+    let adjacent = match (events.last_mut(), event) {
+        (Some(ProviderEvent::TextDelta { text: previous }), ProviderEvent::TextDelta { text })
+        | (
+            Some(ProviderEvent::ReasoningSummaryDelta { text: previous }),
+            ProviderEvent::ReasoningSummaryDelta { text },
+        ) => Some((previous, text)),
+        (
+            Some(ProviderEvent::ToolArgumentsDelta {
+                call_id: previous_id,
+                delta: previous,
+            }),
+            ProviderEvent::ToolArgumentsDelta { call_id, delta },
+        ) if previous_id == call_id => Some((previous, delta)),
+        _ => None,
+    };
+    if let Some((previous, delta)) = adjacent {
+        // JSON string encoding is additive after removing its two quote bytes,
+        // including escaped characters and multibyte UTF-8.
+        let added_bytes = serde_json::to_vec(delta)
+            .map_err(|_| AiError::ProviderFailed)?
+            .len()
+            .checked_sub(2)
+            .ok_or(AiError::ProviderFailed)?;
+        let merged_bytes = last_event_bytes
+            .checked_add(added_bytes)
+            .ok_or(AiError::ProviderFailed)?;
+        if merged_bytes <= limits.maximum_event_bytes {
+            previous.push_str(delta);
+            *last_event_bytes = merged_bytes;
+            return Ok(());
+        }
+    }
+    if events.len() >= limits.maximum_events {
+        return Err(AiError::ProviderFailed);
+    }
+    events.push(event.clone());
+    *last_event_bytes = event_bytes;
+    Ok(())
+}
+
 impl AiProviderCallExecutor {
     /// Creates a provider-turn executor.
     pub fn new(
@@ -3091,10 +3227,11 @@ impl AiProviderCallExecutor {
             tokio::select! {
                 result = &mut turn => break result,
                 current_lease = lease_after_delay(&lease_state, delay) => {
-                    current_claim = match session_service
-                        .heartbeat(&current_lease, &current_claim)
-                        .await
-                    {
+                    let (renewal, completed_turn) = maintenance::poll_provider_during_maintenance(
+                        turn.as_mut(),
+                        session_service.heartbeat(&current_lease, &current_claim),
+                    ).await;
+                    current_claim = match renewal {
                         Ok(claim) => claim,
                         Err(error) => {
                             drop(current_lease);
@@ -3108,6 +3245,10 @@ impl AiProviderCallExecutor {
                             return Err(error);
                         }
                     };
+                    drop(current_lease);
+                    if let Some(result) = completed_turn {
+                        break result;
+                    }
                 }
             }
         };
@@ -3424,6 +3565,7 @@ impl AiProviderCallExecutor {
                 maximum_tool_calls: self.limits.maximum_tool_calls,
                 calls: Mutex::new(Vec::new()),
                 results: Mutex::new(Vec::new()),
+                schema_rejections: Mutex::new(BTreeSet::new()),
             })
         });
         let dispatch = if let Some(responder) = &dynamic_responder {
@@ -3480,6 +3622,7 @@ impl AiProviderCallExecutor {
             )
             .await?;
         let mut events = Vec::new();
+        let mut last_retained_event_bytes = 0;
         let mut total_bytes = 0usize;
         let mut usage = None;
         let mut provider_response_id = None;
@@ -3569,12 +3712,22 @@ impl AiProviderCallExecutor {
             total_bytes = total_bytes
                 .checked_add(event_bytes)
                 .ok_or(AiError::ProviderFailed)?;
-            if events.len() >= self.limits.maximum_events
-                || event_bytes > self.limits.maximum_event_bytes
+            if event_bytes > self.limits.maximum_event_bytes
                 || total_bytes > self.limits.maximum_total_event_bytes
             {
+                self.record_provider_failure(AiProviderFailureCategory::ProtocolFrameLimit);
                 return Err(AiError::ProviderFailed);
             }
+            retain_provider_event(
+                &mut events,
+                &mut last_retained_event_bytes,
+                &event,
+                event_bytes,
+                self.limits,
+            )
+            .inspect_err(|_| {
+                self.record_provider_failure(AiProviderFailureCategory::ProtocolFrameLimit);
+            })?;
             match &event {
                 ProviderEvent::ResponseStarted { response_id }
                 | ProviderEvent::ResponseCompleted { response_id } => {
@@ -3650,7 +3803,16 @@ impl AiProviderCallExecutor {
                     let validator = jsonschema::validator_for(argument_schema)
                         .map_err(|_| AiError::ProviderFailed)?;
                     if !validator.is_valid(arguments) {
-                        return Err(AiError::ProviderFailed);
+                        let rejected = if let Some(responder) = &dynamic_responder {
+                            responder
+                                .has_persisted_schema_rejection(call_id, tool_id, arguments)
+                                .await
+                        } else {
+                            false
+                        };
+                        if !rejected {
+                            return Err(AiError::ProviderFailed);
+                        }
                     }
                     completed_tool_calls.insert(
                         call_id.clone(),
@@ -3713,7 +3875,6 @@ impl AiProviderCallExecutor {
                 )
                 .await?;
             }
-            events.push(event);
         }
         if let Some(coalescer) = live_coalescer.as_mut() {
             let batches = coalescer.flush_all()?;
@@ -10205,6 +10366,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fragmented_text_retention_preserves_content_and_settles_usage() {
+        let fragment = "🙂\n\"";
+        let mut events = vec![ProviderEvent::ResponseStarted {
+            response_id: Some("fragmented-response".to_owned()),
+        }];
+        events.extend((0..6_000).map(|_| ProviderEvent::TextDelta {
+            text: fragment.to_owned(),
+        }));
+        events.extend([
+            ProviderEvent::Usage {
+                input_tokens: 3,
+                output_tokens: 6_000,
+                cached_input_tokens: 0,
+            },
+            ProviderEvent::ResponseCompleted {
+                response_id: Some("fragmented-response".to_owned()),
+            },
+        ]);
+        let fixture = fixture(events).await;
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(4_096, 64 * 1_024, 8 * 1_024 * 1_024).unwrap(),
+        );
+        let result = executor
+            .execute(&fixture.lease, plan(&fixture))
+            .await
+            .unwrap();
+        let text: String = result
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, fragment.repeat(6_000));
+        assert!(result.events().len() < 10);
+        assert_eq!(result.usage().output_tokens, 6_000);
+        assert_eq!(fixture.mock.request_count(), 1);
+        assert_eq!(reservation_state(&fixture.database).await, "committed");
+    }
+
+    #[test]
+    fn stream_retention_preserves_order_and_serialized_bounds() {
+        let limits = AiProviderCallLimits::new(64, 128, 8_192).unwrap();
+        let mut events = Vec::new();
+        let mut last_bytes = 0;
+        let fragment = "🙂\n\"";
+        for _ in 0..100 {
+            let event = ProviderEvent::TextDelta {
+                text: fragment.into(),
+            };
+            let bytes = serde_json::to_vec(&event).unwrap().len();
+            retain_provider_event(&mut events, &mut last_bytes, &event, bytes, limits).unwrap();
+            assert_eq!(
+                last_bytes,
+                serde_json::to_vec(events.last().unwrap()).unwrap().len()
+            );
+        }
+        assert!(events.len() > 1);
+        assert!(
+            events
+                .iter()
+                .all(|e| serde_json::to_vec(e).unwrap().len() <= 128)
+        );
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ProviderEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, fragment.repeat(100));
+        let boundary = events.len();
+        for event in [
+            ProviderEvent::ReasoningSummaryDelta {
+                text: "summary".into(),
+            },
+            ProviderEvent::ReasoningSummaryDelta {
+                text: " continuation".into(),
+            },
+            ProviderEvent::TextDelta {
+                text: "after summary".into(),
+            },
+            ProviderEvent::ToolArgumentsDelta {
+                call_id: "one".into(),
+                delta: "{".into(),
+            },
+            ProviderEvent::ToolArgumentsDelta {
+                call_id: "one".into(),
+                delta: "}".into(),
+            },
+            ProviderEvent::ToolArgumentsDelta {
+                call_id: "two".into(),
+                delta: "{}".into(),
+            },
+        ] {
+            let bytes = serde_json::to_vec(&event).unwrap().len();
+            retain_provider_event(&mut events, &mut last_bytes, &event, bytes, limits).unwrap();
+        }
+        assert_eq!(
+            &events[boundary..],
+            &[
+                ProviderEvent::ReasoningSummaryDelta {
+                    text: "summary continuation".into()
+                },
+                ProviderEvent::TextDelta {
+                    text: "after summary".into()
+                },
+                ProviderEvent::ToolArgumentsDelta {
+                    call_id: "one".into(),
+                    delta: "{}".into()
+                },
+                ProviderEvent::ToolArgumentsDelta {
+                    call_id: "two".into(),
+                    delta: "{}".into()
+                },
+            ]
+        );
+        let one_event = AiProviderCallLimits::new(1, 128, 128).unwrap();
+        let event = ProviderEvent::ResponseCompleted { response_id: None };
+        let bytes = serde_json::to_vec(&event).unwrap().len();
+        assert!(
+            retain_provider_event(&mut events, &mut last_bytes, &event, bytes, one_event).is_err()
+        );
+        let event = ProviderEvent::TextDelta {
+            text: "x".repeat(129),
+        };
+        let bytes = serde_json::to_vec(&event).unwrap().len();
+        assert!(retain_provider_event(&mut Vec::new(), &mut 0, &event, bytes, limits).is_err());
+    }
+
+    #[tokio::test]
+    async fn stream_retention_still_enforces_cumulative_incoming_bytes() {
+        let fixture = fixture(
+            (0..100)
+                .map(|_| ProviderEvent::TextDelta { text: "x".into() })
+                .collect(),
+        )
+        .await;
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 128, 256).unwrap(),
+        );
+        assert!(matches!(
+            executor.execute(&fixture.lease, plan(&fixture)).await,
+            Err(AiError::ProviderFailed)
+        ));
+        assert_eq!(reservation_state(&fixture.database).await, "uncertain");
+    }
+
+    #[tokio::test]
     async fn complete_provider_actual_usage_above_estimate_is_committed_in_full() {
         let fixture = fixture(vec![
             ProviderEvent::ResponseStarted {
@@ -10788,11 +11109,52 @@ mod tests {
             .expect("description should carry an opaque loaded reference")
             .to_owned();
 
-        let execute = commit_broker_provider_budget(
+        // A model-added bound for an unsupported relationship must fail
+        // before execution, persist a content-free correction, and permit a
+        // fresh corrected call through the same checkpoint/egress path.
+        let invalid = commit_broker_provider_budget(
             &fixture,
             broker_provider_result(
                 &lease,
                 Some("broker-response-2".to_owned()),
+                "broker-response-invalid",
+                "broker-invalid-call",
+                execute_definition,
+                json!({
+                    "loadedReference": loaded_reference,
+                    "arguments": [{"name": "recordId", "value": "record-42"}],
+                    "selections": ["recordId", "subject"],
+                    "relationshipArguments": [],
+                    "relationshipMaximumItems": [{"path": "sensitive_model_value", "maximumItems": 10}],
+                    "maximumItems": null
+                }),
+            ),
+        ).await;
+        let (invalid_call, lease) = broker_turns
+            .persist_and_execute(
+                &mut guard,
+                &lease,
+                &invalid,
+                &[&discover, &describe, &invalid],
+            )
+            .await;
+        let correction = broker_output(&invalid_call);
+        assert_eq!(correction["code"], "invalid_arguments");
+        assert_eq!(correction["version"], 2);
+        assert!(
+            correction["correction"]
+                .as_str()
+                .unwrap()
+                .contains("send relationshipMaximumItems as an empty array")
+        );
+        assert!(!correction.to_string().contains("sensitive_model_value"));
+        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 0);
+
+        let execute = commit_broker_provider_budget(
+            &fixture,
+            broker_provider_result(
+                &lease,
+                Some("broker-response-invalid".to_owned()),
                 "broker-response-3",
                 "broker-execute-call",
                 execute_definition,
@@ -10812,7 +11174,7 @@ mod tests {
                 &mut guard,
                 &lease,
                 &execute,
-                &[&discover, &describe, &execute],
+                &[&discover, &describe, &invalid, &execute],
             )
             .await;
         let execute_output = broker_output(&execute_call);
@@ -10824,8 +11186,8 @@ mod tests {
         let amplification = delivery.amplification();
         assert_eq!(amplification.discover_calls, 1);
         assert_eq!(amplification.describe_calls, 1);
-        assert_eq!(amplification.execute_calls, 1);
-        assert_eq!(amplification.total_calls(), 3);
+        assert_eq!(amplification.execute_calls, 2);
+        assert_eq!(amplification.total_calls(), 4);
 
         let rows = AiToolCallRecord::query(fixture.database.pool())
             .filter(AiToolCallRecordWhereInput {
@@ -10839,8 +11201,18 @@ mod tests {
             .fetch_all()
             .await
             .expect("broker tool rows should load");
-        assert_eq!(rows.len(), 3);
-        assert!(rows.iter().all(|row| row.state == "completed"));
+        assert_eq!(rows.len(), 4);
+        assert_eq!(
+            rows.iter().filter(|row| row.state == "completed").count(),
+            3
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.state == "execution_failed"
+                    && row.authorization_code.as_deref() == Some("invalid_arguments"))
+                .count(),
+            1
+        );
         assert_eq!(
             rows.iter()
                 .map(|row| row.tool_id.as_str())
@@ -11048,23 +11420,33 @@ mod tests {
     #[cfg(feature = "provider-grok-acp")]
     #[tokio::test]
     async fn grok_wire_dynamic_calls_complete_through_retained_executor() {
-        assert_grok_wire_dynamic_calls(8, false).await;
+        assert_grok_wire_dynamic_calls(8, false, false).await;
     }
 
     #[cfg(feature = "provider-grok-acp")]
     #[tokio::test]
     async fn grok_last_tool_slot_returns_durable_limit_and_still_finishes() {
-        assert_grok_wire_dynamic_calls(3, false).await;
+        assert_grok_wire_dynamic_calls(3, false, false).await;
     }
 
     #[cfg(feature = "provider-grok-acp")]
     #[tokio::test]
     async fn grok_stationary_end_turn_settles_persisted_tools_once_and_explains_partial_work() {
-        assert_grok_wire_dynamic_calls(8, true).await;
+        assert_grok_wire_dynamic_calls(8, true, false).await;
     }
 
     #[cfg(feature = "provider-grok-acp")]
-    async fn assert_grok_wire_dynamic_calls(maximum_calls: usize, stationarity: bool) {
+    #[tokio::test]
+    async fn schema_invalid_dynamic_call_then_correction_completes_the_retained_executor() {
+        assert_grok_wire_dynamic_calls(8, false, true).await;
+    }
+
+    #[cfg(feature = "provider-grok-acp")]
+    async fn assert_grok_wire_dynamic_calls(
+        maximum_calls: usize,
+        stationarity: bool,
+        invalid_first: bool,
+    ) {
         use crate::providers::{AiGrokAcpProvider, AiGrokAcpRegistration, ExecutorWireFactory};
         let seed = fixture(vec![]).await;
         let tools = tool_plan(&seed).request.tools;
@@ -11097,7 +11479,10 @@ mod tests {
         let provider = Arc::new(
             AiGrokAcpProvider::new(
                 registration.clone(),
-                Arc::new(ExecutorWireFactory { stationarity }),
+                Arc::new(ExecutorWireFactory {
+                    stationarity,
+                    invalid_first,
+                }),
                 2,
                 std::time::Duration::from_secs(5),
             )
@@ -11221,7 +11606,11 @@ mod tests {
             .expect("real Grok wire callbacks must complete the retained executor");
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            if maximum_calls == 3 { 2 } else { 3 }
+            if maximum_calls == 3 || invalid_first {
+                2
+            } else {
+                3
+            }
         );
         if maximum_calls == 3 {
             let last = result.interactive_tool_results().last().unwrap();
@@ -11240,6 +11629,19 @@ mod tests {
         if stationarity {
             assert!(result.events().iter().any(|event| matches!(event, ProviderEvent::TextDelta { text } if text.contains("repeated-activity limit") && text.contains("incomplete"))));
         }
+        if invalid_first {
+            assert_eq!(
+                result.interactive_tool_results()[0].model_input().unwrap(),
+                &ModelInputBlock::ToolResult {
+                    call_id: result.tool_calls()[0].call_id().to_owned(),
+                    tool_id: result.tool_calls()[0].tool_id().as_str().to_owned(),
+                    output: crate::AiApplicationToolFailureEnvelope::new(
+                        crate::AiApplicationToolFailureCode::InvalidArguments
+                    )
+                    .to_json()
+                }
+            );
+        }
         assert_eq!(result.tool_calls().len(), 3);
         assert_eq!(result.interactive_tool_results.len(), 3);
         for (call, persisted) in result
@@ -11249,7 +11651,14 @@ mod tests {
         {
             assert_eq!(call.call_id(), persisted.provider_call_id());
             assert_eq!(call.tool_fingerprint(), registration.tools()[0].fingerprint);
-            assert_eq!(call.arguments(), &json!({"recordId":"54"}));
+            assert_eq!(
+                call.arguments(),
+                &if invalid_first && call.call_id() == result.tool_calls()[0].call_id() {
+                    json!({"recordId":false})
+                } else {
+                    json!({"recordId":"54"})
+                }
+            );
         }
         assert_eq!(result.usage().input_tokens, 29390);
         assert_eq!(result.usage().output_tokens, 3000);
@@ -11397,6 +11806,7 @@ mod tests {
             maximum_tool_calls,
             calls: Mutex::new(Vec::new()),
             results: Mutex::new(Vec::new()),
+            schema_rejections: Mutex::new(BTreeSet::new()),
         };
         assert!(matches!(
             responder.respond(call.clone()).await,
@@ -11434,6 +11844,158 @@ mod tests {
             executions.load(Ordering::SeqCst),
             usize::from(maximum_tool_calls > 1),
             "denial must not replay execution"
+        );
+        fixture
+            .run_service
+            .finish(
+                &lease.lock().await.clone(),
+                crate::AiRunCompletion::new(
+                    AiRunState::RecoveryRequired,
+                    "provider_turn_uncertain",
+                    Some("provider_turn_uncertain".into()),
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .expect("denied result must preserve the renewed fence for terminal recovery");
+        let run = AiRunRecord::find_by_id(&fixture.database, &fixture.lease.run_id().0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state, "recovery_required");
+    }
+
+    #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
+    #[tokio::test]
+    async fn schema_invalid_dynamic_call_is_durably_rejected_without_execution() {
+        assert_invalid_dynamic_result(false).await;
+    }
+
+    #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
+    #[tokio::test]
+    async fn schema_invalid_dynamic_call_audit_failure_preserves_fence_and_denies_egress() {
+        assert_invalid_dynamic_result(true).await;
+    }
+
+    #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
+    async fn assert_invalid_dynamic_result(audit_denied: bool) {
+        let fixture = fixture(vec![
+            ProviderEvent::ResponseStarted {
+                response_id: Some("denied-response".into()),
+            },
+            ProviderEvent::Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cached_input_tokens: 0,
+            },
+            ProviderEvent::ResponseCompleted {
+                response_id: Some("denied-response".into()),
+            },
+        ])
+        .await;
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8192, 65536).unwrap(),
+        );
+        let result = executor
+            .execute(&fixture.lease, tool_plan(&fixture))
+            .await
+            .unwrap();
+        let call = crate::ProviderInvalidDynamicToolCall::from_definition(
+            "denied-response",
+            "denied-call",
+            &result.request_snapshot.tools[0],
+            json!({"recordId":false}),
+        )
+        .unwrap();
+        let lease = Arc::new(Mutex::new(fixture.lease.clone()));
+        let executions = Arc::new(AtomicUsize::new(0));
+        let responder = DynamicToolResponder {
+            lease: lease.clone(),
+            execution: Arc::new(PersistingDynamicToolExecution {
+                service: automatic_mutation_service(
+                    &fixture,
+                    if audit_denied {
+                        Arc::new(FailAudit)
+                    } else {
+                        fixture.audit.clone()
+                    },
+                ),
+                scope: fixture.scope.clone(),
+                calls: executions.clone(),
+            }),
+            session_id: fixture.lease.session_id(),
+            run_id: fixture.lease.run_id(),
+            attempt_id: fixture.lease.attempt_id(),
+            lease_generation: fixture.lease.lease_generation(),
+            provider_kind: result.provider_kind.clone(),
+            provider_model: result.provider_model.clone(),
+            budget_reservation_id: result.budget_reservation_id,
+            previous_response_id: None,
+            previous_continuation_reference: None,
+            request_snapshot: result.request_snapshot.clone(),
+            model_inference_manifest: result.model_inference_manifest.clone(),
+            maximum_tool_calls: 8,
+            calls: Mutex::new(Vec::new()),
+            results: Mutex::new(Vec::new()),
+            schema_rejections: Mutex::new(BTreeSet::new()),
+        };
+        let rejected = responder.reject_invalid_arguments(call.clone()).await;
+        if audit_denied {
+            assert!(matches!(rejected, Err(ProviderError::Rejected)));
+            assert!(responder.results().await.is_empty());
+        } else {
+            let response = rejected.expect("a schema error must return a durable correction");
+            assert_eq!(
+                response.output(),
+                &crate::AiApplicationToolFailureEnvelope::new(
+                    crate::AiApplicationToolFailureCode::InvalidArguments
+                )
+                .to_json()
+            );
+            assert_eq!(responder.results().await.len(), 1);
+        }
+        let calls = AiToolCallRecord::query(fixture.database.pool())
+            .filter(AiToolCallRecordWhereInput {
+                run_id: Some(UuidFilter {
+                    eq: Some(fixture.lease.run_id().0),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .limit(2)
+            .fetch_all()
+            .await
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].state,
+            if audit_denied {
+                "egress_audit_failed"
+            } else {
+                "execution_failed"
+            }
+        );
+        assert!(calls[0].completed_at.is_some());
+        assert!(calls[0].protected_result.is_some());
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            0,
+            "invalid calls must never execute"
+        );
+        assert!(matches!(
+            responder.reject_invalid_arguments(call).await,
+            Err(ProviderError::Rejected)
+        ));
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            0,
+            "duplicates must not execute"
         );
         fixture
             .run_service

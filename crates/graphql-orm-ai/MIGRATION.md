@@ -19,6 +19,78 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.100.2 to 0.101.0
+
+Provider and retained-session heartbeat maintenance now continues polling the provider's
+in-flight persistence while renewal waits. A started renewal settles even if the provider
+finishes first, retaining the new row-version proof. This prevents self-deadlock on a
+provider-held writer without replaying provider requests or application tools. No data migration
+is needed.
+
+Run start and heartbeat now honor `AiRunServiceLimits`' transaction retry bound
+for classified retryable database failures, with a short capped backoff. Each
+attempt checks the current time after acquiring the transaction lock. Expired,
+superseded and conflicting leases are still rejected; exhausted retries remain
+persistence failures. No provider or tool request is retried, and no data migration
+or change to existing run outcomes is needed.
+
+Provider-call event-count limits now apply to the bounded retained representation:
+adjacent same-kind text/visible-summary deltas and same-call argument deltas may
+be combined. Consumers must not treat transport fragment boundaries as semantic
+message boundaries. Other events remain ordering barriers. Individual serialized
+event bounds and cumulative incoming bytes are unchanged; live persistence still
+processes each incoming event. No data migration or historical run replay is needed.
+
+The Grok wire profile explicitly excludes hosted `web_search` and `x_search`,
+which the native runtime offers separately from `toolConfig`. This enforces the
+existing factory contract; it does not enable or account for hosted search.
+Hosts must continue to isolate native tools. No stored data migration is needed.
+
+Broker query-plan compile rejections may now emit failure-envelope version 2 with
+one additional `correction` string selected from closed runtime guidance. Consumers
+must preserve it as authorized model input; it contains no input values, schema
+values or internal error text. Other failure envelopes remain version 1. Validation,
+execution authority and no-replay behavior are unchanged; no data migration is needed.
+
+No data migration is needed. Schema module, GraphQL SDL and existing failed runs are
+unchanged. Update custom Codex transports to handle `InvalidDynamicToolCall` through
+`ProviderDynamicToolResponder::reject_invalid_arguments`, returning only its durable,
+egress-approved response. Never pass rejected arguments into tool execution. The default
+responder implementation denies rejection if the consumer has not implemented this path.
+The built-in coordinator supports it. Grok's SDK enum adds `InvalidToolCall`; exhaustive
+consumer matches must handle or reject it. Normal validated-call constructors and the
+meaning of their `arguments()` accessor are preserved.
+
+Schema-invalid requests remain subject to callback counts, current principal, cancellation,
+protected persistence and egress audit. Provider event validation accepts such a completion
+only after the exact rejection succeeds. No historical run or completed tool is replayed.
+Failure envelopes may be followed by a newly authored corrected request with a new call ID.
+
+Grok's internal `workflows-reload` response uses the existing bounded reload shape and
+count. The [upstream watcher](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-shell/src/agent/app.rs)
+injects it independently of prompts; the
+[upstream handler](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-shell/src/extensions/session_admin.rs)
+returns the number of sessions whose commands were re-advertised. Exact known reload
+responses are status only. Unknown IDs, extra fields, excessive counts and pending or
+uncertain application calls retain their existing rejection behavior.
+
+Grok registers unknown model-authored tool names before its toolset lookup fails.
+Unidentified pending/other display notices now require a matching failed update
+before prompt completion; they grant no execution or disclosure authority. Any
+progress/success, duplicate or unresolved lifecycle remains rejected. See the
+[upstream preparation](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-shell/src/session/acp_session_impl/tool_calls.rs)
+and [identity normalization](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-tools/src/normalization.rs).
+Custom execution implementations can override `persist_unexecuted_dynamic_failure`
+to apply current rule and per-run admission before persisting a failure; its default
+forwards to the existing failure method. The built-in read-only coordinator counts
+these attempts and checks cancellation without executing rejected arguments.
+
+Discovery definitions now require only `text` and `maximumResults`; the three
+optional filters may be absent or explicitly null, as already accepted by broker
+deserialization. Definition fingerprints change. Rebuild exact tool registrations
+and recreate retained provider bindings through their ordinary admission path.
+Old failed runs remain unchanged. No database migration is required.
+
 ## 0.100.1 to 0.100.2
 
 No data migration is required. GraphQL SDL, existing stored recovery outcomes and

@@ -850,15 +850,15 @@ impl OrmAiRunService {
     }
 
     /// Renews a current leased/running claim and returns its new row-version
-    /// proof.
+    /// proof. Classified retryable database transactions use the configured
+    /// transaction retry bound; provider requests and tools are never retried.
     ///
     /// # Errors
     ///
     /// Fails closed for an expired, superseded, malformed, non-active, or
     /// otherwise stale fence, and for persistence failures.
     pub async fn heartbeat(&self, lease: &AiRunLease) -> Result<AiRunLease, AiError> {
-        let now = canonical_second(self.clock.now());
-        self.update_active_lease(lease, LeaseUpdate::Heartbeat, now)
+        self.update_active_lease(lease, LeaseUpdate::Heartbeat)
             .await
     }
 
@@ -872,9 +872,7 @@ impl OrmAiRunService {
     /// Fails closed for an expired or stale fence, invalid state, or
     /// persistence failure.
     pub async fn start(&self, lease: &AiRunLease) -> Result<AiRunLease, AiError> {
-        let now = canonical_second(self.clock.now());
-        self.update_active_lease(lease, LeaseUpdate::Start, now)
-            .await
+        self.update_active_lease(lease, LeaseUpdate::Start).await
     }
 
     /// Completes a current attempt and appends its immutable outcome in the
@@ -4538,13 +4536,37 @@ impl OrmAiRunService {
         &self,
         lease: &AiRunLease,
         update: LeaseUpdate,
-        now: OffsetDateTime,
     ) -> Result<AiRunLease, AiError> {
+        for retry in 0..=self.limits.maximum_transaction_retries {
+            match self.update_active_lease_once(lease, update).await {
+                Ok(renewed) => return Ok(renewed),
+                Err(TransactionError::Retryable(_))
+                    if retry < self.limits.maximum_transaction_retries =>
+                {
+                    // Only the rolled-back fenced state transition repeats.
+                    // A small bounded delay lets the competing writer finish.
+                    tokio::time::sleep(std::time::Duration::from_millis(5 << retry.min(5))).await;
+                }
+                Err(error) => return Err(map_transaction(error)),
+            }
+        }
+        Err(AiError::PersistenceFailed)
+    }
+
+    async fn update_active_lease_once(
+        &self,
+        lease: &AiRunLease,
+        update: LeaseUpdate,
+    ) -> Result<AiRunLease, TransactionError> {
         let lease = lease.clone();
         let lease_ttl = self.limits.lease_ttl;
+        let clock = self.clock.clone();
         self.database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    // Lock admission may itself wait. Check the current time
+                    // after acquiring it, so contention cannot revive expiry.
+                    let now = canonical_second(clock.now());
                     let current = load_and_validate_active_lease(tx, &lease, now).await?;
                     let current_state = persisted_state(&current)?;
                     let next_state = match update {
@@ -4587,7 +4609,6 @@ impl OrmAiRunService {
                 })
             })
             .await
-            .map_err(map_transaction)
     }
 }
 
@@ -6175,3 +6196,7 @@ pub(crate) async fn run_provider_dispatch_possible(
         .map_err(OrmPublicError::from)?;
     Ok(!rows.is_empty())
 }
+
+#[cfg(all(test, feature = "sqlite"))]
+#[path = "orm_run_heartbeat_tests.rs"]
+mod heartbeat_contention_tests;

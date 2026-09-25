@@ -39,6 +39,8 @@ pub enum AiGrokAcpSdkInbound {
     Response(Vec<u8>),
     /// Exact schema-validated application-tool request; never execute locally.
     ToolCall(ProviderDynamicToolCall),
+    /// Offered call with schema-invalid arguments; only durable rejection is permitted.
+    InvalidToolCall(crate::ProviderInvalidDynamicToolCall),
 }
 
 struct Pending {
@@ -244,12 +246,29 @@ impl AiGrokAcpSdkBroker {
                 }
                 identity.update((self.calls as u64).to_be_bytes());
                 let call_id = format!("grok-sdk-{}", hex::encode(identity.finalize()));
-                let call = ProviderDynamicToolCall::from_definition(
-                    &self.response_id,
-                    &call_id,
-                    tool,
-                    inner["params"]["arguments"].clone(),
-                )?;
+                let arguments = inner["params"]
+                    .get("arguments")
+                    .cloned()
+                    .ok_or_else(rejected)?;
+                let validator =
+                    jsonschema::validator_for(&tool.parameters).map_err(|_| rejected())?;
+                let inbound = if !arguments.is_object() || !validator.is_valid(&arguments) {
+                    AiGrokAcpSdkInbound::InvalidToolCall(
+                        crate::ProviderInvalidDynamicToolCall::from_definition(
+                            &self.response_id,
+                            &call_id,
+                            tool,
+                            arguments,
+                        )?,
+                    )
+                } else {
+                    AiGrokAcpSdkInbound::ToolCall(ProviderDynamicToolCall::from_definition(
+                        &self.response_id,
+                        &call_id,
+                        tool,
+                        arguments,
+                    )?)
+                };
                 self.pending.insert(
                     call_id,
                     Pending {
@@ -259,7 +278,7 @@ impl AiGrokAcpSdkBroker {
                     },
                 );
                 self.calls += 1;
-                Ok(AiGrokAcpSdkInbound::ToolCall(call))
+                Ok(inbound)
             }
             _ => Err(rejected()),
         }
@@ -576,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_server_tools_schema_and_preinitialize_requests_fail_closed() {
+    fn unknown_server_tools_and_preinitialize_requests_fail_closed() {
         let mut wrong_server: Value =
             serde_json::from_slice(&request(2, "tools/list", json!({}))).unwrap();
         wrong_server["params"]["serverId"] = json!("ambient-server");
@@ -587,11 +606,6 @@ mod tests {
                 2,
                 "tools/call",
                 json!({"name":"bash","arguments":{"query":"fixture"}}),
-            ),
-            request(
-                2,
-                "tools/call",
-                json!({"name":"discover","arguments":{"query":42}}),
             ),
         ] {
             let mut broker = broker(2);
@@ -607,6 +621,45 @@ mod tests {
                     json!({"name":"discover","arguments":{"query":"fixture"}})
                 ))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn schema_invalid_sdk_call_can_be_corrected_without_restarting_the_broker() {
+        let mut broker = broker(2);
+        initialize(&mut broker);
+        let frame = request(
+            2,
+            "tools/call",
+            json!({"name":"discover","arguments":{"query":42}}),
+        );
+        let AiGrokAcpSdkInbound::InvalidToolCall(call) = broker.accept(&frame).unwrap() else {
+            panic!("invalid arguments must never become an executable call")
+        };
+        let result = ProviderDynamicToolResult::persisted(
+            call.call_id().to_owned(),
+            call.tool_id().to_owned(),
+            crate::AiApplicationToolFailureEnvelope::new(
+                crate::AiApplicationToolFailureCode::InvalidArguments,
+            )
+            .to_json(),
+        )
+        .unwrap();
+        let response: Value =
+            serde_json::from_slice(&broker.tool_response(&result).unwrap()).unwrap();
+        assert_eq!(response["result"]["id"], 102);
+        assert!(!broker.has_pending_calls());
+        assert!(matches!(
+            broker.accept(&request(
+                3,
+                "tools/call",
+                json!({"name":"discover","arguments":{"query":"fixed"}})
+            )),
+            Ok(AiGrokAcpSdkInbound::ToolCall(_))
+        ));
+        assert!(
+            broker.accept(&frame).is_err(),
+            "a rejected request cannot be replayed"
         );
     }
 

@@ -21,6 +21,52 @@ use crate::{
     ProviderRequestContext,
 };
 
+// A malformed argument event is admissible only after the coordinator returned
+// its exact durable rejection. Keep hashes rather than another copy of content.
+struct RejectionTrackingResponder {
+    inner: Arc<dyn ProviderDynamicToolResponder>,
+    rejected: Mutex<BTreeMap<String, (String, [u8; 32])>>,
+}
+
+fn argument_digest(arguments: &serde_json::Value) -> Result<[u8; 32], ProviderError> {
+    let encoded = serde_json::to_vec(arguments).map_err(|_| rejected())?;
+    if encoded.len() > 16 * 1024 * 1024 {
+        return Err(rejected());
+    }
+    Ok(Sha256::digest(encoded).into())
+}
+
+#[async_trait]
+impl ProviderDynamicToolResponder for RejectionTrackingResponder {
+    async fn respond(
+        &self,
+        call: crate::ProviderDynamicToolCall,
+    ) -> Result<crate::ProviderDynamicToolResult, ProviderError> {
+        self.inner.respond(call).await
+    }
+
+    async fn reject_invalid_arguments(
+        &self,
+        call: crate::ProviderInvalidDynamicToolCall,
+    ) -> Result<crate::ProviderDynamicToolResult, ProviderError> {
+        let call_id = call.call_id().to_owned();
+        let tool_id = call.tool_id().to_owned();
+        let digest = argument_digest(call.rejected_arguments())?;
+        let mut rejected_calls = self.rejected.lock().await;
+        if rejected_calls.len() >= super::grok_acp::MAX_SDK_CALLS
+            || rejected_calls.contains_key(&call_id)
+        {
+            return Err(rejected());
+        }
+        let result = self.inner.reject_invalid_arguments(call).await?;
+        if result.call_id() != call_id || result.tool_id() != tool_id {
+            return Err(rejected());
+        }
+        rejected_calls.insert(call_id, (tool_id, digest));
+        Ok(result)
+    }
+}
+
 const PROTOCOL: &str = "grok-acp-sdk-v1";
 
 fn rejected() -> ProviderError {
@@ -764,10 +810,16 @@ impl AiProvider for AiGrokAcpProvider {
             })
             .collect();
         let deadline = tokio::time::Instant::now() + self.turn_timeout;
-        let mut stream =
-            tokio::time::timeout_at(deadline, entry.process.process.prompt(input, responder))
-                .await
-                .map_err(|_| timeout())??;
+        let responder = Arc::new(RejectionTrackingResponder {
+            inner: responder,
+            rejected: Mutex::new(BTreeMap::new()),
+        });
+        let mut stream = tokio::time::timeout_at(
+            deadline,
+            entry.process.process.prompt(input, responder.clone()),
+        )
+        .await
+        .map_err(|_| timeout())??;
         let tools = self.registration.tools().to_vec();
         Ok(Box::pin(async_stream::try_stream! {
             let mut calls=BTreeMap::new();
@@ -795,9 +847,14 @@ impl AiProvider for AiGrokAcpProvider {
                         let (tool_id, complete) = calls.get_mut(call_id).ok_or_else(rejected)?;
                         if *complete { Err(rejected())?; }
                         let definition = tools.iter().find(|tool| tool.tool_id == *tool_id).ok_or_else(rejected)?;
-                        crate::ProviderDynamicToolCall::from_definition(
+                        if crate::ProviderDynamicToolCall::from_definition(
                             "validated-turn", call_id.clone(), definition, arguments.clone()
-                        )?;
+                        ).is_err() {
+                            let digest = argument_digest(arguments)?;
+                            if responder.rejected.lock().await.get(call_id) != Some(&(tool_id.clone(), digest)) {
+                                Err(rejected())?;
+                            }
+                        }
                         *complete = true;
                     },
                     ProviderEvent::Usage{input_tokens,output_tokens,cached_input_tokens} if started&&!usage&&calls.values().all(|(_,complete)|*complete)=>{if *input_tokens>super::grok_acp::MAX_USAGE_TOKENS||*output_tokens>super::grok_acp::MAX_USAGE_TOKENS||cached_input_tokens>input_tokens{Err(rejected())?;}usage=true;},

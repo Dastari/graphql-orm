@@ -55,6 +55,15 @@ pub trait AiGrokAcpWireTransport: Send + Sync {
     async fn read_frame(&self) -> Result<Vec<u8>, ProviderError>;
 }
 
+// Display notifications are not application execution authority. Grok registers
+// unknown model-authored names before reporting their parse/lookup failure.
+#[derive(Default)]
+struct ToolNotifications {
+    seen: BTreeSet<String>,
+    unidentified: BTreeSet<String>,
+    awaiting_rejection: BTreeSet<String>,
+}
+
 struct State {
     serial: u64,
     initialized: bool,
@@ -123,7 +132,9 @@ impl AiGrokAcpWireProcess {
             "name":"graphql-orm-ai","description":"Fixed authorized capability broker",
             "toolConfig":{"tools":[{"id":"GrokBuild:search_tool"},{"id":"GrokBuild:use_tool"}]},
             "injectDefaultTools":false,"discoverSkills":false,"agentsMd":false,
-            "skills":[],"disallowedTools":["Agent"],"maxTurns":self.registration.maximum_model_calls(),
+            // Hosted search is outside toolConfig and must be disabled separately.
+            "skills":[],"disallowedTools":["Agent","web_search","x_search"],
+            "maxTurns":self.registration.maximum_model_calls(),
         })
     }
     fn session_params(&self) -> Value {
@@ -210,7 +221,10 @@ impl AiGrokAcpWireProcess {
         Ok(id.into())
     }
     fn internal_reload(value: &Value, state: &mut State) -> Result<bool, ProviderError> {
-        if value["id"] != "skills-reload" {
+        if !matches!(
+            value["id"].as_str(),
+            Some("skills-reload" | "workflows-reload")
+        ) {
             return Ok(false);
         }
         if value.as_object().is_none_or(|v| v.len() != 3)
@@ -274,13 +288,15 @@ impl AiGrokAcpWireProcess {
                     AiGrokAcpSdkInbound::Response(response) => {
                         self.transport.write_frame(response).await?
                     }
-                    AiGrokAcpSdkInbound::ToolCall(_) => return Err(rejected()),
+                    AiGrokAcpSdkInbound::ToolCall(_) | AiGrokAcpSdkInbound::InvalidToolCall(_) => {
+                        return Err(rejected());
+                    }
                 }
             } else {
                 if value.get("id").is_some() {
                     return Err(rejected());
                 }
-                Self::notification(&value, None, true, &mut BTreeSet::new())?;
+                Self::notification(&value, None, true, &mut ToolNotifications::default())?;
             }
         }
     }
@@ -368,7 +384,7 @@ impl AiGrokAcpWireProcess {
         value: &Value,
         session: Option<&str>,
         history: bool,
-        tool_ids: &mut BTreeSet<String>,
+        tool_ids: &mut ToolNotifications,
     ) -> Result<Option<String>, ProviderError> {
         let method = value["method"].as_str().ok_or_else(rejected)?;
         if value.get("id").is_some() {
@@ -414,27 +430,44 @@ impl AiGrokAcpWireProcess {
                         if history {
                             return Ok(None);
                         }
-                        let name = update["_meta"]["x.ai/tool"]["name"]
-                            .as_str()
-                            .ok_or_else(rejected)?;
-                        if !matches!(name, "search_tool" | "use_tool")
-                            || update["_meta"]["x.ai/tool"]["namespace"] != "grok_build"
+                        let identity = &update["_meta"]["x.ai/tool"];
+                        let unidentified = identity.is_null()
+                            && update["kind"] == "other"
+                            && update["status"] == "pending";
+                        if !unidentified
+                            && (!matches!(
+                                identity["name"].as_str(),
+                                Some("search_tool" | "use_tool")
+                            ) || identity["namespace"] != "grok_build")
                         {
                             return Err(classified(Failure::ProtocolNativeTool));
                         }
                         let id = Self::session_id(&update["toolCallId"])
                             .map_err(|e| classify_protocol(e, Failure::ProtocolToolLifecycle))?;
-                        if tool_ids.len() >= 8192 || !tool_ids.insert(id) {
+                        if tool_ids.seen.len() >= 8192 || !tool_ids.seen.insert(id.clone()) {
                             return Err(classified(Failure::ProtocolToolLifecycle));
+                        }
+                        if unidentified {
+                            tool_ids.unidentified.insert(id.clone());
+                            tool_ids.awaiting_rejection.insert(id);
                         }
                         Ok(None)
                     }
                     Some("tool_call_update") => {
-                        if !history
-                            && !tool_ids
-                                .contains(update["toolCallId"].as_str().ok_or_else(rejected)?)
-                        {
-                            return Err(classified(Failure::ProtocolToolLifecycle));
+                        if !history {
+                            let id = update["toolCallId"].as_str().ok_or_else(rejected)?;
+                            if !tool_ids.seen.contains(id) {
+                                return Err(classified(Failure::ProtocolToolLifecycle));
+                            }
+                            if tool_ids.unidentified.contains(id) {
+                                // A name missing from Grok's frozen toolset may only
+                                // fail before execution; success/progress stays closed.
+                                if update["status"] != "failed"
+                                    || !tool_ids.awaiting_rejection.remove(id)
+                                {
+                                    return Err(classified(Failure::ProtocolNativeTool));
+                                }
+                            }
                         }
                         Ok(None)
                     }
@@ -604,7 +637,7 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
         let registration = self.registration.clone();
         Ok(Box::pin(async_stream::try_stream! {
             yield ProviderEvent::ResponseStarted{response_id:Some(response_id.clone())};
-            let mut tool_ids=BTreeSet::new();
+            let mut tool_ids=ToolNotifications::default();
             let mut retry_notifications=0;
             loop {
                 let (bytes,value)=Self::read(transport.as_ref(),&mut state).await?;
@@ -612,7 +645,7 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
                     if Self::internal_reload(&value,&mut state)? {continue;}
                     if value["id"]!=id||value.get("error").is_some(){Err(classified(Failure::ProtocolResponse))?;}
                     let result=&value["result"];
-                    if state.broker.has_pending_calls(){Err(classified(Failure::ProtocolToolLifecycle))?;}
+                    if state.broker.has_pending_calls() || !tool_ids.awaiting_rejection.is_empty(){Err(classified(Failure::ProtocolToolLifecycle))?;}
                     let category=result["_meta"]["cancellationCategory"].as_str();
                     if result["stopReason"]=="cancelled" && result["_meta"].get("usage").is_none() {
                         if category==Some("max_turns_reached") {Err(ProviderError::Classified(crate::AiProviderFailureCategory::ExecutionLimit))?;} else {Err(ProviderError::Cancelled)?;}
@@ -633,6 +666,15 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
                 if value["method"]=="_x.ai/mcp/sdk_call" {
                     let response=match state.broker.accept(&bytes).map_err(|e| classify_protocol(e, Failure::ProtocolSdk))? {
                         AiGrokAcpSdkInbound::Response(response)=>response,
+                        AiGrokAcpSdkInbound::InvalidToolCall(call)=>{
+                            let call_id=call.call_id().to_owned();
+                            let arguments=call.rejected_arguments().clone();
+                            yield ProviderEvent::ToolCallStarted{call_id:call_id.clone(),tool_id:call.tool_id().to_owned()};
+                            let result=responder.reject_invalid_arguments(call).await?;
+                            let response=state.broker.tool_response(&result).map_err(|e| classify_protocol(e, Failure::ProtocolSdk))?;
+                            yield ProviderEvent::ToolCallCompleted{call_id,arguments};
+                            response
+                        }
                         AiGrokAcpSdkInbound::ToolCall(call)=>{
                             let call_id=call.call_id().to_owned();
                             let arguments=call.arguments().clone();
@@ -729,6 +771,7 @@ pub(crate) mod tests {
     }
     pub(crate) struct ExecutorWireFactory {
         pub stationarity: bool,
+        pub invalid_first: bool,
     }
     #[async_trait]
     impl super::super::grok_acp_provider::AiGrokAcpProcessFactory for ExecutorWireFactory {
@@ -749,7 +792,7 @@ pub(crate) mod tests {
             ));
             reads.push(sdk(101, "tools/list", json!({})));
             for id in 102..105 {
-                reads.push(sdk(id,"tools/call",json!({"name":registration.tools()[0].provider_name,"arguments":{"recordId":"54"}})));
+                reads.push(sdk(id,"tools/call",json!({"name":registration.tools()[0].provider_name,"arguments":if self.invalid_first && id == 102 { json!({"recordId":false}) } else { json!({"recordId":"54"}) }})));
                 reads.push(retrying(1));
             }
             let aggregate = json!({"inputTokens":29390,"outputTokens":3000,"totalTokens":32390,"cachedReadTokens":17152,"cacheCreationTokens":0,"reasoningTokens":25,"modelCalls":5,"numTurns":5,"modelUsage":{"grok-4.7-build":{"inputTokens":29390,"outputTokens":3000,"totalTokens":32390,"cachedReadTokens":17152,"cacheCreationTokens":0,"reasoningTokens":25,"modelCalls":5}}});
@@ -906,6 +949,10 @@ pub(crate) mod tests {
                 .len(),
             2
         );
+        assert_eq!(
+            writes[2]["params"]["_meta"]["agentProfile"]["disallowedTools"],
+            json!(["Agent", "web_search", "x_search"])
+        );
         assert_eq!(writes[3]["params"]["value"], "grok-4.7");
         assert_eq!(writes[4]["params"]["value"], "low");
         let sent = writes
@@ -962,7 +1009,7 @@ pub(crate) mod tests {
                 &frame,
                 Some("session-1"),
                 false,
-                &mut BTreeSet::new(),
+                &mut ToolNotifications::default(),
             )
             .unwrap_err();
             assert_eq!(error.safe_category(), expected);
@@ -974,7 +1021,7 @@ pub(crate) mod tests {
                 &mismatch,
                 Some("session-1"),
                 false,
-                &mut BTreeSet::new()
+                &mut ToolNotifications::default()
             )
             .unwrap_err()
             .safe_category(),
@@ -987,6 +1034,45 @@ pub(crate) mod tests {
         assert_eq!(
             classify_protocol(rejected(), Failure::ProtocolSdk).safe_category(),
             Failure::ProtocolSdk
+        );
+    }
+
+    #[test]
+    fn unknown_display_tool_must_fail_without_execution_before_completion() {
+        let frame = |update| json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":"session-1", "update":update}});
+        let start = frame(
+            json!({"sessionUpdate":"tool_call", "toolCallId":"unknown-1", "kind":"other", "status":"pending", "title":"unavailable-name", "rawInput":{"private":"never-executed"}}),
+        );
+        for status in ["in_progress", "completed", "pending"] {
+            let mut state = ToolNotifications::default();
+            AiGrokAcpWireProcess::notification(&start, Some("session-1"), false, &mut state)
+                .unwrap();
+            assert!(!state.awaiting_rejection.is_empty());
+            let update = frame(
+                json!({"sessionUpdate":"tool_call_update", "toolCallId":"unknown-1", "status":status}),
+            );
+            assert_eq!(
+                AiGrokAcpWireProcess::notification(&update, Some("session-1"), false, &mut state)
+                    .unwrap_err()
+                    .safe_category(),
+                Failure::ProtocolNativeTool
+            );
+        }
+        let mut state = ToolNotifications::default();
+        AiGrokAcpWireProcess::notification(&start, Some("session-1"), false, &mut state).unwrap();
+        let failed = frame(
+            json!({"sessionUpdate":"tool_call_update", "toolCallId":"unknown-1", "status":"failed"}),
+        );
+        AiGrokAcpWireProcess::notification(&failed, Some("session-1"), false, &mut state).unwrap();
+        assert!(state.awaiting_rejection.is_empty());
+        // A terminal rejection cannot later become successful or be replayed.
+        assert!(
+            AiGrokAcpWireProcess::notification(&failed, Some("session-1"), false, &mut state)
+                .is_err()
+        );
+        assert!(
+            AiGrokAcpWireProcess::notification(&start, Some("session-1"), false, &mut state)
+                .is_err()
         );
     }
 
@@ -1201,7 +1287,13 @@ pub(crate) mod tests {
             AiGrokAcpWireProcess::retry_notification(&valid, "session-1", &mut count, 3).is_err()
         );
         assert!(
-            AiGrokAcpWireProcess::notification(&valid, None, true, &mut BTreeSet::new()).is_err(),
+            AiGrokAcpWireProcess::notification(
+                &valid,
+                None,
+                true,
+                &mut ToolNotifications::default()
+            )
+            .is_err(),
             "retry status cannot activate work during initialization or resume"
         );
     }
@@ -1373,8 +1465,13 @@ pub(crate) mod tests {
             json!({"jsonrpc":"2.0","method":"_x.ai/session_notification","params":{"update":{"sessionUpdate":"compaction_started"}}}),
         ] {
             assert!(
-                AiGrokAcpWireProcess::notification(&value, None, false, &mut BTreeSet::new())
-                    .is_err()
+                AiGrokAcpWireProcess::notification(
+                    &value,
+                    None,
+                    false,
+                    &mut ToolNotifications::default()
+                )
+                .is_err()
             );
         }
     }
@@ -1414,6 +1511,96 @@ pub(crate) mod tests {
         ));
     }
     #[tokio::test]
+    async fn unavailable_display_tool_allows_correction_but_not_unresolved_completion() {
+        for resolved in [false, true] {
+            let mut reads = new_session_reads();
+            reads.push(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"tool_call","toolCallId":"unavailable","kind":"other","status":"pending"}}}));
+            if resolved {
+                reads.push(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"unavailable","status":"failed"}}}));
+            }
+            reads.push(response(
+                9,
+                json!({"stopReason":"end_turn","_meta":{"usage":usage()}}),
+            ));
+            let (process, transport) = fixture(reads);
+            process.create_empty_session().await.unwrap();
+            let mut stream = process
+                .prompt(vec!["synthetic".into()], Arc::new(NoTools))
+                .await
+                .unwrap();
+            assert!(matches!(
+                stream.next().await.unwrap().unwrap(),
+                ProviderEvent::ResponseStarted { .. }
+            ));
+            if resolved {
+                assert!(matches!(
+                    stream.next().await.unwrap().unwrap(),
+                    ProviderEvent::Usage { .. }
+                ));
+                assert!(matches!(
+                    stream.next().await.unwrap().unwrap(),
+                    ProviderEvent::ResponseCompleted { .. }
+                ));
+            } else {
+                assert_eq!(
+                    stream.next().await.unwrap().unwrap_err().safe_category(),
+                    Failure::ProtocolToolLifecycle
+                );
+            }
+            assert!(stream.next().await.is_none());
+            assert_eq!(
+                transport
+                    .writes
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|v| v["method"] == "session/prompt")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn workflows_reload_during_prompt_does_not_terminate_or_replay_the_turn() {
+        let mut reads = new_session_reads();
+        reads.push(
+            json!({"jsonrpc":"2.0","id":"workflows-reload","result":{"result":{"reloaded":1}}}),
+        );
+        reads.push(response(
+            9,
+            json!({"stopReason":"end_turn","_meta":{"usage":usage()}}),
+        ));
+        let (process, transport) = fixture(reads);
+        process.create_empty_session().await.unwrap();
+        let mut stream = process
+            .prompt(vec!["synthetic".into()], Arc::new(NoTools))
+            .await
+            .unwrap();
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap(),
+            ProviderEvent::ResponseStarted { .. }
+        ));
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap(),
+            ProviderEvent::Usage { .. }
+        ));
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap(),
+            ProviderEvent::ResponseCompleted { .. }
+        ));
+        assert!(stream.next().await.is_none());
+        let writes = transport.writes.lock().unwrap();
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|v| v["method"] == "session/prompt")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn only_exact_internal_reload_and_manual_fixed_title_are_accepted() {
         let (process, _) = fixture(vec![]);
         let mut state = process.state.lock().await;
@@ -1431,13 +1618,26 @@ pub(crate) mod tests {
             )
             .is_err()
         );
+        assert!(AiGrokAcpWireProcess::internal_reload(
+            &json!({"jsonrpc":"2.0","id":"workflows-reload","result":{"result":{"reloaded":1}}}),
+            &mut state).unwrap());
+        assert!(
+            !AiGrokAcpWireProcess::internal_reload(
+                &json!({"jsonrpc":"2.0","id":"other-reload","result":{"result":{"reloaded":1}}}),
+                &mut state
+            )
+            .unwrap()
+        );
+        assert!(AiGrokAcpWireProcess::internal_reload(
+            &json!({"jsonrpc":"2.0","id":"workflows-reload","result":{"result":{"reloaded":1,"extra":true}}}),
+            &mut state).is_err());
         let mut manual = json!({"jsonrpc":"2.0","method":"_x.ai/session_notification","params":{"sessionId":"session-1","update":{"sessionUpdate":"session_summary_generated","session_summary":FIXED_TITLE},"_meta":{"x.ai/titleIsManual":true}}});
         assert!(
             AiGrokAcpWireProcess::notification(
                 &manual,
                 Some("session-1"),
                 true,
-                &mut BTreeSet::new()
+                &mut ToolNotifications::default()
             )
             .is_ok()
         );
@@ -1447,7 +1647,7 @@ pub(crate) mod tests {
                 &manual,
                 Some("session-1"),
                 true,
-                &mut BTreeSet::new()
+                &mut ToolNotifications::default()
             )
             .is_err()
         );

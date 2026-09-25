@@ -10,6 +10,12 @@ supersedes: []
 
 # graphql-orm-ai
 
+Provider and retained-session heartbeat maintenance now continues polling the provider's
+in-flight persistence while renewal waits. A started renewal settles even if the provider
+finishes first, retaining the new row-version proof. This prevents self-deadlock on a
+provider-held writer without replaying provider requests or application tools. No data migration
+is needed.
+
 A project-neutral, security-first AI runtime for `graphql-orm` applications.
 It turns explicitly reviewed, server-authored GraphQL operations into agent
 tools while keeping application authorization, disclosure, approvals, spend,
@@ -30,6 +36,11 @@ match persisted results and settle successful turns. Factory admission defaults
 to false until exact host isolation is verified; usage follows the existing
 estimate/actual budget contract. See the
 [local harness boundary](docs/local-harness.md).
+
+The frozen ACP profile explicitly excludes hosted `web_search` and `x_search`,
+which Grok offers separately from its client tool configuration. The adapter
+still exposes only the authorized capability broker; hosted search requires a
+separate supported usage and disclosure integration.
 
 Grok transient `retry_state` notifications remain inside the admitted prompt
 instead of aborting as protocol violations. Status admission is session-bound
@@ -55,6 +66,20 @@ allowing the provider to summarize authorized results without another read. Host
 ceilings admit up to 1,024 callbacks and Grok rounds; budgets and no-replay
 fences remain independent. See the [local harness boundary](docs/local-harness.md).
 
+Codex and Grok now distinguish offered requests with invalid model-authored arguments
+from protocol or authorization failures. A separate typed rejection path persists a
+protected, audited correction response without executing the tool. A new corrected
+request can continue in the same turn. The coordinator and Grok adapter accept its
+completion only when it matches the exact successfully persisted rejection; failed
+audit, unknown tools, stale bindings and duplicate callbacks remain closed. Grok's
+bounded internal `workflows-reload` status no longer aborts a prompt.
+
+Broker query-plan compilation also returns bounded repair guidance for unsupported
+relationship bounds or arguments. These version-2 failures contain only closed
+runtime instructions, pass the ordinary disclosure audit, and execute no resolver.
+See [query-plan correction](docs/capability-discovery-and-execution.md#correcting-rejected-broker-query-plans)
+for the envelope and paging contract.
+
 Egress audit writes serialize check-and-insert through the ORM state-machine
 transaction contract. Bounded transaction retries preserve exact replay checks
 and fail closed without repeating application tools or provider requests.
@@ -66,7 +91,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.100.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.101.0", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -308,6 +333,18 @@ same-type, side-effect-free transition and keeps a separate hard ceiling on
 tracked item starts. Duplicate-active identifiers, type changes, tool and
 web-search identifier reuse, malformed correlation, and over-limit lifecycles
 remain rejected.
+
+The provider executor compacts adjacent text, visible-summary and same-call
+argument fragments before retaining them. Event-count limits bound that retained
+representation, while individual and cumulative incoming byte ceilings remain
+enforced. Lifecycle events stay ordered and separate, and live persistence and
+authorization run before any browser disclosure. Transport fragmentation alone
+does not truncate an otherwise bounded long answer.
+
+Run start and heartbeat retry only classified transient database transactions
+within the configured transaction bound. They recheck expiry after acquiring
+the write lock and never renew a stale or expired lease. This persistence retry
+does not resend a provider prompt, execute a tool again or relax cancellation.
 
 The Codex schema projector preserves bounded nullable scalar `type` arrays in
 the crate-authored FixedBroker definitions. It does not pass through arbitrary

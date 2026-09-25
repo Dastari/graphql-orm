@@ -20,6 +20,68 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+Provider and retained-session heartbeat maintenance now continues polling the provider's
+in-flight persistence while renewal waits. A started renewal settles even if the provider
+finishes first, retaining the new row-version proof. This prevents self-deadlock on a
+provider-held writer without replaying provider requests or application tools. No data migration
+is needed.
+
+## [0.101.0] - 2026-09-25
+
+### Added
+
+- Separate `ProviderInvalidDynamicToolCall` and default-denying
+  `ProviderDynamicToolResponder::reject_invalid_arguments` contracts for offered,
+  correlated requests that violate their argument schema. Codex and Grok route these
+  to the coordinator's durable failure service without executing the tool. The model
+  receives the existing `invalid_arguments` correction envelope and can issue a new
+  corrected call within the same turn. Validated dynamic-call construction is unchanged.
+
+### Fixed
+
+- Retry classified retryable run-start/heartbeat database transactions within
+  the configured transaction bound. A competing SQLite writer no longer turns
+  the first transient renewal error into immediate lease loss. Expiry is checked
+  after write-lock admission on every attempt; stale/conflicted fences and
+  non-retryable failures still stop. Provider and tool effects never repeat.
+
+- Compact adjacent streamed text, visible-summary and same-call argument
+  fragments into bounded retained events. A valid long response no longer
+  exhausts the event-count limit solely because the provider sends tiny deltas.
+  Individual and cumulative incoming byte limits, lifecycle ordering, current
+  authorization, metering and live persistence remain enforced.
+
+- Explicitly exclude Grok hosted `web_search` and `x_search` in the frozen ACP
+  profile. Hosted tools are separate from `toolConfig`; omitting native tools
+  alone did not enforce the adapter's existing no-hosted-search contract.
+  Unsupported native activity remains rejected, with no prompt or tool replay.
+
+- Return a durable, bounded v2 correction for locally rejected broker query plans.
+  Unsupported relationship bounds/arguments receive exact repair guidance without
+  echoing model values, private schema details or internal errors. Rejected plans
+  execute nothing; fresh corrected calls retain current authorization, budgets,
+  checkpointing and egress-audit requirements.
+
+- Make discovery's namespace, kind and entity/class filters optional in its model
+  schema, matching the broker's existing deserialization and search behavior.
+  Omitting unused filters no longer rejects otherwise valid searches. Explicit
+  null remains supported; required search text/count, bounds and unknown-field
+  rejection are unchanged.
+- Permit Grok's unidentified pending display notification only when followed by
+  its failed-before-execution update. Unknown names can be corrected by the model;
+  progress, success, duplicate lifecycle and unresolved prompt completion remain
+  rejected. Application tools still require the correlated authorized SDK callback.
+- Count unexecuted schema rejections against the same per-run tool/rule budget,
+  recheck cancellation, and preserve Codex callback accounting through the rejection
+  responder decorator.
+- Preserve completed schema-rejection lifecycles through provider and coordinator
+  normalization only when the exact callback and arguments match a successfully
+  persisted, disclosure-approved rejection. Audit failures keep the renewed run fence
+  and fail closed; duplicate callbacks cannot execute or repeat persistence.
+- Normalize the exact bounded Grok `workflows-reload` response alongside
+  `skills-reload`. These internal directory-watcher notices do not complete prompts,
+  execute tools, alter authorization or trigger retries.
+
 ## [0.100.2] - 2026-09-24
 
 ### Fixed

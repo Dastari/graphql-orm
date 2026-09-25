@@ -777,19 +777,12 @@ impl ReadOnlyDynamicToolExecution {
         }
     }
 
-    async fn rule_usage(&self) -> AiRuleRunUsage {
-        self.state.lock().await.rule_usage
-    }
-}
-
-#[async_trait]
-impl AiProviderDynamicToolExecution for ReadOnlyDynamicToolExecution {
-    async fn execute_dynamic_tool(
+    async fn admit_dynamic_call(
         &self,
         lease: &AiRunLease,
         provider_result: &AiProviderCallResult,
         tool_call_index: usize,
-    ) -> Result<AiPersistedApplicationToolCall, AiError> {
+    ) -> Result<bool, AiError> {
         if self.run_control.cancellation(lease).await?.is_some() {
             return Err(AiError::Conflict);
         }
@@ -817,6 +810,29 @@ impl AiProviderDynamicToolExecution for ReadOnlyDynamicToolExecution {
             state.rule_usage = state.rule_usage.accept_tool_calls(1, &current_rules)?;
             state.accepted_calls == self.maximum_calls
         };
+        Ok(limit_reached)
+    }
+
+    async fn rule_usage(&self) -> AiRuleRunUsage {
+        self.state.lock().await.rule_usage
+    }
+}
+
+#[async_trait]
+impl AiProviderDynamicToolExecution for ReadOnlyDynamicToolExecution {
+    async fn execute_dynamic_tool(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        tool_call_index: usize,
+    ) -> Result<AiPersistedApplicationToolCall, AiError> {
+        let limit_reached = self
+            .admit_dynamic_call(lease, provider_result, tool_call_index)
+            .await?;
+        let call = provider_result
+            .tool_calls()
+            .get(tool_call_index)
+            .ok_or(AiError::Conflict)?;
         // Keep the last run-level slot available for an explanation rather
         // than dispatching another read and abruptly losing the whole answer.
         if limit_reached {
@@ -867,6 +883,23 @@ impl AiProviderDynamicToolExecution for ReadOnlyDynamicToolExecution {
             return Err(AiError::Conflict);
         }
         Ok(persisted)
+    }
+
+    async fn persist_unexecuted_dynamic_failure(
+        &self,
+        lease: &AiRunLease,
+        result: &AiProviderCallResult,
+        index: usize,
+        code: crate::AiApplicationToolFailureCode,
+    ) -> Result<AiPersistedApplicationToolCall, AiError> {
+        let limit_reached = self.admit_dynamic_call(lease, result, index).await?;
+        let code = if limit_reached {
+            crate::AiApplicationToolFailureCode::ToolCallLimitReached
+        } else {
+            code
+        };
+        self.persist_dynamic_failure(lease, result, index, code)
+            .await
     }
 
     async fn persist_dynamic_failure(
@@ -2224,12 +2257,19 @@ impl AiReadOnlyAgentCoordinator {
                             return Err(ProviderTurnFailure::Cancelled(settlement));
                         }
                         None => {
-                            match self.run_control.heartbeat(lease).await {
+                            let (renewal, completed_provider) =
+                                crate::provider_calls::maintenance::poll_provider_during_maintenance(
+                                    provider.as_mut(), self.run_control.heartbeat(lease),
+                                ).await;
+                            match renewal {
                                 Ok(renewed) => *lease = renewed,
                                 Err(error) => {
                                     let _ = self.provider_executor.interrupt_run(lease).await;
                                     return Err(ProviderTurnFailure::LeaseLost(error));
                                 }
+                            }
+                            if let Some(result) = completed_provider {
+                                return result.map_err(|error| classify_provider_turn_failure(&error));
                             }
                         }
                     }
@@ -2286,7 +2326,11 @@ impl AiReadOnlyAgentCoordinator {
                             return Err(ProviderTurnFailure::Cancelled(settlement));
                         }
                         None => {
-                            match self.run_control.heartbeat(&current).await {
+                            let (renewal, completed_provider) =
+                                crate::provider_calls::maintenance::poll_provider_during_maintenance(
+                                    provider.as_mut(), self.run_control.heartbeat(&current),
+                                ).await;
+                            match renewal {
                                 Ok(renewed) => {
                                     *current = renewed.clone();
                                     *lease = renewed;
@@ -2298,6 +2342,10 @@ impl AiReadOnlyAgentCoordinator {
                                     *lease = lost;
                                     return Err(ProviderTurnFailure::LeaseLost(error));
                                 }
+                            }
+                            drop(current);
+                            if let Some(result) = completed_provider {
+                                return result.map_err(|error| classify_provider_turn_failure(&error));
                             }
                         }
                     }
@@ -2366,7 +2414,11 @@ impl AiReadOnlyAgentCoordinator {
                             return Err(ProviderTurnFailure::Cancelled(settlement));
                         }
                         None => {
-                            match self.run_control.heartbeat(&current).await {
+                            let (renewal, completed_provider) =
+                                crate::provider_calls::maintenance::poll_provider_during_maintenance(
+                                    provider.as_mut(), self.run_control.heartbeat(&current),
+                                ).await;
+                            match renewal {
                                 Ok(renewed) => {
                                     *current = renewed.clone();
                                     *lease = renewed;
@@ -2378,6 +2430,14 @@ impl AiReadOnlyAgentCoordinator {
                                     *lease = lost;
                                     return Err(ProviderTurnFailure::LeaseLost(error));
                                 }
+                            }
+                            drop(current);
+                            if let Some(result) = completed_provider {
+                                return match result {
+                                    Ok(value) => Ok(value),
+                                    Err(AiError::ProviderSessionDeferred) => Err(ProviderTurnFailure::Deferred),
+                                    Err(error) => Err(classify_provider_turn_failure(&error)),
+                                };
                             }
                         }
                     }
@@ -2602,6 +2662,10 @@ mod tests {
         AiDataSourceRef, AiDestinationTrust, AiEgressCapability, AiEgressManifest,
         AiRunCancellation, AiSourceTrust, DataClassification, ModelContinuation,
     };
+
+    mod heartbeat_writer_tests {
+        include!("orm_coordinator_heartbeat_tests.rs");
+    }
 
     struct TestRunControl {
         finishes: Mutex<Vec<AiRunState>>,
@@ -4782,6 +4846,106 @@ mod tests {
             0
         );
         assert_eq!(run.final_states(), vec![AiRunState::Completed]);
+    }
+
+    #[tokio::test]
+    async fn unexecuted_failures_count_toward_run_limits_and_respect_cancellation() {
+        struct Rejections(Mutex<Vec<crate::AiApplicationToolFailureCode>>);
+        #[async_trait]
+        impl AiAgentReadOnlyToolExecutor for Rejections {
+            async fn execute_tool(
+                &self,
+                _: &AiRunLease,
+                _: &AiProviderCallResult,
+                _: AiApplicationToolCallContext,
+                _: AiToolResultEgressRoute,
+            ) -> Result<AiPersistedApplicationToolCall, AiError> {
+                panic!("a rejected request must never execute")
+            }
+            async fn persist_safe_failure(
+                &self,
+                lease: &AiRunLease,
+                result: &AiProviderCallResult,
+                _: AiApplicationToolCallContext,
+                _: AiToolResultEgressRoute,
+                code: crate::AiApplicationToolFailureCode,
+            ) -> Result<AiPersistedApplicationToolCall, AiError> {
+                self.0.lock().unwrap().push(code);
+                let call = &result.tool_calls()[0];
+                Ok(AiPersistedApplicationToolCall::test_completed(
+                    lease.clone(),
+                    call.call_id(),
+                    call.tool_id().as_str(),
+                    Some(crate::AiApplicationToolFailureEnvelope::new(code).to_json()),
+                    Some(test_manifest(lease, AiEgressCapability::ToolResult)),
+                ))
+            }
+        }
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        let rejections = Arc::new(Rejections(Mutex::new(Vec::new())));
+        let execution = ReadOnlyDynamicToolExecution::new(
+            run.clone(),
+            rejections.clone(),
+            Arc::new(TestRuleResolver),
+            test_scope(),
+            "reject-test".into(),
+            test_route(),
+            test_rules(test_scope()).fingerprint().to_owned(),
+            0,
+            2,
+            AiRuleRunUsage::default(),
+            None,
+        );
+        let result = AiProviderCallResult::test_result(
+            &lease,
+            None,
+            "response-invalid",
+            vec![("invalid-call", "test.read", json!({}))],
+        );
+        for _ in 0..2 {
+            execution
+                .persist_unexecuted_dynamic_failure(
+                    &lease,
+                    &result,
+                    0,
+                    crate::AiApplicationToolFailureCode::InvalidArguments,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            *rejections.0.lock().unwrap(),
+            vec![
+                crate::AiApplicationToolFailureCode::InvalidArguments,
+                crate::AiApplicationToolFailureCode::ToolCallLimitReached
+            ]
+        );
+        assert_eq!(execution.state.lock().await.accepted_calls, 2);
+        assert!(matches!(
+            execution
+                .persist_unexecuted_dynamic_failure(
+                    &lease,
+                    &result,
+                    0,
+                    crate::AiApplicationToolFailureCode::InvalidArguments
+                )
+                .await,
+            Err(AiError::BudgetDenied)
+        ));
+        run.cancelled.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            execution
+                .persist_unexecuted_dynamic_failure(
+                    &lease,
+                    &result,
+                    0,
+                    crate::AiApplicationToolFailureCode::InvalidArguments
+                )
+                .await,
+            Err(AiError::Conflict)
+        ));
+        assert_eq!(rejections.0.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
