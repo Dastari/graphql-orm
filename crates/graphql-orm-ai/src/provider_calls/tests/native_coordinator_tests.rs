@@ -6,10 +6,20 @@ use crate::{
     ProviderEventStream,
 };
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum CallbackScenario {
+    #[default]
+    MixedApproval,
+    InvalidReadFirst,
+    InvalidMutation,
+}
+
 #[derive(Default)]
 struct MixedRetainedProvider {
+    scenario: CallbackScenario,
     turns: AtomicUsize,
     created: AtomicUsize,
+    invalid_mutations_rejected: Arc<AtomicUsize>,
     replies: Arc<Mutex<Vec<serde_json::Value>>>,
     database: std::sync::Mutex<Option<Database<SqliteBackend>>>,
 }
@@ -77,12 +87,49 @@ impl AiProvider for MixedRetainedProvider {
             );
             assert!(request.native_approved_outcome_hash().is_some());
         }
+        let scenario = self.scenario;
+        let invalid_mutations_rejected = self.invalid_mutations_rejected.clone();
         let replies = self.replies.clone();
         let database = self.database.lock().unwrap().clone().unwrap();
         Ok(Box::pin(async_stream::try_stream! {
             let response = format!("native-coordinator-{turn}");
             yield ProviderEvent::ResponseStarted { response_id: Some(response.clone()) };
             if turn == 0 {
+                if scenario != CallbackScenario::MixedApproval {
+                    let tool_id = if scenario == CallbackScenario::InvalidReadFirst {
+                        "records.read"
+                    } else {
+                        "records.automatic"
+                    };
+                    let definition = request.tools.iter().find(|tool| tool.tool_id == tool_id).unwrap();
+                    let call_id = "native-coordinator-invalid".to_owned();
+                    let arguments = json!({"recordId":false});
+                    yield ProviderEvent::ToolCallStarted { call_id:call_id.clone(), tool_id:tool_id.to_owned() };
+                    let reply = responder.reject_invalid_arguments(
+                        crate::ProviderInvalidDynamicToolCall::from_definition(
+                            &response, &call_id, definition, arguments.clone(),
+                        )?,
+                    ).await;
+                    if scenario == CallbackScenario::InvalidMutation {
+                        assert!(matches!(reply, Err(ProviderError::Rejected)),
+                            "a schema-invalid mutation must never become a safe read retry");
+                        invalid_mutations_rejected.fetch_add(1, Ordering::SeqCst);
+                        Err::<(), _>(ProviderError::Rejected)?;
+                    }
+                    let reply = reply?;
+                    assert_eq!(reply.output(), &crate::AiApplicationToolFailureEnvelope::new(
+                        crate::AiApplicationToolFailureCode::InvalidArguments,
+                    ).to_json());
+                    replies.lock().await.push(reply.output().clone());
+                    let calls = AiToolCallRecord::query(database.pool()).fetch_all().await.unwrap();
+                    assert_eq!(calls.len(), 1);
+                    assert_eq!(calls[0].state, "execution_failed");
+                    assert_eq!(calls[0].tool_call_index, 0);
+                    assert_eq!(calls[0].authorization_code.as_deref(), Some("invalid_arguments"));
+                    assert!(calls[0].protected_result.is_some());
+                    assert!(calls[0].completed_at.is_some());
+                    yield ProviderEvent::ToolCallCompleted { call_id, arguments };
+                }
                 for (index, tool_id, record_id) in [
                     (0, "records.automatic", "ordinary"),
                     (1, "records.automatic", "review"),
@@ -215,11 +262,33 @@ impl AiSupervisedAgentTurnPlanner for MixedPlanner {
 
 #[tokio::test]
 async fn native_coordinator_retained_mixed_turn_parks_then_resumes_only_pending_effect() {
-    Box::pin(native_coordinator_lifecycle()).await;
+    Box::pin(native_coordinator_lifecycle(
+        CallbackScenario::MixedApproval,
+    ))
+    .await;
 }
 
-async fn native_coordinator_lifecycle() {
-    let provider = Arc::new(MixedRetainedProvider::default());
+#[tokio::test]
+async fn native_coordinator_schema_invalid_read_accounts_once_and_continues() {
+    Box::pin(native_coordinator_lifecycle(
+        CallbackScenario::InvalidReadFirst,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn native_coordinator_schema_invalid_mutation_denies_without_effect_or_approval() {
+    Box::pin(native_coordinator_lifecycle(
+        CallbackScenario::InvalidMutation,
+    ))
+    .await;
+}
+
+async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
+    let provider = Arc::new(MixedRetainedProvider {
+        scenario,
+        ..Default::default()
+    });
     let fixture = Arc::new(
         Box::pin(
             fixture_with_optional_provider_and_automatic_static_with_start(
@@ -291,7 +360,23 @@ async fn native_coordinator_lifecycle() {
     );
     let (consequential, approvals) = consequential_test_service(&fixture);
     let consequential = Arc::new(consequential.with_provider_session_service(sessions.clone()));
-    let applications = Arc::new(automatic_mutation_service(&fixture, fixture.audit.clone()));
+    // This fixture can prepend a rejected read to the four mixed callbacks.
+    // Keep application admission aligned with its eight-call coordinator limit.
+    let applications = Arc::new(OrmAiApplicationToolCallService::new(
+        fixture.run_service.clone(),
+        fixture.runtime.clone(),
+        fixture.audit.clone(),
+        Arc::new(SystemClock),
+        AiApplicationToolCallLimits::new(
+            8_192,
+            16_384,
+            4,
+            8,
+            Duration::seconds(30),
+            Duration::seconds(10),
+        )
+        .unwrap(),
+    ));
     let checkpoints = Arc::new(OrmAiCoordinatorCheckpointService::new(
         fixture.run_service.clone(),
         Arc::new(Resolver(fixture.principal.clone())),
@@ -363,8 +448,48 @@ async fn native_coordinator_lifecycle() {
         Box::pin(coordinator.execute_claimed(&fixture.lease)),
     )
     .await
-    .unwrap()
     .unwrap();
+    if scenario == CallbackScenario::InvalidMutation {
+        if let Ok(outcome) = &waiting {
+            assert!(!matches!(
+                outcome,
+                AiSupervisedAgentRunOutcome::Completed { .. }
+                    | AiSupervisedAgentRunOutcome::WaitingApproval { .. }
+            ));
+        }
+        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            provider.invalid_mutations_rejected.load(Ordering::SeqCst),
+            1
+        );
+        assert_eq!(provider.turns.load(Ordering::SeqCst), 1);
+        assert!(provider.replies.lock().await.is_empty());
+        assert!(
+            AiToolCallRecord::query(fixture.database.pool())
+                .fetch_all()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            AiApprovalRecord::query(fixture.database.pool())
+                .fetch_all()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            crate::persistence::AiNativeApprovalCandidateRecord::query(fixture.database.pool())
+                .fetch_all()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        return;
+    }
+    let waiting = waiting.unwrap();
+    let extra_read = usize::from(scenario == CallbackScenario::InvalidReadFirst);
+    let expected_calls = 4 + extra_read;
     let AiSupervisedAgentRunOutcome::WaitingApproval {
         approval_id,
         provider_turns,
@@ -374,10 +499,14 @@ async fn native_coordinator_lifecycle() {
     else {
         panic!("expected durable native approval wait: {waiting:?}")
     };
-    assert_eq!((provider_turns, total_tool_calls), (1, 4));
+    assert_eq!(
+        (provider_turns, total_tool_calls),
+        (1, expected_calls as u32)
+    );
     assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 1);
     let replies = provider.replies.lock().await.clone();
-    assert_eq!(replies.len(), 4);
+    assert_eq!(replies.len(), expected_calls);
+    let replies = &replies[extra_read..];
     assert_eq!(replies[1]["status"], "ApprovalPending");
     assert_eq!(replies[2]["status"], "ConsequentialCallsPaused");
     assert_eq!(replies[1]["effectExecuted"], false);
@@ -386,7 +515,20 @@ async fn native_coordinator_lifecycle() {
         .fetch_all()
         .await
         .unwrap();
-    assert_eq!(calls.len(), 4);
+    assert_eq!(calls.len(), expected_calls);
+    let mut indices = calls
+        .iter()
+        .map(|call| call.tool_call_index)
+        .collect::<Vec<_>>();
+    indices.sort_unstable();
+    assert_eq!(indices, (0..expected_calls as i64).collect::<Vec<_>>());
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.state == "execution_failed")
+            .count(),
+        extra_read
+    );
     assert_eq!(
         calls
             .iter()
@@ -441,21 +583,28 @@ async fn native_coordinator_lifecycle() {
             completed,
             AiSupervisedAgentRunOutcome::Completed {
                 provider_turns: 2,
-                total_tool_calls: 4,
+                total_tool_calls,
                 ..
-            }
+            } if total_tool_calls == expected_calls as u32
         ),
         "{completed:?}"
     );
     assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 2);
     assert_eq!(provider.turns.load(Ordering::SeqCst), 2);
     assert_eq!(provider.created.load(Ordering::SeqCst), 1);
-    assert_eq!(provider.replies.lock().await.len(), 4);
+    assert_eq!(provider.replies.lock().await.len(), expected_calls);
     let calls = AiToolCallRecord::query(fixture.database.pool())
         .fetch_all()
         .await
         .unwrap();
-    assert_eq!(calls.len(), 4);
+    assert_eq!(calls.len(), expected_calls);
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.state == "execution_failed")
+            .count(),
+        extra_read
+    );
     assert_eq!(
         calls
             .iter()
