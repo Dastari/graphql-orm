@@ -2406,7 +2406,11 @@ impl ProviderDynamicToolResult {
         }
     }
 
-    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+    #[cfg(all(
+        test,
+        any(feature = "sqlite", feature = "postgres"),
+        any(feature = "provider-codex-app-server", feature = "provider-grok-acp")
+    ))]
     pub(crate) fn new(
         call: &ProviderDynamicToolCall,
         output: serde_json::Value,

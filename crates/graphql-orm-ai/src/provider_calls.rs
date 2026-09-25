@@ -70,6 +70,10 @@ pub struct AiProviderEgressRequirement {
 }
 
 /// Deployment-owned bounds for a single normalized provider stream.
+///
+/// Adjacent text, visible-summary, and same-call argument fragments share a
+/// retained event up to the individual byte bound. The event count bounds this
+/// retained representation; cumulative bytes still count every incoming frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AiProviderCallLimits {
     maximum_events: usize,
@@ -2754,6 +2758,60 @@ pub struct AiProviderCallExecutor {
     failure_diagnostic_sink: Option<Arc<dyn AiProviderFailureDiagnosticSink>>,
 }
 
+// Transport fragment boundaries carry no semantic identity. Compact only
+// adjacent matching deltas, never lifecycle events or distinct tool calls.
+// Track the last serialized size so appending tiny fragments stays linear in
+// incoming bytes instead of repeatedly serializing the growing retained text.
+fn retain_provider_event(
+    events: &mut Vec<ProviderEvent>,
+    last_event_bytes: &mut usize,
+    event: &ProviderEvent,
+    event_bytes: usize,
+    limits: AiProviderCallLimits,
+) -> Result<(), AiError> {
+    if event_bytes > limits.maximum_event_bytes {
+        return Err(AiError::ProviderFailed);
+    }
+    let adjacent = match (events.last_mut(), event) {
+        (Some(ProviderEvent::TextDelta { text: previous }), ProviderEvent::TextDelta { text })
+        | (
+            Some(ProviderEvent::ReasoningSummaryDelta { text: previous }),
+            ProviderEvent::ReasoningSummaryDelta { text },
+        ) => Some((previous, text)),
+        (
+            Some(ProviderEvent::ToolArgumentsDelta {
+                call_id: previous_id,
+                delta: previous,
+            }),
+            ProviderEvent::ToolArgumentsDelta { call_id, delta },
+        ) if previous_id == call_id => Some((previous, delta)),
+        _ => None,
+    };
+    if let Some((previous, delta)) = adjacent {
+        // JSON string encoding is additive after removing its two quote bytes,
+        // including escaped characters and multibyte UTF-8.
+        let added_bytes = serde_json::to_vec(delta)
+            .map_err(|_| AiError::ProviderFailed)?
+            .len()
+            .checked_sub(2)
+            .ok_or(AiError::ProviderFailed)?;
+        let merged_bytes = last_event_bytes
+            .checked_add(added_bytes)
+            .ok_or(AiError::ProviderFailed)?;
+        if merged_bytes <= limits.maximum_event_bytes {
+            previous.push_str(delta);
+            *last_event_bytes = merged_bytes;
+            return Ok(());
+        }
+    }
+    if events.len() >= limits.maximum_events {
+        return Err(AiError::ProviderFailed);
+    }
+    events.push(event.clone());
+    *last_event_bytes = event_bytes;
+    Ok(())
+}
+
 impl AiProviderCallExecutor {
     /// Creates a provider-turn executor.
     pub fn new(
@@ -3556,6 +3614,7 @@ impl AiProviderCallExecutor {
             )
             .await?;
         let mut events = Vec::new();
+        let mut last_retained_event_bytes = 0;
         let mut total_bytes = 0usize;
         let mut usage = None;
         let mut provider_response_id = None;
@@ -3645,12 +3704,22 @@ impl AiProviderCallExecutor {
             total_bytes = total_bytes
                 .checked_add(event_bytes)
                 .ok_or(AiError::ProviderFailed)?;
-            if events.len() >= self.limits.maximum_events
-                || event_bytes > self.limits.maximum_event_bytes
+            if event_bytes > self.limits.maximum_event_bytes
                 || total_bytes > self.limits.maximum_total_event_bytes
             {
+                self.record_provider_failure(AiProviderFailureCategory::ProtocolFrameLimit);
                 return Err(AiError::ProviderFailed);
             }
+            retain_provider_event(
+                &mut events,
+                &mut last_retained_event_bytes,
+                &event,
+                event_bytes,
+                self.limits,
+            )
+            .inspect_err(|_| {
+                self.record_provider_failure(AiProviderFailureCategory::ProtocolFrameLimit);
+            })?;
             match &event {
                 ProviderEvent::ResponseStarted { response_id }
                 | ProviderEvent::ResponseCompleted { response_id } => {
@@ -3798,7 +3867,6 @@ impl AiProviderCallExecutor {
                 )
                 .await?;
             }
-            events.push(event);
         }
         if let Some(coalescer) = live_coalescer.as_mut() {
             let batches = coalescer.flush_all()?;
@@ -10285,6 +10353,166 @@ mod tests {
         assert!(matches!(
             executor.execute(&fixture.lease, plan(&fixture)).await,
             Err(AiError::PersistenceFailed)
+        ));
+        assert_eq!(reservation_state(&fixture.database).await, "uncertain");
+    }
+
+    #[tokio::test]
+    async fn fragmented_text_retention_preserves_content_and_settles_usage() {
+        let fragment = "🙂\n\"";
+        let mut events = vec![ProviderEvent::ResponseStarted {
+            response_id: Some("fragmented-response".to_owned()),
+        }];
+        events.extend((0..6_000).map(|_| ProviderEvent::TextDelta {
+            text: fragment.to_owned(),
+        }));
+        events.extend([
+            ProviderEvent::Usage {
+                input_tokens: 3,
+                output_tokens: 6_000,
+                cached_input_tokens: 0,
+            },
+            ProviderEvent::ResponseCompleted {
+                response_id: Some("fragmented-response".to_owned()),
+            },
+        ]);
+        let fixture = fixture(events).await;
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(4_096, 64 * 1_024, 8 * 1_024 * 1_024).unwrap(),
+        );
+        let result = executor
+            .execute(&fixture.lease, plan(&fixture))
+            .await
+            .unwrap();
+        let text: String = result
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, fragment.repeat(6_000));
+        assert!(result.events().len() < 10);
+        assert_eq!(result.usage().output_tokens, 6_000);
+        assert_eq!(fixture.mock.request_count(), 1);
+        assert_eq!(reservation_state(&fixture.database).await, "committed");
+    }
+
+    #[test]
+    fn stream_retention_preserves_order_and_serialized_bounds() {
+        let limits = AiProviderCallLimits::new(64, 128, 8_192).unwrap();
+        let mut events = Vec::new();
+        let mut last_bytes = 0;
+        let fragment = "🙂\n\"";
+        for _ in 0..100 {
+            let event = ProviderEvent::TextDelta {
+                text: fragment.into(),
+            };
+            let bytes = serde_json::to_vec(&event).unwrap().len();
+            retain_provider_event(&mut events, &mut last_bytes, &event, bytes, limits).unwrap();
+            assert_eq!(
+                last_bytes,
+                serde_json::to_vec(events.last().unwrap()).unwrap().len()
+            );
+        }
+        assert!(events.len() > 1);
+        assert!(
+            events
+                .iter()
+                .all(|e| serde_json::to_vec(e).unwrap().len() <= 128)
+        );
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ProviderEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, fragment.repeat(100));
+        let boundary = events.len();
+        for event in [
+            ProviderEvent::ReasoningSummaryDelta {
+                text: "summary".into(),
+            },
+            ProviderEvent::ReasoningSummaryDelta {
+                text: " continuation".into(),
+            },
+            ProviderEvent::TextDelta {
+                text: "after summary".into(),
+            },
+            ProviderEvent::ToolArgumentsDelta {
+                call_id: "one".into(),
+                delta: "{".into(),
+            },
+            ProviderEvent::ToolArgumentsDelta {
+                call_id: "one".into(),
+                delta: "}".into(),
+            },
+            ProviderEvent::ToolArgumentsDelta {
+                call_id: "two".into(),
+                delta: "{}".into(),
+            },
+        ] {
+            let bytes = serde_json::to_vec(&event).unwrap().len();
+            retain_provider_event(&mut events, &mut last_bytes, &event, bytes, limits).unwrap();
+        }
+        assert_eq!(
+            &events[boundary..],
+            &[
+                ProviderEvent::ReasoningSummaryDelta {
+                    text: "summary continuation".into()
+                },
+                ProviderEvent::TextDelta {
+                    text: "after summary".into()
+                },
+                ProviderEvent::ToolArgumentsDelta {
+                    call_id: "one".into(),
+                    delta: "{}".into()
+                },
+                ProviderEvent::ToolArgumentsDelta {
+                    call_id: "two".into(),
+                    delta: "{}".into()
+                },
+            ]
+        );
+        let one_event = AiProviderCallLimits::new(1, 128, 128).unwrap();
+        let event = ProviderEvent::ResponseCompleted { response_id: None };
+        let bytes = serde_json::to_vec(&event).unwrap().len();
+        assert!(
+            retain_provider_event(&mut events, &mut last_bytes, &event, bytes, one_event).is_err()
+        );
+        let event = ProviderEvent::TextDelta {
+            text: "x".repeat(129),
+        };
+        let bytes = serde_json::to_vec(&event).unwrap().len();
+        assert!(retain_provider_event(&mut Vec::new(), &mut 0, &event, bytes, limits).is_err());
+    }
+
+    #[tokio::test]
+    async fn stream_retention_still_enforces_cumulative_incoming_bytes() {
+        let fixture = fixture(
+            (0..100)
+                .map(|_| ProviderEvent::TextDelta { text: "x".into() })
+                .collect(),
+        )
+        .await;
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 128, 256).unwrap(),
+        );
+        assert!(matches!(
+            executor.execute(&fixture.lease, plan(&fixture)).await,
+            Err(AiError::ProviderFailed)
         ));
         assert_eq!(reservation_state(&fixture.database).await, "uncertain");
     }

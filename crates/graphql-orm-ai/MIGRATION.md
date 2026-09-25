@@ -21,6 +21,13 @@ use [implementation status](docs/implementation-status.md) and the central
 
 ## 0.100.2 to 0.101.0
 
+Provider-call event-count limits now apply to the bounded retained representation:
+adjacent same-kind text/visible-summary deltas and same-call argument deltas may
+be combined. Consumers must not treat transport fragment boundaries as semantic
+message boundaries. Other events remain ordering barriers. Individual serialized
+event bounds and cumulative incoming bytes are unchanged; live persistence still
+processes each incoming event. No data migration or historical run replay is needed.
+
 The Grok wire profile explicitly excludes hosted `web_search` and `x_search`,
 which the native runtime offers separately from `toolConfig`. This enforces the
 existing factory contract; it does not enable or account for hosted search.

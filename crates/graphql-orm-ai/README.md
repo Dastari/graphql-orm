@@ -328,6 +328,13 @@ tracked item starts. Duplicate-active identifiers, type changes, tool and
 web-search identifier reuse, malformed correlation, and over-limit lifecycles
 remain rejected.
 
+The provider executor compacts adjacent text, visible-summary and same-call
+argument fragments before retaining them. Event-count limits bound that retained
+representation, while individual and cumulative incoming byte ceilings remain
+enforced. Lifecycle events stay ordered and separate, and live persistence and
+authorization run before any browser disclosure. Transport fragmentation alone
+does not truncate an otherwise bounded long answer.
+
 The Codex schema projector preserves bounded nullable scalar `type` arrays in
 the crate-authored FixedBroker definitions. It does not pass through arbitrary
 JSON Schema unions: only unique combinations of supported scalar types plus

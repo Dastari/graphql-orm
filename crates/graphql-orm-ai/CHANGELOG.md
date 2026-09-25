@@ -33,6 +33,12 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ### Fixed
 
+- Compact adjacent streamed text, visible-summary and same-call argument
+  fragments into bounded retained events. A valid long response no longer
+  exhausts the event-count limit solely because the provider sends tiny deltas.
+  Individual and cumulative incoming byte limits, lifecycle ordering, current
+  authorization, metering and live persistence remain enforced.
+
 - Explicitly exclude Grok hosted `web_search` and `x_search` in the frozen ACP
   profile. Hosted tools are separate from `toolConfig`; omitting native tools
   alone did not enforce the adapter's existing no-hosted-search contract.
