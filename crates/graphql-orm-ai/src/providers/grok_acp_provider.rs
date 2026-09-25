@@ -376,7 +376,7 @@ impl AiGrokAcpRegistration {
             || request.tools != self.tools
             || !request.instructions.is_empty()
             || request.continuation_mode != ModelContinuationMode::ProviderRetained
-            || request.continuation.is_some()
+            || (request.continuation.is_some() && request.native_approved_outcome_hash().is_none())
             || !request.builtin_tools.is_empty()
             || request.output_schema.is_some()
             || request.maximum_builtin_tool_calls.is_some()
@@ -682,6 +682,12 @@ impl AiGrokAcpProvider {
         )?;
         let binding = context.run_binding().ok_or_else(rejected)?;
         let session = context.provider_session().ok_or_else(rejected)?;
+        if request.native_approved_outcome_hash().is_some()
+            && session.activation() != crate::AiProviderSessionActivation::ExistingRetained
+        {
+            return Err(ProviderError::Rejected);
+        }
+
         let claim = session.claim();
         if !self.registration.matches(claim.descriptor())
             || session.cursor().kind() != self.registration.cursor_kind()
@@ -1163,6 +1169,40 @@ pub(super) mod tests {
                 .is_err()
         );
     }
+    #[test]
+    fn native_approved_outcome_is_closed_json_and_never_a_second_tool_reply() {
+        let reg = registration();
+        let mut request = ModelRequest {
+            model: reg.model.clone(),
+            instructions: vec![],
+            input: vec![ModelInputBlock::Json {
+                value: serde_json::json!({"formatVersion":1,"kind":"FrameworkApprovedToolOutcome","toolCallId":uuid::Uuid::new_v4(),"providerCallId":"consumed-call","toolId":"records.update","state":"completed","output":{"changed":true}}),
+            }],
+            continuation: Some(crate::ModelContinuation::ProviderResponse {
+                response_id: "settled-turn".to_owned(),
+            }),
+            continuation_mode: ModelContinuationMode::ProviderRetained,
+            tools: reg.tools.clone(),
+            builtin_tools: vec![],
+            maximum_builtin_tool_calls: None,
+            reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: reg.effort,
+            output_schema: None,
+            maximum_output_tokens: Some(2048),
+        };
+        assert!(reg.validate_request(&request).is_ok());
+        request.input = vec![ModelInputBlock::ToolResult {
+            call_id: "consumed-call".to_owned(),
+            tool_id: "records.update".to_owned(),
+            output: serde_json::json!({"changed":true}),
+        }];
+        assert!(reg.validate_request(&request).is_err());
+        request.input = vec![ModelInputBlock::Json {
+            value: serde_json::json!({"kind":"FrameworkApprovedToolOutcome","output":{"changed":true}}),
+        }];
+        assert!(reg.validate_request(&request).is_err());
+    }
+
     #[test]
     fn request_cannot_widen_native_surface_or_output_estimate_admission() {
         let reg = registration();

@@ -3,7 +3,7 @@ title: "Implementation Status"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-15
+last_reviewed: 2026-09-25
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -12,7 +12,8 @@ supersedes: []
 
 Current package versions and dependency selectors are generated in the
 [workspace inventory](../../../docs/reference/workspace-packages.md).
-The AI schema module is `0.66.0`, including the durable inline tool-limit outcome. External `agql-auth` uses the published
+The AI schema module is `0.67.0`, including protected native approval candidates
+and optional trusted tool-call provenance. External `agql-auth` uses the published
 `v0.19.1` tag with its full resolved commit retained in `Cargo.lock`.
 
 Completed stateless local-provider turns can carry a proof-bearing contained
@@ -96,8 +97,12 @@ verification evidence belongs in the focused guides.
   fingerprinting; neither path grants ordinary application authority.
 - Application tools require an explicit catalog, static disclosure contract,
   current host policy, and ordinary resolver authorization. Read-only and the
-  bounded sequential supervised path are implemented; mixed, parallel, and
-  stateless consequential execution remains closed.
+  bounded sequential supervised path are implemented. Explicit classified
+  native turns can mix reads, current-policy automatic writes and exact
+  one-shot approvals under a trusted retained session. Pending approval is a
+  non-executable preparation until provider usage settles; distinct ordered
+  source/outcome proofs prevent callback or effect replay. Parallel and
+  stateless consequential execution remain closed.
 - Finished schemas and semantic metadata now produce canonical deterministic
   compact capability indexes. A fingerprinted index set combines multiple
   owning subgraphs without erasing their target/schema identities or allowing
@@ -121,6 +126,10 @@ verification evidence belongs in the focused guides.
   static/generated identity through authority issuance. Generated reads bind
   the exact target, finished schema, semantic catalogue/root and registered
   capability; dynamic operation-name conventions grant nothing.
+  Query-only remains the adapter default; exact registered mutations require
+  explicit opt-in and current runtime/resolver authority. Optional opaque
+  execution provenance and the validated-request issuer hook support host
+  delegation without reading private runtime tables.
 - Owning subgraphs can compile the same canonical generated/custom GraphQL
   tool manifests through `graphql-orm-ai-tool-profiles` without selecting an
   AI persistence backend. The runtime consumes those exact wire values and

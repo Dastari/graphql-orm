@@ -19,6 +19,76 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.101.0 to 0.102.0
+
+Adopt AI tool profiles `0.14.0` from the same reviewed workspace release.
+Apply AI schema module `0.67.0` through the normal managed schema workflow
+before enabling the new coordinator mode. It adds the hidden protected native
+approval-candidate entity and nullable trusted execution provenance on tool
+calls. Existing calls have no provenance; do not synthesize it from model
+metadata or old rows. Existing checkpoints retain their formats and admission
+rules. Backup/restore includes the new managed entity and remains closed under
+the existing active-run, provider-session and reconciliation gates; this release
+does not authorize replay of restored active or waiting work.
+
+All new mutation exposure is explicit. Static automatic profiles compile to
+`AutonomousWrite`/`None` and require exact catalog policy, current hierarchy,
+current tool authorization and the ordinary authenticated resolver. Hosts may
+return `AiToolAuthorizationDecision::require_one_shot` for selected arguments.
+That tightening prevents direct automatic execution and binds a fresh canonical
+preview, policy version and authorization-state digest to one approval. High
+impact descriptors still use the supervised profile; registration alone grants
+no authority.
+
+Use `AiProviderCallPlan::new_with_classified_tools` and its continuation
+constructor, `AiSupervisedAgentTurnPlan::new_classified_native`, and the
+coordinator's explicit `with_classified_native_tools` integration for mixed
+native turns. Legacy constructors do not enable native control receipts. This
+mode requires a trusted retained provider session. Preparation holds the run
+lease and creates no usable approval; authoritative provider usage settlement
+and the exact ordered native source checkpoint precede finalization and lease
+release. A pending or paused control response never means the action executed.
+Approved resumption uses a distinct framework JSON outcome, not another tool
+response for the already-consumed native call ID. Source callbacks and provider
+usage are counted once, and prior effects are never replayed. Effect/result or
+checkpoint uncertainty remains `RecoveryRequired`.
+
+`AiRemoteGraphqlOperationPolicy` defaults to `QueriesOnly`. Opt into
+`RegisteredQueriesAndMutations` only for reviewed registered contracts and
+retain target resolver authorization. `AiRemoteGraphqlAuthorityIssuer` gains
+the compatible default `issue_for_request` hook after exact factory validation;
+override it when delegation must bind actual resolved operation arguments.
+The issuer receives a trusted host request, not proof that a router preserves
+document or variable spelling. Hosts must define and enforce any resolver-level
+argument digest across routing transformations. Mutation contexts are consumed
+before transport, so an ambiguous transport failure cannot be retried with the
+same context.
+
+Opaque `AiToolExecutionProvenance` carries framework-authored durable call,
+provider, budget, argument and optional consumed-approval bindings. Current
+policy evidence is refreshed before the bridge. It is not a bearer credential,
+an authorization grant, or a replacement for application checks. The direct
+bridge may have no durable provenance; hosts requiring it must reject absence.
+
+Existing `AiApprovalAccessPolicy` implementations compile unchanged. Override
+`can_access_bound_approval` to enforce current session ownership and exact
+resource/action authority from verified `AiApprovalAccessEvidence`; the default
+forwards to coarse access policy. Coarse access is checked before opening
+protected content, and missing or inconsistent retained preview/resources fail
+closed. Do not log the preview. Preview details now allow at most 2 MiB of
+serialized JSON including escaping; source, argument, protection and checkpoint
+bounds remain independent. The protected native preparation has a separate
+4 MiB representation ceiling. These approval-access additions alone require no
+data migration or GraphQL SDL changes.
+
+Native protected-payload retention uses the original candidate/source fence
+even after approved reclaim moves the pending call to a new generation.
+Age-based source/outcome cleanup requires the complete terminal graph and
+deletes a pair atomically. The existing per-session checkpoint row cap is not
+raised implicitly: configure `maximum_run_checkpoints_per_session` to at least
+two for native pair cleanup. Active, current, too-new or recovery-required
+dependencies remain retained. See [session retention](docs/session-retention.md).
+
 ## 0.100.2 to 0.101.0
 
 Provider and retained-session heartbeat maintenance now continues polling the provider's

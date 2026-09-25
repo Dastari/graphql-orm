@@ -247,6 +247,7 @@ pub struct AiProviderCallPlan {
     transfers: Vec<AiEgressManifest>,
     correlation_id: String,
     tool_rule_bindings: Vec<AiPlanToolRuleBinding>,
+    classified_native: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -353,6 +354,7 @@ impl AiProviderCallPlan {
             transfers,
             correlation_id,
             tool_rule_bindings: Vec::new(),
+            classified_native: false,
         })
     }
 
@@ -534,6 +536,123 @@ impl AiProviderCallPlan {
             static_policy,
             generated_targets,
         )
+    }
+
+    /// Creates an initial turn with an explicit mixture of registered reads,
+    /// automatic mutations, and supervised mutations. Static tools require
+    /// exact policy entries; generated capabilities require current target
+    /// policy. Host authorization may tighten an automatic call to one-shot
+    /// approval after its actual arguments are known.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown, stale, disabled, ambiguous, subscription or unsafe
+    /// definitions and pre-populated continuation or tool-result input.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_classified_tools(
+        provider_kind: ProviderKind,
+        request: ModelRequest,
+        budget: AiBudgetReservationRequest,
+        transfers: Vec<AiEgressManifest>,
+        correlation_id: impl Into<String>,
+        catalog: &crate::AiToolCatalog,
+        static_policy: &AiToolPolicySet,
+        generated_targets: &crate::AiGeneratedGraphqlTargetPolicySet,
+    ) -> Result<Self, AiError> {
+        if request.tools.is_empty()
+            || request.continuation.is_some()
+            || request
+                .input
+                .iter()
+                .any(|block| matches!(block, ModelInputBlock::ToolResult { .. }))
+        {
+            return Err(AiError::Forbidden);
+        }
+        Self::new_with_bound_classified_tools(
+            provider_kind,
+            request,
+            budget,
+            transfers,
+            correlation_id,
+            catalog,
+            static_policy,
+            generated_targets,
+        )
+    }
+
+    /// Continues a classified turn using one opaque bounded, egress-authorized
+    /// prior result set. Exact per-tool policy is checked again.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed continuation bindings and any stale or unauthorized
+    /// definition. Existing read-only constructors remain read-only.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_continuation_with_classified_tools(
+        provider_kind: ProviderKind,
+        mut request: ModelRequest,
+        budget: AiBudgetReservationRequest,
+        mut transfers: Vec<AiEgressManifest>,
+        correlation_id: impl Into<String>,
+        continuation: crate::AiAgentContinuation,
+        catalog: &crate::AiToolCatalog,
+        static_policy: &AiToolPolicySet,
+        generated_targets: &crate::AiGeneratedGraphqlTargetPolicySet,
+    ) -> Result<Self, AiError> {
+        transfers.extend(continuation.apply_with_transfers(&mut request)?);
+        Self::new_with_bound_classified_tools(
+            provider_kind,
+            request,
+            budget,
+            transfers,
+            correlation_id,
+            catalog,
+            static_policy,
+            generated_targets,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_bound_classified_tools(
+        provider_kind: ProviderKind,
+        request: ModelRequest,
+        budget: AiBudgetReservationRequest,
+        transfers: Vec<AiEgressManifest>,
+        correlation_id: impl Into<String>,
+        catalog: &crate::AiToolCatalog,
+        static_policy: &AiToolPolicySet,
+        generated_targets: &crate::AiGeneratedGraphqlTargetPolicySet,
+    ) -> Result<Self, AiError> {
+        if request.tools.is_empty() {
+            return Err(AiError::Forbidden);
+        }
+        let bindings = request
+            .tools
+            .iter()
+            .map(|definition| {
+                let (maturity, approval) = catalog.validate_classified_model_definition(
+                    definition,
+                    static_policy,
+                    generated_targets,
+                )?;
+                Ok(AiPlanToolRuleBinding {
+                    fingerprint: definition.fingerprint.clone(),
+                    maturity,
+                    approval,
+                })
+            })
+            .collect::<Result<Vec<_>, AiError>>()?;
+        let mut plan = Self::new_internal(
+            provider_kind,
+            request,
+            budget,
+            transfers,
+            correlation_id.into(),
+            true,
+        )?;
+        plan.tool_rule_bindings = bindings;
+        plan.classified_native = true;
+        Ok(plan)
     }
 
     /// Creates an initial provider call that may expose explicitly enabled
@@ -1169,6 +1288,23 @@ impl AiProviderCallPlan {
             })
     }
 
+    pub(crate) const fn allows_native_control(&self) -> bool {
+        self.classified_native
+    }
+
+    pub(crate) fn has_classified_application_tools(&self) -> bool {
+        !self.tool_rule_bindings.is_empty()
+            && self.tool_rule_bindings.len() == self.request.tools.len()
+            && self.tool_rule_bindings.iter().all(|binding| {
+                matches!(
+                    (binding.maturity, binding.approval),
+                    (ToolMaturity::ReadOnly, AiApprovalRule::None)
+                        | (ToolMaturity::AutonomousWrite, AiApprovalRule::None)
+                        | (ToolMaturity::SupervisedWrite, AiApprovalRule::OneShot)
+                )
+            })
+    }
+
     pub(crate) fn has_only_classified_mutations(&self) -> bool {
         !self.tool_rule_bindings.is_empty()
             && self.tool_rule_bindings.len() == self.request.tools.len()
@@ -1232,6 +1368,25 @@ impl AiProviderCallPlan {
         uses_byok: bool,
     ) -> Result<AiRuleRunUsage, AiError> {
         if self.request.tools.is_empty() {
+            return Err(AiError::Forbidden);
+        }
+        self.project_bound_rule_usage(resolution, usage, uses_byok, true)
+    }
+
+    /// Projects current hierarchical rules for an exact mixed classified plan.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unbound plan, changed per-tool maturity or approval rules,
+    /// provider/egress constraints, or cumulative budget overflow. This grants
+    /// no tool execution authority.
+    pub fn project_classified_rule_usage(
+        &self,
+        resolution: &AiAgentRuleResolution,
+        usage: AiRuleRunUsage,
+        uses_byok: bool,
+    ) -> Result<AiRuleRunUsage, AiError> {
+        if !self.has_classified_application_tools() {
             return Err(AiError::Forbidden);
         }
         self.project_bound_rule_usage(resolution, usage, uses_byok, true)
@@ -1430,6 +1585,7 @@ impl AiProviderCallPlan {
             },
             transfers: Vec::new(),
             correlation_id: uuid::Uuid::new_v4().to_string(),
+            classified_native: false,
             tool_rule_bindings: vec![AiPlanToolRuleBinding {
                 fingerprint: "test-fingerprint".to_owned(),
                 maturity: ToolMaturity::ReadOnly,
@@ -1650,6 +1806,7 @@ pub struct AiProviderCallResult {
     model_inference_manifest: AiEgressManifest,
     replay_tool_transfers: Vec<AiEgressManifest>,
     interactive_tool_results: Vec<AiPersistedApplicationToolCall>,
+    native_control_receipts: Vec<crate::AiNativeToolControlReceipt>,
     provider_session_claim: Option<crate::AiProviderSessionClaim>,
 }
 
@@ -1849,13 +2006,44 @@ pub trait AiProviderUsageAccounting: Send + Sync {
     ) -> Result<AiBudgetAmounts, AiError>;
 }
 
+/// Durable callback outcome for an explicitly classified native turn.
+///
+/// A runtime control receipt states that no domain effect occurred and is never
+/// interchangeable with a completed application result or an approval grant.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum AiProviderDynamicToolOutcome {
+    /// Ordinary protected resolver result or a durable safe application failure.
+    Application(Box<AiPersistedApplicationToolCall>),
+    /// Exact protected and egress-authorized runtime no-effect reply.
+    NativeControl(Box<crate::AiNativeToolControlReceipt>),
+}
+
+impl AiProviderDynamicToolOutcome {
+    fn lease(&self) -> &AiRunLease {
+        match self {
+            Self::Application(result) => result.lease(),
+            Self::NativeControl(receipt) => receipt.lease(),
+        }
+    }
+
+    fn model_input(&self) -> Option<&ModelInputBlock> {
+        match self {
+            Self::Application(result) => result.model_input(),
+            Self::NativeControl(receipt) => Some(receipt.model_input()),
+        }
+    }
+}
+
 /// Coordinator-owned execution boundary for one provider-native in-flight
 /// application-tool request.
 ///
 /// Implementations must apply the same current rule, cancellation, registered
 /// tool, resolver, disclosure, egress, and durable fencing checks as the
 /// ordinary completed-turn tool loop. The provider adapter receives only the
-/// returned [`AiPersistedApplicationToolCall::model_input`] value.
+/// authorized model input from the persisted application result or, with
+/// explicit classified-native opt-in, an opaque framework control receipt.
+/// A control receipt reports that the requested effect was not executed.
 #[async_trait]
 pub trait AiProviderDynamicToolExecution: Send + Sync {
     /// Executes one exact normalized call from a still-active provider turn.
@@ -1888,6 +2076,33 @@ pub trait AiProviderDynamicToolExecution: Send + Sync {
             .await
     }
 
+    /// Executes one callback with an explicit domain-result or no-effect control outcome.
+    ///
+    /// Existing implementations retain their ordinary application-result path.
+    /// Control receipts are accepted only by explicitly classified native plans.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same safe errors as ordinary dynamic execution; uncertain
+    /// consequential outcomes must never be converted into retryable failures.
+    async fn execute_dynamic_outcome(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        tool_call_index: usize,
+    ) -> Result<AiProviderDynamicToolOutcome, AiError> {
+        self.execute_dynamic_tool(lease, provider_result, tool_call_index)
+            .await
+            .map(|result| AiProviderDynamicToolOutcome::Application(Box::new(result)))
+    }
+
+    /// Latest durable fence after a failed multi-stage callback, if preparation advanced it.
+    ///
+    /// This carries no result or retry authority. The responder uses it only to close the owner safely.
+    async fn failed_callback_lease(&self) -> Option<AiRunLease> {
+        None
+    }
+
     /// Persists a deterministic failure for the exact normalized call through
     /// the same durable broker used by ordinary completed-turn execution.
     async fn persist_dynamic_failure(
@@ -1918,13 +2133,16 @@ struct DynamicToolResponder {
     request_snapshot: ModelRequest,
     model_inference_manifest: AiEgressManifest,
     maximum_tool_calls: usize,
+    allows_native_control: bool,
+    provider_session_claim: Option<Arc<Mutex<crate::AiProviderSessionClaim>>>,
+    callbacks: Mutex<()>,
     calls: Mutex<Vec<AiProviderToolCall>>,
-    results: Mutex<Vec<AiPersistedApplicationToolCall>>,
+    results: Mutex<Vec<AiProviderDynamicToolOutcome>>,
     schema_rejections: Mutex<BTreeSet<String>>,
 }
 
 impl DynamicToolResponder {
-    async fn results(&self) -> Vec<AiPersistedApplicationToolCall> {
+    async fn results(&self) -> Vec<AiProviderDynamicToolOutcome> {
         self.results.lock().await.clone()
     }
 
@@ -1942,6 +2160,24 @@ impl DynamicToolResponder {
                 && call.tool_id().as_str() == tool_id
                 && call.arguments() == arguments
         })
+    }
+
+    async fn retain_failed_callback_lease(
+        &self,
+        lease: &mut AiRunLease,
+    ) -> Result<(), ProviderError> {
+        if let Some(renewed) = self.execution.failed_callback_lease().await {
+            if renewed.run_id() != lease.run_id()
+                || renewed.session_id() != lease.session_id()
+                || renewed.attempt_id() != lease.attempt_id()
+                || renewed.lease_generation() != lease.lease_generation()
+                || renewed.worker_id() != lease.worker_id()
+            {
+                return Err(ProviderError::Rejected);
+            }
+            *lease = renewed;
+        }
+        Ok(())
     }
 }
 
@@ -1993,6 +2229,9 @@ impl DynamicToolResponder {
         call: AiProviderToolCall,
         rejected_arguments: bool,
     ) -> Result<ProviderDynamicToolResult, ProviderError> {
+        // Preserve provider arrival order through admission, execution and
+        // persistence even when an adapter offers concurrent callbacks.
+        let _callback_order = self.callbacks.lock().await;
         let _definition = self
             .request_snapshot
             .tools
@@ -2040,7 +2279,11 @@ impl DynamicToolResponder {
             model_inference_manifest: self.model_inference_manifest.clone(),
             replay_tool_transfers: Vec::new(),
             interactive_tool_results: Vec::new(),
-            provider_session_claim: None,
+            native_control_receipts: Vec::new(),
+            provider_session_claim: match &self.provider_session_claim {
+                Some(claim) => Some(claim.lock().await.clone()),
+                None => None,
+            },
         };
         // Reserve the final admitted callback for a durable no-execution
         // response. Do not reinterpret a failed persistence attempt as a
@@ -2051,31 +2294,53 @@ impl DynamicToolResponder {
             rejected_arguments.then_some(crate::AiApplicationToolFailureCode::InvalidArguments)
         };
         let persisted = if let Some(code) = failure {
-            self.execution
+            let persisted = self
+                .execution
                 .persist_unexecuted_dynamic_failure(&lease, &provisional, tool_call_index, code)
-                .await
-                .map_err(|_| ProviderError::Rejected)?
+                .await;
+            match persisted {
+                Ok(persisted) => AiProviderDynamicToolOutcome::Application(Box::new(persisted)),
+                Err(_) => {
+                    self.retain_failed_callback_lease(&mut lease).await?;
+                    return Err(ProviderError::Rejected);
+                }
+            }
         } else {
             match self
                 .execution
-                .execute_dynamic_tool(&lease, &provisional, tool_call_index)
+                .execute_dynamic_outcome(&lease, &provisional, tool_call_index)
                 .await
             {
                 Ok(persisted) => persisted,
                 Err(error) => {
+                    self.retain_failed_callback_lease(&mut lease).await?;
                     let Some(code) = classify_safe_application_tool_error(&error) else {
                         return Err(ProviderError::Rejected);
                     };
-                    self.execution
+                    let persisted = self
+                        .execution
                         .persist_dynamic_failure(&lease, &provisional, tool_call_index, code)
-                        .await
-                        .map_err(|_| ProviderError::Rejected)?
+                        .await;
+                    match persisted {
+                        Ok(persisted) => {
+                            AiProviderDynamicToolOutcome::Application(Box::new(persisted))
+                        }
+                        Err(_) => {
+                            self.retain_failed_callback_lease(&mut lease).await?;
+                            return Err(ProviderError::Rejected);
+                        }
+                    }
                 }
             }
         };
         // Persistence may advance the run even when egress denies the result.
         // Retain that fence before rejecting disclosure so recovery can finish.
         *lease = persisted.lease().clone();
+        if matches!(&persisted, AiProviderDynamicToolOutcome::NativeControl(_))
+            && (!self.allows_native_control || self.provider_session_claim.is_none())
+        {
+            return Err(ProviderError::Rejected);
+        }
         let output = match persisted.model_input() {
             Some(ModelInputBlock::ToolResult {
                 call_id,
@@ -2225,6 +2490,36 @@ impl AiProviderCallResult {
         &self.interactive_tool_results
     }
 
+    /// Durable runtime control replies; these never represent completed domain effects.
+    pub fn native_control_receipts(&self) -> &[crate::AiNativeToolControlReceipt] {
+        &self.native_control_receipts
+    }
+
+    pub(crate) fn native_outcome_checkpoint_values(
+        &self,
+    ) -> Result<Vec<serde_json::Value>, AiError> {
+        if self.tool_calls.len()
+            != self.interactive_tool_results.len() + self.native_control_receipts.len()
+        {
+            return Err(AiError::Conflict);
+        }
+        let mut seen = BTreeSet::new();
+        self.tool_calls.iter().enumerate().map(|(index, call)| {
+            if !seen.insert(call.call_id()) { return Err(AiError::Conflict); }
+            let applications = self.interactive_tool_results.iter().filter(|result| result.provider_call_id() == call.call_id()).collect::<Vec<_>>();
+            let controls = self.native_control_receipts.iter().filter(|receipt| receipt.provider_call_id() == call.call_id()).collect::<Vec<_>>();
+            let (id, input, manifest, kind, control_kind) = match (applications.as_slice(), controls.as_slice()) {
+                ([result], []) => (result.id(), result.model_input().ok_or(AiError::EgressDenied)?, result.egress_manifest().ok_or(AiError::EgressDenied)?, "Application", None),
+                ([], [receipt]) => (receipt.tool_call_id(), receipt.model_input(), receipt.egress_manifest(), "FrameworkControl", Some(receipt.kind())),
+                _ => return Err(AiError::Conflict),
+            };
+            if !matches!(input, ModelInputBlock::ToolResult {call_id, tool_id, ..} if call_id == call.call_id() && tool_id == call.tool_id().as_str()) || manifest.capability != crate::AiEgressCapability::ToolResult {
+                return Err(AiError::Conflict);
+            }
+            Ok(serde_json::json!({"formatVersion":1,"kind":kind,"callIndex":index,"providerCallId":call.call_id(),"toolCallId":id.0,"modelInput":input,"egressManifest":manifest,"controlKind":control_kind}))
+        }).collect()
+    }
+
     pub(crate) fn provider_session_claim(&self) -> Option<&crate::AiProviderSessionClaim> {
         self.provider_session_claim.as_ref()
     }
@@ -2257,6 +2552,7 @@ impl AiProviderCallResult {
             || self.uses_stateless_continuation()
             || self.tool_calls.is_empty()
             || !self.interactive_tool_results.is_empty()
+            || !self.native_control_receipts.is_empty()
         {
             return Err(AiError::Conflict);
         }
@@ -2287,6 +2583,36 @@ impl AiProviderCallResult {
         )
     }
 
+    pub(crate) fn native_provider_session_wait_park_request(
+        &self,
+        lease: &AiRunLease,
+        wait: crate::AiProviderSessionWaitIdentity,
+        source_checkpoint_id: uuid::Uuid,
+        source_checkpoint_fingerprint: impl Into<String>,
+    ) -> Result<crate::AiProviderSessionWaitParkRequest, AiError> {
+        if self
+            .native_control_receipts
+            .iter()
+            .filter(|receipt| receipt.kind() == crate::AiNativeToolControlKind::ApprovalPending)
+            .count()
+            != 1
+            || !self.completes_interactive_tool_calls()
+        {
+            return Err(AiError::Conflict);
+        }
+        let mut pending = self.clone();
+        // The ordinary helper still checks exact retained claim/source/continuation.
+        // Bind the complete ordered receipt transcript into the native source hash.
+        pending.interactive_tool_results.clear();
+        pending.native_control_receipts.clear();
+        pending.provider_session_wait_park_request(
+            lease,
+            wait,
+            source_checkpoint_id,
+            source_checkpoint_fingerprint,
+        )
+    }
+
     pub(crate) fn provider_session_commit(
         &self,
         assistant_message_id: uuid::Uuid,
@@ -2301,12 +2627,7 @@ impl AiProviderCallResult {
         let request =
             serde_json::to_vec(&self.request_snapshot).map_err(|_| AiError::PersistenceFailed)?;
         let events = serde_json::to_vec(&self.events).map_err(|_| AiError::PersistenceFailed)?;
-        let tool_results = self
-            .interactive_tool_results
-            .iter()
-            .map(AiPersistedApplicationToolCall::checkpoint_value)
-            .collect::<Option<Vec<_>>>()
-            .ok_or(AiError::EgressDenied)?;
+        let tool_results = self.native_outcome_checkpoint_values()?;
         let tool_results =
             serde_json::to_vec(&tool_results).map_err(|_| AiError::PersistenceFailed)?;
         let mut digest = Sha256::new();
@@ -2329,24 +2650,7 @@ impl AiProviderCallResult {
     }
 
     pub(crate) fn completes_interactive_tool_calls(&self) -> bool {
-        if self.tool_calls.is_empty() {
-            return self.interactive_tool_results.is_empty();
-        }
-        self.tool_calls.len() == self.interactive_tool_results.len()
-            && self
-                .tool_calls
-                .iter()
-                .zip(&self.interactive_tool_results)
-                .all(|(call, result)| {
-                    result.provider_call_id() == call.call_id()
-                        && result.egress_manifest().is_some()
-                        && matches!(
-                            result.model_input(),
-                            Some(ModelInputBlock::ToolResult { call_id, tool_id, .. })
-                                if call_id == call.call_id()
-                                    && tool_id == call.tool_id().as_str()
-                        )
-                })
+        self.native_outcome_checkpoint_values().is_ok()
     }
 
     /// Returns an explicit stateful continuation for a tool-requesting turn.
@@ -2544,6 +2848,7 @@ impl AiProviderCallResult {
             ),
             replay_tool_transfers: Vec::new(),
             interactive_tool_results: Vec::new(),
+            native_control_receipts: Vec::new(),
             provider_session_claim: None,
         }
     }
@@ -2651,6 +2956,7 @@ impl AiProviderCallResult {
             model_inference_manifest: test_model_inference_manifest(lease, "ui-intent-test-model"),
             replay_tool_transfers: Vec::new(),
             interactive_tool_results: Vec::new(),
+            native_control_receipts: Vec::new(),
             provider_session_claim: None,
         }
     }
@@ -2704,6 +3010,7 @@ impl AiProviderCallResult {
             model_inference_manifest,
             replay_tool_transfers: Vec::new(),
             interactive_tool_results: Vec::new(),
+            native_control_receipts: Vec::new(),
             provider_session_claim: None,
         }
     }
@@ -2987,7 +3294,7 @@ impl AiProviderCallExecutor {
         lease: &AiRunLease,
         plan: AiProviderCallPlan,
     ) -> Result<AiProviderCallResult, AiError> {
-        self.execute_inner(Arc::new(Mutex::new(lease.clone())), plan, None, None)
+        self.execute_inner(Arc::new(Mutex::new(lease.clone())), plan, None, None, None)
             .await
     }
 
@@ -3017,7 +3324,8 @@ impl AiProviderCallExecutor {
         {
             return Err(AiError::Conflict);
         }
-        self.execute_inner(lease, plan, Some(execution), None).await
+        self.execute_inner(lease, plan, Some(execution), None, None)
+            .await
     }
 
     /// Executes through one exact durable provider-session binding.
@@ -3032,7 +3340,19 @@ impl AiProviderCallExecutor {
     ) -> Result<AiProviderCallResult, AiError> {
         if !plan.matches_provider_session_descriptor(session_plan.descriptor())
             || !plan.uses_provider_retained_continuation()
-            || dynamic_execution.is_some() != plan.is_dynamic_tool_initial()
+            || dynamic_execution.is_some()
+                != (plan.is_dynamic_tool_initial()
+                    || (plan.allows_native_control()
+                        && plan.request.continuation.is_some()
+                        && plan.request.reasoning_summary.maximum_bytes().is_none()
+                        && plan.request.output_schema.is_none()
+                        && plan.request.input.iter().all(|input| {
+                            !matches!(
+                                input,
+                                ModelInputBlock::ToolResult { .. }
+                                    | ModelInputBlock::Attachment { .. }
+                            )
+                        })))
         {
             return Err(AiError::Conflict);
         }
@@ -3215,7 +3535,14 @@ impl AiProviderCallExecutor {
         } else {
             opened
         };
-        let turn = self.execute_inner(lease_state.clone(), plan, dynamic_execution, Some(opened));
+        let shared_claim = Arc::new(Mutex::new(claim.clone()));
+        let turn = self.execute_inner(
+            lease_state.clone(),
+            plan,
+            dynamic_execution,
+            Some(opened),
+            Some(shared_claim.clone()),
+        );
         tokio::pin!(turn);
         let mut current_claim = claim;
         let outcome = loop {
@@ -3245,6 +3572,7 @@ impl AiProviderCallExecutor {
                             return Err(error);
                         }
                     };
+                    *shared_claim.lock().await = current_claim.clone();
                     drop(current_lease);
                     if let Some(result) = completed_turn {
                         break result;
@@ -3279,6 +3607,7 @@ impl AiProviderCallExecutor {
         plan: AiProviderCallPlan,
         dynamic_execution: Option<Arc<dyn AiProviderDynamicToolExecution>>,
         provider_session: Option<crate::AiOpenedProviderSession>,
+        native_session_claim: Option<Arc<Mutex<crate::AiProviderSessionClaim>>>,
     ) -> Result<AiProviderCallResult, AiError> {
         let lease = lease_state.lock().await.clone();
         if !self.runtime.start_gate().is_ready()
@@ -3563,6 +3892,9 @@ impl AiProviderCallExecutor {
                 request_snapshot: request_snapshot.clone(),
                 model_inference_manifest: model_inference_manifest.clone(),
                 maximum_tool_calls: self.limits.maximum_tool_calls,
+                allows_native_control: plan.allows_native_control(),
+                provider_session_claim: native_session_claim.clone(),
+                callbacks: Mutex::new(()),
                 calls: Mutex::new(Vec::new()),
                 results: Mutex::new(Vec::new()),
                 schema_rejections: Mutex::new(BTreeSet::new()),
@@ -3949,37 +4281,41 @@ impl AiProviderCallExecutor {
                     .ok_or(AiError::ProviderFailed)?,
             );
         }
-        let interactive_tool_results = if let Some(responder) = &dynamic_responder {
-            let results = responder.results().await;
-            if results.len() != tool_calls.len() {
+        let (interactive_tool_results, native_control_receipts) = if let Some(responder) =
+            &dynamic_responder
+        {
+            let outcomes = responder.results().await;
+            if outcomes.len() != tool_calls.len() {
                 return Err(AiError::ProviderFailed);
             }
-            let by_call = results
-                .into_iter()
-                .map(|result| (result.provider_call_id().to_owned(), result))
-                .collect::<BTreeMap<_, _>>();
-            if by_call.len() != tool_calls.len() {
-                return Err(AiError::ProviderFailed);
+            let mut applications = Vec::new();
+            let mut controls = Vec::new();
+            let mut outcomes_by_call = BTreeMap::new();
+            for outcome in outcomes {
+                let Some(ModelInputBlock::ToolResult { call_id, .. }) = outcome.model_input()
+                else {
+                    return Err(AiError::ProviderFailed);
+                };
+                if outcomes_by_call.insert(call_id.clone(), outcome).is_some() {
+                    return Err(AiError::ProviderFailed);
+                }
             }
-            tool_calls
-                .iter()
-                .map(|call| {
-                    let result = by_call
-                        .get(call.call_id())
-                        .cloned()
-                        .ok_or(AiError::ProviderFailed)?;
-                    match result.model_input() {
-                        Some(ModelInputBlock::ToolResult {
-                            call_id, tool_id, ..
-                        }) if call_id == call.call_id() && tool_id == call.tool_id().as_str() => {
-                            Ok(result)
-                        }
-                        _ => Err(AiError::ProviderFailed),
-                    }
-                })
-                .collect::<Result<Vec<_>, _>>()?
+            for call in &tool_calls {
+                let outcome = outcomes_by_call
+                    .remove(call.call_id())
+                    .ok_or(AiError::ProviderFailed)?;
+                if !matches!(outcome.model_input(), Some(ModelInputBlock::ToolResult {call_id, tool_id, ..}) if call_id == call.call_id() && tool_id == call.tool_id().as_str())
+                {
+                    return Err(AiError::ProviderFailed);
+                }
+                match outcome {
+                    AiProviderDynamicToolOutcome::Application(result) => applications.push(*result),
+                    AiProviderDynamicToolOutcome::NativeControl(receipt) => controls.push(*receipt),
+                }
+            }
+            (applications, controls)
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         if (request_snapshot.continuation_mode == ModelContinuationMode::StatelessReplay
             && provider_response_id.is_some())
@@ -4049,6 +4385,7 @@ impl AiProviderCallExecutor {
             model_inference_manifest,
             replay_tool_transfers,
             interactive_tool_results,
+            native_control_receipts,
             provider_session_claim: None,
         })
     }
@@ -4230,6 +4567,8 @@ fn valid_provider_call_id(value: &str) -> bool {
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
+    mod native_coordinator_tests;
+
     use std::sync::{
         RwLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -4523,6 +4862,7 @@ mod tests {
                 });
             }
             let data = if request.document.contains(" updateRecord(") {
+                self.completed.fetch_add(1, Ordering::SeqCst);
                 json!({"updateRecord": {
                     "subject": subject,
                     "recordId": request.variables.get("recordId"),
@@ -4613,6 +4953,18 @@ mod tests {
         ) -> AiToolAuthorizationDecision {
             if self.0.load(Ordering::SeqCst) == 0 {
                 return AiToolAuthorizationDecision::deny("test_read_denied", "tool-policy-v0");
+            }
+            if _descriptor.id.as_str() == "records.automatic" && _variables["recordId"] == "review"
+            {
+                return AiToolAuthorizationDecision::require_one_shot(
+                    "test_review_required",
+                    format!("tool-policy-v{}", self.0.load(Ordering::SeqCst)),
+                    format!(
+                        "auth-state:{}:v{}",
+                        principal.principal().subject(),
+                        self.0.load(Ordering::SeqCst)
+                    ),
+                );
             }
             AiToolAuthorizationDecision::allow(
                 "test_read_allowed",
@@ -5341,6 +5693,42 @@ mod tests {
         include_static_tools: bool,
         provider: Option<Arc<dyn crate::AiProvider>>,
     ) -> Fixture {
+        fixture_with_optional_provider_and_automatic_static(
+            mock,
+            access_policy,
+            include_static_tools,
+            provider,
+            false,
+        )
+        .await
+    }
+
+    async fn fixture_with_optional_provider_and_automatic_static(
+        mock: MockProvider,
+        access_policy: Arc<dyn AiAccessPolicy>,
+        include_static_tools: bool,
+        provider: Option<Arc<dyn crate::AiProvider>>,
+        automatic_static: bool,
+    ) -> Fixture {
+        fixture_with_optional_provider_and_automatic_static_with_start(
+            mock,
+            access_policy,
+            include_static_tools,
+            provider,
+            automatic_static,
+            true,
+        )
+        .await
+    }
+
+    async fn fixture_with_optional_provider_and_automatic_static_with_start(
+        mock: MockProvider,
+        access_policy: Arc<dyn AiAccessPolicy>,
+        include_static_tools: bool,
+        provider: Option<Arc<dyn crate::AiProvider>>,
+        automatic_static: bool,
+        start: bool,
+    ) -> Fixture {
         let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
             .await
             .expect("in-memory SQLite should open");
@@ -5455,10 +5843,14 @@ mod tests {
             .await
             .expect("test run should claim")
             .expect("test run should be eligible");
-        let lease = run_service
-            .start(&lease)
-            .await
-            .expect("test run should start");
+        let lease = if start {
+            run_service
+                .start(&lease)
+                .await
+                .expect("test run should start")
+        } else {
+            lease
+        };
 
         let budget_limits = AiBudgetServiceLimits::new(
             AiBudgetAmounts {
@@ -5600,6 +5992,16 @@ mod tests {
         .with_graphql_contract(write_contract)
         .with_maturity(ToolMaturity::SupervisedWrite)
         .with_risk(AiToolRisk::HighImpact, AiApprovalRule::OneShot);
+        if automatic_static {
+            let mut automatic = write_descriptor.clone();
+            automatic.id = AiToolId::parse("records.automatic").unwrap();
+            let automatic = automatic
+                .with_maturity(ToolMaturity::AutonomousWrite)
+                .with_risk(AiToolRisk::NonIdempotentWrite, AiApprovalRule::None);
+            tool_catalog
+                .register_with_disclosure(automatic, write_disclosure.clone())
+                .unwrap();
+        }
         if include_static_tools {
             tool_catalog
                 .register_with_disclosure(write_descriptor, write_disclosure)
@@ -5742,7 +6144,7 @@ mod tests {
                 maximum_bytes: 16_384,
                 maximum_attachments: 8,
             })
-            .maximum_tool_maturity(if include_static_tools {
+            .maximum_tool_maturity(if include_static_tools && !automatic_static {
                 ToolMaturity::SupervisedWrite
             } else {
                 ToolMaturity::AutonomousWrite
@@ -5859,6 +6261,385 @@ mod tests {
             )
             .expect("automatic mutation tool limits should validate"),
         )
+    }
+
+    async fn static_automatic_fixture() -> Fixture {
+        fixture_with_optional_provider_and_automatic_static(
+            MockProvider::new(Vec::new()),
+            Arc::new(AllowAccess),
+            true,
+            None,
+            true,
+        )
+        .await
+    }
+
+    fn static_automatic_result(fixture: &Fixture, record_id: &str) -> AiProviderCallResult {
+        let id = AiToolId::parse("records.automatic").unwrap();
+        let mut result = AiProviderCallResult::test_result(
+            &fixture.lease,
+            None,
+            "static-mutation-response",
+            vec![(
+                "static-mutation-call",
+                id.as_str(),
+                json!({"recordId": record_id}),
+            )],
+        );
+        result.tool_calls[0].tool_fingerprint = fixture
+            .runtime
+            .tool_catalog()
+            .descriptor(&id)
+            .unwrap()
+            .fingerprint
+            .clone();
+        result
+    }
+
+    #[tokio::test]
+    async fn classified_static_plan_is_explicit_and_keeps_read_only_defaults() {
+        let fixture = static_automatic_fixture().await;
+        let mut definitions = mixed_read_definitions(&fixture);
+        let mut policy = static_read_policy(&fixture);
+        let mut write_policy = AiToolPolicySet::new(ToolMaturity::AutonomousWrite);
+        for id in ["records.read", "records.automatic", "records.update"] {
+            let descriptor = fixture
+                .runtime
+                .tool_catalog()
+                .descriptor(&AiToolId::parse(id).unwrap())
+                .unwrap();
+            write_policy.bind(AiToolPolicyBinding {
+                tool_id: descriptor.id.clone(),
+                fingerprint: descriptor.fingerprint.clone(),
+                enabled: true,
+            });
+            if id != "records.read" {
+                definitions.push(ModelToolDefinition {
+                    tool_id: id.to_owned(),
+                    provider_name: id.replace('.', "_"),
+                    fingerprint: descriptor.fingerprint.clone(),
+                    description: descriptor.description.clone(),
+                    parameters: descriptor.argument_schema.clone(),
+                    strict: true,
+                    defer_loading: false,
+                });
+            }
+        }
+        let build = |definitions: Vec<ModelToolDefinition>, selected_policy: &AiToolPolicySet| {
+            let mut base = plan(&fixture);
+            base.request.tools = definitions;
+            base.transfers[0].estimated_bytes = base.request.conservative_egress_bytes();
+            AiProviderCallPlan::new_with_classified_tools(
+                base.provider_kind,
+                base.request,
+                base.budget,
+                base.transfers,
+                base.correlation_id,
+                fixture.runtime.tool_catalog(),
+                selected_policy,
+                &fixture.generated_target_policy,
+            )
+        };
+        let admitted = build(definitions.clone(), &write_policy).unwrap();
+        assert!(admitted.has_classified_application_tools());
+        assert!(admitted.allows_native_control());
+        assert!(!tool_plan(&fixture).allows_native_control());
+        assert!(admitted.allows_native_control());
+        assert!(admitted.clone().allows_native_control());
+        assert!(!plan(&fixture).allows_native_control());
+        let ordinary_read = read_capability_plan_with(
+            &fixture,
+            mixed_read_definitions(&fixture),
+            &static_read_policy(&fixture),
+            &fixture.generated_target_policy,
+        )
+        .unwrap();
+        assert!(!ordinary_read.allows_native_control());
+        assert!(!admitted.has_only_classified_mutations());
+        assert_eq!(admitted.tool_rule_bindings.len(), 4);
+        assert!(build(definitions.clone(), &policy).is_err());
+        assert!(
+            read_capability_plan_with(
+                &fixture,
+                definitions.clone(),
+                &write_policy,
+                &fixture.generated_target_policy
+            )
+            .is_err()
+        );
+        for change in 0..4 {
+            let mut altered = definitions.clone();
+            match change {
+                0 => altered[2].fingerprint = "0".repeat(64),
+                1 => altered[2].parameters = json!({"type":"object"}),
+                2 => altered[2].tool_id = "unknown.tool".to_owned(),
+                _ => altered[2].strict = false,
+            }
+            assert!(build(altered, &write_policy).is_err());
+        }
+        // Even a present entry remains disabled under an explicit policy snapshot.
+        let descriptor = fixture
+            .runtime
+            .tool_catalog()
+            .descriptor(&AiToolId::parse("records.automatic").unwrap())
+            .unwrap();
+        policy.bind(AiToolPolicyBinding {
+            tool_id: descriptor.id.clone(),
+            fingerprint: descriptor.fingerprint.clone(),
+            enabled: false,
+        });
+        assert!(build(definitions, &policy).is_err());
+    }
+
+    #[tokio::test]
+    async fn classified_static_escalated_approval_rechecks_exact_policy_before_effect() {
+        let events = vec![
+            ProviderEvent::ResponseStarted {
+                response_id: Some("escalated-response".to_owned()),
+            },
+            ProviderEvent::ToolCallStarted {
+                call_id: "escalated-call".to_owned(),
+                tool_id: "records.automatic".to_owned(),
+            },
+            ProviderEvent::ToolCallCompleted {
+                call_id: "escalated-call".to_owned(),
+                arguments: json!({"recordId":"review"}),
+            },
+            ProviderEvent::Usage {
+                input_tokens: 20,
+                output_tokens: 8,
+                cached_input_tokens: 0,
+            },
+            ProviderEvent::ResponseCompleted {
+                response_id: Some("escalated-response".to_owned()),
+            },
+        ];
+        let fixture = fixture_with_optional_provider_and_automatic_static(
+            MockProvider::new(events),
+            Arc::new(AllowAccess),
+            true,
+            None,
+            true,
+        )
+        .await;
+        let descriptor = fixture
+            .runtime
+            .tool_catalog()
+            .descriptor(&AiToolId::parse("records.automatic").unwrap())
+            .unwrap();
+        let mut policy = AiToolPolicySet::new(ToolMaturity::AutonomousWrite);
+        policy.bind(AiToolPolicyBinding {
+            tool_id: descriptor.id.clone(),
+            fingerprint: descriptor.fingerprint.clone(),
+            enabled: true,
+        });
+        let mut base = plan(&fixture);
+        base.request.tools = vec![ModelToolDefinition {
+            tool_id: descriptor.id.as_str().to_owned(),
+            provider_name: "records_automatic".to_owned(),
+            fingerprint: descriptor.fingerprint.clone(),
+            description: descriptor.description.clone(),
+            parameters: descriptor.argument_schema.clone(),
+            strict: true,
+            defer_loading: false,
+        }];
+        base.transfers[0].estimated_bytes = base.request.conservative_egress_bytes();
+        let plan = AiProviderCallPlan::new_with_classified_tools(
+            base.provider_kind,
+            base.request,
+            base.budget,
+            base.transfers,
+            base.correlation_id,
+            fixture.runtime.tool_catalog(),
+            &policy,
+            &fixture.generated_target_policy,
+        )
+        .unwrap();
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8192, 65536).unwrap(),
+        );
+        let result = executor.execute(&fixture.lease, plan).await.unwrap();
+        let (service, approvals) = consequential_test_service(&fixture);
+        // Native ephemeral providers cannot leave a human wait with a running lease.
+        assert!(
+            service
+                .prepare_native_approval(
+                    &fixture.lease,
+                    &result,
+                    automatic_mutation_context(&fixture)
+                )
+                .await
+                .is_err()
+        );
+        let requested = service
+            .request_approval(
+                &fixture.lease,
+                &result,
+                automatic_mutation_context(&fixture),
+                OffsetDateTime::now_utc() + Duration::minutes(5),
+                false,
+            )
+            .await
+            .unwrap();
+        let row = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
+            .await
+            .unwrap()
+            .unwrap();
+        approvals
+            .decide_approval(
+                &fixture.principal,
+                DecideAiApprovalInput {
+                    id: row.id,
+                    decision: AiApprovalDecision::Approve,
+                    expected_version: row.row_version,
+                },
+            )
+            .await
+            .unwrap();
+        fixture.tool_policy_version.store(2, Ordering::SeqCst);
+        assert!(
+            service
+                .execute_approved(
+                    requested.lease(),
+                    requested.approval_id(),
+                    requested.tool_call_id(),
+                    automatic_mutation_route()
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 0);
+        fixture.tool_policy_version.store(1, Ordering::SeqCst);
+        let outcome = service
+            .execute_approved(
+                requested.lease(),
+                requested.approval_id(),
+                requested.tool_call_id(),
+                automatic_mutation_route(),
+            )
+            .await
+            .unwrap();
+        assert!(outcome.persisted().is_some());
+        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 1);
+        assert!(
+            service
+                .execute_approved(
+                    requested.lease(),
+                    requested.approval_id(),
+                    requested.tool_call_id(),
+                    automatic_mutation_route()
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn classified_static_automatic_lifecycle_retains_trusted_origin_and_does_not_replay() {
+        let fixture = static_automatic_fixture().await;
+        let result = static_automatic_result(&fixture, "54");
+        let service = automatic_mutation_service(&fixture, fixture.audit.clone());
+        assert_eq!(
+            service
+                .classify_tool_call(
+                    &fixture.lease,
+                    &result,
+                    &automatic_mutation_context(&fixture)
+                )
+                .await
+                .unwrap(),
+            crate::AiApplicationToolDisposition::AutomaticMutation
+        );
+        let outcome = service
+            .execute_automatic_mutation(
+                &fixture.lease,
+                &result,
+                automatic_mutation_context(&fixture),
+                automatic_mutation_route(),
+            )
+            .await
+            .unwrap();
+        assert!(outcome.persisted().is_some());
+        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 1);
+        let call = AiToolCallRecord::find_by_id(&fixture.database, &outcome.tool_call_id().0)
+            .await
+            .unwrap()
+            .unwrap();
+        let origin: crate::AiToolExecutionProvenance =
+            serde_json::from_value(call.execution_provenance.unwrap()).unwrap();
+        assert_eq!(origin.session_id(), fixture.lease.session_id());
+        assert_eq!(origin.run_id(), fixture.lease.run_id());
+        assert_eq!(origin.provider_call_id(), "static-mutation-call");
+        assert_eq!(origin.argument_hash(), call.argument_hash);
+        assert!(origin.approval_id().is_none());
+        assert!(!serde_json::to_string(&origin).unwrap().contains("recordId"));
+        assert!(
+            service
+                .execute_automatic_mutation(
+                    &fixture.lease,
+                    &result,
+                    automatic_mutation_context(&fixture),
+                    automatic_mutation_route()
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn classified_static_policy_escalation_refuses_automatic_effect_before_checkpoint() {
+        let fixture = static_automatic_fixture().await;
+        let result = static_automatic_result(&fixture, "review");
+        let service = automatic_mutation_service(&fixture, fixture.audit.clone());
+        assert_eq!(
+            service
+                .classify_tool_call(
+                    &fixture.lease,
+                    &result,
+                    &automatic_mutation_context(&fixture)
+                )
+                .await
+                .unwrap(),
+            crate::AiApplicationToolDisposition::ApprovalRequired
+        );
+        assert!(
+            service
+                .execute_automatic_mutation(
+                    &fixture.lease,
+                    &result,
+                    automatic_mutation_context(&fixture),
+                    automatic_mutation_route()
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 0);
+        assert!(
+            AiToolCallRecord::query(fixture.database.pool())
+                .fetch_all()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let mut changed = result.clone();
+        changed.tool_calls[0].arguments = json!({"recordId": "54", "unregistered": true});
+        assert!(
+            service
+                .classify_tool_call(
+                    &fixture.lease,
+                    &changed,
+                    &automatic_mutation_context(&fixture)
+                )
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -9229,25 +10010,9 @@ mod tests {
         .expect("registered enabled supervised tool plan should validate")
     }
 
-    async fn stage_approved_supervised_call(
+    fn consequential_test_service(
         fixture: &Fixture,
-    ) -> (
-        OrmAiConsequentialToolCallService,
-        AiRequestedConsequentialToolCall,
-    ) {
-        let provider_executor = AiProviderCallExecutor::new(
-            fixture.runtime.clone(),
-            fixture.budget_service.clone(),
-            fixture.audit.clone(),
-            Arc::new(TestUsageAccounting),
-            Arc::new(SystemClock),
-            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
-                .expect("test provider limits should validate"),
-        );
-        let provider_result = provider_executor
-            .execute(&fixture.lease, supervised_tool_plan(fixture))
-            .await
-            .expect("supervised provider call should normalize");
+    ) -> (OrmAiConsequentialToolCallService, OrmAiApprovalService) {
         let approval_service = OrmAiApprovalService::new(
             fixture.database.clone(),
             fixture.run_service.clone(),
@@ -9282,6 +10047,29 @@ mod tests {
             )
             .expect("test tool limits should validate"),
         );
+        (service, approval_service)
+    }
+
+    async fn stage_approved_supervised_call(
+        fixture: &Fixture,
+    ) -> (
+        OrmAiConsequentialToolCallService,
+        AiRequestedConsequentialToolCall,
+    ) {
+        let provider_executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate"),
+        );
+        let provider_result = provider_executor
+            .execute(&fixture.lease, supervised_tool_plan(fixture))
+            .await
+            .expect("supervised provider call should normalize");
+        let (service, approval_service) = consequential_test_service(fixture);
         let context = AiApplicationToolCallContext::new(
             0,
             0,
@@ -11417,6 +12205,560 @@ mod tests {
         );
     }
 
+    struct NativeTestRuleResolver;
+
+    fn native_test_rules(scope: AiScope) -> AiResolvedRuleSet {
+        let rules = test_rules(scope.clone());
+        let mut constraints = rules.constraints().clone();
+        constraints.maximum_tool_maturity = ToolMaturity::AutonomousWrite;
+        AiResolvedRuleSet::new(scope, constraints, rules.applied_layers().to_vec()).unwrap()
+    }
+
+    #[async_trait]
+    impl AiAgentRuleResolver for NativeTestRuleResolver {
+        async fn resolve_rules(
+            &self,
+            _lease: &AiRunLease,
+            scope: &AiScope,
+        ) -> Result<AiAgentRuleResolution, AiError> {
+            AiAgentRuleResolution::new(native_test_rules(scope.clone()), OffsetDateTime::now_utc())
+        }
+    }
+
+    struct NativeOutcomeFailureProtector(Arc<AtomicBool>);
+
+    #[async_trait]
+    impl crate::AiContentProtector for NativeOutcomeFailureProtector {
+        async fn protect(
+            &self,
+            policy: &AiContentProtectionPolicy,
+            context: &crate::ContentProtectionContext,
+            value: serde_json::Value,
+        ) -> Result<crate::ProtectedContentEnvelope, crate::ContentProtectionError> {
+            if self.0.load(Ordering::SeqCst)
+                && context.entity == "graphql_orm_ai_run_checkpoints"
+                && value.get("checkpointKind") == Some(&json!("native_approved_outcome_persisted"))
+            {
+                return Err(crate::ContentProtectionError::ValidationFailed);
+            }
+            crate::AiContentProtector::protect(
+                &DatabaseManagedContentProtector,
+                policy,
+                context,
+                value,
+            )
+            .await
+        }
+        async fn open(
+            &self,
+            policy: &AiContentProtectionPolicy,
+            context: &crate::ContentProtectionContext,
+            envelope: &crate::ProtectedContentEnvelope,
+        ) -> Result<serde_json::Value, crate::ContentProtectionError> {
+            crate::AiContentProtector::open(
+                &DatabaseManagedContentProtector,
+                policy,
+                context,
+                envelope,
+            )
+            .await
+        }
+    }
+
+    #[tokio::test]
+    async fn native_prepared_receipt_blocks_later_writes_but_allows_read_and_exact_accounting() {
+        native_approval_lifecycle(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn native_approved_effect_without_outcome_checkpoint_stays_recovery_required() {
+        native_approval_lifecycle(true, true).await;
+    }
+
+    #[tokio::test]
+    async fn native_approval_resume_preserves_earlier_automatic_effect_without_replay() {
+        native_approval_lifecycle(false, true).await;
+    }
+
+    async fn native_approval_lifecycle(fail_outcome: bool, earlier_automatic: bool) {
+        let pending_index = usize::from(earlier_automatic);
+        let call_count = u32::try_from(3 + pending_index).unwrap();
+        let outcome_failure = Arc::new(AtomicBool::new(false));
+        let fixture = static_automatic_fixture().await;
+        let base = plan(&fixture);
+        let current = fixture
+            .runtime
+            .resolve_current_principal(fixture.lease.principal_reference())
+            .await
+            .unwrap();
+        let budget = fixture
+            .budget_service
+            .reserve(&current, base.budget.clone())
+            .await
+            .unwrap();
+        fixture
+            .budget_service
+            .reconcile(
+                &current,
+                AiBudgetReconciliation {
+                    reservation_id: budget.id(),
+                    attempt_id: fixture.lease.attempt_id(),
+                    lease_generation: fixture.lease.lease_generation(),
+                    actual: None,
+                    cached_input_tokens: None,
+                    outcome: AiBudgetReconciliationOutcome::MarkUncertain,
+                },
+            )
+            .await
+            .unwrap();
+        let sessions = Arc::new(
+            OrmAiProviderSessionService::new(
+                fixture.database.clone(),
+                Arc::new(AllowAccess),
+                Arc::new(ProtectionPolicy),
+                Arc::new(DatabaseManagedContentProtector),
+                Arc::new(Resolver(fixture.principal.clone())),
+                Arc::new(SystemClock),
+                AiProviderSessionLimits::default(),
+                Duration::minutes(5),
+            )
+            .unwrap(),
+        );
+        let session = AiSessionRecord::find_by_id(&fixture.database, &fixture.lease.session_id().0)
+            .await
+            .unwrap()
+            .unwrap();
+        AiSessionRecord::compare_and_swap(
+            &fixture.database,
+            &session.id,
+            session.row_version,
+            AiSessionRecordWhereInput::default(),
+            UpdateAiSessionRecordInput {
+                message_head: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        AiMessageRecord::insert(
+            &fixture.database,
+            CreateAiMessageRecordInput {
+                id: fixture.lease.input_message_id(),
+                session_id: session.id,
+                sequence: 1,
+                message_role: "user".to_owned(),
+                author_principal_kind: Some("user".to_owned()),
+                author_subject: Some(fixture.principal.subject().to_owned()),
+                client_message_id: Some(Uuid::new_v4()),
+                content_hash: Some("c".repeat(64)),
+                run_id: Some(fixture.lease.run_id().0),
+                provider_kind: None,
+                provider_model: None,
+                protected_preview: None,
+                block_count: 1,
+                completion_state: "complete".to_owned(),
+                finalized_at: Some(OffsetDateTime::now_utc().unix_timestamp()),
+                content_purged_at: None,
+            },
+        )
+        .await
+        .unwrap();
+        let descriptor = AiProviderSessionDescriptor::new(
+            base.provider_kind.clone(),
+            "mock-profile",
+            base.request.model.clone(),
+            "a".repeat(64),
+            "responses/v1",
+            "b".repeat(64),
+        )
+        .unwrap();
+        let claim = sessions
+            .bind_for_run(
+                &fixture.lease,
+                AiProviderSessionBindRequest::new(
+                    descriptor,
+                    AiProviderSessionCursor::new("test.thread", "native-test-thread").unwrap(),
+                    "c".repeat(64),
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (consequential, approvals) = consequential_test_service(&fixture);
+        let consequential = consequential.with_provider_session_service(sessions.clone());
+        let applications = automatic_mutation_service(&fixture, fixture.audit.clone());
+        let mut result = static_automatic_result(&fixture, "review");
+        result.provider_kind = base.provider_kind.clone();
+        result.provider_model = base.request.model.clone();
+        result.request_snapshot = base.request.clone();
+        result.budget_reservation_id = budget.id();
+        result.provider_session_claim = Some(claim);
+        let context = |index| {
+            AiApplicationToolCallContext::new(
+                0,
+                index,
+                fixture.scope.clone(),
+                "native-test",
+                budget.id().0.to_string(),
+            )
+            .unwrap()
+        };
+        let mut active = fixture.lease.clone();
+        let mut completed = Vec::new();
+        if earlier_automatic {
+            let mut first = result.tool_calls[0].clone();
+            first.call_id = "earlier-automatic".to_owned();
+            first.arguments = json!({"recordId":"ordinary"});
+            result.tool_calls.insert(0, first);
+            let outcome = applications
+                .execute_automatic_mutation(
+                    &active,
+                    &result,
+                    context(0),
+                    automatic_mutation_route(),
+                )
+                .await
+                .unwrap();
+            let persisted = outcome.persisted().unwrap().clone();
+            active = persisted.lease().clone();
+            completed.push(persisted);
+        }
+        let prepared = consequential
+            .prepare_native_approval(&active, &result, context(pending_index))
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture.completed_executions.load(Ordering::SeqCst),
+            pending_index
+        );
+        let receipt = consequential
+            .prepare_native_approval_receipt(
+                prepared.lease(),
+                &prepared,
+                &automatic_mutation_route(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            receipt.kind(),
+            crate::AiNativeToolControlKind::ApprovalPending
+        );
+        let mut second = result.tool_calls[pending_index].clone();
+        second.call_id = "later-write".to_owned();
+        second.arguments = json!({"recordId":"ordinary"});
+        result.tool_calls.push(second);
+        let paused = consequential
+            .pause_native_consequential_call(
+                receipt.lease(),
+                &result,
+                context(pending_index + 1),
+                &prepared,
+                &automatic_mutation_route(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            paused.kind(),
+            crate::AiNativeToolControlKind::ConsequentialCallsPaused
+        );
+        assert_eq!(
+            fixture.completed_executions.load(Ordering::SeqCst),
+            pending_index
+        );
+        let descriptor = fixture
+            .runtime
+            .tool_catalog()
+            .descriptor(&AiToolId::parse("records.read").unwrap())
+            .unwrap();
+        result.tool_calls.push(AiProviderToolCall {
+            call_id: "later-read".to_owned(),
+            tool_id: descriptor.id.clone(),
+            provider_name: "records_read".to_owned(),
+            tool_fingerprint: descriptor.fingerprint.clone(),
+            arguments: json!({"recordId":"record-1"}),
+        });
+        let read = applications
+            .execute_read_only(
+                paused.lease(),
+                &result,
+                context(pending_index + 2),
+                automatic_mutation_route(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read.state(), AiApplicationToolCallState::Completed);
+        completed.push(read.clone());
+        result.interactive_tool_results = completed;
+        result.native_control_receipts = vec![receipt, paused];
+        let evidence = result.native_outcome_checkpoint_values().unwrap();
+        assert_eq!(
+            evidence
+                .iter()
+                .map(|value| value["kind"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            if earlier_automatic {
+                vec![
+                    "Application",
+                    "FrameworkControl",
+                    "FrameworkControl",
+                    "Application",
+                ]
+            } else {
+                vec!["FrameworkControl", "FrameworkControl", "Application"]
+            }
+        );
+        assert_eq!(evidence[pending_index]["controlKind"], "ApprovalPending");
+        assert_eq!(
+            evidence[pending_index + 1]["controlKind"],
+            "ConsequentialCallsPaused"
+        );
+        let mut guard = crate::AiAgentLoopGuard::new(
+            &fixture.lease,
+            crate::AiAgentLoopLimits::new(4, 8).unwrap(),
+        );
+        assert_eq!(
+            guard.observe_provider_turn(&result).unwrap(),
+            crate::AiAgentLoopTurn::Completed
+        );
+        assert_eq!(guard.total_tool_calls(), call_count);
+        assert!(
+            AiApprovalRecord::query(fixture.database.pool())
+                .limit(1)
+                .fetch_all()
+                .await
+                .unwrap()
+                .is_empty(),
+            "no approval is published while provider accounting is uncertain"
+        );
+        assert_eq!(reservation_state(&fixture.database).await, "uncertain");
+        let stored = crate::persistence::AiNativeApprovalCandidateRecord::find_by_id(
+            &fixture.database,
+            &prepared.tool_call_id().0,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(stored.state, "prepared");
+        assert!(stored.final_approval_id.is_none());
+        let mut altered = result.clone();
+        altered.native_control_receipts[1].provider_call_id = "swapped".to_owned();
+        assert!(altered.native_outcome_checkpoint_values().is_err());
+        fixture
+            .budget_service
+            .reconcile(
+                &current,
+                AiBudgetReconciliation {
+                    reservation_id: budget.id(),
+                    attempt_id: fixture.lease.attempt_id(),
+                    lease_generation: fixture.lease.lease_generation(),
+                    actual: Some(result.usage()),
+                    cached_input_tokens: Some(0),
+                    outcome: AiBudgetReconciliationOutcome::Commit,
+                },
+            )
+            .await
+            .unwrap();
+        let checkpoints = Arc::new(OrmAiCoordinatorCheckpointService::new(
+            fixture.run_service.clone(),
+            Arc::new(Resolver(fixture.principal.clone())),
+            Arc::new(AllowAccess),
+            Arc::new(ProtectionPolicy),
+            Arc::new(NativeOutcomeFailureProtector(outcome_failure.clone())),
+            Arc::new(NativeTestRuleResolver),
+            Arc::new(SystemClock),
+            AiCoordinatorCheckpointLimits::new(256 * 1024, Duration::seconds(30)).unwrap(),
+        ));
+        let (_, usage) = test_rule_checkpoint(&fixture.scope, &[&result], call_count as usize);
+        let rules = native_test_rules(fixture.scope.clone());
+        let source_lease = checkpoints
+            .persist_native_approval_provider_turn(
+                read.lease(),
+                &result,
+                &prepared,
+                &fixture.scope,
+                "native-test",
+                &automatic_mutation_route(),
+                &rules,
+                usage,
+                1,
+                call_count,
+            )
+            .await
+            .unwrap();
+        let wait = consequential
+            .finalize_prepared_approval(
+                &source_lease,
+                &result,
+                &prepared,
+                OffsetDateTime::now_utc() + Duration::minutes(5),
+                false,
+            )
+            .await
+            .unwrap();
+        let approval = AiApprovalRecord::find_by_id(&fixture.database, &wait.approval_id().0)
+            .await
+            .unwrap()
+            .unwrap();
+        approvals
+            .decide_approval(
+                &fixture.principal,
+                DecideAiApprovalInput {
+                    id: approval.id,
+                    decision: AiApprovalDecision::Approve,
+                    expected_version: approval.row_version,
+                },
+            )
+            .await
+            .unwrap();
+        let claimed = fixture
+            .run_service
+            .claim_next_approved("native-resume")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(claimed.lease().lease_generation() > fixture.lease.lease_generation());
+        assert!(
+            fixture
+                .run_service
+                .validate_native_approved_budget(
+                    claimed.lease(),
+                    claimed.approval_id(),
+                    claimed.tool_call_id(),
+                    Uuid::new_v4()
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            fixture
+                .run_service
+                .validate_native_approved_budget(
+                    claimed.lease(),
+                    crate::AiApprovalId::new(),
+                    claimed.tool_call_id(),
+                    budget.id().0
+                )
+                .await
+                .is_err()
+        );
+        fixture
+            .run_service
+            .validate_native_approved_budget(
+                claimed.lease(),
+                claimed.approval_id(),
+                claimed.tool_call_id(),
+                budget.id().0,
+            )
+            .await
+            .unwrap();
+        let resume = OrmAiSupervisedResumeService::new(
+            fixture.run_service.clone(),
+            checkpoints.clone(),
+            Arc::new(consequential),
+        );
+        fixture.tool_policy_version.store(2, Ordering::SeqCst);
+        assert!(
+            resume.execute_claimed(&claimed).await.is_err(),
+            "changed host policy must reject before consuming approval or executing"
+        );
+        assert_eq!(
+            fixture.completed_executions.load(Ordering::SeqCst),
+            pending_index
+        );
+        let unchanged = AiApprovalRecord::find_by_id(&fixture.database, &approval.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.state, "resume_claimed");
+        assert_eq!(unchanged.consumed_uses, 0);
+        fixture.tool_policy_version.store(1, Ordering::SeqCst);
+        outcome_failure.store(fail_outcome, Ordering::SeqCst);
+        let resumed = resume.execute_claimed(&claimed).await.unwrap();
+        if fail_outcome {
+            assert!(matches!(
+                resumed,
+                crate::AiSupervisedResumeOutcome::RecoveryRequired { .. }
+            ));
+            assert_eq!(
+                fixture.completed_executions.load(Ordering::SeqCst),
+                pending_index + 1
+            );
+            let row = AiRunRecord::find_by_id(&fixture.database, &claimed.lease().run_id().0)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.state, "recovery_required");
+            assert_eq!(
+                row.latest_checkpoint_id,
+                claimed.lease().latest_checkpoint_id()
+            );
+            let consumed = AiApprovalRecord::find_by_id(&fixture.database, &approval.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(consumed.state, "consumed");
+            assert_eq!(consumed.consumed_uses, 1);
+            assert!(resume.execute_claimed(&claimed).await.is_err());
+            fixture.run_service.recover_expired_leases().await.unwrap();
+            assert!(
+                fixture
+                    .run_service
+                    .claim_next("native-no-replay")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                fixture
+                    .run_service
+                    .claim_next_approved("native-no-replay")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                fixture.completed_executions.load(Ordering::SeqCst),
+                pending_index + 1
+            );
+            return;
+        }
+        let protected = resumed
+            .checkpointed()
+            .expect("native exact effect should checkpoint");
+        assert_eq!(protected.provider_turns(), 1);
+        assert_eq!(protected.total_tool_calls(), call_count);
+        assert_eq!(protected.rule_usage().steps(), u64::from(call_count) + 1);
+        assert_eq!(
+            fixture.completed_executions.load(Ordering::SeqCst),
+            pending_index + 1,
+            "earlier effects are not replayed and later write stays paused"
+        );
+        let adopted = checkpoints
+            .adopt_classified_mutation_batch(protected.lease())
+            .await
+            .unwrap()
+            .unwrap();
+        let crate::AiAdoptedClassifiedMutationBatch::Supervised(adopted) = adopted else {
+            panic!("native outcome uses supervised adoption proof")
+        };
+        assert!(matches!(
+            adopted.continuation().input(),
+            [ModelInputBlock::Json { .. }]
+        ));
+        let next = checkpoints
+            .consume_supervised_before_provider(protected.lease(), &adopted)
+            .await
+            .unwrap();
+        assert!(next.latest_checkpoint_id().is_none());
+        assert!(
+            checkpoints
+                .consume_supervised_before_provider(&next, &adopted)
+                .await
+                .is_err()
+        );
+    }
+
     #[cfg(feature = "provider-grok-acp")]
     #[tokio::test]
     async fn grok_wire_dynamic_calls_complete_through_retained_executor() {
@@ -11737,19 +13079,72 @@ mod tests {
     }
 
     #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
+    struct CancelledAfterPersistence {
+        inner: PersistingDynamicToolExecution,
+        latest: Mutex<Option<AiRunLease>>,
+    }
+
+    #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
+    #[async_trait]
+    impl AiProviderDynamicToolExecution for CancelledAfterPersistence {
+        async fn execute_dynamic_tool(
+            &self,
+            lease: &AiRunLease,
+            result: &AiProviderCallResult,
+            index: usize,
+        ) -> Result<AiPersistedApplicationToolCall, AiError> {
+            let persisted = self
+                .inner
+                .execute_dynamic_tool(lease, result, index)
+                .await?;
+            *self.latest.lock().await = Some(persisted.lease().clone());
+            Err(AiError::Conflict)
+        }
+
+        async fn failed_callback_lease(&self) -> Option<AiRunLease> {
+            self.latest.lock().await.clone()
+        }
+
+        async fn persist_dynamic_failure(
+            &self,
+            lease: &AiRunLease,
+            result: &AiProviderCallResult,
+            index: usize,
+            code: crate::AiApplicationToolFailureCode,
+        ) -> Result<AiPersistedApplicationToolCall, AiError> {
+            let persisted = self
+                .inner
+                .persist_dynamic_failure(lease, result, index, code)
+                .await?;
+            *self.latest.lock().await = Some(persisted.lease().clone());
+            Err(AiError::Conflict)
+        }
+    }
+
+    #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
     #[tokio::test]
     async fn durably_denied_dynamic_result_keeps_current_lease_without_disclosure() {
-        assert_denied_dynamic_result(8).await;
+        assert_denied_dynamic_result(8, false).await;
     }
 
     #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
     #[tokio::test]
     async fn limit_response_audit_denial_never_executes_or_discloses() {
-        assert_denied_dynamic_result(1).await;
+        assert_denied_dynamic_result(1, false).await;
     }
 
     #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
-    async fn assert_denied_dynamic_result(maximum_tool_calls: usize) {
+    #[tokio::test]
+    async fn native_post_persistence_cancellation_retains_current_fence_and_effect_evidence() {
+        assert_denied_dynamic_result(8, true).await;
+        assert_denied_dynamic_result(1, true).await;
+    }
+
+    #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
+    async fn assert_denied_dynamic_result(
+        maximum_tool_calls: usize,
+        cancelled_after_persist: bool,
+    ) {
         let fixture = fixture(vec![
             ProviderEvent::ResponseStarted {
                 response_id: Some("denied-response".into()),
@@ -11785,13 +13180,29 @@ mod tests {
         .unwrap();
         let lease = Arc::new(Mutex::new(fixture.lease.clone()));
         let executions = Arc::new(AtomicUsize::new(0));
+        let inner = PersistingDynamicToolExecution {
+            service: automatic_mutation_service(
+                &fixture,
+                if cancelled_after_persist {
+                    fixture.audit.clone()
+                } else {
+                    Arc::new(FailAudit)
+                },
+            ),
+            scope: fixture.scope.clone(),
+            calls: executions.clone(),
+        };
+        let execution: Arc<dyn AiProviderDynamicToolExecution> = if cancelled_after_persist {
+            Arc::new(CancelledAfterPersistence {
+                inner,
+                latest: Mutex::new(None),
+            })
+        } else {
+            Arc::new(inner)
+        };
         let responder = DynamicToolResponder {
             lease: lease.clone(),
-            execution: Arc::new(PersistingDynamicToolExecution {
-                service: automatic_mutation_service(&fixture, Arc::new(FailAudit)),
-                scope: fixture.scope.clone(),
-                calls: executions.clone(),
-            }),
+            execution,
             session_id: fixture.lease.session_id(),
             run_id: fixture.lease.run_id(),
             attempt_id: fixture.lease.attempt_id(),
@@ -11804,6 +13215,9 @@ mod tests {
             request_snapshot: result.request_snapshot.clone(),
             model_inference_manifest: result.model_inference_manifest.clone(),
             maximum_tool_calls,
+            allows_native_control: false,
+            provider_session_claim: None,
+            callbacks: Mutex::new(()),
             calls: Mutex::new(Vec::new()),
             results: Mutex::new(Vec::new()),
             schema_rejections: Mutex::new(BTreeSet::new()),
@@ -11829,7 +13243,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].state, "egress_audit_failed");
+        assert_eq!(
+            calls[0].state,
+            if cancelled_after_persist {
+                if maximum_tool_calls == 1 {
+                    "execution_failed"
+                } else {
+                    "completed"
+                }
+            } else {
+                "egress_audit_failed"
+            }
+        );
         assert!(calls[0].completed_at.is_some());
         assert!(calls[0].protected_result.is_some());
         assert_eq!(
@@ -11941,6 +13366,9 @@ mod tests {
             request_snapshot: result.request_snapshot.clone(),
             model_inference_manifest: result.model_inference_manifest.clone(),
             maximum_tool_calls: 8,
+            allows_native_control: false,
+            provider_session_claim: None,
+            callbacks: Mutex::new(()),
             calls: Mutex::new(Vec::new()),
             results: Mutex::new(Vec::new()),
             schema_rejections: Mutex::new(BTreeSet::new()),
@@ -13937,6 +15365,7 @@ mod tests {
                 .append_coordinator_checkpoint(
                     protected.lease(),
                     PreparedCoordinatorCheckpoint {
+                        native_binding: None,
                         id: swapped_checkpoint_id,
                         checkpoint_kind: "tool_batch_persisted".to_owned(),
                         provider_kind: call

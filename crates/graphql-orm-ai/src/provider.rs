@@ -8,8 +8,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use thiserror::Error;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -579,7 +580,52 @@ pub struct ModelRequest {
     pub maximum_output_tokens: Option<u64>,
 }
 
+pub(crate) fn native_approved_outcome_hash(value: &serde_json::Value) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Outcome {
+        format_version: u32,
+        kind: String,
+        tool_call_id: Uuid,
+        provider_call_id: String,
+        tool_id: String,
+        state: String,
+        output: serde_json::Value,
+    }
+    let outcome: Outcome = serde_json::from_value(value.clone()).ok()?;
+    if outcome.format_version != 1
+        || outcome.kind != "FrameworkApprovedToolOutcome"
+        || outcome.tool_call_id.is_nil()
+        || !valid_provider_reference(&outcome.provider_call_id)
+        || outcome.tool_id.trim().is_empty()
+        || outcome.tool_id.len() > 200
+        || !matches!(outcome.state.as_str(), "completed" | "execution_failed")
+        || serde_json::to_vec(&outcome.output).map_or(true, |bytes| bytes.len() > 2 * 1024 * 1024)
+    {
+        return None;
+    }
+    Some(hex::encode(sha2::Sha256::digest(
+        serde_json::to_vec(value).ok()?,
+    )))
+}
+
 impl ModelRequest {
+    pub(crate) fn native_approved_outcome_hash(&self) -> Option<String> {
+        if !matches!(
+            (&self.continuation_mode, &self.continuation),
+            (
+                ModelContinuationMode::ProviderRetained,
+                Some(ModelContinuation::ProviderResponse { .. })
+            )
+        ) {
+            return None;
+        }
+        let [ModelInputBlock::Json { value }] = self.input.as_slice() else {
+            return None;
+        };
+        native_approved_outcome_hash(value)
+    }
+
     /// Validates bounded, provider-neutral request invariants.
     ///
     /// Provider adapters still apply their own capability and protocol limits.
@@ -632,7 +678,9 @@ impl ModelRequest {
             .input
             .iter()
             .any(|block| matches!(block, ModelInputBlock::ToolResult { .. }));
-        if has_tool_results != self.continuation.is_some() {
+        if has_tool_results != self.continuation.is_some()
+            && self.native_approved_outcome_hash().is_none()
+        {
             return Err(ProviderError::InvalidRequest);
         }
         let mut tool_result_call_ids = BTreeSet::new();
@@ -1533,39 +1581,80 @@ impl ProviderRequestContext {
             attachment_count,
             estimated_bytes,
         )?;
-        let mut tool_result_bytes = tool_result_egress_bytes(request);
-        let tool_result_transfers = self
-            .transfers
-            .iter()
-            .filter(|transfer| transfer.manifest.capability == AiEgressCapability::ToolResult)
-            .collect::<Vec<_>>();
-        let mut tool_result_hashes = BTreeSet::new();
-        let mut tool_result_sources = BTreeSet::new();
-        if tool_result_transfers.len() != tool_result_bytes.len()
-            || tool_result_transfers.iter().any(|transfer| {
-                transfer.manifest.provider_kind != provider_kind.as_str()
-                    || transfer.manifest.model != request.model
-                    || transfer.manifest.stable_hash() != transfer.proof.manifest_hash()
-                    || transfer.manifest.sources.len() != 1
-                    || transfer.manifest.sources[0].kind != "application_tool_result"
-                    || !tool_result_hashes.insert(transfer.manifest.stable_hash())
-                    || !tool_result_sources.insert(transfer.manifest.sources[0].reference.as_str())
-            })
-        {
-            return Err(ProviderError::EgressDenied);
-        }
-        tool_result_bytes.sort_unstable();
-        let mut transfer_capacities = tool_result_transfers
-            .iter()
-            .map(|transfer| transfer.manifest.estimated_bytes)
-            .collect::<Vec<_>>();
-        transfer_capacities.sort_unstable();
-        if tool_result_bytes
-            .iter()
-            .zip(transfer_capacities)
-            .any(|(required, capacity)| capacity < *required)
-        {
-            return Err(ProviderError::EgressDenied);
+        if let Some(wrapper_hash) = request.native_approved_outcome_hash() {
+            let transfers = self
+                .transfers
+                .iter()
+                .filter(|transfer| transfer.manifest.capability == AiEgressCapability::ToolResult)
+                .collect::<Vec<_>>();
+            let [transfer] = transfers.as_slice() else {
+                return Err(ProviderError::EgressDenied);
+            };
+            let manifest = &transfer.manifest;
+            let bytes = serde_json::to_vec(&request.input[0])
+                .map_err(|_| ProviderError::InvalidRequest)?
+                .len() as u64;
+            if self.provider_session.is_none()
+                || manifest.provider_kind != provider_kind.as_str()
+                || manifest.model != request.model
+                || manifest.stable_hash() != transfer.proof.manifest_hash()
+                || manifest.estimated_bytes < bytes
+                || manifest.sources.len() != 2
+                || manifest
+                    .sources
+                    .iter()
+                    .filter(|source| source.kind == "application_tool_result")
+                    .count()
+                    != 1
+                || manifest
+                    .sources
+                    .iter()
+                    .filter(|source| {
+                        source.kind == "native_approved_outcome"
+                            && source.reference == wrapper_hash
+                            && source.trust == crate::AiSourceTrust::TrustedRuntime
+                    })
+                    .count()
+                    != 1
+            {
+                return Err(ProviderError::EgressDenied);
+            }
+        } else {
+            let mut tool_result_bytes = tool_result_egress_bytes(request);
+            let tool_result_transfers = self
+                .transfers
+                .iter()
+                .filter(|transfer| transfer.manifest.capability == AiEgressCapability::ToolResult)
+                .collect::<Vec<_>>();
+            let mut tool_result_hashes = BTreeSet::new();
+            let mut tool_result_sources = BTreeSet::new();
+            if tool_result_transfers.len() != tool_result_bytes.len()
+                || tool_result_transfers.iter().any(|transfer| {
+                    transfer.manifest.provider_kind != provider_kind.as_str()
+                        || transfer.manifest.model != request.model
+                        || transfer.manifest.stable_hash() != transfer.proof.manifest_hash()
+                        || transfer.manifest.sources.len() != 1
+                        || transfer.manifest.sources[0].kind != "application_tool_result"
+                        || !tool_result_hashes.insert(transfer.manifest.stable_hash())
+                        || !tool_result_sources
+                            .insert(transfer.manifest.sources[0].reference.as_str())
+                })
+            {
+                return Err(ProviderError::EgressDenied);
+            }
+            tool_result_bytes.sort_unstable();
+            let mut transfer_capacities = tool_result_transfers
+                .iter()
+                .map(|transfer| transfer.manifest.estimated_bytes)
+                .collect::<Vec<_>>();
+            transfer_capacities.sort_unstable();
+            if tool_result_bytes
+                .iter()
+                .zip(transfer_capacities)
+                .any(|(required, capacity)| capacity < *required)
+            {
+                return Err(ProviderError::EgressDenied);
+            }
         }
         for block in &request.input {
             match block {

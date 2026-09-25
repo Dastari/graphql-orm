@@ -27,12 +27,16 @@ use crate::{AiError, AiRunState, AiScope, AiSessionRetentionReport, AiSessionRet
 
 pub(crate) const MAXIMUM_RETENTION_SECONDS: i64 = 315_576_000;
 const RUN_CHECKPOINT_RETENTION_POLICY: &str = "graphql_orm_ai.run_checkpoint.retention_purge";
-const PROTECTED_RUN_CHECKPOINT_KINDS: [&str; 5] = [
+mod native_checkpoints;
+
+const PROTECTED_RUN_CHECKPOINT_KINDS: [&str; 7] = [
     "provider_turn_persisted",
     "tool_batch_persisted",
     "supervised_tool_batch_persisted",
     "subscription_wait_parked",
     "subscription_wait_adopted",
+    native_checkpoints::SOURCE,
+    native_checkpoints::OUTCOME,
 ];
 const MAXIMUM_TITLE_MUTATION_DELETES_PER_PASS: i64 = 5_000;
 const MAXIMUM_RETENTION_QUERY_PAGE: i64 = 100;
@@ -1245,6 +1249,7 @@ impl OrmAiSessionRetentionService {
                                         if !eligible_call_ids.contains(&call.id) {
                                             continue;
                                         }
+                                        purge_native_candidate_payload(tx, &call, now).await?;
                                         if call.payload_purged_at.is_some() {
                                             continue;
                                         }
@@ -3183,14 +3188,49 @@ impl OrmAiSessionRetentionService {
                     let maximum_checkpoints = usize::try_from(checkpoint_limit)
                         .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
                     let mut eligible = Vec::with_capacity(maximum_checkpoints);
+                    let mut selected_ids = HashSet::new();
                     for checkpoint in checkpoints {
                         if checkpoint.created_at > raw_cutoff {
                             break;
                         }
-                        if current_checkpoint_ids.contains(&checkpoint.id) {
+                        if current_checkpoint_ids.contains(&checkpoint.id)
+                            || selected_ids.contains(&checkpoint.id)
+                        {
                             continue;
                         }
-                        eligible.push(checkpoint);
+                        if native_checkpoints::is_native(&checkpoint.checkpoint_kind) {
+                            let run = terminal_runs
+                                .get(&checkpoint.run_id)
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            if run.state == "recovery_required" {
+                                continue;
+                            }
+                            let group = native_checkpoints::group(maintenance, &checkpoint).await?;
+                            if group.is_empty() {
+                                return Ok(RawCheckpointPurgeOutcome::Blocked);
+                            }
+                            if group.iter().any(|row| {
+                                row.created_at > raw_cutoff
+                                    || current_checkpoint_ids.contains(&row.id)
+                            }) {
+                                continue;
+                            }
+                            // A native source/outcome pair is one atomic retention unit.
+                            // Respect the configured row cap; a cap of one cannot purge a pair.
+                            if group.len() > maximum_checkpoints {
+                                return Ok(RawCheckpointPurgeOutcome::Blocked);
+                            }
+                            if eligible.len() + group.len() > maximum_checkpoints {
+                                break;
+                            }
+                            for row in group {
+                                selected_ids.insert(row.id);
+                                eligible.push(row);
+                            }
+                        } else {
+                            selected_ids.insert(checkpoint.id);
+                            eligible.push(checkpoint);
+                        }
                         if eligible.len() == maximum_checkpoints {
                             break;
                         }
@@ -3261,10 +3301,29 @@ impl OrmAiSessionRetentionService {
                         validate_tool_call(call, &eligible_run_ids)?;
                     }
 
+                    let mut validated_native_groups = HashSet::new();
                     for checkpoint in &eligible {
                         let Some(run) = terminal_runs.get(&checkpoint.run_id) else {
                             return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                         };
+                        if native_checkpoints::is_native(&checkpoint.checkpoint_kind) {
+                            let group_key = (checkpoint.run_id, checkpoint.budget_reservation_id);
+                            if validated_native_groups.insert(group_key)
+                                && !native_checkpoints::validate(
+                                    maintenance,
+                                    checkpoint,
+                                    run,
+                                    session_id,
+                                    raw_cutoff,
+                                    &calls.rows,
+                                    &approvals_by_id,
+                                )
+                                .await?
+                            {
+                                return Ok(RawCheckpointPurgeOutcome::Blocked);
+                            }
+                            continue;
+                        }
                         if checkpoint.id.is_nil()
                             || checkpoint.attempt_id.is_nil()
                             || checkpoint.lease_generation <= 0
@@ -4158,6 +4217,121 @@ async fn purge_terminal_subscription_waits(
     Ok(true)
 }
 
+async fn purge_native_candidate_payload(
+    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+    call: &AiToolCallRecord,
+    now: i64,
+) -> Result<(), OrmPublicError> {
+    let Some(candidate) = tx
+        .find_by_id::<AiNativeApprovalCandidateRecord>(&call.id)
+        .await
+        .map_err(OrmPublicError::from)?
+    else {
+        return Ok(());
+    };
+    if candidate.run_id != call.run_id
+        || !tool_call_state_is_terminal(&call.state)
+        || match candidate.state.as_str() {
+            "finalized" => {
+                candidate.lease_generation <= 0
+                    || candidate.lease_generation > call.lease_generation
+                    || candidate.final_approval_id.is_none()
+                    || candidate.final_approval_id != call.approval_id
+                    || candidate.settled_checkpoint_id.is_none()
+                    || candidate.finalized_at.is_none()
+            }
+            "abandoned" => {
+                candidate.lease_generation != call.lease_generation
+                    || candidate.final_approval_id.is_some()
+                    || call.approval_id.is_some()
+                    || call.state != "cancelled"
+            }
+            _ => true,
+        }
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    }
+    if candidate.payload_purged_at.is_some() {
+        if candidate.protected_preparation.is_some()
+            || candidate.protected_control_receipt.is_some()
+        {
+            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+        }
+        return Ok(());
+    }
+    if candidate.protected_preparation.is_none() {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    }
+    if candidate.state == "finalized" {
+        let source_id = candidate
+            .settled_checkpoint_id
+            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+        let sources = tx
+            .query::<AiRunCheckpointRecord>()
+            .filter(AiRunCheckpointRecordWhereInput {
+                id: Some(UuidFilter {
+                    eq: Some(source_id),
+                    ..Default::default()
+                }),
+                run_id: Some(UuidFilter {
+                    eq: Some(candidate.run_id),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .limit(2)
+            .fetch_all()
+            .await
+            .map_err(OrmPublicError::from)?;
+        let source = sources
+            .first()
+            .filter(|_| sources.len() == 1)
+            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+        let approval_id = candidate
+            .final_approval_id
+            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+        let approval = tx
+            .find_by_id::<AiApprovalRecord>(&approval_id)
+            .await
+            .map_err(OrmPublicError::from)?
+            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+        // Approval resume refences the call. Its candidate and settled provider
+        // source retain the original attempt, generation and budget evidence.
+        if source.checkpoint_kind != "native_approval_provider_turn_persisted"
+            || source.run_id != candidate.run_id
+            || source.attempt_id != candidate.attempt_id
+            || source.lease_generation != candidate.lease_generation
+            || source.budget_reservation_id != Some(candidate.budget_reservation_id)
+            || call.budget_reservation_id != source.budget_reservation_id
+            || call.provider_response_id != source.provider_response_id
+            || approval.tool_call_id != call.id
+            || approval.binding_hash != candidate.binding_hash
+            || approval.action_preview_hash != candidate.preview_hash
+        {
+            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+        }
+    }
+    if !matches!(
+        tx.compare_and_swap::<AiNativeApprovalCandidateRecord>(
+            &candidate.id,
+            candidate.row_version,
+            AiNativeApprovalCandidateRecordWhereInput::default(),
+            UpdateAiNativeApprovalCandidateRecordInput {
+                protected_preparation: Some(None),
+                protected_control_receipt: Some(None),
+                payload_purged_at: Some(Some(now)),
+                ..Default::default()
+            }
+        )
+        .await
+        .map_err(OrmPublicError::from)?,
+        ConditionalUpdateOutcome::Updated(_)
+    ) {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
+    Ok(())
+}
+
 fn validate_tool_call(call: &AiToolCallRecord, run_ids: &[Uuid]) -> Result<(), OrmPublicError> {
     if call.id.is_nil()
         || call.run_id.is_nil()
@@ -4258,6 +4432,8 @@ fn tool_call_state_is_terminal(state: &str) -> bool {
     matches!(
         state,
         "completed"
+            | "cancelled"
+            | "control_blocked"
             | "execution_failed"
             | "egress_denied"
             | "egress_audit_failed"
@@ -4275,7 +4451,11 @@ fn run_state_is_retention_closed(state: AiRunState) -> bool {
 fn tool_call_result_required(state: &str) -> bool {
     matches!(
         state,
-        "completed" | "execution_failed" | "egress_denied" | "egress_audit_failed"
+        "completed"
+            | "control_blocked"
+            | "execution_failed"
+            | "egress_denied"
+            | "egress_audit_failed"
     )
 }
 
@@ -5022,6 +5202,7 @@ mod tests {
                 tool_call_index: 0,
                 tool_id: "test.subscription_wait".to_owned(),
                 tool_fingerprint: "tool-fingerprint".to_owned(),
+                execution_provenance: None,
                 protected_arguments: None,
                 argument_hash: "argument-hash".to_owned(),
                 protected_result: None,
@@ -5353,6 +5534,7 @@ mod tests {
                 tool_call_index: 0,
                 tool_id: "test.read".to_owned(),
                 tool_fingerprint: "tool-fingerprint".to_owned(),
+                execution_provenance: None,
                 protected_arguments: Some(serde_json::json!({"protected": "arguments"})),
                 argument_hash: "argument-hash".to_owned(),
                 protected_result: tool_call_result_required(call_state)
@@ -7906,5 +8088,919 @@ mod tests {
             tool_limits.with_tool_payload_limits(2, 0),
             Err(AiError::InvalidConfiguration(_))
         ));
+    }
+    struct NativeRawFixture {
+        database: Database<SqliteBackend>,
+        session: Uuid,
+        run: Uuid,
+        source: AiRunCheckpointRecord,
+        outcome: Option<AiRunCheckpointRecord>,
+        candidate: Uuid,
+        budget: Uuid,
+        prior: Uuid,
+    }
+
+    async fn native_raw_fixture(kind: &str, delay_outcome: bool) -> NativeRawFixture {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy_with_message_retention(&database, &scope, None).await;
+        let session = seed_session(&database, &scope).await;
+        let (_, run) = seed_message(&database, session, "completed", false).await;
+        let wall = OffsetDateTime::now_utc().unix_timestamp();
+        let original = AiRunAttemptRecord::insert(
+            &database,
+            CreateAiRunAttemptRecordInput {
+                run_id: run,
+                lease_generation: 1,
+                worker_id: "native-original".to_owned(),
+                claimed_at: wall - 10,
+                finished_at: None,
+                provider_response_id: None,
+                outcome_code: None,
+            },
+        )
+        .await
+        .unwrap();
+        let budget = AiBudgetReservationRecord::insert(
+            &database,
+            CreateAiBudgetReservationRecordInput {
+                budget_counter_ids: serde_json::json!([]),
+                scope_kind: scope.kind.clone(),
+                scope_id: scope.id.clone(),
+                tenant_id: scope.tenant_id.clone(),
+                principal_kind: "user".to_owned(),
+                principal_subject: "retention-user".to_owned(),
+                session_id: session,
+                run_id: run,
+                attempt_id: original.id,
+                lease_generation: 1,
+                provider_kind: "mock".to_owned(),
+                provider_model: "retention-test".to_owned(),
+                reasoning_effort: "unspecified".to_owned(),
+                pricing_policy_version: "test-v1".to_owned(),
+                reserved_input_tokens: 1,
+                reserved_output_tokens: 1,
+                reserved_tool_units: 3,
+                reserved_image_units: 0,
+                reserved_cost_microunits: 1,
+                reserved_runs: 1,
+                actual_input_tokens: Some(1),
+                actual_cached_input_tokens: Some(0),
+                actual_output_tokens: Some(1),
+                actual_tool_units: Some(3),
+                actual_image_units: Some(0),
+                actual_cost_microunits: Some(1),
+                actual_runs: Some(1),
+                idempotency_key: Uuid::new_v4().to_string(),
+                state: "committed".to_owned(),
+                expires_at: wall + 3600,
+                reconciled_at: Some(wall),
+            },
+        )
+        .await
+        .unwrap();
+        let source = AiRunCheckpointRecord::insert(
+            &database,
+            CreateAiRunCheckpointRecordInput {
+                id: Uuid::new_v4(),
+                run_id: run,
+                attempt_id: original.id,
+                lease_generation: 1,
+                checkpoint_kind: native_checkpoints::SOURCE.to_owned(),
+                provider_response_id: Some("native-response".to_owned()),
+                budget_reservation_id: Some(budget.id),
+                assistant_message_id: None,
+                protected_state: Some(serde_json::json!({"protected":"source"})),
+                checkpoint_hash: "a".repeat(64),
+            },
+        )
+        .await
+        .unwrap();
+        if delay_outcome {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        let resumed = if kind == "consumed" {
+            Some(
+                AiRunAttemptRecord::insert(
+                    &database,
+                    CreateAiRunAttemptRecordInput {
+                        run_id: run,
+                        lease_generation: 2,
+                        worker_id: "native-approved".to_owned(),
+                        claimed_at: source.created_at,
+                        finished_at: None,
+                        provider_response_id: None,
+                        outcome_code: None,
+                    },
+                )
+                .await
+                .unwrap(),
+            )
+        } else {
+            None
+        };
+        let outcome = if let Some(resumed) = &resumed {
+            Some(
+                AiRunCheckpointRecord::insert(
+                    &database,
+                    CreateAiRunCheckpointRecordInput {
+                        id: Uuid::new_v4(),
+                        run_id: run,
+                        attempt_id: resumed.id,
+                        lease_generation: 2,
+                        checkpoint_kind: native_checkpoints::OUTCOME.to_owned(),
+                        provider_response_id: source.provider_response_id.clone(),
+                        budget_reservation_id: Some(budget.id),
+                        assistant_message_id: None,
+                        protected_state: Some(serde_json::json!({"protected":"outcome"})),
+                        checkpoint_hash: "b".repeat(64),
+                    },
+                )
+                .await
+                .unwrap(),
+            )
+        } else {
+            None
+        };
+        AiRunAttemptOutcomeRecord::insert(
+            &database,
+            CreateAiRunAttemptOutcomeRecordInput {
+                attempt_id: original.id,
+                run_id: run,
+                lease_generation: 1,
+                worker_id: original.worker_id,
+                final_state: if kind == "abandoned" {
+                    "cancelled"
+                } else {
+                    "waiting_approval"
+                }
+                .to_owned(),
+                outcome_code: if kind == "abandoned" {
+                    "owner_cancelled"
+                } else {
+                    "approval_wait_parked"
+                }
+                .to_owned(),
+                provider_response_id: source.provider_response_id.clone(),
+                finished_at: source.created_at,
+            },
+        )
+        .await
+        .unwrap();
+        if let (Some(resumed), Some(outcome)) = (&resumed, &outcome) {
+            AiRunAttemptOutcomeRecord::insert(
+                &database,
+                CreateAiRunAttemptOutcomeRecordInput {
+                    attempt_id: resumed.id,
+                    run_id: run,
+                    lease_generation: 2,
+                    worker_id: resumed.worker_id.clone(),
+                    final_state: "completed".to_owned(),
+                    outcome_code: "completed".to_owned(),
+                    provider_response_id: source.provider_response_id.clone(),
+                    finished_at: outcome.created_at,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let prior = seed_tool_call(&database, session, run, "completed", None)
+            .await
+            .0;
+        let state = match kind {
+            "consumed" => "completed",
+            "denied" => "approval_denied",
+            _ => "cancelled",
+        };
+        let (candidate, approval) = seed_tool_call(
+            &database,
+            session,
+            run,
+            state,
+            match kind {
+                "consumed" => Some("consumed"),
+                "denied" => Some("denied"),
+                _ => None,
+            },
+        )
+        .await;
+        let blocked = seed_tool_call(&database, session, run, "control_blocked", None)
+            .await
+            .0;
+        let source_id = source.id;
+        let budget_id = budget.id;
+        let source_time = source.created_at;
+        let end_time = outcome.as_ref().map_or(source_time, |row| row.created_at);
+        let end_attempt = resumed.as_ref().map_or(original.id, |row| row.id);
+        let end_generation = if resumed.is_some() { 2 } else { 1 };
+        database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    tx.update_by_id::<AiRunRecord>(
+                        &run,
+                        UpdateAiRunRecordInput {
+                            state: Some(
+                                if approval.is_some() && end_generation == 2 {
+                                    "completed"
+                                } else {
+                                    "cancelled"
+                                }
+                                .to_owned(),
+                            ),
+                            attempt_id: Some(Some(end_attempt)),
+                            lease_generation: Some(end_generation),
+                            latest_checkpoint_id: Some(None),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    for (index, id) in [prior, candidate, blocked].into_iter().enumerate() {
+                        let generation = if id == candidate { end_generation } else { 1 };
+                        tx.update_by_id::<AiToolCallRecord>(
+                            &id,
+                            UpdateAiToolCallRecordInput {
+                                lease_generation: Some(generation),
+                                tool_call_index: Some(index as i64),
+                                budget_reservation_id: Some(Some(budget_id)),
+                                provider_response_id: Some(Some("native-response".to_owned())),
+                                risk: Some(
+                                    if id == prior {
+                                        "read_only"
+                                    } else {
+                                        "high_impact"
+                                    }
+                                    .to_owned(),
+                                ),
+                                completed_at: Some(Some(if id == candidate {
+                                    end_time
+                                } else {
+                                    source_time
+                                })),
+                                protected_arguments: Some(None),
+                                protected_result: Some(None),
+                                payload_purged_at: Some(Some(now().unix_timestamp())),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        tx.update_by_id::<AiRunStepRecord>(
+                            &id,
+                            UpdateAiRunStepRecordInput {
+                                lease_generation: Some(generation),
+                                started_at: Some(Some(source_time - 1)),
+                                finished_at: Some(Some(if id == candidate {
+                                    end_time
+                                } else {
+                                    source_time
+                                })),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    }
+                    if let Some(id) = approval {
+                        tx.update_by_id::<AiApprovalRecord>(
+                            &id,
+                            UpdateAiApprovalRecordInput {
+                                binding_hash: Some("c".repeat(64)),
+                                action_preview_hash: Some("d".repeat(64)),
+                                protected_resource_bindings: Some(None),
+                                protected_action_preview: Some(None),
+                                payload_purged_at: Some(Some(now().unix_timestamp())),
+                                decided_at: Some(Some(source_time)),
+                                consumed_at: Some((end_generation == 2).then_some(end_time)),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    }
+                    tx.insert::<AiNativeApprovalCandidateRecord>(
+                        CreateAiNativeApprovalCandidateRecordInput {
+                            id: candidate,
+                            run_id: run,
+                            attempt_id: original.id,
+                            lease_generation: 1,
+                            budget_reservation_id: budget_id,
+                            binding_hash: "c".repeat(64),
+                            preview_hash: "d".repeat(64),
+                            protected_preparation: None,
+                            protected_control_receipt: None,
+                            control_receipt_hash: Some("e".repeat(64)),
+                            control_egress_decision_id: Some(Uuid::new_v4()),
+                            control_egress_manifest_hash: Some("f".repeat(64)),
+                            state: if approval.is_some() {
+                                "finalized"
+                            } else {
+                                "abandoned"
+                            }
+                            .to_owned(),
+                            final_approval_id: approval,
+                            settled_checkpoint_id: approval.map(|_| source_id),
+                            payload_purged_at: Some(now().unix_timestamp()),
+                            finalized_at: approval.map(|_| source_time),
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        NativeRawFixture {
+            database,
+            session,
+            run,
+            source,
+            outcome,
+            candidate,
+            budget: budget.id,
+            prior,
+        }
+    }
+
+    fn native_raw_service(fixture: &NativeRawFixture, cap: usize) -> OrmAiSessionRetentionService {
+        let limits = AiSessionRetentionLimits {
+            maximum_run_checkpoints_per_session: cap,
+            ..Default::default()
+        };
+        OrmAiSessionRetentionService::new(
+            fixture.database.clone(),
+            Arc::new(FixedClock::new(now())),
+            limits,
+        )
+    }
+
+    #[tokio::test]
+    async fn native_raw_checkpoint_pair_purges_atomically_only_with_sufficient_row_budget() {
+        let fixture = native_raw_fixture("consumed", false).await;
+        assert!(matches!(
+            native_raw_service(&fixture, 1)
+                .purge_expired_run_checkpoints(fixture.session, now().unix_timestamp())
+                .await
+                .unwrap(),
+            RawCheckpointPurgeOutcome::Blocked
+        ));
+        assert!(
+            AiRunCheckpointRecord::find_by_id(&fixture.database, &fixture.source.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            AiRunCheckpointRecord::find_by_id(
+                &fixture.database,
+                &fixture.outcome.as_ref().unwrap().id
+            )
+            .await
+            .unwrap()
+            .is_some()
+        );
+        assert!(matches!(
+            native_raw_service(&fixture, 2)
+                .purge_expired_run_checkpoints(fixture.session, now().unix_timestamp())
+                .await
+                .unwrap(),
+            RawCheckpointPurgeOutcome::Deleted(2)
+        ));
+        assert!(
+            AiRunCheckpointRecord::find_by_id(&fixture.database, &fixture.source.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            AiRunCheckpointRecord::find_by_id(
+                &fixture.database,
+                &fixture.outcome.as_ref().unwrap().id
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            AiNativeApprovalCandidateRecord::find_by_id(&fixture.database, &fixture.candidate)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(matches!(
+            native_raw_service(&fixture, 2)
+                .purge_expired_run_checkpoints(fixture.session, now().unix_timestamp())
+                .await
+                .unwrap(),
+            RawCheckpointPurgeOutcome::Noop
+        ));
+    }
+
+    #[tokio::test]
+    async fn native_raw_source_without_outcome_requires_exact_closed_no_effect_graph() {
+        for kind in ["abandoned", "denied"] {
+            let fixture = native_raw_fixture(kind, false).await;
+            assert!(matches!(
+                native_raw_service(&fixture, 1)
+                    .purge_expired_run_checkpoints(fixture.session, now().unix_timestamp())
+                    .await
+                    .unwrap(),
+                RawCheckpointPurgeOutcome::Deleted(1)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn native_raw_checkpoint_retention_preserves_current_young_and_recovery_dependencies() {
+        let fixture = native_raw_fixture("consumed", true).await;
+        assert!(fixture.outcome.as_ref().unwrap().created_at > fixture.source.created_at);
+        assert!(matches!(
+            native_raw_service(&fixture, 2)
+                .purge_expired_run_checkpoints(fixture.session, fixture.source.created_at + 60)
+                .await
+                .unwrap(),
+            RawCheckpointPurgeOutcome::Noop
+        ));
+        let run = fixture.run;
+        let current = fixture.outcome.as_ref().unwrap().id;
+        fixture
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    tx.update_by_id::<AiRunRecord>(
+                        &run,
+                        UpdateAiRunRecordInput {
+                            latest_checkpoint_id: Some(Some(current)),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            native_raw_service(&fixture, 2)
+                .purge_expired_run_checkpoints(fixture.session, now().unix_timestamp())
+                .await
+                .unwrap(),
+            RawCheckpointPurgeOutcome::Noop
+        ));
+        fixture
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    tx.update_by_id::<AiRunRecord>(
+                        &run,
+                        UpdateAiRunRecordInput {
+                            latest_checkpoint_id: Some(None),
+                            state: Some("recovery_required".to_owned()),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            native_raw_service(&fixture, 2)
+                .purge_expired_run_checkpoints(fixture.session, now().unix_timestamp())
+                .await
+                .unwrap(),
+            RawCheckpointPurgeOutcome::Noop
+        ));
+        assert!(
+            AiRunCheckpointRecord::find_by_id(&fixture.database, &fixture.source.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            AiRunCheckpointRecord::find_by_id(&fixture.database, &current)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_raw_checkpoint_retention_rejects_cross_fence_or_unpurged_dependencies() {
+        for invalid in ["budget", "candidate", "prior"] {
+            let fixture = native_raw_fixture("consumed", false).await;
+            let budget = fixture.budget;
+            let candidate = fixture.candidate;
+            let prior = fixture.prior;
+            fixture
+                .database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        match invalid {
+                            "budget" => {
+                                tx.update_by_id::<AiBudgetReservationRecord>(
+                                    &budget,
+                                    UpdateAiBudgetReservationRecordInput {
+                                        attempt_id: Some(Uuid::new_v4()),
+                                        ..Default::default()
+                                    },
+                                )
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            }
+                            "candidate" => {
+                                tx.update_by_id::<AiNativeApprovalCandidateRecord>(
+                                    &candidate,
+                                    UpdateAiNativeApprovalCandidateRecordInput {
+                                        payload_purged_at: Some(None),
+                                        protected_preparation: Some(Some(
+                                            serde_json::json!({"protected":true}),
+                                        )),
+                                        ..Default::default()
+                                    },
+                                )
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            }
+                            _ => {
+                                tx.update_by_id::<AiToolCallRecord>(
+                                    &prior,
+                                    UpdateAiToolCallRecordInput {
+                                        payload_purged_at: Some(None),
+                                        protected_result: Some(Some(
+                                            serde_json::json!({"protected":true}),
+                                        )),
+                                        ..Default::default()
+                                    },
+                                )
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            }
+                        }
+                        Ok(())
+                    })
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                native_raw_service(&fixture, 2)
+                    .purge_expired_run_checkpoints(fixture.session, now().unix_timestamp())
+                    .await
+                    .unwrap(),
+                RawCheckpointPurgeOutcome::Blocked
+            ));
+            assert!(
+                AiRunCheckpointRecord::find_by_id(&fixture.database, &fixture.source.id)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                AiRunCheckpointRecord::find_by_id(
+                    &fixture.database,
+                    &fixture.outcome.as_ref().unwrap().id
+                )
+                .await
+                .unwrap()
+                .is_some()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_raw_checkpoint_retention_distinguishes_reclaimed_provider_history() {
+        for state in [
+            "active",
+            "parked",
+            "claimed",
+            "cleanup_pending",
+            "wrong_wait",
+            "wrong_source_hash",
+        ] {
+            let fixture = native_raw_fixture("consumed", false).await;
+            let final_message = seed_final_output_checkpoint(
+                &fixture.database,
+                fixture.session,
+                fixture.run,
+                fixture.outcome.as_ref().unwrap(),
+            )
+            .await;
+            let candidate =
+                AiNativeApprovalCandidateRecord::find_by_id(&fixture.database, &fixture.candidate)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            crate::orm_provider_session::AiProviderSessionBindingRecord::insert(
+                &fixture.database,
+                crate::orm_provider_session::CreateAiProviderSessionBindingRecordInput {
+                    id: Uuid::new_v4(),
+                    session_id: fixture.session,
+                    owner_principal_kind: "user".to_owned(),
+                    owner_subject: "retention-user".to_owned(),
+                    principal_reference: serde_json::json!({}),
+                    scope_key: "retention".to_owned(),
+                    scope_kind: "tenant".to_owned(),
+                    scope_id: "retention".to_owned(),
+                    tenant_id: Some("retention".to_owned()),
+                    provider_kind: "mock".to_owned(),
+                    provider_profile_id: "retention".to_owned(),
+                    provider_model: "retention-test".to_owned(),
+                    registration_fingerprint: "a".repeat(64),
+                    protocol_version: "test/v1".to_owned(),
+                    policy_fingerprint: "b".repeat(64),
+                    cursor_kind: "test.thread".to_owned(),
+                    cursor_fingerprint: "c".repeat(64),
+                    protected_cursor: Some(serde_json::json!({"protected":true})),
+                    through_message_sequence: 2,
+                    transcript_fingerprint: "d".repeat(64),
+                    last_run_id: Some(fixture.run),
+                    last_assistant_message_id: Some(final_message),
+                    state: if state.starts_with("wrong_") {
+                        "active"
+                    } else {
+                        state
+                    }
+                    .to_owned(),
+                    claimed_run_id: (state == "claimed").then_some(fixture.run),
+                    claimed_attempt_id: (state == "claimed")
+                        .then_some(fixture.outcome.as_ref().unwrap().attempt_id),
+                    claimed_run_lease_generation: (state == "claimed").then_some(2),
+                    claim_owner: (state == "claimed").then(|| "worker".to_owned()),
+                    claim_generation: 2,
+                    claim_expires_at: (state == "claimed").then_some(now().unix_timestamp() + 60),
+                    parked_wait_kind: Some("approval".to_owned()),
+                    parked_wait_id: if state == "wrong_wait" {
+                        Some(Uuid::new_v4())
+                    } else {
+                        candidate.final_approval_id
+                    },
+                    park_generation: 1,
+                    parked_source_checkpoint_id: Some(fixture.source.id),
+                    parked_source_checkpoint_fingerprint: Some(if state == "wrong_source_hash" {
+                        "0".repeat(64)
+                    } else {
+                        fixture.source.checkpoint_hash.clone()
+                    }),
+                    parked_checkpoint_id: Some(Uuid::new_v4()),
+                    parked_checkpoint_fingerprint: Some("e".repeat(64)),
+                    parked_continuation_fingerprint: Some("f".repeat(64)),
+                    parked_confirmed_at: Some(fixture.source.created_at),
+                    parked_expires_at: Some(fixture.source.created_at + 60),
+                    parked_reclaimed_at: (state != "parked")
+                        .then_some(fixture.outcome.as_ref().unwrap().created_at),
+                    provider_expires_at: None,
+                    idle_expires_at: now().unix_timestamp() + 60,
+                    absolute_expires_at: now().unix_timestamp() + 120,
+                    cleanup_owner: None,
+                    cleanup_generation: 0,
+                    cleanup_lease_expires_at: None,
+                    cleanup_retry_count: 0,
+                    cleanup_next_attempt_at: None,
+                    cleanup_reason_code: None,
+                    provider_absence_observed_at: None,
+                },
+            )
+            .await
+            .unwrap();
+            let result = native_raw_service(&fixture, 2)
+                .purge_expired_run_checkpoints(fixture.session, now().unix_timestamp())
+                .await
+                .unwrap();
+            if state == "active" {
+                assert!(matches!(result, RawCheckpointPurgeOutcome::Deleted(2)));
+            } else {
+                assert!(matches!(result, RawCheckpointPurgeOutcome::Blocked));
+                assert!(
+                    AiRunCheckpointRecord::find_by_id(&fixture.database, &fixture.source.id)
+                        .await
+                        .unwrap()
+                        .is_some()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_raw_denied_current_parked_checkpoint_remains_protected() {
+        let fixture = native_raw_fixture("denied", false).await;
+        let parked = AiRunCheckpointRecord::insert(
+            &fixture.database,
+            CreateAiRunCheckpointRecordInput {
+                id: Uuid::new_v4(),
+                run_id: fixture.run,
+                attempt_id: fixture.source.attempt_id,
+                lease_generation: 1,
+                checkpoint_kind: "approval_wait_parked".to_owned(),
+                provider_response_id: fixture.source.provider_response_id.clone(),
+                budget_reservation_id: Some(fixture.budget),
+                assistant_message_id: None,
+                protected_state: Some(serde_json::json!({"protected":"parked"})),
+                checkpoint_hash: "9".repeat(64),
+            },
+        )
+        .await
+        .unwrap();
+        let run = fixture.run;
+        fixture
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    tx.update_by_id::<AiRunRecord>(
+                        &run,
+                        UpdateAiRunRecordInput {
+                            latest_checkpoint_id: Some(Some(parked.id)),
+                            attempt_id: Some(None),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            native_raw_service(&fixture, 2)
+                .purge_expired_run_checkpoints(fixture.session, now().unix_timestamp())
+                .await
+                .unwrap(),
+            RawCheckpointPurgeOutcome::Blocked
+        ));
+        assert!(
+            AiRunCheckpointRecord::find_by_id(&fixture.database, &fixture.source.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            AiRunCheckpointRecord::find_by_id(&fixture.database, &parked.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_candidate_content_follows_terminal_tool_retention_atomically() {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy_with_message_retention(&database, &scope, None).await;
+        let session_id = seed_session(&database, &scope).await;
+        let (_, run_id) = seed_message(&database, session_id, "completed", false).await;
+        let (id, _) = seed_tool_call(&database, session_id, run_id, "cancelled", None).await;
+        AiNativeApprovalCandidateRecord::insert(
+            &database,
+            CreateAiNativeApprovalCandidateRecordInput {
+                id,
+                run_id,
+                attempt_id: Uuid::new_v4(),
+                lease_generation: 0,
+                budget_reservation_id: Uuid::new_v4(),
+                binding_hash: "a".repeat(64),
+                preview_hash: "b".repeat(64),
+                protected_preparation: Some(serde_json::json!({"ciphertext":"preparation"})),
+                protected_control_receipt: Some(serde_json::json!({"ciphertext":"receipt"})),
+                control_receipt_hash: Some("c".repeat(64)),
+                control_egress_decision_id: Some(Uuid::new_v4()),
+                control_egress_manifest_hash: Some("d".repeat(64)),
+                state: "abandoned".to_owned(),
+                final_approval_id: None,
+                settled_checkpoint_id: None,
+                payload_purged_at: None,
+                finalized_at: None,
+            },
+        )
+        .await
+        .unwrap();
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            Arc::new(FixedClock::new(now())),
+            AiSessionRetentionLimits::default(),
+        );
+        let report = service.prune_session_content(None).await.unwrap();
+        assert_eq!(report.expired_tool_payloads_purged, 1);
+        let candidate = AiNativeApprovalCandidateRecord::find_by_id(&database, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        let call = AiToolCallRecord::find_by_id(&database, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(candidate.payload_purged_at, call.payload_purged_at);
+        assert_eq!(candidate.payload_purged_at, Some(now().unix_timestamp()));
+        assert!(candidate.protected_preparation.is_none());
+        assert!(candidate.protected_control_receipt.is_none());
+        assert_eq!(candidate.binding_hash, "a".repeat(64));
+        assert_eq!(candidate.state, "abandoned");
+    }
+
+    #[tokio::test]
+    async fn native_finalized_candidate_retention_binds_original_source_after_approved_reclaim() {
+        for invalid_link in [None, Some("source"), Some("approval")] {
+            let database = database().await;
+            let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+            seed_policy_with_message_retention(&database, &scope, None).await;
+            let session_id = seed_session(&database, &scope).await;
+            let (_, run_id) = seed_message(&database, session_id, "completed", false).await;
+            let (id, approval_id) =
+                seed_tool_call(&database, session_id, run_id, "completed", Some("consumed")).await;
+            let source = AiRunCheckpointRecord::insert(
+                &database,
+                CreateAiRunCheckpointRecordInput {
+                    id: Uuid::new_v4(),
+                    run_id,
+                    attempt_id: Uuid::new_v4(),
+                    lease_generation: 1,
+                    checkpoint_kind: "native_approval_provider_turn_persisted".to_owned(),
+                    provider_response_id: Some("native-original-response".to_owned()),
+                    budget_reservation_id: Some(Uuid::new_v4()),
+                    assistant_message_id: None,
+                    protected_state: Some(serde_json::json!({"protected":"source"})),
+                    checkpoint_hash: "a".repeat(64),
+                },
+            )
+            .await
+            .unwrap();
+            let mut rebound = source.clone();
+            rebound.lease_generation = 2;
+            bind_tool_call_to_checkpoint(&database, id, &rebound).await;
+            AiNativeApprovalCandidateRecord::insert(
+                &database,
+                CreateAiNativeApprovalCandidateRecordInput {
+                    id,
+                    run_id,
+                    attempt_id: if invalid_link == Some("source") {
+                        Uuid::new_v4()
+                    } else {
+                        source.attempt_id
+                    },
+                    lease_generation: 1,
+                    budget_reservation_id: source.budget_reservation_id.unwrap(),
+                    binding_hash: "binding-hash".to_owned(),
+                    preview_hash: "preview-hash".to_owned(),
+                    protected_preparation: Some(serde_json::json!({"protected":"preparation"})),
+                    protected_control_receipt: Some(serde_json::json!({"protected":"receipt"})),
+                    control_receipt_hash: Some("c".repeat(64)),
+                    control_egress_decision_id: Some(Uuid::new_v4()),
+                    control_egress_manifest_hash: Some("d".repeat(64)),
+                    state: "finalized".to_owned(),
+                    final_approval_id: if invalid_link == Some("approval") {
+                        Some(Uuid::new_v4())
+                    } else {
+                        approval_id
+                    },
+                    settled_checkpoint_id: Some(source.id),
+                    payload_purged_at: None,
+                    finalized_at: Some(now().unix_timestamp() - 100),
+                },
+            )
+            .await
+            .unwrap();
+            let service = OrmAiSessionRetentionService::new(
+                database.clone(),
+                Arc::new(FixedClock::new(now())),
+                AiSessionRetentionLimits::default(),
+            );
+            let result = service.prune_session_content(None).await;
+            let candidate = AiNativeApprovalCandidateRecord::find_by_id(&database, &id)
+                .await
+                .unwrap()
+                .unwrap();
+            let call = AiToolCallRecord::find_by_id(&database, &id)
+                .await
+                .unwrap()
+                .unwrap();
+            let approval = AiApprovalRecord::find_by_id(&database, &approval_id.unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            if invalid_link.is_some() {
+                assert!(
+                    result.is_err(),
+                    "mismatched native retention graph must fail closed"
+                );
+                assert!(candidate.protected_preparation.is_some());
+                assert!(call.protected_arguments.is_some());
+                assert!(
+                    approval.protected_action_preview.is_some(),
+                    "approval purge must roll back with native candidate mismatch"
+                );
+            } else {
+                assert_eq!(result.unwrap().expired_tool_payloads_purged, 1);
+                assert_eq!(candidate.payload_purged_at, call.payload_purged_at);
+                assert!(candidate.protected_preparation.is_none());
+                assert!(candidate.protected_control_receipt.is_none());
+                assert_eq!(candidate.lease_generation, 1);
+                assert_eq!(call.lease_generation, 2);
+                assert_eq!(candidate.settled_checkpoint_id, Some(source.id));
+                assert!(service.prune_session_content(None).await.is_ok());
+            }
+        }
     }
 }

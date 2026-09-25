@@ -318,6 +318,7 @@ impl AiRemoteGraphqlCapabilityBinding {
         policy: AiRemoteGraphqlOperationPolicy,
     ) -> Result<Self, ToolExecutionError> {
         if !valid_sha256(registered.tool_fingerprint())
+            || !registered.matches_request(request)
             || !policy.permits(registered.operation_kind())
             || request.contract.target_id != target.id
             || request.contract.schema_fingerprint != target.schema_fingerprint
@@ -411,6 +412,8 @@ impl AiRemoteGraphqlCapabilityBinding {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiRemoteGraphqlDelegationRequest {
     capability_binding: AiRemoteGraphqlCapabilityBinding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provenance: Option<crate::AiToolExecutionProvenance>,
     target_id: GraphqlExecutionTargetId,
     target_class: GraphqlExecutionTargetClass,
     audience: String,
@@ -435,6 +438,12 @@ pub struct AiRemoteGraphqlDelegationRequest {
 }
 
 impl AiRemoteGraphqlDelegationRequest {
+    /// Crate-authored durable tool origin, absent for direct bridge calls.
+    /// It does not grant authority or replace current issuer/resolver policy.
+    pub fn provenance(&self) -> Option<&crate::AiToolExecutionProvenance> {
+        self.provenance.as_ref()
+    }
+
     /// Exact crate-authored static or generated capability identity.
     pub const fn capability_binding(&self) -> &AiRemoteGraphqlCapabilityBinding {
         &self.capability_binding
@@ -614,6 +623,7 @@ impl AiRemoteGraphqlDelegationRequest {
             AiRemoteGraphqlCapabilityBinding::from_registered(registered, target, request, policy)?;
         Ok(Self {
             capability_binding,
+            provenance: registered.provenance().cloned(),
             target_id: target.id.clone(),
             target_class: target.class,
             audience,
@@ -649,10 +659,11 @@ impl AiRemoteGraphqlDelegationRequest {
         request: &ToolGraphqlRequest,
         policy: AiRemoteGraphqlOperationPolicy,
     ) -> Result<bool, ToolExecutionError> {
-        Ok(self.capability_binding
-            == AiRemoteGraphqlCapabilityBinding::from_registered(
-                registered, target, request, policy,
-            )?
+        Ok(self.provenance.as_ref() == registered.provenance()
+            && self.capability_binding
+                == AiRemoteGraphqlCapabilityBinding::from_registered(
+                    registered, target, request, policy,
+                )?
             && self.target_id == target.id
             && self.target_class == target.class
             && target.audience.as_deref() == Some(self.audience.as_str())
@@ -757,6 +768,34 @@ pub trait AiRemoteGraphqlAuthorityIssuer: Send + Sync {
         principal: &ResolvedPrincipal,
         request: &AiRemoteGraphqlDelegationRequest,
     ) -> Result<AiRemoteGraphqlAuthority, ToolExecutionError>;
+
+    /// Mints authority after exact registered document, name, variables, and
+    /// invocation validation, with local access to the actual operation.
+    ///
+    /// The default preserves [`Self::issue`]. A trusted host may override this
+    /// to derive an application argument digest from its reviewed static
+    /// mapping before sending the redacted request to an external issuer.
+    /// Federation can rewrite transport documents: the target must validate
+    /// such a digest against its actual resolved arguments. No generic mapping
+    /// or downstream claim enforcement is inferred by this hook.
+    ///
+    /// Operation content may be confidential; do not log it or automatically
+    /// send it to a credential issuer. This method grants no additional policy
+    /// authority and must preserve the exact delegation request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error if current authority or the host's exact argument
+    /// binding cannot be established.
+    async fn issue_for_request(
+        &self,
+        principal: &ResolvedPrincipal,
+        delegation: &AiRemoteGraphqlDelegationRequest,
+        request: &ToolGraphqlRequest,
+    ) -> Result<AiRemoteGraphqlAuthority, ToolExecutionError> {
+        let _ = request;
+        self.issue(principal, delegation).await
+    }
 }
 
 /// Private deployment transport for one exact remote GraphQL operation.
@@ -890,7 +929,10 @@ impl GraphqlRequestContextFactory for AiRemoteAuthenticatedGraphqlAdapter {
             expires_at,
             self.operation_policy,
         )?;
-        let authority = self.issuer.issue(principal, &delegation).await?;
+        let authority = self
+            .issuer
+            .issue_for_request(principal, &delegation, request)
+            .await?;
         let after_issuance = self.clock.now();
         if authority.request != delegation
             || authority.request.expires_at <= after_issuance
@@ -1080,12 +1122,32 @@ mod tests {
 
     struct Issuer {
         calls: AtomicUsize,
+        request_hooks: AtomicUsize,
         hashes: Mutex<Vec<String>>,
         bindings: Mutex<Vec<AiRemoteGraphqlCapabilityBinding>>,
     }
 
     #[async_trait]
     impl AiRemoteGraphqlAuthorityIssuer for Issuer {
+        async fn issue_for_request(
+            &self,
+            principal: &ResolvedPrincipal,
+            delegation: &AiRemoteGraphqlDelegationRequest,
+            request: &ToolGraphqlRequest,
+        ) -> Result<AiRemoteGraphqlAuthority, ToolExecutionError> {
+            assert_eq!(
+                delegation.argument_hash(),
+                canonical_json_hash(&request.variables)?
+            );
+            assert_eq!(
+                delegation.operation_document_hash(),
+                crate::stable_graphql_document_hash(&request.document)
+            );
+            assert_eq!(delegation.operation_name(), request.operation_name);
+            self.request_hooks.fetch_add(1, Ordering::SeqCst);
+            self.issue(principal, delegation).await
+        }
+
         async fn issue(
             &self,
             _principal: &ResolvedPrincipal,
@@ -1238,6 +1300,7 @@ mod tests {
             request,
             Arc::new(Issuer {
                 calls: AtomicUsize::new(0),
+                request_hooks: AtomicUsize::new(0),
                 hashes: Mutex::new(Vec::new()),
                 bindings: Mutex::new(Vec::new()),
             }),
@@ -1972,6 +2035,152 @@ mod tests {
         assert!(adapter.execute(context, request.clone()).await.is_err());
         assert!(adapter.execute(retry, request).await.is_err());
         assert_eq!(transport.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn current_one_shot_requirement_blocks_automatic_and_changed_approved_execution() {
+        struct TighteningPolicy(AtomicBool);
+        #[async_trait]
+        impl AiToolAuthorizationPolicy for TighteningPolicy {
+            async fn authorize(
+                &self,
+                _: &ResolvedPrincipal,
+                _: &AiScope,
+                _: &AiToolDescriptor,
+                _: &serde_json::Value,
+            ) -> AiToolAuthorizationDecision {
+                if self.0.load(Ordering::SeqCst) {
+                    AiToolAuthorizationDecision::require_one_shot("review", "policy-v1", "state-v1")
+                } else {
+                    AiToolAuthorizationDecision::allow("allowed", "policy-v1", "state-v1")
+                }
+            }
+        }
+        let (principal, target, descriptor, mut request, issuer, transport, clock) = fixture();
+        request.document = request.document.replacen("query ", "mutation ", 1);
+        request.contract = GraphqlOperationContract::new(
+            target.id.clone(),
+            target.schema_fingerprint.clone(),
+            &request.operation_name,
+            &request.document,
+            "projection-v1",
+            "disclosure-v1",
+        )
+        .expect("mutation contract");
+        let descriptor = AiToolDescriptor::new(
+            "records.change",
+            "Change one reviewed record",
+            AiToolOperationKind::Mutation,
+            &request.document,
+            descriptor.argument_schema,
+        )
+        .expect("mutation descriptor")
+        .with_result_projection("projection-v1")
+        .with_graphql_contract(request.contract.clone());
+        let adapter = Arc::new(
+            AiRemoteAuthenticatedGraphqlAdapter::new(
+                issuer.clone(),
+                transport.clone(),
+                clock.clone(),
+                AiRemoteGraphqlExecutionLimits::new(Duration::seconds(30), Duration::seconds(30))
+                    .expect("limits"),
+            )
+            .with_operation_policy(AiRemoteGraphqlOperationPolicy::RegisteredQueriesAndMutations),
+        );
+        let mut targets = crate::GraphqlExecutionTargetRegistry::new();
+        targets.register(target).expect("target");
+        let policy = Arc::new(TighteningPolicy(AtomicBool::new(true)));
+        let bridge = crate::AuthenticatedToolBridge::new(
+            Arc::new(Resolver {
+                principal: principal.clone(),
+                now: clock.now(),
+            }),
+            policy.clone(),
+            adapter.clone(),
+            adapter,
+            targets,
+        );
+        let (_, decision) = bridge
+            .preauthorize(&principal.reference(), &descriptor, &request)
+            .await
+            .expect("preauthorization");
+        assert_eq!(
+            decision.approval_requirement(),
+            crate::AiApprovalRule::OneShot
+        );
+        assert!(matches!(
+            bridge
+                .execute(&principal.reference(), &descriptor, request.clone())
+                .await,
+            Err(ToolExecutionError::Authorization)
+        ));
+        assert_eq!(issuer.calls.load(Ordering::SeqCst), 0);
+        bridge
+            .execute_bound(
+                &principal.reference(),
+                &descriptor,
+                request.clone(),
+                "policy-v1",
+                "state-v1",
+                Some(crate::AiApprovalRule::OneShot),
+            )
+            .await
+            .expect("fresh exact approved decision");
+        policy.0.store(false, Ordering::SeqCst);
+        assert!(matches!(
+            bridge
+                .execute_bound(
+                    &principal.reference(),
+                    &descriptor,
+                    request.clone(),
+                    "policy-v1",
+                    "state-v1",
+                    Some(crate::AiApprovalRule::OneShot)
+                )
+                .await,
+            Err(ToolExecutionError::Authorization)
+        ));
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+        bridge
+            .execute(&principal.reference(), &descriptor, request)
+            .await
+            .expect("ordinary allowed decision");
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retained_registration_cannot_authorize_a_different_consistent_contract() {
+        let (principal, target, descriptor, request, issuer, transport, clock) = fixture();
+        let resolved = ResolvedPrincipal::new(principal.reference(), principal, clock.now())
+            .expect("principal");
+        let adapter = AiRemoteAuthenticatedGraphqlAdapter::new(
+            issuer.clone(),
+            transport.clone(),
+            clock,
+            AiRemoteGraphqlExecutionLimits::new(Duration::seconds(30), Duration::seconds(30))
+                .expect("limits"),
+        );
+        let binding = static_binding(&descriptor, &request);
+        let mut changed = request.clone();
+        changed.document = "query ReadOtherRecord { otherRecord { recordId } }".to_owned();
+        changed.operation_name = "ReadOtherRecord".to_owned();
+        changed.contract = GraphqlOperationContract::new(
+            target.id.clone(),
+            target.schema_fingerprint.clone(),
+            &changed.operation_name,
+            &changed.document,
+            "projection-v1",
+            "disclosure-v1",
+        )
+        .expect("internally consistent alternate contract");
+        assert!(matches!(
+            adapter
+                .build_registered(&resolved, &target, &binding, &changed)
+                .await,
+            Err(ToolExecutionError::StaleContract)
+        ));
+        assert_eq!(issuer.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

@@ -134,8 +134,20 @@ the compiled test-backed recipe and the missing reusable bootstrap API.
 - Watermark-bounded, contiguous durable session and owner-inbox replay whose
   `HasMore` contract remains correct at the configured ORM page maximum.
 - Default-deny application tools with server-authored documents and static
-  disclosure schemas; consequential work is exact-preview and one-shot
-  approval bound.
+  disclosure schemas. Exact static mutations can use current host-authorized
+  automatic execution; policy can tighten one call to an exact-preview,
+  one-shot approval without changing its registered contract.
+- Explicit classified native turns can interleave reads and automatic
+  mutations. An approval-required call receives a durable no-effect control
+  receipt; later mutations pause until the provider turn settles and the exact
+  approval is finalized. Approved resumption executes only that pending call
+  and sends a separately authorized framework outcome to the retained provider.
+- Exact resource approval authorization through
+  `AiApprovalAccessPolicy::can_access_bound_approval`. Coarse access precedes
+  decryption; verified `AiApprovalAccessEvidence` lets the host enforce current
+  session ownership and resource authority for requests, reads, decisions,
+  revocations and consumption. Preview details have a 2 MiB serialized JSON
+  ceiling. Approval never replaces current resolver authorization.
 - Backend-neutral automatic query capabilities compiled from the finished SDL
   and canonical semantic catalogue into closed typed plans. Nested
   relationships and opt-in aggregate roots remain explicitly bounded, and
@@ -189,11 +201,16 @@ or paginate the request without receiving response content or mistaking a
 size limit for resolver validation failure.
 
 Private remote execution carries a crate-authored
-`AiRemoteGraphqlCapabilityBinding` to the deployment issuer. Static reads bind
-their exact registered descriptor; generated reads additionally bind the
+`AiRemoteGraphqlCapabilityBinding` to the deployment issuer. Static tools bind
+their exact registered descriptor and operation contract; generated reads additionally bind the
 active target, finished schema, semantic catalogue/root and offered capability
 fingerprints. Issuers can therefore authorize an exact generated query without
-interpreting its dynamic operation name. See
+interpreting its dynamic operation name. Remote mutation execution requires
+the explicit `RegisteredQueriesAndMutations` adapter policy; query-only is the
+default. Runtime-authored `AiToolExecutionProvenance` lets a host bind delegation
+to the durable call and, after approval, its exact consumed approval. The
+`issue_for_request` hook receives the already-validated request and actual
+variables for host-specific argument binding. See
 [private remote GraphQL execution](docs/remote-graphql-execution.md).
 
 Mutation and subscription execution do not use the query path. The

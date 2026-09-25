@@ -29,14 +29,14 @@ use crate::orm_runs::{
 };
 use crate::persistence::*;
 use crate::{
-    AiApprovalAccessPolicy, AiApprovalAction, AiApprovalBinding, AiApprovalConnection,
-    AiApprovalDecision, AiApprovalEdge, AiApprovalGrant, AiApprovalId, AiApprovalService,
-    AiApprovalState, AiApprovalView, AiCanonicalActionPreview, AiContentProtectionPolicy,
-    AiContentProtectionPolicyResolver, AiContentProtector, AiError, AiRunId, AiRunLease, AiScope,
-    AiSessionId, AiSessionWakeup, AiToolCatalog, AiToolId, AiToolOperationDomain,
-    AiToolOperationKind, AiToolRisk, ConsumedAiApproval, ContentProtectionContext,
-    DecideAiApprovalInput, OrmAiRunService, ProtectedContentEnvelope, RevokeAiApprovalInput,
-    ToolMaturity,
+    AiApprovalAccessEvidence, AiApprovalAccessPolicy, AiApprovalAction, AiApprovalBinding,
+    AiApprovalConnection, AiApprovalDecision, AiApprovalEdge, AiApprovalGrant, AiApprovalId,
+    AiApprovalService, AiApprovalState, AiApprovalView, AiCanonicalActionPreview,
+    AiContentProtectionPolicy, AiContentProtectionPolicyResolver, AiContentProtector, AiError,
+    AiRunId, AiRunLease, AiScope, AiSessionId, AiSessionWakeup, AiToolCatalog, AiToolId,
+    AiToolOperationDomain, AiToolOperationKind, AiToolRisk, ConsumedAiApproval,
+    ContentProtectionContext, DecideAiApprovalInput, OrmAiRunService, ProtectedContentEnvelope,
+    RevokeAiApprovalInput, ToolMaturity,
 };
 
 /// Deployment-owned approval freshness, lifetime, and preview bounds.
@@ -427,6 +427,7 @@ impl OrmAiApprovalService {
             expires_at,
             recent_mfa_required,
             None,
+            None,
         )
         .await
     }
@@ -450,6 +451,32 @@ impl OrmAiApprovalService {
             expires_at,
             recent_mfa_required,
             Some(parked),
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn request_prepared_native_approval_with_id(
+        &self,
+        lease: &AiRunLease,
+        approval_id: AiApprovalId,
+        binding: AiApprovalBinding,
+        preview: AiCanonicalActionPreview,
+        expires_at: OffsetDateTime,
+        recent_mfa_required: bool,
+        parked: &crate::AiProviderSessionParkedWait,
+        candidate_id: crate::AiToolCallId,
+    ) -> Result<AiRequestedApproval, AiError> {
+        self.request_approval_inner(
+            lease,
+            approval_id,
+            binding,
+            preview,
+            expires_at,
+            recent_mfa_required,
+            Some(parked),
+            Some(candidate_id),
         )
         .await
     }
@@ -464,6 +491,7 @@ impl OrmAiApprovalService {
         expires_at: OffsetDateTime,
         recent_mfa_required: bool,
         parked: Option<&crate::AiProviderSessionParkedWait>,
+        native_candidate: Option<crate::AiToolCallId>,
     ) -> Result<AiRequestedApproval, AiError> {
         if approval_id.0.is_nil() {
             return Err(AiError::InvalidInput(
@@ -486,8 +514,21 @@ impl OrmAiApprovalService {
             ));
         }
         let resolved = self.resolve_current(lease.principal_reference()).await?;
-        self.require_registered_binding(lease, &binding, "executing")
-            .await?;
+        if native_candidate.is_some_and(|id| id != binding.tool_call_id)
+            || (native_candidate.is_some() && parked.is_none())
+        {
+            return Err(AiError::Conflict);
+        }
+        self.require_registered_binding(
+            lease,
+            &binding,
+            if native_candidate.is_some() {
+                "approval_prepared"
+            } else {
+                "executing"
+            },
+        )
+        .await?;
         if !self
             .access_policy
             .can_access_approval(
@@ -495,6 +536,20 @@ impl OrmAiApprovalService {
                 &binding.scope,
                 binding.session_id,
                 AiApprovalAction::Request,
+            )
+            .await
+        {
+            return Err(AiError::Forbidden);
+        }
+        let evidence = AiApprovalAccessEvidence::from_binding(approval_id, &binding, &preview);
+        if !self
+            .access_policy
+            .can_access_bound_approval(
+                resolved.principal(),
+                &binding.scope,
+                binding.session_id,
+                AiApprovalAction::Request,
+                &evidence,
             )
             .await
         {
@@ -559,6 +614,7 @@ impl OrmAiApprovalService {
                     &binding.scope,
                     parked,
                     &protection,
+                    native_candidate.is_some(),
                 )
                 .await?,
             ),
@@ -597,10 +653,17 @@ impl OrmAiApprovalService {
             expected_tenant_id: binding.scope.tenant_id,
             parked_provider_wait,
         };
-        let lease = self.run_service.request_approval(lease, prepared).await?;
+        let lease = if let Some(candidate_id) = native_candidate {
+            self.run_service
+                .request_prepared_native_approval(lease, prepared, candidate_id)
+                .await?
+        } else {
+            self.run_service.request_approval(lease, prepared).await?
+        };
         Ok(AiRequestedApproval { approval_id, lease })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn prepare_parked_provider_wait(
         &self,
         lease: &AiRunLease,
@@ -609,6 +672,7 @@ impl OrmAiApprovalService {
         scope: &AiScope,
         parked: &crate::AiProviderSessionParkedWait,
         protection: &AiContentProtectionPolicy,
+        native: bool,
     ) -> Result<PreparedApprovalProviderWait, AiError> {
         if parked.wait() != crate::AiProviderSessionWaitIdentity::approval(approval_id)
             || parked.source_run_id != lease.run_id()
@@ -631,7 +695,12 @@ impl OrmAiApprovalService {
         if source.run_id != lease.run_id().0
             || source.attempt_id != lease.attempt_id()
             || source.lease_generation != lease.lease_generation()
-            || source.checkpoint_kind != "provider_turn_persisted"
+            || source.checkpoint_kind
+                != if native {
+                    "native_approval_provider_turn_persisted"
+                } else {
+                    "provider_turn_persisted"
+                }
             || source.checkpoint_hash != parked.source_checkpoint_fingerprint
             || reservation.run_id != lease.run_id().0
             || reservation.attempt_id != lease.attempt_id()
@@ -794,6 +863,20 @@ impl OrmAiApprovalService {
         {
             return Err(AiError::Forbidden);
         }
+        let evidence = AiApprovalAccessEvidence::from_binding(approval_id, binding, preview);
+        if !self
+            .access_policy
+            .can_access_bound_approval(
+                resolved.principal(),
+                &binding.scope,
+                binding.session_id,
+                AiApprovalAction::Consume,
+                &evidence,
+            )
+            .await
+        {
+            return Err(AiError::Forbidden);
+        }
         let event_id = Uuid::new_v4();
         let protected_event = self
             .protect_value(
@@ -918,8 +1001,9 @@ impl OrmAiApprovalService {
                 || descriptor.graphql_contract.as_ref() != Some(&binding.operation)
                 || descriptor.operation_kind != AiToolOperationKind::Mutation
                 || descriptor.operation_domain != AiToolOperationDomain::Application
-                || descriptor.maturity != ToolMaturity::SupervisedWrite
-                || descriptor.approval != crate::AiApprovalRule::OneShot
+                || ((descriptor.maturity != ToolMaturity::SupervisedWrite
+                    || descriptor.approval != crate::AiApprovalRule::OneShot)
+                    && !crate::runtime::is_automatic_application_mutation(descriptor))
                 || matches!(
                     descriptor.risk,
                     AiToolRisk::ReadOnly | AiToolRisk::Proposal | AiToolRisk::Secret
@@ -1009,12 +1093,113 @@ impl OrmAiApprovalService {
             .map_err(map_protection)
     }
 
+    async fn retained_access_evidence(
+        &self,
+        record: &AiApprovalRecord,
+        scope: &AiScope,
+        policy: &AiContentProtectionPolicy,
+    ) -> Result<AiApprovalAccessEvidence, AiError> {
+        let preview: AiCanonicalActionPreview = serde_json::from_value(
+            self.open_value(
+                policy,
+                content_context(
+                    "graphql_orm_ai_approvals",
+                    record.id,
+                    "protected_action_preview",
+                    scope,
+                ),
+                record
+                    .protected_action_preview
+                    .as_ref()
+                    .ok_or(AiError::Forbidden)?,
+            )
+            .await?,
+        )
+        .map_err(|_| AiError::Forbidden)?;
+        let resources: Vec<crate::AiApprovalResourceBinding> = serde_json::from_value(
+            self.open_value(
+                policy,
+                content_context(
+                    "graphql_orm_ai_approvals",
+                    record.id,
+                    "protected_resource_bindings",
+                    scope,
+                ),
+                record
+                    .protected_resource_bindings
+                    .as_ref()
+                    .ok_or(AiError::Forbidden)?,
+            )
+            .await?,
+        )
+        .map_err(|_| AiError::Forbidden)?;
+        crate::approvals::validate_preview_resources(
+            &preview,
+            &resources,
+            &record.action_preview_hash,
+        )
+        .map_err(|_| AiError::Forbidden)?;
+        let identities = [
+            &record.binding_hash,
+            &record.tool_fingerprint,
+            &record.argument_hash,
+            &record.principal_reference_fingerprint,
+            &record.execution_target_id,
+            &record.target_schema_fingerprint,
+            &record.operation_name,
+            &record.operation_document_hash,
+            &record.result_projection_fingerprint,
+            &record.disclosure_schema_fingerprint,
+            &record.policy_version,
+            &record.authorization_state_digest,
+        ];
+        if record.id.is_nil()
+            || record.tool_call_id.is_nil()
+            || identities.iter().any(|value| !valid_safe_reference(value))
+        {
+            return Err(AiError::Forbidden);
+        }
+        let call = AiToolCallRecord::find_by_id(&self.database, &record.tool_call_id)
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::Forbidden)?;
+        let run = AiRunRecord::find_by_id(&self.database, &call.run_id)
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::Forbidden)?;
+        if run.session_id != record.session_id
+            || call.approval_id != Some(record.id)
+            || call.tool_fingerprint != record.tool_fingerprint
+            || call.argument_hash != record.argument_hash
+        {
+            return Err(AiError::Forbidden);
+        }
+        Ok(AiApprovalAccessEvidence {
+            approval_id: AiApprovalId(record.id),
+            tool_call_id: crate::AiToolCallId(record.tool_call_id),
+            binding_hash: record.binding_hash.clone(),
+            tool_fingerprint: record.tool_fingerprint.clone(),
+            argument_hash: record.argument_hash.clone(),
+            principal_reference_fingerprint: record.principal_reference_fingerprint.clone(),
+            execution_target_id: record.execution_target_id.clone(),
+            target_schema_fingerprint: record.target_schema_fingerprint.clone(),
+            operation_name: record.operation_name.clone(),
+            operation_document_hash: record.operation_document_hash.clone(),
+            result_projection_fingerprint: record.result_projection_fingerprint.clone(),
+            disclosure_schema_fingerprint: record.disclosure_schema_fingerprint.clone(),
+            policy_version: record.policy_version.clone(),
+            authorization_state_digest: record.authorization_state_digest.clone(),
+            resources,
+            preview,
+        })
+    }
+
     async fn visible_context(
         &self,
         principal: &AuthPrincipal,
         approval: &AiApprovalRecord,
         action: AiApprovalAction,
-    ) -> Result<(AiScope, AiContentProtectionPolicy), AiError> {
+    ) -> Result<(AiScope, AiContentProtectionPolicy, AiApprovalAccessEvidence), AiError> {
         let session = AiSessionRecord::find_by_id(&self.database, &approval.session_id)
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
@@ -1031,7 +1216,23 @@ impl OrmAiApprovalService {
             return Err(AiError::NotFound);
         }
         let policy = self.protection_policy(principal, &scope).await?;
-        Ok((scope, policy))
+        let evidence = self
+            .retained_access_evidence(approval, &scope, &policy)
+            .await?;
+        if !self
+            .access_policy
+            .can_access_bound_approval(
+                principal,
+                &scope,
+                AiSessionId(session.id),
+                action,
+                &evidence,
+            )
+            .await
+        {
+            return Err(AiError::NotFound);
+        }
+        Ok((scope, policy, evidence))
     }
 
     async fn view(
@@ -1039,24 +1240,11 @@ impl OrmAiApprovalService {
         principal: &AuthPrincipal,
         record: &AiApprovalRecord,
     ) -> Result<AiApprovalView, AiError> {
-        let (scope, policy) = self
+        let (_, _, evidence) = self
             .visible_context(principal, record, AiApprovalAction::Read)
             .await?;
-        let preview = self
-            .open_value(
-                &policy,
-                content_context(
-                    "graphql_orm_ai_approvals",
-                    record.id,
-                    "protected_action_preview",
-                    &scope,
-                ),
-                record
-                    .protected_action_preview
-                    .as_ref()
-                    .ok_or(AiError::PersistenceFailed)?,
-            )
-            .await?;
+        let preview =
+            serde_json::to_value(evidence.preview()).map_err(|_| AiError::PersistenceFailed)?;
         let state = if matches!(
             record.state.as_str(),
             "pending" | "approved" | "resume_claimed"
@@ -1101,7 +1289,7 @@ impl OrmAiApprovalService {
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .ok_or(AiError::NotFound)?;
-        let (scope, policy) = self.visible_context(&principal, &current, action).await?;
+        let (scope, policy, _) = self.visible_context(&principal, &current, action).await?;
         if current.recent_mfa_required {
             self.require_recent_mfa(&principal)?;
         }
@@ -1261,10 +1449,14 @@ impl AiApprovalService for OrmAiApprovalService {
         .map_err(map_orm)?;
         let mut edges = Vec::with_capacity(connection.edges.len());
         for edge in connection.edges {
-            edges.push(AiApprovalEdge {
-                node: self.view(&principal, &edge.node).await?,
-                cursor: edge.cursor,
-            });
+            match self.view(&principal, &edge.node).await {
+                Ok(node) => edges.push(AiApprovalEdge {
+                    node,
+                    cursor: edge.cursor,
+                }),
+                Err(AiError::NotFound | AiError::Forbidden) => continue,
+                Err(error) => return Err(error),
+            }
         }
         let mut page_info = connection.page_info;
         page_info.total_count = None;
@@ -1670,6 +1862,13 @@ impl OrmAiApprovalWaitReconciliationService {
                         })
                         .collect::<Vec<_>>();
                     let call = (waiting_calls.len() == 1).then(|| waiting_calls[0].clone());
+                    let native_candidate = match call.as_ref() {
+                        Some(call) => tx
+                            .find_by_id::<AiNativeApprovalCandidateRecord>(&call.id)
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                        None => None,
+                    };
                     let step = match call.as_ref() {
                         Some(call) => tx
                             .find_by_id::<AiRunStepRecord>(&call.id)
@@ -1715,10 +1914,21 @@ impl OrmAiApprovalWaitReconciliationService {
                                 .fetch_all()
                                 .await
                                 .map_err(OrmPublicError::from)?;
+                            let bounded_sources = candidates.len() < 4_097;
                             let source = candidates
                                 .into_iter()
                                 .filter(|candidate| {
-                                    candidate.checkpoint_kind == "provider_turn_persisted"
+                                    bounded_sources
+                                        && match native_candidate.as_ref() {
+                                            Some(native) => candidate.checkpoint_kind
+                                                == crate::orm_runs::native_checkpoints::SOURCE_KIND
+                                                && native.settled_checkpoint_id
+                                                    == Some(candidate.id),
+                                            None => {
+                                                candidate.checkpoint_kind
+                                                    == "provider_turn_persisted"
+                                            }
+                                        }
                                         && candidate.attempt_id == latest.attempt_id
                                         && candidate.lease_generation == latest.lease_generation
                                         && candidate.provider_response_id
@@ -1756,6 +1966,37 @@ impl OrmAiApprovalWaitReconciliationService {
                             .map_err(OrmPublicError::from)?,
                         None => None,
                     };
+                    let native_linkage_valid =
+                        match (&native_candidate, &checkpoint, &reservation, &approval) {
+                            (
+                                Some(candidate),
+                                Some(checkpoint),
+                                Some(reservation),
+                                Some(approval),
+                            ) => {
+                                match crate::orm_runs::native_checkpoints::waiting(
+                                    tx,
+                                    candidate,
+                                    checkpoint,
+                                    reservation,
+                                    approval,
+                                )
+                                .await
+                                {
+                                    Ok(()) => true,
+                                    Err(error)
+                                        if matches!(
+                                            error.code,
+                                            OrmErrorCode::Conflict | OrmErrorCode::NotFound
+                                        ) =>
+                                    {
+                                        false
+                                    }
+                                    Err(error) => return Err(error),
+                                }
+                            }
+                            _ => false,
+                        };
                     Ok(ApprovalWaitSnapshot {
                         run,
                         session,
@@ -1767,6 +2008,8 @@ impl OrmAiApprovalWaitReconciliationService {
                         parked_checkpoint,
                         attempt_outcome,
                         reservation,
+                        native_candidate,
+                        native_linkage_valid,
                     })
                 })
             })
@@ -1841,6 +2084,8 @@ struct ApprovalWaitSnapshot {
     parked_checkpoint: Option<AiRunCheckpointRecord>,
     attempt_outcome: Option<AiRunAttemptOutcomeRecord>,
     reservation: Option<AiBudgetReservationRecord>,
+    native_candidate: Option<AiNativeApprovalCandidateRecord>,
+    native_linkage_valid: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1976,6 +2221,15 @@ fn approval_wait_linkage_is_valid(
                 && snapshot.attempt_outcome.is_none()
         }
     };
+    let native_source =
+        checkpoint.checkpoint_kind == crate::orm_runs::native_checkpoints::SOURCE_KIND;
+    if native_source {
+        if !snapshot.native_linkage_valid || parked_checkpoint.is_none() {
+            return false;
+        }
+    } else if snapshot.native_candidate.is_some() {
+        return false;
+    }
     let relevant_calls = snapshot
         .calls
         .iter()
@@ -1992,7 +2246,7 @@ fn approval_wait_linkage_is_valid(
         && checkpoint.run_id == snapshot.run.id
         && checkpoint.attempt_id == attempt_id
         && checkpoint.lease_generation == snapshot.run.lease_generation
-        && checkpoint.checkpoint_kind == "provider_turn_persisted"
+        && (native_source || checkpoint.checkpoint_kind == "provider_turn_persisted")
         && checkpoint.assistant_message_id.is_none()
         && expected_hash.is_ok_and(|expected_hash| checkpoint.checkpoint_hash == expected_hash)
         && reservation.id == budget_reservation_id
@@ -2008,15 +2262,14 @@ fn approval_wait_linkage_is_valid(
         && reservation.state == "committed"
         && reservation.actual_runs == Some(1)
         && reservation.reconciled_at.is_some()
-        && relevant_calls.len() == 1
-        && relevant_calls[0].id == call.id
+        && (native_source || (relevant_calls.len() == 1 && relevant_calls[0].id == call.id))
         && call.run_id == snapshot.run.id
         && call.lease_generation == snapshot.run.lease_generation
         && call.provider_kind.as_deref() == Some(reservation.provider_kind.as_str())
         && call.provider_model.as_deref() == Some(reservation.provider_model.as_str())
         && call.provider_response_id.as_deref() == Some(provider_response_id)
         && call.budget_reservation_id == Some(budget_reservation_id)
-        && call.tool_call_index == 0
+        && (native_source || call.tool_call_index == 0)
         && call.state == "waiting_approval"
         && call.completed_at.is_none()
         && call.protected_result.is_none()
@@ -2261,6 +2514,242 @@ mod tests {
         ) -> bool {
             true
         }
+    }
+
+    struct ExactResourceAccess {
+        denied_action: std::sync::Mutex<Option<AiApprovalAction>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AiApprovalAccessPolicy for ExactResourceAccess {
+        async fn can_access_approval(
+            &self,
+            _: &AuthPrincipal,
+            _: &AiScope,
+            _: AiSessionId,
+            _: AiApprovalAction,
+        ) -> bool {
+            true
+        }
+        async fn can_access_bound_approval(
+            &self,
+            _: &AuthPrincipal,
+            _: &AiScope,
+            _: AiSessionId,
+            action: AiApprovalAction,
+            evidence: &AiApprovalAccessEvidence,
+        ) -> bool {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert!(!evidence.approval_id().0.is_nil());
+            assert!(!evidence.execution_target_id().is_empty());
+            assert!(!evidence.operation_document_hash().is_empty());
+            assert_eq!(evidence.preview().action_kind, "application.change");
+            evidence.resources().len() == 1
+                && evidence.resources()[0].resource_type == "record"
+                && evidence.resources()[0].resource_id == "resource-1"
+                && evidence.resources() == evidence.preview().targets
+                && *self.denied_action.lock().unwrap() != Some(action)
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_approval_access_denial_cannot_be_bypassed_by_coarse_scope_grant() {
+        let mut fixture = fixture().await;
+        let policy = Arc::new(ExactResourceAccess {
+            denied_action: std::sync::Mutex::new(Some(AiApprovalAction::Request)),
+            calls: Default::default(),
+        });
+        fixture.approval_service.access_policy = policy.clone();
+        let (lease, call_id) = seed_running_tool(&fixture).await;
+        let (binding, preview) = approval_binding(&fixture, &lease, call_id);
+        let expiry = fixture.now + Duration::minutes(10);
+        assert!(matches!(
+            fixture
+                .approval_service
+                .request_approval(&lease, binding.clone(), preview.clone(), expiry, false)
+                .await,
+            Err(AiError::Forbidden)
+        ));
+        assert!(
+            AiApprovalRecord::query(fixture.database.pool())
+                .limit(1)
+                .fetch_all()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        *policy.denied_action.lock().unwrap() = None;
+        let wait = fixture
+            .approval_service
+            .request_approval(&lease, binding.clone(), preview.clone(), expiry, false)
+            .await
+            .unwrap();
+        let id = wait.approval_id();
+        *policy.denied_action.lock().unwrap() = Some(AiApprovalAction::Read);
+        assert!(
+            fixture
+                .approval_service
+                .approval(&fixture.principal, id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let page = KeysetConnectionInput {
+            first: Some(10),
+            ..Default::default()
+        }
+        .validate(10, 20)
+        .unwrap();
+        assert!(
+            fixture
+                .approval_service
+                .approvals(&fixture.principal, lease.session_id(), page)
+                .await
+                .unwrap()
+                .edges
+                .is_empty()
+        );
+        *policy.denied_action.lock().unwrap() = None;
+        let view = fixture
+            .approval_service
+            .approval(&fixture.principal, id)
+            .await
+            .unwrap()
+            .unwrap();
+        *policy.denied_action.lock().unwrap() = Some(AiApprovalAction::Decide);
+        assert!(
+            fixture
+                .approval_service
+                .decide_approval(
+                    &fixture.principal,
+                    DecideAiApprovalInput {
+                        id: id.0,
+                        decision: AiApprovalDecision::Approve,
+                        expected_version: view.row_version
+                    }
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            AiApprovalRecord::find_by_id(&fixture.database, &id.0)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "pending"
+        );
+        *policy.denied_action.lock().unwrap() = None;
+        let approved = fixture
+            .approval_service
+            .decide_approval(
+                &fixture.principal,
+                DecideAiApprovalInput {
+                    id: id.0,
+                    decision: AiApprovalDecision::Approve,
+                    expected_version: view.row_version,
+                },
+            )
+            .await
+            .unwrap();
+        *policy.denied_action.lock().unwrap() = Some(AiApprovalAction::Revoke);
+        assert!(
+            fixture
+                .approval_service
+                .revoke_approval(
+                    &fixture.principal,
+                    RevokeAiApprovalInput {
+                        id: id.0,
+                        expected_version: approved.row_version
+                    }
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            AiApprovalRecord::find_by_id(&fixture.database, &id.0)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "approved"
+        );
+        let claim = fixture
+            .run_service
+            .claim_next_approved("exact-access-worker")
+            .await
+            .unwrap()
+            .unwrap();
+        *policy.denied_action.lock().unwrap() = Some(AiApprovalAction::Consume);
+        assert!(matches!(
+            fixture
+                .approval_service
+                .consume_approval(claim.lease(), id, &binding, &preview)
+                .await,
+            Err(AiError::Forbidden)
+        ));
+        assert_eq!(
+            AiApprovalRecord::find_by_id(&fixture.database, &id.0)
+                .await
+                .unwrap()
+                .unwrap()
+                .consumed_uses,
+            0
+        );
+        *policy.denied_action.lock().unwrap() = None;
+        fixture
+            .approval_service
+            .consume_approval(claim.lease(), id, &binding, &preview)
+            .await
+            .unwrap();
+        assert_eq!(
+            AiApprovalRecord::find_by_id(&fixture.database, &id.0)
+                .await
+                .unwrap()
+                .unwrap()
+                .consumed_uses,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_approval_preview_must_verify_before_exact_access_hook() {
+        let mut fixture = fixture().await;
+        let (wait, _) = request_wait(&fixture, fixture.now + Duration::minutes(10)).await;
+        let policy = Arc::new(ExactResourceAccess {
+            denied_action: std::sync::Mutex::new(None),
+            calls: Default::default(),
+        });
+        fixture.approval_service.access_policy = policy.clone();
+        let id = wait.approval_id().0;
+        fixture
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    tx.update_by_id::<AiApprovalRecord>(
+                        &id,
+                        UpdateAiApprovalRecordInput {
+                            action_preview_hash: Some("0".repeat(64)),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        assert!(
+            fixture
+                .approval_service
+                .approval(&fixture.principal, AiApprovalId(id))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(policy.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     struct Protection(AiScope);
@@ -2595,6 +3084,7 @@ mod tests {
             .append_coordinator_checkpoint(
                 &lease,
                 PreparedCoordinatorCheckpoint {
+                    native_binding: None,
                     id: checkpoint_id,
                     checkpoint_kind: "provider_turn_persisted".to_owned(),
                     provider_kind: "local_harness".to_owned(),
@@ -2614,6 +3104,7 @@ mod tests {
             .begin_tool_call(
                 &lease,
                 PreparedToolCallStart {
+                    execution_provenance: None,
                     id: tool_call_id.0,
                     provider_call_key: format!("approval-provider-call-{}", tool_call_id.0),
                     provider_call_id: format!("provider-call-{}", tool_call_id.0),
