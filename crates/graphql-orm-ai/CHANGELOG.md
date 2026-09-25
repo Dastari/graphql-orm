@@ -33,6 +33,11 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ### Fixed
 
+- Explicitly exclude Grok hosted `web_search` and `x_search` in the frozen ACP
+  profile. Hosted tools are separate from `toolConfig`; omitting native tools
+  alone did not enforce the adapter's existing no-hosted-search contract.
+  Unsupported native activity remains rejected, with no prompt or tool replay.
+
 - Return a durable, bounded v2 correction for locally rejected broker query plans.
   Unsupported relationship bounds/arguments receive exact repair guidance without
   echoing model values, private schema details or internal errors. Rejected plans

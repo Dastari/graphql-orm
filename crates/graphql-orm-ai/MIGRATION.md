@@ -21,6 +21,11 @@ use [implementation status](docs/implementation-status.md) and the central
 
 ## 0.100.2 to 0.101.0
 
+The Grok wire profile explicitly excludes hosted `web_search` and `x_search`,
+which the native runtime offers separately from `toolConfig`. This enforces the
+existing factory contract; it does not enable or account for hosted search.
+Hosts must continue to isolate native tools. No stored data migration is needed.
+
 Broker query-plan compile rejections may now emit failure-envelope version 2 with
 one additional `correction` string selected from closed runtime guidance. Consumers
 must preserve it as authorized model input; it contains no input values, schema

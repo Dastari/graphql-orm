@@ -31,6 +31,11 @@ to false until exact host isolation is verified; usage follows the existing
 estimate/actual budget contract. See the
 [local harness boundary](docs/local-harness.md).
 
+The frozen ACP profile explicitly excludes hosted `web_search` and `x_search`,
+which Grok offers separately from its client tool configuration. The adapter
+still exposes only the authorized capability broker; hosted search requires a
+separate supported usage and disclosure integration.
+
 Grok transient `retry_state` notifications remain inside the admitted prompt
 instead of aborting as protocol violations. Status admission is session-bound
 and bounded independently of successful model rounds; it sends no prompt and

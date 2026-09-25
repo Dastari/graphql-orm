@@ -132,7 +132,9 @@ impl AiGrokAcpWireProcess {
             "name":"graphql-orm-ai","description":"Fixed authorized capability broker",
             "toolConfig":{"tools":[{"id":"GrokBuild:search_tool"},{"id":"GrokBuild:use_tool"}]},
             "injectDefaultTools":false,"discoverSkills":false,"agentsMd":false,
-            "skills":[],"disallowedTools":["Agent"],"maxTurns":self.registration.maximum_model_calls(),
+            // Hosted search is outside toolConfig and must be disabled separately.
+            "skills":[],"disallowedTools":["Agent","web_search","x_search"],
+            "maxTurns":self.registration.maximum_model_calls(),
         })
     }
     fn session_params(&self) -> Value {
@@ -946,6 +948,10 @@ pub(crate) mod tests {
                 .unwrap()
                 .len(),
             2
+        );
+        assert_eq!(
+            writes[2]["params"]["_meta"]["agentProfile"]["disallowedTools"],
+            json!(["Agent", "web_search", "x_search"])
         );
         assert_eq!(writes[3]["params"]["value"], "grok-4.7");
         assert_eq!(writes[4]["params"]["value"], "low");
