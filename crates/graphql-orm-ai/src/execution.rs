@@ -168,8 +168,8 @@ pub enum AiRegisteredToolExecutionKind {
     StaticOperation,
     /// Exact generated query capability admitted by active target policy.
     GeneratedQuery,
-    /// Exact generated mutation capability. Remote delegated execution denies
-    /// this kind unless a later separately reviewed contract admits it.
+    /// Exact generated mutation capability. Remote delegated execution admits
+    /// it only when the host explicitly enables registered mutations.
     GeneratedMutation,
 }
 

@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use agql_auth::{Clock, ResolvedPrincipal};
 use async_trait::async_trait;
@@ -63,6 +64,29 @@ impl AiRemoteGraphqlExecutionLimits {
     }
 }
 
+/// Operation classes a private remote adapter may delegate.
+///
+/// This is a host configuration ceiling, not tool authorization or approval.
+/// The authenticated runtime must still admit each exact registered tool under
+/// current policy and enforce its mutation execution and approval fences.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AiRemoteGraphqlOperationPolicy {
+    /// Preserve the default read-only remote execution boundary.
+    #[default]
+    QueriesOnly,
+    /// Also admit exact registered static and generated mutations.
+    /// Subscriptions and internal operations remain denied.
+    RegisteredQueriesAndMutations,
+}
+
+impl AiRemoteGraphqlOperationPolicy {
+    fn permits(self, kind: AiToolOperationKind) -> bool {
+        kind == AiToolOperationKind::Query
+            || (self == Self::RegisteredQueriesAndMutations
+                && kind == AiToolOperationKind::Mutation)
+    }
+}
+
 /// Closed origin of an exact remote GraphQL capability binding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -71,6 +95,8 @@ pub enum AiRemoteGraphqlCapabilityKind {
     StaticOperation,
     /// Exact generated query admitted through active target policy.
     GeneratedQuery,
+    /// Exact generated mutation admitted through current mutation policy.
+    GeneratedMutation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,13 +119,25 @@ enum AiRemoteGraphqlCapabilityBindingInner {
         semantic_operation_fingerprint: String,
         root_field: String,
     },
+    GeneratedMutation {
+        operation_kind: GraphqlGeneratedOperationKind,
+        capability_id: AiToolId,
+        capability_fingerprint: String,
+        compiled_tool_fingerprint: String,
+        target_id: GraphqlExecutionTargetId,
+        finished_schema_fingerprint: String,
+        semantic_fingerprint_algorithm: String,
+        semantic_catalog_fingerprint: String,
+        semantic_operation_fingerprint: String,
+        root_field: String,
+    },
 }
 
 /// Immutable crate-authored identity of the registered capability used for
 /// one remote GraphQL invocation.
 ///
 /// The remote adapter constructs this value only from the exact descriptor or
-/// generated query binding already admitted by the authenticated runtime. It
+/// generated operation binding already admitted by the authenticated runtime. It
 /// is descriptive delegation evidence, not user authority, target policy, or
 /// resolver authorization. Its private representation intentionally exposes
 /// read-only accessors but no host constructor.
@@ -108,7 +146,7 @@ enum AiRemoteGraphqlCapabilityBindingInner {
 pub struct AiRemoteGraphqlCapabilityBinding(AiRemoteGraphqlCapabilityBindingInner);
 
 impl AiRemoteGraphqlCapabilityBinding {
-    /// Returns the static or generated-query capability origin.
+    /// Returns the static or generated capability origin.
     pub const fn kind(&self) -> AiRemoteGraphqlCapabilityKind {
         match self.0 {
             AiRemoteGraphqlCapabilityBindingInner::StaticOperation { .. } => {
@@ -117,6 +155,9 @@ impl AiRemoteGraphqlCapabilityBinding {
             AiRemoteGraphqlCapabilityBindingInner::GeneratedQuery { .. } => {
                 AiRemoteGraphqlCapabilityKind::GeneratedQuery
             }
+            AiRemoteGraphqlCapabilityBindingInner::GeneratedMutation { .. } => {
+                AiRemoteGraphqlCapabilityKind::GeneratedMutation
+            }
         }
     }
 
@@ -124,7 +165,8 @@ impl AiRemoteGraphqlCapabilityBinding {
     pub const fn capability_id(&self) -> &AiToolId {
         match &self.0 {
             AiRemoteGraphqlCapabilityBindingInner::StaticOperation { tool_id, .. } => tool_id,
-            AiRemoteGraphqlCapabilityBindingInner::GeneratedQuery { capability_id, .. } => {
+            AiRemoteGraphqlCapabilityBindingInner::GeneratedQuery { capability_id, .. }
+            | AiRemoteGraphqlCapabilityBindingInner::GeneratedMutation { capability_id, .. } => {
                 capability_id
             }
         }
@@ -138,6 +180,10 @@ impl AiRemoteGraphqlCapabilityBinding {
                 tool_fingerprint, ..
             } => tool_fingerprint,
             AiRemoteGraphqlCapabilityBindingInner::GeneratedQuery {
+                capability_fingerprint,
+                ..
+            }
+            | AiRemoteGraphqlCapabilityBindingInner::GeneratedMutation {
                 capability_fingerprint,
                 ..
             } => capability_fingerprint,
@@ -154,6 +200,10 @@ impl AiRemoteGraphqlCapabilityBinding {
             AiRemoteGraphqlCapabilityBindingInner::GeneratedQuery {
                 compiled_tool_fingerprint,
                 ..
+            }
+            | AiRemoteGraphqlCapabilityBindingInner::GeneratedMutation {
+                compiled_tool_fingerprint,
+                ..
             } => compiled_tool_fingerprint,
         }
     }
@@ -164,7 +214,8 @@ impl AiRemoteGraphqlCapabilityBinding {
             AiRemoteGraphqlCapabilityBindingInner::StaticOperation { operation_kind, .. } => {
                 operation_kind
             }
-            AiRemoteGraphqlCapabilityBindingInner::GeneratedQuery { operation_kind, .. } => {
+            AiRemoteGraphqlCapabilityBindingInner::GeneratedQuery { operation_kind, .. }
+            | AiRemoteGraphqlCapabilityBindingInner::GeneratedMutation { operation_kind, .. } => {
                 match operation_kind {
                     GraphqlGeneratedOperationKind::Query => AiToolOperationKind::Query,
                     GraphqlGeneratedOperationKind::Mutation => AiToolOperationKind::Mutation,
@@ -177,21 +228,26 @@ impl AiRemoteGraphqlCapabilityBinding {
         }
     }
 
-    /// Returns the generated query's logical target, or `None` for a static
+    /// Returns the generated operation's logical target, or `None` for a static
     /// descriptor.
     pub const fn generated_target_id(&self) -> Option<&GraphqlExecutionTargetId> {
         match &self.0 {
-            AiRemoteGraphqlCapabilityBindingInner::GeneratedQuery { target_id, .. } => {
+            AiRemoteGraphqlCapabilityBindingInner::GeneratedQuery { target_id, .. }
+            | AiRemoteGraphqlCapabilityBindingInner::GeneratedMutation { target_id, .. } => {
                 Some(target_id)
             }
             AiRemoteGraphqlCapabilityBindingInner::StaticOperation { .. } => None,
         }
     }
 
-    /// Returns the generated query's active finished-schema fingerprint.
+    /// Returns the generated operation's active finished-schema fingerprint.
     pub fn generated_finished_schema_fingerprint(&self) -> Option<&str> {
         match &self.0 {
             AiRemoteGraphqlCapabilityBindingInner::GeneratedQuery {
+                finished_schema_fingerprint,
+                ..
+            }
+            | AiRemoteGraphqlCapabilityBindingInner::GeneratedMutation {
                 finished_schema_fingerprint,
                 ..
             } => Some(finished_schema_fingerprint),
@@ -199,10 +255,14 @@ impl AiRemoteGraphqlCapabilityBinding {
         }
     }
 
-    /// Returns the generated query's semantic fingerprint algorithm.
+    /// Returns the generated operation's semantic fingerprint algorithm.
     pub fn generated_semantic_fingerprint_algorithm(&self) -> Option<&str> {
         match &self.0 {
             AiRemoteGraphqlCapabilityBindingInner::GeneratedQuery {
+                semantic_fingerprint_algorithm,
+                ..
+            }
+            | AiRemoteGraphqlCapabilityBindingInner::GeneratedMutation {
                 semantic_fingerprint_algorithm,
                 ..
             } => Some(semantic_fingerprint_algorithm),
@@ -210,10 +270,14 @@ impl AiRemoteGraphqlCapabilityBinding {
         }
     }
 
-    /// Returns the generated query's exact semantic-catalogue fingerprint.
+    /// Returns the generated operation's exact semantic-catalogue fingerprint.
     pub fn generated_semantic_catalog_fingerprint(&self) -> Option<&str> {
         match &self.0 {
             AiRemoteGraphqlCapabilityBindingInner::GeneratedQuery {
+                semantic_catalog_fingerprint,
+                ..
+            }
+            | AiRemoteGraphqlCapabilityBindingInner::GeneratedMutation {
                 semantic_catalog_fingerprint,
                 ..
             } => Some(semantic_catalog_fingerprint),
@@ -221,10 +285,14 @@ impl AiRemoteGraphqlCapabilityBinding {
         }
     }
 
-    /// Returns the generated query's exact semantic-operation fingerprint.
+    /// Returns the generated operation's exact semantic-operation fingerprint.
     pub fn generated_semantic_operation_fingerprint(&self) -> Option<&str> {
         match &self.0 {
             AiRemoteGraphqlCapabilityBindingInner::GeneratedQuery {
+                semantic_operation_fingerprint,
+                ..
+            }
+            | AiRemoteGraphqlCapabilityBindingInner::GeneratedMutation {
                 semantic_operation_fingerprint,
                 ..
             } => Some(semantic_operation_fingerprint),
@@ -232,10 +300,11 @@ impl AiRemoteGraphqlCapabilityBinding {
         }
     }
 
-    /// Returns the generated query's exact public root field.
+    /// Returns the generated operation's exact public root field.
     pub fn generated_root_field(&self) -> Option<&str> {
         match &self.0 {
-            AiRemoteGraphqlCapabilityBindingInner::GeneratedQuery { root_field, .. } => {
+            AiRemoteGraphqlCapabilityBindingInner::GeneratedQuery { root_field, .. }
+            | AiRemoteGraphqlCapabilityBindingInner::GeneratedMutation { root_field, .. } => {
                 Some(root_field)
             }
             AiRemoteGraphqlCapabilityBindingInner::StaticOperation { .. } => None,
@@ -246,15 +315,19 @@ impl AiRemoteGraphqlCapabilityBinding {
         registered: &AiRegisteredToolExecutionBinding,
         target: &GraphqlExecutionTarget,
         request: &ToolGraphqlRequest,
+        policy: AiRemoteGraphqlOperationPolicy,
     ) -> Result<Self, ToolExecutionError> {
-        if !valid_sha256(registered.tool_fingerprint()) {
+        if !valid_sha256(registered.tool_fingerprint())
+            || !policy.permits(registered.operation_kind())
+            || request.contract.target_id != target.id
+            || request.contract.schema_fingerprint != target.schema_fingerprint
+            || !request_matches_operation(request, registered.operation_kind())
+        {
             return Err(ToolExecutionError::StaleContract);
         }
         match registered.kind() {
             AiRegisteredToolExecutionKind::StaticOperation => {
-                if registered.generated_capability_fingerprint().is_some()
-                    || registered.operation_kind() != AiToolOperationKind::Query
-                {
+                if registered.generated_capability_fingerprint().is_some() {
                     return Err(ToolExecutionError::StaleContract);
                 }
                 Ok(Self(
@@ -265,7 +338,15 @@ impl AiRemoteGraphqlCapabilityBinding {
                     },
                 ))
             }
-            AiRegisteredToolExecutionKind::GeneratedQuery => {
+            AiRegisteredToolExecutionKind::GeneratedQuery
+            | AiRegisteredToolExecutionKind::GeneratedMutation => {
+                let mutation =
+                    registered.kind() == AiRegisteredToolExecutionKind::GeneratedMutation;
+                let operation_kind = if mutation {
+                    GraphqlGeneratedOperationKind::Mutation
+                } else {
+                    GraphqlGeneratedOperationKind::Query
+                };
                 let capability_fingerprint = registered
                     .generated_capability_fingerprint()
                     .filter(|value| valid_sha256(value))
@@ -274,16 +355,21 @@ impl AiRemoteGraphqlCapabilityBinding {
                     .contract
                     .semantic_operation()
                     .ok_or(ToolExecutionError::StaleContract)?;
-                if registered.operation_kind() != AiToolOperationKind::Query
-                    || semantic.kind() != GraphqlGeneratedOperationKind::Query
+                if registered.operation_kind()
+                    != if mutation {
+                        AiToolOperationKind::Mutation
+                    } else {
+                        AiToolOperationKind::Query
+                    }
+                    || semantic.kind() != operation_kind
                     || request.contract.target_id != target.id
                     || request.contract.schema_fingerprint != target.schema_fingerprint
                 {
                     return Err(ToolExecutionError::StaleContract);
                 }
-                Ok(Self(
-                    AiRemoteGraphqlCapabilityBindingInner::GeneratedQuery {
-                        operation_kind: GraphqlGeneratedOperationKind::Query,
+                Ok(Self(if mutation {
+                    AiRemoteGraphqlCapabilityBindingInner::GeneratedMutation {
+                        operation_kind,
                         capability_id: registered.tool_id().clone(),
                         capability_fingerprint: capability_fingerprint.to_owned(),
                         compiled_tool_fingerprint: registered.tool_fingerprint().to_owned(),
@@ -293,11 +379,21 @@ impl AiRemoteGraphqlCapabilityBinding {
                         semantic_catalog_fingerprint: semantic.catalog_fingerprint().to_owned(),
                         semantic_operation_fingerprint: semantic.operation_fingerprint().to_owned(),
                         root_field: semantic.field_name().to_owned(),
-                    },
-                ))
-            }
-            AiRegisteredToolExecutionKind::GeneratedMutation => {
-                Err(ToolExecutionError::StaleContract)
+                    }
+                } else {
+                    AiRemoteGraphqlCapabilityBindingInner::GeneratedQuery {
+                        operation_kind,
+                        capability_id: registered.tool_id().clone(),
+                        capability_fingerprint: capability_fingerprint.to_owned(),
+                        compiled_tool_fingerprint: registered.tool_fingerprint().to_owned(),
+                        target_id: target.id.clone(),
+                        finished_schema_fingerprint: target.schema_fingerprint.clone(),
+                        semantic_fingerprint_algorithm: semantic.fingerprint_algorithm().to_owned(),
+                        semantic_catalog_fingerprint: semantic.catalog_fingerprint().to_owned(),
+                        semantic_operation_fingerprint: semantic.operation_fingerprint().to_owned(),
+                        root_field: semantic.field_name().to_owned(),
+                    }
+                }))
             }
         }
     }
@@ -339,7 +435,7 @@ pub struct AiRemoteGraphqlDelegationRequest {
 }
 
 impl AiRemoteGraphqlDelegationRequest {
-    /// Exact crate-authored static or generated-query capability identity.
+    /// Exact crate-authored static or generated capability identity.
     pub const fn capability_binding(&self) -> &AiRemoteGraphqlCapabilityBinding {
         &self.capability_binding
     }
@@ -465,6 +561,7 @@ impl AiRemoteGraphqlDelegationRequest {
         registered: &AiRegisteredToolExecutionBinding,
         request: &ToolGraphqlRequest,
         expires_at: OffsetDateTime,
+        policy: AiRemoteGraphqlOperationPolicy,
     ) -> Result<Self, ToolExecutionError> {
         target.validate()?;
         if !matches!(
@@ -514,7 +611,7 @@ impl AiRemoteGraphqlDelegationRequest {
             .filter(|value| valid_reference(value))
             .ok_or(ToolExecutionError::InvalidTarget)?;
         let capability_binding =
-            AiRemoteGraphqlCapabilityBinding::from_registered(registered, target, request)?;
+            AiRemoteGraphqlCapabilityBinding::from_registered(registered, target, request, policy)?;
         Ok(Self {
             capability_binding,
             target_id: target.id.clone(),
@@ -550,9 +647,12 @@ impl AiRemoteGraphqlDelegationRequest {
         target: &GraphqlExecutionTarget,
         registered: &AiRegisteredToolExecutionBinding,
         request: &ToolGraphqlRequest,
+        policy: AiRemoteGraphqlOperationPolicy,
     ) -> Result<bool, ToolExecutionError> {
         Ok(self.capability_binding
-            == AiRemoteGraphqlCapabilityBinding::from_registered(registered, target, request)?
+            == AiRemoteGraphqlCapabilityBinding::from_registered(
+                registered, target, request, policy,
+            )?
             && self.target_id == target.id
             && self.target_class == target.class
             && target.audience.as_deref() == Some(self.audience.as_str())
@@ -686,6 +786,7 @@ struct AiRemoteGraphqlRequestContext {
     target: GraphqlExecutionTarget,
     registered: AiRegisteredToolExecutionBinding,
     authority: AiRemoteGraphqlAuthority,
+    mutation_consumed: AtomicBool,
 }
 
 /// Canonical request-context factory and executor for private remote GraphQL
@@ -703,6 +804,7 @@ pub struct AiRemoteAuthenticatedGraphqlAdapter {
     transport: Arc<dyn AiRemoteGraphqlTransport>,
     clock: Arc<dyn Clock>,
     limits: AiRemoteGraphqlExecutionLimits,
+    operation_policy: AiRemoteGraphqlOperationPolicy,
 }
 
 impl AiRemoteAuthenticatedGraphqlAdapter {
@@ -719,7 +821,22 @@ impl AiRemoteAuthenticatedGraphqlAdapter {
             transport,
             clock,
             limits,
+            operation_policy: AiRemoteGraphqlOperationPolicy::QueriesOnly,
         }
+    }
+
+    /// Configures the operation ceiling for this adapter instance.
+    ///
+    /// Enabling mutations does not grant execution or approval authority. The
+    /// issuer must independently authorize the exact operation and the runtime
+    /// must retain its durable mutation and approval fences. Changing policy
+    /// creates a new adapter identity, invalidating previously built contexts.
+    /// Mutation contexts permit at most one transport attempt, including when
+    /// cloned; transport failure or cancellation never makes them reusable.
+    pub fn with_operation_policy(mut self, policy: AiRemoteGraphqlOperationPolicy) -> Self {
+        self.operation_policy = policy;
+        self.adapter_id = Uuid::new_v4();
+        self
     }
 }
 
@@ -766,7 +883,12 @@ impl GraphqlRequestContextFactory for AiRemoteAuthenticatedGraphqlAdapter {
                 principal_expiry.min(maximum_expiry)
             });
         let delegation = AiRemoteGraphqlDelegationRequest::build(
-            principal, target, registered, request, expires_at,
+            principal,
+            target,
+            registered,
+            request,
+            expires_at,
+            self.operation_policy,
         )?;
         let authority = self.issuer.issue(principal, &delegation).await?;
         let after_issuance = self.clock.now();
@@ -781,6 +903,7 @@ impl GraphqlRequestContextFactory for AiRemoteAuthenticatedGraphqlAdapter {
             target: target.clone(),
             registered: registered.clone(),
             authority,
+            mutation_consumed: AtomicBool::new(false),
         }))
     }
 }
@@ -797,10 +920,19 @@ impl AuthenticatedGraphqlExecutor for AiRemoteAuthenticatedGraphqlAdapter {
             .ok_or(ToolExecutionError::RequestContext)?;
         if context.adapter_id != self.adapter_id
             || self.clock.now() >= context.authority.request.expires_at
-            || !context
-                .authority
-                .request
-                .matches(&context.target, &context.registered, &request)?
+            || !context.authority.request.matches(
+                &context.target,
+                &context.registered,
+                &request,
+                self.operation_policy,
+            )?
+        {
+            return Err(ToolExecutionError::Authorization);
+        }
+        // A request context is cloneable. Claim mutation transport once before
+        // awaiting it, and never reset on cancellation, failure, or uncertainty.
+        if context.registered.operation_kind() == AiToolOperationKind::Mutation
+            && context.mutation_consumed.swap(true, Ordering::AcqRel)
         {
             return Err(ToolExecutionError::Authorization);
         }
@@ -808,6 +940,28 @@ impl AuthenticatedGraphqlExecutor for AiRemoteAuthenticatedGraphqlAdapter {
             .execute(&context.target, &context.authority, request)
             .await
     }
+}
+
+// Recheck the actual transport document and selected operation at both
+// issuance and execution. A matching contract hash alone cannot bind mutable
+// request.document or request.operation_name fields.
+fn request_matches_operation(request: &ToolGraphqlRequest, kind: AiToolOperationKind) -> bool {
+    if request.contract.document_hash != stable_text_hash(&request.document)
+        || request.operation_name != request.contract.operation_name
+    {
+        return false;
+    }
+    let Ok(document) = async_graphql_parser::parse_query(&request.document) else {
+        return false;
+    };
+    let selected = document
+        .operations
+        .iter()
+        .find(|(name, _)| name.is_some_and(|name| name.as_str() == request.operation_name));
+    matches!(selected.map(|(_, operation)| operation.node.ty),
+        Some(async_graphql_parser::types::OperationType::Query) if kind == AiToolOperationKind::Query)
+        || matches!(selected.map(|(_, operation)| operation.node.ty),
+            Some(async_graphql_parser::types::OperationType::Mutation) if kind == AiToolOperationKind::Mutation)
 }
 
 fn canonical_json_hash(value: &serde_json::Value) -> Result<String, ToolExecutionError> {
@@ -1361,6 +1515,7 @@ mod tests {
             &registered,
             &request,
             clock.now() + Duration::seconds(30),
+            AiRemoteGraphqlOperationPolicy::QueriesOnly,
         )
         .expect("exact generated delegation should build");
         let binding = delegation.capability_binding();
@@ -1433,7 +1588,12 @@ mod tests {
             assert_ne!(tampered.stable_hash(), original_hash, "{field}");
             assert!(
                 !tampered
-                    .matches(&target, &registered, &request)
+                    .matches(
+                        &target,
+                        &registered,
+                        &request,
+                        AiRemoteGraphqlOperationPolicy::QueriesOnly
+                    )
                     .expect("tampered comparison should remain safe")
             );
         }
@@ -1594,6 +1754,256 @@ mod tests {
             Err(ToolExecutionError::StaleContract)
         ));
         assert_eq!(issuer.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+
+        let adapter = adapter
+            .with_operation_policy(AiRemoteGraphqlOperationPolicy::RegisteredQueriesAndMutations);
+        let context = adapter
+            .build_registered(&resolved, &target, &mutation_binding, &mutation_request)
+            .await
+            .expect("explicit mutation policy should admit exact generated mutation");
+        {
+            let bindings = issuer.bindings.lock().expect("bindings lock");
+            let binding = bindings.last().expect("issued binding");
+            assert_eq!(
+                binding.kind(),
+                AiRemoteGraphqlCapabilityKind::GeneratedMutation
+            );
+            assert_eq!(binding.operation_kind(), AiToolOperationKind::Mutation);
+            assert_eq!(binding.generated_root_field(), Some("ChangeRecord"));
+            assert_eq!(binding.capability_fingerprint(), "a".repeat(64));
+            assert_eq!(
+                serde_json::to_value(binding).expect("serialize")["kind"],
+                "generated_mutation"
+            );
+        }
+        adapter
+            .execute(context, mutation_request)
+            .await
+            .expect("exact mutation transport");
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn opted_in_static_mutations_bind_actual_document_and_selected_operation() {
+        let (principal, target, descriptor, mut request, issuer, transport, clock) = fixture();
+        request.document =
+            "mutation ChangeRecord($recordId: ID!) { changeRecord(id: $recordId) { recordId } }"
+                .to_owned();
+        request.operation_name = "ChangeRecord".to_owned();
+        request.contract = GraphqlOperationContract::new(
+            target.id.clone(),
+            target.schema_fingerprint.clone(),
+            &request.operation_name,
+            &request.document,
+            "projection-v1",
+            "disclosure-v1",
+        )
+        .expect("mutation contract");
+        let descriptor = AiToolDescriptor::new(
+            "records.change",
+            "Change one reviewed record",
+            AiToolOperationKind::Mutation,
+            &request.document,
+            descriptor.argument_schema.clone(),
+        )
+        .expect("mutation descriptor")
+        .with_result_projection("projection-v1")
+        .with_graphql_contract(request.contract.clone());
+        let binding = static_binding(&descriptor, &request);
+        let resolved = ResolvedPrincipal::new(principal.reference(), principal, clock.now())
+            .expect("principal should resolve");
+        let adapter = AiRemoteAuthenticatedGraphqlAdapter::new(
+            issuer.clone(),
+            transport.clone(),
+            clock.clone(),
+            AiRemoteGraphqlExecutionLimits::new(Duration::seconds(30), Duration::seconds(30))
+                .expect("limits"),
+        );
+        assert!(matches!(
+            adapter
+                .build_registered(&resolved, &target, &binding, &request)
+                .await,
+            Err(ToolExecutionError::StaleContract)
+        ));
+        assert_eq!(issuer.calls.load(Ordering::SeqCst), 0);
+        let adapter = adapter
+            .with_operation_policy(AiRemoteGraphqlOperationPolicy::RegisteredQueriesAndMutations);
+        for tamper in 0..7 {
+            let context = adapter
+                .build_registered(&resolved, &target, &binding, &request)
+                .await
+                .expect("mutation admitted");
+            let mut changed = request.clone();
+            match tamper {
+                0 => changed.document = "mutation ChangeRecord { deleteAllRecords }".to_owned(),
+                1 => changed.operation_name = "OtherMutation".to_owned(),
+                2 => changed.variables = json!({"recordId": "55"}),
+                3 => changed.invocation.tool_call_id = AiToolCallId::new(),
+                4 => changed.invocation.idempotency_key = Some("other-effect".to_owned()),
+                5 => changed.contract.schema_fingerprint = "other-schema".to_owned(),
+                _ => {
+                    changed.contract.target_id =
+                        GraphqlExecutionTargetId::parse("other-target").expect("target")
+                }
+            }
+            assert!(
+                adapter.execute(context, changed).await.is_err(),
+                "tamper {tamper}"
+            );
+        }
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+        for operation_kind in [
+            AiToolOperationKind::Query,
+            AiToolOperationKind::Subscription,
+        ] {
+            let mislabeled = AiToolDescriptor::new(
+                descriptor.id.as_str(),
+                descriptor.description.clone(),
+                operation_kind,
+                &request.document,
+                descriptor.argument_schema.clone(),
+            )
+            .expect("structural descriptor")
+            .with_result_projection("projection-v1")
+            .with_graphql_contract(request.contract.clone());
+            assert!(matches!(
+                adapter
+                    .build_registered(
+                        &resolved,
+                        &target,
+                        &static_binding(&mislabeled, &request),
+                        &request
+                    )
+                    .await,
+                Err(ToolExecutionError::StaleContract)
+            ));
+        }
+        let context = adapter
+            .build_registered(&resolved, &target, &binding, &request)
+            .await
+            .expect("mutation admitted");
+        let duplicate = context.clone();
+        let (first, second) = tokio::join!(
+            adapter.execute(context, request.clone()),
+            adapter.execute(duplicate, request.clone()),
+        );
+        assert!(
+            first.is_ok() ^ second.is_ok(),
+            "only one concurrent mutation may execute"
+        );
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+        {
+            let issued = issuer.bindings.lock().expect("bindings");
+            assert!(issued.iter().all(|b| b.kind()
+                == AiRemoteGraphqlCapabilityKind::StaticOperation
+                && b.operation_kind() == AiToolOperationKind::Mutation));
+        }
+
+        let context = adapter
+            .build_registered(&resolved, &target, &binding, &request)
+            .await
+            .expect("mutation admitted");
+        let read_only = adapter.with_operation_policy(AiRemoteGraphqlOperationPolicy::QueriesOnly);
+        assert!(matches!(
+            read_only.execute(context, request).await,
+            Err(ToolExecutionError::Authorization)
+        ));
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_mutation_transport_cannot_be_retried_with_cloned_context() {
+        struct FailedTransport(AtomicUsize);
+        #[async_trait]
+        impl AiRemoteGraphqlTransport for FailedTransport {
+            async fn execute(
+                &self,
+                _: &GraphqlExecutionTarget,
+                _: &AiRemoteGraphqlAuthority,
+                _: ToolGraphqlRequest,
+            ) -> Result<ToolGraphqlResponse, ToolExecutionError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(ToolExecutionError::Authorization)
+            }
+        }
+        let (principal, target, descriptor, mut request, issuer, _, clock) = fixture();
+        request.document = request.document.replacen("query ", "mutation ", 1);
+        request.contract = GraphqlOperationContract::new(
+            target.id.clone(),
+            target.schema_fingerprint.clone(),
+            &request.operation_name,
+            &request.document,
+            "projection-v1",
+            "disclosure-v1",
+        )
+        .expect("mutation contract");
+        let descriptor = AiToolDescriptor::new(
+            "records.change",
+            "Change one reviewed record",
+            AiToolOperationKind::Mutation,
+            &request.document,
+            descriptor.argument_schema,
+        )
+        .expect("mutation descriptor")
+        .with_result_projection("projection-v1")
+        .with_graphql_contract(request.contract.clone());
+        let resolved = ResolvedPrincipal::new(principal.reference(), principal, clock.now())
+            .expect("principal");
+        let transport = Arc::new(FailedTransport(AtomicUsize::new(0)));
+        let adapter = AiRemoteAuthenticatedGraphqlAdapter::new(
+            issuer,
+            transport.clone(),
+            clock,
+            AiRemoteGraphqlExecutionLimits::new(Duration::seconds(30), Duration::seconds(30))
+                .expect("limits"),
+        )
+        .with_operation_policy(AiRemoteGraphqlOperationPolicy::RegisteredQueriesAndMutations);
+        let context = adapter
+            .build_registered(
+                &resolved,
+                &target,
+                &static_binding(&descriptor, &request),
+                &request,
+            )
+            .await
+            .expect("context");
+        let retry = context.clone();
+        assert!(adapter.execute(context, request.clone()).await.is_err());
+        assert!(adapter.execute(retry, request).await.is_err());
+        assert_eq!(transport.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn query_context_cannot_transport_replaced_document_or_operation_name() {
+        let (principal, target, descriptor, request, issuer, transport, clock) = fixture();
+        let resolved = ResolvedPrincipal::new(principal.reference(), principal, clock.now())
+            .expect("principal");
+        let adapter = AiRemoteAuthenticatedGraphqlAdapter::new(
+            issuer,
+            transport.clone(),
+            clock,
+            AiRemoteGraphqlExecutionLimits::new(Duration::seconds(30), Duration::seconds(30))
+                .expect("limits"),
+        );
+        for replace_document in [false, true] {
+            let context = adapter
+                .build_registered(
+                    &resolved,
+                    &target,
+                    &static_binding(&descriptor, &request),
+                    &request,
+                )
+                .await
+                .expect("query context");
+            let mut changed = request.clone();
+            if replace_document {
+                changed.document = "mutation ReadRecord { deleteAllRecords }".to_owned();
+            } else {
+                changed.operation_name = "OtherOperation".to_owned();
+            }
+            assert!(adapter.execute(context, changed).await.is_err());
+        }
         assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
     }
 
