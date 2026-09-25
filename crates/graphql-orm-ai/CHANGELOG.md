@@ -33,6 +33,12 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ### Fixed
 
+- Retry classified retryable run-start/heartbeat database transactions within
+  the configured transaction bound. A competing SQLite writer no longer turns
+  the first transient renewal error into immediate lease loss. Expiry is checked
+  after write-lock admission on every attempt; stale/conflicted fences and
+  non-retryable failures still stop. Provider and tool effects never repeat.
+
 - Compact adjacent streamed text, visible-summary and same-call argument
   fragments into bounded retained events. A valid long response no longer
   exhausts the event-count limit solely because the provider sends tiny deltas.

@@ -335,6 +335,11 @@ enforced. Lifecycle events stay ordered and separate, and live persistence and
 authorization run before any browser disclosure. Transport fragmentation alone
 does not truncate an otherwise bounded long answer.
 
+Run start and heartbeat retry only classified transient database transactions
+within the configured transaction bound. They recheck expiry after acquiring
+the write lock and never renew a stale or expired lease. This persistence retry
+does not resend a provider prompt, execute a tool again or relax cancellation.
+
 The Codex schema projector preserves bounded nullable scalar `type` arrays in
 the crate-authored FixedBroker definitions. It does not pass through arbitrary
 JSON Schema unions: only unique combinations of supported scalar types plus
