@@ -63,6 +63,12 @@ completion only when it matches the exact successfully persisted rejection; fail
 audit, unknown tools, stale bindings and duplicate callbacks remain closed. Grok's
 bounded internal `workflows-reload` status no longer aborts a prompt.
 
+Broker query-plan compilation also returns bounded repair guidance for unsupported
+relationship bounds or arguments. These version-2 failures contain only closed
+runtime instructions, pass the ordinary disclosure audit, and execute no resolver.
+See [query-plan correction](docs/capability-discovery-and-execution.md#correcting-rejected-broker-query-plans)
+for the envelope and paging contract.
+
 Egress audit writes serialize check-and-insert through the ORM state-machine
 transaction contract. Bounded transaction retries preserve exact replay checks
 and fail closed without repeating application tools or provider requests.
