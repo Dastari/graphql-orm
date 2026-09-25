@@ -2057,6 +2057,24 @@ impl ProviderDynamicToolResponder for DynamicToolCallCounter {
         }
         self.inner.respond(call).await
     }
+
+    async fn reject_invalid_arguments(
+        &self,
+        call: crate::ProviderInvalidDynamicToolCall,
+    ) -> Result<crate::ProviderDynamicToolResult, ProviderError> {
+        self.entry
+            .dynamic_tool_calls_in_flight
+            .fetch_add(1, Ordering::SeqCst);
+        let _in_flight = DynamicToolCallInFlightGuard {
+            entry: self.entry.clone(),
+        };
+        if self.entry.interrupt_started.load(Ordering::SeqCst) {
+            self.entry
+                .dynamic_tool_call_after_interrupt
+                .store(true, Ordering::SeqCst);
+        }
+        self.inner.reject_invalid_arguments(call).await
+    }
 }
 
 enum EmptyThreadActivation {
@@ -3411,6 +3429,18 @@ pub enum AiCodexAppServerInbound {
         /// Schema-validated application-tool request.
         call: ProviderDynamicToolCall,
     },
+    /// Offered, correlated tool request with schema-invalid model arguments.
+    /// Only durable rejection is permitted; this variant cannot execute a tool.
+    InvalidDynamicToolCall {
+        /// JSON-RPC identifier for the matching safe correction response.
+        request_id: u64,
+        /// Exact provider thread reference.
+        thread_id: String,
+        /// Exact active turn reference.
+        turn_id: String,
+        /// Bounded rejected request; arguments are untrusted protected content.
+        call: crate::ProviderInvalidDynamicToolCall,
+    },
     /// Content-free lifecycle for one exact experimental dynamic-tool item.
     DynamicToolLifecycle {
         /// Exact provider turn reference.
@@ -3481,6 +3511,18 @@ impl std::fmt::Debug for AiCodexAppServerInbound {
                 call,
             } => formatter
                 .debug_struct("AiCodexAppServerInbound::DynamicToolCall")
+                .field("request_id", request_id)
+                .field("thread_id", thread_id)
+                .field("turn_id", turn_id)
+                .field("call", call)
+                .finish(),
+            Self::InvalidDynamicToolCall {
+                request_id,
+                thread_id,
+                turn_id,
+                call,
+            } => formatter
+                .debug_struct("AiCodexAppServerInbound::InvalidDynamicToolCall")
                 .field("request_id", request_id)
                 .field("thread_id", thread_id)
                 .field("turn_id", turn_id)
@@ -4479,26 +4521,36 @@ impl AiCodexAppServerProtocolActor {
             if self.started_dynamic_calls.get(call_id).map(String::as_str) != Some(tool_name) {
                 return Err(ProviderError::Rejected);
             }
-            let call = ProviderDynamicToolCall::from_definition(
-                turn_id,
-                call_id,
-                definition,
-                params
-                    .get("arguments")
-                    .cloned()
-                    .ok_or(ProviderError::Rejected)?,
-            )?;
             self.validate_active_turn(thread_id, turn_id)?;
-            self.pending_dynamic_requests.insert(
-                request_id,
-                (call.call_id().to_owned(), call.tool_id().to_owned()),
-            );
-            return Ok(AiCodexAppServerInbound::DynamicToolCall {
-                request_id,
-                thread_id: thread_id.to_owned(),
-                turn_id: turn_id.to_owned(),
-                call,
-            });
+            let arguments = params
+                .get("arguments")
+                .cloned()
+                .ok_or(ProviderError::Rejected)?;
+            let validator = jsonschema::validator_for(&definition.parameters)
+                .map_err(|_| ProviderError::InvalidRequest)?;
+            let invalid_arguments = !arguments.is_object() || !validator.is_valid(&arguments);
+            let inbound = if invalid_arguments {
+                AiCodexAppServerInbound::InvalidDynamicToolCall {
+                    request_id,
+                    thread_id: thread_id.to_owned(),
+                    turn_id: turn_id.to_owned(),
+                    call: crate::ProviderInvalidDynamicToolCall::from_definition(
+                        turn_id, call_id, definition, arguments,
+                    )?,
+                }
+            } else {
+                AiCodexAppServerInbound::DynamicToolCall {
+                    request_id,
+                    thread_id: thread_id.to_owned(),
+                    turn_id: turn_id.to_owned(),
+                    call: ProviderDynamicToolCall::from_definition(
+                        turn_id, call_id, definition, arguments,
+                    )?,
+                }
+            };
+            self.pending_dynamic_requests
+                .insert(request_id, (call_id.to_owned(), definition.tool_id.clone()));
+            return Ok(inbound);
         }
         if let Some(id) = object.get("id").and_then(Value::as_u64) {
             if object
@@ -4676,16 +4728,13 @@ impl AiCodexAppServerProtocolActor {
             .get("tool")
             .and_then(Value::as_str)
             .ok_or(ProviderError::Rejected)?;
-        let definition = self
-            .dynamic_tools
+        self.dynamic_tools
             .get(provider_name)
             .ok_or(ProviderError::Rejected)?;
-        let arguments = item.get("arguments").ok_or(ProviderError::Rejected)?;
-        let validator = jsonschema::validator_for(&definition.parameters)
-            .map_err(|_| ProviderError::Rejected)?;
-        if !arguments.is_object() || !validator.is_valid(arguments) {
-            return Err(ProviderError::Rejected);
-        }
+        // Lifecycle metadata is not an execution request. Schema-invalid model
+        // arguments are routed by item/tool/call to durable rejection instead
+        // of killing the provider turn before it can receive a correction.
+        item.get("arguments").ok_or(ProviderError::Rejected)?;
         let completed = method == "item/completed";
         if completed {
             if item.get("status").and_then(Value::as_str) != Some("completed")
@@ -7912,6 +7961,79 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn schema_invalid_dynamic_request_can_be_corrected_in_the_same_turn() {
+        let tool = dynamic_tool();
+        let bootstrap = AiCodexAppServerBootstrapInstructions::disabled();
+        let input = AiCodexAppServerTurnInput::retained_dynamic_tool_readiness_probe(
+            "model-1",
+            &bootstrap,
+            "Call the supplied count tool.",
+            vec![tool.clone()],
+            tool.tool_id.clone(),
+            ModelReasoningEffort::Unspecified,
+            128,
+        )
+        .unwrap();
+        let mut actor = initialized_protocol_actor();
+        let thread_id = start_bound_dynamic_thread(&mut actor, std::slice::from_ref(&tool));
+        start_bound_dynamic_turn(&mut actor, &thread_id, &input, "turn-correction", 3);
+        for (request_id, arguments, invalid) in [
+            (10, json!({"Limit":"wrong-type"}), true),
+            (11, json!({"Limit":3}), false),
+        ] {
+            let call_id = format!("call-{request_id}");
+            let item = json!({"arguments":arguments,"id":call_id,"namespace":null,
+                "status":"inProgress","tool":tool.provider_name,"type":"dynamicToolCall"});
+            actor
+                .accept(&lifecycle_notification(
+                    "item/started",
+                    json!({
+                        "item":item,"startedAtMs":1,"threadId":thread_id,"turnId":"turn-correction"
+                    }),
+                ))
+                .expect("a model mistake in a known lifecycle is not a protocol violation");
+            let frame =
+                serde_json::to_vec(&json!({"id":request_id,"method":"item/tool/call","params":{
+                    "arguments":arguments,"callId":call_id,"namespace":null,"threadId":thread_id,
+                    "tool":tool.provider_name,"turnId":"turn-correction"
+                }}))
+                .unwrap();
+            let result = match actor.accept(&frame).unwrap() {
+                AiCodexAppServerInbound::InvalidDynamicToolCall { call, .. } if invalid => {
+                    assert_eq!(call.rejected_arguments(), &arguments);
+                    assert!(!format!("{call:?}").contains("wrong-type"));
+                    ProviderDynamicToolResult::persisted(
+                        call.call_id().to_owned(),
+                        call.tool_id().to_owned(),
+                        crate::AiApplicationToolFailureEnvelope::new(
+                            crate::AiApplicationToolFailureCode::InvalidArguments,
+                        )
+                        .to_json(),
+                    )
+                    .unwrap()
+                }
+                AiCodexAppServerInbound::DynamicToolCall { call, .. } if !invalid => {
+                    ProviderDynamicToolResult::new(&call, json!({"count":3})).unwrap()
+                }
+                _ => panic!("invalid arguments must never become an executable call"),
+            };
+            actor.dynamic_tool_response(request_id, &result).unwrap();
+            let mut completed = item;
+            completed["status"] = json!("completed");
+            completed["success"] = json!(true);
+            completed["contentItems"] = json!([]);
+            actor.accept(&lifecycle_notification("item/completed", json!({
+                "item":completed,"completedAtMs":2,"threadId":thread_id,"turnId":"turn-correction"
+            }))).unwrap();
+            assert!(actor.dynamic_tool_response(request_id, &result).is_err());
+            assert!(
+                actor.accept(&frame).is_err(),
+                "a completed callback cannot be replayed"
+            );
+        }
+    }
+
+    #[test]
     fn retained_dynamic_readiness_response_is_fixed_exact_and_settleable() {
         let bootstrap = AiCodexAppServerBootstrapInstructions::disabled();
         let tool = dynamic_tool();
@@ -11003,6 +11125,82 @@ pub(crate) mod tests {
             std::future::pending::<()>().await;
             Err(ProviderError::Rejected)
         }
+    }
+
+    #[tokio::test]
+    async fn invalid_dynamic_call_counter_forwards_and_preserves_interrupt_fences() {
+        struct RejectionResponder {
+            entry: Arc<RunEntry>,
+        }
+        #[async_trait]
+        impl ProviderDynamicToolResponder for RejectionResponder {
+            async fn respond(
+                &self,
+                _: ProviderDynamicToolCall,
+            ) -> Result<ProviderDynamicToolResult, ProviderError> {
+                panic!("rejected arguments cannot enter execution")
+            }
+            async fn reject_invalid_arguments(
+                &self,
+                call: crate::ProviderInvalidDynamicToolCall,
+            ) -> Result<ProviderDynamicToolResult, ProviderError> {
+                assert_eq!(
+                    self.entry
+                        .dynamic_tool_calls_in_flight
+                        .load(Ordering::SeqCst),
+                    1
+                );
+                ProviderDynamicToolResult::persisted(
+                    call.call_id().to_owned(),
+                    call.tool_id().to_owned(),
+                    crate::AiApplicationToolFailureEnvelope::new(
+                        crate::AiApplicationToolFailureCode::InvalidArguments,
+                    )
+                    .to_json(),
+                )
+            }
+        }
+        let pool = pool(Arc::new(Counters::new()), 1, 2);
+        let request = dynamic_model_request();
+        let binding = provider_context("profile-1", &request)
+            .run_binding()
+            .unwrap();
+        let entry = pool
+            .entry(binding, dynamic_registration("1.0.0"))
+            .await
+            .unwrap();
+        let responder = DynamicToolCallCounter::wrap(
+            &entry,
+            Arc::new(RejectionResponder {
+                entry: entry.clone(),
+            }),
+        );
+        let call = crate::ProviderInvalidDynamicToolCall::from_definition(
+            "turn-reject",
+            "call-reject",
+            &dynamic_tool(),
+            json!({"Limit":false}),
+        )
+        .unwrap();
+        let result = responder
+            .reject_invalid_arguments(call.clone())
+            .await
+            .unwrap();
+        assert_eq!(result.call_id(), call.call_id());
+        assert_eq!(entry.dynamic_tool_calls_in_flight.load(Ordering::SeqCst), 0);
+        assert!(
+            !entry
+                .dynamic_tool_call_after_interrupt
+                .load(Ordering::SeqCst)
+        );
+        entry.interrupt_started.store(true, Ordering::SeqCst);
+        responder.reject_invalid_arguments(call).await.unwrap();
+        assert_eq!(entry.dynamic_tool_calls_in_flight.load(Ordering::SeqCst), 0);
+        assert!(
+            entry
+                .dynamic_tool_call_after_interrupt
+                .load(Ordering::SeqCst)
+        );
     }
 
     #[tokio::test]

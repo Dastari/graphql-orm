@@ -280,7 +280,7 @@ fn discovery_definition(index_fingerprint: &str) -> ModelToolDefinition {
                 "entityOrClass": {"type": ["string", "null"], "maxLength": 256},
                 "maximumResults": {"type": "integer", "minimum": 1, "maximum": 32}
             },
-            "required": ["text", "namespace", "kind", "entityOrClass", "maximumResults"],
+            "required": ["text", "maximumResults"],
             "additionalProperties": false
         }),
     )
@@ -2265,6 +2265,34 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn discovery_optional_filters_match_the_broker_contract() {
+        let definition = discovery_definition("index");
+        let validator = jsonschema::validator_for(&definition.parameters).unwrap();
+        for arguments in [
+            json!({"text":"reviewed record", "maximumResults":8}),
+            json!({"text":"reviewed record", "maximumResults":8, "namespace":null, "kind":null, "entityOrClass":null}),
+        ] {
+            assert!(validator.is_valid(&arguments));
+            let parsed: BrokerDiscoverArguments = serde_json::from_value(arguments).unwrap();
+            assert!(
+                parsed.namespace.is_none()
+                    && parsed.kind.is_none()
+                    && parsed.entity_or_class.is_none()
+            );
+            assert_eq!(parsed.maximum_results, 8);
+        }
+        for arguments in [
+            json!({"text":"record"}),
+            json!({"text":"record", "maximumResults":0}),
+            json!({"text":"record", "maximumResults":33}),
+            json!({"text":"record", "maximumResults":8, "kind":"mutation"}),
+            json!({"text":"record", "maximumResults":8, "unknown":true}),
+        ] {
+            assert!(!validator.is_valid(&arguments));
+        }
+    }
 
     fn definition(id: &str) -> ModelToolDefinition {
         ModelToolDefinition {

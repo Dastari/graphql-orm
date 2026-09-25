@@ -2290,6 +2290,90 @@ impl ProviderDynamicToolCall {
     }
 }
 
+/// A bounded request for an offered tool whose arguments failed its JSON schema.
+///
+/// This type grants no execution authority and cannot be converted to a
+/// [`ProviderDynamicToolCall`]. The coordinator may persist a safe failure so
+/// the model can correct its request without restarting the provider turn.
+#[derive(Clone, PartialEq)]
+pub struct ProviderInvalidDynamicToolCall {
+    response_id: String,
+    call_id: String,
+    tool_id: String,
+    provider_name: String,
+    tool_fingerprint: String,
+    arguments: serde_json::Value,
+}
+
+impl std::fmt::Debug for ProviderInvalidDynamicToolCall {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderInvalidDynamicToolCall")
+            .field("call_id", &self.call_id)
+            .field("tool_id", &self.tool_id)
+            .field("arguments", &"<rejected-provider-content>")
+            .finish()
+    }
+}
+
+impl ProviderInvalidDynamicToolCall {
+    #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
+    pub(crate) fn from_definition(
+        response_id: impl Into<String>,
+        call_id: impl Into<String>,
+        definition: &ModelToolDefinition,
+        arguments: serde_json::Value,
+    ) -> Result<Self, ProviderError> {
+        definition.validate()?;
+        let response_id = response_id.into();
+        let call_id = call_id.into();
+        if !valid_provider_reference(&response_id)
+            || !valid_provider_reference(&call_id)
+            || serde_json::to_vec(&arguments).map_or(true, |v| v.len() > 16 * 1024 * 1024)
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let validator = jsonschema::validator_for(&definition.parameters)
+            .map_err(|_| ProviderError::InvalidRequest)?;
+        if arguments.is_object() && validator.is_valid(&arguments) {
+            return Err(ProviderError::Rejected);
+        }
+        Ok(Self {
+            response_id,
+            call_id,
+            tool_id: definition.tool_id.clone(),
+            provider_name: definition.provider_name.clone(),
+            tool_fingerprint: definition.fingerprint.clone(),
+            arguments,
+        })
+    }
+
+    /// Exact active provider response or turn identifier.
+    pub fn response_id(&self) -> &str {
+        &self.response_id
+    }
+    /// Exact provider callback identifier.
+    pub fn call_id(&self) -> &str {
+        &self.call_id
+    }
+    /// Stable offered tool identifier, not permission to execute it.
+    pub fn tool_id(&self) -> &str {
+        &self.tool_id
+    }
+    /// Exact offered provider-facing alias.
+    pub fn provider_name(&self) -> &str {
+        &self.provider_name
+    }
+    /// Fingerprint of the exact offered definition.
+    pub fn tool_fingerprint(&self) -> &str {
+        &self.tool_fingerprint
+    }
+    /// Rejected untrusted arguments, for protected history only. Never execute them.
+    pub fn rejected_arguments(&self) -> &serde_json::Value {
+        &self.arguments
+    }
+}
+
 /// Disclosure-approved response to one exact dynamic application-tool call.
 ///
 /// Fields are private so an adapter cannot swap the call/tool identity after
@@ -2322,7 +2406,7 @@ impl ProviderDynamicToolResult {
         }
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
     pub(crate) fn new(
         call: &ProviderDynamicToolCall,
         output: serde_json::Value,
@@ -2333,6 +2417,24 @@ impl ProviderDynamicToolResult {
         Ok(Self {
             call_id: call.call_id.clone(),
             tool_id: call.tool_id.clone(),
+            output,
+        })
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn persisted(
+        call_id: String,
+        tool_id: String,
+        output: serde_json::Value,
+    ) -> Result<Self, ProviderError> {
+        if !valid_provider_reference(&call_id)
+            || serde_json::to_vec(&output).map_or(true, |v| v.len() > 16 * 1024 * 1024)
+        {
+            return Err(ProviderError::Rejected);
+        }
+        Ok(Self {
+            call_id,
+            tool_id,
             output,
         })
     }
@@ -2504,6 +2606,20 @@ pub trait ProviderDynamicToolResponder: Send + Sync {
         &self,
         call: ProviderDynamicToolCall,
     ) -> Result<ProviderDynamicToolResult, ProviderError>;
+
+    /// Persists a schema-invalid request without executing its tool.
+    ///
+    /// The returned correction envelope must pass current authorization,
+    /// cancellation, budget, audit and egress checks. The default denies it.
+    ///
+    /// # Errors
+    /// Returns a safe error when durable rejection is unavailable or uncertain.
+    async fn reject_invalid_arguments(
+        &self,
+        _call: ProviderInvalidDynamicToolCall,
+    ) -> Result<ProviderDynamicToolResult, ProviderError> {
+        Err(ProviderError::Rejected)
+    }
 }
 
 /// Opaque durable binding embedded in one provider background request.

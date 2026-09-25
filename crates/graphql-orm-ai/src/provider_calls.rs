@@ -1864,6 +1864,23 @@ pub trait AiProviderDynamicToolExecution: Send + Sync {
         tool_call_index: usize,
     ) -> Result<AiPersistedApplicationToolCall, AiError>;
 
+    /// Accounts for an admitted callback that will not enter execution, then
+    /// persists its deterministic failure. Implementations must apply current
+    /// rules, cancellation and per-run tool accounting before persistence.
+    ///
+    /// # Errors
+    /// Returns a safe error for stale authority, budget, cancellation or failed persistence.
+    async fn persist_unexecuted_dynamic_failure(
+        &self,
+        lease: &AiRunLease,
+        result: &AiProviderCallResult,
+        index: usize,
+        code: crate::AiApplicationToolFailureCode,
+    ) -> Result<AiPersistedApplicationToolCall, AiError> {
+        self.persist_dynamic_failure(lease, result, index, code)
+            .await
+    }
+
     /// Persists a deterministic failure for the exact normalized call through
     /// the same durable broker used by ordinary completed-turn execution.
     async fn persist_dynamic_failure(
@@ -1896,11 +1913,28 @@ struct DynamicToolResponder {
     maximum_tool_calls: usize,
     calls: Mutex<Vec<AiProviderToolCall>>,
     results: Mutex<Vec<AiPersistedApplicationToolCall>>,
+    schema_rejections: Mutex<BTreeSet<String>>,
 }
 
 impl DynamicToolResponder {
     async fn results(&self) -> Vec<AiPersistedApplicationToolCall> {
         self.results.lock().await.clone()
+    }
+
+    async fn has_persisted_schema_rejection(
+        &self,
+        call_id: &str,
+        tool_id: &str,
+        arguments: &serde_json::Value,
+    ) -> bool {
+        if !self.schema_rejections.lock().await.contains(call_id) {
+            return false;
+        }
+        self.calls.lock().await.iter().any(|call| {
+            call.call_id() == call_id
+                && call.tool_id().as_str() == tool_id
+                && call.arguments() == arguments
+        })
     }
 }
 
@@ -1910,11 +1944,53 @@ impl ProviderDynamicToolResponder for DynamicToolResponder {
         &self,
         call: ProviderDynamicToolCall,
     ) -> Result<ProviderDynamicToolResult, ProviderError> {
+        self.respond_normalized(
+            call.response_id().to_owned(),
+            AiProviderToolCall {
+                call_id: call.call_id().to_owned(),
+                tool_id: crate::AiToolId::parse(call.tool_id().to_owned())
+                    .map_err(|_| ProviderError::Rejected)?,
+                provider_name: call.provider_name().to_owned(),
+                tool_fingerprint: call.tool_fingerprint().to_owned(),
+                arguments: call.arguments().clone(),
+            },
+            false,
+        )
+        .await
+    }
+
+    async fn reject_invalid_arguments(
+        &self,
+        call: crate::ProviderInvalidDynamicToolCall,
+    ) -> Result<ProviderDynamicToolResult, ProviderError> {
+        self.respond_normalized(
+            call.response_id().to_owned(),
+            AiProviderToolCall {
+                call_id: call.call_id().to_owned(),
+                tool_id: crate::AiToolId::parse(call.tool_id().to_owned())
+                    .map_err(|_| ProviderError::Rejected)?,
+                provider_name: call.provider_name().to_owned(),
+                tool_fingerprint: call.tool_fingerprint().to_owned(),
+                arguments: call.rejected_arguments().clone(),
+            },
+            true,
+        )
+        .await
+    }
+}
+
+impl DynamicToolResponder {
+    async fn respond_normalized(
+        &self,
+        response_id: String,
+        call: AiProviderToolCall,
+        rejected_arguments: bool,
+    ) -> Result<ProviderDynamicToolResult, ProviderError> {
         let _definition = self
             .request_snapshot
             .tools
             .iter()
-            .find(|definition| definition.tool_id == call.tool_id())
+            .find(|definition| definition.tool_id == call.tool_id().as_str())
             .filter(|definition| {
                 definition.provider_name == call.provider_name()
                     && definition.fingerprint == call.tool_fingerprint()
@@ -1929,14 +2005,7 @@ impl ProviderDynamicToolResponder for DynamicToolResponder {
             {
                 return Err(ProviderError::Rejected);
             }
-            calls.push(AiProviderToolCall {
-                call_id: call.call_id().to_owned(),
-                tool_id: crate::AiToolId::parse(call.tool_id().to_owned())
-                    .map_err(|_| ProviderError::Rejected)?,
-                provider_name: call.provider_name().to_owned(),
-                tool_fingerprint: call.tool_fingerprint().to_owned(),
-                arguments: call.arguments().clone(),
-            });
+            calls.push(call.clone());
             (calls.len() - 1, calls.clone())
         };
         // Keep the exact lease snapshot locked across execution. The
@@ -1955,7 +2024,7 @@ impl ProviderDynamicToolResponder for DynamicToolResponder {
             usage: AiBudgetAmounts::default(),
             cached_input_tokens: 0,
             builtin_usage: AiProviderBuiltinUsage::default(),
-            provider_response_id: Some(call.response_id().to_owned()),
+            provider_response_id: Some(response_id),
             budget_reservation_id: self.budget_reservation_id,
             previous_response_id: self.previous_response_id.clone(),
             previous_continuation_reference: self.previous_continuation_reference.clone(),
@@ -1969,14 +2038,14 @@ impl ProviderDynamicToolResponder for DynamicToolResponder {
         // Reserve the final admitted callback for a durable no-execution
         // response. Do not reinterpret a failed persistence attempt as a
         // second failure result: its original outcome may be uncertain.
-        let persisted = if tool_call_index + 1 == self.maximum_tool_calls {
+        let failure = if tool_call_index + 1 == self.maximum_tool_calls {
+            Some(crate::AiApplicationToolFailureCode::ToolCallLimitReached)
+        } else {
+            rejected_arguments.then_some(crate::AiApplicationToolFailureCode::InvalidArguments)
+        };
+        let persisted = if let Some(code) = failure {
             self.execution
-                .persist_dynamic_failure(
-                    &lease,
-                    &provisional,
-                    tool_call_index,
-                    crate::AiApplicationToolFailureCode::ToolCallLimitReached,
-                )
+                .persist_unexecuted_dynamic_failure(&lease, &provisional, tool_call_index, code)
                 .await
                 .map_err(|_| ProviderError::Rejected)?
         } else {
@@ -2005,12 +2074,18 @@ impl ProviderDynamicToolResponder for DynamicToolResponder {
                 call_id,
                 tool_id,
                 output,
-            }) if call_id == call.call_id() && tool_id == call.tool_id() => output.clone(),
+            }) if call_id == call.call_id() && tool_id == call.tool_id().as_str() => output.clone(),
             _ => return Err(ProviderError::Rejected),
         };
         drop(lease);
         self.results.lock().await.push(persisted);
-        ProviderDynamicToolResult::new(&call, output)
+        if rejected_arguments {
+            self.schema_rejections
+                .lock()
+                .await
+                .insert(call.call_id().to_owned());
+        }
+        ProviderDynamicToolResult::persisted(call.call_id, call.tool_id.as_str().to_owned(), output)
     }
 }
 
@@ -3424,6 +3499,7 @@ impl AiProviderCallExecutor {
                 maximum_tool_calls: self.limits.maximum_tool_calls,
                 calls: Mutex::new(Vec::new()),
                 results: Mutex::new(Vec::new()),
+                schema_rejections: Mutex::new(BTreeSet::new()),
             })
         });
         let dispatch = if let Some(responder) = &dynamic_responder {
@@ -3650,7 +3726,16 @@ impl AiProviderCallExecutor {
                     let validator = jsonschema::validator_for(argument_schema)
                         .map_err(|_| AiError::ProviderFailed)?;
                     if !validator.is_valid(arguments) {
-                        return Err(AiError::ProviderFailed);
+                        let rejected = if let Some(responder) = &dynamic_responder {
+                            responder
+                                .has_persisted_schema_rejection(call_id, tool_id, arguments)
+                                .await
+                        } else {
+                            false
+                        };
+                        if !rejected {
+                            return Err(AiError::ProviderFailed);
+                        }
                     }
                     completed_tool_calls.insert(
                         call_id.clone(),
@@ -11048,23 +11133,33 @@ mod tests {
     #[cfg(feature = "provider-grok-acp")]
     #[tokio::test]
     async fn grok_wire_dynamic_calls_complete_through_retained_executor() {
-        assert_grok_wire_dynamic_calls(8, false).await;
+        assert_grok_wire_dynamic_calls(8, false, false).await;
     }
 
     #[cfg(feature = "provider-grok-acp")]
     #[tokio::test]
     async fn grok_last_tool_slot_returns_durable_limit_and_still_finishes() {
-        assert_grok_wire_dynamic_calls(3, false).await;
+        assert_grok_wire_dynamic_calls(3, false, false).await;
     }
 
     #[cfg(feature = "provider-grok-acp")]
     #[tokio::test]
     async fn grok_stationary_end_turn_settles_persisted_tools_once_and_explains_partial_work() {
-        assert_grok_wire_dynamic_calls(8, true).await;
+        assert_grok_wire_dynamic_calls(8, true, false).await;
     }
 
     #[cfg(feature = "provider-grok-acp")]
-    async fn assert_grok_wire_dynamic_calls(maximum_calls: usize, stationarity: bool) {
+    #[tokio::test]
+    async fn schema_invalid_dynamic_call_then_correction_completes_the_retained_executor() {
+        assert_grok_wire_dynamic_calls(8, false, true).await;
+    }
+
+    #[cfg(feature = "provider-grok-acp")]
+    async fn assert_grok_wire_dynamic_calls(
+        maximum_calls: usize,
+        stationarity: bool,
+        invalid_first: bool,
+    ) {
         use crate::providers::{AiGrokAcpProvider, AiGrokAcpRegistration, ExecutorWireFactory};
         let seed = fixture(vec![]).await;
         let tools = tool_plan(&seed).request.tools;
@@ -11097,7 +11192,10 @@ mod tests {
         let provider = Arc::new(
             AiGrokAcpProvider::new(
                 registration.clone(),
-                Arc::new(ExecutorWireFactory { stationarity }),
+                Arc::new(ExecutorWireFactory {
+                    stationarity,
+                    invalid_first,
+                }),
                 2,
                 std::time::Duration::from_secs(5),
             )
@@ -11221,7 +11319,11 @@ mod tests {
             .expect("real Grok wire callbacks must complete the retained executor");
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            if maximum_calls == 3 { 2 } else { 3 }
+            if maximum_calls == 3 || invalid_first {
+                2
+            } else {
+                3
+            }
         );
         if maximum_calls == 3 {
             let last = result.interactive_tool_results().last().unwrap();
@@ -11240,6 +11342,19 @@ mod tests {
         if stationarity {
             assert!(result.events().iter().any(|event| matches!(event, ProviderEvent::TextDelta { text } if text.contains("repeated-activity limit") && text.contains("incomplete"))));
         }
+        if invalid_first {
+            assert_eq!(
+                result.interactive_tool_results()[0].model_input().unwrap(),
+                &ModelInputBlock::ToolResult {
+                    call_id: result.tool_calls()[0].call_id().to_owned(),
+                    tool_id: result.tool_calls()[0].tool_id().as_str().to_owned(),
+                    output: crate::AiApplicationToolFailureEnvelope::new(
+                        crate::AiApplicationToolFailureCode::InvalidArguments
+                    )
+                    .to_json()
+                }
+            );
+        }
         assert_eq!(result.tool_calls().len(), 3);
         assert_eq!(result.interactive_tool_results.len(), 3);
         for (call, persisted) in result
@@ -11249,7 +11364,14 @@ mod tests {
         {
             assert_eq!(call.call_id(), persisted.provider_call_id());
             assert_eq!(call.tool_fingerprint(), registration.tools()[0].fingerprint);
-            assert_eq!(call.arguments(), &json!({"recordId":"54"}));
+            assert_eq!(
+                call.arguments(),
+                &if invalid_first && call.call_id() == result.tool_calls()[0].call_id() {
+                    json!({"recordId":false})
+                } else {
+                    json!({"recordId":"54"})
+                }
+            );
         }
         assert_eq!(result.usage().input_tokens, 29390);
         assert_eq!(result.usage().output_tokens, 3000);
@@ -11397,6 +11519,7 @@ mod tests {
             maximum_tool_calls,
             calls: Mutex::new(Vec::new()),
             results: Mutex::new(Vec::new()),
+            schema_rejections: Mutex::new(BTreeSet::new()),
         };
         assert!(matches!(
             responder.respond(call.clone()).await,
@@ -11434,6 +11557,158 @@ mod tests {
             executions.load(Ordering::SeqCst),
             usize::from(maximum_tool_calls > 1),
             "denial must not replay execution"
+        );
+        fixture
+            .run_service
+            .finish(
+                &lease.lock().await.clone(),
+                crate::AiRunCompletion::new(
+                    AiRunState::RecoveryRequired,
+                    "provider_turn_uncertain",
+                    Some("provider_turn_uncertain".into()),
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .expect("denied result must preserve the renewed fence for terminal recovery");
+        let run = AiRunRecord::find_by_id(&fixture.database, &fixture.lease.run_id().0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state, "recovery_required");
+    }
+
+    #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
+    #[tokio::test]
+    async fn schema_invalid_dynamic_call_is_durably_rejected_without_execution() {
+        assert_invalid_dynamic_result(false).await;
+    }
+
+    #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
+    #[tokio::test]
+    async fn schema_invalid_dynamic_call_audit_failure_preserves_fence_and_denies_egress() {
+        assert_invalid_dynamic_result(true).await;
+    }
+
+    #[cfg(any(feature = "provider-codex-app-server", feature = "provider-grok-acp"))]
+    async fn assert_invalid_dynamic_result(audit_denied: bool) {
+        let fixture = fixture(vec![
+            ProviderEvent::ResponseStarted {
+                response_id: Some("denied-response".into()),
+            },
+            ProviderEvent::Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cached_input_tokens: 0,
+            },
+            ProviderEvent::ResponseCompleted {
+                response_id: Some("denied-response".into()),
+            },
+        ])
+        .await;
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8192, 65536).unwrap(),
+        );
+        let result = executor
+            .execute(&fixture.lease, tool_plan(&fixture))
+            .await
+            .unwrap();
+        let call = crate::ProviderInvalidDynamicToolCall::from_definition(
+            "denied-response",
+            "denied-call",
+            &result.request_snapshot.tools[0],
+            json!({"recordId":false}),
+        )
+        .unwrap();
+        let lease = Arc::new(Mutex::new(fixture.lease.clone()));
+        let executions = Arc::new(AtomicUsize::new(0));
+        let responder = DynamicToolResponder {
+            lease: lease.clone(),
+            execution: Arc::new(PersistingDynamicToolExecution {
+                service: automatic_mutation_service(
+                    &fixture,
+                    if audit_denied {
+                        Arc::new(FailAudit)
+                    } else {
+                        fixture.audit.clone()
+                    },
+                ),
+                scope: fixture.scope.clone(),
+                calls: executions.clone(),
+            }),
+            session_id: fixture.lease.session_id(),
+            run_id: fixture.lease.run_id(),
+            attempt_id: fixture.lease.attempt_id(),
+            lease_generation: fixture.lease.lease_generation(),
+            provider_kind: result.provider_kind.clone(),
+            provider_model: result.provider_model.clone(),
+            budget_reservation_id: result.budget_reservation_id,
+            previous_response_id: None,
+            previous_continuation_reference: None,
+            request_snapshot: result.request_snapshot.clone(),
+            model_inference_manifest: result.model_inference_manifest.clone(),
+            maximum_tool_calls: 8,
+            calls: Mutex::new(Vec::new()),
+            results: Mutex::new(Vec::new()),
+            schema_rejections: Mutex::new(BTreeSet::new()),
+        };
+        let rejected = responder.reject_invalid_arguments(call.clone()).await;
+        if audit_denied {
+            assert!(matches!(rejected, Err(ProviderError::Rejected)));
+            assert!(responder.results().await.is_empty());
+        } else {
+            let response = rejected.expect("a schema error must return a durable correction");
+            assert_eq!(
+                response.output(),
+                &crate::AiApplicationToolFailureEnvelope::new(
+                    crate::AiApplicationToolFailureCode::InvalidArguments
+                )
+                .to_json()
+            );
+            assert_eq!(responder.results().await.len(), 1);
+        }
+        let calls = AiToolCallRecord::query(fixture.database.pool())
+            .filter(AiToolCallRecordWhereInput {
+                run_id: Some(UuidFilter {
+                    eq: Some(fixture.lease.run_id().0),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .limit(2)
+            .fetch_all()
+            .await
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].state,
+            if audit_denied {
+                "egress_audit_failed"
+            } else {
+                "execution_failed"
+            }
+        );
+        assert!(calls[0].completed_at.is_some());
+        assert!(calls[0].protected_result.is_some());
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            0,
+            "invalid calls must never execute"
+        );
+        assert!(matches!(
+            responder.reject_invalid_arguments(call).await,
+            Err(ProviderError::Rejected)
+        ));
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            0,
+            "duplicates must not execute"
         );
         fixture
             .run_service

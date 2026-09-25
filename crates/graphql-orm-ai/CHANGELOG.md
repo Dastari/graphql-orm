@@ -20,6 +20,39 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+## [0.101.0] - 2026-09-25
+
+### Added
+
+- Separate `ProviderInvalidDynamicToolCall` and default-denying
+  `ProviderDynamicToolResponder::reject_invalid_arguments` contracts for offered,
+  correlated requests that violate their argument schema. Codex and Grok route these
+  to the coordinator's durable failure service without executing the tool. The model
+  receives the existing `invalid_arguments` correction envelope and can issue a new
+  corrected call within the same turn. Validated dynamic-call construction is unchanged.
+
+### Fixed
+
+- Make discovery's namespace, kind and entity/class filters optional in its model
+  schema, matching the broker's existing deserialization and search behavior.
+  Omitting unused filters no longer rejects otherwise valid searches. Explicit
+  null remains supported; required search text/count, bounds and unknown-field
+  rejection are unchanged.
+- Permit Grok's unidentified pending display notification only when followed by
+  its failed-before-execution update. Unknown names can be corrected by the model;
+  progress, success, duplicate lifecycle and unresolved prompt completion remain
+  rejected. Application tools still require the correlated authorized SDK callback.
+- Count unexecuted schema rejections against the same per-run tool/rule budget,
+  recheck cancellation, and preserve Codex callback accounting through the rejection
+  responder decorator.
+- Preserve completed schema-rejection lifecycles through provider and coordinator
+  normalization only when the exact callback and arguments match a successfully
+  persisted, disclosure-approved rejection. Audit failures keep the renewed run fence
+  and fail closed; duplicate callbacks cannot execute or repeat persistence.
+- Normalize the exact bounded Grok `workflows-reload` response alongside
+  `skills-reload`. These internal directory-watcher notices do not complete prompts,
+  execute tools, alter authorization or trigger retries.
+
 ## [0.100.2] - 2026-09-24
 
 ### Fixed

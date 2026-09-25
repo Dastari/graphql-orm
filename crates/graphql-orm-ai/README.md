@@ -55,6 +55,14 @@ allowing the provider to summarize authorized results without another read. Host
 ceilings admit up to 1,024 callbacks and Grok rounds; budgets and no-replay
 fences remain independent. See the [local harness boundary](docs/local-harness.md).
 
+Codex and Grok now distinguish offered requests with invalid model-authored arguments
+from protocol or authorization failures. A separate typed rejection path persists a
+protected, audited correction response without executing the tool. A new corrected
+request can continue in the same turn. The coordinator and Grok adapter accept its
+completion only when it matches the exact successfully persisted rejection; failed
+audit, unknown tools, stale bindings and duplicate callbacks remain closed. Grok's
+bounded internal `workflows-reload` status no longer aborts a prompt.
+
 Egress audit writes serialize check-and-insert through the ORM state-machine
 transaction contract. Bounded transaction retries preserve exact replay checks
 and fail closed without repeating application tools or provider requests.
@@ -66,7 +74,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.100.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.101.0", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
