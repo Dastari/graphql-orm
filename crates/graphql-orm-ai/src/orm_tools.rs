@@ -1245,11 +1245,12 @@ impl OrmAiApplicationToolCallService {
                 success.disclosure_fingerprint,
             ),
             Err(error) => {
-                let code = crate::classify_safe_application_tool_error(&error)
+                let code = crate::classify_safe_application_tool_error(&error.error)
                     .unwrap_or(crate::AiApplicationToolFailureCode::ToolUnavailable);
+                let (output, fingerprint) = error.model_failure(code);
                 (
                     AiApplicationToolCallState::ExecutionFailed,
-                    crate::AiApplicationToolFailureEnvelope::new(code).to_json(),
+                    output,
                     DataClassification::Public,
                     AiSourceTrust::TrustedRuntime,
                     code.as_str().to_owned(),
@@ -1257,7 +1258,7 @@ impl OrmAiApplicationToolCallService {
                     None,
                     None,
                     Some(code),
-                    safe_failure_disclosure_fingerprint(),
+                    fingerprint,
                 )
             }
         };
@@ -1439,7 +1440,7 @@ impl OrmAiApplicationToolCallService {
         provider_result: &AiProviderCallResult,
         delivery: &crate::AiCapabilityDeliveryTurn,
         operation: crate::AiCapabilityBrokerOperation,
-    ) -> Result<BrokerCallOutput, AiError> {
+    ) -> Result<BrokerCallOutput, BrokerCallFailure> {
         let provider_call = provider_result
             .tool_calls()
             .get(context.tool_call_index)
@@ -1469,6 +1470,7 @@ impl OrmAiApplicationToolCallService {
                         .await?
                 };
                 BrokerCallOutput::metadata(output, broker_disclosure_fingerprint(operation))
+                    .map_err(Into::into)
             }
             crate::AiCapabilityBrokerOperation::Describe => {
                 let description = broker
@@ -1482,7 +1484,7 @@ impl OrmAiApplicationToolCallService {
                         crate::capability_provider_alias(description.capability_id()),
                     )?;
                 if definition.fingerprint != description.capability_fingerprint() {
-                    return Err(AiError::Forbidden);
+                    return Err(AiError::Forbidden.into());
                 }
                 let description = description.with_plan_schema(
                     definition.parameters,
@@ -1492,6 +1494,7 @@ impl OrmAiApplicationToolCallService {
                     description.into_model_result(),
                     broker_disclosure_fingerprint(operation),
                 )
+                .map_err(Into::into)
             }
             crate::AiCapabilityBrokerOperation::Execute => {
                 let execution = broker
@@ -1502,11 +1505,31 @@ impl OrmAiApplicationToolCallService {
                         arguments,
                     )
                     .await?;
-                let compiled = self.runtime.tool_catalog().compile_query_capability(
-                    execution.capability_id(),
-                    execution.capability_fingerprint(),
-                    execution.plan().clone(),
-                )?;
+                let definition = self
+                    .runtime
+                    .tool_catalog()
+                    .query_capability_model_definition(
+                        execution.capability_id(),
+                        crate::capability_provider_alias(execution.capability_id()),
+                    )?;
+                if definition.fingerprint != execution.capability_fingerprint() {
+                    return Err(AiError::Forbidden.into());
+                }
+                let compiled = self
+                    .runtime
+                    .tool_catalog()
+                    .compile_query_capability(
+                        execution.capability_id(),
+                        execution.capability_fingerprint(),
+                        execution.plan().clone(),
+                    )
+                    .map_err(|error| {
+                        BrokerCallFailure::query_plan(
+                            error,
+                            &definition.parameters,
+                            execution.plan(),
+                        )
+                    })?;
                 let (_, disclosure, _) = compiled.into_parts();
                 let disclosure_fingerprint = disclosure.fingerprint.clone();
                 let invocation = GraphqlInvocationContext {
@@ -3457,6 +3480,72 @@ fn valid_audit_reference(value: &str) -> bool {
         && value.bytes().all(|byte| !byte.is_ascii_control())
 }
 
+/// A correction is selected only after loaded-capability authorization and a
+/// failed local compile. It contains no model values, schema values or errors.
+struct BrokerCallFailure {
+    error: AiError,
+    correction: Option<&'static str>,
+}
+
+impl From<AiError> for BrokerCallFailure {
+    fn from(error: AiError) -> Self {
+        Self {
+            error,
+            correction: None,
+        }
+    }
+}
+
+impl BrokerCallFailure {
+    fn query_plan(error: AiError, schema: &serde_json::Value, plan: &serde_json::Value) -> Self {
+        // Only compiler input failures are correctable. Never disclose details
+        // for authorization, configuration, audit or execution failures.
+        let correction = if matches!(&error, AiError::InvalidInput(_)) {
+            let unsupported = |field: &str| {
+                plan.get(field)
+                    .and_then(serde_json::Value::as_object)
+                    .is_some_and(|values| {
+                        values.keys().any(|key| {
+                            schema
+                                .get("properties")
+                                .and_then(|p| p.get(field))
+                                .and_then(|p| p.get("properties"))
+                                .and_then(|p| p.get(key))
+                                .is_none()
+                        })
+                    })
+            };
+            Some(if unsupported("relationshipMaximumItems") {
+                "Remove relationshipMaximumItems entries not listed in planSchema.properties.relationshipMaximumItems.properties. If that properties object is empty, send relationshipMaximumItems as an empty array. Use the described relationshipArguments for connection paging; do not add a collection bound. Issue a new corrected call."
+            } else if unsupported("relationshipArguments") {
+                "Remove relationshipArguments entries not listed in planSchema.properties.relationshipArguments.properties. Use only the described argument names and types, then issue a new corrected call."
+            } else {
+                "The query was not executed. Compare the plan with the described planSchema: use only its exact selection paths, argument types and paging limits, omit unsupported bounds, then issue a new corrected call."
+            })
+        } else {
+            None
+        };
+        Self { error, correction }
+    }
+
+    fn model_failure(
+        &self,
+        code: crate::AiApplicationToolFailureCode,
+    ) -> (serde_json::Value, String) {
+        let mut output = crate::AiApplicationToolFailureEnvelope::new(code).to_json();
+        let fingerprint = if let Some(correction) = self.correction {
+            output["version"] = json!(2);
+            output["correction"] = json!(correction);
+            hex::encode(Sha256::digest(
+                b"graphql-orm-ai/capability-query-plan-correction/v2",
+            ))
+        } else {
+            safe_failure_disclosure_fingerprint()
+        };
+        (output, fingerprint)
+    }
+}
+
 struct BrokerCallOutput {
     output: serde_json::Value,
     classification: DataClassification,
@@ -3541,5 +3630,62 @@ fn map_orm(error: OrmPublicError) -> AiError {
         OrmErrorCode::ServiceUnavailable
         | OrmErrorCode::InternalError
         | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
+    }
+}
+
+#[cfg(test)]
+mod broker_correction_tests {
+    use super::*;
+
+    #[test]
+    fn plan_corrections_are_closed_and_do_not_echo_model_or_error_values() {
+        let schema = json!({"properties": {
+            "relationshipMaximumItems": {"properties": {}},
+            "relationshipArguments": {"properties": {"items": {}}}
+        }});
+        for (plan, expected) in [
+            (
+                json!({"relationshipMaximumItems": {"private-value": 12}}),
+                "send relationshipMaximumItems as an empty array",
+            ),
+            (
+                json!({"relationshipArguments": {"private-value": {}}}),
+                "Remove relationshipArguments entries",
+            ),
+            (json!({"selections": ["private-value"]}), "Compare the plan"),
+        ] {
+            let failure = BrokerCallFailure::query_plan(
+                AiError::InvalidInput("private-error".to_owned()),
+                &schema,
+                &plan,
+            );
+            let (output, fingerprint) =
+                failure.model_failure(crate::AiApplicationToolFailureCode::InvalidArguments);
+            assert_eq!(output["version"], 2);
+            assert!(output["correction"].as_str().unwrap().contains(expected));
+            assert!(!output.to_string().contains("private-"));
+            assert_ne!(fingerprint, safe_failure_disclosure_fingerprint());
+            assert!(output.to_string().len() < 1024);
+        }
+    }
+
+    #[test]
+    fn non_input_failures_keep_the_existing_closed_envelope() {
+        for error in [
+            AiError::Forbidden,
+            AiError::PersistenceFailed,
+            AiError::ToolExecutionFailed,
+        ] {
+            let failure =
+                BrokerCallFailure::query_plan(error, &json!({}), &json!({"private-value": 1}));
+            let code = crate::classify_safe_application_tool_error(&failure.error)
+                .unwrap_or(crate::AiApplicationToolFailureCode::ToolUnavailable);
+            let (output, fingerprint) = failure.model_failure(code);
+            assert_eq!(
+                output,
+                crate::AiApplicationToolFailureEnvelope::new(code).to_json()
+            );
+            assert_eq!(fingerprint, safe_failure_disclosure_fingerprint());
+        }
     }
 }

@@ -21,6 +21,12 @@ use [implementation status](docs/implementation-status.md) and the central
 
 ## 0.100.2 to 0.101.0
 
+Broker query-plan compile rejections may now emit failure-envelope version 2 with
+one additional `correction` string selected from closed runtime guidance. Consumers
+must preserve it as authorized model input; it contains no input values, schema
+values or internal error text. Other failure envelopes remain version 1. Validation,
+execution authority and no-replay behavior are unchanged; no data migration is needed.
+
 No data migration is needed. Schema module, GraphQL SDL and existing failed runs are
 unchanged. Update custom Codex transports to handle `InvalidDynamicToolCall` through
 `ProviderDynamicToolResponder::reject_invalid_arguments`, returning only its durable,

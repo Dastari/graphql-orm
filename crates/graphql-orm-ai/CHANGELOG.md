@@ -33,6 +33,12 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ### Fixed
 
+- Return a durable, bounded v2 correction for locally rejected broker query plans.
+  Unsupported relationship bounds/arguments receive exact repair guidance without
+  echoing model values, private schema details or internal errors. Rejected plans
+  execute nothing; fresh corrected calls retain current authorization, budgets,
+  checkpointing and egress-audit requirements.
+
 - Make discovery's namespace, kind and entity/class filters optional in its model
   schema, matching the broker's existing deserialization and search behavior.
   Omitting unused filters no longer rejects otherwise valid searches. Explicit

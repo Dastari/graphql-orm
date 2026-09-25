@@ -373,3 +373,20 @@ an automatic consequence of migrations:
 Changing provider profile, delivery mode, model/effort, projection or catalogue
 requires the same cleanup/absence/rebind lifecycle. A live provider session is
 never relabeled in place.
+
+## Correcting rejected broker query plans
+
+After reauthorizing an exact loaded capability, the broker compiles its plan before
+resolver execution. A local input rejection becomes a persisted failure with a
+version-2 bounded `correction` string. The closed guidance distinguishes unsupported
+relationship collection bounds, unsupported relationship arguments and other plan
+mismatches. It never includes model values, hidden schema metadata or internal error
+messages. The response uses its own disclosure fingerprint and the ordinary current
+access, egress-audit, tool-budget and checkpoint path. If egress or persistence fails,
+no correction is delivered. Non-input failures retain the existing version-1 envelope.
+
+The model can submit a new corrected query. The rejected plan executes nothing;
+there is no automatic query rewrite, provider replay or repeated completed tool.
+Connection paging uses the exact described relationship arguments; an empty
+`relationshipMaximumItems.properties` means the broker call must carry no relationship
+collection-bound entries.

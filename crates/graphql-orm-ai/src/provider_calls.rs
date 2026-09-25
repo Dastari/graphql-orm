@@ -10873,11 +10873,52 @@ mod tests {
             .expect("description should carry an opaque loaded reference")
             .to_owned();
 
-        let execute = commit_broker_provider_budget(
+        // A model-added bound for an unsupported relationship must fail
+        // before execution, persist a content-free correction, and permit a
+        // fresh corrected call through the same checkpoint/egress path.
+        let invalid = commit_broker_provider_budget(
             &fixture,
             broker_provider_result(
                 &lease,
                 Some("broker-response-2".to_owned()),
+                "broker-response-invalid",
+                "broker-invalid-call",
+                execute_definition,
+                json!({
+                    "loadedReference": loaded_reference,
+                    "arguments": [{"name": "recordId", "value": "record-42"}],
+                    "selections": ["recordId", "subject"],
+                    "relationshipArguments": [],
+                    "relationshipMaximumItems": [{"path": "sensitive_model_value", "maximumItems": 10}],
+                    "maximumItems": null
+                }),
+            ),
+        ).await;
+        let (invalid_call, lease) = broker_turns
+            .persist_and_execute(
+                &mut guard,
+                &lease,
+                &invalid,
+                &[&discover, &describe, &invalid],
+            )
+            .await;
+        let correction = broker_output(&invalid_call);
+        assert_eq!(correction["code"], "invalid_arguments");
+        assert_eq!(correction["version"], 2);
+        assert!(
+            correction["correction"]
+                .as_str()
+                .unwrap()
+                .contains("send relationshipMaximumItems as an empty array")
+        );
+        assert!(!correction.to_string().contains("sensitive_model_value"));
+        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 0);
+
+        let execute = commit_broker_provider_budget(
+            &fixture,
+            broker_provider_result(
+                &lease,
+                Some("broker-response-invalid".to_owned()),
                 "broker-response-3",
                 "broker-execute-call",
                 execute_definition,
@@ -10897,7 +10938,7 @@ mod tests {
                 &mut guard,
                 &lease,
                 &execute,
-                &[&discover, &describe, &execute],
+                &[&discover, &describe, &invalid, &execute],
             )
             .await;
         let execute_output = broker_output(&execute_call);
@@ -10909,8 +10950,8 @@ mod tests {
         let amplification = delivery.amplification();
         assert_eq!(amplification.discover_calls, 1);
         assert_eq!(amplification.describe_calls, 1);
-        assert_eq!(amplification.execute_calls, 1);
-        assert_eq!(amplification.total_calls(), 3);
+        assert_eq!(amplification.execute_calls, 2);
+        assert_eq!(amplification.total_calls(), 4);
 
         let rows = AiToolCallRecord::query(fixture.database.pool())
             .filter(AiToolCallRecordWhereInput {
@@ -10924,8 +10965,18 @@ mod tests {
             .fetch_all()
             .await
             .expect("broker tool rows should load");
-        assert_eq!(rows.len(), 3);
-        assert!(rows.iter().all(|row| row.state == "completed"));
+        assert_eq!(rows.len(), 4);
+        assert_eq!(
+            rows.iter().filter(|row| row.state == "completed").count(),
+            3
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.state == "execution_failed"
+                    && row.authorization_code.as_deref() == Some("invalid_arguments"))
+                .count(),
+            1
+        );
         assert_eq!(
             rows.iter()
                 .map(|row| row.tool_id.as_str())
