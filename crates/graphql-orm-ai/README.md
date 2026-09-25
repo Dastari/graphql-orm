@@ -10,6 +10,12 @@ supersedes: []
 
 # graphql-orm-ai
 
+Provider and retained-session heartbeat maintenance now continues polling the provider's
+in-flight persistence while renewal waits. A started renewal settles even if the provider
+finishes first, retaining the new row-version proof. This prevents self-deadlock on a
+provider-held writer without replaying provider requests or application tools. No data migration
+is needed.
+
 A project-neutral, security-first AI runtime for `graphql-orm` applications.
 It turns explicitly reviewed, server-authored GraphQL operations into agent
 tools while keeping application authorization, disclosure, approvals, spend,

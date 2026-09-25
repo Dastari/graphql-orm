@@ -21,6 +21,12 @@ use [implementation status](docs/implementation-status.md) and the central
 
 ## 0.100.2 to 0.101.0
 
+Provider and retained-session heartbeat maintenance now continues polling the provider's
+in-flight persistence while renewal waits. A started renewal settles even if the provider
+finishes first, retaining the new row-version proof. This prevents self-deadlock on a
+provider-held writer without replaying provider requests or application tools. No data migration
+is needed.
+
 Run start and heartbeat now honor `AiRunServiceLimits`' transaction retry bound
 for classified retryable database failures, with a short capped backoff. Each
 attempt checks the current time after acquiring the transaction lock. Expired,

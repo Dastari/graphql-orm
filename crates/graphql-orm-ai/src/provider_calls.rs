@@ -26,6 +26,9 @@ use crate::{
     ProviderKind, ProviderRequestContext, ToolMaturity, classify_safe_application_tool_error,
 };
 
+#[path = "provider_maintenance.rs"]
+pub(crate) mod maintenance;
+
 const MAXIMUM_PROVIDER_TRANSFERS: usize = 288;
 
 // Await this inside select! alongside the provider, never in a selected branch.
@@ -3224,10 +3227,11 @@ impl AiProviderCallExecutor {
             tokio::select! {
                 result = &mut turn => break result,
                 current_lease = lease_after_delay(&lease_state, delay) => {
-                    current_claim = match session_service
-                        .heartbeat(&current_lease, &current_claim)
-                        .await
-                    {
+                    let (renewal, completed_turn) = maintenance::poll_provider_during_maintenance(
+                        turn.as_mut(),
+                        session_service.heartbeat(&current_lease, &current_claim),
+                    ).await;
+                    current_claim = match renewal {
                         Ok(claim) => claim,
                         Err(error) => {
                             drop(current_lease);
@@ -3241,6 +3245,10 @@ impl AiProviderCallExecutor {
                             return Err(error);
                         }
                     };
+                    drop(current_lease);
+                    if let Some(result) = completed_turn {
+                        break result;
+                    }
                 }
             }
         };

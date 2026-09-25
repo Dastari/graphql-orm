@@ -2257,12 +2257,19 @@ impl AiReadOnlyAgentCoordinator {
                             return Err(ProviderTurnFailure::Cancelled(settlement));
                         }
                         None => {
-                            match self.run_control.heartbeat(lease).await {
+                            let (renewal, completed_provider) =
+                                crate::provider_calls::maintenance::poll_provider_during_maintenance(
+                                    provider.as_mut(), self.run_control.heartbeat(lease),
+                                ).await;
+                            match renewal {
                                 Ok(renewed) => *lease = renewed,
                                 Err(error) => {
                                     let _ = self.provider_executor.interrupt_run(lease).await;
                                     return Err(ProviderTurnFailure::LeaseLost(error));
                                 }
+                            }
+                            if let Some(result) = completed_provider {
+                                return result.map_err(|error| classify_provider_turn_failure(&error));
                             }
                         }
                     }
@@ -2319,7 +2326,11 @@ impl AiReadOnlyAgentCoordinator {
                             return Err(ProviderTurnFailure::Cancelled(settlement));
                         }
                         None => {
-                            match self.run_control.heartbeat(&current).await {
+                            let (renewal, completed_provider) =
+                                crate::provider_calls::maintenance::poll_provider_during_maintenance(
+                                    provider.as_mut(), self.run_control.heartbeat(&current),
+                                ).await;
+                            match renewal {
                                 Ok(renewed) => {
                                     *current = renewed.clone();
                                     *lease = renewed;
@@ -2331,6 +2342,10 @@ impl AiReadOnlyAgentCoordinator {
                                     *lease = lost;
                                     return Err(ProviderTurnFailure::LeaseLost(error));
                                 }
+                            }
+                            drop(current);
+                            if let Some(result) = completed_provider {
+                                return result.map_err(|error| classify_provider_turn_failure(&error));
                             }
                         }
                     }
@@ -2399,7 +2414,11 @@ impl AiReadOnlyAgentCoordinator {
                             return Err(ProviderTurnFailure::Cancelled(settlement));
                         }
                         None => {
-                            match self.run_control.heartbeat(&current).await {
+                            let (renewal, completed_provider) =
+                                crate::provider_calls::maintenance::poll_provider_during_maintenance(
+                                    provider.as_mut(), self.run_control.heartbeat(&current),
+                                ).await;
+                            match renewal {
                                 Ok(renewed) => {
                                     *current = renewed.clone();
                                     *lease = renewed;
@@ -2411,6 +2430,14 @@ impl AiReadOnlyAgentCoordinator {
                                     *lease = lost;
                                     return Err(ProviderTurnFailure::LeaseLost(error));
                                 }
+                            }
+                            drop(current);
+                            if let Some(result) = completed_provider {
+                                return match result {
+                                    Ok(value) => Ok(value),
+                                    Err(AiError::ProviderSessionDeferred) => Err(ProviderTurnFailure::Deferred),
+                                    Err(error) => Err(classify_provider_turn_failure(&error)),
+                                };
                             }
                         }
                     }
@@ -2635,6 +2662,10 @@ mod tests {
         AiDataSourceRef, AiDestinationTrust, AiEgressCapability, AiEgressManifest,
         AiRunCancellation, AiSourceTrust, DataClassification, ModelContinuation,
     };
+
+    mod heartbeat_writer_tests {
+        include!("orm_coordinator_heartbeat_tests.rs");
+    }
 
     struct TestRunControl {
         finishes: Mutex<Vec<AiRunState>>,
