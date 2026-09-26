@@ -441,11 +441,19 @@ async fn reauthorization_blip_is_survived_and_denial_still_fails_fast() {
     .expect("reauthorization must be retried during the outage");
     outage.expect("the stream must not error inside the grace window");
 
-    // Still inside the grace window, durable delivery continues.
-    send(&sessions, &principal, session.id, "during outage").await;
-    let during = tokio::time::timeout(Duration::from_secs(5), stream.next())
-        .await
-        .expect("delivery continues during the outage")
+    // Keep polling the retained stream while writing: the outage loop may
+    // have suspended it inside a durable head read. Awaiting only the writer
+    // would leave that SQLite read transaction unpolled until its lock timeout.
+    // This still requires the actual durable event inside the outage window.
+    let (_, during) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            send(&sessions, &principal, session.id, "during outage"),
+            stream.next(),
+        )
+    })
+    .await
+    .expect("delivery continues during the outage");
+    let during = during
         .expect("item")
         .expect("event delivered while reauthorization is unavailable");
     assert!(during.closed.is_none());
